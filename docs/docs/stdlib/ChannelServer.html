@@ -1869,7 +1869,30 @@
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ChannelServer</span></nav><h1>ChannelServer</h1><div class="mdoc"><p>ChannelServer module: runtime helpers for Phoenix-style channel processes.</p><p>This module provides the building blocks for implementing channel processes using March's actor system.  The actual actor declarations must be provided by the application (actors cannot be spawned from closures in March).</p><p>A channel process is an actor that:</p><ol><li>Receives a ChannelJoin message with topic/params.</li><li>Calls the handler's join/3 callback.</li><li>On success, subscribes to PubSub for the topic.</li><li>Loops receiving ChannelMailbox messages and dispatching to callbacks.</li><li>On ChannelLeave, unsubscribes from PubSub and calls leave/3.</li></ol><p>Example actor using these helpers:</p><p>actor MyChannelProcess do state = ChannelServer.init_state()</p><p>on ChannelIn(ref, event, payload) -&amp;gt; ChannelServer.handle_in_msg(state, ref, event, payload)</p><p>on ChannelBroadcast(topic, event, payload) -&amp;gt; ChannelServer.handle_broadcast(state, topic, event, payload)</p><p>on ChannelLeave(reason) -&amp;gt; ChannelServer.handle_leave(state, reason) end</p><p>PubSub shard actors are similarly declared by the framework user:</p><p>actor PubSubShard do state = PubSub.new_state()</p><p>on PubSubSubscribe(topic, pid) -&amp;gt; PubSub.subscribe_state(state, topic, pid)</p><p>on PubSubUnsubscribe(topic, pid) -&amp;gt; PubSub.unsubscribe_state(state, topic, pid)</p><p>on PubSubBroadcast(topic, excl, event, payload) -&amp;gt; PubSub.broadcast_to(PubSub.get_subscribers(state, topic), excl, event, payload) state end</p></div><h2>Types</h2><div class="item" id="type-JoinResult"><div class="ih"><span class="badge bty">type</span><span class="name">JoinResult</span><span class="sig"><a href="#type-JoinResult">JoinResult</a>(a) = JoinOk(a) | JoinErr(String)</span><a class="anchor-link" href="#type-JoinResult" title="Link">#</a></div><div class="ib"></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>ChannelServer</span></nav><h1>ChannelServer</h1><div class="mdoc"><p>ChannelServer module: runtime helpers for Phoenix-style channel processes.</p><p>This module provides the building blocks for implementing channel processes using March's actor system.  The actual actor declarations must be provided by the application (actors cannot be spawned from closures in March).</p><p>A channel process is an actor that:</p><ol><li>Receives a ChannelJoin message with topic/params.</li><li>Calls the handler's join/3 callback.</li><li>On success, subscribes to PubSub for the topic.</li><li>Loops receiving ChannelMailbox messages and dispatching to callbacks.</li><li>On ChannelLeave, unsubscribes from PubSub and calls leave/3.</li></ol><p>Example actor using these helpers:</p><pre><code>actor MyChannelProcess do
+  state = ChannelServer.init_state()
+
+  on ChannelIn(ref, event, payload) -&gt;
+    ChannelServer.handle_in_msg(state, ref, event, payload)
+
+  on ChannelBroadcast(topic, event, payload) -&gt;
+    ChannelServer.handle_broadcast(state, topic, event, payload)
+
+  on ChannelLeave(reason) -&gt;
+    ChannelServer.handle_leave(state, reason)
+end</code></pre><p>PubSub shard actors are similarly declared by the framework user:</p><pre><code>actor PubSubShard do
+  state = PubSub.new_state()
+
+  on PubSubSubscribe(topic, pid) -&gt;
+    PubSub.subscribe_state(state, topic, pid)
+
+  on PubSubUnsubscribe(topic, pid) -&gt;
+    PubSub.unsubscribe_state(state, topic, pid)
+
+  on PubSubBroadcast(topic, excl, event, payload) -&gt;
+    PubSub.broadcast_to(PubSub.get_subscribers(state, topic), excl, event, payload)
+    state
+end</code></pre></div><h2>Types</h2><div class="item" id="type-JoinResult"><div class="ih"><span class="badge bty">type</span><span class="name">JoinResult</span><span class="sig"><a href="#type-JoinResult">JoinResult</a>(a) = JoinOk(a) | JoinErr(String)</span><a class="anchor-link" href="#type-JoinResult" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="type-ChannelConfig"><div class="ih"><span class="badge bty">type</span><span class="name">ChannelConfig</span><span class="sig"><a href="#type-ChannelConfig">ChannelConfig</a>(a, b, c, d, e) = <a href="#type-ChannelConfig">ChannelConfig</a>(</span><a class="anchor-link" href="#type-ChannelConfig" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-apply_result"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply_result</span><span class="sig">apply_result(cfg, result, ref)</span><a class="anchor-link" href="#fn-apply_result" title="Link">#</a></div><div class="ib"><p>Apply a HandleResult: if Reply, send the reply to the transport; return the new state.  For Stop, call do_leave. Returns the new channel state. Must be called from within an actor handler (requires actor runtime).</p></div></div>
 <div class="item" id="fn-config_shard"><div class="ih"><span class="badge bfn">fn</span><span class="name">config_shard</span><span class="sig">config_shard(cfg)</span><a class="anchor-link" href="#fn-config_shard" title="Link">#</a></div><div class="ib"><p>Extract the pubsub shard pid from a config.</p></div></div>
 <div class="item" id="fn-config_socket"><div class="ih"><span class="badge bfn">fn</span><span class="name">config_socket</span><span class="sig">config_socket(cfg)</span><a class="anchor-link" href="#fn-config_socket" title="Link">#</a></div><div class="ib"><p>Extract the socket from a config.</p></div></div>

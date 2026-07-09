@@ -747,6 +747,146 @@ reproduce through the real `forge check` path, hence `zcore.march`).
 total, up from 11). Standard runners unaffected: 424 compiler / 231 eval /
 391 codegen, all exit 0 (stdlib runner not re-verified this pass).
 
+## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
+
+The filed "container/factory `cap_narrow`-taint gap" is closed, with a
+corrected diagnosis. `tag_cap_producer_result` (typecheck.ml) was genuinely
+shallow — it tagged a bare `Cap(a)`/`TVar` only, while the paired detector
+`ty_has_tagged_cap_producer` already recursed into tuples/records/`TCon`
+args. Investigation reproduced the exact historically-filed repro
+(`box(x) = (x, 0)` called as `box(cap_narrow(cap))`, destructured, consumed
+as a proof cap) plus 11 further container shapes (Option-wrap, forward-ref,
+single-module, cross-module, closure/thunk, record-wrap, 3-layer wrap) — none
+forge on this tree. A live source A/B against the actual historical commit
+(`66b6716a`) shows why: the identical program forges there and rejects on
+every later commit — the original escape was actually the (separately fixed,
+three commits later) nested-module qualified-prebind type-erasure bug, since
+`box` is an unannotated nested-module helper, exactly the shape that bug
+corrupted; the reviewer's shallow-tagger attribution was plausible but
+incorrect. Independent of exploitability, `demote_to_monomorphic`'s value
+restriction plus `unify`'s own tag-propagation-on-bind already make the
+shallow/recursive tagger distinction moot for every constructible shape
+(the original tainted var is pinned monomorphic at production and flows by
+reference through arbitrary wrapping). The architectural asymmetry was fixed
+anyway, as hardening: `tag_cap_producer_result` now recurses identically to
+`ty_has_tagged_cap_producer`, at zero rejection cost (tagging only ever marks
+a still-unbound var, never anything already resolved to a concrete type via
+ordinary unification — verified with a devious over-rejection probe: a
+tainted IO narrow tupled with an unrelated, already-legitimate proof-cap
+passthrough still accepts). 4 new tests in `test/test_compiler.ml`'s
+`proof_cap_mint` group, honestly documented as passing with or without the
+recursive fix on this tree (value restriction already covers every shape
+tried) rather than overclaiming independent necessity. Six-runner suite green
+(compiler 486 / eval 231 / codegen 394 / stdlib 804); `check_types.sh`
+120/120; `check-docs.sh` clean. See `specs/todos.md`'s "Container/factory
+`cap_narrow`-taint gap" entry for the full investigation.
+
+## Current State (as of 2026-07-08, finding 20 — compiled actor-struct FBIP/RC race fixed)
+
+**Finding 20** (compiled actor scheduler intermittently losing a legitimate
+message, filed during the finding-19 fix review) is FIXED. Root cause was
+**not** the mailbox drain the original hypothesis pointed at — it was FBIP
+in-place reuse racing an actor handle's refcount: an actor handler writes its
+new state back via a Perceus `EReuse`, and the generic emit path is
+RC-conditional (mutate in place iff `rc == 1`, else allocate a fresh copy and
+discard the old). The actor object is a stable daemon-owned singleton mutated
+solely by its own thread, but its *handle* refcount is concurrently,
+atomically incremented/decremented by the caller thread as it passes the
+`Pid` through successive `send`s — a handler observing a transient `rc > 1`
+took the "fresh" branch and silently discarded its state write (memory-safe:
+a wrong-but-valid count, never a crash). Fix (`lib/tir/llvm_emit.ml`
+`emit_expr`'s `EReuse` case): a new branch makes an actor-struct `EReuse`
+ALWAYS mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+Verified deterministic over 200 compiled runs of the repro (0 failures, was
+~5–17%); golden `g40_actor_foreign_msg_drop.march` restored to the fuller
+`Inc(3)/Zlog/Inc(4)/Report → count=7` shape now that it's deterministic
+(`verify.sh` MATCH). Six-runner suite green; the pre-existing
+`examples/actors.march` dead-actor-drop ordering divergence is unrelated
+(confirmed identical pre-fix/post-fix via file-copy A/B, not caused by this
+change).
+
+**Same-day follow-up (adversarial review):** the fix's first cut gated the
+always-in-place branch on `Tir_names.is_actor_struct_name` — a NAME-suffix
+check (`"_Actor"`) — which was a Critical false-positive vector: an ordinary
+user type coincidentally named `Foo_Actor` would also take the unconditional
+path and silently corrupt a SHARED (`RC > 1`) value under FBIP (verified live
+with a `Tree_Actor` ADT). Fixed by making the gate STRUCTURAL:
+`Repr.is_actor_struct_type` (`lib/tir/repr.ml`) checks the type's field 0 for
+the literal, compiler-only `"$d_dispatch"` marker (`lower_actor.ml`'s
+`TDRecord` construction) instead of pattern-matching the type name — March
+identifiers can never start with `$`, so no user type can forge this. Two new
+regression tests in `test/test_codegen.ml` (RED on the name-based gate / GREEN
+after, confirmed via file-copy A/B). Six-runner green again (compiler 482 /
+eval 231 / codegen 394, IR-gate clean / stdlib 804); `verify.sh` 40/40;
+`check-docs.sh` clean. See `specs/todos.md`'s finding 20 entry (both cuts).
+
+## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
+
+Slice 6 lands **two soundness properties** in `lib/typecheck/typecheck.ml` (both
+real compiler fixes, gated on the full six-runner suite), then documents and
+witnesses them across `specs/lang/core-march-types.md` §2.8.13,
+`specs/lang/capabilities.md`, the `specs/lang/types/` corpus, and `INDEX.md`.
+
+- **The P0 nested-module type-erasure fix (GENERAL soundness).** Nesting no
+  longer weakens type checking: an intra-module reference to a function is now
+  checked against that function's real, body-checked (possibly polymorphic)
+  scheme at every nesting level, INCLUDING the entry module. Root cause (see
+  `.superpowers/sdd/prebind-fix-report.md`): an unannotated public fn in a
+  nested `mod` was prebound under its QUALIFIED name (`App.id`) to a fresh
+  placeholder that `check_decl`'s DFn branch reconciled only under the BARE
+  name, so a sibling resolving the desugar-qualified reference got a decoupled
+  `?a -> ?b` that **erased the type of anything laundered through it** — base
+  types (`Int`→`String`, a genuine memory-safety break), ADT args
+  (`Box(String)`→`Box(Int)`), and `Cap` alike. The proof-cap forge was one
+  exploitation of this general hole. The fix reconciles every qualified fn key
+  (both the `cap_qual_prefix` nested key and the `current_module` entry-self
+  key) to `check_fn`'s real scheme, and orders forward references so the rebind
+  runs in time; `unify` is untouched. 25 NON-VACUOUS unit tests
+  (`nested_mod_prebind_erasure` group, RED pre-fix / GREEN after), fixed across
+  three adversarial-review rounds (`10249488`, `d19dc519`, `cbbf99a8`).
+- **The proof-cap minting discipline.** Proof capabilities (`proof cap Name` in
+  a `mod`, consumed as `Cap(Mod.Name)`) are now genuinely unforgeable. The
+  gated `mint_cap` primitive is the ONLY way to construct a proof cap and
+  typechecks iff used in a PUBLIC (`fn`, not `pfn`) function of the cap's
+  declaring module; `cap_narrow` — the ordinary IO-lattice narrower — can no
+  longer produce a proof cap in ANY expression position (Batch-A: value
+  restriction + a use-site `unify` proof-cap hook + call/instantiate/factory
+  taint propagation). Both are runtime-erased (`mint_cap` aliases `cap_narrow`
+  downstream). The only two ways to obtain `Cap(P)` are now receive-and-pass-
+  through or `mint_cap` in P's declaring module's public fns. See
+  `.superpowers/sdd/batch-a-report.md`; 12 `proof_cap_mint` unit tests.
+
+- **Reference:** `core-march-types.md` gains a general typing-soundness rule
+  ((T-QualRef): intra-module references reconcile to the real body-checked
+  scheme regardless of nesting) and a dedicated proof-capabilities subsection
+  §2.8.13 (Check 1 self-declaration, Check 6 pass-through, the `mint_cap` rule,
+  the `cap_narrow` restriction, and the unforgeability property), reconciling
+  §2.8's opening "(Check 6) out of scope here" and §2.8.8's stale `cap_narrow`-
+  mints-a-proof-cap note. The still-OPEN `cap_narrow` container-launder taint
+  follow-up is noted as a documented residual.
+- **Tutorial:** `capabilities.md`'s proof-caps section replaces the
+  non-typechecking `; ()` mint idiom with `mint_cap`, updates the "unforgeable"
+  claims to the now-enforced mechanism, and replaces the "Known mismatch, being
+  reconciled in a later slice" callout with the resolved mechanism.
+- **Corpus:** `specs/lang/types/` grew from 109 to **120 programs** (63 accept /
+  57 reject). New reject witnesses (`t51`–`t57`) each type-correct so they were
+  ACCEPTED pre-fix (IMPOSSIBLE to reject pre-fix): nested `id`-launder
+  `Int`→`String`/`Box`, distinct-tvar launder, entry-module self-qualified
+  launder, `cap_narrow` proof-cap forge, `mint_cap` external, `mint_cap` in a
+  `pfn`. New accept witnesses (`t60`–`t63`): legit nested polymorphism, legit IO
+  narrow, legit `mint_cap` in the declaring module's public fn, proof-cap
+  pass-through. `check_types.sh`: **120 passed, 0 failed**, exit 0;
+  `check-docs.sh` exit 0.
+- **Findings:** `specs/todos.md`'s "proof-cap mint mismatch" reflects the
+  resolved state (mint_cap + cap_narrow restriction landed; general erasure
+  closed by the prebind fix); the container-launder taint gap and the
+  `global_registry` parser finding remain filed OPEN.
+- **Compiler unchanged in this closeout** — the fixes already landed on `main`
+  (HEAD `cbbf99a8`); this slice is the docs + `.march` corpus + specs finish
+  work. run_compiler is now **482** (with the 25+12 new unit tests).
+- **Next queued widening slice:** linear/affine types (per the survey's
+  scoping recommendation and the roadmap's Phase-2b/3 phasing).
+
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
 Compiled `Task.await` / `Task.await_many` / `Task.async_stream` returned wrong
@@ -3217,8 +3357,10 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
      match inside a `cap no_panic` module is invisible to both the
      ordinary warning and F3's new error path — live-verified to panic at
      runtime uncaught. Pre-existing behavior F3 correctly inherits rather
-     than introduces; not in F3's scope; would need a guard-aware
-     (Z3-backed) exhaustiveness analysis to close.
+     than introduces; not in F3's scope. **(Subsequently FIXED, fix-campaign
+     batch 3, 2026-07-07 — see the dedicated entry below; a guard-aware SMT
+     analysis turned out NOT to be needed: computing coverage over the
+     GUARDLESS branches only is a sound, conservative, bounded fix.)**
 - **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
   already wired into `specs/lang/index.md`'s chapter map before this slice)
   reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
@@ -3249,6 +3391,53 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
 
 Next queued widening slice: **proof caps** (closing the proof-cap mint
 mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
+
+## Fix-campaign batch 3 — `cap no_panic` guarded-match exhaustiveness gap (2026-07-07)
+
+Closes the residual soundness gap slice 5 (above) filed OPEN as finding 6: a
+`match` with a `when` guard used to short-circuit `check_exhaustiveness`
+entirely (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+match inside a `cap no_panic` module was recorded by NEITHER the ordinary
+Warning NOR F3's `env.nonexhaustive_match_spans` side-table — `--check` exited
+0 with zero diagnostics, then panicked at runtime ("no matching clause") on a
+value that failed every guard. Exactly the failure class `cap no_panic` exists
+to rule out.
+
+- **The fix (`lib/typecheck/typecheck.ml`, `check_exhaustiveness`).** For a
+  guarded match, the function no longer returns immediately. It computes
+  coverage over the GUARDLESS branches ONLY (`guardless_matrix` = the
+  `norm_pat`s of the arms with `branch_guard = None`). A branch reachable only
+  behind a guard cannot be relied on to match, so it contributes nothing to
+  GUARANTEED coverage; if the guardless branches alone are non-exhaustive, the
+  match can panic when every guard fails at runtime → the span is recorded into
+  `env.nonexhaustive_match_spans` and `check_no_panic_module` promotes it to an
+  ERROR, exactly as for the guard-free case. If the guardless branches ARE
+  exhaustive (a guarded arm followed by an unguarded catch-all), nothing is
+  recorded and the match still accepts. `find_missing_mc` already handles an
+  empty matrix (all-guarded match) correctly, so an all-guarded match reports
+  non-exhaustive rather than crashing.
+- **Minimal blast radius.** The guarded case RECORDS the span but emits **no
+  global Warning** — guarded matches are common in ordinary code and get no
+  such warning today, so only `cap no_panic` modules (which opt into
+  strictness) are made stricter. The guard-FREE path is untouched (still
+  Warning + record). No non-`cap no_panic` behavior changed — the
+  record-without-warning split is clean, regression-guarded by a new
+  plain-module guarded-non-exhaustive unit test that stays silent.
+- **Corpus.** types 107 → **109** (58 → **59** accept, 49 → **50** reject):
+  `reject/t50_cap_no_panic_guarded_nonexhaustive` (guardless arms `{None}`,
+  non-exhaustive — IMPOSSIBLE to reject pre-fix, accepted exit 0) and
+  `accept/t59_cap_no_panic_guarded_guardless_catchall` (adds an unguarded
+  `Some(v)` arm → guardless-exhaustive → still accepts, proving no
+  over-rejection). `check_types.sh` 109/109, exit 0; `check-docs.sh` exit 0.
+- **Unit tests.** 3 new NON-VACUOUS cases in `test/test_compiler.ml`'s
+  `cap_no_panic` group (RED pre-fix / GREEN after): `cap no_panic` + guarded
+  non-exhaustive → `has_errors` true; `cap no_panic` + guarded guardless-catch-
+  all → no error; plain (non-cap) guarded non-exhaustive → no error (the
+  record-without-warning regression guard).
+- **Docs.** `core-march-types.md` §2.8.11's residual-gap paragraph and §2.1a's
+  guard-short-circuit paragraph flipped from "open gap" to FIXED with the
+  guardless-matrix mechanism; the §2.8 preamble roadmap note updated.
+  `specs/todos.md` finding 6 converted from OPEN to a ✅ FIXED entry.
 
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 

@@ -390,8 +390,50 @@ let emit_atom_show_table ctx =
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
 let build_ctor_info ctx (m : Tir.tir_module) =
+  (* Finding-19 memory-safety fix: actor message variant constructors
+     (<Actor>_Msg) get GLOBALLY-unique heap tags across all actors, not the
+     per-variant 0-based tag ordinary ADTs use.  Rationale: a message meant for
+     actor B may be delivered to actor A's mailbox (send does not gate by
+     target actor — a separate, deferred type-system gap).  With per-actor
+     0-based tags, B's first message ctor and A's first message ctor both carry
+     tag 0, so A's dispatch ECase reads tag 0 and MISROUTES B's payload into A's
+     first handler at the wrong type (memory-unsafe).  A global tag makes B's
+     ctor tag distinct from every one of A's, so it falls to A's dispatch
+     default arm and is dropped (parity with the interpreter's silent drop).
+     Base is well clear of small-ADT tags and of MARCH_MIGRATE_TAG
+     (0x4D494752); i32 header field, so ~0x60000000 headroom remains. *)
+  let actor_msg_tag = ref 0x0100_0000 in
   List.iter (fun td ->
     match td with
+    | Tir.TDVariant (_name, ctors) when Tir_names.is_actor_msg_name _name ->
+      (* Actor message type: assign global tags, but otherwise identical to the
+         generic TDVariant arm (type_params + qualified ctor_info key +
+         poly_ctors), so send-site EAlloc and dispatch ECase resolve the same
+         ce_tag from the same key. *)
+      let seen = Hashtbl.create 4 in
+      let params = ref [] in
+      let rec collect_tvars = function
+        | Tir.TVar n ->
+          if not (Hashtbl.mem seen n) then begin
+            Hashtbl.add seen n (); params := n :: !params
+          end
+        | Tir.TCon (_, args) -> List.iter collect_tvars args
+        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
+        | Tir.TTuple ts     -> List.iter collect_tvars ts
+        | Tir.TPtr t        -> collect_tvars t
+        | _                 -> ()
+      in
+      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
+      Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
+      List.iter (fun (ctor_name, field_tys) ->
+        let g = !actor_msg_tag in
+        incr actor_msg_tag;
+        let key = _name ^ "." ^ ctor_name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+        if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
+          Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
+      ) ctors
     | Tir.TDVariant (_name, ctors) ->
       (* Collect free type-variable names in declaration order for poly resolution *)
       let seen = Hashtbl.create 4 in

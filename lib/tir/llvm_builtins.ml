@@ -617,6 +617,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_narrow(ptr %cap)" };
+  (* mint_cap — gated proof-cap mint; runtime-erased alias of cap_narrow. Reuses
+     the march_cap_narrow C symbol (declare emitted by the cap_narrow entry
+     above), so no new PDeclare/runtime symbol is needed. *)
+  { march_name = "mint_cap"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = None };
   { march_name = "demonitor"; c_name = Some "march_demonitor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
