@@ -38,6 +38,88 @@
 
   function setStatus(s) { document.getElementById("tp-status").textContent = s; }
 
+  /* ------------------------------------------------------------------ */
+  /* Syntax highlighter — same tokenizer as march-repl.js's _hlLine, but */
+  /* applied LIVE to the editable textarea (that one only highlights    */
+  /* already-submitted read-only history entries). Duplicated rather    */
+  /* than shared: these are two independent js_of_ocaml-adjacent bundle */
+  /* pages, not meant to be coupled.                                    */
+  /* ------------------------------------------------------------------ */
+
+  var _KWS = ['fn', 'pfn', 'let', 'type', 'ptype', 'mod', 'do', 'end', 'match', 'if', 'else', 'with', 'when',
+              'actor', 'state', 'init', 'on', 'reply', 'spawn', 'send', 'run_until_idle',
+              'true', 'false', 'in', 'import', 'use', 'doc',
+              'linear', 'always_linear', 'needs', 'cap', 'proof', 'tag', 'transitions'];
+
+  function _esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function _col(v, s) {
+    return '<span style="color:var(' + v + ')">' + _esc(s) + '</span>';
+  }
+
+  function _hlLine(line) {
+    var out = "", i = 0, n = line.length;
+    while (i < n) {
+      var c = line[i];
+      if (c === "-" && line[i + 1] === "-") { out += _col("--syn-cm", line.slice(i)); break; }
+      if (c === '"') {
+        var j = i + 1;
+        while (j < n && line[j] !== '"') { if (line[j] === "\\") j++; j++; }
+        out += _col("--syn-st", line.slice(i, j + 1));
+        i = j + 1; continue;
+      }
+      if (c >= "0" && c <= "9") {
+        var j = i;
+        while (j < n && ((line[j] >= "0" && line[j] <= "9") || line[j] === ".")) j++;
+        out += _col("--syn-nm", line.slice(i, j));
+        i = j; continue;
+      }
+      var lo = c >= "a" && c <= "z", hi = c >= "A" && c <= "Z";
+      if (lo || hi || c === "_") {
+        var j = i;
+        while (j < n) {
+          var d = line[j];
+          if (!((d >= "a" && d <= "z") || (d >= "A" && d <= "Z") ||
+                (d >= "0" && d <= "9") || d === "_")) break;
+          j++;
+        }
+        var w = line.slice(i, j);
+        out += (_KWS.indexOf(w) >= 0) ? _col("--syn-kw", w) :
+               hi                      ? _col("--syn-tp", w) :
+               _col("--syn-id", w);
+        i = j; continue;
+      }
+      var tw = c + (line[i + 1] || "");
+      if (tw === "->" || tw === "<-" || tw === "|>" || tw === "++" ||
+          tw === "+." || tw === "-." || tw === "*." || tw === "/." ||
+          tw === "==" || tw === "!=" || tw === "<=" || tw === ">=" || tw === "..") {
+        out += _col("--syn-op", tw); i += 2; continue;
+      }
+      if ("|=:+-*/<>!".indexOf(c) >= 0) { out += _col("--syn-op", c); i++; continue; }
+      out += _esc(c);
+      i++;
+    }
+    return out;
+  }
+
+  function renderHighlight() {
+    var editor = document.getElementById("tp-editor");
+    var hl = document.getElementById("tp-highlight");
+    var html = editor.value.split("\n").map(_hlLine).join("\n");
+    // A trailing newline needs an extra blank line in the backdrop too,
+    // or the <pre> collapses it and the caret drifts out of sync on the
+    // last line.
+    hl.innerHTML = html + (editor.value.endsWith("\n") ? "\n" : "") + " ";
+  }
+
+  function syncHighlightScroll() {
+    var editor = document.getElementById("tp-editor");
+    var hl = document.getElementById("tp-highlight");
+    hl.scrollTop = editor.scrollTop;
+    hl.scrollLeft = editor.scrollLeft;
+  }
+
   function showErrors(errs) {
     var el = document.getElementById("tp-errors");
     if (!errs || !errs.length) {
@@ -121,10 +203,29 @@
     });
   };
 
+  (function () {
+    var editor = document.getElementById("tp-editor");
+    editor.addEventListener("input", renderHighlight);
+    editor.addEventListener("scroll", syncHighlightScroll);
+    // Tab inserts a literal tab instead of moving focus, matching a real
+    // code editor (and keeping March's 2-space-indent convention easy to
+    // reach — Shift+Tab is intentionally not handled, out of scope for a
+    // minimal editor).
+    editor.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Tab") return;
+      ev.preventDefault();
+      var start = editor.selectionStart, end = editor.selectionEnd;
+      editor.value = editor.value.slice(0, start) + "  " + editor.value.slice(end);
+      editor.selectionStart = editor.selectionEnd = start + 2;
+      renderHighlight();
+    });
+  })();
+
   fetch(base + "/assets/tetris/tetris-source.march.txt")
     .then(function (r) { return r.text(); })
     .then(function (src) {
       document.getElementById("tp-editor").value = src;
+      renderHighlight();
     });
 
   window.addEventListener("load", mountStatic);
