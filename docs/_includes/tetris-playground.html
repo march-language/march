@@ -1,5 +1,19 @@
 <style>
-  .tp-wrap { display: flex; gap: 1.5rem; margin: 2rem 0; align-items: flex-start; flex-wrap: wrap; }
+  /* Breaks out of .d-main's reading-width padding (64px desktop / 24px <=900px /
+     16px <=600px, see docs.html's layout) so the editor+game row spans the full
+     content panel instead of the ~700px reading column. The heading/description
+     above this include are NOT wrapped in this class, so they stay at normal
+     reading width. */
+  .tp-wrap {
+    display: flex; gap: 1.5rem; margin: 2rem -64px; align-items: flex-start; flex-wrap: wrap;
+    width: calc(100% + 128px);
+  }
+  @media (max-width: 900px) {
+    .tp-wrap { margin-left: -24px; margin-right: -24px; width: calc(100% + 48px); }
+  }
+  @media (max-width: 600px) {
+    .tp-wrap { margin-left: -16px; margin-right: -16px; width: calc(100% + 32px); }
+  }
   /* min-width: 0 overrides the flex item's default content-based minimum —
      without it a <textarea> child refuses to shrink past its intrinsic
      size, forcing this column (and its sibling) to wrap onto its own line
@@ -74,7 +88,14 @@
     color: var(--text);
     background: transparent;
     pointer-events: none;
+    /* This backdrop is scrolled programmatically (kept in sync with the real
+       textarea on top of it — see syncHighlightScroll in tetris-playground.js),
+       never by the user directly, but overflow: auto alone still paints a
+       native scrollbar on it — a second, non-functional one right next to
+       the textarea's real one. Hide it without losing the scrollability. */
+    scrollbar-width: none;
   }
+  .tp-highlight::-webkit-scrollbar { display: none; }
   .tp-editor {
     width: 100%;
     height: 100%;
@@ -99,7 +120,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
-    background: #1a1a2e;
+    background: var(--bg-code);
   }
   #tp-iframe-host { width: 100%; height: 560px; border: 0; display: block; }
 </style>

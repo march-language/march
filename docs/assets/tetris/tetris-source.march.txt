@@ -275,7 +275,7 @@ mod Tetris do
         match Dom.find(id) do
           None -> ()
           Some(cell) ->
-            if v == 0 do Dom.set_style(cell, "background", "#111")
+            if v == 0 do Dom.set_style(cell, "background", "")
             else Dom.set_style(cell, "background", TetrisLogic.color_of_index(v))
             end
         end

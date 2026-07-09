@@ -130,6 +130,26 @@
     el.classList.add("visible");
   }
 
+  // Reads the SITE's actual theme colors (light/dark toggle, see docs.html's
+  // :root / :root.light) so the game iframe blends with the page instead of
+  // carrying its own hardcoded dark-blue palette. Read once per Run — the
+  // iframe won't live-follow a theme toggle mid-session, only on next Run,
+  // which is an acceptable tradeoff for how rarely that happens mid-edit.
+  function themeColors() {
+    var s = getComputedStyle(document.documentElement);
+    function v(name, fallback) {
+      var val = s.getPropertyValue(name).trim();
+      return val || fallback;
+    }
+    return {
+      bg: v("--bg", "#07101a"),
+      bgCode: v("--bg-code", "#0c1928"),
+      text: v("--text", "#cce5f5"),
+      textMuted: v("--text-muted", "#4a7898"),
+      border: v("--border", "#0f2438")
+    };
+  }
+
   function buildSrcdoc(js) {
     // tetris.mjs's own emitted code imports "./march_runtime.mjs" and
     // "./march_dom.mjs" by RELATIVE path. A srcdoc iframe's base URL is the
@@ -137,16 +157,17 @@
     // import silently resolves to the wrong place (and fails) unless we set
     // an explicit <base href> pointing at the assets directory.
     var assetsBase = window.location.origin + base + "/assets/tetris/";
+    var t = themeColors();
     return (
       "<!DOCTYPE html><html><head><meta charset='utf-8'>" +
       "<base href='" + assetsBase + "'>" +
       "<style>" +
       "*{box-sizing:border-box;margin:0;padding:0}" +
-      "body{background:#1a1a2e;color:#eee;font-family:system-ui,sans-serif;" +
+      "body{background:" + t.bg + ";color:" + t.text + ";font-family:system-ui,sans-serif;" +
       "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;height:100vh}" +
-      "#board{display:flex;flex-direction:column;border:2px solid rgba(255,255,255,.2);background:#000}" +
-      ".tetris-row{display:flex}.tetris-cell{width:16px;height:16px;border:1px solid #222;background:#111}" +
-      "#hud{display:flex;gap:1rem;font-size:.85rem;color:#cbd5e0}" +
+      "#board{display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
+      ".tetris-row{display:flex}.tetris-cell{width:16px;height:16px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
+      "#hud{display:flex;gap:1rem;font-size:.85rem;color:" + t.textMuted + "}" +
       "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:.85rem}" +
       "</style></head><body>" +
       "<div id='board'></div>" +

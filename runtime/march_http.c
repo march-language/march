@@ -2052,6 +2052,10 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
 void *march_ws_recv(int64_t fd) {
     int sock = (int)fd;
     uint8_t hdr2[2];
+    /* Declared before any `goto closed` so the cleanup free() at the label
+       never sees an uninitialized pointer — the header/length/mask read
+       failures below jump to `closed` before payload is otherwise set. */
+    uint8_t *payload = NULL;
 
     /* Read 2-byte frame header */
     if (recv_exact(sock, hdr2, 2) < 0)
@@ -2083,13 +2087,14 @@ void *march_ws_recv(int64_t fd) {
     }
 
     /* Read payload */
-    uint8_t *payload = NULL;
     if (payload_len > 0) {
         if (payload_len > 16 * 1024 * 1024) goto closed;  /* 16MB limit */
         payload = malloc(payload_len + 1);
         if (!payload) goto closed;
         if (recv_exact(sock, payload, payload_len) < 0) {
-            free(payload); goto closed;
+            /* `closed:` frees payload — jumping straight there avoids a
+               double-free (freeing here and again at the label). */
+            goto closed;
         }
         /* Unmask */
         if (masked) {
