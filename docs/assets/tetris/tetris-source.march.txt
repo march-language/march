@@ -10,7 +10,25 @@
 -- keydown and the gravity-tick interval are independent callbacks with no
 -- shared mutable cell to close over. Every handler reads #game-state,
 -- computes a new state (pure), re-renders, and writes the new state back.
-
+--
+-- Piece selection uses its OWN small Park-Miller LCG (state threaded
+-- through data-rng, a single Int) rather than stdlib's Random module, for
+-- two independent reasons found while building this:
+--   1. Random.int reseeds from the current wall-clock time on EVERY call —
+--      calls close enough together (e.g. several piece spawns in a fast
+--      game) can get the identical seed and return the identical value.
+--      Random.seed/Random.range don't have that problem (thread the Rng
+--      forward instead of reseeding), but:
+--   2. stdlib/random.march's xoshiro256** algorithm needs full 63-bit
+--      integer arithmetic; the --target js backend represents Int as an
+--      ordinary JS double (exact only to 2^53) and lowers bitwise ops to
+--      native JS operators (which truncate to 32 bits) — so xoshiro's
+--      64-bit mixing silently produces degenerate (near-constant) output
+--      once compiled to JS, even though it's correct natively/interpreted.
+-- This LCG (`state = (state * 16807) % 2147483647`, the "minimal standard"
+-- generator) only ever multiplies values that stay under 2^31 by a small
+-- constant, so the product stays under 2^46 — always exactly representable
+-- as a JS double, no truncation anywhere in the chain.
 mod Tetris do
 
   mod TetrisLogic do
@@ -156,6 +174,7 @@ mod Tetris do
 
   end
 
+  needs IO.Clock
 
   fn int_list_to_string(xs: List(Int)) : String do
     String.join(List.map(xs, fn x -> int_to_string(x)), ",")
@@ -163,6 +182,15 @@ mod Tetris do
 
   fn string_to_int_list(s: String) : List(Int) do
     List.map(String.split(s, ","), fn x -> Option.unwrap_or(string_to_int(x), 0))
+  end
+
+  fn lcg_next(state: Int) : Int do
+    (state * 16807) % 2147483647
+  end
+
+  fn lcg_seed() : Int do
+    let raw = int_mod(float_to_int(unix_time(()) *. 1000000.0), 2147483646)
+    if raw <= 0 do raw + 2147483646 else raw end
   end
 
   fn piece_from_string(s: String) : TetrisLogic.Piece do
@@ -189,10 +217,14 @@ mod Tetris do
     end
   end
 
-  fn random_piece() : TetrisLogic.Piece do
+  -- Draws the next piece from the threaded LCG state. Returns (piece, new_rng).
+  fn next_piece(rng: Int) : (TetrisLogic.Piece, Int) do
     let pieces = [TetrisLogic.I, TetrisLogic.O, TetrisLogic.T, TetrisLogic.S,
                   TetrisLogic.Z, TetrisLogic.J, TetrisLogic.L]
-    List.nth(pieces, Random.int(0, 7))
+    let rng2 = lcg_next(rng)
+    let idx = rng2 % 7
+    let result = (List.nth(pieces, idx), rng2)
+    result
   end
 
   fn state_el() do
@@ -223,13 +255,15 @@ mod Tetris do
   end
 
   -- Spawns a new falling piece at the top-center. Returns
-  -- (piece, rot, x, y, next_piece, game_over).
-  fn spawn_piece(next: TetrisLogic.Piece, board) do
+  -- (piece, rot, x, y, next_piece, new_rng, game_over).
+  fn spawn_piece(next: TetrisLogic.Piece, board, rng: Int) do
     let cells = TetrisLogic.piece_cells(next)
     let x = 3
     let y = 0
     let over = TetrisLogic.collides(board, cells, x, y)
-    (next, 0, x, y, random_piece(), over)
+    match next_piece(rng) do
+      (next2, rng2) -> (next, 0, x, y, next2, rng2, over)
+    end
   end
 
   fn render_board(board) : Unit do
@@ -277,7 +311,8 @@ mod Tetris do
   end
 
   -- Reads state from #game-state, applies `f` to (board, piece, rot, x, y,
-  -- next, score, lines), renders the result, and writes it back to the DOM.
+  -- next, score, lines, rng), renders the result, and writes it back to
+  -- the DOM.
   fn with_state(f) : Unit do
     let el = state_el()
     let over = get_str_attr(el, "data-over", "false") == "true"
@@ -291,8 +326,9 @@ mod Tetris do
       let next = piece_from_string(get_str_attr(el, "data-next", "O"))
       let score = get_int_attr(el, "data-score", 0)
       let lines = get_int_attr(el, "data-lines", 0)
-      match f(board, piece, rot, x, y, next, score, lines) do
-        (board2, piece2, rot2, x2, y2, next2, score2, lines2, over2) ->
+      let rng = get_int_attr(el, "data-rng", 1)
+      match f(board, piece, rot, x, y, next, score, lines, rng) do
+        (board2, piece2, rot2, x2, y2, next2, score2, lines2, rng2, over2) ->
           render_board(board2)
           if !over2 do render_falling(piece2, rot2, x2, y2) else () end
           set_text_if_found("score", "Score: " ++ int_to_string(score2))
@@ -309,6 +345,7 @@ mod Tetris do
           Dom.set_attr(el, "data-next", piece_to_string(next2))
           Dom.set_attr(el, "data-score", int_to_string(score2))
           Dom.set_attr(el, "data-lines", int_to_string(lines2))
+          Dom.set_attr(el, "data-rng", int_to_string(rng2))
           Dom.set_attr(el, "data-over", if over2 do "true" else "false" end)
       end
     end
@@ -316,50 +353,50 @@ mod Tetris do
 
   -- Locks the current piece, clears lines, updates score, and spawns the
   -- next piece.
-  fn lock_and_advance(board, piece, rot: Int, x: Int, y: Int, next, score: Int, lines: Int) do
+  fn lock_and_advance(board, piece, rot: Int, x: Int, y: Int, next, score: Int, lines: Int, rng: Int) do
     let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
     let locked = TetrisLogic.lock_piece(board, cells, x, y, TetrisLogic.piece_color_index(piece))
     match TetrisLogic.clear_lines(locked) do
       (cleared_board, n) ->
         let new_score = score + TetrisLogic.score_for_lines(n)
         let new_lines = lines + n
-        match spawn_piece(next, cleared_board) do
-          (piece2, rot2, x2, y2, next2, over) ->
-            (cleared_board, piece2, rot2, x2, y2, next2, new_score, new_lines, over)
+        match spawn_piece(next, cleared_board, rng) do
+          (piece2, rot2, x2, y2, next2, rng2, over) ->
+            (cleared_board, piece2, rot2, x2, y2, next2, new_score, new_lines, rng2, over)
         end
     end
   end
 
   fn tick() : Unit do
-    with_state(fn (board, piece, rot, x, y, next, score, lines) ->
+    with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
       if TetrisLogic.collides(board, cells, x, y + 1) do
-        lock_and_advance(board, piece, rot, x, y, next, score, lines)
+        lock_and_advance(board, piece, rot, x, y, next, score, lines, rng)
       else
-        (board, piece, rot, x, y + 1, next, score, lines, false)
+        (board, piece, rot, x, y + 1, next, score, lines, rng, false)
       end
     )
   end
 
   fn try_move(dx: Int, dy: Int) : Unit do
-    with_state(fn (board, piece, rot, x, y, next, score, lines) ->
+    with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
       if TetrisLogic.collides(board, cells, x + dx, y + dy) do
-        (board, piece, rot, x, y, next, score, lines, false)
+        (board, piece, rot, x, y, next, score, lines, rng, false)
       else
-        (board, piece, rot, x + dx, y + dy, next, score, lines, false)
+        (board, piece, rot, x + dx, y + dy, next, score, lines, rng, false)
       end
     )
   end
 
   fn try_rotate() : Unit do
-    with_state(fn (board, piece, rot, x, y, next, score, lines) ->
+    with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let new_rot = (rot + 1) % 4
       let cells = rotate_n(TetrisLogic.piece_cells(piece), new_rot)
       if TetrisLogic.collides(board, cells, x, y) do
-        (board, piece, rot, x, y, next, score, lines, false)
+        (board, piece, rot, x, y, next, score, lines, rng, false)
       else
-        (board, piece, new_rot, x, y, next, score, lines, false)
+        (board, piece, new_rot, x, y, next, score, lines, rng, false)
       end
     )
   end
@@ -371,33 +408,38 @@ mod Tetris do
   end
 
   fn hard_drop() : Unit do
-    with_state(fn (board, piece, rot, x, y, next, score, lines) ->
+    with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
       let final_y = fall_from(board, cells, x, y)
-      lock_and_advance(board, piece, rot, x, final_y, next, score, lines)
+      lock_and_advance(board, piece, rot, x, final_y, next, score, lines, rng)
     )
   end
 
   fn restart() : Unit do
     let el = state_el()
     let board = TetrisLogic.empty_board()
-    match spawn_piece(random_piece(), board) do
-      (piece, rot, x, y, next, _over) ->
-        render_board(board)
-        render_falling(piece, rot, x, y)
-        set_text_if_found("score", "Score: 0")
-        set_text_if_found("level", "Level: 0")
-        set_text_if_found("next", "Next: " ++ piece_to_string(next))
-        set_text_if_found("game-over", "")
-        Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board)))
-        Dom.set_attr(el, "data-piece", piece_to_string(piece))
-        Dom.set_attr(el, "data-rot", int_to_string(rot))
-        Dom.set_attr(el, "data-x", int_to_string(x))
-        Dom.set_attr(el, "data-y", int_to_string(y))
-        Dom.set_attr(el, "data-next", piece_to_string(next))
-        Dom.set_attr(el, "data-score", "0")
-        Dom.set_attr(el, "data-lines", "0")
-        Dom.set_attr(el, "data-over", "false")
+    let rng0 = lcg_seed()
+    match next_piece(rng0) do
+      (first, rng1) ->
+        match spawn_piece(first, board, rng1) do
+          (piece, rot, x, y, next, rng2, _over) ->
+            render_board(board)
+            render_falling(piece, rot, x, y)
+            set_text_if_found("score", "Score: 0")
+            set_text_if_found("level", "Level: 0")
+            set_text_if_found("next", "Next: " ++ piece_to_string(next))
+            set_text_if_found("game-over", "")
+            Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board)))
+            Dom.set_attr(el, "data-piece", piece_to_string(piece))
+            Dom.set_attr(el, "data-rot", int_to_string(rot))
+            Dom.set_attr(el, "data-x", int_to_string(x))
+            Dom.set_attr(el, "data-y", int_to_string(y))
+            Dom.set_attr(el, "data-next", piece_to_string(next))
+            Dom.set_attr(el, "data-score", "0")
+            Dom.set_attr(el, "data-lines", "0")
+            Dom.set_attr(el, "data-rng", int_to_string(rng2))
+            Dom.set_attr(el, "data-over", "false")
+        end
     end
   end
 

@@ -71,7 +71,7 @@
       "<div id='hud'><span id='score'>Score: 0</span><span id='level'>Level: 0</span><span id='next'>Next: O</span></div>" +
       "<div id='game-over'></div>" +
       "<div id='game-state' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +
-      "data-next='O' data-score='0' data-lines='0' data-over='false' style='display:none'></div>" +
+      "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' style='display:none'></div>" +
       "<script>window.onerror = function (msg) { parent.postMessage({tpError: String(msg)}, '*'); };<\/script>" +
       "<script type='module'>" +
       js +

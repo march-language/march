@@ -103,7 +103,12 @@ mod Random do
 
   doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
   fn int(lo : Int, hi : Int) : Int do
-    let rng = seed(float_to_int(unix_time(())))
+    -- Scale to microseconds before truncating: float_to_int(unix_time(()))
+    -- alone drops everything but whole seconds, so calls made within the
+    -- same wall-clock second (extremely common — e.g. several calls in a
+    -- tight loop, or several keypresses in a fast game) all reseed
+    -- identically and return the SAME "random" value every time.
+    let rng = seed(float_to_int(unix_time(()) *. 1000000.0))
     let (n, _) = range(rng, lo, hi)
     n
   end

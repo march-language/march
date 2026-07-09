@@ -26,7 +26,6 @@ let browser_stdlib_files = [
   "math.march";
   "string.march";
   "array.march";
-  "random.march";
   "dom.march";
 ]
 
