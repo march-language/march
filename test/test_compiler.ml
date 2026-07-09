@@ -4500,6 +4500,118 @@ let test_mint_cap_io_target_rejected () =
   end|} in
   Alcotest.(check bool) "mint_cap at IO-cap target: error" true (has_errors ctx)
 
+(* ── Container/factory cap_narrow-taint gap (todos.md finding, Batch-A
+   follow-up) ──────────────────────────────────────────────────────────────
+   `tag_cap_producer_result` (the tagger) was shallow — it only tagged a bare
+   `Cap(a)`/`TVar`, while `ty_has_tagged_cap_producer` (the detector gating the
+   call/factory taint-propagation sites) already recursed into tuples/records/
+   TCon args — an asymmetry: the detector could find a tag buried in a
+   container, but the tagger's own `| _ -> ()` catch-all silently dropped it
+   when asked to mark one. Investigation traced the historically-filed repro
+   (a nested-module `box(x) = (x, 0)` called as `box(cap_narrow(cap))`) and
+   found it does NOT currently forge on this tree for a DIFFERENT reason than
+   the shallow tagger: `demote_to_monomorphic`'s value restriction pins the
+   ORIGINAL `cap_narrow`-tagged var to level 0 the instant it's produced, so
+   it is never swept into any later generalization — the same physical var
+   flows through arbitrary tuple/record/generic wrapping by reference, and
+   `unify`'s own hook (plus its "propagate the tag to whatever var this one
+   gets bound to" logic) keeps the taint alive across the underlying var
+   graph regardless of syntactic nesting. (An EARLIER instance of the exact
+   `box(cap_narrow(cap))` program DID forge, confirmed live via a source A/B
+   against commit `66b6716a` — but that reproduced the UNRELATED qualified-
+   prebind type-erasure bug, fixed three commits later in the same line of
+   work: `box`, an unannotated helper in a nested module, had its qualified
+   reference resolve to a decoupled placeholder that bypassed normal
+   unification entirely, which is what actually let the forge through.)
+
+   Given the tagger/detector asymmetry is real regardless, `tag_cap_producer_result`
+   was still made to recurse identically to `ty_has_tagged_cap_producer` — closing
+   the architectural gap outright rather than resting on the incidental
+   protection above, at zero rejection cost (tagging only ever marks a still-
+   UNBOUND var; anything already resolved to a concrete type via ordinary
+   argument-passing is untouched, so it cannot introduce a false positive).
+   The tests below are honest about what they demonstrate: they lock in the
+   currently-correct reject/accept behavior for every container shape the
+   original finding named (tuple, Option, cross-module, single-module,
+   forward-referenced, multi-hop — all exhaustively verified live before this
+   change), but on THIS tree they pass whether or not the tagger recurses,
+   since value restriction's own robustness already covers them. *)
+let test_container_launder_tuple_forge () =
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn mkbox(cap) do (cap_narrow(cap), 0) end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do
+        let (c, _) = mkbox(cap)
+        consume(c)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forged via an unannotated tuple-wrapping factory: error"
+    true (has_errors ctx)
+
+let test_container_launder_option_forge () =
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn wrap(x) do Some(x) end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do
+        match wrap(cap_narrow(cap)) do
+          Some(c) -> consume(c)
+          None -> 0
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forged via an Option-wrapping factory: error"
+    true (has_errors ctx)
+
+let test_container_launder_io_still_ok () =
+  (* Regression guard: an ordinary IO-cap narrow, wrapped in a tuple by an
+     unannotated generic factory, must STAY accepted. *)
+  let ctx = typecheck {|mod Top do mod App do
+    needs IO
+    fn box(x) do (x, 0) end
+    fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+    fn go(cap : Cap(IO)) : Int do
+      let (c, _) = box(cap_narrow(cap))
+      use_net(c)
+    end
+  end end|} in
+  Alcotest.(check bool) "IO-cap narrow wrapped in a tuple factory: no error"
+    false (has_errors ctx)
+
+let test_container_combine_legit_proof_cap_still_ok () =
+  (* Over-rejection guard: a generic factory tuples a tainted cap_narrow result
+     together with an UNRELATED, already-legitimate proof-cap parameter passed
+     straight through. Tagging must not spill onto the legit slot — the
+     already-concrete `Cap(Db.P)` param has no unbound var left to tag by the
+     time the factory's result is examined (it was already unified against the
+     caller's concrete argument type). *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn combine(io_cap, db_cap) do (cap_narrow(io_cap), db_cap) end
+      fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn go(io : Cap(IO), db : Cap(Db.P)) : Int do
+        let (net, passed) = combine(io, db)
+        use_net(net) + consume(passed)
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "tainted IO narrow tupled with an unrelated legit proof-cap passthrough: no error"
+    false (has_errors ctx)
+
 (* ── Nested-module qualified-prebind type-erasure hole ────────────────────
    ROOT CAUSE (confirmed): an UNANNOTATED public fn defined inside a NESTED
    `mod` gets its QUALIFIED name (`Mod.fn`) prebound to a fresh `Mono (fresh_var)`
@@ -7374,6 +7486,10 @@ let compiler_suites =
           Alcotest.test_case "mint_cap in applied lambda in declaring fn: no error" `Quick test_mint_cap_lambda_declaring_ok;
           Alcotest.test_case "mint_cap in applied lambda in external module: error" `Quick test_mint_cap_lambda_external_rejected;
           Alcotest.test_case "mint_cap at IO-cap target: error"             `Quick test_mint_cap_io_target_rejected;
+          Alcotest.test_case "container/factory taint: tuple-wrapped forge: error" `Quick test_container_launder_tuple_forge;
+          Alcotest.test_case "container/factory taint: Option-wrapped forge: error" `Quick test_container_launder_option_forge;
+          Alcotest.test_case "container/factory taint: IO narrow in a tuple: no error" `Quick test_container_launder_io_still_ok;
+          Alcotest.test_case "container/factory taint: legit proof-cap passthrough beside a tainted slot: no error" `Quick test_container_combine_legit_proof_cap_still_ok;
         ] );
       ( "nested_mod_prebind_erasure", [
           (* RED pre-fix (forge accepted), GREEN after the qualified-prebind reconciliation. *)

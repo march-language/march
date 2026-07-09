@@ -283,6 +283,40 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
+
+The filed "container/factory `cap_narrow`-taint gap" is closed, with a
+corrected diagnosis. `tag_cap_producer_result` (typecheck.ml) was genuinely
+shallow — it tagged a bare `Cap(a)`/`TVar` only, while the paired detector
+`ty_has_tagged_cap_producer` already recursed into tuples/records/`TCon`
+args. Investigation reproduced the exact historically-filed repro
+(`box(x) = (x, 0)` called as `box(cap_narrow(cap))`, destructured, consumed
+as a proof cap) plus 11 further container shapes (Option-wrap, forward-ref,
+single-module, cross-module, closure/thunk, record-wrap, 3-layer wrap) — none
+forge on this tree. A live source A/B against the actual historical commit
+(`66b6716a`) shows why: the identical program forges there and rejects on
+every later commit — the original escape was actually the (separately fixed,
+three commits later) nested-module qualified-prebind type-erasure bug, since
+`box` is an unannotated nested-module helper, exactly the shape that bug
+corrupted; the reviewer's shallow-tagger attribution was plausible but
+incorrect. Independent of exploitability, `demote_to_monomorphic`'s value
+restriction plus `unify`'s own tag-propagation-on-bind already make the
+shallow/recursive tagger distinction moot for every constructible shape
+(the original tainted var is pinned monomorphic at production and flows by
+reference through arbitrary wrapping). The architectural asymmetry was fixed
+anyway, as hardening: `tag_cap_producer_result` now recurses identically to
+`ty_has_tagged_cap_producer`, at zero rejection cost (tagging only ever marks
+a still-unbound var, never anything already resolved to a concrete type via
+ordinary unification — verified with a devious over-rejection probe: a
+tainted IO narrow tupled with an unrelated, already-legitimate proof-cap
+passthrough still accepts). 4 new tests in `test/test_compiler.ml`'s
+`proof_cap_mint` group, honestly documented as passing with or without the
+recursive fix on this tree (value restriction already covers every shape
+tried) rather than overclaiming independent necessity. Six-runner suite green
+(compiler 486 / eval 231 / codegen 394 / stdlib 804); `check_types.sh`
+120/120; `check-docs.sh` clean. See `specs/todos.md`'s "Container/factory
+`cap_narrow`-taint gap" entry for the full investigation.
+
 ## Current State (as of 2026-07-08, finding 20 — compiled actor-struct FBIP/RC race fixed)
 
 **Finding 20** (compiled actor scheduler intermittently losing a legitimate

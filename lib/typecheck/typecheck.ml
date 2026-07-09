@@ -656,8 +656,26 @@ let rec demote_to_monomorphic (t : ty) : unit =
     shapes are tagged: [Cap(a)] (tag the inner var [a]) and a bare var [r] (the
     whole value type is a still-unknown var — as happens when a laundering fn's
     return decouples from its param; tag [r] itself).  If the type is already a
-    concrete cap, tagging is a no-op. *)
-let tag_cap_producer_result (env : env) (rty : ty) (sp : Ast.span) : unit =
+    concrete cap, tagging is a no-op.
+
+    RECURSES into container shapes (tuples, records, and other [TCon] type
+    arguments) so the tag reaches a cap-producer var wrapped by a factory
+    function's return type — e.g. [(Cap(a), Int)] or [Option(Cap(a))] — not
+    just a bare top-level [Cap(a)]/[TVar].  Mirrors
+    [ty_has_tagged_cap_producer]'s traversal exactly: that detector already
+    walks containers to decide WHETHER to propagate the taint into a call's
+    result (see its call sites below); before this fix, the tagging half of
+    that pairing silently no-opped on any container shape it found (`| _ -> ()`),
+    so a container-wrapped cap-producer var reaching a truly fresh (never
+    independently tagged) result var never got marked.  (In practice this was
+    not independently exploitable on this tree — the ORIGINAL cap_narrow-tagged
+    var is forced monomorphic by [demote_to_monomorphic] and so is never
+    re-instantiated by generalization, and [unify]'s hook propagates the tag to
+    any var it gets bound to, including through element-wise tuple/record
+    unification — but the asymmetry left the detector/tagger pairing at the
+    call-propagation sites below inert for container-shaped results, which is
+    latent risk independent of that protection.) *)
+let rec tag_cap_producer_result (env : env) (rty : ty) (sp : Ast.span) : unit =
   match repr rty with
   | TCon ("Cap", [inner]) ->
     (match repr inner with
@@ -670,7 +688,14 @@ let tag_cap_producer_result (env : env) (rty : ty) (sp : Ast.span) : unit =
     (match !r with
      | Unbound (id, _) -> Hashtbl.replace env.cap_producer_ivars id sp
      | Link _ -> ())
-  | _ -> ()
+  | TCon (_, args)       -> List.iter (fun t -> tag_cap_producer_result env t sp) args
+  | TArrow (a, b)        -> tag_cap_producer_result env a sp; tag_cap_producer_result env b sp
+  | TTuple ts            -> List.iter (fun t -> tag_cap_producer_result env t sp) ts
+  | TRecord flds         -> List.iter (fun (_, t) -> tag_cap_producer_result env t sp) flds
+  | TLin (_, t)          -> tag_cap_producer_result env t sp
+  | TNatOp (_, a, b)     -> tag_cap_producer_result env a sp; tag_cap_producer_result env b sp
+  | TRefine (base, _, _) -> tag_cap_producer_result env base sp
+  | TChan _ | TNat _ | TError -> ()
 
 (** True if [ty] carries a [cap_narrow]-tagged cap-producer var anywhere — the
     inner var of a [Cap(a)] whose [a] is tagged, or a bare tagged var.  Used to
