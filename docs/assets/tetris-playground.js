@@ -288,6 +288,7 @@
     var t = themeColors();
     var cell = computeCellSize();
     var hudFont = Math.max(12, Math.round(cell * 0.5));
+    var boardPx = cell * BOARD_COLS;
     return (
       "<!DOCTYPE html><html><head><meta charset='utf-8'>" +
       "<base href='" + assetsBase + "'>" +
@@ -304,8 +305,14 @@
       ".hud-btn:disabled{opacity:.4;cursor:default}" +
       "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
       "#pause-status{color:" + t.textMuted + ";font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
-      "#tt-bar{display:flex;align-items:center;gap:.5rem;font-size:" + hudFont + "px;color:" + t.textMuted + ";width:100%;max-width:360px}" +
-      "#tt-slider{flex:1;min-width:0}" +
+      // Squeezing the slider into the same row as the step buttons, frame
+      // count, and "Resume from here" left it almost no width to shrink
+      // into — it read as "collapsed". Full-width slider on its own row,
+      // sized to match the board, with the controls on a row underneath.
+      "#tt-bar{display:flex;flex-direction:column;gap:.4rem;font-size:" + hudFont + "px;" +
+      "color:" + t.textMuted + ";width:" + boardPx + "px}" +
+      "#tt-slider{width:100%}" +
+      "#tt-controls{display:flex;align-items:center;justify-content:center;gap:.5rem}" +
       "#tt-label{white-space:nowrap;font-variant-numeric:tabular-nums}" +
       "</style></head><body>" +
       "<div id='board'></div>" +
@@ -314,11 +321,13 @@
       "<div id='game-over'></div>" +
       "<div id='pause-status'></div>" +
       "<div id='tt-bar'>" +
-      "<button id='tt-back' class='hud-btn' type='button' title='Step back'>&#9664;</button>" +
       "<input id='tt-slider' type='range' min='0' max='0' value='0'>" +
-      "<button id='tt-fwd' class='hud-btn' type='button' title='Step forward'>&#9654;</button>" +
+      "<div id='tt-controls'>" +
+      "<button id='tt-back' class='hud-btn' type='button' title='Step back'>&#9664;</button>" +
       "<span id='tt-label'>Frame 0/0</span>" +
+      "<button id='tt-fwd' class='hud-btn' type='button' title='Step forward'>&#9654;</button>" +
       "<button id='tt-resume' class='hud-btn' type='button' style='display:none'>Resume from here</button>" +
+      "</div>" +
       "</div>" +
       "<div id='game-state' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +
       "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' data-paused='false' data-seq='0' style='display:none'></div>" +
