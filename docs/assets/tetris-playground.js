@@ -228,12 +228,13 @@
       "backBtn.disabled=historyIndex<=0;" +
       "fwdBtn.disabled=historyIndex>=n-1;" +
       "label.textContent='Frame '+(n?historyIndex+1:0)+'/'+n;" +
-      // While scrubbed away from the live tip, "Pause"/"Resume" and "Resume
-      // from here" would otherwise both read "Resume" at once — toggling
-      // plain pause means nothing while inspecting a past frame anyway (you
-      // can't play against history without branching), so hide it and leave
-      // "Resume from here" as the one unambiguous action.
-      "resumeBtn.style.display=followingLive?'none':'inline-block';" +
+      // While scrubbed away from the live tip, "Pause"/"Resume" and this
+      // button would otherwise both read "Resume" at once — toggling plain
+      // pause means nothing while inspecting a past frame anyway (you can't
+      // play against history without branching), so hide it and leave this
+      // as the one unambiguous action. visibility (not display) so toggling
+      // it never changes the row's height and shifts the game underneath.
+      "resumeBtn.style.visibility=followingLive?'hidden':'visible';" +
       "pauseBtn.style.display=followingLive?'':'none';" +
       "}" +
       "function scrubTo(i){" +
@@ -326,7 +327,7 @@
       "<button id='tt-back' class='hud-btn' type='button' title='Step back'>&#9664;</button>" +
       "<span id='tt-label'>Frame 0/0</span>" +
       "<button id='tt-fwd' class='hud-btn' type='button' title='Step forward'>&#9654;</button>" +
-      "<button id='tt-resume' class='hud-btn' type='button' style='display:none'>Resume from here</button>" +
+      "<button id='tt-resume' class='hud-btn' type='button' style='visibility:hidden'>Resume</button>" +
       "</div>" +
       "</div>" +
       "<div id='game-state' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +

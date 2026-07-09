@@ -539,16 +539,32 @@ mod Tetris do
     end)
   end
 
+  fn is_scroll_key(key: String) : Bool do
+    match key do
+      "ArrowLeft" -> true
+      "ArrowRight" -> true
+      "ArrowDown" -> true
+      "ArrowUp" -> true
+      " " -> true
+      _ -> false
+    end
+  end
+
   fn handle_key(ev) : Unit do
-    match Dom.event_key(ev) do
+    let key = Dom.event_key(ev)
+    -- Arrow keys and Space scroll the page by default; prevented
+    -- unconditionally (not just while an action fires) so the game stays
+    -- put whether it's mid-move, paused, or time-traveling.
+    if is_scroll_key(key) do Dom.prevent_default(ev) else () end
+    match key do
       "r" -> restart()
       "R" -> restart()
       "p" -> toggle_pause()
       "P" -> toggle_pause()
-      key ->
+      k ->
         if is_paused() do ()
         else
-          match key do
+          match k do
             "ArrowLeft"  -> try_move(-1, 0)
             "ArrowRight" -> try_move(1, 0)
             "ArrowDown"  -> try_move(0, 1)
