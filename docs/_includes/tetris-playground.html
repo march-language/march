@@ -1,24 +1,46 @@
 <style>
-  /* Breaks out of .d-main's reading-width padding (64px desktop / 24px <=900px /
-     16px <=600px, see docs.html's layout) so the editor+game row spans the full
-     content panel instead of the ~700px reading column. The heading/description
-     above this include are NOT wrapped in this class, so they stay at normal
-     reading width. */
+  /* This page wants a full-width, full-height split view instead of the
+     normal ~840px reading column .d-main caps every docs page at (see
+     docs.html's .d-main { max-width: 840px }). Rather than touch that
+     shared layout (used by every other docs page), scope the override to
+     just the .d-main that contains this page's #tp-wrap via :has() — a
+     zero-blast-radius, self-contained override that lives entirely in
+     this include. */
+  .d-main:has(#tp-wrap) { max-width: none; padding: 32px 32px 52px; }
+  @media (max-width: 900px) { .d-main:has(#tp-wrap) { padding: 24px 16px 32px; } }
+
   .tp-wrap {
-    display: flex; gap: 1.5rem; margin: 2rem -64px; align-items: flex-start; flex-wrap: wrap;
-    width: calc(100% + 128px);
+    display: flex;
+    gap: 1.5rem;
+    align-items: stretch;
+    height: calc(100vh - 160px);
+    min-height: 560px;
   }
+  /* Below this width the two columns can no longer both be usefully wide
+     AND tall at once — stack them, each getting its own sane height
+     instead of splitting one shared height in half. */
   @media (max-width: 900px) {
-    .tp-wrap { margin-left: -24px; margin-right: -24px; width: calc(100% + 48px); }
+    .tp-wrap { flex-direction: column; height: auto; min-height: 0; }
   }
-  @media (max-width: 600px) {
-    .tp-wrap { margin-left: -16px; margin-right: -16px; width: calc(100% + 32px); }
-  }
+
   /* min-width: 0 overrides the flex item's default content-based minimum —
      without it a <textarea> child refuses to shrink past its intrinsic
      size, forcing this column (and its sibling) to wrap onto its own line
      even when flex-basis/min-width alone would fit side-by-side. */
-  .tp-editor-col { flex: 1 1 380px; min-width: 0; }
+  .tp-editor-col {
+    flex: 1 1 50%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  @media (max-width: 900px) {
+    .tp-editor-col { flex: none; }
+  }
+
+  .tp-heading { flex-shrink: 0; margin-bottom: 1rem; }
+  .tp-heading h1 { margin: 0 0 12px; }
+  .tp-heading p { margin: 0; }
 
   /* Terminal chrome, matching docs/_includes/playground.html's .pg-terminal
      so this page reads as the same family of widget as /docs/playground/. */
@@ -30,6 +52,13 @@
     font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo", monospace;
     font-size: 12px;
     line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+  @media (max-width: 900px) {
+    .tp-terminal { flex: none; height: 420px; }
   }
   .tp-titlebar {
     background: var(--bg-sidebar, var(--bg-code));
@@ -38,6 +67,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
+    flex-shrink: 0;
   }
   .tp-dot { width: 10px; height: 10px; border-radius: 50%; }
   .tp-dot-red    { background: #ff5f57; }
@@ -71,7 +101,7 @@
      every keystroke; scroll position is synced the same way. This mirrors
      march-repl.js's highlighter, applied live instead of only to submitted
      history entries. */
-  .tp-editor-wrap { position: relative; height: 480px; }
+  .tp-editor-wrap { position: relative; flex: 1; min-height: 0; }
   .tp-highlight, .tp-editor {
     position: absolute;
     inset: 0;
@@ -105,7 +135,7 @@
     caret-color: var(--text);
     resize: none;
   }
-  .tp-status-row { margin-top: 8px; color: var(--text-faint); font-size: 12px; }
+  .tp-status-row { margin-top: 8px; color: var(--text-faint); font-size: 12px; flex-shrink: 0; }
   .tp-errors {
     white-space: pre-wrap;
     color: #f87171;
@@ -113,20 +143,39 @@
     font-size: 12px;
     margin-top: 8px;
     display: none;
+    flex-shrink: 0;
+    max-height: 140px;
+    overflow-y: auto;
   }
   .tp-errors.visible { display: block; }
-  .tp-game-col { flex: 1 1 300px; min-width: 0; }
+
+  .tp-game-col { flex: 1 1 50%; min-width: 0; display: flex; }
+  @media (max-width: 900px) {
+    .tp-game-col { flex: none; height: 480px; }
+  }
   .tp-iframe-wrap {
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
     background: var(--bg-code);
+    flex: 1;
+    display: flex;
+    min-height: 0;
   }
-  #tp-iframe-host { width: 100%; height: 560px; border: 0; display: block; }
+  #tp-iframe-host { width: 100%; flex: 1; border: 0; display: block; }
 </style>
 
 <div class="tp-wrap" id="tp-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
   <div class="tp-editor-col">
+    <div class="tp-heading d-content">
+      <h1>Tetris Playground</h1>
+      <p>
+        Edit the March source on the left and hit <strong>Run</strong> to
+        recompile and replay the game on the right — a full trip through
+        the real March compiler (parse, typecheck, lower, optimize, emit
+        JS), running in your browser.
+      </p>
+    </div>
     <div class="tp-terminal">
       <div class="tp-titlebar">
         <span class="tp-dot tp-dot-red"></span>
