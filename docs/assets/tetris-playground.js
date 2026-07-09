@@ -209,6 +209,7 @@
       "var backBtn=document.getElementById('tt-back');" +
       "var fwdBtn=document.getElementById('tt-fwd');" +
       "var resumeBtn=document.getElementById('tt-resume');" +
+      "var pauseBtn=document.getElementById('pause-btn');" +
       "var label=document.getElementById('tt-label');" +
       "function capture(){" +
       "var s={};ATTRS.forEach(function(a){s[a]=gs.getAttribute(a);});return s;" +
@@ -227,7 +228,13 @@
       "backBtn.disabled=historyIndex<=0;" +
       "fwdBtn.disabled=historyIndex>=n-1;" +
       "label.textContent='Frame '+(n?historyIndex+1:0)+'/'+n;" +
+      // While scrubbed away from the live tip, "Pause"/"Resume" and "Resume
+      // from here" would otherwise both read "Resume" at once — toggling
+      // plain pause means nothing while inspecting a past frame anyway (you
+      // can't play against history without branching), so hide it and leave
+      // "Resume from here" as the one unambiguous action.
       "resumeBtn.style.display=followingLive?'none':'inline-block';" +
+      "pauseBtn.style.display=followingLive?'':'none';" +
       "}" +
       "function scrubTo(i){" +
       "i=Math.max(0,Math.min(i,history.length-1));" +
