@@ -1534,14 +1534,76 @@ static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_me
     march_respawn_child(supervisor, sup_meta, child_idx);
 }
 
+/* one_for_all: every child is killed and respawned when any one crashes.
+ * Mirrors eval.ml:1640-1687. child_idx (which one originally crashed) is
+ * unused here — ALL children are affected identically. */
+static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    (void)child_idx;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    if (n == 0) return;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) {
+        live_children[i] = NULL;
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        /* The originally-crashed child is already dead at this point (Task 4's
+         * do_actor_death ran on it before calling march_supervisor_notify) —
+         * march_is_alive is false for it, so it's correctly skipped here and
+         * only respawned (not double-killed) in the loop below. */
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
+/* rest_for_one: the crashed child and every child declared AFTER it (in
+ * sup_children array order, which matches sc_order — Task 3's field
+ * injection walks sc.sc_fields in declaration order) are killed and
+ * respawned; earlier siblings are untouched. Mirrors eval.ml:1691-1761. */
+static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) live_children[i] = NULL;
+    for (int i = child_idx + 1; i < n; i++) {
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = child_idx + 1; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = child_idx; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
 static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
     march_actor_meta *sup_meta = find_meta(supervisor);
     if (!sup_meta) return;
     int child_idx = crashed_meta->sup_child_index;
     switch (sup_meta->supervisor_strategy) {
         case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
-        /* case 1 (one_for_all) and case 2 (rest_for_one): added alongside
-         * their own C implementations further below. */
+        case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
+        case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
         default: break;
     }
 }
