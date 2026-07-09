@@ -1517,6 +1517,8 @@ let builtin_bindings : (string * scheme) list =
     ("string_to_int",   Mono (TArrow (t_string, t_option t_int)));
     ("string_to_float", Mono (TArrow (t_string, t_option t_float)));
     ("string_length",   Mono (TArrow (t_string, t_int)));
+    ("string_to_codepoints",  Mono (TArrow (t_string, t_list t_int)));
+    ("string_from_codepoint", Mono (TArrow (t_int, t_option t_string)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));

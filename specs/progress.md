@@ -332,62 +332,53 @@ consumers assumed names were unique within a function.
 
 ## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
 
-`runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
-(`CONN_BUF_SIZE`); a request that filled it without a complete parse got an
-immediate 413, capping the whole request (headers + body) at 64KB. That made the
-forgepm package registry reject any tarball upload > 64KB (a 486KB `bastion`
-publish → 413 → the `forge publish` client saw it as a 502 through Cloudflare).
+## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
 
-- **Fix:** grow the buffer by doubling on demand up to `MAX_REQ_SIZE = 32MB`
-  (one `realloc` in the recv step); only a request past the cap gets a 413.
-  Sub-64KB requests never leave the initial buffer, so the hot path is unchanged.
-- **Verified:** live on the deploy droplet — a 600KB POST reaches the handler
-  (401 for a bad token) instead of 413; `bastion` 0.2.1 (485KB, carrying the
-  server-owned-island dispatch fix in `priv/js/march-islands.js`) published to
-  the registry (now 0.1.0–0.2.1). forgepm's `forge.toml` repointed at
-  `bastion = "0.2.1"`.
-- **Open follow-up:** the `forge publish` client (`registry.march`) panics
-  `non-exhaustive pattern match` parsing the publish *success* response — the
-  publish completes server-side but the CLI reports failure. Client-side only.
+Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
+runs a real trip through the compiler (parse → typecheck → lower → optimize → js_emit)
+entirely in the browser, driven by a new js_of_ocaml entry point,
+`js/march_browser_compile.ml` (`marchCompileToJs`), built on a new shared library,
+`lib/driver/js_pipeline.ml`, that both it and future tooling can call without going
+through `bin/main.ml`'s CLI. The game itself: `demo_app/tetris_logic/` (pure rules,
+14 forge unit tests, native-safe) + `demo_app/tetris/` (Dom wiring, depends on
+`tetris_logic` via a `forge.toml` path dep so `forge test` never touches Dom externs
+natively). State lives in the DOM itself (a `#game-state` element's `data-*` attrs) since
+March has no mutable-cell primitive reachable across independent event callbacks
+(keydown vs. the gravity-tick interval).
 
-## Current State (as of 2026-07-08, entry-module self-qualified `--check` type-erasure closed)
+Getting the real game through both the `--target js` codegen backend AND, separately,
+the browser-hosted typechecker surfaced genuine pre-existing compiler bugs, fixed here:
 
-An unannotated (or distinct-tvar-annotated) fn at the **entry module's** top level,
-referenced through the entry-module-qualified name (`EntryMod.fn`), erased the type of
-anything laundered through it, so `march --check` exited 0 on a memory-unsafe mismatch
-(`need_str(Main.id(42))` — an `Int` into a `String` parameter — typechecked clean, while
-the bare `need_str(id(42))` correctly rejected).
+- **`lib/tir/js_emit.ml` had no case at all** for `int_div`/`int_mod`/`int_mod_euclid`
+  (emitted as calls to a nonexistent JS function — any `Array` growth past 32 elements
+  hits this via the PVec trie), the bitwise family (`int_and`/`int_or`/`int_xor`/
+  `int_shl`/`int_shr` — same PVec trie), `unix_time` (`Random`'s default seed), and
+  `int_pow`/`int_abs`/`int_max_value`/`int_min_value`. All added, either as new
+  `runtime/march_runtime.mjs` helpers (matching `march_runtime.c`'s checked/panic-on-zero
+  semantics) or inline JS operators.
+- **`lib/typecheck/typecheck.ml` never registered `string_from_codepoint`/
+  `string_to_codepoints`** — real interpreter builtins (`lib/eval/eval.ml`), just never
+  wired into the type env, so any strict typecheck of `stdlib/string.march` (not just
+  this playground) would have failed on them. Added.
+- **`stdlib/random.march`'s `mix()` had a bare integer literal (`1234567891011`)**
+  exceeding the March lexer's `max_int` — but only when the *compiler itself* runs as
+  browser JS (js_of_ocaml represents OCaml's native `int` as 32-bit; native/`--target js`
+  compilation was always fine since the multiply runs at the *compiled program's*
+  runtime). Rewritten as an exactly-equal `1234567 * 1000000 + 891011` (deferred to
+  runtime, never lexed as one token) — a real fix for the existing interpreter REPL
+  playground too, not just this new one.
 
-- **Root cause:** the entry module is UNWRAPPED at the combined module's top level, so —
-  unlike a wrapped sibling module, whose public members are re-exported under `Sib.fn` with
-  their real body-checked schemes when its `DMod` is checked — the entry's own top-level
-  fns are only ever seeded by `check_module_core`'s Pass 1b (`prebind_mod_members
-  m.mod_name.txt`) as a bare `Mono (fresh_var 1)` placeholder (`prebind_fn_scheme` returns
-  None for an unannotated fn; a distinct-tvar annotation `fn f(x:a):b` seeds an
-  un-body-validated `a -> b`). That decoupled `?a -> ?b` was never reconciled with the fn's
-  real scheme, so an `EntryMod.fn` reference (produced by desugar's `qualify_module_refs`,
-  or hand-written to disambiguate a shadowing nested local) instantiated it and erased the
-  laundered type; the pinned placeholder also spuriously over-rejected legitimate
-  polymorphism.
-- **Fix:** the DFn branch of `check_decl` (`lib/typecheck/typecheck.ml`) now rebinds the
-  entry-qualified name to `sch` — the scheme `check_fn` validated against the body — so it
-  is exactly as polymorphic as the bare name. Guarded to the ENTRY level (`cap_qual_prefix
-  = "" && current_module <> ""`) and to an already-seeded key (`Some _`), so nested/loaded
-  modules, private `pfn`s, and the incremental `check_module_with_env` path are untouched.
-  Codegen-safe: mono/TIR key on the per-span `type_map`, not this env scheme.
-- **Scope:** this closes the `--check` type-erasure aspect only; the sibling link-time
-  finding (an entry file self-qualifying its own top-level mod name → undefined symbols at
-  link time) shares the `entry_prefix = "" / cap_qual_prefix = ""` root but is a
-  codegen/lowering gap and remains open (see `specs/todos.md`).
-- **Regression:** `test/test_compiler.ml` group `entry_mod_qual_erasure` (8 non-vacuous
-  cases): the `Int`→`String`, `Box(String)`→`Box(Int)`, and `Cap(IO)`→`Cap(Db.P)` launder
-  shapes, the C2 distinct-tvar variant, and a nested-sibling `T.id` shape (all flip
-  clean→rejected), plus three green guards (single-type use stays clean, polymorphic use
-  restored to clean, annotated `a->a` stays clean).
-- **Verification:** full suite green — 451 compiler (+8) / 231 eval / 394 codegen
-  (`llvm_ir_validity_gate` 0 failures) / 805 stdlib / 29 snapshots, 0 failures
-  (`test_stdlib_march`'s lone `global_registry` `unbound variable` failure is pre-existing —
-  identical at HEAD without this change).
+**Filed, not fixed:** `check_module_full`'s pass-1 registers unqualified names into one
+flat table when many stdlib files are merged as top-level siblings (both browser tools'
+approach — never previously run through the real typechecker, since the interpreter
+skips typecheck and the CLI lazy-loads per file). A same-named function in two merged
+modules (`fold_left`, in both `prelude.march` and `list.march`/`array.march`) can shadow
+across module boundaries, producing a bogus type error inside the *other* module's own
+body. Worked around in `js/march_browser_compile.ml` by dropping `prelude.march`'s bare
+`fold_left` from that bundle specifically.
+
+Full suite green throughout: 451 compiler / 231 eval / 398 codegen / 773 stdlib (quick).
+Plan: `docs/superpowers/plans/2026-07-08-tetris-playground.md` (gitignored, per this
 
 ## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
 
