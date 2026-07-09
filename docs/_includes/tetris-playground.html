@@ -104,7 +104,18 @@
      march-repl.js's highlighter, applied live instead of only to submitted
      history entries. */
   .tp-editor-wrap { position: relative; flex: 1; min-height: 0; height: 100%; }
-  .tp-highlight, .tp-editor {
+  /* ID selectors, not classes: this page's markdown body sits inside
+     docs.html's `.d-content` wrapper, whose `.d-content pre` rule (styling
+     for ordinary fenced code blocks) has HIGHER specificity than a plain
+     `.tp-highlight` class selector and silently overrode font-size,
+     line-height, padding, and tab-size on this <pre> — while #tp-editor
+     (a <textarea>, not a <pre>) was unaffected. That divergence meant the
+     visible highlighted text and the real (invisible) textarea text no
+     longer lined up character-for-character, so clicks landed on a
+     different character than the one visually under the pointer. ID
+     selectors trivially outrank `.d-content pre` and keep both elements
+     pixel-identical regardless of what the surrounding page's CSS does. */
+  #tp-highlight, #tp-editor {
     position: absolute;
     inset: 0;
     margin: 0;
@@ -112,11 +123,14 @@
     border: 0;
     box-sizing: border-box;
     font: inherit;
+    font-family: inherit;
+    font-size: inherit;
     line-height: inherit;
+    tab-size: 8;
     white-space: pre;
     overflow: auto;
   }
-  .tp-highlight {
+  #tp-highlight {
     color: var(--text);
     background: transparent;
     pointer-events: none;
@@ -127,8 +141,8 @@
        the textarea's real one. Hide it without losing the scrollability. */
     scrollbar-width: none;
   }
-  .tp-highlight::-webkit-scrollbar { display: none; }
-  .tp-editor {
+  #tp-highlight::-webkit-scrollbar { display: none; }
+  #tp-editor {
     width: 100%;
     height: 100%;
     min-width: 0;
