@@ -1294,6 +1294,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/get_actor_field_direct.expected native_get_actor_field_direct.out)))
 
+; ── Regression: a compiled supervisor must actually spawn its declared
+; children (the old lowering only registered the supervision strategy and
+; left child state fields at their literal init values, e.g. wa=0/wb=0).
+(rule
+ (targets native_supervisor_spawn_children native_supervisor_spawn_children.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_spawn_children.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_spawn_children
+        native/supervisor_spawn_children.march)
+   (with-stdout-to native_supervisor_spawn_children.out
+        (system "./native_supervisor_spawn_children")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
+
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
 ; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)

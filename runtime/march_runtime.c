@@ -1141,6 +1141,16 @@ typedef struct march_monitor_node {
     struct march_monitor_node  *next;
 } march_monitor_node;
 
+/* One entry per child declared in a `supervise do ... end` block. Set once
+ * at initial spawn time (march_actor_register_child) and read by every
+ * restart (compiled actor supervision, Task 4/5). */
+typedef struct {
+    void *(*spawn_fn)(void);  /* <ActorName>_spawn — called fresh on every restart */
+    int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
+                                  state fields; this child's Int-encoded pid lives at
+                                  ((int64_t*)supervisor)[4 + word_idx] */
+} march_sup_child;
+
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
@@ -1162,6 +1172,14 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* Set on a CHILD when it is spawned by a supervisor; NULL for every
+     * other actor, including a supervisor's own meta. */
+    void                        *supervisor;
+    int                          sup_child_index;
+    /* Set on a SUPERVISOR (an actor that itself declares `supervise do ... end`);
+     * NULL/0 for every other actor, including its own children. */
+    march_sup_child             *sup_children;
+    int                          sup_num_children;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -3130,6 +3148,34 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
     meta->supervisor_strategy  = (int)strategy;
     meta->supervisor_max_restarts = max_restarts;
     meta->supervisor_window_secs  = window_secs;
+}
+
+/* Called once per declared supervise-block child, from the generated
+ * Name_spawn() body, right after BOTH the child and the supervisor itself
+ * have been spawned (march_spawn already ran on both). Links parent->child
+ * (for the crash trap to find "is this actor supervised, and by whom") and
+ * records enough for a later restart: which function respawns this child
+ * (spawn_fn), and which Int-typed state-field slot of the supervisor holds
+ * its encoded pid (word_idx, see march_sup_child above). */
+void march_actor_register_child(void *supervisor, void *child,
+                                 void *(*spawn_fn)(void), int64_t word_idx) {
+    march_actor_meta *sup_meta = find_or_create_meta(supervisor);
+    march_actor_meta *child_meta = find_or_create_meta(child);
+    child_meta->supervisor = supervisor;
+    child_meta->sup_child_index = sup_meta->sup_num_children;
+    int idx = sup_meta->sup_num_children;
+    sup_meta->sup_children = realloc(sup_meta->sup_children,
+                                      (size_t)(idx + 1) * sizeof(march_sup_child));
+    sup_meta->sup_children[idx].spawn_fn = spawn_fn;
+    sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_num_children = idx + 1;
+}
+
+/* pid_index_of: the Int a compiled supervisor stores in its own state field
+ * to represent a just-spawned child's Pid (see march_pid_of_int for the
+ * reverse direction). */
+int64_t march_pid_index_of(void *actor) {
+    return find_or_create_meta(actor)->pid_index;
 }
 
 /* monitor: establish a monitor link from watcher to target.
