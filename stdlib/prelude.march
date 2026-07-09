@@ -123,7 +123,7 @@ mod Prelude do
   Left fold over a list.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).
   """
-  fn fold_left(xs : List(a), acc : b, f : (b, a) -> b) : b do
+  fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b do
     match xs do
     Nil        -> acc
     Cons(h, t) -> fold_left(t, f(acc, h), f)
