@@ -132,6 +132,19 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
 
   | Tir.ELet (v, rhs, body) ->
     let rhs' = cprop_expr ~changed env avar fenv rhs in
+    (* Shadow: drop any outer/prior knowledge about this name BEFORE deciding
+       whether to add new knowledge. TIR reuses the literal source name across
+       shadowed same-block `let`s (lower.ml does not alpha-rename), e.g.
+       `let x = 5 in let x = x + 1 in ... x ...`. Without this shadow step,
+       a rebind whose RHS isn't itself a bare literal/alias/record (like
+       `x + 1` above) left the OUTER "x" -> 5 mapping active for the rest of
+       the block, so later uses of the REBOUND x were wrongly substituted
+       with the stale literal 5 instead of the (unknown, un-folded) new value.
+       [rhs'] above is deliberately computed against the un-shadowed env/avar/
+       fenv, since the RHS itself must still see the outer/prior binding. *)
+    let env  = List.filter (fun (n, _) -> n <> v.Tir.v_name) env in
+    let avar = List.filter (fun (n, _) -> n <> v.Tir.v_name) avar in
+    let fenv = List.filter (fun (n, _) -> n <> v.Tir.v_name) fenv in
     (* Extend literal env when the RHS is a bare literal atom. *)
     let env' = match rhs' with
       | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env

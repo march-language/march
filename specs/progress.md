@@ -283,6 +283,53 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, shadowed same-block `let` rebinding fixed — js_emit TDZ crash + a silent-corruption Cprop bug)
+
+A shadowed same-block `let` rebinding a name off its own prior value
+(`let x = 5 in let x = x + 1 in ...`, or the `Random.seed` idiom
+`let s0 = ... in let s0 = if s0 == 0 do 1 else s0 end`) hit two independent
+bugs sharing one root cause: TIR (`lower.ml`) deliberately does not
+alpha-rename a shadowed binding — the second `let x` keeps the literal
+source name `"x"` in its `Tir.var.v_name` — and two different downstream
+consumers assumed names were unique within a function.
+
+- **`lib/tir/js_emit.ml` (crash, `--target js` only):** the second binding
+  emitted as `const x = ...` inside a fresh `{ }` block, relying on JS block
+  scoping alone for "shadowing." When the initializer referenced the prior
+  `x`, JS `const`/`let` TDZ (which covers a declaration's own initializer)
+  made the reference resolve to the not-yet-initialized new `x`, throwing
+  `ReferenceError: Cannot access 'x' before initialization` at runtime.
+- **`lib/tir/cprop.ml` (silent wrong VALUE, every target, default flags):**
+  the constant-propagation `env` (name → known literal) was extended on a
+  literal rebind but never invalidated on a later non-literal rebind of the
+  same name, so the stale literal stayed active and every later reference to
+  the rebound name was substituted with the OLD value. This ran in the
+  post-Perceus `Opt.run` fixpoint, which every target (native, wasm, js) goes
+  through by default (`opt_enabled = true` unless `--no-opt`) — confirmed via
+  a standalone per-pass TIR dump that `let x = 5 in let x = x + 1 in
+  int_to_string(x)` was still correct through `Escape`, then `Opt.run` folded
+  it to `int_to_string(5)`.
+- **Fix:** `js_emit.ml` now tracks a per-function shadow map (`ctx.var_names`
+  / `ctx.var_counters`) — a shadowing `let` mints a fresh JS identifier
+  (`x$1`, `x$2`, ...) and commits it only AFTER its initializer is emitted, so
+  the initializer still resolves against the prior binding; function params
+  seed the map too, so `fn f(x) { let x = x + 1; ... }` is covered.
+  `cprop.ml`'s `ELet` case now drops any existing `env`/`avar`/`fenv` entry
+  for the rebound name before conditionally adding new knowledge — the RHS
+  is still evaluated against the un-shadowed tables first.
+- **New dual-target golden test:** `test/native/let_shadow_rebind.march` /
+  `.expected` (+ `native_let_shadow_rebind` / `js_let_shadow_rebind` rules in
+  `test/dune`) — arithmetic rebind, the `Random.seed` if/else shape, a
+  4-deep shadow chain, and a parameter shadow; both native (default `--opt`)
+  and JS (`--target js`, default opt) must match the interpreter.
+- **Stdlib audit:** grepped all of `stdlib/*.march` for repeated same-name
+  `let`s; `stdlib/random.march`'s `mix`/`seed` were the only genuine
+  same-scope self-referential shadows (everything else flagged was separate
+  `match`/`if-else` arms, not a real hazard) — both now compile correctly
+  under `--target js` with no source workaround needed.
+- **805 tests** (`scripts/run-tests.sh`, quick + slow) plus the two new
+  golden rules all pass.
+
 ## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
 
 `runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
