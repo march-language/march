@@ -3403,3 +3403,62 @@ Follow-up round on the Tetris live-compile playground (`docs/tetris-playground/`
 No compiler/stdlib changes this round — `demo_app/tetris/lib/tetris.march` and
 `docs/assets/tetris-playground.js` only. Verified live in a local Jekyll preview
 (desktop + mobile) and deployed to `march-lang.org`.
+
+## Current State (as of 2026-07-09, Tetris playground follow-up + real JS-backend Int `/` compiler bug fixed)
+
+Further Tetris Playground follow-up, plus one genuine compiler bug found and fixed:
+
+- **Scrubbing UX**: throttled the time-travel slider's restore calls to one per
+  animation frame (verified via a real Chrome performance trace that the
+  reported "jitter" was NOT DOM reflow — a single restore is ~0.7ms, zero
+  forced-reflow/CLS signal on a simulated fast drag — the actual cause was
+  restoring every un-throttled `input` event, flashing through many
+  genuinely-different recorded frames faster than the eye tracks); gave the
+  slider its own full-width row (matching the board's actual pixel width)
+  instead of squeezing it into one row with the step buttons/frame count/
+  "Resume from here", which left it almost no space to shrink into; hid the
+  redundant Pause/Resume toggle while scrubbed off the live tip (it and
+  "Resume from here" both read "Resume" at once, and toggling plain pause
+  means nothing while inspecting a past frame); shortened "Resume from here"
+  to "Resume" and switched its show/hide to `visibility` instead of `display`
+  so appearing never shifts the row's height and moves the game underneath.
+- **Arrow keys/Space no longer scroll the page** while the game is focused —
+  `handle_key` now calls the existing `Dom.prevent_default` for those keys
+  unconditionally (mid-move, paused, or time-traveling).
+- **Tetris source reorganized to invite tweaking** (`demo_app/tetris_logic/lib/tetris_logic.march`):
+  piece shapes (`piece_cells`), colors, and game-speed knobs
+  (`level_for_lines`/`drop_interval_ms`) moved to the top of the file under a
+  "Tweak me" banner; board mechanics (collision, locking, line-clearing) moved
+  below under a separate heading. `drop_interval_ms(level)` existed and was
+  tested but was **dead code** — `main()` hardcoded a fixed 500ms
+  `Dom.set_interval` — so editing it as a "knob" would have silently done
+  nothing. Wired it up for real: `tetris.march`'s tick loop is now a
+  self-rescheduling `Dom.set_timeout` (`schedule_tick`) that re-reads the
+  current level fresh before every tick, so the drop rate genuinely speeds up
+  as lines clear.
+- **Compiler bug found while wiring the above, fixed at the root**
+  (`lib/tir/js_emit.ml`): `inline_binop`'s fast-path table matched the bare
+  `"/"` operator name and unconditionally emitted raw JS `(a / b)` — true
+  division — for **every** `/` call, Int or Float, completely shadowing the
+  correct type-aware `Math.trunc` guard a few lines below (which checks
+  `atom_ty a = TInt` but was unreachable dead code for that name). Minimal
+  repro: `fn half(n: Int): Int do n / 10 end` compiled with `--target js`
+  printed `1.5` for `half(15)` (correct: `1`, and correct natively/
+  interpreted). Fix: removed `"/"` from that fast-path arm (kept `"/."`,
+  float division needing no truncation), forcing all Int `/` through the
+  existing type-aware match arm. Full suite verified green after the fix:
+  805 tests, exit 0, including the existing adversarial-regressions
+  division-by-zero cases. Likely impact: any `--target js` program dividing
+  two `Int`s via bare `/` (not the separately-named `div_int` builtin) with a
+  non-exact result got a fractional JS value silently — no compiler warning,
+  no runtime type distinction to catch it. Plausibly latent since the `/`
+  Int-truncation guard was added; first surfaced here because the Tetris
+  playground is the first `--target js` consumer in this repo to divide by a
+  divisor that doesn't evenly divide its dividend during normal use.
+  Full finding: `specs/todos.md` "Compiler bug — JS backend Int `/` never
+  truncated".
+
+Rebuilt after the compiler fix: `docs/assets/march_compile.js` (the
+js_of_ocaml browser-compiler bundle used by the live-editable playground) and
+`docs/assets/tetris/tetris.mjs` (the static pre-compiled fallback), both via
+their existing build steps, no manual patching.

@@ -8,15 +8,11 @@ mod TetrisLogic do
 
   type Piece = I | O | T | S | Z | J | L
 
-  fn board_width() : Int do 10 end
-  fn board_height() : Int do 20 end
+  -- ==== Tweak me — everything below is meant to be played with ====
 
-  fn cell_index(x: Int, y: Int) : Int do y * board_width() + x end
-
-  fn empty_board() do
-    Array.from_list(List.repeat(0, board_width() * board_height()))
-  end
-
+  -- Each piece's shape: 4 (x, y) offsets inside a 4x4 spawn box. Try
+  -- editing one (e.g. give O a 3-cell "corner" shape, or make S/Z
+  -- symmetric) and hit Run.
   fn piece_cells(p: Piece) : List((Int, Int)) do
     match p do
       I -> [(0, 1), (1, 1), (2, 1), (3, 1)]
@@ -29,6 +25,9 @@ mod TetrisLogic do
     end
   end
 
+  -- Falling-piece color. color_of_index mirrors this for LOCKED cells (the
+  -- board only stores a piece_color_index, not the piece itself) — keep the
+  -- two in sync if you change a color here.
   fn piece_color(p: Piece) : String do
     match p do
       I -> "#00CED1"
@@ -64,6 +63,42 @@ mod TetrisLogic do
       7 -> "#F39C12"
       _ -> ""
     end
+  end
+
+  -- Game speed: how many lines make up one level, and how fast pieces fall
+  -- at each level. tetris.march's tick loop reschedules itself with
+  -- drop_interval_ms(current level) after every tick, so editing either of
+  -- these changes difficulty ramp-up immediately.
+  fn level_for_lines(total_lines: Int) : Int do
+    total_lines / 10
+  end
+
+  fn drop_interval_ms(level: Int) : Int do
+    let raw = 500 - level * 40
+    if raw < 100 do 100 else raw end
+  end
+
+  -- Points awarded for clearing 1/2/3/4 lines at once.
+  fn score_for_lines(n: Int) : Int do
+    match n do
+      1 -> 100
+      2 -> 300
+      3 -> 500
+      4 -> 800
+      _ -> 0
+    end
+  end
+
+  -- Board size in cells.
+  fn board_width() : Int do 10 end
+  fn board_height() : Int do 20 end
+
+  -- ==== Board mechanics — the rules that make the knobs above behave ====
+
+  fn cell_index(x: Int, y: Int) : Int do y * board_width() + x end
+
+  fn empty_board() do
+    Array.from_list(List.repeat(0, board_width() * board_height()))
   end
 
   fn rotate_cell(c: (Int, Int)) : (Int, Int) do
@@ -124,25 +159,6 @@ mod TetrisLogic do
     let blank_cells = List.repeat(0, cleared * board_width())
     let new_board = Array.from_list(List.append(blank_cells, kept_cells))
     (new_board, cleared)
-  end
-
-  fn score_for_lines(n: Int) : Int do
-    match n do
-      1 -> 100
-      2 -> 300
-      3 -> 500
-      4 -> 800
-      _ -> 0
-    end
-  end
-
-  fn level_for_lines(total_lines: Int) : Int do
-    total_lines / 10
-  end
-
-  fn drop_interval_ms(level: Int) : Int do
-    let raw = 500 - level * 40
-    if raw < 100 do 100 else raw end
   end
 
 end

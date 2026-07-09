@@ -190,7 +190,11 @@ let inline_binop = function
   | "+"  | "+." -> Some "+"
   | "-"  | "-." -> Some "-"   (* binary; unary negation is handled separately *)
   | "*"  | "*." -> Some "*"
-  | "/"  | "/." -> Some "/"
+  | "/." -> Some "/"
+  (* NOT "/": Int division needs Math.trunc (JS "/" is true division), Float
+     division doesn't — the type-aware match arm below tells them apart via
+     atom_ty. Folding "/" into this generic fast path would always emit the
+     untruncated form, silently turning e.g. 15/10 into 1.5 for Int. *)
   | "%"         -> Some "%"
   | "<"         -> Some "<"
   | ">"         -> Some ">"
