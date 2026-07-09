@@ -1,8 +1,14 @@
 <style>
-  .tp-wrap { display: flex; gap: 2rem; margin: 2rem 0; align-items: flex-start; flex-wrap: wrap; }
-  .tp-editor-col { flex: 1 1 480px; min-width: 320px; }
+  .tp-wrap { display: flex; gap: 1.5rem; margin: 2rem 0; align-items: flex-start; flex-wrap: wrap; }
+  /* min-width: 0 overrides the flex item's default content-based minimum —
+     without it a <textarea> child refuses to shrink past its intrinsic
+     size, forcing this column (and its sibling) to wrap onto its own line
+     even when flex-basis/min-width alone would fit side-by-side. */
+  .tp-editor-col { flex: 1 1 380px; min-width: 0; }
   .tp-editor {
     width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     height: 480px;
     background: var(--bg-code);
     border: 1px solid var(--border);
@@ -34,7 +40,7 @@
     display: none;
   }
   .tp-errors.visible { display: block; }
-  .tp-game-col { flex: 1 1 340px; min-width: 300px; }
+  .tp-game-col { flex: 1 1 300px; min-width: 0; }
   .tp-iframe-wrap {
     border: 1px solid var(--border);
     border-radius: 8px;
