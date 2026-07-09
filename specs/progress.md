@@ -3357,3 +3357,49 @@ but on a different registration path.
 
 **Next queued widening slice:** actors (per the roadmap's Phase-2b/3
 phasing).
+
+## Current State (as of 2026-07-09, Tetris playground: pause, layout fixes, time-travel debugger)
+
+Follow-up round on the Tetris live-compile playground (`docs/tetris-playground/`):
+
+- **Pause** (`demo_app/tetris/lib/tetris.march`): `P` key or a HUD button toggles
+  `data-paused` on `#game-state`; every gameplay function (`tick`/`try_move`/
+  `try_rotate`/`hard_drop`) already reads state through `with_state`, so a single
+  `is_paused()` guard in `handle_key` and `tick` was enough — no per-action changes.
+- **Layout bugs found and fixed** (`docs/_includes/tetris-playground.html`,
+  `docs/assets/tetris-playground.js`): the live syntax-highlight overlay `<pre>`
+  inherited `docs.html`'s global `.d-content pre` rule (meant for markdown fenced
+  code blocks) since it has higher specificity than the overlay's own class
+  selector — silently overriding font-size/line-height/padding/tab-size and
+  making the *visible* highlighted text render at a different scale than the
+  *real* (invisible) textarea underneath it, so clicks landed on the wrong
+  character. Fixed by switching the overlay's shared rules to ID selectors.
+  Separately, the board rendered at a fixed 16px/cell regardless of the actual
+  (now full-height) panel size — `computeCellSize()` now measures
+  `#tp-iframe-host`'s real dimensions per Run and sizes cells to fill it
+  (clamped 12–44px).
+- **Game focus**: the game iframe never received keyboard focus after mount, so
+  arrow keys only worked after manually clicking into the board. `mountJs` now
+  calls `iframe.contentWindow.focus()` on load.
+- **Time-travel debugger**: extends the existing "state lives in the DOM"
+  architecture with zero compiler changes. `#game-state` gains a `data-seq`
+  counter bumped only by real gameplay-advancing paths (`with_state`'s commit,
+  `restart`). The host page's `MutationObserver` watches `data-seq` alone and
+  records a full attribute snapshot into an in-memory history array (capped at
+  3000) every time it changes — pausing or scrubbing never records, since
+  neither touches `data-seq`. A new `restore_from_request()` (`tetris.march`)
+  reads a hidden `#restore-request` element's attributes and applies them as
+  the live `#game-state`, re-rendering — the only way host JS can push a
+  historical frame back in, since `js_emit` doesn't export top-level March
+  functions today; this goes through the DOM instead, the same bridge keyboard
+  input already uses. A slider + step buttons scrub through history (forcing
+  `data-paused=true`, which the existing pause guard already makes airtight);
+  a "Resume from here" button truncates history to the current frame and
+  restores it unpaused, branching play forward exactly like undo-then-edit.
+  Rewinding past a game-over and resuming un-game-overs it for free — no
+  special case needed. Design: `docs/superpowers/specs/2026-07-09-tetris-time-travel-design.md`
+  (gitignored, per this repo's `docs/superpowers/` convention).
+
+No compiler/stdlib changes this round — `demo_app/tetris/lib/tetris.march` and
+`docs/assets/tetris-playground.js` only. Verified live in a local Jekyll preview
+(desktop + mobile) and deployed to `march-lang.org`.

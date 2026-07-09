@@ -327,6 +327,7 @@ mod Tetris do
       let score = get_int_attr(el, "data-score", 0)
       let lines = get_int_attr(el, "data-lines", 0)
       let rng = get_int_attr(el, "data-rng", 1)
+      let seq = get_int_attr(el, "data-seq", 0)
       match f(board, piece, rot, x, y, next, score, lines, rng) do
         (board2, piece2, rot2, x2, y2, next2, score2, lines2, rng2, over2) ->
           render_board(board2)
@@ -347,6 +348,11 @@ mod Tetris do
           Dom.set_attr(el, "data-lines", int_to_string(lines2))
           Dom.set_attr(el, "data-rng", int_to_string(rng2))
           Dom.set_attr(el, "data-over", if over2 do "true" else "false" end)
+          -- Bumped ONLY here and in restart — the two paths that genuinely
+          -- advance gameplay. The time-travel history recorder (host JS,
+          -- tetris-playground.js) watches this attribute alone to decide
+          -- when to snapshot, so pausing/scrubbing/restoring never records.
+          Dom.set_attr(el, "data-seq", int_to_string(seq + 1))
       end
     end
   end
@@ -462,7 +468,60 @@ mod Tetris do
             Dom.set_attr(el, "data-lines", "0")
             Dom.set_attr(el, "data-rng", int_to_string(rng2))
             Dom.set_attr(el, "data-over", "false")
+            Dom.set_attr(el, "data-seq", int_to_string(get_int_attr(el, "data-seq", 0) + 1))
         end
+    end
+  end
+
+  -- Time travel: the host page (tetris-playground.js) records a snapshot of
+  -- every #game-state attribute set whenever data-seq changes, and can push
+  -- an old snapshot back by writing it to #restore-request and clicking
+  -- #restore-trigger. There's no exported March function to call directly —
+  -- js_emit doesn't export top-level fns today — so this goes through the
+  -- DOM, the same bridge keyboard input already uses.
+  fn restore_from_request() : Unit do
+    match Dom.find("restore-request") do
+      None -> ()
+      Some(req) ->
+        let el = state_el()
+        let board_s = get_str_attr(req, "data-board", "")
+        let piece_s = get_str_attr(req, "data-piece", "I")
+        let rot = get_int_attr(req, "data-rot", 0)
+        let x = get_int_attr(req, "data-x", 3)
+        let y = get_int_attr(req, "data-y", 0)
+        let next_s = get_str_attr(req, "data-next", "O")
+        let score = get_int_attr(req, "data-score", 0)
+        let lines = get_int_attr(req, "data-lines", 0)
+        let rng_s = get_str_attr(req, "data-rng", "1")
+        let over = get_str_attr(req, "data-over", "false") == "true"
+        let paused = get_str_attr(req, "data-paused", "false") == "true"
+        let board = Array.from_list(string_to_int_list(board_s))
+        let piece = piece_from_string(piece_s)
+        let next = piece_from_string(next_s)
+        render_board(board)
+        if !over do render_falling(piece, rot, x, y) else () end
+        set_text_if_found("score", "Score: " ++ int_to_string(score))
+        set_text_if_found("level", "Level: " ++ int_to_string(TetrisLogic.level_for_lines(lines)))
+        set_text_if_found("next", "Next: " ++ piece_to_string(next))
+        if over do set_text_if_found("game-over", "Game Over — press R to restart")
+        else set_text_if_found("game-over", "")
+        end
+        set_paused(el, paused)
+        Dom.set_attr(el, "data-board", board_s)
+        Dom.set_attr(el, "data-piece", piece_s)
+        Dom.set_attr(el, "data-rot", int_to_string(rot))
+        Dom.set_attr(el, "data-x", int_to_string(x))
+        Dom.set_attr(el, "data-y", int_to_string(y))
+        Dom.set_attr(el, "data-next", next_s)
+        Dom.set_attr(el, "data-score", int_to_string(score))
+        Dom.set_attr(el, "data-lines", int_to_string(lines))
+        Dom.set_attr(el, "data-rng", rng_s)
+        Dom.set_attr(el, "data-over", if over do "true" else "false" end)
+        -- data-seq is deliberately left untouched: restoring a snapshot is
+        -- never itself a new gameplay event, whether it's a passive scrub
+        -- (paused=true) or a resume-and-branch (paused=false) — the very
+        -- next real move naturally bumps data-seq and starts recording the
+        -- new branch's future.
     end
   end
 
@@ -509,6 +568,10 @@ mod Tetris do
         restart()
         Dom.listen(Dom.body(), "keydown", fn ev -> handle_key(ev))
         Dom.set_interval(500, fn _ -> tick())
+        match Dom.find("restore-trigger") do
+          None -> ()
+          Some(trigger) -> Dom.listen(trigger, "click", fn _ -> restore_from_request())
+        end
     end
   end
 

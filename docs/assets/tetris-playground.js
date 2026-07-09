@@ -162,13 +162,99 @@
   function computeCellSize() {
     var host = document.getElementById("tp-iframe-host");
     var rect = host.getBoundingClientRect();
-    var reservedV = 110; // HUD + game-over lines + gaps + body padding
+    var reservedV = 155; // HUD + game-over + pause-status + time-travel bar + gaps + body padding
     var reservedH = 32;  // board border + side margin
     var byHeight = Math.floor((rect.height - reservedV) / BOARD_ROWS);
     var byWidth = Math.floor((rect.width - reservedH) / BOARD_COLS);
     var size = Math.min(byHeight, byWidth);
     if (!isFinite(size) || size <= 0) size = 20;
     return Math.max(12, Math.min(size, 44));
+  }
+
+  // The attributes that fully describe one game frame. Time travel copies
+  // these verbatim between #game-state and #restore-request — see the
+  // inline script below and Tetris.restore_from_request in tetris.march.
+  var STATE_ATTRS = ["data-board", "data-piece", "data-rot", "data-x", "data-y",
+                      "data-next", "data-score", "data-lines", "data-rng",
+                      "data-over", "data-paused"];
+  var HISTORY_CAP = 3000;
+
+  // Runs inside the iframe as a plain (non-module) script, so it executes
+  // synchronously during parse — before the deferred `type=module` script
+  // that calls Tetris.main() — guaranteeing the MutationObserver below is
+  // already attached when restart() makes its first move.
+  //
+  // Recording: a fresh snapshot of every #game-state attribute is captured
+  // each time data-seq changes (bumped only by with_state's commit branch
+  // and restart() in tetris.march — never by pausing or by restoring a
+  // snapshot), so passively scrubbing history never records anything.
+  //
+  // Scrubbing writes the target frame to #restore-request (forcing
+  // data-paused='true' so nothing can advance while you're looking at the
+  // past — every gameplay function already refuses to run while paused)
+  // and clicks #restore-trigger, which tetris.march wires to
+  // restore_from_request(). "Resume from here" truncates the in-memory
+  // history to the current frame and restores it with data-paused='false',
+  // branching play forward from that point exactly like undo-then-edit.
+  function timeTravelScript() {
+    return (
+      "(function(){" +
+      "var ATTRS=" + JSON.stringify(STATE_ATTRS) + ";" +
+      "var CAP=" + HISTORY_CAP + ";" +
+      "var history=[],historyIndex=-1,followingLive=true;" +
+      "var gs=document.getElementById('game-state');" +
+      "var req=document.getElementById('restore-request');" +
+      "var trigger=document.getElementById('restore-trigger');" +
+      "var slider=document.getElementById('tt-slider');" +
+      "var backBtn=document.getElementById('tt-back');" +
+      "var fwdBtn=document.getElementById('tt-fwd');" +
+      "var resumeBtn=document.getElementById('tt-resume');" +
+      "var label=document.getElementById('tt-label');" +
+      "function capture(){" +
+      "var s={};ATTRS.forEach(function(a){s[a]=gs.getAttribute(a);});return s;" +
+      "}" +
+      "function writeRequest(snap,pausedOverride){" +
+      "ATTRS.forEach(function(a){" +
+      "req.setAttribute(a,a==='data-paused'&&pausedOverride!==null?pausedOverride:snap[a]);" +
+      "});" +
+      "trigger.click();" +
+      "}" +
+      "function updateUI(){" +
+      "var n=history.length;" +
+      "slider.max=String(Math.max(n-1,0));" +
+      "slider.value=String(Math.max(historyIndex,0));" +
+      "slider.disabled=n<=1;" +
+      "backBtn.disabled=historyIndex<=0;" +
+      "fwdBtn.disabled=historyIndex>=n-1;" +
+      "label.textContent='Frame '+(n?historyIndex+1:0)+'/'+n;" +
+      "resumeBtn.style.display=followingLive?'none':'inline-block';" +
+      "}" +
+      "function scrubTo(i){" +
+      "i=Math.max(0,Math.min(i,history.length-1));" +
+      "historyIndex=i;" +
+      "followingLive=(i===history.length-1);" +
+      "writeRequest(history[i],followingLive?null:'true');" +
+      "updateUI();" +
+      "}" +
+      "new MutationObserver(function(){" +
+      "history.push(capture());" +
+      "if(history.length>CAP)history.shift();" +
+      "if(followingLive)historyIndex=history.length-1;" +
+      "updateUI();" +
+      "}).observe(gs,{attributes:true,attributeFilter:['data-seq']});" +
+      "slider.addEventListener('input',function(e){scrubTo(parseInt(e.target.value,10));});" +
+      "backBtn.addEventListener('click',function(){scrubTo(historyIndex-1);});" +
+      "fwdBtn.addEventListener('click',function(){scrubTo(historyIndex+1);});" +
+      "resumeBtn.addEventListener('click',function(){" +
+      "var snap=history[historyIndex];" +
+      "history.length=historyIndex+1;" +
+      "followingLive=true;" +
+      "writeRequest(snap,'false');" +
+      "updateUI();" +
+      "});" +
+      "updateUI();" +
+      "})();"
+    );
   }
 
   function buildSrcdoc(js) {
@@ -191,19 +277,33 @@
       "#board{display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
       ".tetris-row{display:flex}.tetris-cell{width:" + cell + "px;height:" + cell + "px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
       "#hud{display:flex;gap:1rem;align-items:center;font-size:" + hudFont + "px;color:" + t.textMuted + "}" +
-      "#pause-btn{font:inherit;color:inherit;background:transparent;border:1px solid " + t.border + ";" +
+      ".hud-btn{font:inherit;color:inherit;background:transparent;border:1px solid " + t.border + ";" +
       "border-radius:4px;padding:2px 10px;cursor:pointer}" +
-      "#pause-btn:hover{border-color:" + t.textMuted + "}" +
+      ".hud-btn:hover{border-color:" + t.textMuted + "}" +
+      ".hud-btn:disabled{opacity:.4;cursor:default}" +
       "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
       "#pause-status{color:" + t.textMuted + ";font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
+      "#tt-bar{display:flex;align-items:center;gap:.5rem;font-size:" + hudFont + "px;color:" + t.textMuted + ";width:100%;max-width:360px}" +
+      "#tt-slider{flex:1;min-width:0}" +
+      "#tt-label{white-space:nowrap;font-variant-numeric:tabular-nums}" +
       "</style></head><body>" +
       "<div id='board'></div>" +
       "<div id='hud'><span id='score'>Score: 0</span><span id='level'>Level: 0</span><span id='next'>Next: O</span>" +
-      "<button id='pause-btn' type='button'>Pause</button></div>" +
+      "<button id='pause-btn' class='hud-btn' type='button'>Pause</button></div>" +
       "<div id='game-over'></div>" +
       "<div id='pause-status'></div>" +
+      "<div id='tt-bar'>" +
+      "<button id='tt-back' class='hud-btn' type='button' title='Step back'>&#9664;</button>" +
+      "<input id='tt-slider' type='range' min='0' max='0' value='0'>" +
+      "<button id='tt-fwd' class='hud-btn' type='button' title='Step forward'>&#9654;</button>" +
+      "<span id='tt-label'>Frame 0/0</span>" +
+      "<button id='tt-resume' class='hud-btn' type='button' style='display:none'>Resume from here</button>" +
+      "</div>" +
       "<div id='game-state' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +
+      "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' data-paused='false' data-seq='0' style='display:none'></div>" +
+      "<div id='restore-request' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +
       "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' data-paused='false' style='display:none'></div>" +
+      "<button id='restore-trigger' type='button' style='display:none'></button>" +
       "<script>window.onerror = function (msg) { parent.postMessage({tpError: String(msg)}, '*'); };<\/script>" +
       "<script>" +
       "document.getElementById('pause-btn').addEventListener('click', function () {" +
@@ -217,6 +317,7 @@
       "document.getElementById('pause-btn').textContent = paused ? 'Resume' : 'Pause';" +
       "}).observe(document.getElementById('game-state'), {attributes: true, attributeFilter: ['data-paused']});" +
       "<\/script>" +
+      "<script>" + timeTravelScript() + "<\/script>" +
       "<script type='module'>" +
       js +
       "<\/script>" +
@@ -235,6 +336,13 @@
     iframe.style.width = "100%";
     iframe.style.height = "100%";
     iframe.style.border = "0";
+    // Without this, arrow keys silently do nothing until the player clicks
+    // into the board — keyboard focus stays on the outer page (e.g. on the
+    // Run button) after every mount, since a fresh iframe never grabs it on
+    // its own.
+    iframe.onload = function () {
+      if (iframe.contentWindow) iframe.contentWindow.focus();
+    };
     host.appendChild(iframe);
     iframe.srcdoc = buildSrcdoc(js);
   }
