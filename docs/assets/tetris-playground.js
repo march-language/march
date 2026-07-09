@@ -242,7 +242,21 @@
       "if(followingLive)historyIndex=history.length-1;" +
       "updateUI();" +
       "}).observe(gs,{attributes:true,attributeFilter:['data-seq']});" +
-      "slider.addEventListener('input',function(e){scrubTo(parseInt(e.target.value,10));});" +
+      // Dragging fires many 'input' events per second, each a distinct
+      // recorded game frame (a piece can move/lock/clear/spawn between two
+      // adjacent frames) — restoring every single one, un-throttled, flashes
+      // through many visually different boards faster than the eye can
+      // track, reading as jitter. Coalescing to the latest value once per
+      // animation frame caps the restore rate to the display's own paint
+      // rate without changing what a deliberate single step/click does.
+      "var pendingScrub=null,scrubScheduled=false;" +
+      "function scheduleScrub(i){" +
+      "pendingScrub=i;" +
+      "if(scrubScheduled)return;" +
+      "scrubScheduled=true;" +
+      "requestAnimationFrame(function(){scrubScheduled=false;scrubTo(pendingScrub);});" +
+      "}" +
+      "slider.addEventListener('input',function(e){scheduleScrub(parseInt(e.target.value,10));});" +
       "backBtn.addEventListener('click',function(){scrubTo(historyIndex-1);});" +
       "fwdBtn.addEventListener('click',function(){scrubTo(historyIndex+1);});" +
       "resumeBtn.addEventListener('click',function(){" +
