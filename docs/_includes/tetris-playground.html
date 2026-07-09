@@ -33,6 +33,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    height: 100%;
   }
   @media (max-width: 900px) {
     .tp-editor-col { flex: none; }
@@ -56,6 +57,7 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
+    height: 100%;
   }
   @media (max-width: 900px) {
     .tp-terminal { flex: none; height: 420px; }
@@ -101,7 +103,7 @@
      every keystroke; scroll position is synced the same way. This mirrors
      march-repl.js's highlighter, applied live instead of only to submitted
      history entries. */
-  .tp-editor-wrap { position: relative; flex: 1; min-height: 0; }
+  .tp-editor-wrap { position: relative; flex: 1; min-height: 0; height: 100%; }
   .tp-highlight, .tp-editor {
     position: absolute;
     inset: 0;
