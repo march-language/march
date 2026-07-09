@@ -664,23 +664,6 @@ static void march_print_backtrace(void) {
 
 /* ── Panic ───────────────────────────────────────────────────────────────── */
 
-/* Set (to a jmp_buf living on the CURRENT green thread's own stack) only
- * while dispatching a message to an actor that IS a supervised child
- * (meta->supervisor != NULL); NULL otherwise. march_panic checks this to
- * decide whether a panic inside a supervised actor's handler should
- * longjmp back into actor_green_thread (crash-isolated, restart-eligible)
- * instead of exit(1)-ing the whole process. Every other actor keeps today's
- * exit(1)-on-panic behavior unchanged. Save/restore around each
- * actor_green_thread invocation (see that function, below) is safe under
- * both cooperative and preemptive green-thread scheduling: it is a
- * per-invocation dynamic scope that nests correctly regardless of which
- * other green thread runs on this OS thread in between (the existing
- * saved_rc = a[0]; a[0] = 1; ...; a[0] = saved_rc; dance in that same
- * function relies on the exact same property — a green thread's own
- * stack-local state survives any number of suspend/resume cycles for as
- * long as its actor_green_thread call frame is alive). */
-static _Thread_local jmp_buf *g_current_actor_crash_jmp = NULL;
-
 /* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
  * which is defined just below. */
 void march_panic(void *s);
@@ -718,8 +701,15 @@ void march_panic(void *s) {
         march_test_fail_buf[len] = '\0';
         longjmp(march_test_jmp_buf, 1);
     }
-    if (g_current_actor_crash_jmp) {
-        longjmp(*g_current_actor_crash_jmp, 1);
+    /* Compiled actor supervision: a panic inside a supervised child's
+     * message handler longjmp's back into actor_green_thread instead of
+     * exit(1)-ing the whole process (see march_proc.crash_jmp's doc
+     * comment in march_scheduler.h for why this is stored on the proc,
+     * not a _Thread_local — this scheduler is work-stealing across
+     * multiple OS threads, so the currently-running proc can migrate). */
+    march_proc *cur_proc = march_sched_current();
+    if (cur_proc && cur_proc->crash_jmp) {
+        longjmp(*cur_proc->crash_jmp, 1);
     }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
@@ -1366,19 +1356,27 @@ static void actor_green_thread(void *arg) {
     void *actor = meta->actor;
     int64_t *a = (int64_t *)actor;
 
+    /* self is THIS green thread's own proc — march_sched_current() reads
+     * tl_sched->current, which correctly names "whatever proc this OS
+     * thread's scheduler is running right now" regardless of which OS
+     * thread that happens to be (see march_proc.crash_jmp's doc comment
+     * in march_scheduler.h for why the trap pointer lives on the proc,
+     * not a _Thread_local — this scheduler steals procs across OS
+     * threads, so a raw thread-local would go stale after a migration). */
+    march_proc *self = march_sched_current();
     jmp_buf crash_jmp;
-    jmp_buf *saved_jmp = g_current_actor_crash_jmp;
-    if (meta->supervisor) {
+    jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
+    if (meta->supervisor && self) {
         /* Only a supervised child gets crash-isolated — an unsupervised
          * actor's panic keeps today's exit(1) behavior (see march_panic). */
-        g_current_actor_crash_jmp = &crash_jmp;
+        self->crash_jmp = &crash_jmp;
     }
-    if (meta->supervisor && setjmp(crash_jmp) != 0) {
+    if (meta->supervisor && self && setjmp(crash_jmp) != 0) {
         /* march_panic longjmp'd here instead of exit(1)-ing the process.
          * do_actor_death mirrors what march_kill would have done, and
          * (since this actor has a supervisor) triggers a restart — kill/
          * crash-notify parity with the interpreter's kill = crash_actor. */
-        g_current_actor_crash_jmp = saved_jmp;
+        self->crash_jmp = saved_jmp;
         do_actor_death(actor);
         pthread_mutex_lock(&g_tbl_mu);
         meta->green_thread = NULL;
@@ -1460,7 +1458,7 @@ static void actor_green_thread(void *arg) {
      * scheduler shutdown) and this proc is about to die and be freed by
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
-    g_current_actor_crash_jmp = saved_jmp;
+    if (self) self->crash_jmp = saved_jmp;
     pthread_mutex_lock(&g_tbl_mu);
     meta->green_thread = NULL;
     pthread_mutex_unlock(&g_tbl_mu);

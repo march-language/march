@@ -10,6 +10,7 @@
 #include <stdatomic.h>
 #include <ucontext.h>
 #include <pthread.h>
+#include <setjmp.h>
 
 #include "march_deque.h"
 
@@ -98,6 +99,16 @@ typedef struct march_proc {
                                               * procs remain and nothing is runnable, parked
                                               * daemons are woken without a message so their
                                               * loops exit and the process can terminate. */
+    /* Compiled actor supervision: set (to a jmp_buf on THIS proc's own
+     * green-thread stack) only while dispatching a message to an actor
+     * that is a supervised child. march_panic longjmp's here instead of
+     * exit(1)-ing the whole process. Deliberately stored on march_proc,
+     * not as a _Thread_local — this scheduler is work-stealing across
+     * MARCH_NUM_SCHEDULERS OS threads (march_deque_steal), so a proc can
+     * resume on a DIFFERENT OS thread than the one that set the trap; a
+     * thread-local would read the wrong (or another proc's) value after
+     * such a migration. This field migrates with the proc itself. */
+    jmp_buf                   *crash_jmp;
 } march_proc;
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
