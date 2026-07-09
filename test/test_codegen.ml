@@ -1,6 +1,86 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
+
+let compile_to_js src =
+  let m = parse_and_desugar src in
+  March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
+    ~fn_lines:[] m
+
+let test_js_pipeline_simple_program_compiles () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn add(a: Int, b: Int) : Int do a + b end
+    fn main() : Unit do
+      let _ = add(1, 2)
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output mentions main" true
+      (Test_helpers.contains "main" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_typecheck_error_surfaces () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let _ = 1 + "not a number"
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a typecheck error, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "at least one error message" true (errs <> [])
+
+let test_js_pipeline_dom_extern_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    resource Node
+    resource Event
+    extern "dom" : Cap(Ffi) do
+      fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
+    end
+    fn main() : Unit do
+      let _ = dom_get_element_by_id("root")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references the extern symbol" true
+      (Test_helpers.contains "march_dom_get_element_by_id" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_dom_event_key_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    extern "dom" : Cap(Ffi) do
+      fn dom_event_key(ev: String) : String = "march_dom_event_key"
+    end
+    fn main() : Unit do
+      let _ = dom_event_key("x")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references march_dom_event_key" true
+      (Test_helpers.contains "march_dom_event_key" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -8182,6 +8262,12 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "js_pipeline", [
+          Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
+          Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
+          Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
+          Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
