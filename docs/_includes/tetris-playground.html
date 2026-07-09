@@ -1,0 +1,130 @@
+<style>
+  .tp-wrap { display: flex; gap: 1.5rem; margin: 2rem 0; align-items: flex-start; flex-wrap: wrap; }
+  /* min-width: 0 overrides the flex item's default content-based minimum —
+     without it a <textarea> child refuses to shrink past its intrinsic
+     size, forcing this column (and its sibling) to wrap onto its own line
+     even when flex-basis/min-width alone would fit side-by-side. */
+  .tp-editor-col { flex: 1 1 380px; min-width: 0; }
+
+  /* Terminal chrome, matching docs/_includes/playground.html's .pg-terminal
+     so this page reads as the same family of widget as /docs/playground/. */
+  .tp-terminal {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .tp-titlebar {
+    background: var(--bg-sidebar, var(--bg-code));
+    border-bottom: 1px solid var(--border);
+    padding: 11px 16px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .tp-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .tp-dot-red    { background: #ff5f57; }
+  .tp-dot-yellow { background: #febc2e; }
+  .tp-dot-green  { background: #28c840; }
+  .tp-title-label {
+    margin-left: 8px;
+    color: var(--text-faint);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    flex: 1;
+  }
+  .tp-run-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 3px 12px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+  .tp-run-btn:hover { border-color: var(--accent); }
+
+  /* Live syntax highlighting: a highlighted <pre> sits behind a transparent
+     <textarea> (same font metrics, perfectly overlaid) — the textarea's own
+     glyphs are invisible (color: transparent) but its caret and selection
+     still render, and it still receives all real keyboard/paste input.
+     `_hlLine` (docs/assets/tetris-playground.js) re-renders the <pre> on
+     every keystroke; scroll position is synced the same way. This mirrors
+     march-repl.js's highlighter, applied live instead of only to submitted
+     history entries. */
+  .tp-editor-wrap { position: relative; height: 480px; }
+  .tp-highlight, .tp-editor {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 12px;
+    border: 0;
+    box-sizing: border-box;
+    font: inherit;
+    line-height: inherit;
+    white-space: pre;
+    overflow: auto;
+  }
+  .tp-highlight {
+    color: var(--text);
+    background: transparent;
+    pointer-events: none;
+  }
+  .tp-editor {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--text);
+    resize: none;
+  }
+  .tp-status-row { margin-top: 8px; color: var(--text-faint); font-size: 12px; }
+  .tp-errors {
+    white-space: pre-wrap;
+    color: #f87171;
+    font-family: monospace;
+    font-size: 12px;
+    margin-top: 8px;
+    display: none;
+  }
+  .tp-errors.visible { display: block; }
+  .tp-game-col { flex: 1 1 300px; min-width: 0; }
+  .tp-iframe-wrap {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1a1a2e;
+  }
+  #tp-iframe-host { width: 100%; height: 560px; border: 0; display: block; }
+</style>
+
+<div class="tp-wrap" id="tp-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
+  <div class="tp-editor-col">
+    <div class="tp-terminal">
+      <div class="tp-titlebar">
+        <span class="tp-dot tp-dot-red"></span>
+        <span class="tp-dot tp-dot-yellow"></span>
+        <span class="tp-dot tp-dot-green"></span>
+        <span class="tp-title-label">tetris.march</span>
+        <button class="tp-run-btn" onclick="tpRun()">Run &#9654;</button>
+      </div>
+      <div class="tp-editor-wrap">
+        <pre class="tp-highlight" id="tp-highlight" aria-hidden="true"></pre>
+        <textarea class="tp-editor" id="tp-editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+      </div>
+    </div>
+    <div class="tp-status-row" id="tp-status"></div>
+    <div class="tp-errors" id="tp-errors"></div>
+  </div>
+  <div class="tp-game-col">
+    <div class="tp-iframe-wrap"><div id="tp-iframe-host"></div></div>
+  </div>
+</div>
+
+<script src="{{ site.baseurl }}/assets/tetris-playground.js?v={{ site.time | date: '%s' }}"></script>

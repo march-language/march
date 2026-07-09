@@ -1,0 +1,5 @@
+-- The aliased-to module: a 2-level (dotted) module name, whose emitted TIR
+-- symbols are prefixed with the full "AcBase.Target." path.
+mod AcBase.Target do
+  fn answer() do 42 end
+end

@@ -283,6 +283,54 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
+
+Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
+runs a real trip through the compiler (parse → typecheck → lower → optimize → js_emit)
+entirely in the browser, driven by a new js_of_ocaml entry point,
+`js/march_browser_compile.ml` (`marchCompileToJs`), built on a new shared library,
+`lib/driver/js_pipeline.ml`, that both it and future tooling can call without going
+through `bin/main.ml`'s CLI. The game itself: `demo_app/tetris_logic/` (pure rules,
+14 forge unit tests, native-safe) + `demo_app/tetris/` (Dom wiring, depends on
+`tetris_logic` via a `forge.toml` path dep so `forge test` never touches Dom externs
+natively). State lives in the DOM itself (a `#game-state` element's `data-*` attrs) since
+March has no mutable-cell primitive reachable across independent event callbacks
+(keydown vs. the gravity-tick interval).
+
+Getting the real game through both the `--target js` codegen backend AND, separately,
+the browser-hosted typechecker surfaced genuine pre-existing compiler bugs, fixed here:
+
+- **`lib/tir/js_emit.ml` had no case at all** for `int_div`/`int_mod`/`int_mod_euclid`
+  (emitted as calls to a nonexistent JS function — any `Array` growth past 32 elements
+  hits this via the PVec trie), the bitwise family (`int_and`/`int_or`/`int_xor`/
+  `int_shl`/`int_shr` — same PVec trie), `unix_time` (`Random`'s default seed), and
+  `int_pow`/`int_abs`/`int_max_value`/`int_min_value`. All added, either as new
+  `runtime/march_runtime.mjs` helpers (matching `march_runtime.c`'s checked/panic-on-zero
+  semantics) or inline JS operators.
+- **`lib/typecheck/typecheck.ml` never registered `string_from_codepoint`/
+  `string_to_codepoints`** — real interpreter builtins (`lib/eval/eval.ml`), just never
+  wired into the type env, so any strict typecheck of `stdlib/string.march` (not just
+  this playground) would have failed on them. Added.
+- **`stdlib/random.march`'s `mix()` had a bare integer literal (`1234567891011`)**
+  exceeding the March lexer's `max_int` — but only when the *compiler itself* runs as
+  browser JS (js_of_ocaml represents OCaml's native `int` as 32-bit; native/`--target js`
+  compilation was always fine since the multiply runs at the *compiled program's*
+  runtime). Rewritten as an exactly-equal `1234567 * 1000000 + 891011` (deferred to
+  runtime, never lexed as one token) — a real fix for the existing interpreter REPL
+  playground too, not just this new one.
+
+**Filed, not fixed:** `check_module_full`'s pass-1 registers unqualified names into one
+flat table when many stdlib files are merged as top-level siblings (both browser tools'
+approach — never previously run through the real typechecker, since the interpreter
+skips typecheck and the CLI lazy-loads per file). A same-named function in two merged
+modules (`fold_left`, in both `prelude.march` and `list.march`/`array.march`) can shadow
+across module boundaries, producing a bogus type error inside the *other* module's own
+body. Worked around in `js/march_browser_compile.ml` by dropping `prelude.march`'s bare
+`fold_left` from that bundle specifically.
+
+Full suite green throughout: 451 compiler / 231 eval / 398 codegen / 773 stdlib (quick).
+Plan: `docs/superpowers/plans/2026-07-08-tetris-playground.md` (gitignored, per this
+
 ## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
 
 The filed "container/factory `cap_narrow`-taint gap" is closed, with a

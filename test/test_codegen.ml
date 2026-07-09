@@ -1,6 +1,86 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
+
+let compile_to_js src =
+  let m = parse_and_desugar src in
+  March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
+    ~fn_lines:[] m
+
+let test_js_pipeline_simple_program_compiles () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn add(a: Int, b: Int) : Int do a + b end
+    fn main() : Unit do
+      let _ = add(1, 2)
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output mentions main" true
+      (Test_helpers.contains "main" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_typecheck_error_surfaces () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let _ = 1 + "not a number"
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a typecheck error, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "at least one error message" true (errs <> [])
+
+let test_js_pipeline_dom_extern_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    resource Node
+    resource Event
+    extern "dom" : Cap(Ffi) do
+      fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
+    end
+    fn main() : Unit do
+      let _ = dom_get_element_by_id("root")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references the extern symbol" true
+      (Test_helpers.contains "march_dom_get_element_by_id" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_dom_event_key_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    extern "dom" : Cap(Ffi) do
+      fn dom_event_key(ev: String) : String = "march_dom_event_key"
+    end
+    fn main() : Unit do
+      let _ = dom_event_key("x")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references march_dom_event_key" true
+      (Test_helpers.contains "march_dom_event_key" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -6331,6 +6411,119 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
        interior nested tuple) matches the interpreter"
       "15" run_out
 
+(* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
+   A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
+   with the MANY stdlib helpers that use a conventionally-named nested
+   `fn go` (List.length, List.reverse, List.map, …).  Monomorphization's
+   [rewrite_calls] resolved every call named `go` against the module-level
+   fn_table (keyed by bare name), so the stdlib helpers' nested `go` calls were
+   silently rebound to the USER's top-level `go`.  `List.length(r)` then ran the
+   user's reverse-accumulator against an Int accumulator (0), returning a garbage
+   pointer reinterpreted as an Int (observed: len=4745871568 instead of 5).
+   The interpreter has no mangling/linking step, so it was always correct — an
+   interpreter-correct / compiled-wrong divergence.  Compile-and-run because the
+   symptom is a wrong runtime value, not an IR shape.  Fix: nested-fn names
+   shadow same-named top-level fns in mono (lib/tir/mono.ml `rewrite_calls`). *)
+let test_nested_fn_name_shadows_toplevel_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_go_collision"
+    "mod GoCollision do\n\
+    \  pfn go(xs, acc) do\n\
+    \    match xs do\n\
+    \    Nil -> acc\n\
+    \    Cons(h, t) -> go(t, Cons(h, acc))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let r = go([1, 2, 3, 4, 5], [])\n\
+    \    println(int_to_string(List.length(r)) ++ \"|\" ++ int_to_string(List.sum_int(r)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no mangling, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: user `go` reverses to a 5-element list; stdlib `go` helpers \
+     (length/sum_int) still resolve to their own bodies"
+    "5|15" interp_out;
+  (* --- compiled: must match; before the fix this printed a garbage length --- *)
+  let bin = Filename.concat tmp "gocollisionbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: stdlib nested `go` helpers are NOT captured by the user's \
+       top-level `go` — List.length/List.sum_int return the SAME values as the \
+       interpreter (not a garbage pointer reinterpreted as an Int)"
+      "5|15" run_out
+
+(* ── Non-entry-module single-field ADT: construct-vs-destructure repr ──────
+   A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`)
+   defined in a NON-ENTRY module (a nested `mod`, or any MARCH_LIB_PATH library
+   like stdlib) is registered under its MODULE-QUALIFIED name ("Inner.Wrap") by
+   [Lower.lower_mod_decls], but the module's own value types reference it BARE
+   ("Wrap") — the typechecker drops the prefix on same-module references.  So
+   [Repr.find_variant]/[repr_of_ty] missed on the bare-name query and defaulted
+   to [Boxed] at construction (EAlloc) and top-level pattern sites, while the
+   codegen newtype-recovery path (`emit_case`, which looks up by CTOR name → the
+   qualified typedef) saw [Newtype].  A tuple-nested destructure
+   `match (w1,w2) do (Wrap(xs),Wrap(ys)) -> …` reaches [emit_case] with a
+   TVar-erased sub-scrutinee → took the Newtype (identity) path, so `xs` was the
+   BOX pointer, not the payload; `List.length(xs)` then read the box header
+   (tag 0) as an empty `Nil` → 0.  Entry-module ADTs are registered bare so both
+   sides agreed (Newtype) and worked — this was non-entry-only, and it made
+   compiled `Bytes.concat` (bytes.march is a non-entry module) return an empty
+   `Bytes`, hanging forgepm's Postgres handshake.  Fixed in [Repr.find_variant]:
+   reconcile a bare query against a unique module-qualified registration.
+   Compile-and-run because the symptom is a wrong runtime value across the
+   construct/destructure boundary, not an IR shape. *)
+let test_nonentry_newtype_tuple_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nonentry_newtype"
+    "mod Main do\n\
+    \  needs IO.Console\n\
+    \  mod Inner do\n\
+    \    type Wrap = Wrap(List(Int))\n\
+    \    fn mk(xs) do Wrap(xs) end\n\
+    \    fn sum_pair(w1, w2) do\n\
+    \      match (w1, w2) do\n\
+    \      (Wrap(xs), Wrap(ys)) -> List.length(xs) + List.length(ys)\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let a = Inner.mk([1, 2, 3])\n\
+    \    let b = Inner.mk([4, 5])\n\
+    \    println(int_to_string(Inner.sum_pair(a, b)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no repr/mangling step, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: tuple-destructure of a non-entry single-field ADT unwraps \
+     both payloads (3 + 2)"
+    "5" interp_out;
+  (* --- compiled: must match; before the fix the nested Wrap destructure took
+         the Newtype (identity) path against a boxed value and printed 0 --- *)
+  let bin = Filename.concat tmp "nonentrynewtypebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: a non-entry single-field ADT is classified identically at \
+       construction and (tuple-nested) destructure — the payload is unwrapped, \
+       not read as an empty niche/newtype (which returned 0)"
+      "5" run_out
+
 (* ── EUpdate on type-erased records (B5) ─────────────────────────────────
    `{ base with f: v }` where the base's static shape is unknown
    (get_record_fields = [], e.g. a record_from_list/record_put result) used
@@ -7526,8 +7719,108 @@ let test_unreadable_sibling_dir_does_not_crash_check () =
         true
         (ir_contains out "EXIT:0"))
 
+(* ── Cross-compile: TLS (OpenSSL) + gzip (zlib) for linux/amd64 (P3) ────────
+   Cross-compile a program that references BOTH the TLS runtime
+   (march_tls_write / march_tls_close) AND the gzip runtime (march_gzip_encode /
+   march_gzip_decode), then assert the output is a valid Linux x86-64 ELF whose
+   DT_NEEDED lists libssl.so.3, libcrypto.so.3 and libz.so.1 — i.e. the cross
+   link resolved the external symbols against the target sysroot instead of
+   failing with "undefined symbol: march_tls_write" (the P1 pure-compute
+   behaviour this fix replaces).
+
+   This is a LINK-STRUCTURE test: the binary is x86-64 Linux and cannot RUN on
+   the (arm64/macOS) test host, so we inspect the ELF, we do not execute it.  It
+   REQUIRES `zig` (the cross driver) and the target sysroot cache
+   (scripts/fetch-cross-sysroot.sh amd64); when either is absent it SKIPS
+   cleanly via the tool-absence ledger rather than failing — mirroring the
+   clang-absence policy for the JIT tests. *)
+let test_cross_tls_gzip_linux_amd64_elf () =
+  if not (zig_available ()) then
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no zig on PATH (cross driver absent)"
+  else match cross_sysroot_dir "amd64" with
+  | None ->
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no target sysroot \
+       (run scripts/fetch-cross-sysroot.sh amd64)"
+  | Some _sysroot ->
+    let main_exe = find_main_exe () in
+    let project_root = march_project_root () in
+    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+       libssl/libcrypto would be dropped and the assertion below would be a
+       false negative.  The gzip calls are unconditional. *)
+    let src_text =
+      "mod XTls do\n\
+      \  needs IO.NetConnect.TLS\n\
+      \  fn main() do\n\
+      \    let payload = Bytes.from_string(\"march cross tls+gzip probe\")\n\
+      \    let gz = match stdlib_gzip_encode(payload, -1) do\n\
+      \      Ok(c)  -> c\n\
+      \      Err(_) -> payload\n\
+      \    end\n\
+      \    let restored = match stdlib_gzip_decode(gz) do\n\
+      \      Ok(o)  -> o\n\
+      \      Err(_) -> gz\n\
+      \    end\n\
+      \    if Bytes.length(restored) > 1000000000 do\n\
+      \      let _ = tls_write(0, \"ping\")\n\
+      \      tls_close(0)\n\
+      \    else\n\
+      \      ()\n\
+      \    end\n\
+      \    println(\"probe ok\")\n\
+      \  end\n\
+       end\n"
+    in
+    let tmp = Filename.temp_file "march_xtls" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "xtls.march" in
+    let oc = open_out src in
+    output_string oc src_text;
+    close_out oc;
+    let bin = Filename.concat tmp "xtls_linux" in
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      String.trim (Buffer.contents buf)
+    in
+    let compile_out = read_cmd (Printf.sprintf
+      "cd %s && %s --compile --target linux/amd64 -o %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "cross-compile succeeds (no undefined march_tls_*/march_gzip_* \
+                       symbols); output:\n%s" compile_out)
+      true (ir_contains compile_out "EXIT:0" && Sys.file_exists bin);
+    (* Assert Linux x86-64 ELF via `file`. *)
+    let file_out = read_cmd (Printf.sprintf "file %s" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "output is a Linux x86-64 ELF; `file` said:\n%s" file_out)
+      true
+      (ir_contains file_out "ELF 64-bit"
+       && ir_contains file_out "x86-64"
+       && ir_contains file_out "GNU/Linux");
+    (* Assert DT_NEEDED lists all three target sonames.  `objdump -p` parses the
+       Linux ELF fine on the host; llvm-readelf would work too. *)
+    let needed = read_cmd (Printf.sprintf
+      "objdump -p %s 2>/dev/null | grep NEEDED || true" (Filename.quote bin)) in
+    List.iter (fun so ->
+        Alcotest.(check bool)
+          (Printf.sprintf "DT_NEEDED contains %s; NEEDED lines:\n%s" so needed)
+          true (ir_contains needed so))
+      ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"]
+
 let codegen_suites =
   [
+      ( "cross_compile", [
+          Alcotest.test_case
+            "linux/amd64 TLS+gzip links to valid ELF w/ libssl/libcrypto/libz NEEDED (P3)"
+            `Quick test_cross_tls_gzip_linux_amd64_elf;
+        ] );
       ( "tir_names", [
           Alcotest.test_case "tuple_tag round-trip"       `Quick test_tir_names_tuple_tag;
           Alcotest.test_case "fv_field round-trip"        `Quick test_tir_names_fv_field_round_trip;
@@ -8017,6 +8310,14 @@ let codegen_suites =
           Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
             test_nested_tuple_let_deep_wildcard_compiled;
         ] );
+      ( "nested_fn_name_collision_codegen", [
+          Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
+            test_nested_fn_name_shadows_toplevel_compiled;
+        ] );
+      ( "nonentry_newtype_repr_codegen", [
+          Alcotest.test_case "non-entry single-field ADT: construct/destructure repr agree (tuple-nested)" `Quick
+            test_nonentry_newtype_tuple_destructure_compiled;
+        ] );
       ( "erased_record_update_codegen", [
           Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick
             test_erased_update_single_dyn_call_ir;
@@ -8088,6 +8389,12 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "js_pipeline", [
+          Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
+          Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
+          Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
+          Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

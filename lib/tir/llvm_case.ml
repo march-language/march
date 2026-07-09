@@ -67,10 +67,29 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     | [br] when (let t = br.Tir.br_tag in
                  String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z') ->
       let tag = br.Tir.br_tag in
+      (* Classify the owning type by the SAME name construction/EAlloc uses: the
+         BARE type name (its ctor key is "TypeName.CtorName").  A type defined in
+         a NON-ENTRY module is registered here under its module-qualified name
+         (e.g. "Bytes.Bytes"), but EAlloc and top-level patterns resolve it by the
+         bare "Bytes" and so classify it [Boxed] (the runtime constructs `Bytes`
+         boxed too — [make_bytes_from_raw]).  If the recovery instead looked up
+         the qualified [tname] it would see [Newtype] and take the identity path
+         for a boxed value — reading a box header as an empty niche payload
+         (compiled `Bytes.concat` returned an empty `Bytes`, hanging forgepm's
+         Postgres handshake).  Stripping to the bare name keeps the recovery
+         consistent with construction: a genuine (entry-module) newtype is
+         registered bare so [last_seg] is a no-op and it still classifies
+         [Newtype]. *)
+      let last_seg s =
+        match String.rindex_opt s '.' with
+        | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+        | None -> s
+      in
       let owner_reprs = List.filter_map (function
         | Tir.TDVariant (tname, variants)
           when List.exists (fun (c, _) -> c = tag) variants ->
-          Some (Repr.repr_of_ty ctx.Llvm_ctx.type_defs (Tir.TCon (tname, [])))
+          Some (Repr.repr_of_ty ctx.Llvm_ctx.type_defs
+                  (Tir.TCon (last_seg tname, [])))
         | _ -> None) ctx.Llvm_ctx.type_defs in
       (match owner_reprs with
        | Repr.Newtype p0 :: rest
