@@ -8766,9 +8766,24 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
   let rec conv (s : Ast.ty) : ty option =
     match s with
     | Ast.TyCon (name, args) ->
-      (match opt_all (List.map conv args) with
-       | Some args' -> Some (TCon (name.txt, args'))
-       | None -> None)
+      (* Decline to build a scheme from a QUALIFIED type name.  This prebind
+         pass has no env, so it cannot reproduce [surface_ty]'s type resolution:
+         [surface_ty] canonicalizes a qualified variant to its bare nominal
+         (`Conduit.ConduitError` -> `ConduitError`) AND expands a qualified
+         record to a structural [TRecord].  Emitting a verbatim qualified nominal
+         `TCon("Mod.T")` here made a prebind fn scheme — used at a call site
+         checked BEFORE the callee's Pass-2 re-derivation — mismatch the bare
+         (or structural) type the caller's argument carries, an order-dependent
+         "expected Mod.T but got T".  Guessing bare unconditionally instead
+         wrongly conflates two same-suffixed types (`Conduit.Config` vs stdlib
+         `Config`).  Returning None falls back to the [fresh_var] placeholder,
+         which unifies with anything and imposes no false constraint; the
+         callee's own [check_fn] still derives and enforces its real type. *)
+      if String.contains name.txt '.' then None
+      else
+        (match opt_all (List.map conv args) with
+         | Some args' -> Some (TCon (name.txt, args'))
+         | None -> None)
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -8828,7 +8843,20 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      declarations so that cross-module forward references are pre-bound in
      pass 1. This mirrors the eval.ml global module_registry approach.
      Only pre-binds public functions to preserve private-access restrictions. *)
-  let rec prebind_mod_members prefix env decls =
+  let rec prebind_mod_members ?(opaque = StringSet.empty) prefix env decls =
+    (* Opaque type names per submodule, taken from a sibling `sig <Mod>`
+       declaration.  A type a signature exports opaquely (`type Stack a`, no
+       constructors) must keep its constructors HIDDEN outside the module — so
+       the bare-constructor seeding below is suppressed for them, matching the
+       Pass-2 export filter (:7467) and preserving order-independence (hidden
+       ctors stay unreferenceable cross-module by design). *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -8843,14 +8871,40 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -8866,7 +8920,30 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              (* Register both local name and fully-qualified name in env.records
@@ -8881,11 +8958,23 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) env decls
   in
   (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
+  (* Opaque type names per top-level module, from sibling `sig <Mod>` decls: the
+     entry module is unwrapped so its `sig`/`mod` pairs are siblings here, not
+     inside [prebind_mod_members] (see the same map built there). *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -8901,7 +8990,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
-        let env = prebind_mod_members mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
@@ -9050,7 +9141,16 @@ let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.creat
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let errors = env.errors in
   let type_map = env.type_map in
-  let rec prebind_mod_members_inc prefix e decls =
+  let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =
+    (* See [prebind_mod_members]: suppress bare-constructor seeding for types a
+       sibling `sig` exports opaquely. *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -9060,14 +9160,40 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -9083,7 +9209,30 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -9095,11 +9244,20 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members_inc ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) e decls
   in
   (* Pass 1: forward-reference placeholders for new declarations *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -9109,7 +9267,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         (* Register the sibling module's members, then its interface impls — an
            impl declared in a sibling must satisfy constraints unit-wide
            regardless of check order (mirrors check_module_core's pass 1). *)
-        let env = prebind_mod_members_inc mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members_inc ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e

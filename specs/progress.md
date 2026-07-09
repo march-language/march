@@ -283,6 +283,42 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, order-independent multi-module name resolution)
+
+Multi-module typechecking is now **order-independent** for bare/qualified type
+and constructor references — the same file set checks identically no matter
+which file is the compile entry. Before, a `mod A.Sub` that referenced a sibling
+`mod A`'s constructors/types by bare name (or the `Type.Ctor` disambiguation
+form) with no `import`/`use` resolved only when `mod A` happened to be
+Pass-2-checked first; a **cyclic** module graph (real case: the `conduit`
+package, `Conduit` ↔ `Conduit.API`) is impossible to topologically order, so
+`forge check` passed or failed depending on the entry file (`backoff.march` →
+59 errors, `api.march` → 0, same sources). Fix in `lib/typecheck/typecheck.ml`,
+all in Pass-1 prebinding so resolution no longer depends on Pass-2 order:
+
+- `prebind_mod_members` (+ the `_inc` LSP/REPL twin) now seeds a nested public
+  type's **bare** name and **bare constructor** keys (and the bare `Type.Ctor`
+  disambiguation key), mirroring what the top-level path and records already
+  did. The module-qualified constructor now carries `ci_type = <bare type>` (was
+  the qualified `qname`), matching `check_decl` — the sole site that produced a
+  qualified nominal, cause of "expected `Mod.T` but got `T`".
+- `prebind_fn_scheme` declines to build a scheme from a **qualified** type name
+  (falls back to the fresh-var placeholder) rather than emit a qualified nominal
+  it cannot canonicalize without an env — killing an order-dependent
+  signature/argument mismatch without over-canonicalizing distinct same-suffix
+  types (`Conduit.Config` vs stdlib `Config`).
+- Bare-constructor seeding is **suppressed for types a sibling `sig` exports
+  opaquely**, preserving opaque-type constructor hiding (the `sig` opacity filter
+  is threaded through prebind via an `~opaque` set built from sibling `sig`
+  decls at both the nested and unwrapped-entry levels).
+
+All ~40 `conduit` files now `--check` clean as the entry, in any order. Full
+suite green modulo the pre-existing baseline (14 Slow compiled
+adversarial-regressions). New regression tests
+`test_tc_cyclic_bare_ctor_order_independent` and
+`test_tc_qualified_sig_type_order_independent` (`test/test_stdlib_suite.ml`,
+module-system group); `test_tc_sig_opaque_hides_ctors` guards the opacity
+carve-out.
 ## Current State (as of 2026-07-08, shadowed same-block `let` rebinding fixed — js_emit TDZ crash + a silent-corruption Cprop bug)
 
 A shadowed same-block `let` rebinding a name off its own prior value
