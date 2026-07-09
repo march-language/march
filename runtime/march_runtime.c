@@ -3264,12 +3264,11 @@ void march_revoke_cap(int64_t pid_index, int64_t epoch) {
     pthread_mutex_unlock(&g_revoc_mu);
 }
 
-/* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
- * A capability is invalid if it is in the revocation table, the actor is dead,
- * or the actor's current epoch differs. */
-int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
-    if (revoc_contains(pid_index, epoch)) return 0;
-    /* Look up actor by pid_index to check liveness and current epoch. */
+/* Shared by march_is_cap_valid and march_pid_of_int: locate an actor's meta
+ * entry by its sequential spawn index — the value a compiled Int field uses
+ * to encode a Pid (see march_actor_register_child, Task 3). Returns NULL if
+ * no actor was ever assigned this index. */
+static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
     pthread_mutex_lock(&g_tbl_mu);
     march_actor_meta *m = NULL;
     for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
@@ -3281,6 +3280,15 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
         if (m) break;
     }
     pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
+/* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
+ * A capability is invalid if it is in the revocation table, the actor is dead,
+ * or the actor's current epoch differs. */
+int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
+    if (revoc_contains(pid_index, epoch)) return 0;
+    march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
     if (m->epoch != epoch) return 0;
     return 1;
@@ -3320,9 +3328,30 @@ void march_send_checked(void *cap, void *msg) {
     march_decrc(result);
 }
 
-/* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */
+/* march_pid_of_int(n) is an escape hatch: March code that stores a child's
+ * pid as a plain Int (e.g. a supervisor's Int-typed state field, see Task 3)
+ * converts it back to a usable Pid via this call. When n does not name any
+ * actor this process has spawned (a stale/garbage index), march_send /
+ * march_kill / march_is_alive all read their `actor` argument's $e_alive
+ * flag (word index 3) UNCONDITIONALLY with no NULL check — returning NULL
+ * here would crash every one of them. Instead return a pointer to a static,
+ * already-"dead" actor struct: same header/dispatch/alive word layout as a
+ * real actor, with $e_alive already 0, so every caller's EXISTING
+ * "actor already dead" early-return path (march_kill's `if (!fields[3])
+ * return;`, march_send's `if (!a[3]) { ...none...; return; }`,
+ * march_is_alive's plain read) handles it exactly like any other actor
+ * that was already killed — no new code path, nothing to get wrong.
+ * rc starts at a billion: no realistic amount of incrc/decrc traffic on a
+ * Pid value approaches that within one process's lifetime, so this static
+ * object is never freed. */
+static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
+    march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
+                                   .dispatch = 0, .alive = 0 };
+
 void *march_pid_of_int(int64_t n) {
-    return (void *)(intptr_t)n;
+    march_actor_meta *m = find_meta_by_pid_index(n);
+    if (m) return m->actor;
+    return &march_dead_actor_sentinel;
 }
 
 /* get_actor_field: retrieve a named field from an actor's state. Stub: returns None. */
