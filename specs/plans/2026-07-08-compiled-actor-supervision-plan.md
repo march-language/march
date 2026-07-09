@@ -955,8 +955,28 @@ git commit -m "feat: compiled supervisors spawn their declared children at spawn
 
 ### Task 4: Crash isolation + `one_for_one` restart
 
+**Design note (post-implementation):** `march_sup_child`'s child-respawn field
+is named `spawn_clo`, not `spawn_fn`, and is NOT a raw C function pointer.
+Testing surfaced a real bug: `<ActorName>_spawn` referenced as a first-class
+value (the same pattern `lower_actor.ml`'s existing `dispatch_fn_ptr_var`
+uses for `$d_dispatch`) is ALWAYS represented as a heap-allocated March
+closure cell (offset-16 word = a `$clo_wrap` function pointer) in this
+compiler — never a bare function pointer — confirmed by inspecting the
+emitted IR (`@Worker_spawn$clo_wrap`). Calling the stored value directly as
+`void *(*)(void)` crashed with SIGBUS. `march_respawn_child` (below) unwraps
+it exactly like `do_actor_death`'s existing cleanup-closure invocation code
+does, just with a 1-arg wrapper signature (`<ActorName>_spawn`'s own arity
+is 0, so its wrapper's only parameter is the closure cell itself — contrast
+cleanup's `Unit -> Unit` closures, whose wrapper takes closure+unit, 2 args).
+Also: this pre-existing test in `test/test_eval.ml` had a field-name/
+supervise-name mismatch (`state { count : Int }` vs `supervise { Worker
+worker }`) that never could have worked functionally under a real
+implementation — it was updated (`count`→`worker` throughout) to match the
+convention a second, already-passing test in the same file already used.
+
 **Files:**
 - Modify: `runtime/march_runtime.c` (`march_kill` refactor, `actor_green_thread`, `march_panic`, new restart-budget helper, new `march_respawn_child`, new `march_one_for_one_restart`, new `march_supervisor_notify` dispatcher)
+- Modify: `test/test_eval.ml` (`test_actor_tir_supervisor_spawn_calls_register`'s mismatched field name)
 - Create: `test/native/supervisor_one_for_one_restart.march`, `.expected`
 - Modify: `test/dune`
 
