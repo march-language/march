@@ -740,6 +740,7 @@ end
 
 ```march
 needs IO.Network, IO.Clock
+needs [IO.Network, IO.Clock]   -- bracketed form, identical meaning
 ```
 
 Declares capability requirements for the module.

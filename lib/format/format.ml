@@ -848,7 +848,12 @@ and emit_decl ctx = function
   | DNeeds (caps, _) ->
     let cs = List.map
       (fun cap -> String.concat "." (List.map (fun n -> n.txt) cap)) caps in
-    line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
+    let joined = String.concat ", " cs in
+    let rendered = match cs with
+      | [_] -> joined
+      | _ -> Printf.sprintf "[%s]" joined
+    in
+    line ctx (Printf.sprintf "needs %s" rendered)
 
   | DProofCap (name, _) ->
     line ctx (Printf.sprintf "proof cap %s" name.txt)

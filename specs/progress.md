@@ -283,6 +283,33 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-08, bracketed multi-capability `needs [A, B, C]` syntax)
+
+`needs` now accepts a bracketed capability list as an alternative spelling of
+the existing bare comma-separated list — `needs [IO.Clock, IO.Mut, IO.Random]`
+parses to the exact same `DNeeds` AST node as `needs IO.Clock, IO.Mut,
+IO.Random` or three separate `needs` lines; no new AST variant, desugar step,
+or typecheck change was needed since `DNeeds` already carries a `name list
+list`. `needs_decl` in `lib/parser/parser.mly` gained one grammar alternative
+reusing the existing `cap_path` production and `LBRACKET`/`RBRACKET` tokens —
+zero new shift/reduce conflicts (7 states / 59 conflicts, unchanged from
+baseline). Documented in `specs/lang/capabilities.md` ("Declaring multiple
+capabilities" section, right after the first `needs` example) and
+`specs/lang/surface-syntax.md`'s Capabilities quick-reference entry. New test
+`test_cap_parse_needs_bracketed` in `test/test_codegen.ml` (capabilities
+group), asserting the bracket form parses to a single `DNeeds` carrying all
+three caps. **395 codegen tests** (+1).
+
+**The bracketed form is canonical in `forge format`.** `DNeeds` printing in
+`lib/format/format.ml` now emits `needs [A, B, C]` for 2+ capabilities
+(reformatting a bare comma list into brackets) and leaves a single capability
+unbracketed (`needs A` — bracketing a lone item would read oddly and diverge
+from every existing single-cap example in the docs). Three new idempotency
+tests in `test/test_fmt.ml` (`needs decl single`, `needs decl multi
+bracketed`, `needs decl multi canonicalizes`) confirm: single-cap stays bare,
+already-bracketed multi-cap is a fixpoint, and bare-comma multi-cap input
+reformats to brackets.
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type

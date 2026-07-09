@@ -719,9 +719,12 @@ upper_dot_path:
   | name = upper_name; DOT; rest = upper_dot_path { name :: rest }
 
 (** Capability manifest: needs IO.Network, IO.Clock
+    or bracketed: needs [IO.Network, IO.Clock]
     Each path is a dot-separated sequence of uppercase names stored as a name list. *)
 needs_decl:
   | NEEDS; caps = separated_nonempty_list(COMMA, cap_path)
+    { DNeeds (caps, mk_span ($loc)) }
+  | NEEDS; LBRACKET; caps = separated_nonempty_list(COMMA, cap_path); RBRACKET
     { DNeeds (caps, mk_span ($loc)) }
 
 cap_path:

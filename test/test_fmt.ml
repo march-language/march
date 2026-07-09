@@ -190,6 +190,46 @@ end|} in
   check_parses "type alias" src;
   check_idempotent "type alias" src
 
+let contains_substring ~needle haystack =
+  let nlen = String.length needle in
+  let hlen = String.length haystack in
+  let rec go i =
+    if i + nlen > hlen then false
+    else if String.sub haystack i nlen = needle then true
+    else go (i + 1)
+  in
+  go 0
+
+let test_needs_decl_single () =
+  (* A single capability stays unbracketed — canonical form. *)
+  let src = {|mod Test do
+needs IO.Network
+fn f(x) do x end
+end|} in
+  check_parses "needs decl single" src;
+  check_idempotent "needs decl single" src;
+  Alcotest.(check bool) "needs decl single: no brackets" false
+    (contains_substring ~needle:"needs [" (fmt src))
+
+let test_needs_decl_multi_bracketed () =
+  (* Multiple capabilities: bracketed form is already canonical, stays fixed. *)
+  let src = {|mod Test do
+needs [IO.Clock, IO.Mut, IO.Random]
+fn f(x) do x end
+end|} in
+  check_parses "needs decl multi bracketed" src;
+  check_idempotent "needs decl multi bracketed" src
+
+let test_needs_decl_multi_canonicalizes () =
+  (* Multiple capabilities written as a bare comma list get reformatted into
+     the canonical bracketed form. *)
+  let src = {|mod Test do
+needs IO.Clock, IO.Mut, IO.Random
+fn f(x) do x end
+end|} in
+  Alcotest.(check bool) "needs decl multi: canonicalizes to brackets" true
+    (contains_substring ~needle:"needs [IO.Clock, IO.Mut, IO.Random]" (fmt src))
+
 (* ------------------------------------------------------------------ *)
 (* Idempotence property: format is a fixpoint                         *)
 (* ------------------------------------------------------------------ *)
@@ -303,6 +343,9 @@ let () =
       test_case "use decl"        `Quick test_use_decl;
       test_case "doc comment"     `Quick test_doc_comment;
       test_case "type alias"      `Quick test_type_alias;
+      test_case "needs decl single"            `Quick test_needs_decl_single;
+      test_case "needs decl multi bracketed"   `Quick test_needs_decl_multi_bracketed;
+      test_case "needs decl multi canonicalizes" `Quick test_needs_decl_multi_canonicalizes;
       test_case "format fixpoint" `Quick test_format_fixpoint;
       test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
     ];

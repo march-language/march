@@ -5665,6 +5665,26 @@ let test_cap_parse_needs_dotted () =
   Alcotest.(check bool) "IO.Network parsed as DNeeds" true
     (List.exists (fun paths -> List.mem "IO.Network" paths) cap_paths)
 
+(* needs [A, B, C] bracketed form is sugar for the same DNeeds as comma-separated *)
+let test_cap_parse_needs_bracketed () =
+  let src = {|mod Test do
+    needs [IO.Clock, IO.Mut, IO.Random]
+    fn f(x) do x end
+  end|} in
+  let m = parse_and_desugar src in
+  let cap_paths = List.filter_map (fun d ->
+    match d with
+    | March_ast.Ast.DNeeds (caps, _) ->
+      Some (List.map (fun names ->
+        String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) names)
+      ) caps)
+    | _ -> None
+  ) m.March_ast.Ast.mod_decls in
+  Alcotest.(check bool) "bracketed needs parsed as single DNeeds with all caps" true
+    (List.exists (fun paths ->
+      List.mem "IO.Clock" paths && List.mem "IO.Mut" paths && List.mem "IO.Random" paths
+    ) cap_paths)
+
 (* ── Transitive capability enforcement tests ────────────────────────────── *)
 
 (* Module that imports another with matching needs declared — should be ok *)
@@ -8062,6 +8082,7 @@ let codegen_suites =
           Alcotest.test_case "multiple needs"            `Quick test_cap_multiple_needs;
           Alcotest.test_case "parse needs"               `Quick test_cap_parse_needs;
           Alcotest.test_case "parse needs dotted"        `Quick test_cap_parse_needs_dotted;
+          Alcotest.test_case "parse needs bracketed"     `Quick test_cap_parse_needs_bracketed;
           Alcotest.test_case "transitive ok"             `Quick test_cap_transitive_ok;
           Alcotest.test_case "transitive missing error"  `Quick test_cap_transitive_missing_error;
           Alcotest.test_case "transitive supertype ok"   `Quick test_cap_transitive_supertype_ok;

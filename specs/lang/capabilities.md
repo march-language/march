@@ -71,6 +71,20 @@ end
 
 The compiler enforces this transitively **when the capability flows through a signature** — Check 4: `Server.listen` takes `Cap(IO.Network)` as a parameter, so any module that `use`s `Server` and calls `listen` must itself declare `needs IO.Network` (directly or via a broader ancestor, e.g. `needs IO`), or the build fails with a clear message telling you which import requires which cap (verified live: a `Caller` module `use`ing `Server` without `needs IO.Network` gets `` module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`. ``, exit 1). This ERROR-level guarantee is the signature/`use`/extern surface (Checks 1, 4, and 5) — see "What the compiler tells you," below, for the separate, weaker case where a module reaches for an IO builtin directly in a function body without ever putting `Cap(X)` in a signature.
 
+### Declaring multiple capabilities
+
+A single `needs` accepts a comma-separated list, and — equivalently — a bracketed list. Both forms produce the same declaration as writing one `needs` per line:
+
+```march
+mod Server do
+  needs IO.Clock, IO.Mut, IO.Random
+
+  -- identical: needs [IO.Clock, IO.Mut, IO.Random]
+end
+```
+
+Pick whichever reads better at the call site; there's no semantic difference and no compiler preference between the three spellings (one-per-line, bare comma list, or bracketed).
+
 ### Capability hierarchy
 
 `Cap(IO)` is the root. Sub-capabilities narrow what is allowed:
