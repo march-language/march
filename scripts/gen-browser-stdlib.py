@@ -9,10 +9,13 @@ import os
 
 FILES = [
     "prelude.march", "option.march", "result.march", "list.march",
+    "task.march",
     "hamt.march", "map.march", "math.march", "string.march", "sort.march",
     "seq.march", "set.march", "array.march", "tuple.march", "char.march",
     "range.march", "enum.march", "random.march", "json.march",
     "http.march", "http_transport.march", "http_client.march",
+    "crypto.march", "deque.march", "vector_clock.march", "merkle.march",
+    "crdt.march", "consistent_hash.march",
 ]
 
 
