@@ -3295,6 +3295,58 @@ let test_tc_sig_opaque_hides_ctors () =
   end|} in
   Alcotest.(check bool) "opaque type — ctors hidden outside" true (has_errors ctx)
 
+(* Order-independent multi-module resolution: a submodule that references a
+   sibling's BARE type/constructors (no import) must resolve regardless of check
+   order.  A dependency CYCLE (Types -> Handlers via a call, Handlers -> Types
+   via bare `Event`/`Started`) makes the two impossible to topologically order,
+   so before bare types/ctors were seeded in Pass 1 this failed whenever the
+   referrer sorted first ("I cannot find `Event`" / unknown constructor). *)
+let test_tc_cyclic_bare_ctor_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+      fn describe(e : Event) : String do Handlers.label(e) end
+    end
+    mod Handlers do
+      fn label(e : Event) : String do
+        match e do
+          Started -> "started"
+          Stopped(m) -> m
+        end
+      end
+      fn make() : Event do Started end
+      fn disambig() : Event do Event.Stopped("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "cyclic cross-module bare ctor/type — no errors"
+    false (has_errors ctx)
+
+(* Companion: a function whose signature names a sibling module's type by its
+   QUALIFIED path (`Types.Event`) must still unify with the bare `Event` a
+   caller produces, regardless of which module's Pass-2 check runs first.  The
+   prebind fn-scheme used to emit the qualified nominal verbatim, giving an
+   order-dependent "expected Types.Event but got Event". *)
+let test_tc_qualified_sig_type_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+    end
+    mod Producer do
+      fn make() : Event do Started end
+    end
+    mod Consumer do
+      fn take(e : Types.Event) : String do
+        match e do
+          Started -> "s"
+          Stopped(m) -> m
+        end
+      end
+      fn run() : String do Consumer.take(Producer.make()) end
+    end
+  end|} in
+  Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11638,6 +11690,8 @@ let stdlib_suites =
         (* Phase 2: sig conformance *)
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
+        Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
+        Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;
