@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Regenerate docs/assets/march_stdlib.js (window.marchStdlib).
 
-The FILES list must match `browser_stdlib_files` in js/march_browser.ml.
+The FILES list must be a SUPERSET of both js/march_browser.ml's
+browser_stdlib_files (the interpreter-backed REPL) and
+js/march_browser_compile.ml's browser_stdlib_files (the live-compile
+playground) — each reader only pulls the filenames it lists for itself;
+extra entries are simply unused by whichever reader doesn't need them.
 Run from the project (worktree) root: python3 scripts/gen-browser-stdlib.py
 """
 import json
@@ -16,6 +20,10 @@ FILES = [
     "http.march", "http_transport.march", "http_client.march",
     "crypto.march", "deque.march", "vector_clock.march", "merkle.march",
     "crdt.march", "consistent_hash.march",
+    # dom.march, hash_map.march: needed by js/march_browser_compile.ml (the
+    # live-compile playground entry point), not by march_browser.ml's
+    # interpreter.
+    "dom.march", "hash_map.march",
 ]
 
 

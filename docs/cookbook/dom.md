@@ -203,6 +203,19 @@ Dom.listen(container, "click", fn ev ->
 )
 ```
 
+`Dom.event_key` reads the key that triggered a `"keydown"`/`"keyup"` event
+(e.g. `"ArrowLeft"`, `"a"`, `" "` for space):
+
+```march
+Dom.listen(Dom.body(), "keydown", fn ev ->
+  match Dom.event_key(ev) do
+    "ArrowLeft"  -> move_left()
+    "ArrowRight" -> move_right()
+    _            -> ()
+  end
+)
+```
+
 ---
 
 ## Form inputs

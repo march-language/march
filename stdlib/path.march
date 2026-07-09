@@ -261,8 +261,10 @@ mod Path do
 
   ## Examples
 
-      march> Path.assert_no_traversal("foo/bar")      -- ok, returns ()
-      march> Path.assert_no_traversal("../etc/passwd") -- panics
+      march> Path.assert_no_traversal("foo/bar")
+      ()
+      march> Path.assert_no_traversal("../etc/passwd")
+      ** panic: path traversal detected: ../etc/passwd
   """
   fn assert_no_traversal(path) do
     let parts = components(path)

@@ -1,0 +1,5 @@
+[package]
+name = "tetris_logic"
+version = "0.1.0"
+type = "lib"
+description = "March Tetris — pure game logic (no Dom), unit-testable natively"

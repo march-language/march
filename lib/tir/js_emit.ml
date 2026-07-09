@@ -26,6 +26,16 @@ type ctx = {
   param_names  : (string, unit) Hashtbl.t;
   (* local parameter names in the current function — excluded from $clo suffix
      to avoid false positives when a parameter shadows a module function *)
+  var_names    : (string, string) Hashtbl.t;
+  (* current JS identifier bound to each TIR source var name, in the current
+     function. TIR reuses the literal source name across shadowed same-block
+     `let`s (lower.ml does not alpha-rename), so a naive `mangle v_name` would
+     collide: a second `let x = ...` that references the prior `x` would
+     self-shadow under JS `const`/`let` block scoping — the new declaration's
+     TDZ covers its own initializer expression, throwing "Cannot access 'x'
+     before initialization" at runtime. See [fresh_name_for]/[commit_var]. *)
+  var_counters : (string, int) Hashtbl.t;
+  (* per-source-name counter used to mint fresh JS identifiers on shadowing *)
   extern_fns   : (string, Tir.extern_decl) Hashtbl.t;
   (* extern march_name → decl; populated before emission for call-site tracking *)
   used_externs : (string, unit) Hashtbl.t;
@@ -45,6 +55,8 @@ let create_ctx ?(fn_lines=[]) () = {
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
   param_names  = Hashtbl.create 8;
+  var_names    = Hashtbl.create 16;
+  var_counters = Hashtbl.create 8;
   extern_fns   = Hashtbl.create 8;
   used_externs = Hashtbl.create 8;
   async_fns    = Hashtbl.create 8;
@@ -92,6 +104,41 @@ let mangle name =
   let s = Bytes.to_string b in
   if List.mem s js_reserved then "_" ^ s else s
 
+(** The JS identifier currently bound to a TIR source var name, or its
+    mangled base form if unbound (function params are pre-registered in
+    [ctx.var_names]; anything else falls back to the base). *)
+let resolved_name ctx v_name =
+  match Hashtbl.find_opt ctx.var_names v_name with
+  | Some js -> js
+  | None    -> mangle v_name
+
+(** Decide the JS identifier for a new `let`-bound [v], WITHOUT committing it
+    to [ctx.var_names] yet. Call this, emit the binding's declaration text,
+    THEN emit its initializer (still resolving references against the OLD
+    mapping), and only call [commit_var] afterwards — so a self-referential
+    rebind (`let x = ...; let x = f(x)`) reads the prior `x` correctly instead
+    of resolving to its own not-yet-initialized JS declaration. *)
+let fresh_name_for ctx (v : Tir.var) : string =
+  let base = mangle v.Tir.v_name in
+  if Hashtbl.mem ctx.var_names v.Tir.v_name then begin
+    let n = 1 + Option.value (Hashtbl.find_opt ctx.var_counters v.Tir.v_name) ~default:0 in
+    Hashtbl.replace ctx.var_counters v.Tir.v_name n;
+    Printf.sprintf "%s$%d" base n
+  end else base
+
+(** Commit [js_name] as the active JS identifier for [v]'s source name, for
+    the remainder of the enclosing scope. Returns a thunk that restores the
+    previous mapping (or removes it) — call after emitting the scope that
+    this binding is visible in, so sibling scopes reusing the same source
+    name aren't affected. *)
+let commit_var ctx (v : Tir.var) (js_name : string) : unit -> unit =
+  let prev = Hashtbl.find_opt ctx.var_names v.Tir.v_name in
+  Hashtbl.replace ctx.var_names v.Tir.v_name js_name;
+  fun () ->
+    match prev with
+    | Some p -> Hashtbl.replace ctx.var_names v.Tir.v_name p
+    | None   -> Hashtbl.remove ctx.var_names v.Tir.v_name
+
 (** Constructor key in EAlloc is "TypeName.CtorName"; return just "CtorName". *)
 let bare_ctor key =
   match String.rindex_opt key '.' with
@@ -135,7 +182,7 @@ let emit_literal ctx lit =
 (* Emit an atom as a plain name — used for apply-function slots in EAlloc
    where we need the raw function, not a closure wrapper. *)
 let emit_atom_raw ctx = function
-  | Tir.AVar v    -> emit ctx (mangle v.Tir.v_name)
+  | Tir.AVar v    -> emit ctx (resolved_name ctx v.Tir.v_name)
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
   | Tir.ALit l    -> emit_literal ctx l
 
@@ -145,7 +192,7 @@ let emit_atom_raw ctx = function
    Extern function names also get the $clo suffix and are tracked as used. *)
 let emit_atom ctx = function
   | Tir.AVar v ->
-    let n = mangle v.Tir.v_name in
+    let n = resolved_name ctx v.Tir.v_name in
     if Hashtbl.mem ctx.extern_fns v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
     then begin
@@ -200,6 +247,16 @@ let inline_binop = function
   | "!=" | "!=." -> Some "!=="
   | "&&"        -> Some "&&"
   | "||"        -> Some "||"
+  (* Bitwise integer builtins (stdlib/array.march's PVec trie indexing math
+     is the main caller). JS's &, |, ^, <<, >> coerce to 32-bit signed ints
+     (ToInt32) and >> is arithmetic (sign-propagating), matching the native
+     backend's is_int_bitwise -> LLVM and/or/xor/shl/ashr lowering for the
+     small (well under 2^31) magnitudes these builtins are used at. *)
+  | "int_and"   -> Some "&"
+  | "int_or"    -> Some "|"
+  | "int_xor"   -> Some "^"
+  | "int_shl"   -> Some "<<"
+  | "int_shr"   -> Some ">>"
   | _    -> None
 
 (* ── Scrutinee type helpers ─────────────────────────────────────── *)
@@ -435,6 +492,15 @@ and emit_val_impl ctx expr =
         emit ctx "("; emit_atom ctx a; emit ctx " / "; emit_atom ctx b; emit ctx ")"
       | "mod_int",   [a; b] ->
         emit ctx "("; emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ")"
+      | "int_div", [a; b] ->
+        use_runtime ctx "march_int_div";
+        emit ctx "march_int_div("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_mod", [a; b] ->
+        use_runtime ctx "march_int_mod";
+        emit ctx "march_int_mod("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_mod_euclid", [a; b] ->
+        use_runtime ctx "march_int_mod_euclid";
+        emit ctx "march_int_mod_euclid("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       | "int_to_float", [a] ->
         emit_atom ctx a
       | "float_to_int", [a] | "float_truncate", [a] ->
@@ -516,6 +582,20 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "unix_time",  _ ->
+        use_runtime ctx "march_unix_time";
+        emit ctx "march_unix_time()"
+      | "int_pow", [a; b] ->
+        use_runtime ctx "march_int_pow";
+        emit ctx "march_int_pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_abs", [a] ->
+        emit ctx "Math.abs("; emit_atom ctx a; emit ctx ")"
+      (* 64-bit boundary constants: not exactly representable as JS doubles
+         (max safe integer is 2^53-1), but emitted as the literal native
+         values for consistency — this backend doesn't claim full 64-bit
+         integer semantics anywhere else either. *)
+      | "int_max_value", _ -> emit ctx "9223372036854775807"
+      | "int_min_value", _ -> emit ctx "-9223372036854775808"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with
@@ -645,24 +725,37 @@ and emit_stmts_impl ctx expr =
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
-       Wrap in a block so this binding can shadow an outer variable of the same name. *)
+       Wrap in a block so this binding can shadow an outer variable of the same name.
+       Decide the JS identifier before emitting the scrutinee/branches (which may
+       themselves reference a prior same-named binding) and only commit it to
+       ctx.var_names afterwards, so those references still resolve to the OLD
+       binding instead of this not-yet-initialized one. *)
+    let js_name = fresh_name_for ctx v in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
-    emitl ctx ("let " ^ mangle v.Tir.v_name ^ ";");
-    emit_case ctx (Some (mangle v.Tir.v_name)) case_expr;
+    emitl ctx ("let " ^ js_name ^ ";");
+    emit_case ctx (Some js_name) case_expr;
+    let restore = commit_var ctx v js_name in
     emit_stmts ctx rest;
+    restore ();
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELet (v, e1, e2) ->
-    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name. *)
+    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name.
+       Same ordering as above: mint the JS name, emit e1 against the OLD mapping,
+       then commit — so `let x = ...; let x = f(x)` reads the prior `x` correctly
+       instead of self-shadowing under JS const/let TDZ. *)
+    let js_name = fresh_name_for ctx v in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emit_indent ctx;
-    emit ctx ("const " ^ mangle v.Tir.v_name ^ " = ");
+    emit ctx ("const " ^ js_name ^ " = ");
     emit_val ctx e1;
     emit ctx ";\n";
+    let restore = commit_var ctx v js_name in
     emit_stmts ctx e2;
+    restore ();
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
@@ -865,8 +958,19 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
      that happen to share a name with a module-level function. *)
   Hashtbl.clear ctx.param_names;
   List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
+  (* Reset the shadow-renaming state for this function and seed it with the
+     params, under their own (unmangled) JS names — so a body-level `let`
+     that reuses a parameter's name (`fn f(x) { let x = x + 1; ... }`) is
+     detected as a shadow and given a fresh JS identifier instead of
+     colliding with the parameter under JS block-scoping/TDZ rules. *)
+  Hashtbl.clear ctx.var_names;
+  Hashtbl.clear ctx.var_counters;
+  List.iter (fun p -> Hashtbl.replace ctx.var_names p.Tir.v_name (mangle p.Tir.v_name))
+    fn.Tir.fn_params;
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
   Hashtbl.clear ctx.param_names;
+  Hashtbl.clear ctx.var_names;
+  Hashtbl.clear ctx.var_counters;
   emit_indent ctx;
   emit ctx "}\n";
   (* Closure-protocol wrapper: allows this function to be used as a first-class
