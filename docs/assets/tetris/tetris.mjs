@@ -5934,7 +5934,7 @@ function $lam27504$apply$3689($clo, x) {
                     {
                       const $t27510 = (v === 0);
                       if ($t27510 === true) {
-                        return Dom$set_style(cell, "background", "#111");
+                        return Dom$set_style(cell, "background", "");
                       } else {
                         return (() => {
                           {
