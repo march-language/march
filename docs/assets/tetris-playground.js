@@ -190,15 +190,33 @@
       "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;height:100vh}" +
       "#board{display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
       ".tetris-row{display:flex}.tetris-cell{width:" + cell + "px;height:" + cell + "px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
-      "#hud{display:flex;gap:1rem;font-size:" + hudFont + "px;color:" + t.textMuted + "}" +
+      "#hud{display:flex;gap:1rem;align-items:center;font-size:" + hudFont + "px;color:" + t.textMuted + "}" +
+      "#pause-btn{font:inherit;color:inherit;background:transparent;border:1px solid " + t.border + ";" +
+      "border-radius:4px;padding:2px 10px;cursor:pointer}" +
+      "#pause-btn:hover{border-color:" + t.textMuted + "}" +
       "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
+      "#pause-status{color:" + t.textMuted + ";font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
       "</style></head><body>" +
       "<div id='board'></div>" +
-      "<div id='hud'><span id='score'>Score: 0</span><span id='level'>Level: 0</span><span id='next'>Next: O</span></div>" +
+      "<div id='hud'><span id='score'>Score: 0</span><span id='level'>Level: 0</span><span id='next'>Next: O</span>" +
+      "<button id='pause-btn' type='button'>Pause</button></div>" +
       "<div id='game-over'></div>" +
+      "<div id='pause-status'></div>" +
       "<div id='game-state' data-board='' data-piece='I' data-rot='0' data-x='3' data-y='0' " +
-      "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' style='display:none'></div>" +
+      "data-next='O' data-score='0' data-lines='0' data-rng='' data-over='false' data-paused='false' style='display:none'></div>" +
       "<script>window.onerror = function (msg) { parent.postMessage({tpError: String(msg)}, '*'); };<\/script>" +
+      "<script>" +
+      "document.getElementById('pause-btn').addEventListener('click', function () {" +
+      "document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'p', bubbles: true}));" +
+      "});" +
+      // Reflects the March side's actual data-paused attribute (rather than
+      // guessing from the click alone) so the label stays correct even when
+      // toggle_pause is a no-op — e.g. it refuses to pause a finished game.
+      "new MutationObserver(function () {" +
+      "var paused = document.getElementById('game-state').getAttribute('data-paused') === 'true';" +
+      "document.getElementById('pause-btn').textContent = paused ? 'Resume' : 'Pause';" +
+      "}).observe(document.getElementById('game-state'), {attributes: true, attributeFilter: ['data-paused']});" +
+      "<\/script>" +
       "<script type='module'>" +
       js +
       "<\/script>" +
