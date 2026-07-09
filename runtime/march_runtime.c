@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <sys/time.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -663,9 +664,32 @@ static void march_print_backtrace(void) {
 
 /* ── Panic ───────────────────────────────────────────────────────────────── */
 
+/* Set (to a jmp_buf living on the CURRENT green thread's own stack) only
+ * while dispatching a message to an actor that IS a supervised child
+ * (meta->supervisor != NULL); NULL otherwise. march_panic checks this to
+ * decide whether a panic inside a supervised actor's handler should
+ * longjmp back into actor_green_thread (crash-isolated, restart-eligible)
+ * instead of exit(1)-ing the whole process. Every other actor keeps today's
+ * exit(1)-on-panic behavior unchanged. Save/restore around each
+ * actor_green_thread invocation (see that function, below) is safe under
+ * both cooperative and preemptive green-thread scheduling: it is a
+ * per-invocation dynamic scope that nests correctly regardless of which
+ * other green thread runs on this OS thread in between (the existing
+ * saved_rc = a[0]; a[0] = 1; ...; a[0] = saved_rc; dance in that same
+ * function relies on the exact same property — a green thread's own
+ * stack-local state survives any number of suspend/resume cycles for as
+ * long as its actor_green_thread call frame is alive). */
+static _Thread_local jmp_buf *g_current_actor_crash_jmp = NULL;
+
 /* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
  * which is defined just below. */
 void march_panic(void *s);
+
+/* Forward declaration: do_actor_death (defined further below, after the
+ * restart strategies) is called from actor_green_thread's crash-recovery
+ * branch (below) and from march_kill / the restart helpers, both of which
+ * are also defined earlier in the file than do_actor_death itself. */
+static void do_actor_death(void *actor);
 
 /* panic_ / todo_ / unreachable_: internal runtime primitives called by the
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
@@ -693,6 +717,9 @@ void march_panic(void *s) {
         memcpy(march_test_fail_buf, ms->data, (size_t)len);
         march_test_fail_buf[len] = '\0';
         longjmp(march_test_jmp_buf, 1);
+    }
+    if (g_current_actor_crash_jmp) {
+        longjmp(*g_current_actor_crash_jmp, 1);
     }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
@@ -1145,7 +1172,15 @@ typedef struct march_monitor_node {
  * at initial spawn time (march_actor_register_child) and read by every
  * restart (compiled actor supervision, Task 4/5). */
 typedef struct {
-    void *(*spawn_fn)(void);  /* <ActorName>_spawn — called fresh on every restart */
+    /* <ActorName>_spawn, referenced as a first-class value from
+     * lower_actor.ml — the compiler ALWAYS represents a bare top-level
+     * function reference this way (a heap-allocated March closure cell
+     * whose offset-16 word holds a $clo_wrap function pointer; see how
+     * $d_dispatch is stored/consumed for actors, and how do_actor_death's
+     * cleanup callbacks are invoked), never a raw C function pointer.
+     * march_respawn_child unwraps it the same way. Called fresh on every
+     * restart. */
+    void *spawn_clo;
     int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
                                   state fields; this child's Int-encoded pid lives at
                                   ((int64_t*)supervisor)[4 + word_idx] */
@@ -1180,6 +1215,10 @@ typedef struct march_actor_meta {
      * NULL/0 for every other actor, including its own children. */
     march_sup_child             *sup_children;
     int                          sup_num_children;
+    /* Restart-history timestamps (seconds), for max_restarts-within-window
+     * throttling; valid only when this actor IS a supervisor. */
+    double                      *sup_restart_ts;
+    int                          sup_restart_len;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1297,6 +1336,26 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     return m;
 }
 
+/* Shared by march_is_cap_valid, march_pid_of_int, and the restart-strategy
+ * code below: locate an actor's meta entry by its sequential spawn index —
+ * the value a compiled Int field uses to encode a Pid (see
+ * march_actor_register_child). Returns NULL if no actor was ever assigned
+ * this index. */
+static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = NULL;
+    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
+        march_actor_meta *cur = g_actor_tbl[i];
+        while (cur) {
+            if (cur->pid_index == pid_index) { m = cur; break; }
+            cur = cur->tbl_next;
+        }
+        if (m) break;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
 /* ── Actor green thread loop ─────────────────────────────────────── */
 
 /* Each actor runs as a green thread that loops on recv→dispatch.
@@ -1306,6 +1365,26 @@ static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
     int64_t *a = (int64_t *)actor;
+
+    jmp_buf crash_jmp;
+    jmp_buf *saved_jmp = g_current_actor_crash_jmp;
+    if (meta->supervisor) {
+        /* Only a supervised child gets crash-isolated — an unsupervised
+         * actor's panic keeps today's exit(1) behavior (see march_panic). */
+        g_current_actor_crash_jmp = &crash_jmp;
+    }
+    if (meta->supervisor && setjmp(crash_jmp) != 0) {
+        /* march_panic longjmp'd here instead of exit(1)-ing the process.
+         * do_actor_death mirrors what march_kill would have done, and
+         * (since this actor has a supervisor) triggers a restart — kill/
+         * crash-notify parity with the interpreter's kill = crash_actor. */
+        g_current_actor_crash_jmp = saved_jmp;
+        do_actor_death(actor);
+        pthread_mutex_lock(&g_tbl_mu);
+        meta->green_thread = NULL;
+        pthread_mutex_unlock(&g_tbl_mu);
+        return;
+    }
 
     while (a[3]) {  /* while alive */
         void *msg = march_sched_recv();
@@ -1381,6 +1460,7 @@ static void actor_green_thread(void *arg) {
      * scheduler shutdown) and this proc is about to die and be freed by
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
+    g_current_actor_crash_jmp = saved_jmp;
     pthread_mutex_lock(&g_tbl_mu);
     meta->green_thread = NULL;
     pthread_mutex_unlock(&g_tbl_mu);
@@ -1388,7 +1468,91 @@ static void actor_green_thread(void *arg) {
 
 /* ── Public actor API ────────────────────────────────────────────── */
 
-void march_kill(void *actor) {
+/* Returns 1 (and appends `now` to sup_meta's restart history) if a restart
+ * is currently permitted under its max_restarts-within-window budget;
+ * returns 0 (budget exceeded — caller must crash the supervisor itself)
+ * otherwise. Mirrors the identical window-check inlined in all three of
+ * eval.ml's one_for_one_restart / one_for_all_restart / rest_for_one_restart. */
+static int march_restart_budget_ok(march_actor_meta *sup_meta) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    double window = (double)sup_meta->supervisor_window_secs;
+    int kept = 0;
+    for (int i = 0; i < sup_meta->sup_restart_len; i++) {
+        if (now - sup_meta->sup_restart_ts[i] < window) {
+            sup_meta->sup_restart_ts[kept++] = sup_meta->sup_restart_ts[i];
+        }
+    }
+    sup_meta->sup_restart_len = kept;
+    if (kept >= sup_meta->supervisor_max_restarts) return 0;
+    sup_meta->sup_restart_ts = realloc(sup_meta->sup_restart_ts,
+                                        (size_t)(kept + 1) * sizeof(double));
+    sup_meta->sup_restart_ts[kept] = now;
+    sup_meta->sup_restart_len = kept + 1;
+    return 1;
+}
+
+/* Spawn a fresh replacement for sup_children[child_idx], link it to the
+ * supervisor in that SAME slot (never appends — march_actor_register_child
+ * is only for a child's initial spawn), inherit the crashed child's
+ * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
+ * inheritance), and write the new pid_index into the supervisor's state. */
+static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    march_sup_child *child = &sup_meta->sup_children[child_idx];
+    int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
+    march_actor_meta *old_meta = find_meta_by_pid_index(old_pid_index);
+    int64_t inherited_epoch = old_meta ? old_meta->epoch + 1 : 0;
+
+    /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
+     * pointer), NOT a raw C function pointer — see march_sup_child's field
+     * comment. <ActorName>_spawn is a zero-arg function, so its wrapper's
+     * only parameter is the closure cell itself (contrast the 2-arg
+     * cleanup-closure convention in do_actor_death, whose underlying
+     * function is Unit -> Unit). */
+    typedef void *(*spawn_clo_fn_t)(void *);
+    void **clo_fields = (void **)((char *)child->spawn_clo + 16);
+    spawn_clo_fn_t fn_ptr = (spawn_clo_fn_t)(*clo_fields);
+    void *raw = fn_ptr(child->spawn_clo);
+    void *new_child = march_spawn(raw);
+    march_actor_meta *new_meta = find_or_create_meta(new_child);
+    new_meta->supervisor = supervisor;
+    new_meta->sup_child_index = child_idx;
+    new_meta->epoch = inherited_epoch;
+    ((int64_t *)supervisor)[4 + child->word_idx] = new_meta->pid_index;
+    return new_child;
+}
+
+/* one_for_one: only the crashed child is respawned; siblings untouched.
+ * Mirrors eval.ml:1588-1637. */
+static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    march_respawn_child(supervisor, sup_meta, child_idx);
+}
+
+static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
+    march_actor_meta *sup_meta = find_meta(supervisor);
+    if (!sup_meta) return;
+    int child_idx = crashed_meta->sup_child_index;
+    switch (sup_meta->supervisor_strategy) {
+        case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
+        /* case 1 (one_for_all) and case 2 (rest_for_one): added alongside
+         * their own C implementations further below. */
+        default: break;
+    }
+}
+
+/* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
+ * wake its green thread — and, notify its supervisor (if it has one) for a
+ * possible restart. The ONE place that does this, called both by an
+ * explicit kill() and by a panic inside a supervised actor's handler
+ * (the crash trap in actor_green_thread below) — mirrors the interpreter's
+ * kill = crash_actor unification (eval.ml:3004-3006). */
+static void do_actor_death(void *actor) {
     int64_t *fields = (int64_t *)actor;
     if (!fields[3]) return;   /* Already dead */
 
@@ -1448,6 +1612,14 @@ void march_kill(void *actor) {
     if (meta && meta->green_thread) {
         march_sched_wake(meta->green_thread);
     }
+
+    if (meta && meta->supervisor) {
+        march_supervisor_notify(meta->supervisor, meta);
+    }
+}
+
+void march_kill(void *actor) {
+    do_actor_death(actor);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -3154,11 +3326,17 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
  * Name_spawn() body, right after BOTH the child and the supervisor itself
  * have been spawned (march_spawn already ran on both). Links parent->child
  * (for the crash trap to find "is this actor supervised, and by whom") and
- * records enough for a later restart: which function respawns this child
- * (spawn_fn), and which Int-typed state-field slot of the supervisor holds
- * its encoded pid (word_idx, see march_sup_child above). */
+ * records enough for a later restart: which March closure respawns this
+ * child (spawn_clo — a reference to <ActorName>_spawn as a first-class
+ * value, NOT a raw C function pointer; see march_sup_child's field
+ * comment), and which Int-typed state-field slot of the supervisor holds
+ * its encoded pid (word_idx, see march_sup_child above). spawn_clo arrives
+ * with ownership transferred from the caller (the normal convention for a
+ * non-borrowed argument) and is held here permanently — never decref'd —
+ * so it stays valid for every future restart, exactly like a cleanup
+ * closure stored on meta->cleanup_head. */
 void march_actor_register_child(void *supervisor, void *child,
-                                 void *(*spawn_fn)(void), int64_t word_idx) {
+                                 void *spawn_clo, int64_t word_idx) {
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
     child_meta->supervisor = supervisor;
@@ -3166,7 +3344,7 @@ void march_actor_register_child(void *supervisor, void *child,
     int idx = sup_meta->sup_num_children;
     sup_meta->sup_children = realloc(sup_meta->sup_children,
                                       (size_t)(idx + 1) * sizeof(march_sup_child));
-    sup_meta->sup_children[idx].spawn_fn = spawn_fn;
+    sup_meta->sup_children[idx].spawn_clo = spawn_clo;
     sup_meta->sup_children[idx].word_idx = word_idx;
     sup_meta->sup_num_children = idx + 1;
 }
@@ -3310,24 +3488,6 @@ void march_revoke_cap(int64_t pid_index, int64_t epoch) {
     pthread_mutex_unlock(&g_revoc_mu);
 }
 
-/* Shared by march_is_cap_valid and march_pid_of_int: locate an actor's meta
- * entry by its sequential spawn index — the value a compiled Int field uses
- * to encode a Pid (see march_actor_register_child, Task 3). Returns NULL if
- * no actor was ever assigned this index. */
-static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = NULL;
-    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
-        march_actor_meta *cur = g_actor_tbl[i];
-        while (cur) {
-            if (cur->pid_index == pid_index) { m = cur; break; }
-            cur = cur->tbl_next;
-        }
-        if (m) break;
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
-    return m;
-}
 
 /* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
  * A capability is invalid if it is in the revocation table, the actor is dead,

@@ -2966,14 +2966,14 @@ let test_actor_tir_supervisor_spawn_calls_register () =
       on DoWork() do { count: state.count + 1 } end
     end
     actor Supervisor do
-      state { count : Int }
-      init { count: 0 }
+      state { worker : Int }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
         Worker worker
       end
-      on Start() do { count: state.count } end
+      on Start() do { worker: state.worker } end
     end
     fn main() : Unit do () end
   end|} in

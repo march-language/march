@@ -1320,6 +1320,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
 
+; ── Regression: a panic inside a SUPERVISED actor's message handler must
+; not exit(1) the whole process — it must crash-isolate to that actor's own
+; green thread and trigger a one_for_one restart (before this fix, kill()
+; on a supervised child did nothing: no crash trap, no restart notify).
+(rule
+ (targets native_supervisor_one_for_one_restart native_supervisor_one_for_one_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_one_for_one_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_one_for_one_restart
+        native/supervisor_one_for_one_restart.march)
+   (with-stdout-to native_supervisor_one_for_one_restart.out
+        (system "./native_supervisor_one_for_one_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_one_for_one_restart.expected native_supervisor_one_for_one_restart.out)))
+
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
 ; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)
