@@ -118,7 +118,7 @@ mod Parallel do
   ## Examples
 
       march> Parallel.psum_float(RRB.from_list([1.0, 2.5, 3.5]))
-      7.0
+      7.
   """
   fn psum_float(v): Float do
     preduce(v, 0.0, fn n -> n, fn (a, b) -> a +. b)

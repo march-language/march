@@ -200,6 +200,16 @@ let inline_binop = function
   | "!=" | "!=." -> Some "!=="
   | "&&"        -> Some "&&"
   | "||"        -> Some "||"
+  (* Bitwise integer builtins (stdlib/array.march's PVec trie indexing math
+     is the main caller). JS's &, |, ^, <<, >> coerce to 32-bit signed ints
+     (ToInt32) and >> is arithmetic (sign-propagating), matching the native
+     backend's is_int_bitwise -> LLVM and/or/xor/shl/ashr lowering for the
+     small (well under 2^31) magnitudes these builtins are used at. *)
+  | "int_and"   -> Some "&"
+  | "int_or"    -> Some "|"
+  | "int_xor"   -> Some "^"
+  | "int_shl"   -> Some "<<"
+  | "int_shr"   -> Some ">>"
   | _    -> None
 
 (* ── Scrutinee type helpers ─────────────────────────────────────── *)
@@ -435,6 +445,15 @@ and emit_val_impl ctx expr =
         emit ctx "("; emit_atom ctx a; emit ctx " / "; emit_atom ctx b; emit ctx ")"
       | "mod_int",   [a; b] ->
         emit ctx "("; emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ")"
+      | "int_div", [a; b] ->
+        use_runtime ctx "march_int_div";
+        emit ctx "march_int_div("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_mod", [a; b] ->
+        use_runtime ctx "march_int_mod";
+        emit ctx "march_int_mod("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_mod_euclid", [a; b] ->
+        use_runtime ctx "march_int_mod_euclid";
+        emit ctx "march_int_mod_euclid("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       | "int_to_float", [a] ->
         emit_atom ctx a
       | "float_to_int", [a] | "float_truncate", [a] ->
@@ -516,6 +535,20 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "unix_time",  _ ->
+        use_runtime ctx "march_unix_time";
+        emit ctx "march_unix_time()"
+      | "int_pow", [a; b] ->
+        use_runtime ctx "march_int_pow";
+        emit ctx "march_int_pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_abs", [a] ->
+        emit ctx "Math.abs("; emit_atom ctx a; emit ctx ")"
+      (* 64-bit boundary constants: not exactly representable as JS doubles
+         (max safe integer is 2^53-1), but emitted as the literal native
+         values for consistency — this backend doesn't claim full 64-bit
+         integer semantics anywhere else either. *)
+      | "int_max_value", _ -> emit ctx "9223372036854775807"
+      | "int_min_value", _ -> emit ctx "-9223372036854775808"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with

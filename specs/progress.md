@@ -321,422 +321,193 @@ alone (no sibling modules involved).
   one fixed stdlib file completely standalone via `check_module_core` and
   asserting zero errors.
 
-## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
+## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
 
-`runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
-(`CONN_BUF_SIZE`); a request that filled it without a complete parse got an
-immediate 413, capping the whole request (headers + body) at 64KB. That made the
-forgepm package registry reject any tarball upload > 64KB (a 486KB `bastion`
-publish → 413 → the `forge publish` client saw it as a 502 through Cloudflare).
+Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
+runs a real trip through the compiler (parse → typecheck → lower → optimize → js_emit)
+entirely in the browser, driven by a new js_of_ocaml entry point,
+`js/march_browser_compile.ml` (`marchCompileToJs`), built on a new shared library,
+`lib/driver/js_pipeline.ml`, that both it and future tooling can call without going
+through `bin/main.ml`'s CLI. The game itself: `demo_app/tetris_logic/` (pure rules,
+14 forge unit tests, native-safe) + `demo_app/tetris/` (Dom wiring, depends on
+`tetris_logic` via a `forge.toml` path dep so `forge test` never touches Dom externs
+natively). State lives in the DOM itself (a `#game-state` element's `data-*` attrs) since
+March has no mutable-cell primitive reachable across independent event callbacks
+(keydown vs. the gravity-tick interval).
 
-- **Fix:** grow the buffer by doubling on demand up to `MAX_REQ_SIZE = 32MB`
-  (one `realloc` in the recv step); only a request past the cap gets a 413.
-  Sub-64KB requests never leave the initial buffer, so the hot path is unchanged.
-- **Verified:** live on the deploy droplet — a 600KB POST reaches the handler
-  (401 for a bad token) instead of 413; `bastion` 0.2.1 (485KB, carrying the
-  server-owned-island dispatch fix in `priv/js/march-islands.js`) published to
-  the registry (now 0.1.0–0.2.1). forgepm's `forge.toml` repointed at
-  `bastion = "0.2.1"`.
-- **Open follow-up:** the `forge publish` client (`registry.march`) panics
-  `non-exhaustive pattern match` parsing the publish *success* response — the
-  publish completes server-side but the CLI reports failure. Client-side only.
+Getting the real game through both the `--target js` codegen backend AND, separately,
+the browser-hosted typechecker surfaced genuine pre-existing compiler bugs, fixed here:
 
-## Current State (as of 2026-07-08, entry-module self-qualified `--check` type-erasure closed)
+- **`lib/tir/js_emit.ml` had no case at all** for `int_div`/`int_mod`/`int_mod_euclid`
+  (emitted as calls to a nonexistent JS function — any `Array` growth past 32 elements
+  hits this via the PVec trie), the bitwise family (`int_and`/`int_or`/`int_xor`/
+  `int_shl`/`int_shr` — same PVec trie), `unix_time` (`Random`'s default seed), and
+  `int_pow`/`int_abs`/`int_max_value`/`int_min_value`. All added, either as new
+  `runtime/march_runtime.mjs` helpers (matching `march_runtime.c`'s checked/panic-on-zero
+  semantics) or inline JS operators.
+- **`lib/typecheck/typecheck.ml` never registered `string_from_codepoint`/
+  `string_to_codepoints`** — real interpreter builtins (`lib/eval/eval.ml`), just never
+  wired into the type env, so any strict typecheck of `stdlib/string.march` (not just
+  this playground) would have failed on them. Added.
+- **`stdlib/random.march`'s `mix()` had a bare integer literal (`1234567891011`)**
+  exceeding the March lexer's `max_int` — but only when the *compiler itself* runs as
+  browser JS (js_of_ocaml represents OCaml's native `int` as 32-bit; native/`--target js`
+  compilation was always fine since the multiply runs at the *compiled program's*
+  runtime). Rewritten as an exactly-equal `1234567 * 1000000 + 891011` (deferred to
+  runtime, never lexed as one token) — a real fix for the existing interpreter REPL
+  playground too, not just this new one.
 
-An unannotated (or distinct-tvar-annotated) fn at the **entry module's** top level,
-referenced through the entry-module-qualified name (`EntryMod.fn`), erased the type of
-anything laundered through it, so `march --check` exited 0 on a memory-unsafe mismatch
-(`need_str(Main.id(42))` — an `Int` into a `String` parameter — typechecked clean, while
-the bare `need_str(id(42))` correctly rejected).
+**Filed, not fixed:** `check_module_full`'s pass-1 registers unqualified names into one
+flat table when many stdlib files are merged as top-level siblings (both browser tools'
+approach — never previously run through the real typechecker, since the interpreter
+skips typecheck and the CLI lazy-loads per file). A same-named function in two merged
+modules (`fold_left`, in both `prelude.march` and `list.march`/`array.march`) can shadow
+across module boundaries, producing a bogus type error inside the *other* module's own
+body. Worked around in `js/march_browser_compile.ml` by dropping `prelude.march`'s bare
+`fold_left` from that bundle specifically.
 
-- **Root cause:** the entry module is UNWRAPPED at the combined module's top level, so —
-  unlike a wrapped sibling module, whose public members are re-exported under `Sib.fn` with
-  their real body-checked schemes when its `DMod` is checked — the entry's own top-level
-  fns are only ever seeded by `check_module_core`'s Pass 1b (`prebind_mod_members
-  m.mod_name.txt`) as a bare `Mono (fresh_var 1)` placeholder (`prebind_fn_scheme` returns
-  None for an unannotated fn; a distinct-tvar annotation `fn f(x:a):b` seeds an
-  un-body-validated `a -> b`). That decoupled `?a -> ?b` was never reconciled with the fn's
-  real scheme, so an `EntryMod.fn` reference (produced by desugar's `qualify_module_refs`,
-  or hand-written to disambiguate a shadowing nested local) instantiated it and erased the
-  laundered type; the pinned placeholder also spuriously over-rejected legitimate
-  polymorphism.
-- **Fix:** the DFn branch of `check_decl` (`lib/typecheck/typecheck.ml`) now rebinds the
-  entry-qualified name to `sch` — the scheme `check_fn` validated against the body — so it
-  is exactly as polymorphic as the bare name. Guarded to the ENTRY level (`cap_qual_prefix
-  = "" && current_module <> ""`) and to an already-seeded key (`Some _`), so nested/loaded
-  modules, private `pfn`s, and the incremental `check_module_with_env` path are untouched.
-  Codegen-safe: mono/TIR key on the per-span `type_map`, not this env scheme.
-- **Scope:** this closes the `--check` type-erasure aspect only; the sibling link-time
-  finding (an entry file self-qualifying its own top-level mod name → undefined symbols at
-  link time) shares the `entry_prefix = "" / cap_qual_prefix = ""` root but is a
-  codegen/lowering gap and remains open (see `specs/todos.md`).
-- **Regression:** `test/test_compiler.ml` group `entry_mod_qual_erasure` (8 non-vacuous
-  cases): the `Int`→`String`, `Box(String)`→`Box(Int)`, and `Cap(IO)`→`Cap(Db.P)` launder
-  shapes, the C2 distinct-tvar variant, and a nested-sibling `T.id` shape (all flip
-  clean→rejected), plus three green guards (single-type use stays clean, polymorphic use
-  restored to clean, annotated `a->a` stays clean).
-- **Verification:** full suite green — 451 compiler (+8) / 231 eval / 394 codegen
-  (`llvm_ir_validity_gate` 0 failures) / 805 stdlib / 29 snapshots, 0 failures
-  (`test_stdlib_march`'s lone `global_registry` `unbound variable` failure is pre-existing —
-  identical at HEAD without this change).
+Full suite green throughout: 451 compiler / 231 eval / 398 codegen / 773 stdlib (quick).
+Plan: `docs/superpowers/plans/2026-07-08-tetris-playground.md` (gitignored, per this
 
-## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
+## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
 
-A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`) defined in a
-**non-entry module** (a nested `mod`, or any MARCH_LIB_PATH library — all of stdlib)
-was *constructed boxed* but *tuple-nested-destructured as a newtype*, so compiled
-`Bytes.concat` returned an empty `Bytes` — the actual forgepm native-deploy blocker
-(empty Postgres wire packets → hung handshake).
+The filed "container/factory `cap_narrow`-taint gap" is closed, with a
+corrected diagnosis. `tag_cap_producer_result` (typecheck.ml) was genuinely
+shallow — it tagged a bare `Cap(a)`/`TVar` only, while the paired detector
+`ty_has_tagged_cap_producer` already recursed into tuples/records/`TCon`
+args. Investigation reproduced the exact historically-filed repro
+(`box(x) = (x, 0)` called as `box(cap_narrow(cap))`, destructured, consumed
+as a proof cap) plus 11 further container shapes (Option-wrap, forward-ref,
+single-module, cross-module, closure/thunk, record-wrap, 3-layer wrap) — none
+forge on this tree. A live source A/B against the actual historical commit
+(`66b6716a`) shows why: the identical program forges there and rejects on
+every later commit — the original escape was actually the (separately fixed,
+three commits later) nested-module qualified-prebind type-erasure bug, since
+`box` is an unannotated nested-module helper, exactly the shape that bug
+corrupted; the reviewer's shallow-tagger attribution was plausible but
+incorrect. Independent of exploitability, `demote_to_monomorphic`'s value
+restriction plus `unify`'s own tag-propagation-on-bind already make the
+shallow/recursive tagger distinction moot for every constructible shape
+(the original tainted var is pinned monomorphic at production and flows by
+reference through arbitrary wrapping). The architectural asymmetry was fixed
+anyway, as hardening: `tag_cap_producer_result` now recurses identically to
+`ty_has_tagged_cap_producer`, at zero rejection cost (tagging only ever marks
+a still-unbound var, never anything already resolved to a concrete type via
+ordinary unification — verified with a devious over-rejection probe: a
+tainted IO narrow tupled with an unrelated, already-legitimate proof-cap
+passthrough still accepts). 4 new tests in `test/test_compiler.ml`'s
+`proof_cap_mint` group, honestly documented as passing with or without the
+recursive fix on this tree (value restriction already covers every shape
+tried) rather than overclaiming independent necessity. Six-runner suite green
+(compiler 486 / eval 231 / codegen 394 / stdlib 804); `check_types.sh`
+120/120; `check-docs.sh` clean. See `specs/todos.md`'s "Container/factory
+`cap_narrow`-taint gap" entry for the full investigation.
 
-- **Root cause:** `Lower.lower_mod_decls` registers a non-entry module's typedef under
-  its module-qualified name (`Bytes.Bytes`), but the module's own value types reference it
-  BARE (`Bytes`) — the typechecker drops the prefix on same-module references (entry-module
-  types are registered bare, so this was non-entry-only). Construction (EAlloc) and
-  top-level patterns resolve by the bare name → `repr_of_ty` misses → `Boxed` (which is
-  ALSO the C-runtime layout: `make_bytes_from_raw`/`bytes_to_raw` build/read `Bytes` as a
-  box with `List(Int)` at offset 16). But `emit_case`'s newtype-recovery path — fired by a
-  TVar-erased tuple-element sub-scrutinee, keyed on the CTOR name → the qualified typedef —
-  saw `Newtype`. The nested `(Bytes(xs), Bytes(ys))` destructure took the Newtype identity
-  path against a boxed value: `xs` = the box pointer, and the header (tag 0) read as an
-  empty `Nil`.
-- **Fix:** make `emit_case`'s newtype-recovery classify the owning type by its BARE
-  (last dot-segment) name, exactly as construction and the runtime do — so a non-entry
-  single-field type stays consistently `Boxed` (a genuine entry-module newtype is
-  registered bare, so stripping is a no-op and it still classifies `Newtype`). Keeping
-  `Bytes` boxed is required — the runtime constructs/consumes it boxed across crypto,
-  compression, HTTP, and `tcp_recv_exact`; flipping compiled `Bytes` to a raw list made
-  every runtime-built `Bytes` decode as an empty `Nil` (`Bytes.get: index out of bounds`
-  on the PG handshake buffer).
-- **Regression:** `test/test_codegen.ml` `nonentry_newtype_repr_codegen` — a nested `mod`
-  single-field ADT, tuple-destructured, must print `5` compiled (RED `0` pre-fix).
-- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1) / 805
-  stdlib / 29 snapshots, 0 failures; differential property oracle no new divergences;
-  RC benchmarks unchanged. Compiled `Bytes.concat` byte-correct AND native forgepm clears
-  the live Postgres handshake on the deploy droplet → unblocks the native deploy.
+## Current State (as of 2026-07-08, finding 20 — compiled actor-struct FBIP/RC race fixed)
 
-## Current State (as of 2026-07-08, monomorphization nested-fn/top-level name-collision fixed)
+**Finding 20** (compiled actor scheduler intermittently losing a legitimate
+message, filed during the finding-19 fix review) is FIXED. Root cause was
+**not** the mailbox drain the original hypothesis pointed at — it was FBIP
+in-place reuse racing an actor handle's refcount: an actor handler writes its
+new state back via a Perceus `EReuse`, and the generic emit path is
+RC-conditional (mutate in place iff `rc == 1`, else allocate a fresh copy and
+discard the old). The actor object is a stable daemon-owned singleton mutated
+solely by its own thread, but its *handle* refcount is concurrently,
+atomically incremented/decremented by the caller thread as it passes the
+`Pid` through successive `send`s — a handler observing a transient `rc > 1`
+took the "fresh" branch and silently discarded its state write (memory-safe:
+a wrong-but-valid count, never a crash). Fix (`lib/tir/llvm_emit.ml`
+`emit_expr`'s `EReuse` case): a new branch makes an actor-struct `EReuse`
+ALWAYS mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+Verified deterministic over 200 compiled runs of the repro (0 failures, was
+~5–17%); golden `g40_actor_foreign_msg_drop.march` restored to the fuller
+`Inc(3)/Zlog/Inc(4)/Report → count=7` shape now that it's deterministic
+(`verify.sh` MATCH). Six-runner suite green; the pre-existing
+`examples/actors.march` dead-actor-drop ordering divergence is unrelated
+(confirmed identical pre-fix/post-fix via file-copy A/B, not caused by this
+change).
 
-Monomorphization (`lib/tir/mono.ml` `rewrite_calls`) resolved a call's callee by
-**bare name** against the module-level `fn_table` while recursing into
-`ELetRec`/`ELet`/`ECase` bodies without tracking lexically-bound nested-function
-names. Because March's stdlib conventionally names inner accumulator helpers
-`fn go(...)` (in `List.length`/`reverse`/`map`/`sum_int`/… and `Bytes.concat`'s
-`list_append_go`), ANY user top-level `go` made `fn_table["go"]` hit, silently
-rebinding every stdlib helper's nested `go(...)` call to the user's top-level
-`go`. Compiled tail-recursive list accumulators then returned garbage (a heap
-pointer reinterpreted as an `Int`), while the interpreter — which has no
-mangling/link step — stayed correct. This was the root cause of the native
-forgepm deploy hang (empty Postgres startup packets from `Bytes.concat`).
+**Same-day follow-up (adversarial review):** the fix's first cut gated the
+always-in-place branch on `Tir_names.is_actor_struct_name` — a NAME-suffix
+check (`"_Actor"`) — which was a Critical false-positive vector: an ordinary
+user type coincidentally named `Foo_Actor` would also take the unconditional
+path and silently corrupt a SHARED (`RC > 1`) value under FBIP (verified live
+with a `Tree_Actor` ADT). Fixed by making the gate STRUCTURAL:
+`Repr.is_actor_struct_type` (`lib/tir/repr.ml`) checks the type's field 0 for
+the literal, compiler-only `"$d_dispatch"` marker (`lower_actor.ml`'s
+`TDRecord` construction) instead of pattern-matching the type name — March
+identifiers can never start with `$`, so no user type can forge this. Two new
+regression tests in `test/test_codegen.ml` (RED on the name-based gate / GREEN
+after, confirmed via file-copy A/B). Six-runner green again (compiler 482 /
+eval 231 / codegen 394, IR-gate clean / stdlib 804); `verify.sh` 40/40;
+`check-docs.sh` clean. See `specs/todos.md`'s finding 20 entry (both cuts).
 
-- **Fix:** thread a `shadowed` name-set through `rewrite_calls`; a callee whose
-  name is bound by a lexically-enclosing nested `fn` (accumulated from `ELetRec`
-  fn names, the `ELet` binder that a block-`fn` lowers its continuation under,
-  and `ECase` `br_vars`) is left un-resolved for `Defun` to lift as a distinct
-  `…$apply$N` closure — exactly the path taken when no name collision exists.
-  Function params are intentionally NOT seeded (preserves the `ECallPtr`
-  erased-type interface-dispatch fallback).
-- **Regression:** `test/test_codegen.ml` `nested_fn_name_collision_codegen` —
-  a top-level `go` reversing `[1..5]`, then `List.length`/`List.sum_int` on the
-  result, must print `5|15` compiled (was `5|<garbage>`), matching the interpreter.
-- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1)
-  / 805 stdlib / 29 snapshots, 0 failures. RC benchmarks unchanged
-  (tree_transform=104857600, list_ops=333333666666, binary_trees depth-16=131071).
+## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
 
-## Current State (as of 2026-07-07, Linux cross-compile P3 — OpenSSL/TLS + zlib/gzip for the main binary)
+Slice 6 lands **two soundness properties** in `lib/typecheck/typecheck.ml` (both
+real compiler fixes, gated on the full six-runner suite), then documents and
+witnesses them across `specs/lang/core-march-types.md` §2.8.13,
+`specs/lang/capabilities.md`, the `specs/lang/types/` corpus, and `INDEX.md`.
 
-`march --compile --target linux/amd64|linux/arm64` (and `forge build --target …`)
-now cross-link **TLS (OpenSSL 3)** and **gzip (zlib)** into the main binary. P1
-deliberately dropped both (pure-compute only), so a real server app — forgepm,
-which uses native HTTPS and gzip tarball extraction — failed to link for Linux
-with `undefined symbol: march_tls_write / march_tls_close / march_gzip_decode`.
-P3 resolves them against a **target sysroot** extracted from Debian *bookworm*
-(matching the `debian:bookworm-slim` deploy image: `libssl.so.3` /
-`libcrypto.so.3` / `libz.so.1`, glibc 2.36).
+- **The P0 nested-module type-erasure fix (GENERAL soundness).** Nesting no
+  longer weakens type checking: an intra-module reference to a function is now
+  checked against that function's real, body-checked (possibly polymorphic)
+  scheme at every nesting level, INCLUDING the entry module. Root cause (see
+  `.superpowers/sdd/prebind-fix-report.md`): an unannotated public fn in a
+  nested `mod` was prebound under its QUALIFIED name (`App.id`) to a fresh
+  placeholder that `check_decl`'s DFn branch reconciled only under the BARE
+  name, so a sibling resolving the desugar-qualified reference got a decoupled
+  `?a -> ?b` that **erased the type of anything laundered through it** — base
+  types (`Int`→`String`, a genuine memory-safety break), ADT args
+  (`Box(String)`→`Box(Int)`), and `Cap` alike. The proof-cap forge was one
+  exploitation of this general hole. The fix reconciles every qualified fn key
+  (both the `cap_qual_prefix` nested key and the `current_module` entry-self
+  key) to `check_fn`'s real scheme, and orders forward references so the rebind
+  runs in time; `unify` is untouched. 25 NON-VACUOUS unit tests
+  (`nested_mod_prebind_erasure` group, RED pre-fix / GREEN after), fixed across
+  three adversarial-review rounds (`10249488`, `d19dc519`, `cbbf99a8`).
+- **The proof-cap minting discipline.** Proof capabilities (`proof cap Name` in
+  a `mod`, consumed as `Cap(Mod.Name)`) are now genuinely unforgeable. The
+  gated `mint_cap` primitive is the ONLY way to construct a proof cap and
+  typechecks iff used in a PUBLIC (`fn`, not `pfn`) function of the cap's
+  declaring module; `cap_narrow` — the ordinary IO-lattice narrower — can no
+  longer produce a proof cap in ANY expression position (Batch-A: value
+  restriction + a use-site `unify` proof-cap hook + call/instantiate/factory
+  taint propagation). Both are runtime-erased (`mint_cap` aliases `cap_narrow`
+  downstream). The only two ways to obtain `Cap(P)` are now receive-and-pass-
+  through or `mint_cap` in P's declaring module's public fns. See
+  `.superpowers/sdd/batch-a-report.md`; 12 `proof_cap_mint` unit tests.
 
-- **Sysroot fetch/cache.** `scripts/fetch-cross-sysroot.sh <amd64|arm64>`
-  populates `~/.cache/march/cross-sysroot/linux-<arch>/{lib,include}` from the
-  bookworm `libssl3`/`libssl-dev`/`zlib1g`/`zlib1g-dev` `.deb`s, extracted with
-  `ar` + `tar` (the mac has no `dpkg-deb`). It resolves the exact `.deb`
-  filenames from the suite `Packages.gz` index — the flat pool dir mixes in
-  trixie/sid, so a pool-listing grep would grab the wrong versions — with pinned
-  known-good fallbacks if the index is unreachable, and copies the **multiarch**
-  `openssl/opensslconf.h` (Debian ships it under `usr/include/<multiarch>/openssl`,
-  not `usr/include/openssl` — miss it and the compile fails "opensslconf.h file
-  not found") into `include/openssl/`.
-- **Compiler.** `bin/main.ml` gains `cross_sysroot_dir` (env override
-  `MARCH_CROSS_SYSROOT_<ARCH>` / `MARCH_CROSS_SYSROOT` → `~/.cache` cache) with a
-  clear, actionable error on a cache miss (names the fetch script — no silent
-  auto-download). The `is_cross` link block now **keeps** `march_tls.c` +
-  `march_compress.c` (they cross-compile fine against the target headers) and
-  links OpenSSL/zlib by **direct positional `.so` paths** — `<sysroot>/lib/
-  libssl.so.3` etc., NOT `-l:libssl.so.3`/`-L` (lld can't find them via `-l:`;
-  the direct path records the correct `DT_NEEDED` soname) — with
-  `-I<sysroot>/include` and no `-L/opt/homebrew` host paths. It still drops
-  `march_blake3.c` (needs a target `libblake3` we don't vendor — the prompt's
-  "pure C" assumption was wrong; it `#include <blake3.h>`) and `march_reload.c`
-  (HCR-over-cross is out of scope). zstd/brotli stay off (`-DMARCH_HAVE_*`
-  undefined); zlib is the only mandatory codec and gzip/deflate is pure zlib.
-- **glibc floor 2.31 → 2.36.** Bumped in `parse_target`. Mandatory for TLS: the
-  target `libcrypto.so.3` references `GLIBC_2.34` symbols
-  (`pthread_getspecific`, `dlsym`/`dlclose` — where libdl merged into libc) and
-  `stat@2.33`, which a lower floor's libc doesn't provide, so `ld.lld
-  --no-allow-shlib-undefined` rejects the link. 2.36 exactly matches bookworm;
-  `zig_target` already appends the floor (`x86_64-linux-gnu.2.36`).
-  **Portability cost:** cross binaries now require glibc ≥ 2.36 (bookworm+) —
-  acceptable since the hot-deploy target is bookworm.
-- **CAS.** The target OpenSSL/zlib `.so` live outside the repo, so
-  `runtime_identity` (which digests only `runtime/*.c/*.h`) doesn't cover them; a
-  12-hex digest of the three sysroot `.so` files is folded into `cas_flags` (both
-  the source-level early cache and the inner link cache) so a sysroot re-fetch
-  that changes the linked libs invalidates cached cross binaries. Verified: a
-  content change to `libz.so.1` flips a cached build back to recompiling.
-- **Verification** is link-structure only on the Mac (the Linux ELF can't run
-  there): the TLS+gzip probe cross-links to a valid `ELF 64-bit … x86-64 …
-  GNU/Linux` (and `ARM aarch64` for arm64) whose `DT_NEEDED` lists all three
-  sonames; forgepm's `.ll` references the full `march_tls_*`/`march_gzip_*` API
-  (all previously undefined-symbol errors), and its linux/amd64 build now reaches
-  link-parity with its native build — both fail only on a pre-existing,
-  unrelated `PubSub` module-qualification issue in the cleaned dep copies.
-  **Runtime** (HTTPS/gzip round-trip) validation happens on the droplet at deploy
-  time. New regression test `test/test_codegen.ml` (`cross_compile` suite)
-  asserts the ELF type + all three `DT_NEEDED` sonames and SKIPS cleanly (via the
-  tool-absence ledger) when zig or the sysroot cache is absent.
-
-The change is scoped strictly to `is_cross && target_is_linux`; the Native and
-JS compile paths are byte-identical (a native TLS+gzip build still uses host
-homebrew OpenSSL/zlib and runs). Full suite green after a complete `dune build`:
-**445 compiler / 231 eval / 393 codegen (+1) / 804 stdlib / 29 snapshots** (the
-~15 "cannot find runtime/march_runtime.c" stdlib fixtures are the documented
-partial-build artifact — they vanish on a full build).
-
-## Current State (as of 2026-07-07, module alias in a non-entry module body now resolves at codegen)
-
-`forge build` of a multi-repo project (forgepm → bastion) failed to LINK with
-`Undefined symbols: _PubSub.subscribe` (and `_unsubscribe`/`_unsubscribe_all`/
-`_broadcast_from`), referenced from `IslandSocket.handle_text`/`ws_loop`.
-bastion's `mod IslandSocket` declares `alias Bastion.PubSub as PubSub` and calls
-`PubSub.subscribe(...)`; typecheck resolved the alias, but codegen emitted the
-CALL as `_PubSub.subscribe` while the DEFINITION (`mod Bastion.PubSub`) was
-`Bastion.PubSub.subscribe` — the two never converged.
-
-**Root cause**: TIR lowering resolves module aliases through `_use_aliases` +
-`resolve_use_alias` (`lib/tir/lower.ml` / `lower_state.ml`). The top-level decl
-loop over `m.mod_decls` has a `DAlias` handler, but `lower_mod_decls` — which
-lowers every NON-entry module (auto-discovered MARCH_LIB_PATH files and nested
-`DMod`s) — had **no `DAlias` case** in its inner decl match; it fell into the
-`_ -> ()` catch-all. So an `alias` at the entry file's own top level resolved,
-but the identical alias inside any auto-discovered module body was silently
-dropped, and its `Short.member` calls kept the un-canonicalized alias name at
-codegen. This is the exact entry-file-vs-lib-file asymmetry: `alias X as Y` in
-the compile-entry module worked; the same in a sibling/dependency module linked
-to nothing.
-
-**Fix**: an order-independent module-alias prefix table `_module_aliases`
-(short name → full module path, e.g. `"PubSub" → "Bastion.PubSub"`), populated
-from `DAlias` in BOTH the top-level handler and the newly-added `lower_mod_decls`
-handler, plus a fallback branch in `resolve_use_alias` that rewrites
-`Short.member → Long.Path.member` by prefix substitution once every exact-name
-lookup has missed. The prefix rewrite is deliberately order-independent: the
-pre-existing exact-entry mechanism scans `!fns` and so only covers aliases whose
-target module was lowered first (guaranteed for the entry file, processed after
-every other module — NOT for a lib module whose target sibling may be lowered
-afterward). Exact entries still take precedence; the prefix table only
-backstops, so import/`use`-based exact aliases and the builtin/hijack guards in
-`resolve_use_alias` are untouched.
-
-New native golden (`test/dune` rule + `test/alias_codegen/` fixtures): a
-non-entry module `AcCaller` aliasing a 2-level `AcBase.Target`, compiled with
-MARCH_LIB_PATH, run, and diffed to `42` — RED pre-fix (`_T.answer` undefined →
-clang link failure), GREEN post-fix. Verified end-to-end: forgepm now compiles
-and links to a native binary (the last remaining deploy blocker). **Full suite
-(complete `dune build`): 443 compiler / 231 eval / 391 codegen / 805 stdlib
-pass, 0 failures.**
-
-## Current State (as of 2026-07-07, `march check` quadratic hang on large MARCH_LIB_PATH projects fixed)
-
-`march check`/`forge build --target ...` on a large multi-repo downstream project
-(forgepm + bastion + depot + march_doc as `path` deps, ~200 auto-discovered
-`.march` files under `MARCH_LIB_PATH`) burned 99.9% CPU for 30+ minutes instead
-of the seconds-to-low-minutes this kind of check should take — confirmed
-genuinely computing, not deadlocked, via repeated `sample <pid>` snapshots all
-showing the same hot call stack: `caml_main -> ... -> camlStdlib__List.mem_472
--> caml_c_call -> caml_compare -> compare_val`, i.e. OCaml's polymorphic-compare
-`List.mem` dominating by a wide margin.
-
-**Root cause**: `Typecheck.record_use` (`lib/typecheck/typecheck.ml`) is called
-on every single `Ast.EVar` node during `infer_expr` — once per variable
-reference in the WHOLE combined program, since `check_module_core` typechecks
-stdlib + every MARCH_LIB_PATH-discovered file as one shared `env` (not
-per-file). It did:
-
-```ocaml
-if !(env.import_tracker) <> [] then
-  List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
-    !(env.import_tracker);
-```
-
-`env.import_tracker` accumulates ONE ENTRY PER `use`/`import`/`alias`
-DECLARATION ACROSS THE ENTIRE PROGRAM (populated at the four `ie_matches`
-construction sites — `DUse`'s `UseAll`/`UseNames`/`UseExcept`, and `DAlias` —
-and never scoped back down per-file), so this is a full `List.iter` (each
-`ie_matches` closure itself doing a `List.mem`/polymorphic-`=` scan for the
-`UseAll`/`UseExcept` shapes) over an unboundedly-growing list, on every EVar.
-That pairing is **O(total-var-refs × total-imports)** — quadratic in project
-size — and swamped everything else in the pipeline (parse/desugar/
-resolve-imports/stdlib-load were all sub-100ms per `--timings` even on the real
-forgepm repro; typecheck alone was 1.3-2s there and scales far worse on larger
-synthetic trees, see below).
-
-**Investigated and ruled out first, per the promising leads in `specs/todos.md`'s
-`user_files`/`loaded_paths` entry**: `lib/resolver/resolver.ml`'s `loaded_paths`,
-`resolved`, `in_progress`, and `seen` tables are already `Hashtbl`-based (not
-the bug); `lib/modules/module_registry.ml`'s `registry`/`loading` are also
-`Hashtbl`-based (not the bug). `bin/main.ml`'s `is_user_file` does a real
-`List.mem f user_files`, but it runs once per *diagnostic* (bounded by warning/
-error count — typically dozens to low hundreds even on a large project), not
-once per EVar — it never appeared in any `sample` profile at any scale tested
-and is a much smaller-order cost than `record_use`; left as-is.
-
-**Fix**: index `import_tracker` entries at creation time into a new
-`env.import_idx` — two `Hashtbl`s populated at all four `ie_matches`
-construction sites: `ie_exact_index` (every literal name an entry can
-exact-match: rebound short names for `UseAll`/`UseExcept`, the single name for
-`UseNames`, the alias name for `DAlias`, and the bare qualified module/alias
-name itself for the "referenced the module path literally" case) and
-`ie_prefix_index` (keyed by the first-dot-split "prefix root" of a qualified
-reference — e.g. `"Depot.Gate.foo"` and `"Depot"` both key to the same root,
-mirroring `split_qualified`'s existing first-dot-split convention elsewhere in
-this file). `record_use` now does two O(1)-average Hashtbl lookups instead of
-an O(n) scan; the prefix-index path still calls the entry's real `ie_matches`
-closure before marking it used (defends against two different imports sharing
-a first path segment), so semantics are exactly preserved, not approximated —
-verified by running the real forgepm repro before/after and diffing output
-(byte-identical diagnostics either way) and by the alcotest suite's existing
-unused-import/alias warning tests still passing unchanged.
-
-**Scaling verification** (synthetic MARCH_LIB_PATH: N auto-discovered modules
-each `import Shared` + 30 EVar references into it; CAS cache (`.march/cas`)
-cleared between every run so these are real typecheck times, not cache hits):
-
-| files | pre-fix (quadratic) | post-fix (indexed) | speedup |
-|-------|---------------------|---------------------|---------|
-| 400   | ~1.2s               | ~0.6s               | ~2x     |
-| 1200  | ~8.2s               | ~1.4s               | ~6x     |
-| 2000  | ~21.1s              | ~2.3s               | ~9x     |
-| 3000  | ~45.5s              | ~3.7s               | ~12x    |
-
-Pre-fix time fits ~quadratic (k≈5e-6·n²); post-fix is linear. The real
-forgepm repro (~200 files) itself only shows a modest 1.99s→1.32s
-improvement at its current size — the dramatic blowup only dominates at
-larger N, which is exactly why the task called for a synthetic scale-up to
-"nail the exact complexity class" rather than relying on the real repo alone.
-
-**Spurious-error cascade — same root cause or separate?** A secondary symptom
-was reported: a cascade of spurious `Unknown module` errors (`DateTime`,
-`UUID`, `IOList`, and reportedly `Config`) when scoping down a killed run.
-Investigated and confirmed **SEPARATE, not the same root cause, and not a
-compiler bug**: `find_stdlib_dir()` (duplicated in both `bin/main.ml` and
-`lib/modules/module_registry.ml`) resolves the bundled `stdlib/` directory via
-paths relative to the compiler executable (`exe_dir/../stdlib`, `../../stdlib`,
-etc.) or `"stdlib"` relative to CWD — all of which fail when (a) `main.exe` is
-invoked from a cwd outside the march source tree (e.g. `/path/to/forgepm`,
-exactly what the repro command does) AND (b) the binary was built via a
-partial `dune build bin/main.exe test/run_*.exe` rather than a full `dune
-build` / `dune build @install` (only the latter populates
-`_build/default/stdlib/` via the `stdlib/dune` `(install (section share))`
-stanza). When stdlib fails to resolve, `load_stdlib()` returns `[]` (no
-stdlib DMods get prepended), so every stdlib module reference falls through to
-`Typecheck.qualified_error_msg`'s lazy `Module_registry.ensure_loaded`
-fallback — which uses the SAME broken `find_stdlib_dir()` and also fails,
-producing "Unknown module" for genuinely-valid stdlib modules. Confirmed by:
-reproducing the exact cascade with the `import_tracker` fix fully applied but
-`_build/default/stdlib` temporarily removed (cascade reappears verbatim), and
-confirming it disappears with a complete build (zero "Unknown module" hits in
-the final clean run). This is a pre-existing build/packaging rough edge in a
-partially-built worktree, not something this fix touches or needs to fix —
-documented here so the next person who hits it recognizes it immediately
-instead of re-investigating from scratch.
-
-**Regression test**: `test_large_multi_file_check_is_not_quadratic` in
-`test/test_compiler.ml`'s `resolver` suite (`Slow`) builds a synthetic
-MARCH_LIB_PATH with 2500 auto-discovered modules (each `import Shared` +
-30 EVar refs into a 20-function shared module) and asserts the check
-completes under 30s. Confirmed RED pre-fix (measured 30.78s, matching the
-scaling-table calibration) / GREEN post-fix (~3-5s) by temporarily
-stashing/restoring `lib/typecheck/typecheck.ml`'s fix while keeping the test
-in place.
-
-**Full suite, complete build (not the partial `bin/main.exe test/run_*.exe`
-target list — a full `dune build` / `dune build @install` is needed to
-populate `_build/default/stdlib` and `_build/default/runtime`, else 14-15
-compiled-fixture tests fail with `march: cannot find runtime/march_runtime.c`,
-reproduced identically on an unmodified clean baseline worktree off this same
-`main` commit and confirmed to disappear with a complete build on BOTH
-branches — a pre-existing partial-build artifact, not a regression): **429
-compiler (+1) / 231 eval / 391 codegen / 805 stdlib pass, 0 failures.**
-Baseline (throwaway clean worktree off the same `main` commit, complete build):
-428/231/391/805, also 0 failures — confirms this change adds exactly the one
-new test and introduces zero regressions.
-
-## Current State (as of 2026-07-07, interpreter HTTP server event-loop fix — idle client no longer wedges `forge run` dev server)
-
-- **`lib/eval/eval.ml` `run_http_event_loop` replaces the fully-sequential accept loop behind the interpreted `http_server_listen` builtin** (interpreter-only — `forge run` / plain `march file.march`; the compiled/LLVM path's `runtime/march_http.c` already has real event-loop/thread-pool concurrency and was not touched). The old implementation `select`ed only on the listening socket, then `accept`ed exactly one client and blocked synchronously on that client's `recv`/`send` for its whole request-response cycle before accepting the next — a client that opened the TCP connection and then paused before sending bytes (e.g. a WebSocket reconnect with backoff) parked the interpreter's one OS thread inside a blocking `recv()`, starving every other connection server-wide (reproduced firsthand via `sample <pid>` showing the sole thread blocked in `camlUnix.recv_1225`, with unrelated routes hanging 90+ seconds). Fix mirrors the interpreter's existing cooperative actor-mailbox scheduling pattern (`BlockedOnReceive`/`run_scheduler`) at the socket level instead of adding real OS threads (deliberately out of scope per `specs/todos.md`'s "interpreter-only scaffolding" note on `lib/scheduler/*.ml` and `task_spawn`'s Phase-1 eager-eval comment): every connection socket is set non-blocking and tracked as a small state machine (`http_conn_state` — `HCReadingRequest` accumulating bytes via `http_try_parse_request`, a Content-Length-aware incremental parser, until a full request is available; `HCWriting` draining a queued response buffer across non-blocking writes), and a single `Unix.select` per loop iteration multiplexes the listen socket plus every open client connection — no connection's I/O can block progress on any other. `EAGAIN`/`EWOULDBLOCK`/`EINTR` are treated as "not ready, retry next iteration." WebSocket upgrades are unchanged: `http_run_pipeline_and_respond` detects `WebSocketUpgrade`, writes the handshake, and still runs `handler_fn` synchronously/blocking on that one connection for its lifetime — identical to the pre-fix semantics (an open WS connection already monopolized the old sequential loop for its whole lifetime too, so this is unchanged behavior, not a new limitation). `handle_http_connection` (still used by the fork-based `http_server_spawn_n` N-request test variant, where each forked child only ever serves one client at a time by design) is untouched. Regression test `test_interp_http_server_idle_client_does_not_block_others` in `test/test_stdlib_suite.ml`'s `adversarial-regressions` group (`Slow`): launches `bin/main.exe` (interpreter, no `--compile`) as a real subprocess bound to a real port, opens a TCP connection that connects but never sends a byte, then a second connection that sends a complete `GET /` request, and asserts the response arrives within 1s of a 2s deadline. Verified to fail (times out, empty response) on the pre-fix code and pass post-fix by temporarily stashing/restoring `lib/eval/eval.ml` while keeping the test in place. **373 compiler / 224 eval / 327 codegen / 791 stdlib / 53 stdlib_march pass** (interpreter-level `test/stdlib/test_http_server.march` and `test_websocket.march` — pure Conn-value/pipeline tests, no real TCP — unaffected since the external `Conn`/`Upgrade` contract and `http_server_listen`/`http_server_spawn_n` signatures are unchanged). Not covered by this fix (pre-existing, orthogonal limitations worth flagging): no HTTP keep-alive (every connection is closed after one response is fully written, matching the prior behavior — a persistent keep-alive connection would need the state machine to loop back to `HCReadingRequest` after a write completes instead of closing); chunked `Transfer-Encoding` request bodies are not parsed (only `Content-Length`, matching prior behavior); a very large response body under sustained socket-buffer backpressure will correctly drain across many `select` iterations but hasn't been load-tested at scale.
-
-## Current State (as of 2026-07-07, spec-search Claude skill — FTS5 index over language/design docs)
-
-- **New dev-tooling, not a compiler change — no test count change.** `scripts/build-spec-index.sh` + `scripts/spec_index_build.py` vendor `specs/lang/`, `specs/impl/`, `specs/features/` (top-level `*.md` only) into `.claude/skills/spec-search/docs/` and build an FTS5 SQLite index (`sections` table: `file`, `heading_path`, `content`, `lineno`, `end_lineno` — one row per H1-H3 markdown section). `.claude/skills/spec-search/spec-search.sh` is a self-locating bash script (`sqlite3` CLI only, no Python at query time) supporting human-readable and `--json` output, ranked by `bm25()`. `.claude/skills/spec-search/SKILL.md` instructs Claude to search then `Read` only the matched section via `lineno`/`end_lineno` rather than whole chapters. Designed to be installed once at `~/.claude/skills/spec-search/` (user-level) so it works across every March project on the machine, not just this repo — verified by running the installed copy from `/tmp` and from a scratch directory with no `specs/` of its own. Design: `docs/superpowers/specs/2026-07-06-spec-search-fts5-design.md`; plan: `docs/superpowers/plans/2026-07-06-spec-search-fts5.md`.
-
-## Current State (as of 2026-07-07, `dependency_order_dmod_run` hard/soft-edge cycle corruption fixed)
-
-Checking a real downstream project (`conduit`) whole-program surfaced a fourth
-`run_check_cmd`-family bug, this time inside the typechecker's own module
-ordering pass rather than `run_check_cmd` itself: `dependency_order_dmod_run`
-(`lib/typecheck/typecheck.ml`) topologically sorts sibling DMods over the
-UNION of two different kinds of dependency edges — qualified references
-(`Mod.fn`/`Mod.Ctor`, from `module_refs_in_decls`) and bare/unqualified
-ctor-or-type references (from `unqualified_module_deps`). The two kinds are
-not equally load-bearing: qualified references are pre-bound as pass-1 Mono
-placeholders regardless of check order (see `prebind_mod_members`), so
-ordering by them is purely a precision nicety (avoids a caller pinning an
-under-generalized placeholder — the rationale `0799c745` added this class of
-edge for). Bare references have no such placeholder — the referenced name
-only becomes visible once the defining sibling's DMod has actually been
-processed by `check_decl` — so ordering by them is a hard correctness
-requirement. Real sibling modules commonly form actual reference cycles
-through qualified calls alone (a facade module delegating into an internal
-one, which calls back into a module the facade itself depends on) — legal
-and previously harmless, since qualified refs tolerate any order. But mixing
-both edge kinds into one DFS meant a soft-edge cycle could non-deterministically
-reorder a hard edge the wrong way: whichever edge type the traversal reached
-an already-in-progress ancestor through "won", independent of which one was
-actually load-bearing. Live repro: `conduit`'s base module (`Conduit`)
-qualified-delegates to `Conduit.API`, which qualified-calls into
-`Conduit.Worker`, which bare-pattern-matches `WorkerError` — a constructor
-declared on `Conduit`. The DFS visited `Conduit` first, recursed into the
-soft-edge cycle before `Conduit` could push itself, and `Conduit.Worker` (its
-hard dependent) ended up ordered first — "I don't know a constructor called
-`WorkerError`" despite the constructor being correctly declared.
-
-Fixed by computing the existing combined-edge DFS order as before (unchanged
-for the common case — no behavior change when there's no hard/soft
-conflict), then validating it against the hard edges alone. If satisfied
-(the overwhelming majority of real programs, including every existing
-regression fixture), return it unchanged. Only when a hard edge is actually
-violated does it fall back to Kahn's algorithm restricted to hard edges,
-using the original combined-edge order purely as a tie-break, so soft-edge
-precision is preserved everywhere it doesn't conflict with a hard
-requirement. New regression test
-`test_check_qualified_cycle_does_not_break_bare_ctor_ordering` in
-`forge/test/test_build_check.ml`, minimized to the same three-module
-facade/worker/core shape (file naming there is itself load-bearing —
-`Cmd_build.find_march_files` walks sorted-ascending but prepends, so the
-file list handed to `march check` is sorted DESCENDING; the module carrying
-the hard dependency's definition has to be discovered first for the bug to
-reproduce through the real `forge check` path, hence `zcore.march`).
-
-**Test counts:** `forge/test/test_build_check.exe` gains 1 more case (12
-total, up from 11). Standard runners unaffected: 424 compiler / 231 eval /
-391 codegen, all exit 0 (stdlib runner not re-verified this pass).
+- **Reference:** `core-march-types.md` gains a general typing-soundness rule
+  ((T-QualRef): intra-module references reconcile to the real body-checked
+  scheme regardless of nesting) and a dedicated proof-capabilities subsection
+  §2.8.13 (Check 1 self-declaration, Check 6 pass-through, the `mint_cap` rule,
+  the `cap_narrow` restriction, and the unforgeability property), reconciling
+  §2.8's opening "(Check 6) out of scope here" and §2.8.8's stale `cap_narrow`-
+  mints-a-proof-cap note. The still-OPEN `cap_narrow` container-launder taint
+  follow-up is noted as a documented residual.
+- **Tutorial:** `capabilities.md`'s proof-caps section replaces the
+  non-typechecking `; ()` mint idiom with `mint_cap`, updates the "unforgeable"
+  claims to the now-enforced mechanism, and replaces the "Known mismatch, being
+  reconciled in a later slice" callout with the resolved mechanism.
+- **Corpus:** `specs/lang/types/` grew from 109 to **120 programs** (63 accept /
+  57 reject). New reject witnesses (`t51`–`t57`) each type-correct so they were
+  ACCEPTED pre-fix (IMPOSSIBLE to reject pre-fix): nested `id`-launder
+  `Int`→`String`/`Box`, distinct-tvar launder, entry-module self-qualified
+  launder, `cap_narrow` proof-cap forge, `mint_cap` external, `mint_cap` in a
+  `pfn`. New accept witnesses (`t60`–`t63`): legit nested polymorphism, legit IO
+  narrow, legit `mint_cap` in the declaring module's public fn, proof-cap
+  pass-through. `check_types.sh`: **120 passed, 0 failed**, exit 0;
+  `check-docs.sh` exit 0.
+- **Findings:** `specs/todos.md`'s "proof-cap mint mismatch" reflects the
+  resolved state (mint_cap + cap_narrow restriction landed; general erasure
+  closed by the prebind fix); the container-launder taint gap and the
+  `global_registry` parser finding remain filed OPEN.
+- **Compiler unchanged in this closeout** — the fixes already landed on `main`
+  (HEAD `cbbf99a8`); this slice is the docs + `.march` corpus + specs finish
+  work. run_compiler is now **482** (with the 25+12 new unit tests).
+- **Next queued widening slice:** linear/affine types (per the survey's
+  scoping recommendation and the roadmap's Phase-2b/3 phasing).
 
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
@@ -3208,8 +2979,10 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
      match inside a `cap no_panic` module is invisible to both the
      ordinary warning and F3's new error path — live-verified to panic at
      runtime uncaught. Pre-existing behavior F3 correctly inherits rather
-     than introduces; not in F3's scope; would need a guard-aware
-     (Z3-backed) exhaustiveness analysis to close.
+     than introduces; not in F3's scope. **(Subsequently FIXED, fix-campaign
+     batch 3, 2026-07-07 — see the dedicated entry below; a guard-aware SMT
+     analysis turned out NOT to be needed: computing coverage over the
+     GUARDLESS branches only is a sound, conservative, bounded fix.)**
 - **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
   already wired into `specs/lang/index.md`'s chapter map before this slice)
   reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
@@ -3240,6 +3013,53 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
 
 Next queued widening slice: **proof caps** (closing the proof-cap mint
 mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
+
+## Fix-campaign batch 3 — `cap no_panic` guarded-match exhaustiveness gap (2026-07-07)
+
+Closes the residual soundness gap slice 5 (above) filed OPEN as finding 6: a
+`match` with a `when` guard used to short-circuit `check_exhaustiveness`
+entirely (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+match inside a `cap no_panic` module was recorded by NEITHER the ordinary
+Warning NOR F3's `env.nonexhaustive_match_spans` side-table — `--check` exited
+0 with zero diagnostics, then panicked at runtime ("no matching clause") on a
+value that failed every guard. Exactly the failure class `cap no_panic` exists
+to rule out.
+
+- **The fix (`lib/typecheck/typecheck.ml`, `check_exhaustiveness`).** For a
+  guarded match, the function no longer returns immediately. It computes
+  coverage over the GUARDLESS branches ONLY (`guardless_matrix` = the
+  `norm_pat`s of the arms with `branch_guard = None`). A branch reachable only
+  behind a guard cannot be relied on to match, so it contributes nothing to
+  GUARANTEED coverage; if the guardless branches alone are non-exhaustive, the
+  match can panic when every guard fails at runtime → the span is recorded into
+  `env.nonexhaustive_match_spans` and `check_no_panic_module` promotes it to an
+  ERROR, exactly as for the guard-free case. If the guardless branches ARE
+  exhaustive (a guarded arm followed by an unguarded catch-all), nothing is
+  recorded and the match still accepts. `find_missing_mc` already handles an
+  empty matrix (all-guarded match) correctly, so an all-guarded match reports
+  non-exhaustive rather than crashing.
+- **Minimal blast radius.** The guarded case RECORDS the span but emits **no
+  global Warning** — guarded matches are common in ordinary code and get no
+  such warning today, so only `cap no_panic` modules (which opt into
+  strictness) are made stricter. The guard-FREE path is untouched (still
+  Warning + record). No non-`cap no_panic` behavior changed — the
+  record-without-warning split is clean, regression-guarded by a new
+  plain-module guarded-non-exhaustive unit test that stays silent.
+- **Corpus.** types 107 → **109** (58 → **59** accept, 49 → **50** reject):
+  `reject/t50_cap_no_panic_guarded_nonexhaustive` (guardless arms `{None}`,
+  non-exhaustive — IMPOSSIBLE to reject pre-fix, accepted exit 0) and
+  `accept/t59_cap_no_panic_guarded_guardless_catchall` (adds an unguarded
+  `Some(v)` arm → guardless-exhaustive → still accepts, proving no
+  over-rejection). `check_types.sh` 109/109, exit 0; `check-docs.sh` exit 0.
+- **Unit tests.** 3 new NON-VACUOUS cases in `test/test_compiler.ml`'s
+  `cap_no_panic` group (RED pre-fix / GREEN after): `cap no_panic` + guarded
+  non-exhaustive → `has_errors` true; `cap no_panic` + guarded guardless-catch-
+  all → no error; plain (non-cap) guarded non-exhaustive → no error (the
+  record-without-warning regression guard).
+- **Docs.** `core-march-types.md` §2.8.11's residual-gap paragraph and §2.1a's
+  guard-short-circuit paragraph flipped from "open gap" to FIXED with the
+  guardless-matrix mechanism; the §2.8 preamble roadmap note updated.
+  `specs/todos.md` finding 6 converted from OPEN to a ✅ FIXED entry.
 
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 
