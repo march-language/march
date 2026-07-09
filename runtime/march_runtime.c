@@ -3354,14 +3354,6 @@ void *march_pid_of_int(int64_t n) {
     return &march_dead_actor_sentinel;
 }
 
-/* get_actor_field: retrieve a named field from an actor's state. Stub: returns None. */
-void *march_get_actor_field(void *pid, void *name) {
-    (void)pid; (void)name;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
-}
-
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
 /* Format a March value as a human-readable string.

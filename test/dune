@@ -1267,6 +1267,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/pid_of_int_roundtrip.expected native_pid_of_int_roundtrip.out)))
 
+; ── Regression: get_actor_field must resolve real state fields, not always
+; return None (the C stub march_get_actor_field always did) — this exercises
+; the compile-time field-resolution codegen directly on a non-supervised
+; actor's own Int fields, isolated from Task 3's spawn-injection.
+(rule
+ (targets native_get_actor_field_direct native_get_actor_field_direct.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/get_actor_field_direct.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_get_actor_field_direct
+        native/get_actor_field_direct.march)
+   (with-stdout-to native_get_actor_field_direct.out
+        (system "./native_get_actor_field_direct")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/get_actor_field_direct.expected native_get_actor_field_direct.out)))
+
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
 ; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)

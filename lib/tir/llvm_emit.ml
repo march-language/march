@@ -2395,6 +2395,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          let v_coerced = coerce ctx v_ty v_val field_ty in
          emit_store_field ctx ptr i field_ty v_coerced
        ) args;
+       (* Actor structs get a runtime shape id stamped into the header pad
+          word so get_actor_field's C implementation (march_get_actor_field,
+          runtime/march_extras.c) can look up a named state field by the
+          actor's own shape at runtime, regardless of whether the caller's
+          static Pid(a) type is concrete at that call site (it usually is
+          NOT — a call routed through a small generic helper like
+          child_int(sup, field) never resolves `a` past an abstract type
+          variable, since nothing in get_actor_field's own signature forces
+          monomorphization on it). Scoped to actor structs only via
+          is_actor_struct_name — not a general shape-stamping change for
+          every Boxed EAlloc/ctor-application site. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then
+         emit_set_shape ctx ptr (get_record_fields ctx (Tir.TCon (alloc_type_name, [])));
        (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
           after allocation so the actor green thread uses the hot-reload table.
           Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn

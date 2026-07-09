@@ -2190,6 +2190,32 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
     return (void *)(intptr_t)raw;
 }
 
+/* get_actor_field(pid, field): a PARTIAL lookup, unlike march_record_field_dyn
+ * above (a total EField read that panics on a missing name) — March code,
+ * most often through a small generic helper (e.g. supervision_strategies
+ * .march's child_int), reads a named actor state field without statically
+ * knowing whether it exists, and expects Option(b): None if absent. Reuses
+ * the SAME runtime shape registry march_record_field_dyn consults — a shape
+ * id stamped into the actor struct header's pad word at spawn time (the
+ * EAlloc actor-struct branch in llvm_emit.ml, guarded by
+ * Tir_names.is_actor_struct_name) — so this works regardless of whether the
+ * caller's static Pid(a) type is concrete or still an unresolved type
+ * variable (the realistic case: nothing in get_actor_field's own signature
+ * forces monomorphization on `a` through an indirecting helper function).
+ * Returns a niche-tagged Option: NULL = None, (n<<1)|1 = Some(n) for an 'i'
+ * (Int/Bool/Unit/Atom) field, the raw pointer verbatim for anything else —
+ * matching march_record_field_dyn's found-value convention exactly. */
+void *march_get_actor_field(void *pid, void *name) {
+    march_string *ns = (march_string *)name;
+    march_record_shape *s = rec_shape_of(pid);
+    if (!s) return NULL;
+    int32_t i = rec_find_field(s, ns->data, ns->len);
+    if (i < 0) return NULL;
+    int64_t raw = rec_field_raw(pid, i);
+    if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
+    return (void *)(intptr_t)raw;
+}
+
 /* Record update (`{ r with f: v, ... }`) for statically-unknown record types
  * (the EUpdate counterpart of march_record_field_dyn above): one allocation,
  * the base cell's fields copied, the named fields overwritten.  Varargs are
