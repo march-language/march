@@ -216,15 +216,37 @@ mod Tetris do
     end
   end
 
+  fn is_paused() : Bool do
+    get_str_attr(state_el(), "data-paused", "false") == "true"
+  end
+
+  fn set_paused(el, paused: Bool) : Unit do
+    Dom.set_attr(el, "data-paused", if paused do "true" else "false" end)
+    set_text_if_found("pause-status", if paused do "Paused — press P to resume" else "" end)
+  end
+
+  -- No-op when the game is already over, so a stray "p" doesn't paste a
+  -- "Paused" message over the game-over text.
+  fn toggle_pause() : Unit do
+    let el = state_el()
+    let over = get_str_attr(el, "data-over", "false") == "true"
+    if over do ()
+    else set_paused(el, !is_paused())
+    end
+  end
+
   fn tick() : Unit do
-    with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
-      let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
-      if TetrisLogic.collides(board, cells, x, y + 1) do
-        lock_and_advance(board, piece, rot, x, y, next, score, lines, rng)
-      else
-        (board, piece, rot, x, y + 1, next, score, lines, rng, false)
-      end
-    )
+    if is_paused() do ()
+    else
+      with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
+        let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
+        if TetrisLogic.collides(board, cells, x, y + 1) do
+          lock_and_advance(board, piece, rot, x, y, next, score, lines, rng)
+        else
+          (board, piece, rot, x, y + 1, next, score, lines, rng, false)
+        end
+      )
+    end
   end
 
   fn try_move(dx: Int, dy: Int) : Unit do
@@ -278,6 +300,7 @@ mod Tetris do
             set_text_if_found("level", "Level: 0")
             set_text_if_found("next", "Next: " ++ piece_to_string(next))
             set_text_if_found("game-over", "")
+            set_paused(el, false)
             Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board)))
             Dom.set_attr(el, "data-piece", piece_to_string(piece))
             Dom.set_attr(el, "data-rot", int_to_string(rot))
@@ -308,14 +331,22 @@ mod Tetris do
 
   fn handle_key(ev) : Unit do
     match Dom.event_key(ev) do
-      "ArrowLeft"  -> try_move(-1, 0)
-      "ArrowRight" -> try_move(1, 0)
-      "ArrowDown"  -> try_move(0, 1)
-      "ArrowUp"    -> try_rotate()
-      " "          -> hard_drop()
-      "r"          -> restart()
-      "R"          -> restart()
-      _            -> ()
+      "r" -> restart()
+      "R" -> restart()
+      "p" -> toggle_pause()
+      "P" -> toggle_pause()
+      key ->
+        if is_paused() do ()
+        else
+          match key do
+            "ArrowLeft"  -> try_move(-1, 0)
+            "ArrowRight" -> try_move(1, 0)
+            "ArrowDown"  -> try_move(0, 1)
+            "ArrowUp"    -> try_rotate()
+            " "          -> hard_drop()
+            _            -> ()
+          end
+        end
     end
   end
 
