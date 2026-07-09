@@ -1,6 +1,52 @@
 (function () {
   "use strict";
   var base = document.getElementById("tp-wrap").dataset.base || "";
+  var ver = document.getElementById("tp-wrap").dataset.ver || "0";
+  var loaded = false, loading = false, pending = null;
+
+  function loadScript(src, ok, err) {
+    var s = document.createElement("script");
+    s.src = src; s.onload = ok; s.onerror = err;
+    document.head.appendChild(s);
+  }
+
+  function ensureCompilerLoaded(cb) {
+    if (loaded) { cb(); return; }
+    if (loading) { pending = cb; return; }
+    loading = true;
+    setStatus("Loading compiler…");
+    loadScript(base + "/assets/march_stdlib.js?v=" + ver, function () {
+      loadScript(base + "/assets/march_compile.js?v=" + ver, function () {
+        loaded = true; loading = false;
+        setStatus("Ready.");
+        cb();
+        if (pending) { var f = pending; pending = null; f(); }
+      }, onLoadFail);
+    }, function () {
+      loadScript(base + "/assets/march_compile.js?v=" + ver, function () {
+        loaded = true; loading = false;
+        setStatus("Ready (no stdlib bundle).");
+        cb();
+      }, onLoadFail);
+    });
+  }
+
+  function onLoadFail() {
+    loading = false;
+    setStatus("Failed to load compiler.");
+  }
+
+  function setStatus(s) { document.getElementById("tp-status").textContent = s; }
+
+  function showErrors(errs) {
+    var el = document.getElementById("tp-errors");
+    if (!errs || !errs.length) {
+      el.textContent = ""; el.classList.remove("visible");
+      return;
+    }
+    el.textContent = errs.join("\n");
+    el.classList.add("visible");
+  }
 
   function buildSrcdoc(js) {
     // tetris.mjs's own emitted code imports "./march_runtime.mjs" and
@@ -34,28 +80,52 @@
     );
   }
 
+  // Each Run rebuilds a FRESH iframe rather than reusing the existing one —
+  // this cleanly discards any intervals/listeners/DOM state left over from
+  // the previous run instead of trying to individually tear them down.
+  function mountJs(js) {
+    var host = document.getElementById("tp-iframe-host");
+    host.innerHTML = "";
+    var iframe = document.createElement("iframe");
+    iframe.id = "tp-iframe";
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "0";
+    host.appendChild(iframe);
+    iframe.srcdoc = buildSrcdoc(js);
+  }
+
   function mountStatic() {
     fetch(base + "/assets/tetris/tetris.mjs")
       .then(function (r) { return r.text(); })
-      .then(function (js) {
-        var host = document.getElementById("tp-iframe-host");
-        host.innerHTML = "";
-        var iframe = document.createElement("iframe");
-        iframe.id = "tp-iframe";
-        iframe.style.width = "100%";
-        iframe.style.height = "100%";
-        iframe.style.border = "0";
-        host.appendChild(iframe);
-        iframe.srcdoc = buildSrcdoc(js);
-      });
+      .then(mountJs);
   }
+
+  window.addEventListener("message", function (ev) {
+    if (ev.data && ev.data.tpError) showErrors(["runtime error: " + ev.data.tpError]);
+  });
+
+  window.tpRun = function () {
+    var src = document.getElementById("tp-editor").value;
+    ensureCompilerLoaded(function () {
+      setStatus("Compiling…");
+      var result = window.marchCompileToJs(src);
+      if (result.js !== null) {
+        showErrors([]);
+        setStatus("Running.");
+        mountJs(result.js);
+      } else {
+        showErrors(result.errors);
+        setStatus("Compile failed.");
+      }
+    });
+  };
 
   fetch(base + "/assets/tetris/tetris-source.march.txt")
     .then(function (r) { return r.text(); })
-    .then(function (src) { document.getElementById("tp-editor").value = src; });
+    .then(function (src) {
+      document.getElementById("tp-editor").value = src;
+    });
 
   window.addEventListener("load", mountStatic);
-  window.tpRun = function () {
-    document.getElementById("tp-status").textContent = "(static preview — Run wiring lands in Task 7)";
-  };
 })();

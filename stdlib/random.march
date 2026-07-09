@@ -30,7 +30,15 @@ mod Random do
   pfn mix(x : Int) : Int do
     let max_v = int_max_value(())
     let x = int_xor(x, int_shr(int_and(x, max_v), 30))
-    let x = x * 1234567891011
+    -- Written as a product+sum rather than the literal 1234567891011: the
+    -- March lexer's integer-literal parser uses OCaml's native `int`, which
+    -- js_of_ocaml (the browser playground's compiler-in-the-browser) represents
+    -- as 32-bit — a literal this large fails to LEX only in that browser
+    -- context (native/--target js compilation was always fine, since the
+    -- multiply itself runs at the COMPILED PROGRAM's runtime, not the
+    -- compiler's own arithmetic). Exact same value, just expressed as
+    -- multiple in-range literal tokens: 1234567 * 1000000 + 891011 = 1234567891011.
+    let x = x * (1234567 * 1000000 + 891011)
     let x = int_xor(x, int_shr(int_and(x, max_v), 27))
     let x = x * 987654321
     let x = int_xor(x, int_shr(int_and(x, max_v), 31))
