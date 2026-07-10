@@ -2193,3 +2193,66 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/march_prefixed_local.expected native_march_prefixed_local.out)))
+
+; ── Foreign-thread actor bridge: HTTP evloop pthread drives actor ops ──
+; The server binary and the client binary are the SAME compiled program
+; (FAH_MODE selects the branch); the action backgrounds the server, runs
+; the client, and unconditionally kills the server (kill -9, since a
+; wedged evloop server has been observed to survive plain SIGTERM) plus a
+; watchdog that force-kills the client if it ever hangs.
+(rule
+ (targets native_foreign_actor_http native_foreign_actor_http.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_http.c) (file ../runtime/march_http.h)
+       (file ../runtime/march_remote_registry.c)
+       (file ../runtime/march_http_evloop.c)
+       (file ../stdlib/http_server.march)
+       (file ../stdlib/http_transport.march)
+       (file ../stdlib/http.march)
+       (file ../stdlib/env.march)
+       (file ../stdlib/socket.march)
+       (file native/foreign_actor_http.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_foreign_actor_http
+        native/foreign_actor_http.march)
+   (with-stdout-to native_foreign_actor_http.out
+        (system "./native_foreign_actor_http & SRV=$!; sleep 1; (FAH_MODE=client ./native_foreign_actor_http & CLI=$!; (sleep 60; kill -9 $CLI 2>/dev/null) & WD=$!; wait $CLI; RC=$?; kill $WD 2>/dev/null; wait $WD 2>/dev/null; kill -9 $SRV 2>/dev/null; wait $SRV 2>/dev/null; exit $RC)")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/foreign_actor_http.expected native_foreign_actor_http.out)))
+
+; ── Actor.call timeout enforcement (compiled runtime) ──
+(rule
+ (targets native_actor_call_timeout native_actor_call_timeout.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../runtime/march_http.c) (file ../runtime/march_http.h)
+       (file ../runtime/march_remote_registry.c)
+       (file native/actor_call_timeout.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_call_timeout
+        native/actor_call_timeout.march)
+   (with-stdout-to native_actor_call_timeout.out
+        (system "./native_actor_call_timeout")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_timeout.expected native_actor_call_timeout.out)))
