@@ -89,6 +89,16 @@ mod TestPerihelionCore do
     ten_runs_go(10)
   end
 
+
+  pfn run_n(g : Game, n : Int) : Game do
+    if n == 0 do
+      g
+    else
+      let keys = if n % 30 == 0 do Cons(" ", Nil) else Nil end
+      run_n(Perihelion.Core.update(g, no_taps(), keys, Perihelion.Core.dt()), n - 1)
+    end
+  end
+
   pfn run_ticks(g : Game, n : Int) : Bool do
     if n == 0 do
       is_playing(g.phase)
@@ -276,8 +286,10 @@ mod TestPerihelionCore do
     end
 
     test "a long untapped run stays safely Playing (scripted-run smoke)" do
+      -- spawn_timer pushed out so no asteroid interferes: this test isolates
+      -- the property that orbiting alone never ends a run.
       let g0 = Perihelion.Core.new_game(42)
-      let g = { g0 with phase: Playing }
+      let g = { g0 with phase: Playing, spawn_timer: 100000.0 }
       assert (run_ticks(g, 600))
     end
   end
@@ -372,6 +384,29 @@ mod TestPerihelionCore do
       let (b, rs) = Perihelion.Core.decode_save("17|")
       assert (b == 17)
       assert (List.is_empty(rs))
+    end
+  end
+
+  describe "combat pipeline" do
+    test "spacebar during orbit produces a shot through update" do
+      let g = mk_game(0.0)
+      let g2 = Perihelion.Core.update(g, no_taps(), Cons(" ", Nil), Perihelion.Core.dt())
+      assert (List.length(g2.player_shots) == 1)
+    end
+
+    test "asteroid contact ends the run through update" do
+      let g0 = mk_game(0.0)
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_over(g2.phase))
+    end
+
+    test "a 3600-tick armed run does not crash and spawns asteroids" do
+      let g0 = Perihelion.Core.new_game(42)
+      let g = { g0 with phase: Playing }
+      let g2 = run_n(g, 3600)
+      assert (List.length(g2.stars) >= 3)
     end
   end
 

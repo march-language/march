@@ -81,11 +81,21 @@ mod Perihelion.Core do
   end
 
   pfn step_playing(game : Game, tapped : Bool, keys : List(String), dt_s : Float) : Game do
-    let g = match game.mode do
+    let g1 = match game.mode do
       Orbiting(idx, angle) -> step_orbit(game, idx, angle, tapped, dt_s)
       Flying(vx, vy)       -> step_flight(game, vx, vy, dt_s)
     end
-    step_camera(g, dt_s)
+    match g1.phase do
+      Playing ->
+        let g2 = Perihelion.Combat.step(g1, dt_s)
+        let g3 = Perihelion.Combat.fire(g2, keys, dt_s)
+        let g4 = Perihelion.Combat.collide(g3)
+        match g4.phase do
+          Playing -> step_camera(g4, dt_s)
+          _ -> g4
+        end
+      _ -> g1
+    end
   end
 
   pfn step_orbit(game : Game, idx : Int, angle : Float, tapped : Bool, dt_s : Float) : Game do
@@ -159,7 +169,7 @@ mod Perihelion.Core do
         let dx = t.x - g.ball_x
         let dy = t.y - g.ball_y
         if Math.sqrt(dx * dx + dy * dy) <= t.capture_radius do
-          on_capture(g, t, g.current + 1)
+          after_capture(on_capture(g, t, g.current + 1))
         else
           check_death(g)
         end
@@ -189,6 +199,11 @@ mod Perihelion.Core do
         rng: rng2,
         ball_x: captured.x + Math.cos(angle) * captured.capture_radius,
         ball_y: captured.y + Math.sin(angle) * captured.capture_radius }
+  end
+
+  -- Post-capture hook: roll an enemy-ship spawn on the newly appended star.
+  pfn after_capture(game : Game) : Game do
+    Perihelion.Combat.maybe_spawn_ship(game, List.length(game.stars) - 1)
   end
 
   pfn top_star(stars : List(Star), fallback : Star) : Star do
