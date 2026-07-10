@@ -402,6 +402,591 @@ pre-existing race); the 6 smaller supervision goldens are stable.
 
 Six-runner suite green (compiler 486 / eval 231 / codegen 394 / stdlib 804);
 no regressions from the runtime changes.
+## Current State (as of 2026-07-08, order-independent multi-module name resolution)
+
+Multi-module typechecking is now **order-independent** for bare/qualified type
+and constructor references — the same file set checks identically no matter
+which file is the compile entry. Before, a `mod A.Sub` that referenced a sibling
+`mod A`'s constructors/types by bare name (or the `Type.Ctor` disambiguation
+form) with no `import`/`use` resolved only when `mod A` happened to be
+Pass-2-checked first; a **cyclic** module graph (real case: the `conduit`
+package, `Conduit` ↔ `Conduit.API`) is impossible to topologically order, so
+`forge check` passed or failed depending on the entry file (`backoff.march` →
+59 errors, `api.march` → 0, same sources). Fix in `lib/typecheck/typecheck.ml`,
+all in Pass-1 prebinding so resolution no longer depends on Pass-2 order:
+
+- `prebind_mod_members` (+ the `_inc` LSP/REPL twin) now seeds a nested public
+  type's **bare** name and **bare constructor** keys (and the bare `Type.Ctor`
+  disambiguation key), mirroring what the top-level path and records already
+  did. The module-qualified constructor now carries `ci_type = <bare type>` (was
+  the qualified `qname`), matching `check_decl` — the sole site that produced a
+  qualified nominal, cause of "expected `Mod.T` but got `T`".
+- `prebind_fn_scheme` declines to build a scheme from a **qualified** type name
+  (falls back to the fresh-var placeholder) rather than emit a qualified nominal
+  it cannot canonicalize without an env — killing an order-dependent
+  signature/argument mismatch without over-canonicalizing distinct same-suffix
+  types (`Conduit.Config` vs stdlib `Config`).
+- Bare-constructor seeding is **suppressed for types a sibling `sig` exports
+  opaquely**, preserving opaque-type constructor hiding (the `sig` opacity filter
+  is threaded through prebind via an `~opaque` set built from sibling `sig`
+  decls at both the nested and unwrapped-entry levels).
+
+All ~40 `conduit` files now `--check` clean as the entry, in any order. Full
+suite green modulo the pre-existing baseline (14 Slow compiled
+adversarial-regressions). New regression tests
+`test_tc_cyclic_bare_ctor_order_independent` and
+`test_tc_qualified_sig_type_order_independent` (`test/test_stdlib_suite.ml`,
+module-system group); `test_tc_sig_opaque_hides_ctors` guards the opacity
+carve-out.
+
+## Current State (as of 2026-07-08, shadowed same-block `let` rebinding fixed — js_emit TDZ crash + a silent-corruption Cprop bug)
+
+A shadowed same-block `let` rebinding a name off its own prior value
+(`let x = 5 in let x = x + 1 in ...`, or the `Random.seed` idiom
+`let s0 = ... in let s0 = if s0 == 0 do 1 else s0 end`) hit two independent
+bugs sharing one root cause: TIR (`lower.ml`) deliberately does not
+alpha-rename a shadowed binding — the second `let x` keeps the literal
+source name `"x"` in its `Tir.var.v_name` — and two different downstream
+consumers assumed names were unique within a function.
+
+- **`lib/tir/js_emit.ml` (crash, `--target js` only):** the second binding
+  emitted as `const x = ...` inside a fresh `{ }` block, relying on JS block
+  scoping alone for "shadowing." When the initializer referenced the prior
+  `x`, JS `const`/`let` TDZ (which covers a declaration's own initializer)
+  made the reference resolve to the not-yet-initialized new `x`, throwing
+  `ReferenceError: Cannot access 'x' before initialization` at runtime.
+- **`lib/tir/cprop.ml` (silent wrong VALUE, every target, default flags):**
+  the constant-propagation `env` (name → known literal) was extended on a
+  literal rebind but never invalidated on a later non-literal rebind of the
+  same name, so the stale literal stayed active and every later reference to
+  the rebound name was substituted with the OLD value. This ran in the
+  post-Perceus `Opt.run` fixpoint, which every target (native, wasm, js) goes
+  through by default (`opt_enabled = true` unless `--no-opt`) — confirmed via
+  a standalone per-pass TIR dump that `let x = 5 in let x = x + 1 in
+  int_to_string(x)` was still correct through `Escape`, then `Opt.run` folded
+  it to `int_to_string(5)`.
+- **Fix:** `js_emit.ml` now tracks a per-function shadow map (`ctx.var_names`
+  / `ctx.var_counters`) — a shadowing `let` mints a fresh JS identifier
+  (`x$1`, `x$2`, ...) and commits it only AFTER its initializer is emitted, so
+  the initializer still resolves against the prior binding; function params
+  seed the map too, so `fn f(x) { let x = x + 1; ... }` is covered.
+  `cprop.ml`'s `ELet` case now drops any existing `env`/`avar`/`fenv` entry
+  for the rebound name before conditionally adding new knowledge — the RHS
+  is still evaluated against the un-shadowed tables first.
+- **New dual-target golden test:** `test/native/let_shadow_rebind.march` /
+  `.expected` (+ `native_let_shadow_rebind` / `js_let_shadow_rebind` rules in
+  `test/dune`) — arithmetic rebind, the `Random.seed` if/else shape, a
+  4-deep shadow chain, and a parameter shadow; both native (default `--opt`)
+  and JS (`--target js`, default opt) must match the interpreter.
+- **Stdlib audit:** grepped all of `stdlib/*.march` for repeated same-name
+  `let`s; `stdlib/random.march`'s `mix`/`seed` were the only genuine
+  same-scope self-referential shadows (everything else flagged was separate
+  `match`/`if-else` arms, not a real hazard) — both now compile correctly
+  under `--target js` with no source workaround needed.
+- **805 tests** (`scripts/run-tests.sh`, quick + slow) plus the two new
+  golden rules all pass.
+
+## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
+
+`runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
+(`CONN_BUF_SIZE`); a request that filled it without a complete parse got an
+immediate 413, capping the whole request (headers + body) at 64KB. That made the
+forgepm package registry reject any tarball upload > 64KB (a 486KB `bastion`
+publish → 413 → the `forge publish` client saw it as a 502 through Cloudflare).
+
+- **Fix:** grow the buffer by doubling on demand up to `MAX_REQ_SIZE = 32MB`
+  (one `realloc` in the recv step); only a request past the cap gets a 413.
+  Sub-64KB requests never leave the initial buffer, so the hot path is unchanged.
+- **Verified:** live on the deploy droplet — a 600KB POST reaches the handler
+  (401 for a bad token) instead of 413; `bastion` 0.2.1 (485KB, carrying the
+  server-owned-island dispatch fix in `priv/js/march-islands.js`) published to
+  the registry (now 0.1.0–0.2.1). forgepm's `forge.toml` repointed at
+  `bastion = "0.2.1"`.
+- **Open follow-up:** the `forge publish` client (`registry.march`) panics
+  `non-exhaustive pattern match` parsing the publish *success* response — the
+  publish completes server-side but the CLI reports failure. Client-side only.
+
+## Current State (as of 2026-07-08, stdlib curried-vs-tuple-arrow HOF callback annotation bug fixed)
+
+Six stdlib functions annotated a callback/comparator parameter as a TUPLE-arrow
+type (`f : (b, a) -> b`, i.e. `TArrow(TTuple[b;a], b)`) while calling it with
+N-ary uncurried call syntax (`f(acc, h)`). `infer_app` (`lib/typecheck/typecheck.ml`)
+is purely curried with no auto-tupling special case, so the first call argument
+got checked against the whole tuple type and failed — a real, self-contained
+internal type error, reproducible with the offending file typechecked completely
+alone (no sibling modules involved).
+
+- **Not a module-scoping bug.** Originally reported as a suspected
+  `lib/typecheck/typecheck.ml` pass-1/1b bare-name cross-module leak (`fold_left`
+  exists in both `prelude.march` and `list.march`); that hypothesis was
+  investigated and falsified by direct reproduction — `stdlib/prelude.march`
+  alone, with zero siblings in the merge, reproduces the identical error. No
+  compiler code changed.
+- **Why it was invisible:** `bin/main.ml`'s `is_user_file` diagnostic filter
+  (both the single-file `--check`/`--compile` path and `run_check_cmd`'s
+  multi-file path) drops every diagnostic whose span points into a stdlib
+  file, by design — so this silently passed on every `march --compile` for the
+  bug's entire lifetime. A downstream pipeline that skips that filter (a
+  browser live-compile target) is what originally surfaced it.
+- **Fixed the annotation** (tuple-arrow → curried arrow chain) in `fold_left`
+  (`stdlib/prelude.march`, `stdlib/iterable.march`), `cmp`/`fold` callbacks
+  (`stdlib/ordered_map.march`, `stdlib/sorted_set.march`), and `reduce`
+  (`stdlib/range.march`). Also fixed one unrelated pre-existing bug uncovered
+  while verifying end-to-end: `range.march`'s `reduce` called
+  `List.fold_left` with the collection/accumulator arguments swapped.
+- **Verified via the real `bin/main.exe --check` CLI**, not just an isolated
+  test harness: previously `fold_left(xs, 0, fn (acc, x) -> acc + x)` in a
+  user's own program produced a user-visible cascading `` `(<error>, Int)`
+  does not implement Num `` error — this bug DID leak past the stdlib-file
+  filter into real user-facing diagnostics, not just hidden internal noise.
+  Now typechecks/compiles clean.
+- Regression coverage: 5 new `test/test_compiler.ml` tests, each typechecking
+  one fixed stdlib file completely standalone via `check_module_core` and
+  asserting zero errors.
+
+
+## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
+
+Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
+runs a real trip through the compiler (parse → typecheck → lower → optimize → js_emit)
+entirely in the browser, driven by a new js_of_ocaml entry point,
+`js/march_browser_compile.ml` (`marchCompileToJs`), built on a new shared library,
+`lib/driver/js_pipeline.ml`, that both it and future tooling can call without going
+through `bin/main.ml`'s CLI. The game itself: `demo_app/tetris_logic/` (pure rules,
+14 forge unit tests, native-safe) + `demo_app/tetris/` (Dom wiring, depends on
+`tetris_logic` via a `forge.toml` path dep so `forge test` never touches Dom externs
+natively). State lives in the DOM itself (a `#game-state` element's `data-*` attrs) since
+March has no mutable-cell primitive reachable across independent event callbacks
+(keydown vs. the gravity-tick interval).
+
+Getting the real game through both the `--target js` codegen backend AND, separately,
+the browser-hosted typechecker surfaced genuine pre-existing compiler bugs, fixed here:
+
+- **`lib/tir/js_emit.ml` had no case at all** for `int_div`/`int_mod`/`int_mod_euclid`
+  (emitted as calls to a nonexistent JS function — any `Array` growth past 32 elements
+  hits this via the PVec trie), the bitwise family (`int_and`/`int_or`/`int_xor`/
+  `int_shl`/`int_shr` — same PVec trie), `unix_time` (`Random`'s default seed), and
+  `int_pow`/`int_abs`/`int_max_value`/`int_min_value`. All added, either as new
+  `runtime/march_runtime.mjs` helpers (matching `march_runtime.c`'s checked/panic-on-zero
+  semantics) or inline JS operators.
+- **`lib/typecheck/typecheck.ml` never registered `string_from_codepoint`/
+  `string_to_codepoints`** — real interpreter builtins (`lib/eval/eval.ml`), just never
+  wired into the type env, so any strict typecheck of `stdlib/string.march` (not just
+  this playground) would have failed on them. Added.
+- **`stdlib/random.march`'s `mix()` had a bare integer literal (`1234567891011`)**
+  exceeding the March lexer's `max_int` — but only when the *compiler itself* runs as
+  browser JS (js_of_ocaml represents OCaml's native `int` as 32-bit; native/`--target js`
+  compilation was always fine since the multiply runs at the *compiled program's*
+  runtime). Rewritten as an exactly-equal `1234567 * 1000000 + 891011` (deferred to
+  runtime, never lexed as one token) — a real fix for the existing interpreter REPL
+  playground too, not just this new one.
+
+**Filed, not fixed:** `check_module_full`'s pass-1 registers unqualified names into one
+flat table when many stdlib files are merged as top-level siblings (both browser tools'
+approach — never previously run through the real typechecker, since the interpreter
+skips typecheck and the CLI lazy-loads per file). A same-named function in two merged
+modules (`fold_left`, in both `prelude.march` and `list.march`/`array.march`) can shadow
+across module boundaries, producing a bogus type error inside the *other* module's own
+body. Worked around in `js/march_browser_compile.ml` by dropping `prelude.march`'s bare
+`fold_left` from that bundle specifically.
+
+Full suite green throughout: 451 compiler / 231 eval / 398 codegen / 773 stdlib (quick).
+Plan: `docs/superpowers/plans/2026-07-08-tetris-playground.md` (gitignored, per this
+
+## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
+
+A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`) defined in a
+**non-entry module** (a nested `mod`, or any MARCH_LIB_PATH library — all of stdlib)
+was *constructed boxed* but *tuple-nested-destructured as a newtype*, so compiled
+`Bytes.concat` returned an empty `Bytes` — the actual forgepm native-deploy blocker
+(empty Postgres wire packets → hung handshake).
+
+- **Root cause:** `Lower.lower_mod_decls` registers a non-entry module's typedef under
+  its module-qualified name (`Bytes.Bytes`), but the module's own value types reference it
+  BARE (`Bytes`) — the typechecker drops the prefix on same-module references (entry-module
+  types are registered bare, so this was non-entry-only). Construction (EAlloc) and
+  top-level patterns resolve by the bare name → `repr_of_ty` misses → `Boxed` (which is
+  ALSO the C-runtime layout: `make_bytes_from_raw`/`bytes_to_raw` build/read `Bytes` as a
+  box with `List(Int)` at offset 16). But `emit_case`'s newtype-recovery path — fired by a
+  TVar-erased tuple-element sub-scrutinee, keyed on the CTOR name → the qualified typedef —
+  saw `Newtype`. The nested `(Bytes(xs), Bytes(ys))` destructure took the Newtype identity
+  path against a boxed value: `xs` = the box pointer, and the header (tag 0) read as an
+  empty `Nil`.
+- **Fix:** make `emit_case`'s newtype-recovery classify the owning type by its BARE
+  (last dot-segment) name, exactly as construction and the runtime do — so a non-entry
+  single-field type stays consistently `Boxed` (a genuine entry-module newtype is
+  registered bare, so stripping is a no-op and it still classifies `Newtype`). Keeping
+  `Bytes` boxed is required — the runtime constructs/consumes it boxed across crypto,
+  compression, HTTP, and `tcp_recv_exact`; flipping compiled `Bytes` to a raw list made
+  every runtime-built `Bytes` decode as an empty `Nil` (`Bytes.get: index out of bounds`
+  on the PG handshake buffer).
+- **Regression:** `test/test_codegen.ml` `nonentry_newtype_repr_codegen` — a nested `mod`
+  single-field ADT, tuple-destructured, must print `5` compiled (RED `0` pre-fix).
+- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1) / 805
+  stdlib / 29 snapshots, 0 failures; differential property oracle no new divergences;
+  RC benchmarks unchanged. Compiled `Bytes.concat` byte-correct AND native forgepm clears
+  the live Postgres handshake on the deploy droplet → unblocks the native deploy.
+
+## Current State (as of 2026-07-10, self-referencing block-let shadow miscompile fixed)
+
+Block-let lowering (`lib/tir/lower.ml`) emitted a shadowing rebinding under the
+SAME source name — `let x = 10; let x = x + 5; …` lowered to
+`let x = 10 in let x = +(x,5) in int_to_string(x)`. That tree is structurally
+correct (proper lexical nesting), and native codegen (`llvm_emit`) copes by
+renaming colliding alloca slots (verified: `--emit-llvm --no-opt` is correct).
+But every NAME-BASED TIR pass captures across the shadow: copy-prop/fold (on at
+all `--opt` levels — `opt_enabled` is orthogonal to the clang `--opt N` level)
+records `x -> 10` from the OUTER binding and substitutes it into the inner
+binding's USE site `int_to_string(x)`, folding to `int_to_string(10)` (the
+inner binding then dies and is DCE'd). So `--compile` printed `10`, `--target js`
+folded to `String(10)`, and a non-foldable chain emitted nested
+`{ const x = (…x…) }` that TDZ-faults in JS — all three silently wrong while the
+interpreter (lexical scoping) printed the correct `15`.
+
+- **Fix:** new `Lower_decls.uniquify_fn`, mapped over every function at the end
+  of `Lower.lower_module`. A scope-aware walk (over `ELet`, `ELetRec`
+  fn-names+params, `ECase` `br_vars`, and `fn_params`) alpha-renames any local
+  binder that SHADOWS a name already in scope to a fresh unique name
+  (`orig ^ "$sh" ^ N`) and rewrites references within that binder's scope. A
+  non-shadowing binder keeps its source name, so non-shadowing code is
+  byte-for-byte unchanged and only genuinely-shadowing functions shift. This
+  kills the whole capture class at once (cprop/fold/inline/dce + the JS `const`
+  emitter) and aligns the compiled backends with the interpreter. Post-lower TIR
+  is now `let x = 10 in let x$sh1 = +(x,5) in int_to_string(x$sh1)`.
+- **Regression:** `test/native/shadow_selfref_let.march` compile-and-run golden
+  (single, chained, and match-arm-body shadows) — native, JS, and interpreter
+  all print `15 / 70 / 107 / 0`. One intended snapshot shift (`guard_match`): the
+  two guarded arms each bind `n = x` and the guard-fallthrough nesting made the
+  second a genuine shadow → `n$sh1` (behavior-preserving; both bind `x`).
+- **Verification:** 451 compiler / 231 eval / 394 codegen / 807 stdlib / 53
+  test_stdlib_march / 29 snapshots, 0 new failures. The lone
+  `task_await_int`/`task_await_ptr` ir-verify-gate failure is PRE-EXISTING — a
+  CWD-dependent tmp-dir emit artifact that reproduces identically with the fix
+  disabled; the task_await compile-and-run golden itself passes.
+
+## Current State (as of 2026-07-08, monomorphization nested-fn/top-level name-collision fixed)
+
+Monomorphization (`lib/tir/mono.ml` `rewrite_calls`) resolved a call's callee by
+**bare name** against the module-level `fn_table` while recursing into
+`ELetRec`/`ELet`/`ECase` bodies without tracking lexically-bound nested-function
+names. Because March's stdlib conventionally names inner accumulator helpers
+`fn go(...)` (in `List.length`/`reverse`/`map`/`sum_int`/… and `Bytes.concat`'s
+`list_append_go`), ANY user top-level `go` made `fn_table["go"]` hit, silently
+rebinding every stdlib helper's nested `go(...)` call to the user's top-level
+`go`. Compiled tail-recursive list accumulators then returned garbage (a heap
+pointer reinterpreted as an `Int`), while the interpreter — which has no
+mangling/link step — stayed correct. This was the root cause of the native
+forgepm deploy hang (empty Postgres startup packets from `Bytes.concat`).
+
+- **Fix:** thread a `shadowed` name-set through `rewrite_calls`; a callee whose
+  name is bound by a lexically-enclosing nested `fn` (accumulated from `ELetRec`
+  fn names, the `ELet` binder that a block-`fn` lowers its continuation under,
+  and `ECase` `br_vars`) is left un-resolved for `Defun` to lift as a distinct
+  `…$apply$N` closure — exactly the path taken when no name collision exists.
+  Function params are intentionally NOT seeded (preserves the `ECallPtr`
+  erased-type interface-dispatch fallback).
+- **Regression:** `test/test_codegen.ml` `nested_fn_name_collision_codegen` —
+  a top-level `go` reversing `[1..5]`, then `List.length`/`List.sum_int` on the
+  result, must print `5|15` compiled (was `5|<garbage>`), matching the interpreter.
+- **Verification:** full suite green — 443 compiler / 231 eval / 393 codegen (+1)
+  / 805 stdlib / 29 snapshots, 0 failures. RC benchmarks unchanged
+  (tree_transform=104857600, list_ops=333333666666, binary_trees depth-16=131071).
+
+## Current State (as of 2026-07-07, Linux cross-compile P3 — OpenSSL/TLS + zlib/gzip for the main binary)
+
+`march --compile --target linux/amd64|linux/arm64` (and `forge build --target …`)
+now cross-link **TLS (OpenSSL 3)** and **gzip (zlib)** into the main binary. P1
+deliberately dropped both (pure-compute only), so a real server app — forgepm,
+which uses native HTTPS and gzip tarball extraction — failed to link for Linux
+with `undefined symbol: march_tls_write / march_tls_close / march_gzip_decode`.
+P3 resolves them against a **target sysroot** extracted from Debian *bookworm*
+(matching the `debian:bookworm-slim` deploy image: `libssl.so.3` /
+`libcrypto.so.3` / `libz.so.1`, glibc 2.36).
+
+- **Sysroot fetch/cache.** `scripts/fetch-cross-sysroot.sh <amd64|arm64>`
+  populates `~/.cache/march/cross-sysroot/linux-<arch>/{lib,include}` from the
+  bookworm `libssl3`/`libssl-dev`/`zlib1g`/`zlib1g-dev` `.deb`s, extracted with
+  `ar` + `tar` (the mac has no `dpkg-deb`). It resolves the exact `.deb`
+  filenames from the suite `Packages.gz` index — the flat pool dir mixes in
+  trixie/sid, so a pool-listing grep would grab the wrong versions — with pinned
+  known-good fallbacks if the index is unreachable, and copies the **multiarch**
+  `openssl/opensslconf.h` (Debian ships it under `usr/include/<multiarch>/openssl`,
+  not `usr/include/openssl` — miss it and the compile fails "opensslconf.h file
+  not found") into `include/openssl/`.
+- **Compiler.** `bin/main.ml` gains `cross_sysroot_dir` (env override
+  `MARCH_CROSS_SYSROOT_<ARCH>` / `MARCH_CROSS_SYSROOT` → `~/.cache` cache) with a
+  clear, actionable error on a cache miss (names the fetch script — no silent
+  auto-download). The `is_cross` link block now **keeps** `march_tls.c` +
+  `march_compress.c` (they cross-compile fine against the target headers) and
+  links OpenSSL/zlib by **direct positional `.so` paths** — `<sysroot>/lib/
+  libssl.so.3` etc., NOT `-l:libssl.so.3`/`-L` (lld can't find them via `-l:`;
+  the direct path records the correct `DT_NEEDED` soname) — with
+  `-I<sysroot>/include` and no `-L/opt/homebrew` host paths. It still drops
+  `march_blake3.c` (needs a target `libblake3` we don't vendor — the prompt's
+  "pure C" assumption was wrong; it `#include <blake3.h>`) and `march_reload.c`
+  (HCR-over-cross is out of scope). zstd/brotli stay off (`-DMARCH_HAVE_*`
+  undefined); zlib is the only mandatory codec and gzip/deflate is pure zlib.
+- **glibc floor 2.31 → 2.36.** Bumped in `parse_target`. Mandatory for TLS: the
+  target `libcrypto.so.3` references `GLIBC_2.34` symbols
+  (`pthread_getspecific`, `dlsym`/`dlclose` — where libdl merged into libc) and
+  `stat@2.33`, which a lower floor's libc doesn't provide, so `ld.lld
+  --no-allow-shlib-undefined` rejects the link. 2.36 exactly matches bookworm;
+  `zig_target` already appends the floor (`x86_64-linux-gnu.2.36`).
+  **Portability cost:** cross binaries now require glibc ≥ 2.36 (bookworm+) —
+  acceptable since the hot-deploy target is bookworm.
+- **CAS.** The target OpenSSL/zlib `.so` live outside the repo, so
+  `runtime_identity` (which digests only `runtime/*.c/*.h`) doesn't cover them; a
+  12-hex digest of the three sysroot `.so` files is folded into `cas_flags` (both
+  the source-level early cache and the inner link cache) so a sysroot re-fetch
+  that changes the linked libs invalidates cached cross binaries. Verified: a
+  content change to `libz.so.1` flips a cached build back to recompiling.
+- **Verification** is link-structure only on the Mac (the Linux ELF can't run
+  there): the TLS+gzip probe cross-links to a valid `ELF 64-bit … x86-64 …
+  GNU/Linux` (and `ARM aarch64` for arm64) whose `DT_NEEDED` lists all three
+  sonames; forgepm's `.ll` references the full `march_tls_*`/`march_gzip_*` API
+  (all previously undefined-symbol errors), and its linux/amd64 build now reaches
+  link-parity with its native build — both fail only on a pre-existing,
+  unrelated `PubSub` module-qualification issue in the cleaned dep copies.
+  **Runtime** (HTTPS/gzip round-trip) validation happens on the droplet at deploy
+  time. New regression test `test/test_codegen.ml` (`cross_compile` suite)
+  asserts the ELF type + all three `DT_NEEDED` sonames and SKIPS cleanly (via the
+  tool-absence ledger) when zig or the sysroot cache is absent.
+
+The change is scoped strictly to `is_cross && target_is_linux`; the Native and
+JS compile paths are byte-identical (a native TLS+gzip build still uses host
+homebrew OpenSSL/zlib and runs). Full suite green after a complete `dune build`:
+**445 compiler / 231 eval / 393 codegen (+1) / 804 stdlib / 29 snapshots** (the
+~15 "cannot find runtime/march_runtime.c" stdlib fixtures are the documented
+partial-build artifact — they vanish on a full build).
+
+## Current State (as of 2026-07-07, module alias in a non-entry module body now resolves at codegen)
+
+`forge build` of a multi-repo project (forgepm → bastion) failed to LINK with
+`Undefined symbols: _PubSub.subscribe` (and `_unsubscribe`/`_unsubscribe_all`/
+`_broadcast_from`), referenced from `IslandSocket.handle_text`/`ws_loop`.
+bastion's `mod IslandSocket` declares `alias Bastion.PubSub as PubSub` and calls
+`PubSub.subscribe(...)`; typecheck resolved the alias, but codegen emitted the
+CALL as `_PubSub.subscribe` while the DEFINITION (`mod Bastion.PubSub`) was
+`Bastion.PubSub.subscribe` — the two never converged.
+
+**Root cause**: TIR lowering resolves module aliases through `_use_aliases` +
+`resolve_use_alias` (`lib/tir/lower.ml` / `lower_state.ml`). The top-level decl
+loop over `m.mod_decls` has a `DAlias` handler, but `lower_mod_decls` — which
+lowers every NON-entry module (auto-discovered MARCH_LIB_PATH files and nested
+`DMod`s) — had **no `DAlias` case** in its inner decl match; it fell into the
+`_ -> ()` catch-all. So an `alias` at the entry file's own top level resolved,
+but the identical alias inside any auto-discovered module body was silently
+dropped, and its `Short.member` calls kept the un-canonicalized alias name at
+codegen. This is the exact entry-file-vs-lib-file asymmetry: `alias X as Y` in
+the compile-entry module worked; the same in a sibling/dependency module linked
+to nothing.
+
+**Fix**: an order-independent module-alias prefix table `_module_aliases`
+(short name → full module path, e.g. `"PubSub" → "Bastion.PubSub"`), populated
+from `DAlias` in BOTH the top-level handler and the newly-added `lower_mod_decls`
+handler, plus a fallback branch in `resolve_use_alias` that rewrites
+`Short.member → Long.Path.member` by prefix substitution once every exact-name
+lookup has missed. The prefix rewrite is deliberately order-independent: the
+pre-existing exact-entry mechanism scans `!fns` and so only covers aliases whose
+target module was lowered first (guaranteed for the entry file, processed after
+every other module — NOT for a lib module whose target sibling may be lowered
+afterward). Exact entries still take precedence; the prefix table only
+backstops, so import/`use`-based exact aliases and the builtin/hijack guards in
+`resolve_use_alias` are untouched.
+
+New native golden (`test/dune` rule + `test/alias_codegen/` fixtures): a
+non-entry module `AcCaller` aliasing a 2-level `AcBase.Target`, compiled with
+MARCH_LIB_PATH, run, and diffed to `42` — RED pre-fix (`_T.answer` undefined →
+clang link failure), GREEN post-fix. Verified end-to-end: forgepm now compiles
+and links to a native binary (the last remaining deploy blocker). **Full suite
+(complete `dune build`): 443 compiler / 231 eval / 391 codegen / 805 stdlib
+pass, 0 failures.**
+
+## Current State (as of 2026-07-07, `march check` quadratic hang on large MARCH_LIB_PATH projects fixed)
+
+`march check`/`forge build --target ...` on a large multi-repo downstream project
+(forgepm + bastion + depot + march_doc as `path` deps, ~200 auto-discovered
+`.march` files under `MARCH_LIB_PATH`) burned 99.9% CPU for 30+ minutes instead
+of the seconds-to-low-minutes this kind of check should take — confirmed
+genuinely computing, not deadlocked, via repeated `sample <pid>` snapshots all
+showing the same hot call stack: `caml_main -> ... -> camlStdlib__List.mem_472
+-> caml_c_call -> caml_compare -> compare_val`, i.e. OCaml's polymorphic-compare
+`List.mem` dominating by a wide margin.
+
+**Root cause**: `Typecheck.record_use` (`lib/typecheck/typecheck.ml`) is called
+on every single `Ast.EVar` node during `infer_expr` — once per variable
+reference in the WHOLE combined program, since `check_module_core` typechecks
+stdlib + every MARCH_LIB_PATH-discovered file as one shared `env` (not
+per-file). It did:
+
+```ocaml
+if !(env.import_tracker) <> [] then
+  List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
+    !(env.import_tracker);
+```
+
+`env.import_tracker` accumulates ONE ENTRY PER `use`/`import`/`alias`
+DECLARATION ACROSS THE ENTIRE PROGRAM (populated at the four `ie_matches`
+construction sites — `DUse`'s `UseAll`/`UseNames`/`UseExcept`, and `DAlias` —
+and never scoped back down per-file), so this is a full `List.iter` (each
+`ie_matches` closure itself doing a `List.mem`/polymorphic-`=` scan for the
+`UseAll`/`UseExcept` shapes) over an unboundedly-growing list, on every EVar.
+That pairing is **O(total-var-refs × total-imports)** — quadratic in project
+size — and swamped everything else in the pipeline (parse/desugar/
+resolve-imports/stdlib-load were all sub-100ms per `--timings` even on the real
+forgepm repro; typecheck alone was 1.3-2s there and scales far worse on larger
+synthetic trees, see below).
+
+**Investigated and ruled out first, per the promising leads in `specs/todos.md`'s
+`user_files`/`loaded_paths` entry**: `lib/resolver/resolver.ml`'s `loaded_paths`,
+`resolved`, `in_progress`, and `seen` tables are already `Hashtbl`-based (not
+the bug); `lib/modules/module_registry.ml`'s `registry`/`loading` are also
+`Hashtbl`-based (not the bug). `bin/main.ml`'s `is_user_file` does a real
+`List.mem f user_files`, but it runs once per *diagnostic* (bounded by warning/
+error count — typically dozens to low hundreds even on a large project), not
+once per EVar — it never appeared in any `sample` profile at any scale tested
+and is a much smaller-order cost than `record_use`; left as-is.
+
+**Fix**: index `import_tracker` entries at creation time into a new
+`env.import_idx` — two `Hashtbl`s populated at all four `ie_matches`
+construction sites: `ie_exact_index` (every literal name an entry can
+exact-match: rebound short names for `UseAll`/`UseExcept`, the single name for
+`UseNames`, the alias name for `DAlias`, and the bare qualified module/alias
+name itself for the "referenced the module path literally" case) and
+`ie_prefix_index` (keyed by the first-dot-split "prefix root" of a qualified
+reference — e.g. `"Depot.Gate.foo"` and `"Depot"` both key to the same root,
+mirroring `split_qualified`'s existing first-dot-split convention elsewhere in
+this file). `record_use` now does two O(1)-average Hashtbl lookups instead of
+an O(n) scan; the prefix-index path still calls the entry's real `ie_matches`
+closure before marking it used (defends against two different imports sharing
+a first path segment), so semantics are exactly preserved, not approximated —
+verified by running the real forgepm repro before/after and diffing output
+(byte-identical diagnostics either way) and by the alcotest suite's existing
+unused-import/alias warning tests still passing unchanged.
+
+**Scaling verification** (synthetic MARCH_LIB_PATH: N auto-discovered modules
+each `import Shared` + 30 EVar references into it; CAS cache (`.march/cas`)
+cleared between every run so these are real typecheck times, not cache hits):
+
+| files | pre-fix (quadratic) | post-fix (indexed) | speedup |
+|-------|---------------------|---------------------|---------|
+| 400   | ~1.2s               | ~0.6s               | ~2x     |
+| 1200  | ~8.2s               | ~1.4s               | ~6x     |
+| 2000  | ~21.1s              | ~2.3s               | ~9x     |
+| 3000  | ~45.5s              | ~3.7s               | ~12x    |
+
+Pre-fix time fits ~quadratic (k≈5e-6·n²); post-fix is linear. The real
+forgepm repro (~200 files) itself only shows a modest 1.99s→1.32s
+improvement at its current size — the dramatic blowup only dominates at
+larger N, which is exactly why the task called for a synthetic scale-up to
+"nail the exact complexity class" rather than relying on the real repo alone.
+
+**Spurious-error cascade — same root cause or separate?** A secondary symptom
+was reported: a cascade of spurious `Unknown module` errors (`DateTime`,
+`UUID`, `IOList`, and reportedly `Config`) when scoping down a killed run.
+Investigated and confirmed **SEPARATE, not the same root cause, and not a
+compiler bug**: `find_stdlib_dir()` (duplicated in both `bin/main.ml` and
+`lib/modules/module_registry.ml`) resolves the bundled `stdlib/` directory via
+paths relative to the compiler executable (`exe_dir/../stdlib`, `../../stdlib`,
+etc.) or `"stdlib"` relative to CWD — all of which fail when (a) `main.exe` is
+invoked from a cwd outside the march source tree (e.g. `/path/to/forgepm`,
+exactly what the repro command does) AND (b) the binary was built via a
+partial `dune build bin/main.exe test/run_*.exe` rather than a full `dune
+build` / `dune build @install` (only the latter populates
+`_build/default/stdlib/` via the `stdlib/dune` `(install (section share))`
+stanza). When stdlib fails to resolve, `load_stdlib()` returns `[]` (no
+stdlib DMods get prepended), so every stdlib module reference falls through to
+`Typecheck.qualified_error_msg`'s lazy `Module_registry.ensure_loaded`
+fallback — which uses the SAME broken `find_stdlib_dir()` and also fails,
+producing "Unknown module" for genuinely-valid stdlib modules. Confirmed by:
+reproducing the exact cascade with the `import_tracker` fix fully applied but
+`_build/default/stdlib` temporarily removed (cascade reappears verbatim), and
+confirming it disappears with a complete build (zero "Unknown module" hits in
+the final clean run). This is a pre-existing build/packaging rough edge in a
+partially-built worktree, not something this fix touches or needs to fix —
+documented here so the next person who hits it recognizes it immediately
+instead of re-investigating from scratch.
+
+**Regression test**: `test_large_multi_file_check_is_not_quadratic` in
+`test/test_compiler.ml`'s `resolver` suite (`Slow`) builds a synthetic
+MARCH_LIB_PATH with 2500 auto-discovered modules (each `import Shared` +
+30 EVar refs into a 20-function shared module) and asserts the check
+completes under 30s. Confirmed RED pre-fix (measured 30.78s, matching the
+scaling-table calibration) / GREEN post-fix (~3-5s) by temporarily
+stashing/restoring `lib/typecheck/typecheck.ml`'s fix while keeping the test
+in place.
+
+**Full suite, complete build (not the partial `bin/main.exe test/run_*.exe`
+target list — a full `dune build` / `dune build @install` is needed to
+populate `_build/default/stdlib` and `_build/default/runtime`, else 14-15
+compiled-fixture tests fail with `march: cannot find runtime/march_runtime.c`,
+reproduced identically on an unmodified clean baseline worktree off this same
+`main` commit and confirmed to disappear with a complete build on BOTH
+branches — a pre-existing partial-build artifact, not a regression): **429
+compiler (+1) / 231 eval / 391 codegen / 805 stdlib pass, 0 failures.**
+Baseline (throwaway clean worktree off the same `main` commit, complete build):
+428/231/391/805, also 0 failures — confirms this change adds exactly the one
+new test and introduces zero regressions.
+
+## Current State (as of 2026-07-07, interpreter HTTP server event-loop fix — idle client no longer wedges `forge run` dev server)
+
+- **`lib/eval/eval.ml` `run_http_event_loop` replaces the fully-sequential accept loop behind the interpreted `http_server_listen` builtin** (interpreter-only — `forge run` / plain `march file.march`; the compiled/LLVM path's `runtime/march_http.c` already has real event-loop/thread-pool concurrency and was not touched). The old implementation `select`ed only on the listening socket, then `accept`ed exactly one client and blocked synchronously on that client's `recv`/`send` for its whole request-response cycle before accepting the next — a client that opened the TCP connection and then paused before sending bytes (e.g. a WebSocket reconnect with backoff) parked the interpreter's one OS thread inside a blocking `recv()`, starving every other connection server-wide (reproduced firsthand via `sample <pid>` showing the sole thread blocked in `camlUnix.recv_1225`, with unrelated routes hanging 90+ seconds). Fix mirrors the interpreter's existing cooperative actor-mailbox scheduling pattern (`BlockedOnReceive`/`run_scheduler`) at the socket level instead of adding real OS threads (deliberately out of scope per `specs/todos.md`'s "interpreter-only scaffolding" note on `lib/scheduler/*.ml` and `task_spawn`'s Phase-1 eager-eval comment): every connection socket is set non-blocking and tracked as a small state machine (`http_conn_state` — `HCReadingRequest` accumulating bytes via `http_try_parse_request`, a Content-Length-aware incremental parser, until a full request is available; `HCWriting` draining a queued response buffer across non-blocking writes), and a single `Unix.select` per loop iteration multiplexes the listen socket plus every open client connection — no connection's I/O can block progress on any other. `EAGAIN`/`EWOULDBLOCK`/`EINTR` are treated as "not ready, retry next iteration." WebSocket upgrades are unchanged: `http_run_pipeline_and_respond` detects `WebSocketUpgrade`, writes the handshake, and still runs `handler_fn` synchronously/blocking on that one connection for its lifetime — identical to the pre-fix semantics (an open WS connection already monopolized the old sequential loop for its whole lifetime too, so this is unchanged behavior, not a new limitation). `handle_http_connection` (still used by the fork-based `http_server_spawn_n` N-request test variant, where each forked child only ever serves one client at a time by design) is untouched. Regression test `test_interp_http_server_idle_client_does_not_block_others` in `test/test_stdlib_suite.ml`'s `adversarial-regressions` group (`Slow`): launches `bin/main.exe` (interpreter, no `--compile`) as a real subprocess bound to a real port, opens a TCP connection that connects but never sends a byte, then a second connection that sends a complete `GET /` request, and asserts the response arrives within 1s of a 2s deadline. Verified to fail (times out, empty response) on the pre-fix code and pass post-fix by temporarily stashing/restoring `lib/eval/eval.ml` while keeping the test in place. **373 compiler / 224 eval / 327 codegen / 791 stdlib / 53 stdlib_march pass** (interpreter-level `test/stdlib/test_http_server.march` and `test_websocket.march` — pure Conn-value/pipeline tests, no real TCP — unaffected since the external `Conn`/`Upgrade` contract and `http_server_listen`/`http_server_spawn_n` signatures are unchanged). Not covered by this fix (pre-existing, orthogonal limitations worth flagging): no HTTP keep-alive (every connection is closed after one response is fully written, matching the prior behavior — a persistent keep-alive connection would need the state machine to loop back to `HCReadingRequest` after a write completes instead of closing); chunked `Transfer-Encoding` request bodies are not parsed (only `Content-Length`, matching prior behavior); a very large response body under sustained socket-buffer backpressure will correctly drain across many `select` iterations but hasn't been load-tested at scale.
+
+## Current State (as of 2026-07-07, spec-search Claude skill — FTS5 index over language/design docs)
+
+- **New dev-tooling, not a compiler change — no test count change.** `scripts/build-spec-index.sh` + `scripts/spec_index_build.py` vendor `specs/lang/`, `specs/impl/`, `specs/features/` (top-level `*.md` only) into `.claude/skills/spec-search/docs/` and build an FTS5 SQLite index (`sections` table: `file`, `heading_path`, `content`, `lineno`, `end_lineno` — one row per H1-H3 markdown section). `.claude/skills/spec-search/spec-search.sh` is a self-locating bash script (`sqlite3` CLI only, no Python at query time) supporting human-readable and `--json` output, ranked by `bm25()`. `.claude/skills/spec-search/SKILL.md` instructs Claude to search then `Read` only the matched section via `lineno`/`end_lineno` rather than whole chapters. Designed to be installed once at `~/.claude/skills/spec-search/` (user-level) so it works across every March project on the machine, not just this repo — verified by running the installed copy from `/tmp` and from a scratch directory with no `specs/` of its own. Design: `docs/superpowers/specs/2026-07-06-spec-search-fts5-design.md`; plan: `docs/superpowers/plans/2026-07-06-spec-search-fts5.md`.
+
+## Current State (as of 2026-07-07, `dependency_order_dmod_run` hard/soft-edge cycle corruption fixed)
+
+Checking a real downstream project (`conduit`) whole-program surfaced a fourth
+`run_check_cmd`-family bug, this time inside the typechecker's own module
+ordering pass rather than `run_check_cmd` itself: `dependency_order_dmod_run`
+(`lib/typecheck/typecheck.ml`) topologically sorts sibling DMods over the
+UNION of two different kinds of dependency edges — qualified references
+(`Mod.fn`/`Mod.Ctor`, from `module_refs_in_decls`) and bare/unqualified
+ctor-or-type references (from `unqualified_module_deps`). The two kinds are
+not equally load-bearing: qualified references are pre-bound as pass-1 Mono
+placeholders regardless of check order (see `prebind_mod_members`), so
+ordering by them is purely a precision nicety (avoids a caller pinning an
+under-generalized placeholder — the rationale `0799c745` added this class of
+edge for). Bare references have no such placeholder — the referenced name
+only becomes visible once the defining sibling's DMod has actually been
+processed by `check_decl` — so ordering by them is a hard correctness
+requirement. Real sibling modules commonly form actual reference cycles
+through qualified calls alone (a facade module delegating into an internal
+one, which calls back into a module the facade itself depends on) — legal
+and previously harmless, since qualified refs tolerate any order. But mixing
+both edge kinds into one DFS meant a soft-edge cycle could non-deterministically
+reorder a hard edge the wrong way: whichever edge type the traversal reached
+an already-in-progress ancestor through "won", independent of which one was
+actually load-bearing. Live repro: `conduit`'s base module (`Conduit`)
+qualified-delegates to `Conduit.API`, which qualified-calls into
+`Conduit.Worker`, which bare-pattern-matches `WorkerError` — a constructor
+declared on `Conduit`. The DFS visited `Conduit` first, recursed into the
+soft-edge cycle before `Conduit` could push itself, and `Conduit.Worker` (its
+hard dependent) ended up ordered first — "I don't know a constructor called
+`WorkerError`" despite the constructor being correctly declared.
+
+Fixed by computing the existing combined-edge DFS order as before (unchanged
+for the common case — no behavior change when there's no hard/soft
+conflict), then validating it against the hard edges alone. If satisfied
+(the overwhelming majority of real programs, including every existing
+regression fixture), return it unchanged. Only when a hard edge is actually
+violated does it fall back to Kahn's algorithm restricted to hard edges,
+using the original combined-edge order purely as a tie-break, so soft-edge
+precision is preserved everywhere it doesn't conflict with a hard
+requirement. New regression test
+`test_check_qualified_cycle_does_not_break_bare_ctor_ordering` in
+`forge/test/test_build_check.ml`, minimized to the same three-module
+facade/worker/core shape (file naming there is itself load-bearing —
+`Cmd_build.find_march_files` walks sorted-ascending but prepends, so the
+file list handed to `march check` is sorted DESCENDING; the module carrying
+the hard dependency's definition has to be discovered first for the bug to
+reproduce through the real `forge check` path, hence `zcore.march`).
+
+**Test counts:** `forge/test/test_build_check.exe` gains 1 more case (12
+total, up from 11). Standard runners unaffected: 424 compiler / 231 eval /
+391 codegen, all exit 0 (stdlib runner not re-verified this pass).
 
 ## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
 
@@ -3200,3 +3785,144 @@ but on a different registration path.
 
 **Next queued widening slice:** actors (per the roadmap's Phase-2b/3
 phasing).
+
+## `Dom.set_timeout`/`set_interval`/`on_frame` callback signature fix (2026-07-09)
+
+Resolves the zero-arg-lambda follow-up filed by the Canvas 2D API work below (spawn_task `task_f422fd93`).
+
+- [x] **Fixed a never-satisfiable extern signature.** `stdlib/dom.march`'s three deferred-callback externs declared `cb: Unit -> Unit`, but a zero-arg March lambda (`fn -> body`) types to its body's result directly with no arrow wrapper (T-Abs), so it could never unify with a declared arrow type — these three callbacks were uncallable from real March source (no existing test exercised them). Changed `cb` to `Int -> Unit` (dummy ignored argument), matching the codebase's existing `task_spawn`/`pmap_threshold`/`task_cancel_token_new` idiom for this exact shape; callers now write `fn _ -> body`. `runtime/march_dom.mjs`'s three JS wrappers updated to call `cb._0(cb, 0)` (was `cb._0(cb)`), matching the `f._0(f, args...)` closure-call ABI for a 1-declared-param closure.
+- [x] Regression: `test/native/js_dom_timeout_callback.{march,expected}` + `test/dune` rule — compiles `--target js`, runs under `node`, verifies the callback typechecks with `fn _ -> ...` and actually fires (prints "fired") via the fixed ABI. Added a `march_dom.mjs` copy-rule to `test/dune` (this is the first JS test to actually invoke a `Dom` extern; the pre-existing `js_dom_available` test only referenced `Dom.body()` from dead code).
+- Full suite green: `scripts/run-tests.sh` (807 tests) + all `test/dune` JS-target golden diffs (`js_dom_available`, `js_dom_timeout_callback`, `js_extern_import`, `js_ffi_async`, `js_ffi_blocking_raises`, `js_ffi_raises`, `js_ffi_cbacked`).
+
+## Current State (as of 2026-07-09, Canvas 2D API for JS target)
+
+**New `Canvas` stdlib module (`stdlib/canvas.march` + `runtime/march_canvas.mjs`)** — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Mirrors `Dom`'s existing extern-block pattern: `resource Context`/`resource Image`, `needs Ffi`, JS-target-only (registered in `bin/main.ml`'s `js_only_stdlib_file_list`; native/JIT calls panic). Covers state (`save`/`restore`/`translate`/`rotate`/`scale`), style (`set_fill_style`/`set_stroke_style`/`set_line_width`/`set_global_alpha`/`set_font`), rects, paths (`begin_path`/`move_to`/`line_to`/`arc`/`quadratic_curve_to`/`bezier_curve_to`/`fill`/`stroke`), text, and images (`load_image` — a `blocking raises` extern returning `Result(Image, String)`, so callers write `let? img = Canvas.load_image(url)` with no callback API). One new line in `lib/tir/js_emit.ml`'s `js_runtime_module_path` maps the `"canvas"` extern lib to `./march_canvas.mjs`.
+
+**`Dom` gains pointer-coordinate accessors** — `Dom.event_x`/`Dom.event_y` (`event.offsetX`/`offsetY`, canvas-relative), enabling tap/click hit-testing against a `<canvas>` without manual `getBoundingClientRect()` math. Verified live: a browser click lands a drawn marker at the exact clicked canvas coordinate.
+
+**New `demo_app/canvas_demo/`** exercises the full surface in a real browser: static shapes (rect, stroked rect, filled arc, quadratic-curve stroke, text), `translate`/`rotate`/`save`/`restore` via a static rotated bar, click-to-drop markers via `Dom.listen`+`event_x`/`event_y`, and one `load_image`+`draw_image` call against an inline SVG data URI (no binary asset committed). Verified with the preview browser tools: all shapes render, zero console/network errors.
+
+**Found and filed, not fixed here:** `Dom.on_frame`/`set_timeout`/`set_interval` are currently **uncallable from March source with a zero-arg lambda** — the originally-planned animation loop for `canvas_demo` had to be dropped in favor of a static rotated shape. Root cause (confirmed against `specs/lang/core-march-types.md`'s T-Abs rule and `test/native/zero_arg_closure_default.march`'s own comment): a zero-arg lambda `fn -> body` typechecks to its body's result type directly (a "thunk", no arrow wrapper) and can never unify with the extern's declared `Unit -> Unit` arrow type — reproduced with a minimal standalone repro outside any Canvas/Dom code, so this is a pre-existing latent bug in `dom.march`'s signatures, not something this change introduced. Filed as a follow-up task (spawn_task `task_f422fd93`) rather than fixed here — root-causing the correct fix (typechecker special-case vs. a different signature/idiom) is compiler work beyond this change's scope.
+
+**Validation:** no `test_oracle.ml`/`@oracle` coverage — that suite diffs interpreter vs. *native* compile and structurally cannot exercise `--target js`-only code (same as `Dom` today; confirmed with the user rather than added as a no-op task). Instead: a new `test/native/js_canvas_available.march` fixture (dead-code references to force typecheck/module-load coverage of every `Canvas` function without needing a real `document`/`CanvasRenderingContext2D`/`Image` under plain `node`) diffed via a new `test/dune` golden rule, plus `test/native/js_dom_available.march` extended with the same dead-code pattern for `event_x`/`event_y`. Both pass; full alcotest suite green under `scripts/run-tests.sh`. The real end-to-end proof is `canvas_demo`, which calls every function from a live `main()` and was verified in an actual browser.
+
+**Docs:** `docs/stdlib.md` gains a `## Canvas (JS only)` section (mirroring `## Dom (JS only)`) and a summary-table row; stdlib module count bumped 108 → 109 across `docs/stdlib.md`, `CLAUDE.md`, and `.claude/skills/march-lang/SKILL.md` (two spots) to keep `scripts/check-docs.sh` green. Design doc: `docs/superpowers/specs/2026-07-09-canvas-api-design.md`; plan: `docs/superpowers/plans/2026-07-09-canvas-2d-api.md` (both uncommitted — `docs/superpowers/` is gitignored in this repo).
+
+**Also fixed in passing:** `demo_app/canvas_demo/build.sh`'s `dune build` now passes `--root` and a specific target (`bin/main.exe`) — a plain `dune build` from a nested worktree (e.g. `.claude/worktrees/<name>`) escapes upward to the outer repo's project root and additionally pulls in the full test suite by default. `demo_app/dom_demo/build.sh` has the same latent issue, left as-is (out of scope for this change).
+
+## Current State (as of 2026-07-09, Tetris playground: pause, layout fixes, time-travel debugger)
+
+Follow-up round on the Tetris live-compile playground (`docs/tetris-playground/`):
+
+- **Pause** (`demo_app/tetris/lib/tetris.march`): `P` key or a HUD button toggles
+  `data-paused` on `#game-state`; every gameplay function (`tick`/`try_move`/
+  `try_rotate`/`hard_drop`) already reads state through `with_state`, so a single
+  `is_paused()` guard in `handle_key` and `tick` was enough — no per-action changes.
+- **Layout bugs found and fixed** (`docs/_includes/tetris-playground.html`,
+  `docs/assets/tetris-playground.js`): the live syntax-highlight overlay `<pre>`
+  inherited `docs.html`'s global `.d-content pre` rule (meant for markdown fenced
+  code blocks) since it has higher specificity than the overlay's own class
+  selector — silently overriding font-size/line-height/padding/tab-size and
+  making the *visible* highlighted text render at a different scale than the
+  *real* (invisible) textarea underneath it, so clicks landed on the wrong
+  character. Fixed by switching the overlay's shared rules to ID selectors.
+  Separately, the board rendered at a fixed 16px/cell regardless of the actual
+  (now full-height) panel size — `computeCellSize()` now measures
+  `#tp-iframe-host`'s real dimensions per Run and sizes cells to fill it
+  (clamped 12–44px).
+- **Game focus**: the game iframe never received keyboard focus after mount, so
+  arrow keys only worked after manually clicking into the board. `mountJs` now
+  calls `iframe.contentWindow.focus()` on load.
+- **Time-travel debugger**: extends the existing "state lives in the DOM"
+  architecture with zero compiler changes. `#game-state` gains a `data-seq`
+  counter bumped only by real gameplay-advancing paths (`with_state`'s commit,
+  `restart`). The host page's `MutationObserver` watches `data-seq` alone and
+  records a full attribute snapshot into an in-memory history array (capped at
+  3000) every time it changes — pausing or scrubbing never records, since
+  neither touches `data-seq`. A new `restore_from_request()` (`tetris.march`)
+  reads a hidden `#restore-request` element's attributes and applies them as
+  the live `#game-state`, re-rendering — the only way host JS can push a
+  historical frame back in, since `js_emit` doesn't export top-level March
+  functions today; this goes through the DOM instead, the same bridge keyboard
+  input already uses. A slider + step buttons scrub through history (forcing
+  `data-paused=true`, which the existing pause guard already makes airtight);
+  a "Resume from here" button truncates history to the current frame and
+  restores it unpaused, branching play forward exactly like undo-then-edit.
+  Rewinding past a game-over and resuming un-game-overs it for free — no
+  special case needed. Design: `docs/superpowers/specs/2026-07-09-tetris-time-travel-design.md`
+  (gitignored, per this repo's `docs/superpowers/` convention).
+
+No compiler/stdlib changes this round — `demo_app/tetris/lib/tetris.march` and
+`docs/assets/tetris-playground.js` only. Verified live in a local Jekyll preview
+(desktop + mobile) and deployed to `march-lang.org`.
+
+## Current State (as of 2026-07-09, Tetris playground follow-up + real JS-backend Int `/` compiler bug fixed)
+
+Further Tetris Playground follow-up, plus one genuine compiler bug found and fixed:
+
+- **Scrubbing UX**: throttled the time-travel slider's restore calls to one per
+  animation frame (verified via a real Chrome performance trace that the
+  reported "jitter" was NOT DOM reflow — a single restore is ~0.7ms, zero
+  forced-reflow/CLS signal on a simulated fast drag — the actual cause was
+  restoring every un-throttled `input` event, flashing through many
+  genuinely-different recorded frames faster than the eye tracks); gave the
+  slider its own full-width row (matching the board's actual pixel width)
+  instead of squeezing it into one row with the step buttons/frame count/
+  "Resume from here", which left it almost no space to shrink into; hid the
+  redundant Pause/Resume toggle while scrubbed off the live tip (it and
+  "Resume from here" both read "Resume" at once, and toggling plain pause
+  means nothing while inspecting a past frame); shortened "Resume from here"
+  to "Resume" and switched its show/hide to `visibility` instead of `display`
+  so appearing never shifts the row's height and moves the game underneath.
+- **Arrow keys/Space no longer scroll the page** while the game is focused —
+  `handle_key` now calls the existing `Dom.prevent_default` for those keys
+  unconditionally (mid-move, paused, or time-traveling).
+- **Tetris source reorganized to invite tweaking** (`demo_app/tetris_logic/lib/tetris_logic.march`):
+  piece shapes (`piece_cells`), colors, and game-speed knobs
+  (`level_for_lines`/`drop_interval_ms`) moved to the top of the file under a
+  "Tweak me" banner; board mechanics (collision, locking, line-clearing) moved
+  below under a separate heading. `drop_interval_ms(level)` existed and was
+  tested but was **dead code** — `main()` hardcoded a fixed 500ms
+  `Dom.set_interval` — so editing it as a "knob" would have silently done
+  nothing. Wired it up for real: `tetris.march`'s tick loop is now a
+  self-rescheduling `Dom.set_timeout` (`schedule_tick`) that re-reads the
+  current level fresh before every tick, so the drop rate genuinely speeds up
+  as lines clear.
+- **Compiler bug found while wiring the above, fixed at the root**
+  (`lib/tir/js_emit.ml`): `inline_binop`'s fast-path table matched the bare
+  `"/"` operator name and unconditionally emitted raw JS `(a / b)` — true
+  division — for **every** `/` call, Int or Float, completely shadowing the
+  correct type-aware `Math.trunc` guard a few lines below (which checks
+  `atom_ty a = TInt` but was unreachable dead code for that name). Minimal
+  repro: `fn half(n: Int): Int do n / 10 end` compiled with `--target js`
+  printed `1.5` for `half(15)` (correct: `1`, and correct natively/
+  interpreted). Fix: removed `"/"` from that fast-path arm (kept `"/."`,
+  float division needing no truncation), forcing all Int `/` through the
+  existing type-aware match arm. Full suite verified green after the fix:
+  805 tests, exit 0, including the existing adversarial-regressions
+  division-by-zero cases. Likely impact: any `--target js` program dividing
+  two `Int`s via bare `/` (not the separately-named `div_int` builtin) with a
+  non-exact result got a fractional JS value silently — no compiler warning,
+  no runtime type distinction to catch it. Plausibly latent since the `/`
+  Int-truncation guard was added; first surfaced here because the Tetris
+  playground is the first `--target js` consumer in this repo to divide by a
+  divisor that doesn't evenly divide its dividend during normal use.
+  Full finding: `specs/todos.md` "Compiler bug — JS backend Int `/` never
+  truncated".
+
+Rebuilt after the compiler fix: `docs/assets/march_compile.js` (the
+js_of_ocaml browser-compiler bundle used by the live-editable playground) and
+`docs/assets/tetris/tetris.mjs` (the static pre-compiled fallback), both via
+their existing build steps, no manual patching.
+
+## Current State (as of 2026-07-10, Perihelion one-tap orbit game + js_emit fallthrough fix)
+
+**`demo_app/perihelion/` — a playable one-tap orbit-slingshot game, the first real game on the Canvas API.** Pure functional core: `Perihelion.Core.update(game, taps, dt) : Game` is the only state transition (orbit → tangent release → capture-assisted straight flight → capture/score or off-screen death → restart), all tuning constants in one named block, `on_capture` as the named scoring seam for future rules. `Perihelion.Level` generates the star ladder with a module-local Park–Miller minstd LCG (`s * 16807 % 2147483647`, exact in JS doubles) after the Random-on-JS gate below ruled out stdlib `Random`. Thin impure shell: polls the new `Dom.taps`, steps `update` at fixed dt (1/60), draws via Canvas (camera = `translate` by eased `camera_y`, y-down world), re-registers via `Dom.on_frame(fn _ -> ...)` per the merged deferred-callback convention. 22 interpreter-run unit tests cover the whole game logic; browser + headless-node verification cover the compiled artifact (capture/score, death/best, tap-to-retry restart all end-to-end; the preview tab's rAF throttling makes live play slow-motion, so the deterministic frame-stepping node driver over the same `perihelion.mjs` is the authoritative gameplay check).
+
+**New `Dom.taps(el) : List((Int, Int))`** — poll-based input drain (JS-side pointerdown buffer per element, WeakMap; first call installs the listener), the input half of the March game-loop idiom: pure `update(state, taps, dt)` + one poll per frame. Documented in `docs/stdlib.md`; dead-code coverage in `js_dom_available.march`.
+
+**Fixed a real js_emit codegen bug found by the game's draw loop:** statement-position match arms fell through the emitted JS switch into the non-exhaustive default throw whenever the arm body ended in a Unit-typed call (emit_case emitted `break;` only for value-position arms). Any recursive list walk in statement position hit it. Unconditional `break;` after `emit_stmts` in branch + default arms; golden `js_match_stmt_fallthrough` pins the shape; all 18 JS goldens green.
+
+**Random-on-JS gate (planned as a golden, became a bug find):** the planned `js_random_determinism` golden crashed at first (`ReferenceError: int_max_value`) — js_emit then had no int-bitwise builtin mappings — and after merging origin/main's Tetris-session fixes it runs but produces silently-degenerate values (`0, 0` where the interpreter gives `107510, 492299`): xoshiro's 63-bit arithmetic exceeds the 2^53 exact-double range. Layer 1 (missing mappings) fixed on main; layer 2 (wrong values) remains the open P1 with the repro kept deliberately unwired in `test/native/js_random_determinism.march`.
+
+**Merged origin/main mid-build** (Dom deferred-callback `Int -> Unit` fix, `Dom.event_key`, Tetris playground JS-backend fixes); conflicts in `stdlib/dom.march`/`march_dom.mjs`/`js_dom_available.march`/`test/dune`/`launch.json`/both spec docs resolved keep-both (ports deduped: tetris → 4854, perihelion → 4855).

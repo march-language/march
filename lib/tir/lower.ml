@@ -64,6 +64,7 @@ let fresh_var = Lower_state.fresh_var
 let nonexhaustive_panic = Lower_state.nonexhaustive_panic
 let _fn_param_types = Lower_state._fn_param_types
 let _use_aliases = Lower_state._use_aliases
+let _module_aliases = Lower_state._module_aliases
 let _module_alias_snapshots = Lower_state._module_alias_snapshots
 let _current_module_fns = Lower_state._current_module_fns
 let with_current_module_fns = Lower_state.with_current_module_fns
@@ -83,6 +84,7 @@ let note_alias_candidate = Lower_state.note_alias_candidate
 let lower_type_def = Lower_decls.lower_type_def
 let lower_fn_def = Lower_decls.lower_fn_def
 let rename_tir_vars = Lower_decls.rename_tir_vars
+let uniquify_fn = Lower_decls.uniquify_fn
 
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
@@ -808,6 +810,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   let env = { type_map; current_module_aliases = Hashtbl.create 16 } in
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
+  _module_aliases := Hashtbl.create 16;
   _module_alias_snapshots := Hashtbl.create 16;
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
@@ -1263,6 +1266,23 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    imports of top-level non-prefixed modules. *)
                 register_aliases ctx_prefix;
                 register_aliases import_prefix
+              | Ast.DAlias (ad, _) ->
+                (* `alias Long.Path as Short` INSIDE a module body.  The
+                   top-level DAlias handler (which builds exact !fns-scanned
+                   entries) is only reached for aliases at the entry file's
+                   top level; an alias in an auto-discovered/stdlib module
+                   body arrives here instead and was previously dropped by the
+                   [_ -> ()] catch-all, so `Short.member` never resolved to
+                   `Long.Path.member` and codegen emitted an undefined
+                   `_Short.member` symbol.  Register the order-independent
+                   prefix mapping (first-wins) — [resolve_use_alias]'s prefix
+                   fallback then rewrites references without needing the target
+                   sibling to have been lowered yet. *)
+                let full_path =
+                  String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
+                let short = ad.alias_name.Ast.txt in
+                if not (Hashtbl.mem !_module_aliases short) then
+                  Hashtbl.replace !_module_aliases short full_path
               | Ast.DActor (_, name, actor_def, _) ->
                 (* Actors defined inside a module block need the same spawn/handler
                    glue as top-level actors.  The spawn symbol uses the actor's
@@ -1354,7 +1374,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               let rest = String.sub fn_name plen (String.length fn_name - plen) in
               Hashtbl.replace !_use_aliases (short_prefix ^ rest) fn_name
             end
-          ) all_fn_names
+          ) all_fn_names;
+        (* Also register the order-independent prefix mapping so a reference
+           whose target fn was not yet in [!fns] when this ran still resolves
+           (see [resolve_use_alias]'s [_module_aliases] fallback).  The exact
+           entries above still win when present; this only backstops. *)
+        (let full_path =
+           String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
+         if not (Hashtbl.mem !_module_aliases short_name) then
+           Hashtbl.replace !_module_aliases short_name full_path)
       | Ast.DDescribe _ | Ast.DOpts _ -> ()
     ) m.mod_decls;
   (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
@@ -1421,6 +1449,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             { fn with fn_body = body }
         ) all_fns
   in
+  (* Alpha-rename any shadowed local binder to a fresh unique name so that
+     every name-based downstream pass (cprop/fold/inline/dce and the JS
+     [const] emitter) is immune to variable capture across shadowing.  A
+     non-shadowing binder keeps its source name, so only genuinely-shadowing
+     functions change shape.  See [Lower_decls.uniquify_fn]. *)
+  let all_fns = List.map uniquify_fn all_fns in
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = all_fns;
     tm_types = builtin_type_defs @ List.rev !types;
@@ -1436,4 +1470,5 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _saved_iface_methods := Hashtbl.copy !_iface_methods;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
+  _module_aliases := Hashtbl.create 0;
   result

@@ -1,0 +1,24 @@
+-- Regression: Canvas module must be auto-loaded for --target js builds.
+-- canvas.march is JS-only and excluded from native/JIT stdlib precompile.
+-- This typechecks Canvas.* usage without calling it at runtime (no real
+-- <canvas>/CanvasRenderingContext2D/Image exists under plain node).
+mod JsCanvasAvailable do
+  fn canvas_smoke(node: Node) : Unit do
+    match Canvas.get_context(node) do
+      None -> ()
+      Some(ctx) ->
+        Canvas.fill_rect(ctx, 0.0, 0.0, 10.0, 10.0)
+        Canvas.begin_path(ctx)
+        Canvas.arc(ctx, 5.0, 5.0, 2.0, 0.0, 6.283185307179586)
+        Canvas.fill(ctx)
+        match Canvas.load_image("x.png") do
+          Ok(img)  -> Canvas.draw_image(ctx, img, 0.0, 0.0)
+          Err(_)   -> ()
+        end
+    end
+  end
+
+  fn main() : Unit do
+    println("canvas available")
+  end
+end

@@ -10,8 +10,8 @@ case $guard10 of
   true() -> "pos"
   _ -> let $jp_clo7 : () -> '_ = letrec [$jp6] in
 $jp6 in
-let n : Int = x in
-let $guard5 : Bool = <(n, 0) in
+let n$sh1 : Int = x in
+let $guard5 : Bool = <(n$sh1, 0) in
 case $guard5 of
   true() -> "neg"
   _ -> let $jp_clo2 : () -> '_ = letrec [$jp1] in

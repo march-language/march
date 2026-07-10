@@ -423,6 +423,41 @@ type import_entry = {
   ie_used    : bool ref;
 }
 
+(* Index bookkeeping for [record_use]'s import-tracker lookup.  [record_use]
+   runs once per EVar in the WHOLE combined program (stdlib + every
+   auto-discovered file), so it must not re-scan the full [import_tracker]
+   list (whose length is O(total use/import/alias decls across the whole
+   program)) on every call -- that pairing is O(var-refs * imports), which
+   is quadratic-and-then-some on a multi-hundred-file project.  Instead each
+   entry is also indexed by every literal name it can EXACT-match (module
+   short names / aliased names) into [ie_exact_index], and by its
+   qualification prefix (the module/alias name before the dot) into
+   [ie_prefix_index], so [record_use] does two O(1)-average Hashtbl lookups
+   instead of an O(n) scan.  This mirrors -- but does not replace -- each
+   entry's original [ie_matches] closure, which remains the source of truth
+   used at entry-creation time to populate the index (no behavior change,
+   just no longer scanning the flat list at lookup time). *)
+type import_index = {
+  ie_exact_index  : (string, import_entry list) Hashtbl.t;
+  (** name -> entries that match it via an EXACT name (short_names / n.txt /
+      short_name), populated with the same names the closures compare against. *)
+  ie_prefix_index : (string, import_entry list) Hashtbl.t;
+  (** prefix root (mod_str for Use*, alias short_name for DAlias) -> entries
+      that also accept a qualified reference under that prefix.  [record_use]
+      only consults this when the looked-up name contains a '.'. *)
+}
+
+let make_import_index () =
+  { ie_exact_index = Hashtbl.create 64; ie_prefix_index = Hashtbl.create 16 }
+
+let import_index_add_exact idx key entry =
+  let prev = try Hashtbl.find idx.ie_exact_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_exact_index key (entry :: prev)
+
+let import_index_add_prefix idx key entry =
+  let prev = try Hashtbl.find idx.ie_prefix_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_prefix_index key (entry :: prev)
+
 (** Computed session-type information for a declared [protocol].
     Stored in [env.protocols] after [DProtocol] is checked. *)
 type proto_info = {
@@ -456,6 +491,11 @@ type env = {
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
+  import_idx : import_index;
+  (** O(1)-average-lookup index mirroring [import_tracker] -- see
+      [import_index] for why [record_use] must not scan [import_tracker]
+      directly.  Shared (mutable) across all env copies derived from the
+      same root, same as [import_tracker]. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -595,6 +635,7 @@ let make_env errors type_map = {
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
+  import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   proof_caps = [];
@@ -1476,6 +1517,8 @@ let builtin_bindings : (string * scheme) list =
     ("string_to_int",   Mono (TArrow (t_string, t_option t_int)));
     ("string_to_float", Mono (TArrow (t_string, t_option t_float)));
     ("string_length",   Mono (TArrow (t_string, t_int)));
+    ("string_to_codepoints",  Mono (TArrow (t_string, t_list t_int)));
+    ("string_from_codepoint", Mono (TArrow (t_int, t_option t_string)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
@@ -2805,10 +2848,30 @@ let lin_display_name n =
   | None -> n
 
 let record_use name span env =
-  (* Mark any import entry that matches this name as used. *)
-  if !(env.import_tracker) <> [] then
-    List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
-      !(env.import_tracker);
+  (* Mark any import entry that matches this name as used.
+     [import_tracker] can hold one entry per use/import/alias declaration
+     across the WHOLE combined program (stdlib + every file pulled in via
+     MARCH_LIB_PATH auto-discovery) and [record_use] runs once per EVar in
+     that same combined program, so a linear scan here is O(var-refs *
+     imports) -- quadratic in project size and the dominant cost on any
+     multi-hundred-file project (confirmed via `sample` showing
+     List.mem/compare_val as the hot path during `march check`).  Use the
+     Hashtbl-backed [import_idx] instead: an exact-name lookup for the
+     common (unqualified) case, plus a prefix-root lookup only when [name]
+     is qualified (contains a '.').  Both indices were populated from the
+     exact same names/prefixes each entry's [ie_matches] closure compares
+     against, so this is behavior-preserving, just no longer O(n) per call. *)
+  (match Hashtbl.find_opt env.import_idx.ie_exact_index name with
+   | None -> ()
+   | Some entries -> List.iter (fun ie -> ie.ie_used := true) entries);
+  (match String.index_opt name '.' with
+   | None -> ()
+   | Some dot ->
+     let prefix_root = String.sub name 0 dot in
+     match Hashtbl.find_opt env.import_idx.ie_prefix_index prefix_root with
+     | None -> ()
+     | Some entries ->
+       List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
@@ -6789,7 +6852,12 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
       names;
     !dup
   in
-  if has_dup then run
+  if has_dup then begin
+    if Sys.getenv_opt "MARCH_DEBUG_ORDER" <> None then
+      Printf.eprintf "[order] has_dup=true, skipping reorder of %d-mod run: %s\n%!"
+        (List.length names) (String.concat "," names);
+    run
+  end
   else begin
     let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
     let by_name : (string, Ast.decl list * Ast.decl) Hashtbl.t = Hashtbl.create 16 in
@@ -6814,8 +6882,40 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
              | _ -> ())
           | _ -> ()) decls
       ) info;
+    (* [hard_deps] (unqualified bare ctor/type refs) are a correctness
+       requirement: a bare name is only visible in [env] once the defining
+       sibling's DMod has actually been processed by [check_decl] (its ctors
+       are exported at that point — see the [new_ctors]/[qual_ctors] merge in
+       the [DMod] case of [check_decl]).  There is no pass-1 placeholder for
+       bare ctor names the way there is for qualified "Mod.fn" names, so
+       violating a hard dependency is a hard failure ("I cannot find
+       `Ctor`"), not just an imprecise type.
+       [module_refs_in_decls] (qualified "Mod.fn"/"Mod.Ctor" refs) is only a
+       precision nicety: those names ARE pre-bound as pass-1 placeholders
+       regardless of order (see [prebind_mod_members]), so ordering by them
+       just avoids callers unifying against a still-generalizing Mono
+       placeholder — never required for resolution to succeed.
+       Sibling modules commonly form real reference cycles through qualified
+       calls (e.g. a facade module delegating to an internal one, which in
+       turn bare-pattern-matches a type owned by the facade's module). A
+       single DFS over the union of both kinds of edges lets a soft
+       (qualified) cycle silently reorder a hard (bare) dependency the wrong
+       way — whichever edge the traversal happens to reach the ancestor
+       through "wins", independent of which one is actually load-bearing.
+       So: compute the preferred order via the existing combined-edge DFS
+       (unchanged — this is what every existing case, including cycle-free
+       ones, already relies on for precision), then verify it against the
+       hard edges ALONE.  If it already satisfies every hard edge (the
+       common case: no hard/soft cycle exists) return it unchanged.  Only
+       when a hard edge is actually violated do we recompute a corrected
+       order via Kahn's algorithm restricted to hard edges, using the
+       preferred order purely as a tie-break — this guarantees every hard
+       dependency is satisfied while still respecting the soft-edge
+       preference everywhere it doesn't conflict. *)
+    let hard_deps_of decls = unqualified_module_deps ~type_owner ~ctor_owner decls in
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
+    let dbg = Sys.getenv_opt "MARCH_DEBUG_ORDER" <> None in
     let rec visit name =
       if not (Hashtbl.mem visited name) then begin
         Hashtbl.replace visited name ();
@@ -6826,15 +6926,103 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
               (StringSet.inter name_set
                  (StringSet.union
                     (module_refs_in_decls decls)
-                    (unqualified_module_deps ~type_owner ~ctor_owner decls)))
+                    (hard_deps_of decls)))
           in
+          if dbg then
+            Printf.eprintf "[order] visit %s deps=[%s]\n%!" name
+              (String.concat "," (StringSet.elements deps));
           StringSet.iter visit deps;
           out := dm :: !out
         | None -> ()
       end
     in
     List.iter (fun n -> visit n) names;
-    List.rev !out
+    let preferred = List.rev !out in
+    (* Hard-dependency graph, restricted to sibling names, self-edges removed. *)
+    let hard_graph : (string, StringSet.t) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (modname, (decls, _)) ->
+        let deps = StringSet.remove modname (StringSet.inter name_set (hard_deps_of decls)) in
+        Hashtbl.replace hard_graph modname deps)
+      info;
+    let pos : (string, int) Hashtbl.t = Hashtbl.create 16 in
+    List.iteri (fun i d -> match d with
+        | Ast.DMod (n, _, _, _) -> Hashtbl.replace pos n.Ast.txt i
+        | _ -> ())
+      preferred;
+    let satisfies_hard_deps order =
+      let p = Hashtbl.create 16 in
+      List.iteri (fun i n -> Hashtbl.replace p n i) order;
+      List.for_all (fun n ->
+          let deps = Option.value ~default:StringSet.empty (Hashtbl.find_opt hard_graph n) in
+          StringSet.for_all (fun d ->
+              match Hashtbl.find_opt p d, Hashtbl.find_opt p n with
+              | Some pd, Some pn -> pd < pn
+              | _ -> true)
+            deps)
+        names
+    in
+    let preferred_names =
+      List.filter_map (function Ast.DMod (n, _, _, _) -> Some n.Ast.txt | _ -> None) preferred
+    in
+    let final =
+      if satisfies_hard_deps preferred_names then preferred
+      else begin
+        if dbg then
+          Printf.eprintf
+            "[order] hard-dependency violation in combined order — falling back to \
+             hard-edge Kahn's-algorithm order for: %s\n%!"
+            (String.concat "," preferred_names);
+        (* Kahn's algorithm over [hard_graph], breaking ties by [pos]
+           (the combined-edge DFS's preferred order) so behavior stays as
+           close to the previous output as the hard constraints allow. *)
+        let in_degree : (string, int) Hashtbl.t = Hashtbl.create 16 in
+        let enables : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+        List.iter (fun n ->
+            let deps = Option.value ~default:StringSet.empty (Hashtbl.find_opt hard_graph n) in
+            Hashtbl.replace in_degree n (StringSet.cardinal deps);
+            StringSet.iter (fun d ->
+                Hashtbl.replace enables d (n :: Option.value ~default:[] (Hashtbl.find_opt enables d)))
+              deps)
+          names;
+        let ready = ref (List.filter (fun n -> Hashtbl.find in_degree n = 0) names) in
+        let by_pos a b =
+          compare (Option.value ~default:max_int (Hashtbl.find_opt pos a))
+                  (Option.value ~default:max_int (Hashtbl.find_opt pos b))
+        in
+        let corrected = ref [] in
+        let remaining = ref (List.length names) in
+        while !remaining > 0 do
+          match List.sort by_pos !ready with
+          | [] ->
+            (* Genuine hard cycle: no way to satisfy every constraint.
+               Emit whatever is left in preferred order (best effort,
+               matches the previous behavior for irreducible cycles). *)
+            List.iter (fun n ->
+                if not (List.mem n !corrected) then corrected := n :: !corrected)
+              preferred_names;
+            remaining := 0
+          | n :: _ ->
+            ready := List.filter (fun x -> x <> n) !ready;
+            corrected := n :: !corrected;
+            decr remaining;
+            List.iter (fun dependent ->
+                let d = Hashtbl.find in_degree dependent - 1 in
+                Hashtbl.replace in_degree dependent d;
+                if d = 0 then ready := dependent :: !ready)
+              (Option.value ~default:[] (Hashtbl.find_opt enables n))
+        done;
+        (* [corrected] was built by prepending as each node finished, so its
+           head is the LAST node processed — reverse to restore the actual
+           topological (processing) order before mapping back to decls. *)
+        List.map (fun n -> snd (Hashtbl.find by_name n)) (List.rev !corrected)
+      end
+    in
+    if dbg then
+      Printf.eprintf "[order] final order (%d mods): %s\n%!"
+        (List.length final)
+        (String.concat ","
+           (List.filter_map (function Ast.DMod (n, _, _, _) -> Some n.Ast.txt | _ -> None) final));
+    final
   end
 
 (* Reorder both function runs (by call dependency) and module runs (by module
@@ -7878,7 +8066,19 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         (* Index for O(1) [record_use] lookup: every rebound short name is an
+            exact-match key, as is the bare module name itself (ie_matches's
+            "name = mod_str" clause -- an EVar referencing the module path
+            literally); the module's first path segment is the prefix-index
+            key a qualified reference (e.g. "Depot.Gate.foo") hashes to (see
+            [record_use] -- it looks up by first-dot-split, matching
+            [split_qualified]'s convention elsewhere in this file). *)
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env
      | Ast.UseNames names ->
@@ -7893,6 +8093,7 @@ let rec check_decl env (d : Ast.decl) : env =
                          ; ie_matches = (fun name -> name = n.Ast.txt)
                          ; ie_used = ref false } in
              env.import_tracker := entry :: !(env.import_tracker);
+             import_index_add_exact env.import_idx n.Ast.txt entry;
              bind_var n.Ast.txt sch env
            | None ->
              Err.error env.errors ~span:n.Ast.span
@@ -7929,7 +8130,12 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env)
 
@@ -7956,7 +8162,12 @@ let rec check_decl env (d : Ast.decl) : env =
                       (String.length name >= plen && String.sub name 0 plen = short_prefix)
                       || name = short_name)
                   ; ie_used = ref false } in
-      env.import_tracker := entry :: !(env.import_tracker)
+      env.import_tracker := entry :: !(env.import_tracker);
+      (* [short_name] has no dots, so it is both the exact-match key (bare
+         alias reference) and the prefix-index key (qualified reference
+         "FB.baz" first-dot-splits to exactly "FB" = short_name). *)
+      import_index_add_exact env.import_idx short_name entry;
+      import_index_add_prefix env.import_idx short_name entry
     end;
     bind_vars new_bindings env
 
@@ -8579,9 +8790,24 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
   let rec conv (s : Ast.ty) : ty option =
     match s with
     | Ast.TyCon (name, args) ->
-      (match opt_all (List.map conv args) with
-       | Some args' -> Some (TCon (name.txt, args'))
-       | None -> None)
+      (* Decline to build a scheme from a QUALIFIED type name.  This prebind
+         pass has no env, so it cannot reproduce [surface_ty]'s type resolution:
+         [surface_ty] canonicalizes a qualified variant to its bare nominal
+         (`Conduit.ConduitError` -> `ConduitError`) AND expands a qualified
+         record to a structural [TRecord].  Emitting a verbatim qualified nominal
+         `TCon("Mod.T")` here made a prebind fn scheme — used at a call site
+         checked BEFORE the callee's Pass-2 re-derivation — mismatch the bare
+         (or structural) type the caller's argument carries, an order-dependent
+         "expected Mod.T but got T".  Guessing bare unconditionally instead
+         wrongly conflates two same-suffixed types (`Conduit.Config` vs stdlib
+         `Config`).  Returning None falls back to the [fresh_var] placeholder,
+         which unifies with anything and imposes no false constraint; the
+         callee's own [check_fn] still derives and enforces its real type. *)
+      if String.contains name.txt '.' then None
+      else
+        (match opt_all (List.map conv args) with
+         | Some args' -> Some (TCon (name.txt, args'))
+         | None -> None)
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -8641,7 +8867,20 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      declarations so that cross-module forward references are pre-bound in
      pass 1. This mirrors the eval.ml global module_registry approach.
      Only pre-binds public functions to preserve private-access restrictions. *)
-  let rec prebind_mod_members prefix env decls =
+  let rec prebind_mod_members ?(opaque = StringSet.empty) prefix env decls =
+    (* Opaque type names per submodule, taken from a sibling `sig <Mod>`
+       declaration.  A type a signature exports opaquely (`type Stack a`, no
+       constructors) must keep its constructors HIDDEN outside the module — so
+       the bare-constructor seeding below is suppressed for them, matching the
+       Pass-2 export filter (:7467) and preserving order-independence (hidden
+       ctors stay unreferenceable cross-module by design). *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -8656,14 +8895,40 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -8679,7 +8944,30 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              (* Register both local name and fully-qualified name in env.records
@@ -8694,11 +8982,23 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) env decls
   in
   (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
+  (* Opaque type names per top-level module, from sibling `sig <Mod>` decls: the
+     entry module is unwrapped so its `sig`/`mod` pairs are siblings here, not
+     inside [prebind_mod_members] (see the same map built there). *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -8714,7 +9014,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
-        let env = prebind_mod_members mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
@@ -8863,7 +9165,16 @@ let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.creat
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let errors = env.errors in
   let type_map = env.type_map in
-  let rec prebind_mod_members_inc prefix e decls =
+  let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =
+    (* See [prebind_mod_members]: suppress bare-constructor seeding for types a
+       sibling `sig` exports opaquely. *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -8873,14 +9184,40 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -8896,7 +9233,30 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -8908,11 +9268,20 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members_inc ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) e decls
   in
   (* Pass 1: forward-reference placeholders for new declarations *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -8922,7 +9291,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         (* Register the sibling module's members, then its interface impls — an
            impl declared in a sibling must satisfy constraints unit-wide
            regardless of check order (mirrors check_module_core's pass 1). *)
-        let env = prebind_mod_members_inc mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members_inc ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e

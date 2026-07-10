@@ -1,0 +1,116 @@
+-- Perihelion — impure shell: input polling, Canvas rendering, the frame loop.
+-- All game logic lives in Perihelion.Core (pure); star placement in Perihelion.Level.
+-- The on_frame callback takes one ignored Int argument (`fn _ -> ...`) — see
+-- stdlib/dom.march's module doc on deferred-callback signatures.
+mod Perihelion do
+
+  pfn two_pi() : Float do 6.283185307179586 end
+
+  pfn draw_star(ctx, s : Star) : Unit do
+    Canvas.set_global_alpha(ctx, 0.25)
+    Canvas.set_stroke_style(ctx, "#7f8cff")
+    Canvas.set_line_width(ctx, 1.0)
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, s.x, s.y, s.capture_radius, 0.0, two_pi())
+    Canvas.stroke(ctx)
+    Canvas.set_global_alpha(ctx, 1.0)
+    Canvas.set_fill_style(ctx, "#ffd166")
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, s.x, s.y, s.radius, 0.0, two_pi())
+    Canvas.fill(ctx)
+  end
+
+  pfn draw_stars(ctx, stars : List(Star), cam : Float) : Unit do
+    match stars do
+      Nil -> ()
+      Cons(s, rest) ->
+        if s.y < cam + Perihelion.Core.view_h() + 100.0 && s.y > cam - 100.0 do
+          draw_star(ctx, s)
+        else
+          ()
+        end
+        draw_stars(ctx, rest, cam)
+    end
+  end
+
+  pfn draw_tether(ctx, game : Game) : Unit do
+    match game.mode do
+      Flying(_, _) -> ()
+      Orbiting(idx, _) ->
+        match List.nth_opt(game.stars, idx) do
+          None -> ()
+          Some(s) ->
+            Canvas.set_global_alpha(ctx, 0.5)
+            Canvas.set_stroke_style(ctx, "#e0e0e0")
+            Canvas.set_line_width(ctx, 1.0)
+            Canvas.begin_path(ctx)
+            Canvas.move_to(ctx, s.x, s.y)
+            Canvas.line_to(ctx, game.ball_x, game.ball_y)
+            Canvas.stroke(ctx)
+            Canvas.set_global_alpha(ctx, 1.0)
+        end
+    end
+  end
+
+  pfn draw_ball(ctx, game : Game) : Unit do
+    Canvas.set_fill_style(ctx, "#ffffff")
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, game.ball_x, game.ball_y, 6.0, 0.0, two_pi())
+    Canvas.fill(ctx)
+  end
+
+  pfn draw_hud(ctx, game : Game) : Unit do
+    Canvas.set_fill_style(ctx, "#eeeeee")
+    Canvas.set_font(ctx, "18px sans-serif")
+    Canvas.set_text_align(ctx, "left")
+    Canvas.fill_text(ctx, int_to_string(game.score), 14.0, 28.0)
+    Canvas.set_text_align(ctx, "right")
+    Canvas.fill_text(ctx, "best " ++ int_to_string(game.best),
+                     Perihelion.Core.view_w() - 14.0, 28.0)
+    Canvas.set_text_align(ctx, "center")
+    match game.phase do
+      Ready ->
+        Canvas.set_font(ctx, "22px sans-serif")
+        Canvas.fill_text(ctx, "tap to start",
+                         Perihelion.Core.view_w() / 2.0, Perihelion.Core.view_h() / 2.0)
+      Over ->
+        Canvas.set_font(ctx, "22px sans-serif")
+        Canvas.fill_text(ctx, "score " ++ int_to_string(game.score) ++ " — tap to retry",
+                         Perihelion.Core.view_w() / 2.0, Perihelion.Core.view_h() / 2.0)
+      Playing -> ()
+    end
+  end
+
+  pfn draw(ctx, game : Game) : Unit do
+    Canvas.set_global_alpha(ctx, 1.0)
+    Canvas.set_fill_style(ctx, "#0b0b18")
+    Canvas.fill_rect(ctx, 0.0, 0.0, Perihelion.Core.view_w(), Perihelion.Core.view_h())
+    Canvas.save(ctx)
+    Canvas.translate(ctx, 0.0, 0.0 - game.camera_y)
+    draw_stars(ctx, game.stars, game.camera_y)
+    draw_tether(ctx, game)
+    draw_ball(ctx, game)
+    Canvas.restore(ctx)
+    draw_hud(ctx, game)
+  end
+
+  pfn tick(ctx, el, game : Game) : Unit do
+    let taps = Dom.taps(el)
+    let g2 = Perihelion.Core.update(game, taps, Perihelion.Core.dt())
+    draw(ctx, g2)
+    Dom.on_frame(fn _ -> tick(ctx, el, g2))
+  end
+
+  fn main() : Unit do
+    match Dom.find("game-canvas") do
+      None -> println("no #game-canvas found")
+      Some(node) ->
+        match Canvas.get_context(node) do
+          None -> println("2d context unavailable")
+          Some(ctx) ->
+            tick(ctx, node, Perihelion.Core.new_game(42))
+        end
+    end
+  end
+
+end

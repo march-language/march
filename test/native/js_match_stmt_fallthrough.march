@@ -1,0 +1,21 @@
+-- Regression: a statement-position match arm ending in a Unit-typed call
+-- must not fall through the emitted JS switch into the next case / the
+-- non-exhaustive default throw. Shape: recursive list walk whose Cons arm
+-- ends in the recursive call (js_emit emitted no break/return after
+-- emit_stmts, so after the innermost call returned, every frame fell into
+-- `default: throw "non-exhaustive pattern match"`).
+mod JsMatchStmtFallthrough do
+  fn walk(xs : List(Int), n : Int) : Unit do
+    match xs do
+      Nil -> println("nil at " ++ int_to_string(n))
+      Cons(x, rest) ->
+        println("cons " ++ int_to_string(x))
+        walk(rest, n + 1)
+    end
+  end
+
+  fn main() : Unit do
+    walk(Cons(10, Cons(20, Cons(30, Nil))), 0)
+    println("done")
+  end
+end

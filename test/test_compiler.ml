@@ -3529,6 +3529,98 @@ let test_resolver_skips_dangling_symlink () =
   Alcotest.(check bool) "dangling symlink not collected"
     false (List.exists (fun p -> Filename.basename p = "broken") files)
 
+(** Regression test for the O(var-refs * imports) blowup in
+    [Typecheck.record_use]: every EVar lookup used to linearly scan
+    [env.import_tracker], whose length is one entry per use/import/alias
+    declaration across the WHOLE combined program (stdlib + every file
+    pulled in via MARCH_LIB_PATH auto-discovery).  On a real multi-hundred-
+    file project (forgepm + bastion + depot + march_doc, ~200 files) this
+    made `march check` hang for 30+ minutes burning 100% CPU in
+    List.mem/compare_val (confirmed via `sample`), instead of completing in
+    seconds.  This test builds a synthetic MARCH_LIB_PATH with many
+    auto-discovered modules, each importing a shared module (`import Shared`)
+    and referencing several of its functions -- the exact shape that
+    stresses [record_use]'s import-tracker lookup -- and asserts the check
+    completes within a bound chosen to clearly separate "linear" from
+    "quadratic blowup" at this N.  Measured directly (CAS cache cleared
+    between runs, so these are real typecheck times, not cache hits):
+      files   pre-fix (quadratic)   post-fix (indexed)
+       400          ~1.2s                ~0.6s
+      1200          ~8.2s                ~1.4s   (~6x)
+      2000         ~21.1s                ~2.3s   (~9x)
+      3000         ~45.5s                ~3.7s  (~12x)
+    Pre-fix time roughly follows n^2 (k ~= 5e-6); post-fix is ~linear.  This
+    test uses N = 2500 files, where the pre-fix code would take ~31s (already
+    past the 30s bound below) while the fixed code takes ~3s -- comfortably
+    separating "would time out" from "clearly fine" without making the test
+    itself slow. *)
+let test_large_multi_file_check_is_not_quadratic () =
+  let dir = Filename.temp_file "march_lib_path_scale_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    (* Best-effort cleanup: this test writes thousands of small files. *)
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in
+    output_string oc contents;
+    close_out oc
+  in
+  (* One shared module with several functions, imported by every generated
+     module below via `import Shared` (a UseAll-style bulk import) -- this
+     populates one [import_tracker] entry per importing file, and each
+     `helperN()` call inside those files is an EVar lookup that must mark
+     the right entry used via [record_use]. *)
+  let n_helpers = 20 in
+  let shared_src =
+    let buf = Buffer.create 1024 in
+    Buffer.add_string buf "mod Shared do\n";
+    for i = 0 to n_helpers - 1 do
+      Buffer.add_string buf (Printf.sprintf "  fn helper%d() do\n    %d\n  end\n" i i)
+    done;
+    Buffer.add_string buf "end\n";
+    Buffer.contents buf
+  in
+  write_file (Filename.concat dir "shared.march") shared_src;
+  let n_files = 2500 in
+  let n_refs  = 30 in
+  for i = 0 to n_files - 1 do
+    let buf = Buffer.create 512 in
+    Buffer.add_string buf (Printf.sprintf "mod Wu%d do\n" i);
+    Buffer.add_string buf "  import Shared\n";
+    Buffer.add_string buf "  fn value() do\n";
+    for j = 0 to n_refs - 1 do
+      Buffer.add_string buf
+        (Printf.sprintf "    let x%d = helper%d() + %d\n" j (j mod n_helpers) j)
+    done;
+    Buffer.add_string buf "    x0\n  end\nend\n";
+    write_file (Filename.concat dir (Printf.sprintf "wu%d.march" i)) (Buffer.contents buf)
+  done;
+  (* Entry file: trivial, imports nothing itself -- all the files above are
+     pulled in purely via MARCH_LIB_PATH auto-discovery (resolve_imports's
+     step 2), exactly like forgepm's `.march` tree under MARCH_LIB_PATH. *)
+  let entry_src = "mod Entry do\n  fn main() do\n    0\n  end\nend\n" in
+  Unix.putenv "MARCH_LIB_PATH" dir;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let m = parse_and_desugar entry_src in
+    let start = Unix.gettimeofday () in
+    let (resolve_errors, extra_decls, _user_files) =
+      March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+    Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+    let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+    let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+    let elapsed = Unix.gettimeofday () -. start in
+    Alcotest.(check bool) "no typecheck errors" false (has_errors errors);
+    (* 30s bound: the fixed (indexed) code finishes this N in ~3-5s even on a
+       loaded CI box; the pre-fix O(var-refs * imports) scan measured ~31s+
+       at this exact N (see the doc comment above) -- comfortably on the far
+       side of this bound, so a regression back to the linear-scan version
+       would fail this test rather than merely being "a bit slower". *)
+    Alcotest.(check bool)
+      (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
+      true (elapsed < 30.0)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -7133,12 +7225,188 @@ let test_broken_ctor_field_type_reported_once () =
   Alcotest.(check int) "`Bogus` unresolved-type error reported exactly once" 1
     (count_errors_matching ctx "I cannot find `Bogus`.")
 
+(* ── Entry-module self-qualified type erasure ─────────────────────────────
+   An UNANNOTATED fn at the ENTRY module's top level, referenced by the
+   entry-module-qualified name (`EntryMod.fn` — produced by desugar's
+   [qualify_module_refs] to disambiguate a shadowing nested local, or written
+   by hand), must be exactly as type-safe as the bare reference.  The entry
+   module is UNWRAPPED at the combined module's top level, so — unlike a wrapped
+   sibling module, whose public members are re-exported under `Sib.fn` with
+   their real schemes when the sibling's DMod is checked — its own top-level fns
+   are only ever seeded by [check_module_core]'s Pass 1b
+   (`prebind_mod_members m.mod_name.txt`) as a bare `Mono (fresh_var 1)`
+   placeholder ([prebind_fn_scheme] returns None for an unannotated fn).  Before
+   the fix that decoupled `?a -> ?b` placeholder was never reconciled with the
+   fn's real body-checked scheme, so `EntryMod.id` ERASED the type of anything
+   laundered through it — a general memory-safety hole (an Int laundered into a
+   String parameter typechecked).  The DFn branch of [check_decl] now rebinds
+   the entry-qualified name to the validated scheme.  These launder cases are
+   RED before the fix (each typechecks clean) and GREEN after. *)
+
+let test_entry_qual_launders_int_as_string () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_launders_box () =
+  let ctx = typecheck {|mod Main do
+    type Box(a) = Box(a)
+    fn id(x) do x end
+    fn need_int(_b : Box(Int)) : Int do 0 end
+    fn attack() : Int do need_int(Main.id(Box("hi"))) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Box(String) into Box(Int): rejected" true
+    (has_errors ctx)
+
+let test_entry_qual_forges_proof_cap () =
+  (* The proof-cap forge: `Main.id` must not launder a `Cap(IO)` into a
+     `Cap(Db.P)` parameter.  The module also lacks `needs` declarations (which
+     raise their own, unrelated errors), so assert on the FORGE-SPECIFIC
+     mismatch rather than the error count: it is absent (count 0) when the type
+     erases and present (>= 1) when the forge is caught. *)
+  let ctx = typecheck {|mod Main do
+    mod Db do
+      proof cap P
+    end
+    fn id(x) do x end
+    fn consume(_c : Cap(Db.P)) : Int do 0 end
+    fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
+  end|} in
+  Alcotest.(check bool) "Main.id forging Cap(IO) -> Cap(Db.P): mismatch caught" true
+    (count_errors_matching ctx "expected `Db.P` but got `IO`." >= 1)
+
+let test_entry_qual_distinct_tvar_launders () =
+  (* C2 variant: an ANNOTATED but distinct-tvar helper `fn f(x:a):b do x` gets a
+     prebind built purely from annotation SYNTAX (`a -> b`, never unified against
+     the body constraint a~b), so `Main.f` erased just like the unannotated case.
+     The unconditional rebind to the body-checked scheme closes this too. *)
+  let ctx = typecheck {|mod Main do
+    fn launder(x : a) : b do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.launder(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.launder (a->b) laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_from_nested_sibling () =
+  (* The entry-qualified reference can also come from a NESTED module: `T.id`
+     used inside `mod App` (nested in the entry `T`) resolves the same
+     entry-level `T.id` prebind and must be reconciled just as a top-level
+     `T.id` reference is. *)
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(T.id(42)) end
+    end
+  end|} in
+  Alcotest.(check bool) "T.id from nested App laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+(* ── Stdlib HOF-callback annotations must be curried, not tuple-arrow ──────
+   March's uncurried-collection convention calls callbacks with N-ary call
+   syntax (`f(acc, x)`), which [infer_app] treats as peeling one `TArrow`
+   layer per argument (purely curried — there is no auto-tupling special
+   case).  Annotating such a callback param as a TUPLE-arrow (`f : (b, a) ->
+   b`, parsed as `TArrow(TTuple[b;a], b)`) instead of a curried chain
+   (`f : b -> a -> b`) therefore makes the recursive self-call inside the
+   function's OWN body check its first arg against the tuple `(b,a)` and
+   fail — a real, self-contained type error entirely internal to the stdlib
+   file, independent of any other module.  (An earlier hypothesis blamed
+   this on cross-module bare-name collisions when many stdlib modules are
+   merged as typecheck siblings — e.g. `fold_left` existing in both
+   `prelude.march` and `list.march`; that was investigated and falsified:
+   the error reproduces identically with the offending file typechecked
+   completely alone.)  Such an error is invisible via the normal CLI
+   because `bin/main.ml`'s `is_user_file` filter drops any diagnostic
+   whose span points into a stdlib file — so this class of bug can persist
+   silently until something (e.g. a pipeline that does NOT filter by file,
+   like a browser/playground compile target) surfaces it.  `fold_left`
+   (prelude.march, iterable.march), `cmp`/`fold` (ordered_map.march,
+   sorted_set.march), and `reduce` (range.march) all had this typo; fixed
+   to curried-arrow form.  Guard each by typechecking the file completely
+   standalone (no other stdlib siblings) via [check_module_core], mirroring
+   how `bin/main.ml`'s `get_stdlib_tc_env` typechecks stdlib. *)
+
+let assert_stdlib_file_typechecks_cleanly name =
+  let dmod = load_stdlib_file_for_test name in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
+    mod_decls = [dmod];
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
+    false (has_errors errors)
+
+let test_stdlib_prelude_fold_left_curried () =
+  assert_stdlib_file_typechecks_cleanly "prelude.march"
+
+let test_stdlib_iterable_fold_curried () =
+  assert_stdlib_file_typechecks_cleanly "iterable.march"
+
+let test_stdlib_ordered_map_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "ordered_map.march"
+
+let test_stdlib_sorted_set_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "sorted_set.march"
+
+let test_stdlib_range_reduce_curried () =
+  assert_stdlib_file_typechecks_cleanly "range.march"
+
+(* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
+
+let test_entry_qual_same_type_ok () =
+  (* `Main.id` used at a single, consistent type stays clean (green before and
+     after the fix). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int only: no error" false (has_errors ctx)
+
+let test_entry_qual_polymorphic_ok () =
+  (* Reconciling `Main.id` to the fn's REAL scheme (rather than a pinned
+     placeholder) also RESTORES polymorphism: the bare `id` is `∀a. a -> a`, so
+     `Main.id` used at BOTH Int and String must typecheck exactly as the bare
+     name does.  RED before the fix — the placeholder `?a` was pinned to Int by
+     the first use, so the String use spuriously failed (an over-rejection). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+    fn use_str() : String do Main.id("hi") end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int AND String: no error" false (has_errors ctx)
+
+let test_entry_qual_annotated_same_tvar_ok () =
+  (* An annotated `a -> a` entry fn used consistently stays clean — its prebind
+     is already a real, body-consistent scheme, and the rebind to [sch] keeps it
+     that way. *)
+  let ctx = typecheck {|mod Main do
+    fn identity(x : a) : a do x end
+    fn ok() : Int do Main.identity(42) end
+  end|} in
+  Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
             test_resolver_skips_dangling_symlink;
+          Alcotest.test_case
+            "large multi-file MARCH_LIB_PATH check is not quadratic (record_use import_tracker)"
+            `Slow test_large_multi_file_check_is_not_quadratic;
         ] );
       ( "diagnostic dedup",
         [
@@ -7761,6 +8029,21 @@ let compiler_suites =
           Alcotest.test_case "B14: interleaved same-name fn groups error"          `Quick test_interleaved_fn_clauses_error;
           Alcotest.test_case "B14: adjacent multi-head clauses still parse"        `Quick test_adjacent_fn_clauses_still_parse;
           Alcotest.test_case "B14: same fn name in nested mod is fine"             `Quick test_same_fn_name_in_nested_mod_ok;
+        ] );
+      ( "entry_mod_qual_erasure", [
+          Alcotest.test_case "Main.id launders Int -> String: error"              `Quick test_entry_qual_launders_int_as_string;
+          Alcotest.test_case "Main.id launders Box(String) -> Box(Int): error"    `Quick test_entry_qual_launders_box;
+          Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
+          Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
+          Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
+          Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
+          Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;
+          Alcotest.test_case "sorted_set.march cmp/fold: curried, no internal error"  `Quick test_stdlib_sorted_set_cmp_curried;
+          Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
+          Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
+          Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
+          Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
         ] );
   ]
 

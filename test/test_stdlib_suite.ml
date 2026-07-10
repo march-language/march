@@ -3295,6 +3295,58 @@ let test_tc_sig_opaque_hides_ctors () =
   end|} in
   Alcotest.(check bool) "opaque type — ctors hidden outside" true (has_errors ctx)
 
+(* Order-independent multi-module resolution: a submodule that references a
+   sibling's BARE type/constructors (no import) must resolve regardless of check
+   order.  A dependency CYCLE (Types -> Handlers via a call, Handlers -> Types
+   via bare `Event`/`Started`) makes the two impossible to topologically order,
+   so before bare types/ctors were seeded in Pass 1 this failed whenever the
+   referrer sorted first ("I cannot find `Event`" / unknown constructor). *)
+let test_tc_cyclic_bare_ctor_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+      fn describe(e : Event) : String do Handlers.label(e) end
+    end
+    mod Handlers do
+      fn label(e : Event) : String do
+        match e do
+          Started -> "started"
+          Stopped(m) -> m
+        end
+      end
+      fn make() : Event do Started end
+      fn disambig() : Event do Event.Stopped("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "cyclic cross-module bare ctor/type — no errors"
+    false (has_errors ctx)
+
+(* Companion: a function whose signature names a sibling module's type by its
+   QUALIFIED path (`Types.Event`) must still unify with the bare `Event` a
+   caller produces, regardless of which module's Pass-2 check runs first.  The
+   prebind fn-scheme used to emit the qualified nominal verbatim, giving an
+   order-dependent "expected Types.Event but got Event". *)
+let test_tc_qualified_sig_type_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+    end
+    mod Producer do
+      fn make() : Event do Started end
+    end
+    mod Consumer do
+      fn take(e : Types.Event) : String do
+        match e do
+          Started -> "s"
+          Stopped(m) -> m
+        end
+      end
+      fn run() : String do Consumer.take(Producer.make()) end
+    end
+  end|} in
+  Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11136,6 +11188,152 @@ let test_compiled_aliased_arg_no_double_free () =
       "compiled f(x,x) with owned heap arg does not double-free (exit 0)"
       0 run_rc
 
+(* Regression: the interpreter's [http_server_listen] (lib/eval/eval.ml) used
+   to accept exactly one client, block synchronously on that one client's
+   recv/send for the entire request-response cycle, then close it and only
+   THEN accept the next — a single slow/idle client (e.g. a WebSocket client
+   that opens the TCP connection and then pauses before sending its upgrade
+   request) wedged the whole server: no other connection could be accepted
+   or served for as long as the idle client's blocking recv() was pending.
+   Fixed by rewriting the accept loop as a single-threaded, non-blocking,
+   multiplexed event loop (see [run_http_event_loop] in lib/eval/eval.ml)
+   that selects across the listen socket AND every open client connection,
+   so an idle connection can never block progress on any other connection.
+
+   This test runs the *interpreter* (main.exe without --compile) as a real
+   subprocess, since the bug is specific to the OCaml eval.ml implementation
+   of http_server_listen and does not exist in the compiled/LLVM runtime
+   path (runtime/march_http.c has real thread/event-loop concurrency
+   already). It then, from this OCaml test process:
+     1. opens a first TCP connection and deliberately sends nothing
+        (an "idle client" — connects but never completes a request), and
+     2. opens a second TCP connection and sends a complete, valid GET
+        request, asserting the response arrives well within a generous
+        time bound.
+   Under the pre-fix code, step 2 would hang for the full read timeout
+   (no response) because the accept loop was still blocked inside a
+   recv() on the first (idle) connection. Under the fix, the second
+   connection is served promptly regardless of the first. *)
+let test_interp_http_server_idle_client_does_not_block_others () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no interpreter binary *)
+  else begin
+    let tmp = Filename.temp_file "march_http_evloop" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    (* Derive a port from our own pid to reduce collision risk when tests
+       run concurrently / repeatedly. *)
+    let port = 21000 + (Unix.getpid () mod 4000) in
+    let src = Filename.concat tmp "srv.march" in
+    let oc = open_out src in
+    output_string oc (Printf.sprintf
+      "mod Srv do\n\
+      \  fn router(conn) do\n\
+      \    conn |> HttpServer.text(200, \"hello\")\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    HttpServer.new(%d)\n\
+      \    |> HttpServer.plug(router)\n\
+      \    |> HttpServer.listen()\n\
+      \  end\n\
+       end\n" port);
+    close_out oc;
+    (* Launch the interpreter (no --compile) as a real child process so it
+       binds a real port that this test process can connect sockets to.
+       stdout/stderr are redirected to a log file rather than inherited,
+       so the "march: HTTP server listening..." banner doesn't clutter
+       test output. *)
+    let log_path = Filename.concat tmp "srv.log" in
+    let log_fd = Unix.openfile log_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
+    let child_pid =
+      Unix.create_process main_exe [| main_exe; src |] Unix.stdin log_fd log_fd
+    in
+    Unix.close log_fd;
+    let cleanup () =
+      (try Unix.kill child_pid Sys.sigkill with _ -> ());
+      (try ignore (Unix.waitpid [] child_pid) with _ -> ())
+    in
+    Fun.protect ~finally:cleanup (fun () ->
+      (* Give the child a moment to bind and start listening. Poll rather
+         than a single fixed sleep so this isn't flaky under load. *)
+      let connect_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
+      let rec wait_for_listen attempts =
+        if attempts <= 0 then
+          Alcotest.fail "interpreted HTTP server never started listening"
+        else
+          let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+          match (try Unix.connect probe connect_addr; `Ok
+                 with Unix.Unix_error _ -> `NotYet)
+          with
+          | `Ok -> (try Unix.close probe with _ -> ())
+          | `NotYet ->
+            (try Unix.close probe with _ -> ());
+            Unix.sleepf 0.1;
+            wait_for_listen (attempts - 1)
+      in
+      wait_for_listen 50;  (* up to ~5s *)
+
+      (* 1. Idle client: connect but never send a byte. Left open for the
+         duration of the test so it can wedge the old blocking accept loop. *)
+      let idle_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect idle_sock connect_addr;
+
+      (* Give the server a moment to accept the idle connection and (on the
+         buggy pre-fix code) get stuck blocking inside recv() on it, before
+         we try the second connection — this is what makes the test a
+         faithful reproduction rather than a race that might accidentally
+         pass on old code too. *)
+      Unix.sleepf 0.2;
+
+      (* 2. A second, well-behaved client: sends a complete request and
+         must get a prompt, correct response — bounded by a real time
+         limit so this test fails (times out) rather than hangs forever
+         on the pre-fix code. *)
+      let start_time = Unix.gettimeofday () in
+      let client_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect client_sock connect_addr;
+      let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" in
+      ignore (Unix.write_substring client_sock request 0 (String.length request));
+      (* Bound the read with select() so a hang shows up as a fast,
+         deterministic test failure instead of blocking the suite. *)
+      let deadline = 2.0 in
+      let buf = Buffer.create 256 in
+      let rec read_until_closed_or_deadline () =
+        let elapsed = Unix.gettimeofday () -. start_time in
+        let remaining = deadline -. elapsed in
+        if remaining <= 0.0 then ()
+        else
+          match Unix.select [client_sock] [] [] remaining with
+          | ([], _, _) -> ()  (* timed out waiting for data *)
+          | (_, _, _) ->
+            let chunk = Bytes.create 4096 in
+            let n = try Unix.read client_sock chunk 0 4096 with _ -> 0 in
+            if n > 0 then begin
+              Buffer.add_subbytes buf chunk 0 n;
+              read_until_closed_or_deadline ()
+            end
+      in
+      read_until_closed_or_deadline ();
+      let elapsed = Unix.gettimeofday () -. start_time in
+      (try Unix.close client_sock with _ -> ());
+      (try Unix.close idle_sock with _ -> ());
+      let response = Buffer.contents buf in
+      Alcotest.(check bool)
+        "second client got a response while first client was idle"
+        true (String.length response > 0);
+      Alcotest.(check bool)
+        "response is 200 OK"
+        true
+        (String.length response >= 15 && String.sub response 0 15 = "HTTP/1.1 200 OK");
+      Alcotest.(check bool)
+        (Printf.sprintf
+           "second client served promptly (%.3fs) despite idle first client \
+            — must be well under the %.1fs deadline, not just barely under it"
+           elapsed deadline)
+        true (elapsed < 1.0))
+  end
+
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
    compiler — [Sys.is_directory] stats through the link and raises Sys_error.
    [collect_lib_files] must skip it and still find sibling .march modules. *)
@@ -11492,6 +11690,8 @@ let stdlib_suites =
         (* Phase 2: sig conformance *)
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
+        Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
+        Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;
@@ -12162,5 +12362,7 @@ let stdlib_suites =
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
+        Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
+          test_interp_http_server_idle_client_does_not_block_others;
       ]);
     ]

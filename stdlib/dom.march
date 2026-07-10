@@ -10,6 +10,11 @@
 --       Dom.set_text(el, "0")
 --       Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
 --   end
+--
+-- Note: set_timeout/set_interval/on_frame callbacks take one ignored Int
+-- argument (`fn _ -> ...`), not a true zero-arg lambda (`fn -> ...`). A
+-- zero-arg March lambda types to its body's result directly with no arrow
+-- wrapper, so it can never satisfy a declared `Unit -> Unit` parameter.
 
 mod Dom do
   needs Ffi
@@ -80,16 +85,25 @@ mod Dom do
     -- ── Event properties ───────────────────────────────────────────────
     fn dom_event_target(ev: Event)              : Node   = "march_dom_event_target"
     fn dom_event_type(ev: Event)                : String = "march_dom_event_type"
+    fn dom_event_key(ev: Event)                 : String = "march_dom_event_key"
     fn dom_prevent_default(ev: Event)           : Unit   = "march_dom_prevent_default"
     fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
+    fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
+    fn dom_event_y(ev: Event)                   : Int    = "march_dom_event_y"
+    fn dom_taps(el: Node)                       : List((Int, Int)) = "march_dom_taps"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
     fn dom_href()                               : String = "march_dom_href"
     fn dom_set_href(url: String)                : Unit   = "march_dom_set_href"
-    fn dom_set_timeout(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_timeout"
-    fn dom_set_interval(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_interval"
-    fn dom_request_animation_frame(cb: Unit -> Unit) : Unit = "march_dom_request_animation_frame"
+    -- cb takes a dummy Int arg (ignored) rather than Unit: a zero-arg March
+    -- lambda (`fn -> body`) types to its body's result directly (no arrow
+    -- wrapper — see T-Abs in specs/lang/core-march-types.md), so it can never
+    -- unify with a declared `Unit -> Unit` parameter. Same idiom as
+    -- `task_spawn`'s thunk param; pass `fn _ -> body` and ignore the arg.
+    fn dom_set_timeout(ms: Int, cb: Int -> Unit) : Unit = "march_dom_set_timeout"
+    fn dom_set_interval(ms: Int, cb: Int -> Unit) : Unit = "march_dom_set_interval"
+    fn dom_request_animation_frame(cb: Int -> Unit) : Unit = "march_dom_request_animation_frame"
   end
 
   -- ── Public API ─────────────────────────────────────────────────────────
@@ -193,11 +207,23 @@ mod Dom do
   doc "Return the event type string for `ev` (e.g. \"click\", \"input\")."
   fn event_type(ev)                    do dom_event_type(ev) end
 
+  doc "Return the key that triggered a `\"keydown\"`/`\"keyup\"` event (e.g. \"ArrowLeft\", \"a\", \" \" for space)."
+  fn event_key(ev)                     do dom_event_key(ev) end
+
   doc "Prevent the browser's default action for `ev` (e.g. stop a link from navigating, a form from submitting)."
   fn prevent_default(ev)               do dom_prevent_default(ev) end
 
   doc "Stop `ev` from bubbling up to parent elements."
   fn stop_propagation(ev)              do dom_stop_propagation(ev) end
+
+  doc "Return the x-coordinate of `ev` relative to the target element (`event.offsetX`). Useful for hit-testing pointer/click events against a `<canvas>`."
+  fn event_x(ev)                       do dom_event_x(ev) end
+
+  doc "Return the y-coordinate of `ev` relative to the target element (`event.offsetY`)."
+  fn event_y(ev)                       do dom_event_y(ev) end
+
+  doc "Drain and return the pointer taps (pointerdown events) on `el` since the last call, as element-relative `(x, y)` integer pairs. The first call installs the buffering listener. Poll this once per animation frame for game input."
+  fn taps(el)                          do dom_taps(el) end
 
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end
@@ -208,13 +234,13 @@ mod Dom do
   doc "Navigate to `url` by setting `window.location.href`. This replaces the current page."
   fn navigate(url)                     do dom_set_href(url) end
 
-  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`."
+  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`. `cb` takes one ignored Int argument — pass `fn _ -> ...` (a zero-arg `fn -> ...` lambda cannot be used here; see the module doc)."
   fn set_timeout(ms, cb)               do dom_set_timeout(ms, cb) end
 
-  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM."
+  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM. `cb` takes one ignored Int argument — pass `fn _ -> ...`."
   fn set_interval(ms, cb)              do dom_set_interval(ms, cb) end
 
-  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations."
+  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations. `cb` takes one ignored Int argument — pass `fn _ -> ...`."
   fn on_frame(cb)                      do dom_request_animation_frame(cb) end
 
 end

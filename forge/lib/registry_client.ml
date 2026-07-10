@@ -70,6 +70,40 @@ let compile_registry_task tmp_src =
   let rc = Sys.command cmd in
   if rc <> 0 then Error rc else Ok out
 
+(** Compile the embedded registry.march client to a fresh temp binary and
+    return its path.  Used by `forge deps` to compile the client ONCE and then
+    run the `fetch` action many times (metadata + tarball downloads) against
+    the same binary, instead of recompiling per URL.  Caller owns the returned
+    binary and is responsible for removing it (and the temp source). *)
+let compile_client () =
+  let tmp_src = write_temp Registry_march_src.content ".march" in
+  match compile_registry_task tmp_src with
+  | Error rc ->
+    (try Sys.remove tmp_src with Sys_error _ -> ());
+    Error rc
+  | Ok binary ->
+    (try Unix.chmod binary 0o755 with Unix.Unix_error _ -> ());
+    (try Sys.remove tmp_src with Sys_error _ -> ());
+    Ok binary
+
+(** Build the child env array for a `fetch` action of a pre-compiled client
+    ([compile_client]).  GETs [url] over native HTTP/TLS and writes the raw
+    body to [out].  Returned as a full env array (inherited env + our vars)
+    ready for [Unix.create_process_env]; secrets are irrelevant for reads. *)
+let fetch_env ~url ~out =
+  let stdlib_env =
+    match Archive_store.find_stdlib_dir () with
+    | None -> []
+    | Some p -> [ "MARCH_STDLIB=" ^ p ]
+  in
+  let base_env =
+    [ "FORGE_ACTION=fetch";
+      "FORGE_URL=" ^ url;
+      "FORGE_OUT=" ^ out ]
+    @ stdlib_env
+  in
+  Array.append (Unix.environment ()) (Array.of_list base_env)
+
 (** Run the embedded registry.march task with FORGE_ACTION=<action> and the
     given env vars. Returns the subprocess's exit code (0/1/2/3/4/5 per
     registry.march's own convention — see this plan's Global Constraints).

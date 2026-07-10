@@ -7,6 +7,17 @@ mod JsDomAvailable do
     ()
   end
 
+  fn event_smoke(ev: Event) : Unit do
+    let _ = Dom.event_x(ev)
+    let _ = Dom.event_y(ev)
+    ()
+  end
+
+  fn taps_smoke(el: Node) : Unit do
+    let _ = Dom.taps(el)
+    ()
+  end
+
   fn main() : Unit do
     println("dom available")
   end
