@@ -1874,6 +1874,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
 
+; js_random_determinism: native/js_random_determinism.march is a KNOWN-BROKEN
+; repro (Random crashes on --target js — missing int_max_value mapping + 63-bit
+; ints don't fit JS doubles; see specs/todos.md P1). No rule on purpose; wire it
+; up as a golden once fixed.
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)

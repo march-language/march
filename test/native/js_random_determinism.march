@@ -1,0 +1,24 @@
+-- KNOWN-BROKEN repro, deliberately NOT wired into test/dune (no runtest rule):
+-- pure-March Random (xoshiro) crashes under --target js.
+--   1. js_emit has no mapping for the `int_max_value` builtin → emitted JS
+--      throws ReferenceError in Random.mix (this program's actual failure).
+--   2. Deeper: xoshiro needs exact 63-bit wraparound arithmetic; JS numbers
+--      are doubles, so `x * 1234567891011` in mix() silently exceeds 2^53
+--      and loses bits — mapping the builtin is NOT sufficient to make
+--      Random correct on the JS target.
+-- Tracked in specs/todos.md (P1, "Random unusable on --target js", 2026-07-09).
+-- Wire this into test/dune as a golden once fixed: it self-checks range and
+-- distinctness, and the diff pins cross-run determinism.
+mod JsRandomDeterminism do
+  fn main() : Unit do
+    let rng = Random.seed(42)
+    let (a, rng2) = Random.range(rng, 0, 1000000)
+    let (b, rng3) = Random.range(rng2, 0, 1000000)
+    let (f, _) = Random.next_float(rng3)
+    println(int_to_string(a))
+    println(int_to_string(b))
+    println(if f >= 0.0 && f < 1.0 do "float-ok" else "float-bad" end)
+    println(if a == b do "collision" else "distinct" end)
+    println(if a >= 0 && a <= 1000000 && b >= 0 && b <= 1000000 do "range-ok" else "range-bad" end)
+  end
+end
