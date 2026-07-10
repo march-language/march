@@ -1737,6 +1737,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps (file ../runtime/march_runtime.mjs))
  (action (copy ../runtime/march_runtime.mjs march_runtime.mjs)))
 
+; Same for march_dom.mjs, needed by any JS test that actually calls a Dom
+; extern (the generated import is the relative specifier "./march_dom.mjs").
+(rule
+ (targets march_dom.mjs)
+ (deps (file ../runtime/march_dom.mjs))
+ (action (copy ../runtime/march_dom.mjs march_dom.mjs)))
+
 (rule
  (targets js_atom_ctor_field.mjs)
  (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
@@ -1908,6 +1915,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_dom_available.out (run node js_dom_available.mjs))))
 
 (rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))
+
+; js_dom_timeout_callback — verifies Dom.set_timeout's `Int -> Unit` callback
+; (dummy ignored arg, not `Unit -> Unit`) both typechecks with `fn _ -> ...`
+; and actually fires via the `cb._0(cb, 0)` ABI in march_dom.mjs.
+(rule
+ (targets js_dom_timeout_callback.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_dom_timeout_callback.march) march_runtime.mjs march_dom.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_dom_timeout_callback.mjs native/js_dom_timeout_callback.march)))
+
+(rule
+ (targets js_dom_timeout_callback.out)
+ (deps js_dom_timeout_callback.mjs march_runtime.mjs march_dom.mjs)
+ (action (with-stdout-to js_dom_timeout_callback.out (run node js_dom_timeout_callback.mjs))))
+
+(rule (alias runtest) (action (diff native/js_dom_timeout_callback.expected js_dom_timeout_callback.out)))
+
+; js_canvas_available — verifies that canvas.march is auto-loaded for --target js builds
+(rule
+ (targets js_canvas_available.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_canvas_available.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_canvas_available.mjs native/js_canvas_available.march)))
+
+(rule
+ (targets js_canvas_available.out)
+ (deps js_canvas_available.mjs march_runtime.mjs)
+ (action (with-stdout-to js_canvas_available.out (run node js_canvas_available.mjs))))
+
+(rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
 
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule

@@ -319,6 +319,7 @@ adversarial-regressions). New regression tests
 `test_tc_qualified_sig_type_order_independent` (`test/test_stdlib_suite.ml`,
 module-system group); `test_tc_sig_opaque_hides_ctors` guards the opacity
 carve-out.
+
 ## Current State (as of 2026-07-08, shadowed same-block `let` rebinding fixed — js_emit TDZ crash + a silent-corruption Cprop bug)
 
 A shadowed same-block `let` rebinding a name off its own prior value
@@ -3628,6 +3629,30 @@ but on a different registration path.
 
 **Next queued widening slice:** actors (per the roadmap's Phase-2b/3
 phasing).
+
+## `Dom.set_timeout`/`set_interval`/`on_frame` callback signature fix (2026-07-09)
+
+Resolves the zero-arg-lambda follow-up filed by the Canvas 2D API work below (spawn_task `task_f422fd93`).
+
+- [x] **Fixed a never-satisfiable extern signature.** `stdlib/dom.march`'s three deferred-callback externs declared `cb: Unit -> Unit`, but a zero-arg March lambda (`fn -> body`) types to its body's result directly with no arrow wrapper (T-Abs), so it could never unify with a declared arrow type — these three callbacks were uncallable from real March source (no existing test exercised them). Changed `cb` to `Int -> Unit` (dummy ignored argument), matching the codebase's existing `task_spawn`/`pmap_threshold`/`task_cancel_token_new` idiom for this exact shape; callers now write `fn _ -> body`. `runtime/march_dom.mjs`'s three JS wrappers updated to call `cb._0(cb, 0)` (was `cb._0(cb)`), matching the `f._0(f, args...)` closure-call ABI for a 1-declared-param closure.
+- [x] Regression: `test/native/js_dom_timeout_callback.{march,expected}` + `test/dune` rule — compiles `--target js`, runs under `node`, verifies the callback typechecks with `fn _ -> ...` and actually fires (prints "fired") via the fixed ABI. Added a `march_dom.mjs` copy-rule to `test/dune` (this is the first JS test to actually invoke a `Dom` extern; the pre-existing `js_dom_available` test only referenced `Dom.body()` from dead code).
+- Full suite green: `scripts/run-tests.sh` (807 tests) + all `test/dune` JS-target golden diffs (`js_dom_available`, `js_dom_timeout_callback`, `js_extern_import`, `js_ffi_async`, `js_ffi_blocking_raises`, `js_ffi_raises`, `js_ffi_cbacked`).
+
+## Current State (as of 2026-07-09, Canvas 2D API for JS target)
+
+**New `Canvas` stdlib module (`stdlib/canvas.march` + `runtime/march_canvas.mjs`)** — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Mirrors `Dom`'s existing extern-block pattern: `resource Context`/`resource Image`, `needs Ffi`, JS-target-only (registered in `bin/main.ml`'s `js_only_stdlib_file_list`; native/JIT calls panic). Covers state (`save`/`restore`/`translate`/`rotate`/`scale`), style (`set_fill_style`/`set_stroke_style`/`set_line_width`/`set_global_alpha`/`set_font`), rects, paths (`begin_path`/`move_to`/`line_to`/`arc`/`quadratic_curve_to`/`bezier_curve_to`/`fill`/`stroke`), text, and images (`load_image` — a `blocking raises` extern returning `Result(Image, String)`, so callers write `let? img = Canvas.load_image(url)` with no callback API). One new line in `lib/tir/js_emit.ml`'s `js_runtime_module_path` maps the `"canvas"` extern lib to `./march_canvas.mjs`.
+
+**`Dom` gains pointer-coordinate accessors** — `Dom.event_x`/`Dom.event_y` (`event.offsetX`/`offsetY`, canvas-relative), enabling tap/click hit-testing against a `<canvas>` without manual `getBoundingClientRect()` math. Verified live: a browser click lands a drawn marker at the exact clicked canvas coordinate.
+
+**New `demo_app/canvas_demo/`** exercises the full surface in a real browser: static shapes (rect, stroked rect, filled arc, quadratic-curve stroke, text), `translate`/`rotate`/`save`/`restore` via a static rotated bar, click-to-drop markers via `Dom.listen`+`event_x`/`event_y`, and one `load_image`+`draw_image` call against an inline SVG data URI (no binary asset committed). Verified with the preview browser tools: all shapes render, zero console/network errors.
+
+**Found and filed, not fixed here:** `Dom.on_frame`/`set_timeout`/`set_interval` are currently **uncallable from March source with a zero-arg lambda** — the originally-planned animation loop for `canvas_demo` had to be dropped in favor of a static rotated shape. Root cause (confirmed against `specs/lang/core-march-types.md`'s T-Abs rule and `test/native/zero_arg_closure_default.march`'s own comment): a zero-arg lambda `fn -> body` typechecks to its body's result type directly (a "thunk", no arrow wrapper) and can never unify with the extern's declared `Unit -> Unit` arrow type — reproduced with a minimal standalone repro outside any Canvas/Dom code, so this is a pre-existing latent bug in `dom.march`'s signatures, not something this change introduced. Filed as a follow-up task (spawn_task `task_f422fd93`) rather than fixed here — root-causing the correct fix (typechecker special-case vs. a different signature/idiom) is compiler work beyond this change's scope.
+
+**Validation:** no `test_oracle.ml`/`@oracle` coverage — that suite diffs interpreter vs. *native* compile and structurally cannot exercise `--target js`-only code (same as `Dom` today; confirmed with the user rather than added as a no-op task). Instead: a new `test/native/js_canvas_available.march` fixture (dead-code references to force typecheck/module-load coverage of every `Canvas` function without needing a real `document`/`CanvasRenderingContext2D`/`Image` under plain `node`) diffed via a new `test/dune` golden rule, plus `test/native/js_dom_available.march` extended with the same dead-code pattern for `event_x`/`event_y`. Both pass; full alcotest suite green under `scripts/run-tests.sh`. The real end-to-end proof is `canvas_demo`, which calls every function from a live `main()` and was verified in an actual browser.
+
+**Docs:** `docs/stdlib.md` gains a `## Canvas (JS only)` section (mirroring `## Dom (JS only)`) and a summary-table row; stdlib module count bumped 108 → 109 across `docs/stdlib.md`, `CLAUDE.md`, and `.claude/skills/march-lang/SKILL.md` (two spots) to keep `scripts/check-docs.sh` green. Design doc: `docs/superpowers/specs/2026-07-09-canvas-api-design.md`; plan: `docs/superpowers/plans/2026-07-09-canvas-2d-api.md` (both uncommitted — `docs/superpowers/` is gitignored in this repo).
+
+**Also fixed in passing:** `demo_app/canvas_demo/build.sh`'s `dune build` now passes `--root` and a specific target (`bin/main.exe`) — a plain `dune build` from a nested worktree (e.g. `.claude/worktrees/<name>`) escapes upward to the outer repo's project root and additionally pulls in the full test suite by default. `demo_app/dom_demo/build.sh` has the same latent issue, left as-is (out of scope for this change).
 
 ## Current State (as of 2026-07-09, Tetris playground: pause, layout fixes, time-travel debugger)
 
