@@ -255,6 +255,19 @@ mod Tetris do
     end
   end
 
+  -- Self-rescheduling rather than a single fixed-rate Dom.set_interval, so
+  -- the drop rate can actually speed up as the level rises: TetrisLogic's
+  -- drop_interval_ms(level) is re-read fresh before every tick. Keeps
+  -- rescheduling even while paused (tick() itself no-ops then) so play
+  -- resumes automatically without any separate timer wiring.
+  fn schedule_tick() : Unit do
+    let level = TetrisLogic.level_for_lines(get_int_attr(state_el(), "data-lines", 0))
+    Dom.set_timeout(TetrisLogic.drop_interval_ms(level), fn _ -> do
+      tick()
+      schedule_tick()
+    end)
+  end
+
   fn try_move(dx: Int, dy: Int) : Unit do
     with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
@@ -432,7 +445,7 @@ mod Tetris do
         build_board_dom(board_el)
         restart()
         Dom.listen(Dom.body(), "keydown", fn ev -> handle_key(ev))
-        Dom.set_interval(500, fn _ -> tick())
+        schedule_tick()
         match Dom.find("restore-trigger") do
           None -> ()
           Some(trigger) -> Dom.listen(trigger, "click", fn _ -> restore_from_request())

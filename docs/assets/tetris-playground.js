@@ -152,25 +152,6 @@
 
   var BOARD_COLS = 10, BOARD_ROWS = 20;
 
-  // The board rendered at a fixed 16px/cell regardless of how much space the
-  // panel actually had — tiny and lost in the middle of a tall panel. Instead
-  // size cells from the ACTUAL space #tp-iframe-host has right now (measured
-  // before the old iframe is torn down, since the host's own size comes from
-  // outer flex layout and doesn't depend on its children), reserving room for
-  // the HUD/game-over lines and some breathing room, so the board fills most
-  // of the panel on a big screen and still fits on a small one.
-  function computeCellSize() {
-    var host = document.getElementById("tp-iframe-host");
-    var rect = host.getBoundingClientRect();
-    var reservedV = 155; // HUD + game-over + pause-status + time-travel bar + gaps + body padding
-    var reservedH = 32;  // board border + side margin
-    var byHeight = Math.floor((rect.height - reservedV) / BOARD_ROWS);
-    var byWidth = Math.floor((rect.width - reservedH) / BOARD_COLS);
-    var size = Math.min(byHeight, byWidth);
-    if (!isFinite(size) || size <= 0) size = 20;
-    return Math.max(12, Math.min(size, 44));
-  }
-
   // The attributes that fully describe one game frame. Time travel copies
   // these verbatim between #game-state and #restore-request — see the
   // inline script below and Tetris.restore_from_request in tetris.march.
@@ -211,6 +192,18 @@
       "var resumeBtn=document.getElementById('tt-resume');" +
       "var pauseBtn=document.getElementById('pause-btn');" +
       "var label=document.getElementById('tt-label');" +
+      "var boardEl=document.getElementById('board');" +
+      "var ttBar=document.getElementById('tt-bar');" +
+      // #board's width now falls out of its aspect-ratio (no JS-computed px
+      // value to reuse), so mirror its ACTUAL rendered width onto the
+      // time-travel bar instead of guessing — a ResizeObserver keeps them in
+      // sync through window resizes and any future layout change.
+      "function syncTtBarWidth(){" +
+      "var w=boardEl.getBoundingClientRect().width;" +
+      "if(w>0)ttBar.style.width=w+'px';" +
+      "}" +
+      "new ResizeObserver(syncTtBarWidth).observe(boardEl);" +
+      "syncTtBarWidth();" +
       "function capture(){" +
       "var s={};ATTRS.forEach(function(a){s[a]=gs.getAttribute(a);});return s;" +
       "}" +
@@ -287,31 +280,44 @@
     // an explicit <base href> pointing at the assets directory.
     var assetsBase = window.location.origin + base + "/assets/tetris/";
     var t = themeColors();
-    var cell = computeCellSize();
-    var hudFont = Math.max(12, Math.round(cell * 0.5));
-    var boardPx = cell * BOARD_COLS;
     return (
       "<!DOCTYPE html><html><head><meta charset='utf-8'>" +
       "<base href='" + assetsBase + "'>" +
       "<style>" +
       "*{box-sizing:border-box;margin:0;padding:0}" +
+      "html,body{height:100%;overflow:hidden}" +
+      // Every previous version of this layout computed a fixed px cell size
+      // from a hand-guessed "reserved space for everything else" constant —
+      // any viewport where that guess ran short (a tall MacBook screen, an
+      // extra HUD row added later) let the board's real content height
+      // exceed the iframe's box, forcing an internal scrollbar. Flex + one
+      // aspect-ratio on #board makes the browser compute cell size from
+      // whatever space is ACTUALLY left after the HUD/status/time-travel
+      // rows take their natural height — it can never overflow by
+      // construction, no guessing involved.
       "body{background:" + t.bg + ";color:" + t.text + ";font-family:system-ui,sans-serif;" +
-      "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;height:100vh}" +
-      "#board{display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
-      ".tetris-row{display:flex}.tetris-cell{width:" + cell + "px;height:" + cell + "px;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
-      "#hud{display:flex;gap:1rem;align-items:center;font-size:" + hudFont + "px;color:" + t.textMuted + "}" +
+      "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
+      "gap:.5rem;height:100vh;padding:.5rem}" +
+      "#board{flex:1;min-height:0;aspect-ratio:" + BOARD_COLS + "/" + BOARD_ROWS + ";" +
+      "display:flex;flex-direction:column;border:2px solid " + t.border + ";background:" + t.bgCode + "}" +
+      ".tetris-row{flex:1;display:flex}.tetris-cell{flex:1;border:1px solid " + t.border + ";background:" + t.bgCode + "}" +
+      "#hud{display:flex;gap:1rem;align-items:center;flex-shrink:0;" +
+      "font-size:clamp(11px,2.2vh,16px);color:" + t.textMuted + "}" +
       ".hud-btn{font:inherit;color:inherit;background:transparent;border:1px solid " + t.border + ";" +
       "border-radius:4px;padding:2px 10px;cursor:pointer}" +
       ".hud-btn:hover{border-color:" + t.textMuted + "}" +
       ".hud-btn:disabled{opacity:.4;cursor:default}" +
-      "#game-over{color:#f87171;font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
-      "#pause-status{color:" + t.textMuted + ";font-weight:600;min-height:1.2em;font-size:" + hudFont + "px}" +
+      "#game-over{color:#f87171;font-weight:600;min-height:1.2em;flex-shrink:0;font-size:clamp(11px,2.2vh,16px)}" +
+      "#pause-status{color:" + t.textMuted + ";font-weight:600;min-height:1.2em;flex-shrink:0;font-size:clamp(11px,2.2vh,16px)}" +
       // Squeezing the slider into the same row as the step buttons, frame
       // count, and "Resume from here" left it almost no width to shrink
       // into — it read as "collapsed". Full-width slider on its own row,
       // sized to match the board, with the controls on a row underneath.
-      "#tt-bar{display:flex;flex-direction:column;gap:.4rem;font-size:" + hudFont + "px;" +
-      "color:" + t.textMuted + ";width:" + boardPx + "px}" +
+      // Width is synced to #board's actual rendered width in JS (see
+      // syncTtBarWidth below) since the board's own width is no longer a
+      // value this script computes — it falls out of the aspect-ratio.
+      "#tt-bar{display:flex;flex-direction:column;gap:.4rem;flex-shrink:0;" +
+      "font-size:clamp(11px,2.2vh,16px);color:" + t.textMuted + "}" +
       "#tt-slider{width:100%}" +
       "#tt-controls{display:flex;align-items:center;justify-content:center;gap:.5rem}" +
       "#tt-label{white-space:nowrap;font-variant-numeric:tabular-nums}" +

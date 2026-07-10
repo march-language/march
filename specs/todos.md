@@ -1407,3 +1407,35 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ **New dual-target golden test: `test/native/let_shadow_rebind.march`/`.expected`** (`native_let_shadow_rebind` + `js_let_shadow_rebind` rules in `test/dune`, modeled on the existing `let_tuple_destructure` dual-target pair) — covers arithmetic rebind, the `Random.seed` if/else rebind shape, a 4-deep shadow chain, and a rebind shadowing a fn parameter; asserts native (`--compile`, default opt) and JS (`--target js`, default opt) both match the interpreter's ground truth (`6`/`13`/`4`/`12`). Both bugs had to be fixed together for this test to pass under DEFAULT flags (opt enabled) — fixing only `js_emit.ml` left native and default-opt JS silently wrong via the `Cprop` bug.
 - ✅ **Stdlib audit: `stdlib/random.march`'s `mix`/`seed` are the only genuine same-block self-referential shadow sites found.** A heuristic grep across `stdlib/**/*.march` for repeated `let NAME = ...` within a function turned up 44 candidates; manual inspection showed all but `random.march` are false positives (separate `match`/`if-else` arms binding the same name independently, not a shared same-scope rebind) — e.g. `hamt.march`/`set.march`/`map.march`'s repeated `idx` and `msgpack.march`'s repeated `len` are each in mutually-exclusive branches. No other stdlib source changes were needed; `random.march`'s `mix` (5-deep `x` shadow chain) and `seed` (`s0` if/else rebind) now compile correctly under `--target js` without any workaround.
 - ✅ **Full suite green:** `scripts/run-tests.sh` (805 tests, quick + slow) and the two new golden-test rules (`native_let_shadow_rebind`, `js_let_shadow_rebind`, verified via direct `dune build` + diff against `.expected`) all pass.
+
+## Compiler bug — JS backend Int `/` never truncated (2026-07-09)
+
+- ✅ **`lib/tir/js_emit.ml`'s `inline_binop` shadowed the type-aware Int-division
+  guard for the `/` operator.** `inline_binop("/")` matched first (a fast-path
+  table for symbolic operators) and unconditionally emitted raw `(a / b)` —
+  JS's true division — for EVERY `/` call, Int or Float. The correct,
+  type-aware logic a few lines below (`"/", [a; b] when atom_ty a = TInt ->
+  Math.trunc(a / b)`) was dead code, unreachable for the symbolic `"/"` name
+  since `inline_binop` always won first. Reproduced minimally:
+  `fn half(n: Int): Int do n / 10 end; half(15)` printed `1.5` under
+  `--target js` (correct answer: `1`, and correct natively/interpreted).
+  Found while wiring `TetrisLogic.level_for_lines`/`drop_interval_ms` into
+  the Tetris playground demo's tick loop (`total_lines / 10` was silently
+  producing fractional levels, e.g. "Level: 1.5").
+- **Fix:** removed `"/"` from `inline_binop`'s combined `"/" | "/." -> Some "/"`
+  arm (kept `"/."` — float division needs no truncation and was never
+  ambiguous), forcing all Int `/` through the existing type-aware match arm.
+  One-line-plus-comment fix in `lib/tir/js_emit.ml`.
+- **Verified:** full suite green (805 tests, exit 0) including the existing
+  `adversarial-regressions` int/float-division-by-zero cases; minimal repro
+  now prints `1`; Tetris playground's level display and drop-speed ramp both
+  correct in the browser (level text, and measured tick-interval deltas
+  matching `drop_interval_ms(level)` exactly for level 0 and level 1).
+- **Likely impact:** any `--target js` program dividing two `Int`s via the
+  bare `/` operator (not the `div_int`-named builtin, nor `Int.div`-style
+  helpers) got a fractional JS result instead of a truncated one — silent,
+  no compiler warning, no type error (JS has no static Int/Float
+  distinction at runtime). Plausibly present since `/`'s Int-truncation
+  guard was added; not otherwise caught because the browser playground demo
+  is the first `--target js` consumer in this repo to exercise Int
+  division on a value that wasn't already a multiple of the divisor.
