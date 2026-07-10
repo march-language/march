@@ -91,6 +91,9 @@ mod Dom do
     fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
     fn dom_event_y(ev: Event)                   : Int    = "march_dom_event_y"
     fn dom_taps(el: Node)                       : List((Int, Int)) = "march_dom_taps"
+    fn dom_key_presses()                        : List(String) = "march_dom_key_presses"
+    fn dom_store_get(key: String)               : Option(String) = "march_dom_store_get"
+    fn dom_store_set(key: String, val: String)  : Unit = "march_dom_store_set"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
@@ -224,6 +227,15 @@ mod Dom do
 
   doc "Drain and return the pointer taps (pointerdown events) on `el` since the last call, as element-relative `(x, y)` integer pairs. The first call installs the buffering listener. Poll this once per animation frame for game input."
   fn taps(el)                          do dom_taps(el) end
+
+  doc "Drain and return the keyboard keys (keydown `event.key` strings, e.g. \" \", \"ArrowLeft\", \"a\") pressed since the last call. The first call installs a document-level buffering listener which prevents the browser default ONLY for space and arrow keys (so game input doesn't scroll the page). Poll once per animation frame."
+  fn key_presses()                     do dom_key_presses() end
+
+  doc "Read `key` from the browser's localStorage. Returns `None` if the key is absent or storage is unavailable (e.g. private browsing)."
+  fn store_get(key)                    do dom_store_get(key) end
+
+  doc "Write `val` under `key` in the browser's localStorage. Silently does nothing if storage is unavailable."
+  fn store_set(key, val)               do dom_store_set(key, val) end
 
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end
