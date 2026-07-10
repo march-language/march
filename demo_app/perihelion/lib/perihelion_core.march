@@ -25,6 +25,10 @@ mod Perihelion.Core do
   fn kill_margin() : Float do 40.0 end
   fn overshoot_margin() : Float do 150.0 end
   fn fall_margin() : Float do 200.0 end
+  -- Ladder generation stays this many screen-heights ahead of the visible
+  -- top edge (world y = camera_y), so a newly-generated star is always
+  -- already off-screen before it scrolls into view -- no visual pop-in.
+  fn lookahead_screens() : Float do 1.5 end
   fn two_pi() : Float do 6.283185307179586 end
   fn mult_cap() : Int do 5 end
 
@@ -102,7 +106,7 @@ mod Perihelion.Core do
         let g3 = Perihelion.Combat.fire(g2, keys, cursor, dt_s)
         let g4 = Perihelion.Combat.collide(g3)
         match g4.phase do
-          Playing -> step_camera(g4, dt_s)
+          Playing -> top_up(step_camera(g4, dt_s))
           _ -> g4
         end
       _ -> g1
@@ -249,20 +253,25 @@ mod Perihelion.Core do
     end
   end
 
-  -- Keep at least two stars above the current one; each appended star rolls
-  -- an enemy-ship spawn. (Skip-a-rung captures can consume lookahead faster
-  -- than one-per-capture generation replaces it.)
+  -- Keep the ladder generated lookahead_screens() screen-heights above the
+  -- visible top edge -- distance-based rather than a fixed star count, so a
+  -- tall full-screen viewport (which can see much further ahead than the
+  -- original 640px design) never scrolls into a star that pops into
+  -- existence right as it enters view. Each appended star rolls an enemy-ship
+  -- spawn. Called both defensively every frame (step_playing) and eagerly
+  -- right after a capture (skip-a-rung captures can consume lookahead faster
+  -- than the per-frame call alone would replace it).
   pfn top_up(game : Game) : Game do
-    if List.length(game.stars) - 1 - game.current >= 2 do
-      game
-    else
-      let fallback = { x: game.view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
-      let top = top_star(game.stars, fallback)
+    let fallback = { x: game.view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let top = top_star(game.stars, fallback)
+    if top.y > game.camera_y - game.view_h * lookahead_screens() do
       let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top, game.view_w)
       let g2 = { game with
           stars: List.append(game.stars, Cons(fresh, Nil)),
           rng: rng2 }
       top_up(Perihelion.Combat.maybe_spawn_ship(g2, List.length(g2.stars) - 1))
+    else
+      game
     end
   end
 

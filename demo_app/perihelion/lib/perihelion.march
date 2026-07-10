@@ -20,6 +20,65 @@ mod Perihelion do
     Canvas.fill(ctx)
   end
 
+  -- Cheap deterministic per-cell hash, same GLSL-style trick as asteroid_hash.
+  pfn bg_hash(gx : Int, gy : Int) : Float do
+    let x = Math.sin(int_to_float(gx) * 12.9898 + int_to_float(gy) * 78.233) * 43758.5453
+    x - Math.floor(x)
+  end
+
+  -- Purely decorative, non-interactive background starfield: a deterministic
+  -- hash keyed by world-space grid cell (not stored in Game) so it needs no
+  -- spawn event and therefore never pops in -- whatever cell scrolls into
+  -- view was already "there". Fills the full width (including the edges a
+  -- wide viewport leaves empty around the narrow gameplay ladder) and
+  -- scrolls vertically with the same camera translate as everything else.
+  pfn draw_bg_cell(ctx, gx : Int, gy : Int, cell : Float) : Unit do
+    let h = bg_hash(gx, gy)
+    if h > 0.35 do
+      ()
+    else
+      let jx = bg_hash(gx, gy + 1000)
+      let jy = bg_hash(gx + 1000, gy)
+      let x = int_to_float(gx) * cell + jx * cell
+      let y = int_to_float(gy) * cell + jy * cell
+      let br = 0.12 + 0.45 * bg_hash(gx + 2000, gy + 2000)
+      let sz = 1.0 + 1.4 * bg_hash(gx - 2000, gy - 2000)
+      Canvas.set_global_alpha(ctx, br)
+      Canvas.begin_path(ctx)
+      Canvas.arc(ctx, x, y, sz, 0.0, two_pi())
+      Canvas.fill(ctx)
+    end
+  end
+
+  pfn draw_bg_row(ctx, gx : Int, gx_max : Int, gy : Int, cell : Float) : Unit do
+    if gx > gx_max do
+      ()
+    else
+      draw_bg_cell(ctx, gx, gy, cell)
+      draw_bg_row(ctx, gx + 1, gx_max, gy, cell)
+    end
+  end
+
+  pfn draw_bg_rows(ctx, gx0 : Int, gx1 : Int, gy : Int, gy_max : Int, cell : Float) : Unit do
+    if gy > gy_max do
+      ()
+    else
+      draw_bg_row(ctx, gx0, gx1, gy, cell)
+      draw_bg_rows(ctx, gx0, gx1, gy + 1, gy_max, cell)
+    end
+  end
+
+  pfn draw_starfield(ctx, cam : Float, view_w : Float, view_h : Float) : Unit do
+    let cell = 90.0
+    let gx0 = 0 - 1
+    let gx1 = float_to_int(Math.floor(view_w / cell)) + 1
+    let gy0 = float_to_int(Math.floor(cam / cell)) - 1
+    let gy1 = float_to_int(Math.floor((cam + view_h) / cell)) + 1
+    Canvas.set_fill_style(ctx, "#ffffff")
+    draw_bg_rows(ctx, gx0, gx1, gy0, gy1, cell)
+    Canvas.set_global_alpha(ctx, 1.0)
+  end
+
   pfn draw_stars(ctx, stars : List(Star), cam : Float, view_h : Float) : Unit do
     match stars do
       Nil -> ()
@@ -195,6 +254,7 @@ mod Perihelion do
     Canvas.fill_rect(ctx, 0.0, 0.0, game.view_w, game.view_h)
     Canvas.save(ctx)
     Canvas.translate(ctx, 0.0, 0.0 - game.camera_y)
+    draw_starfield(ctx, game.camera_y, game.view_w, game.view_h)
     draw_stars(ctx, game.stars, game.camera_y, game.view_h)
     draw_asteroids(ctx, game.asteroids)
     draw_ships(ctx, game.ships)
