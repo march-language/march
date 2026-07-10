@@ -7244,6 +7244,48 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(** Cross-module ambiguous-constructor resolution (compiled-only regression).
+
+    `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
+    names `Null`/`Bool`/`Str`/`Array` at DIFFERENT tag positions (`Array` is tag 5
+    in `Value`, tag 4 in `JsonValue`). Pre-fix, an unannotated `Msgpack` function
+    resolving a bare `Array`/`Str`/`Null` could pick the sibling module's variant,
+    so:
+      • `encode_val`'s scrutinee typed as `JsonValue` → the `Int`/`Array`/`Map`
+        arms (Msgpack-only) collapsed to a non-exhaustive `switch`, and
+        `Msgpack.encode(Msgpack.int(42))` panicked with "non-exhaustive pattern
+        match" at runtime (interpreter was fine — this was compiled-only), and
+      • `decode` constructed `alloc JsonValue.Array` (tag 4) where a `Value`
+        (tag 5) was meant, so a decoded array no longer matched `Msgpack.Array`.
+    The interpreter got both right, making this a pure codegen parity divergence.
+    Fixed as a side effect of the sibling-ctor-shadowing fix (`add_ctor` moving a
+    module's own re-registered constructor to the front of its candidate list —
+    see the "sibling-ctor shadowing" entry in `specs/progress.md`). This
+    exercises the Msgpack-only arms (Int, Array, Map) through both encode and a
+    decode round-trip. *)
+let test_msgpack_cross_module_ctor_resolution_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_msgpack_ctor_resolution"
+    ~src:"mod MsgpackCtorResolution do\n\
+         \  fn describe(bs : List(Int)) : String do\n\
+         \    match Msgpack.decode(bs) do\n\
+         \      Ok(Msgpack.Int(n))   -> \"int:\" ++ String.from_int(n)\n\
+         \      Ok(Msgpack.Array(_)) -> \"array\"\n\
+         \      Ok(Msgpack.Map(_))   -> \"map\"\n\
+         \      Ok(_)                -> \"other\"\n\
+         \      Err(e)               -> \"err:\" ++ e\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(String.from_int(List.length(Msgpack.encode(Msgpack.int(42)))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.int(7))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.int(2), Nil))))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.map(Cons((Msgpack.str(\"k\"), Msgpack.int(9)), Nil)))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"1\nint:7\narray\nmap"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -8421,6 +8463,10 @@ let codegen_suites =
             test_newtype_eq_operator_boxed_payload_compiled;
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
+        ] );
+      ( "cross_module_ctor_resolution", [
+          Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
+            test_msgpack_cross_module_ctor_resolution_compiled;
         ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick

@@ -351,6 +351,19 @@ suite 807 → **808**). Full six-runner suite green; check-docs clean.
 Remaining from the same merge: the bench `ptype Tree` stdlib collision
 (filed, open).
 
+**Addendum (same day, found independently investigating a compiled-only
+MessagePack panic):** the `add_ctor` move-to-front fix above also closes a
+second, distinct ambiguous-bare-constructor bug — `Msgpack.Value` and
+`Json.JsonValue` (both stdlib) share `Null`/`Bool`/`Str`/`Array` at DIFFERENT
+tag positions (`Array` = tag 5 in `Value`, tag 4 in `JsonValue`). Pre-fix, a
+bare `Array`/`Int`/`Map` inside `mod Msgpack`'s own `encode_val`/`decode` could
+resolve to `JsonValue`'s variant, producing a non-exhaustive LLVM `switch`
+(`Msgpack.encode(Msgpack.int(42))` panicked "non-exhaustive pattern match"
+when compiled — interpreter was correct) and a mistagged `alloc
+JsonValue.Array` in `decode`. New regression `cross_module_ctor_resolution`
+(`test/test_codegen.ml`) confirms this is fixed by the same mechanism; no
+further compiler change needed.
+
 ## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
 
 **Slice-7 finding L7 is FIXED**, with a corrected diagnosis: the original
