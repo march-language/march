@@ -96,7 +96,8 @@ mod Perihelion do
 
   pfn tick(ctx, el, game : Game) : Unit do
     let taps = Dom.taps(el)
-    let g2 = Perihelion.Core.update(game, taps, Perihelion.Core.dt())
+    let keys = Dom.key_presses()
+    let g2 = Perihelion.Core.update(game, taps, keys, Perihelion.Core.dt())
     draw(ctx, g2)
     Dom.on_frame(fn _ -> tick(ctx, el, g2))
   end

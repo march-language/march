@@ -1,0 +1,34 @@
+-- Perihelion.Combat — pure combat logic: asteroids, enemy ships, shots,
+-- shield pickups. All randomness threads the Int LCG via Perihelion.Level.
+mod Perihelion.Combat do
+
+  type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float }
+
+  type Ship = { star_idx : Int, angle : Float, fire_cooldown : Float }
+
+  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float }
+
+  type Pickup = { x : Float, y : Float, ttl : Float }
+
+  -- ── Tuning constants ─────────────────────────────────────────────────
+  fn asteroid_interval() : Float do 4.0 end
+  fn asteroid_jitter() : Float do 1.0 end
+  fn asteroid_speed() : Float do 90.0 end
+  fn asteroid_radius() : Float do 10.0 end
+  fn ship_score_min() : Int do 3 end
+  fn ship_orbit_mult() : Float do 1.6 end
+  fn ship_orbit_speed() : Float do 1.4 end
+  fn ship_radius() : Float do 10.0 end
+  fn ship_fire_interval() : Float do 2.5 end
+  fn ship_fire_range() : Float do 380.0 end
+  fn enemy_shot_speed() : Float do 150.0 end
+  fn player_shot_speed() : Float do 420.0 end
+  fn shot_ttl() : Float do 3.0 end
+  fn shot_radius() : Float do 3.0 end
+  fn player_fire_cooldown() : Float do 0.4 end
+  fn drop_chance() : Float do 0.25 end
+  fn pickup_ttl() : Float do 8.0 end
+  fn pickup_radius() : Float do 12.0 end
+  fn ball_radius() : Float do 6.0 end
+
+end
