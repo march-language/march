@@ -24,6 +24,12 @@ mod JsDomAvailable do
     Dom.store_set("k", "v")
   end
 
+  fn viewport_smoke(el: Node) : Unit do
+    let _ = Dom.pointer_pos(el)
+    let _ = Dom.window_size()
+    ()
+  end
+
   fn main() : Unit do
     println("dom available")
   end

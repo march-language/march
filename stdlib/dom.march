@@ -94,6 +94,8 @@ mod Dom do
     fn dom_key_presses()                        : List(String) = "march_dom_key_presses"
     fn dom_store_get(key: String)               : Option(String) = "march_dom_store_get"
     fn dom_store_set(key: String, val: String)  : Unit = "march_dom_store_set"
+    fn dom_pointer_pos(el: Node)                : (Int, Int) = "march_dom_pointer_pos"
+    fn dom_window_size()                        : (Int, Int) = "march_dom_window_size"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
@@ -236,6 +238,12 @@ mod Dom do
 
   doc "Write `val` under `key` in the browser's localStorage. Silently does nothing if storage is unavailable."
   fn store_set(key, val)               do dom_store_set(key, val) end
+
+  doc "The live cursor position over `el` as element-relative `(x, y)` integers, updated by a `mousemove` listener installed on the first call. Defaults to `el`'s center before any movement. Unlike `taps`, this reads the current position rather than draining a buffer."
+  fn pointer_pos(el)                   do dom_pointer_pos(el) end
+
+  doc "The browser window's inner size (`window.innerWidth`/`innerHeight`) in CSS pixels, as `(w, h)`. No devicePixelRatio handling."
+  fn window_size()                     do dom_window_size() end
 
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end

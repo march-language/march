@@ -20,38 +20,45 @@ mod Perihelion do
     Canvas.fill(ctx)
   end
 
-  pfn draw_stars(ctx, stars : List(Star), cam : Float) : Unit do
+  pfn draw_stars(ctx, stars : List(Star), cam : Float, view_h : Float) : Unit do
     match stars do
       Nil -> ()
       Cons(s, rest) ->
-        if s.y < cam + Perihelion.Core.view_h() + 100.0 && s.y > cam - 100.0 do
+        if s.y < cam + view_h + 100.0 && s.y > cam - 100.0 do
           draw_star(ctx, s)
         else
           ()
         end
-        draw_stars(ctx, rest, cam)
+        draw_stars(ctx, rest, cam, view_h)
     end
   end
 
-  pfn draw_tether(ctx, game : Game) : Unit do
-    match game.mode do
-      Flying(_, _) -> ()
-      Orbiting(idx, _) ->
-        match List.nth_opt(game.stars, idx) do
-          None -> ()
-          Some(s) ->
-            Canvas.set_global_alpha(ctx, 0.5)
-            Canvas.set_stroke_style(ctx, "#e0e0e0")
-            Canvas.set_line_width(ctx, 1.0)
-            Canvas.begin_path(ctx)
-            Canvas.move_to(ctx, s.x, s.y)
-            Canvas.line_to(ctx, game.ball_x, game.ball_y)
-            Canvas.stroke(ctx)
-            Canvas.set_global_alpha(ctx, 1.0)
-        end
-    end
+  -- Cheap deterministic per-vertex hash (GLSL-style sin/frac trick) — no RNG
+  -- state needed beyond the asteroid's own stored shape_seed.
+  pfn asteroid_hash(seed : Float, i : Int) : Float do
+    let x = Math.sin(seed * 12.9898 + int_to_float(i) * 78.233) * 43758.5453
+    x - Math.floor(x)
   end
 
+  pfn asteroid_vertex(a : Asteroid, i : Int) : (Float, Float) do
+    let angle = int_to_float(i) * (two_pi() / 8.0)
+    let jitter = 0.7 + 0.6 * asteroid_hash(a.shape_seed, i)
+    let r = a.radius * jitter
+    let pt = (a.x + Math.cos(angle) * r, a.y + Math.sin(angle) * r)
+    pt
+  end
+
+  pfn draw_asteroid_edges(ctx, a : Asteroid, i : Int) : Unit do
+    if i > 7 do
+      Canvas.close_path(ctx)
+      Canvas.fill(ctx)
+    else
+      let pt = asteroid_vertex(a, i)
+      let (px, py) = pt
+      if i == 0 do Canvas.move_to(ctx, px, py) else Canvas.line_to(ctx, px, py) end
+      draw_asteroid_edges(ctx, a, i + 1)
+    end
+  end
 
   pfn draw_asteroids(ctx, asteroids : List(Asteroid)) : Unit do
     match asteroids do
@@ -59,8 +66,7 @@ mod Perihelion do
       Cons(a, rest) ->
         Canvas.set_fill_style(ctx, "#8a8a94")
         Canvas.begin_path(ctx)
-        Canvas.arc(ctx, a.x, a.y, a.radius, 0.0, two_pi())
-        Canvas.fill(ctx)
+        draw_asteroid_edges(ctx, a, 0)
         draw_asteroids(ctx, rest)
     end
   end
@@ -77,14 +83,22 @@ mod Perihelion do
     end
   end
 
-  pfn draw_ships(ctx, game : Game, ships : List(Ship)) : Unit do
+  pfn ship_heading(sh : Ship) : Float do
+    match sh.mode do
+      ShipOrbiting(angle) ->
+        let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
+        angle + d * 1.5707963
+      ShipFlying(vx, vy) -> Math.atan2(vy, vx)
+    end
+  end
+
+  pfn draw_ships(ctx, ships : List(Ship)) : Unit do
     match ships do
       Nil -> ()
       Cons(sh, rest) ->
-        let pos = Perihelion.Combat.ship_pos(game, sh)
+        let pos = Perihelion.Combat.ship_pos(sh)
         let (sx, sy) = pos
-        let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
-        let heading = sh.angle + d * 1.5707963
+        let heading = ship_heading(sh)
         Canvas.save(ctx)
         Canvas.translate(ctx, sx, sy)
         Canvas.rotate(ctx, heading)
@@ -96,7 +110,7 @@ mod Perihelion do
         Canvas.close_path(ctx)
         Canvas.fill(ctx)
         Canvas.restore(ctx)
-        draw_ships(ctx, game, rest)
+        draw_ships(ctx, rest)
     end
   end
 
@@ -113,7 +127,7 @@ mod Perihelion do
     end
   end
 
-  pfn draw_runs(ctx, runs : List(RunRecord), y : Float, i : Int) : Unit do
+  pfn draw_runs(ctx, runs : List(RunRecord), view_w : Float, y : Float, i : Int) : Unit do
     if i >= 5 do
       ()
     else
@@ -124,8 +138,8 @@ mod Perihelion do
           Canvas.fill_text(ctx,
             int_to_string(r.score) ++ " x" ++ int_to_string(r.max_mult)
               ++ " · " ++ int_to_string(r.stars) ++ " stars",
-            Perihelion.Core.view_w() / 2.0, y)
-          draw_runs(ctx, rest, y + 20.0, i + 1)
+            view_w / 2.0, y)
+          draw_runs(ctx, rest, view_w, y + 20.0, i + 1)
       end
     end
   end
@@ -153,7 +167,7 @@ mod Perihelion do
     Canvas.fill_text(ctx, int_to_string(game.score), 14.0, 28.0)
     Canvas.set_text_align(ctx, "right")
     Canvas.fill_text(ctx, "best " ++ int_to_string(game.best),
-                     Perihelion.Core.view_w() - 14.0, 28.0)
+                     game.view_w - 14.0, 28.0)
     if game.multiplier > 1 do
       Canvas.set_text_align(ctx, "left")
       Canvas.fill_text(ctx, "x" ++ int_to_string(game.multiplier), 14.0, 52.0)
@@ -165,12 +179,12 @@ mod Perihelion do
       Ready ->
         Canvas.set_font(ctx, "22px sans-serif")
         Canvas.fill_text(ctx, "tap to start",
-                         Perihelion.Core.view_w() / 2.0, Perihelion.Core.view_h() / 2.0)
+                         game.view_w / 2.0, game.view_h / 2.0)
       Over ->
         Canvas.set_font(ctx, "22px sans-serif")
         Canvas.fill_text(ctx, "score " ++ int_to_string(game.score) ++ " — tap to retry",
-                         Perihelion.Core.view_w() / 2.0, Perihelion.Core.view_h() / 2.0)
-        draw_runs(ctx, game.runs, Perihelion.Core.view_h() / 2.0 + 36.0, 0)
+                         game.view_w / 2.0, game.view_h / 2.0)
+        draw_runs(ctx, game.runs, game.view_w, game.view_h / 2.0 + 36.0, 0)
       Playing -> ()
     end
   end
@@ -178,13 +192,12 @@ mod Perihelion do
   pfn draw(ctx, game : Game) : Unit do
     Canvas.set_global_alpha(ctx, 1.0)
     Canvas.set_fill_style(ctx, "#0b0b18")
-    Canvas.fill_rect(ctx, 0.0, 0.0, Perihelion.Core.view_w(), Perihelion.Core.view_h())
+    Canvas.fill_rect(ctx, 0.0, 0.0, game.view_w, game.view_h)
     Canvas.save(ctx)
     Canvas.translate(ctx, 0.0, 0.0 - game.camera_y)
-    draw_stars(ctx, game.stars, game.camera_y)
-    draw_tether(ctx, game)
+    draw_stars(ctx, game.stars, game.camera_y, game.view_h)
     draw_asteroids(ctx, game.asteroids)
-    draw_ships(ctx, game, game.ships)
+    draw_ships(ctx, game.ships)
     draw_shots(ctx, game.player_shots, "#7cf7d4", 3.0)
     draw_shots(ctx, game.enemy_shots, "#ff6b6b", 2.5)
     draw_pickups(ctx, game.pickups)
@@ -207,10 +220,24 @@ mod Perihelion do
     end
   end
 
+  pfn resize_canvas(el, game : Game, w : Float, h : Float) : Unit do
+    if w == game.view_w && h == game.view_h do
+      ()
+    else
+      Dom.set_attr(el, "width", int_to_string(float_to_int(w)))
+      Dom.set_attr(el, "height", int_to_string(float_to_int(h)))
+    end
+  end
+
   pfn tick(ctx, el, game : Game) : Unit do
     let taps = Dom.taps(el)
     let keys = Dom.key_presses()
-    let g2 = Perihelion.Core.update(game, taps, keys, Perihelion.Core.dt())
+    let cursor = Dom.pointer_pos(el)
+    let (win_w, win_h) = Dom.window_size()
+    let view_w = int_to_float(win_w)
+    let view_h = int_to_float(win_h)
+    resize_canvas(el, game, view_w, view_h)
+    let g2 = Perihelion.Core.update(game, taps, keys, cursor, view_w, view_h, Perihelion.Core.dt())
     if was_playing(game) && is_over_phase(g2) do
       Dom.store_set("perihelion.v1", Perihelion.Core.encode_save(g2.best, g2.runs))
     else
@@ -218,6 +245,19 @@ mod Perihelion do
     end
     draw(ctx, g2)
     Dom.on_frame(fn _ -> tick(ctx, el, g2))
+  end
+
+  -- Deferred to the first animation frame: at module-load time the browser
+  -- hasn't computed layout yet, so window.innerWidth/innerHeight (and thus
+  -- Dom.window_size()) read as 0 -- baking a 0x0 viewport into the initial
+  -- star ladder. By the first on_frame callback, layout is guaranteed.
+  pfn boot(ctx, node, best : Int, runs : List(RunRecord)) : Unit do
+    let (win_w, win_h) = Dom.window_size()
+    let view_w = int_to_float(win_w)
+    let view_h = int_to_float(win_h)
+    Dom.set_attr(node, "width", int_to_string(win_w))
+    Dom.set_attr(node, "height", int_to_string(win_h))
+    tick(ctx, node, Perihelion.Core.new_game_saved(42, best, runs, view_w, view_h))
   end
 
   fn main() : Unit do
@@ -232,7 +272,7 @@ mod Perihelion do
               Some(sv) -> sv
             end
             let (best, runs) = Perihelion.Core.decode_save(saved)
-            tick(ctx, node, Perihelion.Core.new_game_saved(42, best, runs))
+            Dom.on_frame(fn _ -> boot(ctx, node, best, runs))
         end
     end
   end

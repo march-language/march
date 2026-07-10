@@ -2,9 +2,26 @@
 -- shield pickups. All randomness threads a Random.Rng via Perihelion.Level.
 mod Perihelion.Combat do
 
-  type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float }
+  -- shape_seed: a uniform [0,1) float drawn once at spawn, used to derive a
+  -- deterministic jagged polygon outline in the shell's draw code (visual
+  -- only — collision still treats every asteroid as a circle of `radius`).
+  type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float, shape_seed : Float }
 
-  type Ship = { star_idx : Int, angle : Float, fire_cooldown : Float }
+  -- Ships migrate between stars the same way the player does: orbit for a
+  -- while (ShipOrbiting), then release on a tangent toward another star
+  -- (ShipFlying), arrive, re-orbit there. star_idx means "current star"
+  -- while orbiting and "last star departed from" while flying; x/y are
+  -- always the ship's real world position (derived from the orbit formula
+  -- each tick while orbiting; integrated directly while flying).
+  type ShipMode = ShipOrbiting(Float) | ShipFlying(Float, Float)
+
+  type Ship = {
+    star_idx : Int,
+    x : Float, y : Float,
+    mode : ShipMode,
+    fire_cooldown : Float,
+    idle_timer : Float
+  }
 
   type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float }
 
@@ -15,12 +32,15 @@ mod Perihelion.Combat do
   fn asteroid_jitter() : Float do 1.0 end
   fn asteroid_speed() : Float do 90.0 end
   fn asteroid_radius() : Float do 10.0 end
-  fn ship_score_min() : Int do 3 end
+  fn ship_score_min() : Int do 6 end
   fn ship_orbit_mult() : Float do 1.6 end
   fn ship_orbit_speed() : Float do 1.4 end
   fn ship_radius() : Float do 10.0 end
   fn ship_fire_interval() : Float do 2.5 end
   fn ship_fire_range() : Float do 380.0 end
+  fn ship_idle_min() : Float do 3.0 end
+  fn ship_idle_max() : Float do 6.0 end
+  fn ship_fly_speed() : Float do 180.0 end
   fn enemy_shot_speed() : Float do 150.0 end
   fn player_shot_speed() : Float do 420.0 end
   fn shot_ttl() : Float do 3.0 end
@@ -32,17 +52,10 @@ mod Perihelion.Combat do
   fn ball_radius() : Float do 6.0 end
 
   -- ── Derived positions ────────────────────────────────────────────────
-  doc "World position of a ship, derived from its star and angle."
-  fn ship_pos(game : Game, ship : Ship) : (Float, Float) do
-    match Perihelion.Core.star_at(game, ship.star_idx) do
-      None ->
-        let far = (0.0 - 9999.0, 0.0 - 9999.0)
-        far
-      Some(s) ->
-        let r = s.capture_radius * ship_orbit_mult()
-        let pos = (s.x + Math.cos(ship.angle) * r, s.y + Math.sin(ship.angle) * r)
-        pos
-    end
+  doc "A ship's current world position."
+  fn ship_pos(ship : Ship) : (Float, Float) do
+    let pos = (ship.x, ship.y)
+    pos
   end
 
   pfn dist2(x1 : Float, y1 : Float, x2 : Float, y2 : Float) : Float do
@@ -76,25 +89,26 @@ mod Perihelion.Combat do
       let (r2, y_f) = draw(r1)
       let (r3, ang_f) = draw(r2)
       let (r4, next_f) = draw(r3)
+      let (r5, shape_f) = draw(r4)
       let from_left = side_f < 0.5
-      let x = if from_left do 0.0 - 20.0 else Perihelion.Core.view_w() + 20.0 end
-      let y = game.camera_y + y_f * Perihelion.Core.view_h()
+      let x = if from_left do 0.0 - 20.0 else game.view_w + 20.0 end
+      let y = game.camera_y + y_f * game.view_h
       -- aim across the screen with +/-30 degree vertical jitter
       let jitter = (ang_f - 0.5) * 1.0472
       let dir_x = if from_left do 1.0 else 0.0 - 1.0 end
       let vx = dir_x * asteroid_speed() * Math.cos(jitter)
       let vy = asteroid_speed() * Math.sin(jitter)
-      let a = { x: x, y: y, vx: vx, vy: vy, radius: asteroid_radius() }
+      let a = { x: x, y: y, vx: vx, vy: vy, radius: asteroid_radius(), shape_seed: shape_f }
       { game with
           asteroids: Cons(a, game.asteroids),
-          rng: r4,
+          rng: r5,
           spawn_timer: asteroid_interval() + (next_f - 0.5) * 2.0 * asteroid_jitter() }
     end
   end
 
   pfn in_band(game : Game, x : Float, y : Float) : Bool do
-    y > game.camera_y - 100.0 && y < game.camera_y + Perihelion.Core.view_h() + 100.0
-    && x > 0.0 - 100.0 && x < Perihelion.Core.view_w() + 100.0
+    y > game.camera_y - 100.0 && y < game.camera_y + game.view_h + 100.0
+    && x > 0.0 - 100.0 && x < game.view_w + 100.0
   end
 
   pfn age_shot(s : Shot, dt_s : Float) : Shot do
@@ -124,7 +138,59 @@ mod Perihelion.Combat do
     step_ships_go(game, game.ships, Nil, Nil, dt_s)
   end
 
-  -- Walk ships, advancing angle/cooldown and collecting fired shots.
+  -- Index (by ladder position) of the nearest star to (from_x, from_y)
+  -- other than skip_idx.
+  pfn nearest_other_star(from_x : Float, from_y : Float, skip_idx : Int, stars : List(Star), i : Int, best : Option(Int), best_d : Float) : Option(Int) do
+    match stars do
+      Nil -> best
+      Cons(s, rest) ->
+        if i == skip_idx do
+          nearest_other_star(from_x, from_y, skip_idx, rest, i + 1, best, best_d)
+        else
+          let dx = s.x - from_x
+          let dy = s.y - from_y
+          let d = dx * dx + dy * dy
+          if d < best_d do
+            nearest_other_star(from_x, from_y, skip_idx, rest, i + 1, Some(i), d)
+          else
+            nearest_other_star(from_x, from_y, skip_idx, rest, i + 1, best, best_d)
+          end
+        end
+    end
+  end
+
+  -- The star (if any) whose capture_radius now contains (x, y) — a flying
+  -- ship's arrival test. No ball-radius grace (that forgiveness is specific
+  -- to the player).
+  pfn arrived_star(stars : List(Star), x : Float, y : Float, i : Int) : Option((Int, Star)) do
+    match stars do
+      Nil -> None
+      Cons(s, rest) ->
+        let dx = s.x - x
+        let dy = s.y - y
+        if Math.sqrt(dx * dx + dy * dy) <= s.capture_radius do
+          Some((i, s))
+        else
+          arrived_star(rest, x, y, i + 1)
+        end
+    end
+  end
+
+  pfn ship_fire_shot(sx : Float, sy : Float, game : Game) : Shot do
+    let dx = game.ball_x - sx
+    let dy = game.ball_y - sy
+    let dist = Math.sqrt(dx * dx + dy * dy)
+    if dist > 0.0 do
+      { x: sx, y: sy, vx: dx / dist * enemy_shot_speed(), vy: dy / dist * enemy_shot_speed(), ttl: shot_ttl() }
+    else
+      { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl() }
+    end
+  end
+
+  -- Walk ships: advance orbit/flight state, roll releases and arrivals,
+  -- collect fired shots. `game` is threaded as the fold accumulator so its
+  -- `rng` stays correct across ships that roll a fresh idle timer on
+  -- arrival (same threading shape roll_drops uses for shield-pickup rolls).
   pfn step_ships_go(game : Game, ships : List(Ship), acc : List(Ship), new_shots : List(Shot), dt_s : Float) : Game do
     match ships do
       Nil ->
@@ -132,37 +198,87 @@ mod Perihelion.Combat do
             ships: List.reverse(acc),
             enemy_shots: List.append(new_shots, game.enemy_shots) }
       Cons(sh, rest) ->
-        let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
-        let sh2 = { sh with
-                      angle: sh.angle + d * ship_orbit_speed() * dt_s,
-                      fire_cooldown: sh.fire_cooldown - dt_s }
-        let pos = ship_pos(game, sh2)
-        let (sx, sy) = pos
-        let in_range = dist2(sx, sy, game.ball_x, game.ball_y)
-                       <= ship_fire_range() * ship_fire_range()
-        if sh2.fire_cooldown <= 0.0 && in_range do
-          let dx = game.ball_x - sx
-          let dy = game.ball_y - sy
-          let dist = Math.sqrt(dist2(sx, sy, game.ball_x, game.ball_y))
-          let shot = if dist > 0.0 do
-            { x: sx, y: sy,
-              vx: dx / dist * enemy_shot_speed(),
-              vy: dy / dist * enemy_shot_speed(),
-              ttl: shot_ttl() }
-          else
-            { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl() }
-          end
-          let sh3 = { sh2 with fire_cooldown: ship_fire_interval() }
-          step_ships_go(game, rest, Cons(sh3, acc), Cons(shot, new_shots), dt_s)
-        else
-          step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+        match sh.mode do
+          ShipOrbiting(angle) ->
+            match Perihelion.Core.star_at(game, sh.star_idx) do
+              None -> step_ships_go(game, rest, acc, new_shots, dt_s)
+              Some(s) ->
+                let idle2 = sh.idle_timer - dt_s
+                if idle2 <= 0.0 do
+                  match nearest_other_star(sh.x, sh.y, sh.star_idx, game.stars, 0, None, 999999999.0) do
+                    None ->
+                      -- no other star to jump to (shouldn't happen, top_up
+                      -- keeps >= 2 stars ahead) — just keep orbiting
+                      let sh2 = { sh with idle_timer: ship_idle_max() }
+                      step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+                    Some(target_idx) ->
+                      match Perihelion.Core.star_at(game, target_idx) do
+                        None ->
+                          let sh2 = { sh with idle_timer: ship_idle_max() }
+                          step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+                        Some(t) ->
+                          let dx = t.x - sh.x
+                          let dy = t.y - sh.y
+                          let dist = Math.sqrt(dx * dx + dy * dy)
+                          let vel = if dist > 0.0 do
+                            (dx / dist * ship_fly_speed(), dy / dist * ship_fly_speed())
+                          else
+                            (0.0, ship_fly_speed())
+                          end
+                          let (vx, vy) = vel
+                          let sh2 = { sh with mode: ShipFlying(vx, vy) }
+                          step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+                      end
+                  end
+                else
+                  let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
+                  let angle2 = angle + d * ship_orbit_speed() * dt_s
+                  let r = s.capture_radius * ship_orbit_mult()
+                  let sx = s.x + Math.cos(angle2) * r
+                  let sy = s.y + Math.sin(angle2) * r
+                  let cd2 = sh.fire_cooldown - dt_s
+                  let in_range = dist2(sx, sy, game.ball_x, game.ball_y) <= ship_fire_range() * ship_fire_range()
+                  if cd2 <= 0.0 && in_range do
+                    let shot = ship_fire_shot(sx, sy, game)
+                    let sh2 = { sh with x: sx, y: sy, mode: ShipOrbiting(angle2), idle_timer: idle2, fire_cooldown: ship_fire_interval() }
+                    step_ships_go(game, rest, Cons(sh2, acc), Cons(shot, new_shots), dt_s)
+                  else
+                    let sh2 = { sh with x: sx, y: sy, mode: ShipOrbiting(angle2), idle_timer: idle2, fire_cooldown: cd2 }
+                    step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+                  end
+                end
+            end
+          ShipFlying(vx, vy) ->
+            let x2 = sh.x + vx * dt_s
+            let y2 = sh.y + vy * dt_s
+            match arrived_star(game.stars, x2, y2, 0) do
+              Some(pair) ->
+                let (idx, t) = pair
+                let angle = Math.atan2(y2 - t.y, x2 - t.x)
+                let (rng2, idle_f) = draw(game.rng)
+                let idle = ship_idle_min() + idle_f * (ship_idle_max() - ship_idle_min())
+                let r = t.capture_radius * ship_orbit_mult()
+                let sh2 = { sh with
+                              x: t.x + Math.cos(angle) * r,
+                              y: t.y + Math.sin(angle) * r,
+                              star_idx: idx, mode: ShipOrbiting(angle), idle_timer: idle }
+                step_ships_go({ game with rng: rng2 }, rest, Cons(sh2, acc), new_shots, dt_s)
+              None ->
+                if in_band(game, x2, y2) do
+                  let sh2 = { sh with x: x2, y: y2 }
+                  step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+                else
+                  -- drifted off-screen without reaching a star: despawn
+                  step_ships_go(game, rest, acc, new_shots, dt_s)
+                end
+            end
         end
     end
   end
 
-  -- ── fire: spacebar radial shot ───────────────────────────────────────
-  doc "Spacebar radial shot: only while orbiting and off cooldown; direction is star->ball."
-  fn fire(game : Game, keys : List(String), dt_s : Float) : Game do
+  -- ── fire: spacebar shot toward the cursor ────────────────────────────
+  doc "Spacebar shot toward the live cursor position: only while orbiting and off cooldown. Falls back to the star->ball radial direction if the cursor sits exactly on the ball (degenerate zero-length aim); silently doesn't fire in the (essentially impossible) case both are degenerate."
+  fn fire(game : Game, keys : List(String), cursor : (Int, Int), _dt_s : Float) : Game do
     let pressed = List.any(keys, fn k -> k == " ")
     if !pressed || game.fire_cooldown > 0.0 do
       game
@@ -173,19 +289,31 @@ mod Perihelion.Combat do
           match Perihelion.Core.star_at(game, idx) do
             None -> game
             Some(s) ->
-              let dx = game.ball_x - s.x
-              let dy = game.ball_y - s.y
+              let (cx, cy) = cursor
+              -- camera only shifts vertically, so only y needs the offset
+              let cursor_world_y = int_to_float(cy) + game.camera_y
+              let dx = int_to_float(cx) - game.ball_x
+              let dy = cursor_world_y - game.ball_y
               let dist = Math.sqrt(dx * dx + dy * dy)
-              if dist > 0.0 do
-                let shot = { x: game.ball_x, y: game.ball_y,
-                             vx: dx / dist * player_shot_speed(),
-                             vy: dy / dist * player_shot_speed(),
-                             ttl: shot_ttl() }
-                { game with
-                    player_shots: Cons(shot, game.player_shots),
-                    fire_cooldown: player_fire_cooldown() }
+              let aim = if dist > 0.0 do
+                Some((dx / dist, dy / dist))
               else
-                game
+                let rdx = game.ball_x - s.x
+                let rdy = game.ball_y - s.y
+                let rdist = Math.sqrt(rdx * rdx + rdy * rdy)
+                if rdist > 0.0 do Some((rdx / rdist, rdy / rdist)) else None end
+              end
+              match aim do
+                None -> game
+                Some(pair) ->
+                  let (ax, ay) = pair
+                  let shot = { x: game.ball_x, y: game.ball_y,
+                               vx: ax * player_shot_speed(),
+                               vy: ay * player_shot_speed(),
+                               ttl: shot_ttl() }
+                  { game with
+                      player_shots: Cons(shot, game.player_shots),
+                      fire_cooldown: player_fire_cooldown() }
               end
           end
       end
@@ -216,17 +344,17 @@ mod Perihelion.Combat do
         score: game.score + List.length(dead) * game.multiplier }
   end
 
-  pfn ship_shot_hit(game : Game, sh : Ship, s : Shot) : Bool do
-    let pos = ship_pos(game, sh)
+  pfn ship_shot_hit(sh : Ship, s : Shot) : Bool do
+    let pos = ship_pos(sh)
     let (sx, sy) = pos
     shot_hits_at(s, sx, sy, ship_radius())
   end
 
   pfn collide_shots_ships(game : Game) : Game do
     let (dead, alive) = List.partition(game.ships, fn sh ->
-      List.any(game.player_shots, fn s -> ship_shot_hit(game, sh, s)))
+      List.any(game.player_shots, fn s -> ship_shot_hit(sh, s)))
     let shots = List.filter(game.player_shots, fn s ->
-      !List.any(game.ships, fn sh -> ship_shot_hit(game, sh, s)))
+      !List.any(game.ships, fn sh -> ship_shot_hit(sh, s)))
     let g2 = { game with
         ships: alive,
         player_shots: shots,
@@ -238,7 +366,7 @@ mod Perihelion.Combat do
     match dead do
       Nil -> game
       Cons(sh, rest) ->
-        let pos = ship_pos(game, sh)
+        let pos = ship_pos(sh)
         let (sx, sy) = pos
         let (rng2, roll) = draw(game.rng)
         let g2 = if roll < drop_chance() do
@@ -272,7 +400,7 @@ mod Perihelion.Combat do
   end
 
   pfn ball_hits_ship(game : Game, sh : Ship) : Bool do
-    let pos = ship_pos(game, sh)
+    let pos = ship_pos(sh)
     let (sx, sy) = pos
     hits(sx, sy, ship_radius(), game.ball_x, game.ball_y, ball_radius())
   end
@@ -312,12 +440,21 @@ mod Perihelion.Combat do
       game
     else
       let (rng2, roll) = draw(game.rng)
-      let chance_raw = 0.25 + 0.05 * int_to_float(game.score - ship_score_min())
-      let chance = if chance_raw > 0.6 do 0.6 else chance_raw end
+      let chance_raw = 0.12 + 0.03 * int_to_float(game.score - ship_score_min())
+      let chance = if chance_raw > 0.35 do 0.35 else chance_raw end
       if roll < chance do
-        { game with
-            rng: rng2,
-            ships: Cons({ star_idx: star_idx, angle: 0.0, fire_cooldown: ship_fire_interval() }, game.ships) }
+        match Perihelion.Core.star_at(game, star_idx) do
+          None -> { game with rng: rng2 }
+          Some(s) ->
+            let (rng3, idle_f) = draw(rng2)
+            let r = s.capture_radius * ship_orbit_mult()
+            let idle = ship_idle_min() + idle_f * (ship_idle_max() - ship_idle_min())
+            let ship = { star_idx: star_idx,
+                         x: s.x + Math.cos(0.0) * r, y: s.y + Math.sin(0.0) * r,
+                         mode: ShipOrbiting(0.0),
+                         fire_cooldown: ship_fire_interval(), idle_timer: idle }
+            { game with rng: rng3, ships: Cons(ship, game.ships) }
+        end
       else
         { game with rng: rng2 }
       end

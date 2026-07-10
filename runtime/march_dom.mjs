@@ -157,6 +157,28 @@ export function march_dom_store_set(key, val) {
   try { window.localStorage.setItem(key, val); } catch (e) { }
 }
 
+// ── Pointer / viewport polling ──────────────────────────────────────────────
+
+const __pointer_positions = new WeakMap();
+
+export function march_dom_pointer_pos(el) {
+  let pos = __pointer_positions.get(el);
+  if (pos === undefined) {
+    const rect = el.getBoundingClientRect();
+    pos = { x: Math.trunc(rect.width / 2), y: Math.trunc(rect.height / 2) };
+    __pointer_positions.set(el, pos);
+    el.addEventListener("mousemove", (e) => {
+      pos.x = Math.trunc(e.offsetX);
+      pos.y = Math.trunc(e.offsetY);
+    });
+  }
+  return { _0: pos.x, _1: pos.y };
+}
+
+export function march_dom_window_size() {
+  return { _0: Math.trunc(window.innerWidth), _1: Math.trunc(window.innerHeight) };
+}
+
 // ── Window ────────────────────────────────────────────────────────────────────
 
 export function march_dom_alert(msg) { window.alert(msg); }

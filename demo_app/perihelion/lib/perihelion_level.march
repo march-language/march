@@ -32,13 +32,13 @@ mod Perihelion.Level do
     lo + t * (hi - lo)
   end
 
-  doc "Place the next star 120-200px above `prev` (y-down world: smaller y), x within margins."
-  fn next_star(rng : Random.Rng, prev : Star) : (Star, Random.Rng) do
+  doc "Place the next star 120-200px above `prev` (y-down world: smaller y), x within margins of `view_w`."
+  fn next_star(rng : Random.Rng, prev : Star, view_w : Float) : (Star, Random.Rng) do
     let (r1, ty) = draw(rng)
     let (r2, tx) = draw(r1)
     let (r3, tr) = draw(r2)
     let gap = lerp(gap_min(), gap_max(), ty)
-    let x = lerp(margin(), Perihelion.Core.view_w() - margin(), tx)
+    let x = lerp(margin(), view_w - margin(), tx)
     let r = lerp(radius_min(), radius_max(), tr)
     let s = { x: x, y: prev.y - gap, radius: r, capture_radius: r * capture_mult() }
     let result = (s, r3)
@@ -46,10 +46,10 @@ mod Perihelion.Level do
   end
 
   doc "The opening board: a fixed centered first star plus two generated above it. Bottom-first order."
-  fn initial_stars(rng : Random.Rng) : (List(Star), Random.Rng) do
-    let first = { x: Perihelion.Core.view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
-    let (s2, rng2) = next_star(rng, first)
-    let (s3, rng3) = next_star(rng2, s2)
+  fn initial_stars(rng : Random.Rng, view_w : Float) : (List(Star), Random.Rng) do
+    let first = { x: view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let (s2, rng2) = next_star(rng, first, view_w)
+    let (s3, rng3) = next_star(rng2, s2, view_w)
     let stars = Cons(first, Cons(s2, Cons(s3, Nil)))
     let result = (stars, rng3)
     result

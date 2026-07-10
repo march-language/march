@@ -31,7 +31,8 @@ mod TestPerihelionCore do
       rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
       shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
-      loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil }
+      loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil,
+      view_w: 400.0, view_h: 640.0 }
   end
 
   pfn is_playing(p : Phase) : Bool do
@@ -76,7 +77,7 @@ mod TestPerihelionCore do
     else
       match g.mode do
         Orbiting(_, _) -> g
-        Flying(_, _) -> run_until_capture(Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt()), fuel - 1)
+        Flying(_, _) -> run_until_capture(Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt()), fuel - 1)
       end
     end
   end
@@ -95,7 +96,7 @@ mod TestPerihelionCore do
       g
     else
       let keys = if n % 30 == 0 do Cons(" ", Nil) else Nil end
-      run_n(Perihelion.Core.update(g, no_taps(), keys, Perihelion.Core.dt()), n - 1)
+      run_n(Perihelion.Core.update(g, no_taps(), keys, (999, 999), 400.0, 640.0, Perihelion.Core.dt()), n - 1)
     end
   end
 
@@ -103,7 +104,7 @@ mod TestPerihelionCore do
     if n == 0 do
       is_playing(g.phase)
     else
-      run_ticks(Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt()), n - 1)
+      run_ticks(Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt()), n - 1)
     end
   end
 
@@ -122,13 +123,13 @@ mod TestPerihelionCore do
   describe "phases" do
     test "Ready + tap starts Playing" do
       let g = { mk_game(0.0) with phase: Ready }
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_playing(g2.phase))
     end
 
     test "Ready without tap stays Ready" do
       let g = { mk_game(0.0) with phase: Ready }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_ready(g2.phase))
     end
   end
@@ -136,7 +137,7 @@ mod TestPerihelionCore do
   describe "orbit" do
     test "no tap advances the orbit angle in dir(+) for star 0" do
       let g = mk_game(0.0)
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       match g2.mode do
         Orbiting(i, a) ->
           assert (i == 0)
@@ -148,7 +149,7 @@ mod TestPerihelionCore do
 
     test "ball position stays on the orbit circle" do
       let g = mk_game(1.0)
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       let dx = g2.ball_x - 200.0
       let dy = g2.ball_y - 520.0
       assert (approx(Math.sqrt(dx * dx + dy * dy), 54.0))
@@ -164,7 +165,7 @@ mod TestPerihelionCore do
   describe "release" do
     test "tap at angle pi releases upward (negative vy) at fly_speed" do
       let g = mk_game(Math.pi())
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           assert (vy < 0.0)
@@ -176,7 +177,7 @@ mod TestPerihelionCore do
 
     test "tangent is perpendicular to the radius vector" do
       let g = mk_game(0.7)
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           -- radius vector at release = (cos 0.7, sin 0.7); dot with v must be ~0
@@ -190,7 +191,7 @@ mod TestPerihelionCore do
   describe "flight and assist" do
     test "flight integrates position" do
       let g = mk_flying(200.0, 500.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.ball_y < 500.0)
       assert (approx(g2.ball_x, 200.0))
     end
@@ -199,7 +200,7 @@ mod TestPerihelionCore do
       -- next star (index 1) is at (200, 360), capture 54; assist range = 81.
       -- Ball 70px below it, offset 10px left, flying straight up: inside range.
       let g = mk_flying(190.0, 430.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           assert (vx > 0.0)
@@ -210,7 +211,7 @@ mod TestPerihelionCore do
 
     test "no assist outside range" do
       let g = mk_flying(200.0, 520.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, _) -> assert (approx(vx, 0.0))
         _ -> assert false
@@ -223,9 +224,9 @@ mod TestPerihelionCore do
       -- Ball just outside star 1's capture radius (60px from center), flying
       -- straight at it at ~5.7px/tick; 3 ticks crosses the 54px boundary.
       let g = mk_flying(200.0, 420.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
-      let g3 = Perihelion.Core.update(g2, no_taps(), no_keys(), Perihelion.Core.dt())
-      let g4 = Perihelion.Core.update(g3, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      let g3 = Perihelion.Core.update(g2, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      let g4 = Perihelion.Core.update(g3, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       -- loop_angle 0 = a quick capture: multiplier bumps to 2 and scores 2
       assert (g4.score == 2)
       assert (g4.current == 1)
@@ -239,28 +240,28 @@ mod TestPerihelionCore do
     test "exiting the viewport bottom ends the run and records best" do
       let g0 = mk_flying(200.0, 815.0, 0.0, Perihelion.Core.fly_speed())
       let g = { g0 with score: 5, best: 3 }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))
       assert (g2.best == 5)
     end
 
     test "exiting a side ends the run" do
       let g = mk_flying(0.0 - 41.0, 400.0, 0.0 - Perihelion.Core.fly_speed(), 0.0)
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))
     end
 
     test "best is not lowered by a worse run" do
       let g0 = mk_flying(200.0, 815.0, 0.0, Perihelion.Core.fly_speed())
       let g = { g0 with score: 2, best: 9 }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.best == 9)
     end
 
     test "tap from Over starts a fresh Playing run keeping best" do
       let g0 = mk_game(0.0)
       let g = { g0 with phase: Over, score: 4, best: 7 }
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_playing(g2.phase))
       assert (g2.score == 0)
       assert (g2.best == 7)
@@ -281,7 +282,7 @@ mod TestPerihelionCore do
       let g0 = mk_game(0.0)
       let g = { g0 with camera_y: 300.0 }
       -- target for star 0 (y=520) = 520 - 0.6*640 = 136 < 300, so camera_y must decrease
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.camera_y < 300.0)
       assert (g2.camera_y > 136.0)
     end
@@ -324,7 +325,7 @@ mod TestPerihelionCore do
 
     test "orbiting accumulates loop_angle" do
       let g = mk_game(0.0)
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.loop_angle > 0.0)
     end
   end
@@ -333,7 +334,7 @@ mod TestPerihelionCore do
     test "death prepends a run record and caps at 10" do
       let g0 = mk_flying(200.0, 815.0, 0.0, Perihelion.Core.fly_speed())
       let g = { g0 with score: 6, stars_chained: 3, max_mult: 2, runs: ten_runs() }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (List.length(g2.runs) == 10)
       match g2.runs do
         Cons(r, _) ->
@@ -347,7 +348,7 @@ mod TestPerihelionCore do
     test "restart preserves runs" do
       let g0 = mk_game(0.0)
       let g = { g0 with phase: Over, runs: Cons({ score: 5, stars: 5, max_mult: 1 }, Nil) }
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (List.length(g2.runs) == 1)
     end
   end
@@ -391,15 +392,15 @@ mod TestPerihelionCore do
   describe "combat pipeline" do
     test "spacebar during orbit produces a shot through update" do
       let g = mk_game(0.0)
-      let g2 = Perihelion.Core.update(g, no_taps(), Cons(" ", Nil), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Cons(" ", Nil), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (List.length(g2.player_shots) == 1)
     end
 
     test "asteroid contact ends the run through update" do
       let g0 = mk_game(0.0)
-      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
       let g = { g0 with asteroids: Cons(ast, Nil) }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))
     end
 
@@ -417,14 +418,14 @@ mod TestPerihelionCore do
       -- flying-camera target = ball_y - 384 < current camera, so camera rises
       let g0 = mk_flying(200.0, 250.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
       let g = { g0 with camera_y: 136.0 }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.camera_y < 136.0)
     end
 
     test "camera still anchors to the current star while orbiting" do
       let g0 = mk_game(0.0)
       let g = { g0 with camera_y: 300.0 }
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (g2.camera_y < 300.0)
       assert (g2.camera_y > 136.0)
     end
@@ -432,7 +433,7 @@ mod TestPerihelionCore do
     test "flying far above the next star ends the run (overshoot)" do
       -- next star (idx 1) at y=360; overshoot margin 150 -> death above y=210
       let g = mk_flying(200.0, 205.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))
     end
 
@@ -440,13 +441,13 @@ mod TestPerihelionCore do
       -- current star at y=520; fall line = 520 + 200 = 720. Camera chases the
       -- falling ball so the old bottom-of-viewport kill can never fire.
       let g = mk_flying(200.0, 725.0, 0.0, Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))
     end
 
     test "flying between stars does not overshoot-kill" do
       let g = mk_flying(200.0, 430.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_playing(g2.phase))
     end
   end
@@ -460,7 +461,7 @@ mod TestPerihelionCore do
                    current: 1, score: 5, multiplier: 3,
                    mode: Flying(0.0, Perihelion.Core.fly_speed()),
                    ball_x: 200.0, ball_y: 458.0 }
-      let g2 = Perihelion.Core.update(g1, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g1, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_orbiting_star(g2.mode, 0))
       assert (g2.current == 0)
       assert (g2.score == 5)
@@ -470,14 +471,14 @@ mod TestPerihelionCore do
     test "ring-edge touch captures (ball radius grace)" do
       -- ball center just inside capture_radius + ball_radius of star 1
       let g = mk_flying(200.0, 360.0 + 58.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
-      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_orbiting_star(g2.mode, 1))
     end
 
     test "a fresh release does not instantly recapture its own star" do
       let g = mk_game(Math.pi())
-      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
-      let g3 = Perihelion.Core.update(g2, no_taps(), no_keys(), Perihelion.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      let g3 = Perihelion.Core.update(g2, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (match g3.mode do
         Flying(_, _) -> true
         _ -> false

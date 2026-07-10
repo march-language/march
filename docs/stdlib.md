@@ -711,6 +711,8 @@ Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll
 Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
 Dom.store_get("save")          -- Option(String) — localStorage read
 Dom.store_set("save", data)    -- localStorage write
+Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
+Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.

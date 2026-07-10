@@ -18,12 +18,12 @@ mod TestPerihelionLevel do
     if n == 0 do
       true
     else
-      let (s, rng2) = Perihelion.Level.next_star(rng, prev)
+      let (s, rng2) = Perihelion.Level.next_star(rng, prev, 400.0)
       let gap = prev.y - s.y
       let in_bounds =
         gap >= Perihelion.Level.gap_min() && gap <= Perihelion.Level.gap_max()
         && s.x >= Perihelion.Level.margin()
-        && s.x <= Perihelion.Core.view_w() - Perihelion.Level.margin()
+        && s.x <= 400.0 - Perihelion.Level.margin()
         && s.radius >= Perihelion.Level.radius_min()
         && s.radius <= Perihelion.Level.radius_max()
         && s.capture_radius == s.radius * Perihelion.Level.capture_mult()
@@ -33,14 +33,14 @@ mod TestPerihelionLevel do
 
   describe "next_star" do
     test "same seed produces the same star" do
-      let (a, _) = Perihelion.Level.next_star(Random.seed(42), base_star())
-      let (b, _) = Perihelion.Level.next_star(Random.seed(42), base_star())
+      let (a, _) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
+      let (b, _) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
       assert (star_eq(a, b))
     end
 
     test "different rng states produce different stars" do
-      let (a, rng2) = Perihelion.Level.next_star(Random.seed(42), base_star())
-      let (b, _) = Perihelion.Level.next_star(rng2, base_star())
+      let (a, rng2) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
+      let (b, _) = Perihelion.Level.next_star(rng2, base_star(), 400.0)
       assert (!star_eq(a, b))
     end
 
@@ -51,13 +51,13 @@ mod TestPerihelionLevel do
 
   describe "initial_stars" do
     test "produces 3 stars, bottom-first, strictly climbing" do
-      let (stars, _) = Perihelion.Level.initial_stars(Random.seed(42))
+      let (stars, _) = Perihelion.Level.initial_stars(Random.seed(42), 400.0)
       assert (List.length(stars) == 3)
       match stars do
         Cons(s0, Cons(s1, Cons(s2, Nil))) ->
           assert (s0.y > s1.y)
           assert (s1.y > s2.y)
-          assert (s0.x == Perihelion.Core.view_w() / 2.0)
+          assert (s0.x == 400.0 / 2.0)
         _ -> assert false
       end
     end
