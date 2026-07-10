@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- Repo: `/Users/80197052/code/march`. All paths below are relative to it.
+- Repo: `/Users/80197052/code/march`, worktree `.claude/worktrees/foreign-thread-actor-bridge`, branch `foreign-thread-actor-bridge` (based on `main`). All paths below are relative to the worktree root.
+- NOTE: cited line numbers were taken from an older tree and have drifted (e.g. `march_sched_wake`'s foreign push is at ~`march_scheduler.c:867-871` on this branch, `march_actor_call` at ~`march_runtime.c:1809`). Locate code by the quoted symbols/snippets, not line numbers. All anchors (`g_ext_spawn_head`, `last_yielded`, owner-only deque comments, `"not in scheduler context"`, `"timeout not yet enforced"`) are verified present on this branch.
 - macOS + Linux portability: any new libc usage must follow the existing guard pattern (`#if defined(__APPLE__)` / `#if defined(__linux__)`; see top of `march_scheduler.c`).
 - No new external dependencies; C11 `<stdatomic.h>` + `<pthread.h>` only.
 - The full suite must stay green: `dune runtest` (compiler 321 / eval 224 / stdlib 786 counts per `specs/todos.md` — exact counts may have moved; the bar is "no new failures").
