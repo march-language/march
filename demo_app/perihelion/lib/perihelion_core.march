@@ -1,9 +1,11 @@
 -- Perihelion.Core — pure game state + physics. No Dom/Canvas imports.
 -- All tuning constants live in the block below; nothing else is magic.
 -- World coords are y-down (canvas-native): climbing = decreasing y.
--- The rng field is a 31-bit LCG state (Int) rather than Random.Rng:
--- stdlib Random (xoshiro, 63-bit int ops) is broken on --target js —
--- see specs/todos.md P1 "Random unusable on --target js" (2026-07-09).
+-- The rng field is a stdlib Random.Rng, seeded from an Int in new_game.
+-- Random's sfc32 core is bit-identical on the interpreter, native, and
+-- --target js backends, so a seeded run replays the same star ladder
+-- everywhere (it replaced a hand-rolled 31-bit LCG once Random became
+-- JS-portable; see specs/progress.md, sfc32 Random core).
 mod Perihelion.Core do
 
   -- ── Tuning constants ─────────────────────────────────────────────────
@@ -12,11 +14,13 @@ mod Perihelion.Core do
   fn dt() : Float do 0.0166667 end
   fn orbit_speed() : Float do 2.4 end
   fn fly_speed() : Float do 340.0 end
-  fn assist_strength() : Float do 900.0 end
-  fn assist_range_mult() : Float do 1.5 end
+  fn assist_strength() : Float do 1600.0 end
+  fn assist_range_mult() : Float do 2.4 end
   fn cam_ease() : Float do 3.0 end
   fn cam_anchor() : Float do 0.6 end
   fn kill_margin() : Float do 40.0 end
+  fn overshoot_margin() : Float do 150.0 end
+  fn fall_margin() : Float do 200.0 end
   fn two_pi() : Float do 6.283185307179586 end
   fn mult_cap() : Int do 5 end
 
@@ -44,7 +48,7 @@ mod Perihelion.Core do
     score : Int,
     best : Int,
     camera_y : Float,
-    rng : Int,
+    rng : Random.Rng,
     asteroids : List(Asteroid),
     ships : List(Ship),
     player_shots : List(Shot),
@@ -136,10 +140,28 @@ mod Perihelion.Core do
     end
   end
 
-  -- Capture assist: inside assist_range_mult * capture_radius of the NEXT star,
-  -- bend velocity toward its center; renormalize so assist never adds speed.
+  -- Nearest star the ball is APPROACHING whose assist bubble contains it.
+  -- (Receding stars excluded so the just-left star never drags the launch.)
+  pfn nearest_assist_target(game : Game, vx : Float, vy : Float, stars : List(Star), best : Option(Star), best_d : Float) : Option(Star) do
+    match stars do
+      Nil -> best
+      Cons(s, rest) ->
+        let dx = s.x - game.ball_x
+        let dy = s.y - game.ball_y
+        let d = Math.sqrt(dx * dx + dy * dy)
+        let approaching = vx * dx + vy * dy > 0.0
+        if approaching && d < assist_range_mult() * s.capture_radius && d < best_d do
+          nearest_assist_target(game, vx, vy, rest, Some(s), d)
+        else
+          nearest_assist_target(game, vx, vy, rest, best, best_d)
+        end
+    end
+  end
+
+  -- Capture assist: bend velocity toward the nearest approaching star whose
+  -- assist bubble contains the ball; renormalize so assist never adds speed.
   pfn assisted_velocity(game : Game, vx : Float, vy : Float, dt_s : Float) : (Float, Float) do
-    match star_at(game, game.current + 1) do
+    match nearest_assist_target(game, vx, vy, game.stars, None, 999999.0) do
       None ->
         let out = (vx, vy)
         out
@@ -147,12 +169,34 @@ mod Perihelion.Core do
         let dx = t.x - game.ball_x
         let dy = t.y - game.ball_y
         let dist = Math.sqrt(dx * dx + dy * dy)
-        if dist > 0.0 && dist < assist_range_mult() * t.capture_radius do
+        if dist > 0.0 do
           renormalize(vx + dx / dist * assist_strength() * dt_s,
                       vy + dy / dist * assist_strength() * dt_s)
         else
           let out = (vx, vy)
           out
+        end
+    end
+  end
+
+  -- Any star's ring captures — provided the ball is APPROACHING it
+  -- (velocity . (star - ball) > 0). A tangent release is exactly
+  -- perpendicular to its own star's radial, so the origin star cannot
+  -- instantly recapture; incoming paths across ANY ring (older stars
+  -- included) capture as the player expects. Grace includes the ball's
+  -- own radius so a visual ring-touch counts.
+  pfn find_capture(game : Game, vx : Float, vy : Float, stars : List(Star), i : Int) : Option((Int, Star)) do
+    match stars do
+      Nil -> None
+      Cons(s, rest) ->
+        let dx = s.x - game.ball_x
+        let dy = s.y - game.ball_y
+        let grace = s.capture_radius + Perihelion.Combat.ball_radius()
+        let approaching = vx * dx + vy * dy > 0.0
+        if approaching && Math.sqrt(dx * dx + dy * dy) <= grace do
+          Some((i, s))
+        else
+          find_capture(game, vx, vy, rest, i + 1)
         end
     end
   end
@@ -163,47 +207,56 @@ mod Perihelion.Core do
                 ball_x: game.ball_x + vx2 * dt_s,
                 ball_y: game.ball_y + vy2 * dt_s,
                 mode: Flying(vx2, vy2) }
-    match star_at(g, g.current + 1) do
+    match find_capture(g, vx2, vy2, g.stars, 0) do
       None -> check_death(g)
-      Some(t) ->
-        let dx = t.x - g.ball_x
-        let dy = t.y - g.ball_y
-        if Math.sqrt(dx * dx + dy * dy) <= t.capture_radius do
-          after_capture(on_capture(g, t, g.current + 1))
-        else
-          check_death(g)
-        end
+      Some((idx, t)) -> on_capture(g, t, idx)
     end
   end
 
   -- THE scoring seam: every successful capture flows through here.
+  -- Forward captures (a higher star) score and grow the ladder; backward
+  -- captures (an older ring caught mid-fall) are a rescue: re-orbit, no
+  -- score, multiplier resets.
   pfn on_capture(game : Game, captured : Star, idx : Int) : Game do
     let angle = Math.atan2(game.ball_y - captured.y, game.ball_x - captured.x)
-    let top = top_star(game.stars, captured)
-    let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top)
-    let new_mult =
-      if game.loop_angle < two_pi() do
-        if game.multiplier + 1 > mult_cap() do mult_cap() else game.multiplier + 1 end
-      else
-        1
-      end
-    { game with
+    let snapped = { game with
         mode: Orbiting(idx, angle),
-        current: idx,
-        score: game.score + new_mult,
-        stars_chained: game.stars_chained + 1,
-        multiplier: new_mult,
-        max_mult: max2(game.max_mult, new_mult),
         loop_angle: 0.0,
-        stars: List.append(game.stars, Cons(fresh, Nil)),
-        rng: rng2,
         ball_x: captured.x + Math.cos(angle) * captured.capture_radius,
         ball_y: captured.y + Math.sin(angle) * captured.capture_radius }
+    if idx > game.current do
+      let new_mult =
+        if game.loop_angle < two_pi() do
+          if game.multiplier + 1 > mult_cap() do mult_cap() else game.multiplier + 1 end
+        else
+          1
+        end
+      top_up({ snapped with
+          current: idx,
+          score: game.score + new_mult,
+          stars_chained: game.stars_chained + 1,
+          multiplier: new_mult,
+          max_mult: max2(game.max_mult, new_mult) })
+    else
+      { snapped with current: idx, multiplier: 1 }
+    end
   end
 
-  -- Post-capture hook: roll an enemy-ship spawn on the newly appended star.
-  pfn after_capture(game : Game) : Game do
-    Perihelion.Combat.maybe_spawn_ship(game, List.length(game.stars) - 1)
+  -- Keep at least two stars above the current one; each appended star rolls
+  -- an enemy-ship spawn. (Skip-a-rung captures can consume lookahead faster
+  -- than one-per-capture generation replaces it.)
+  pfn top_up(game : Game) : Game do
+    if List.length(game.stars) - 1 - game.current >= 2 do
+      game
+    else
+      let fallback = { x: view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+      let top = top_star(game.stars, fallback)
+      let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top)
+      let g2 = { game with
+          stars: List.append(game.stars, Cons(fresh, Nil)),
+          rng: rng2 }
+      top_up(Perihelion.Combat.maybe_spawn_ship(g2, List.length(g2.stars) - 1))
+    end
   end
 
   pfn top_star(stars : List(Star), fallback : Star) : Star do
@@ -230,19 +283,37 @@ mod Perihelion.Core do
   pfn check_death(game : Game) : Game do
     let below = game.ball_y > game.camera_y + view_h() + kill_margin()
     let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > view_w() + kill_margin()
-    if below || off_side do end_run(game) else game end
-  end
-
-  pfn step_camera(game : Game, dt_s : Float) : Game do
-    match star_at(game, game.current) do
-      None -> game
-      Some(s) ->
-        let target = s.y - cam_anchor() * view_h()
-        { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+    -- Overshoot: sailed well past the target star with no capture — without
+    -- this, an upward miss never triggers ANY end state (no gravity, no top
+    -- kill) and the run dangles forever off-screen.
+    let fallback = { x: view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let topmost = top_star(game.stars, fallback)
+    let overshot = game.ball_y < topmost.y - overshoot_margin()
+    -- Falling below the current star is equally unrecoverable (no gravity,
+    -- nothing below) — and the flying camera CHASES the ball, so the
+    -- viewport-bottom kill above can no longer fire on its own.
+    let fallen = match star_at(game, 0) do
+      None -> false
+      Some(c) -> game.ball_y > c.y + fall_margin()
     end
+    if below || off_side || overshot || fallen do end_run(game) else game end
   end
 
-  pfn fresh_run(rng : Int, best : Int, runs : List(RunRecord)) : Game do
+  -- Camera: anchored to the current star while orbiting; chases the BALL
+  -- while flying so the player can watch the shot (and its miss/capture).
+  pfn step_camera(game : Game, dt_s : Float) : Game do
+    let target = match game.mode do
+      Flying(_, _) -> game.ball_y - cam_anchor() * view_h()
+      Orbiting(_, _) ->
+        match star_at(game, game.current) do
+          None -> game.camera_y
+          Some(s) -> s.y - cam_anchor() * view_h()
+        end
+    end
+    { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+  end
+
+  pfn fresh_run(rng : Random.Rng, best : Int, runs : List(RunRecord)) : Game do
     let (stars, rng2) = Perihelion.Level.initial_stars(rng)
     let start_angle = Math.pi() / 2.0
     match stars do
@@ -277,7 +348,7 @@ mod Perihelion.Core do
 
   doc "A fresh game seeded with persisted best + run history (from decode_save)."
   fn new_game_saved(seed : Int, best : Int, runs : List(RunRecord)) : Game do
-    fresh_run(seed, best, runs)
+    fresh_run(Random.seed(seed), best, runs)
   end
 
   pfn restart(game : Game) : Game do

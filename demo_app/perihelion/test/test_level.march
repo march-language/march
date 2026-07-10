@@ -14,7 +14,7 @@ mod TestPerihelionLevel do
   end
 
   -- Generate a chain of n stars, asserting bounds on each link.
-  pfn check_chain(rng : Int, prev : Star, n : Int) : Bool do
+  pfn check_chain(rng : Random.Rng, prev : Star, n : Int) : Bool do
     if n == 0 do
       true
     else
@@ -33,25 +33,25 @@ mod TestPerihelionLevel do
 
   describe "next_star" do
     test "same seed produces the same star" do
-      let (a, _) = Perihelion.Level.next_star(42, base_star())
-      let (b, _) = Perihelion.Level.next_star(42, base_star())
+      let (a, _) = Perihelion.Level.next_star(Random.seed(42), base_star())
+      let (b, _) = Perihelion.Level.next_star(Random.seed(42), base_star())
       assert (star_eq(a, b))
     end
 
     test "different rng states produce different stars" do
-      let (a, rng2) = Perihelion.Level.next_star(42, base_star())
+      let (a, rng2) = Perihelion.Level.next_star(Random.seed(42), base_star())
       let (b, _) = Perihelion.Level.next_star(rng2, base_star())
       assert (!star_eq(a, b))
     end
 
     test "a 50-star chain stays in bounds" do
-      assert (check_chain(7, base_star(), 50))
+      assert (check_chain(Random.seed(7), base_star(), 50))
     end
   end
 
   describe "initial_stars" do
     test "produces 3 stars, bottom-first, strictly climbing" do
-      let (stars, _) = Perihelion.Level.initial_stars(42)
+      let (stars, _) = Perihelion.Level.initial_stars(Random.seed(42))
       assert (List.length(stars) == 3)
       match stars do
         Cons(s0, Cons(s1, Cons(s2, Nil))) ->

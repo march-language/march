@@ -6690,6 +6690,45 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** int_div_euclid: native codegen must route through march_checked_ediv and
+    match the interpreter's Euclidean quotient across all four sign quadrants.
+    Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
+    at link time with `Undefined symbols: _int_div_euclid`. The negative-operand
+    cases exercise the truncated→Euclidean correction step (r<0 → q∓1). *)
+let test_compiled_int_div_euclid_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_div_euclid"
+    ~src:"mod IntDivEuclidParity do\n\
+         \  fn main() do\n\
+         \    println([int_div_euclid(7, 2), int_div_euclid(-7, 2), \
+                        int_div_euclid(-7, -2), int_div_euclid(7, -2)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[3, -4, 4, -3]"
+    ()
+
+(** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
+    the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
+    left the outer binding's literal mapping (`x -> 10`) in scope when the
+    shadowing RHS was not itself a literal/alias/record, so the body's uses of
+    the *new* `x` were substituted with the *old* value — a silently-wrong
+    compile on BOTH the native and JS backends (interpreter was correct). The
+    chain `((10 + 5) * 2)` discriminates cleanly: correct = 30, buggy = 10
+    (every shadow kept reading the original 10). *)
+let test_compiled_let_shadowing_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_let_shadowing"
+    ~src:"mod LetShadowParity do\n\
+         \  fn main() do\n\
+         \    let x = 10\n\
+         \    let x = x + 5\n\
+         \    let x = x * 2\n\
+         \    println(int_to_string(x))\n\
+         \  end\n\
+          end\n"
+    ~expected:"30"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -7205,6 +7244,48 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(** Cross-module ambiguous-constructor resolution (compiled-only regression).
+
+    `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
+    names `Null`/`Bool`/`Str`/`Array` at DIFFERENT tag positions (`Array` is tag 5
+    in `Value`, tag 4 in `JsonValue`). Pre-fix, an unannotated `Msgpack` function
+    resolving a bare `Array`/`Str`/`Null` could pick the sibling module's variant,
+    so:
+      • `encode_val`'s scrutinee typed as `JsonValue` → the `Int`/`Array`/`Map`
+        arms (Msgpack-only) collapsed to a non-exhaustive `switch`, and
+        `Msgpack.encode(Msgpack.int(42))` panicked with "non-exhaustive pattern
+        match" at runtime (interpreter was fine — this was compiled-only), and
+      • `decode` constructed `alloc JsonValue.Array` (tag 4) where a `Value`
+        (tag 5) was meant, so a decoded array no longer matched `Msgpack.Array`.
+    The interpreter got both right, making this a pure codegen parity divergence.
+    Fixed as a side effect of the sibling-ctor-shadowing fix (`add_ctor` moving a
+    module's own re-registered constructor to the front of its candidate list —
+    see the "sibling-ctor shadowing" entry in `specs/progress.md`). This
+    exercises the Msgpack-only arms (Int, Array, Map) through both encode and a
+    decode round-trip. *)
+let test_msgpack_cross_module_ctor_resolution_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_msgpack_ctor_resolution"
+    ~src:"mod MsgpackCtorResolution do\n\
+         \  fn describe(bs : List(Int)) : String do\n\
+         \    match Msgpack.decode(bs) do\n\
+         \      Ok(Msgpack.Int(n))   -> \"int:\" ++ String.from_int(n)\n\
+         \      Ok(Msgpack.Array(_)) -> \"array\"\n\
+         \      Ok(Msgpack.Map(_))   -> \"map\"\n\
+         \      Ok(_)                -> \"other\"\n\
+         \      Err(e)               -> \"err:\" ++ e\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(String.from_int(List.length(Msgpack.encode(Msgpack.int(42)))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.int(7))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.int(2), Nil))))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.map(Cons((Msgpack.str(\"k\"), Msgpack.int(9)), Nil)))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"1\nint:7\narray\nmap"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -7274,6 +7355,7 @@ declare double @march_checked_fdiv(double %a, double %b)
 declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
 declare i64    @march_checked_umod(i64 %a, i64 %b)
+declare i64    @march_checked_ediv(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
@@ -8329,6 +8411,10 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
+            test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
+            test_compiled_let_shadowing_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
@@ -8377,6 +8463,10 @@ let codegen_suites =
             test_newtype_eq_operator_boxed_payload_compiled;
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
+        ] );
+      ( "cross_module_ctor_resolution", [
+          Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
+            test_msgpack_cross_module_ctor_resolution_compiled;
         ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick

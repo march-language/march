@@ -1,14 +1,14 @@
--- KNOWN-BROKEN repro, deliberately NOT wired into test/dune (no runtest rule):
--- pure-March Random (xoshiro) crashes under --target js.
---   1. js_emit has no mapping for the `int_max_value` builtin → emitted JS
---      throws ReferenceError in Random.mix (this program's actual failure).
---   2. Deeper: xoshiro needs exact 63-bit wraparound arithmetic; JS numbers
---      are doubles, so `x * 1234567891011` in mix() silently exceeds 2^53
---      and loses bits — mapping the builtin is NOT sufficient to make
---      Random correct on the JS target.
--- Tracked in specs/todos.md (P1, "Random unusable on --target js", 2026-07-09).
--- Wire this into test/dune as a golden once fixed: it self-checks range and
--- distinctness, and the diff pins cross-run determinism.
+-- Golden: stdlib Random on --target js (wired in test/dune; fixed 2026-07-10).
+-- Random's core is sfc32 on 32-bit words, so every intermediate stays below
+-- 2^53 and the sequence is exact — and IDENTICAL — on the interpreter,
+-- native, and JS backends; the .expected file is that shared output.
+-- The int bitwise builtins (int_and/or/xor/shl/shr, int_mod, ...) are mapped
+-- to checked implementations in runtime/march_runtime.mjs, and an unmapped
+-- builtin on the JS target is now a compile error rather than a silent
+-- bare-call emit (the original failure mode here: xoshiro-based Random threw
+-- `ReferenceError: int_max_value is not defined` at runtime).
+-- Self-checks: value range and distinctness; the golden diff additionally
+-- pins cross-run determinism.
 mod JsRandomDeterminism do
   fn main() : Unit do
     let rng = Random.seed(42)

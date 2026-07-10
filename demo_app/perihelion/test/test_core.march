@@ -28,7 +28,7 @@ mod TestPerihelionCore do
       stars: Cons(s0, Cons(s1, Nil)),
       current: 0, score: 0, best: 0,
       camera_y: 136.0,
-      rng: 7,
+      rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
       shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
       loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil }
@@ -229,7 +229,8 @@ mod TestPerihelionCore do
       -- loop_angle 0 = a quick capture: multiplier bumps to 2 and scores 2
       assert (g4.score == 2)
       assert (g4.current == 1)
-      assert (List.length(g4.stars) == 3)
+      -- top-up generation keeps >= 2 stars ahead of current: 2 initial + 2 new
+      assert (List.length(g4.stars) == 4)
       assert (is_orbiting_star(g4.mode, 1))
     end
   end
@@ -407,6 +408,87 @@ mod TestPerihelionCore do
       let g = { g0 with phase: Playing }
       let g2 = run_n(g, 3600)
       assert (List.length(g2.stars) >= 3)
+    end
+  end
+
+  describe "flight camera and overshoot" do
+    test "camera follows the ball upward while flying" do
+      -- ball above the star anchor but short of the overshoot line (y > 210):
+      -- flying-camera target = ball_y - 384 < current camera, so camera rises
+      let g0 = mk_flying(200.0, 250.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g = { g0 with camera_y: 136.0 }
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (g2.camera_y < 136.0)
+    end
+
+    test "camera still anchors to the current star while orbiting" do
+      let g0 = mk_game(0.0)
+      let g = { g0 with camera_y: 300.0 }
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (g2.camera_y < 300.0)
+      assert (g2.camera_y > 136.0)
+    end
+
+    test "flying far above the next star ends the run (overshoot)" do
+      -- next star (idx 1) at y=360; overshoot margin 150 -> death above y=210
+      let g = mk_flying(200.0, 205.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_over(g2.phase))
+    end
+
+    test "falling below the current star ends the run despite the chasing camera" do
+      -- current star at y=520; fall line = 520 + 200 = 720. Camera chases the
+      -- falling ball so the old bottom-of-viewport kill can never fire.
+      let g = mk_flying(200.0, 725.0, 0.0, Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_over(g2.phase))
+    end
+
+    test "flying between stars does not overshoot-kill" do
+      let g = mk_flying(200.0, 430.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_playing(g2.phase))
+    end
+  end
+
+  describe "capture any ring" do
+    test "falling across an older star's ring recaptures it without scoring" do
+      -- three stars; ball is falling and crosses star 0's ring while current=1
+      let g0 = mk_game(0.0)
+      let g1 = { g0 with
+                   stars: Cons(mk_star(200.0, 520.0), Cons(mk_star(200.0, 360.0), Cons(mk_star(200.0, 200.0), Nil))),
+                   current: 1, score: 5, multiplier: 3,
+                   mode: Flying(0.0, Perihelion.Core.fly_speed()),
+                   ball_x: 200.0, ball_y: 458.0 }
+      let g2 = Perihelion.Core.update(g1, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_orbiting_star(g2.mode, 0))
+      assert (g2.current == 0)
+      assert (g2.score == 5)
+      assert (g2.multiplier == 1)
+    end
+
+    test "ring-edge touch captures (ball radius grace)" do
+      -- ball center just inside capture_radius + ball_radius of star 1
+      let g = mk_flying(200.0, 360.0 + 58.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (is_orbiting_star(g2.mode, 1))
+    end
+
+    test "a fresh release does not instantly recapture its own star" do
+      let g = mk_game(Math.pi())
+      let g2 = Perihelion.Core.update(g, one_tap(), no_keys(), Perihelion.Core.dt())
+      let g3 = Perihelion.Core.update(g2, no_taps(), no_keys(), Perihelion.Core.dt())
+      assert (match g3.mode do
+        Flying(_, _) -> true
+        _ -> false
+      end)
+    end
+
+    test "forward capture keeps at least two stars ahead" do
+      let g = mk_flying(200.0, 420.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = run_until_capture(g, 20)
+      assert (g2.current == 1)
+      assert (List.length(g2.stars) >= g2.current + 3)
     end
   end
 
