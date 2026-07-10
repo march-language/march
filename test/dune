@@ -1859,6 +1859,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))
 
+; js_canvas_available — verifies that canvas.march is auto-loaded for --target js builds
+(rule
+ (targets js_canvas_available.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_canvas_available.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_canvas_available.mjs native/js_canvas_available.march)))
+
+(rule
+ (targets js_canvas_available.out)
+ (deps js_canvas_available.mjs march_runtime.mjs)
+ (action (with-stdout-to js_canvas_available.out (run node js_canvas_available.mjs))))
+
+(rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)
