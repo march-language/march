@@ -3383,6 +3383,66 @@ let test_tc_same_module_ctor_precedence () =
   Alcotest.(check bool) "same-module ctor outranks un-imported sibling — no errors"
     false (has_errors ctx)
 
+(* Same-module precedence must NOT override a KNOWN scrutinee type that uniquely
+   identifies the constructor.  `Consumer` locally defines `Local = Reg(Int)` yet
+   pattern-matches a value of sibling `RemoteMod.Remote = Reg(String)` via bare
+   `Reg(s)` with the scrutinee type annotated.  The two types have DISTINCT names
+   (`Local` vs `Remote`), so the expected type uniquely selects `Remote`'s ctor —
+   it must win over same-module precedence, else `s` binds `Int` and unification
+   against the `String` return spuriously fails ("expected String but got Int").
+   Guards the layered [lookup_ctor_in_type_unique]-before-same-module ordering at
+   the pattern site. *)
+let test_tc_expected_type_beats_same_module () =
+  let ctx = typecheck {|mod App do
+    mod RemoteMod do
+      type Remote = Reg(String)
+      fn wrap(s : String) : Remote do Reg(s) end
+    end
+    mod Consumer do
+      type Local = Reg(Int)
+      fn local_val() : Local do Reg(7) end
+      fn use_remote(x : RemoteMod.Remote) : String do
+        match x do Reg(s) -> s end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unique expected type outranks same-module ctor — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence for a genuinely NESTED module.  `Inner` and `Sib` sit
+   two levels deep under a non-entry `Outer`, so their constructors are seeded
+   under the accumulated path key (`Outer.Inner.Reg` / `Outer.Sib.Reg`), which
+   the leaf `current_module` name does not match — resolution relies on the
+   [cap_qual_prefix] accumulated path.  Each nested module's bare `Reg` must
+   still resolve to its own type. *)
+let test_tc_same_module_ctor_precedence_nested () =
+  let ctx = typecheck {|mod Top do
+    mod Outer do
+      mod Inner do
+        type Foo = Foo(Int)
+        type Reg = Reg(List(Foo))
+        fn i_add(r : Reg, n : Int) : Reg do
+          match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+        end
+        fn i_items(r : Reg) : List(Foo) do
+          match r do Reg(items) -> items end
+        end
+      end
+      mod Sib do
+        type Bar = Bar(String)
+        type Reg = Reg(List(Bar))
+        fn s_add(r : Reg, s : String) : Reg do
+          match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+        end
+        fn s_items(r : Reg) : List(Bar) do
+          match r do Reg(items) -> items end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested-module same-module ctor precedence — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11729,6 +11789,8 @@ let stdlib_suites =
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
         Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
+        Alcotest.test_case "expected type beats same-module" `Quick test_tc_expected_type_beats_same_module;
+        Alcotest.test_case "nested same-module ctor precedence" `Quick test_tc_same_module_ctor_precedence_nested;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;

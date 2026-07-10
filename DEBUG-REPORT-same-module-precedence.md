@@ -71,37 +71,66 @@ without establishing explicit same-module precedence.
 
 `lib/typecheck/typecheck.ml`. Prebind already seeds a module-qualified key
 `Module.Ctor` (with the bare `ci_type`) for every module's public constructors,
-present in every module's env. New helper:
+keyed by the **accumulated, entry-unwrapped module path**. New helper:
 
 ```ocaml
 let lookup_ctor_same_module name env =
-  if env.current_module = "" || String.contains name '.' then None
-  else lookup_ctor (env.current_module ^ "." ^ name) env
+  let self = if env.cap_qual_prefix <> "" then env.cap_qual_prefix
+             else env.current_module in
+  if self = "" || String.contains name '.' then None
+  else lookup_ctor (self ^ "." ^ name) env
 ```
 
-For an **unqualified** constructor reference, both the expression (`ECon`) and
-pattern (`PatCon`) sites now consult `lookup_ctor_same_module` **first**, then
-fall back to the existing resolution chain.
+**Module identity (Finding 2).** The prebind key is the accumulated path with
+the TIR entry-unwrapping convention: a top-level sibling `Islands` seeds
+`Islands.Registry`; a module one level under the unwrapped entry seeds
+`Inner.Registry`; a module under a non-entry wrapper seeds `Outer.Inner.Registry`.
+`cap_qual_prefix` tracks exactly that accumulated path (empty at the unwrapped
+entry, where prebind instead uses the entry name held by `current_module`), so
+`cap_qual_prefix`-else-`current_module` matches the key for **top-level,
+dotted-single-decl, AND arbitrarily nested** modules. (The first cut used the
+leaf `current_module`, which only matches for top-level / entry+1 nesting; the
+3-level `Top>Outer>Inner` case needs the accumulated path.)
 
-- If the current module defines the constructor, `current_module ^ "." ^ name`
-  is a key and its own candidate wins — same-module precedence.
-- If it does not (imported names, or a genuine cross-module bare reference whose
-  `current_module` prefix does not match the definer, e.g. d95fe942's
-  Core/Facade/Worker cycle), the key is absent and behavior is unchanged —
-  preserving imports, qualified refs, and d95fe942's order-independence.
+If the current module does not define the constructor, the key is absent and we
+fall through to the existing chain — preserving imports, qualified refs, and
+d95fe942's order-independence for genuine cross-module bare references whose
+module path does not match the definer's (e.g. the Core/Facade/Worker cycle).
+
+**Resolution precedence at each site.**
+
+- **Expression `ECon`** (no expected-type context): `lookup_ctor_same_module`
+  first, then the raw head / qualified resolution.
+- **Pattern `PatCon`** (a scrutinee type may be known — **Finding 1**): a KNOWN
+  scrutinee type that *uniquely* identifies the constructor wins first, via the
+  new `lookup_ctor_in_type_unique` (returns a match only when exactly one
+  candidate's `ci_type` equals the expected type name). This lets a module that
+  locally defines `Local = Reg(Int)` still match an imported `Remote = Reg(String)`
+  value via bare `Reg(s)` — the differently-named expected type selects `Remote`.
+  Only when the expected type name is itself *shared* by several candidates (two
+  sibling `Registry` types — so `lookup_ctor_in_type_unique` is ambiguous → `None`)
+  does same-module precedence take over, then the legacy order-dependent
+  expected-type head, then the raw head.
 
 The returned `ci_type` is the bare type name (as prebind seeds it), so nominal
 types and codegen keys are unaffected.
 
 ## Test evidence
 
-### Regression test (in suite)
-`test/test_stdlib_suite.ml`: `test_tc_same_module_ctor_precedence`
-(module-system group, alongside the d95fe942 order-independence tests). Two
-sibling modules `AMod`/`BMod` each define a distinct `type Reg` with different
-element types and construct/retrieve via bare `Reg`. **Fails pre-fix**
-(`expected Bar but got Foo`), **passes post-fix**. Verified by stash/rebuild.
-Module-system group: `same-module ctor precedence [OK]`, 56 tests run.
+### Regression tests (in suite)
+`test/test_stdlib_suite.ml`, module-system group (alongside the d95fe942
+order-independence tests). All three **pass post-fix**; each **fails on the
+relevant baseline**:
+- `test_tc_same_module_ctor_precedence` — two sibling `AMod`/`BMod` with distinct
+  same-named `Reg`. Fails at the base a3d7ebfa (`expected Bar but got Foo`).
+- `test_tc_expected_type_beats_same_module` (Finding 1) — `Consumer` locally
+  defines `Local = Reg(Int)` and pattern-matches an imported `RemoteMod.Remote =
+  Reg(String)` via bare `Reg(s)` with the scrutinee type annotated. Fails at the
+  first-cut same-module-first commit 5a7566dc (`expected Local but got Remote` /
+  `expected String but got Int`).
+- `test_tc_same_module_ctor_precedence_nested` (Finding 2) — `Inner`/`Sib` two
+  levels deep under a non-entry `Outer`. Fails at 5a7566dc (leaf `current_module`
+  misses the `Outer.Inner.Reg` key → 3 mismatches).
 
 ### march suite (`dune runtest --root .`)
 No new failures. stdlib suite 808 tests pass (incl. the new test);
