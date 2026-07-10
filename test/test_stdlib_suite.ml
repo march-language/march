@@ -3347,6 +3347,42 @@ let test_tc_qualified_sig_type_order_independent () =
   Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
     false (has_errors ctx)
 
+(* Same-module precedence: two sibling modules define DISTINCT types that share
+   a constructor name (`Reg`), with different element types, and NEITHER imports
+   the other.  An UNQUALIFIED reference to `Reg` inside each module must resolve
+   to that module's OWN `Reg` — not to the sibling's same-named one.  Because
+   March keys nominal types by bare name, both `Reg`s are the same `TCon("Reg")`
+   at the type level; only the constructors' argument types (`List(Foo)` vs
+   `List(Bar)`) differ.  Before the fix, the bare-name entry in `env.ctors` held
+   a single global winner shared by both modules, so whichever module lost the
+   head saw the sibling's element type ("expected Bar but got Foo").  A module's
+   own definition must outrank an un-imported sibling's. *)
+let test_tc_same_module_ctor_precedence () =
+  let ctx = typecheck {|mod App do
+    mod AMod do
+      type Foo = Foo(Int)
+      type Reg = Reg(List(Foo))
+      fn a_add(r : Reg, n : Int) : Reg do
+        match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+      end
+      fn a_items(r : Reg) : List(Foo) do
+        match r do Reg(items) -> items end
+      end
+    end
+    mod BMod do
+      type Bar = Bar(String)
+      type Reg = Reg(List(Bar))
+      fn b_add(r : Reg, s : String) : Reg do
+        match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+      end
+      fn b_items(r : Reg) : List(Bar) do
+        match r do Reg(items) -> items end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same-module ctor outranks un-imported sibling — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11692,6 +11728,7 @@ let stdlib_suites =
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
+        Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;

@@ -626,6 +626,32 @@ let lookup_ctor name env =
   | Some (ci :: _) -> Some ci
   | _ -> None
 
+(** Same-module precedence for an UNQUALIFIED constructor reference.
+
+    When two sibling modules in the same package define distinct types that
+    share a constructor name (e.g. `IslandSocket.Registry(List(IslandHandler))`
+    and `Islands.Registry(List(Descriptor))`), the bare-name entry in
+    [env.ctors] holds BOTH candidates and [lookup_ctor] returns whichever was
+    registered last — a single global winner shared by every module, regardless
+    of which module's body is being checked.  Since March keys nominal types by
+    bare name, both `Registry`s look identical at the type level; only the
+    constructors' argument types differ, so the wrong candidate silently unifies
+    the sibling's element type in (the observed "expected Descriptor but got
+    IslandHandler").
+
+    A module's own top-level definition must outrank a same-named one from a
+    module it does not even import.  [prebind_mod_members] seeds a
+    module-qualified key `Module.Ctor` (with the bare [ci_type]) for every
+    module's public constructors, so when [env.current_module] is set we look
+    the bare name up under that qualified key first.  If the current module does
+    not define [name] the key is absent and we fall through to the existing
+    resolution (preserving imported names and d95fe942's order-independence for
+    genuinely cross-module bare references, whose [current_module] prefix does
+    not match the definer). *)
+let lookup_ctor_same_module name env =
+  if env.current_module = "" || String.contains name '.' then None
+  else lookup_ctor (env.current_module ^ "." ^ name) env
+
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
     several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); [lookup_ctor]
@@ -2790,6 +2816,11 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        prefer the candidate whose parent type matches, instead of relying on
        [lookup_ctor]'s order-dependent "most recently registered wins". *)
     (let ci_opt =
+       (* Same-module precedence: a module's own constructor outranks a
+          same-named sibling's (see [lookup_ctor_same_module]). *)
+       match lookup_ctor_same_module name.txt env with
+       | Some _ as r -> r
+       | None ->
        let by_expected =
          if String.contains name.txt '.' then None
          else
@@ -3941,7 +3972,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
-      (let ci_opt = match lookup_ctor name.txt env with
+      (let ci_opt = match lookup_ctor_same_module name.txt env with
+         | Some _ as r -> r
+         | None ->
+         match lookup_ctor name.txt env with
          | Some _ as r -> r
          | None ->
            (* Try qualified module resolution: "Mod.Ctor" *)
