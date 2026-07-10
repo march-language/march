@@ -1,0 +1,38 @@
+mod Main do
+  -- Operational linearity witness (core-march.md §4.12): linear/affine
+  -- annotations are COMPILE-TIME-ERASED -- a linearity-correct program runs
+  -- byte-identically interpreted and compiled, with no runtime use-accounting
+  -- on either backend. Exercises all three keyword surfaces: a `linear` fn
+  -- param (consumed once via match INSIDE the callee), a `linear let`
+  -- (consumed once by the call), and an `affine` type-modifier binding
+  -- (consumed once by a helper CALL). Deterministic: no actors, no scheduler.
+  --
+  -- DELIBERATE SHAPE CONSTRAINT (finding L7, specs/todos.md): the affine
+  -- binding is consumed via a helper call, NOT matched directly -- a direct
+  -- `match` on a TyLinear-ANNOTATED binding of a Newtype-shaped ADT reads
+  -- garbage compiled (interp 22 / compiled nondeterministic garbage), so that
+  -- shape cannot be a golden MATCH until L7 is fixed. Passing the same
+  -- binding to a helper (whose param type is plain) is byte-identical.
+  --
+  -- Type named Res, NOT Handle -- always_linear_types is name-keyed globally
+  -- and stdlib handle.march claims Handle (finding L4, specs/todos.md).
+  type Res = R(Int)
+  fn take(linear q : Res) : Int do
+    match q do
+      R(n) -> n
+    end
+  end
+  fn get(q : Res) : Int do
+    match q do
+      R(n) -> n
+    end
+  end
+  fn main() do
+    linear let r : Res = R(20)
+    let a = take(r)
+    let c : affine Res = R(22)
+    let b = get(c)
+    println(int_to_string(a + b))
+    println("done")
+  end
+end

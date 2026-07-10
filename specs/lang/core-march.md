@@ -2623,9 +2623,53 @@ comparison. Declaring protocol roles as their own nullary types (as `g38`/
 `g39` do, `type Client = Client`) silences it, but that is optional hygiene,
 not a golden requirement.
 
+### 4.12 Linearity at runtime (operational: there is none)
+
+Linearity (`core-march-types.md` §2.9) is **compile-time-erased**. Neither
+backend performs any use-accounting at runtime; a linearity-correct program
+behaves identically to the same program with every `linear`/`affine`
+annotation deleted. Golden witness: `g41_linear_annotations_erased` (all
+three keyword surfaces — `linear` param, `linear let`, `affine`
+type-modifier binding — prints `42` / `done`, byte-identical, MATCH).
+
+What each layer actually does (all line numbers drift; re-grep):
+
+- **Interpreter** (`eval.ml`): no tracking. `DAlwaysLinearType` is handled
+  identically to `DType` (`eval.ml:~8412`); `chan_send` passes the endpoint
+  through with the comment "the type system ensures linearity; here we just
+  pass it through" (`:~2686`). The only linear-labeled machinery is actor
+  **Drop-on-crash cleanup** — `ai_linear_values` (value, drop-fn pairs,
+  `:~119`), registered by the `own(pid, value)` builtin (`:~3088`) and run in
+  reverse acquisition order at actor death (`:~1827`) — which is resource
+  management, not enforcement.
+- **Compiled backend** (TIR): the surface linearity is lowered onto TIR vars
+  as `v_lin : Lin | Aff | Unr` (`tir.ml:17`, via `lower_types.ml:58-61`) and
+  used ONLY for optimization, never checks: a `send` of a `v_lin = Lin`
+  message emits `march_send_linear` (zero-copy move instead of copy,
+  `llvm_emit.ml:~1576`), and the implicit `$actor` param is marked `Lin` so
+  Perceus elides incrc on field loads (FBIP in-place mutation,
+  `lower_actor.ml:~92`). The *type*-level `TLin` wrapper is stripped at both
+  lowering entries (`lower_types.ml:51` surface, `:92` typecheck-ty).
+- **Consequence**: any program the static tracker fails to reject (the L3/L4
+  param-field and F7 session-parameter gaps, `specs/todos.md`) runs with NO
+  runtime backstop — same posture as the capability system (§2.8's
+  runtime-erased `Cap(X)`).
+
+**Known compiled divergence excluded from the golden (finding L7,
+`specs/todos.md`):** a direct `match` on a `TyLinear`-ANNOTATED binding of a
+Newtype-shaped ADT (`let c : affine Res = R(22)` then `match c do ... end`,
+where `Res = R(Int)`) prints nondeterministic garbage compiled (interp `22`;
+compiled e.g. `2169571280`, varies per run) — both `linear` and `affine`
+annotation flavors; primitives (`affine Int`) and Boxed ADTs (two-field
+ctor) are unaffected, and consuming the same binding via a helper CALL is
+byte-identical. The repr classification of the annotated match scrutinee is
+the suspected locus. `g41` deliberately consumes its affine binding via a
+call, not a direct match, until L7 is fixed — the same
+witness-documents-around-the-bug pattern as §4.11.5's MPST exclusion.
+
 ## 5. Golden conformance corpus
 
-Thirty-nine programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-one programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
