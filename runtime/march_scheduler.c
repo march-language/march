@@ -628,6 +628,8 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
 
     p->pid        = atomic_fetch_add_explicit(&g_next_pid, 1, memory_order_relaxed);
     p->is_daemon  = is_daemon;
+    /* NEW→RUNNABLE: trivially single-winner (the proc is not yet published
+     * to any other thread); the enqueue below is the one matching enqueue. */
     p->status     = PROC_RUNNABLE;
     p->priority   = PRIO_NORMAL;
     p->reductions = MARCH_REDUCTION_BUDGET;
@@ -832,7 +834,56 @@ static void sched_loop(march_scheduler *sched) {
             continue;
         }
 
-        atomic_store_explicit(&p->status, PROC_RUNNING, memory_order_release);
+        /* Claim the proc with a CAS RUNNABLE→RUNNING before executing it.
+         * Because enqueue is single-winner (every transition INTO RUNNABLE
+         * is one atomic CAS/uncontended store whose winner alone enqueues,
+         * and cross-thread pushes are gone), a dequeued proc is referenced
+         * by this thread only — so this CAS should never lose.  It is a
+         * backstop: if it ever fails with an unexpected state, the single-
+         * membership invariant was violated and (in MARCH_DEBUG builds) we
+         * abort at the moment it happens instead of corrupting a stack.
+         *
+         * One legitimate failure exists: march_task_cancel_by_id stores
+         * PROC_DEAD cross-thread into a proc that may be sitting in a run
+         * queue.  Pre-CAS dispatch ran such a proc anyway (the store was
+         * blindly overwritten with RUNNING and the thunk completed,
+         * setting the task's done flag); preserve exactly that behavior by
+         * claiming DEAD→RUNNING and running it.  Dropping it instead would
+         * strand g_live_procs above zero (shutdown hang) and leave
+         * task_await spinning on a done flag that never gets set. */
+        march_proc_status claim = PROC_RUNNABLE;
+        if (!atomic_compare_exchange_strong_explicit(
+                &p->status, &claim, PROC_RUNNING,
+                memory_order_acq_rel, memory_order_acquire)) {
+            if (claim == PROC_DEAD) {
+                if (!atomic_compare_exchange_strong_explicit(
+                        &p->status, &claim, PROC_RUNNING,
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    /* DEAD moved under us — nothing else may own a dequeued
+                     * proc; drop defensively (debug builds scream). */
+#ifdef MARCH_DEBUG
+                    fprintf(stderr,
+                            "march_sched[BUG]: claim of dequeued pid %lld "
+                            "failed twice (status=%d)\n",
+                            (long long)p->pid, (int)claim);
+                    abort();
+#endif
+                    continue;
+                }
+            } else {
+#ifdef MARCH_DEBUG
+                fprintf(stderr,
+                        "march_sched[BUG]: dequeued pid %lld not RUNNABLE "
+                        "at claim (status=%d, running_on=%d) — "
+                        "single-membership violated\n",
+                        (long long)p->pid, (int)claim,
+                        atomic_load_explicit(&p->dbg_running_on,
+                                             memory_order_acquire));
+                abort();
+#endif
+                continue;   /* stale/duplicate reference: drop, never run */
+            }
+        }
         p->reductions   = MARCH_REDUCTION_BUDGET;
         p->owner_sched  = sched;
         sched->current  = p;
@@ -973,7 +1024,21 @@ __attribute__((noinline))
 void march_sched_yield(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
-    atomic_store_explicit(&p->status, PROC_RUNNABLE, memory_order_release);
+    /* Authorized RUNNING→RUNNABLE transition (single-winner enqueue rule):
+     * only the running proc itself performs it, on its own scheduler
+     * thread, and the matching enqueue is done exactly once by the owner
+     * scheduler after swapcontext returns (post-swap RUNNABLE branch).
+     * The only possible contender is march_task_cancel_by_id's cross-
+     * thread DEAD store; if it raced us, deliberately overwrite it —
+     * pre-CAS dispatch always did — so the cancelled thunk still runs to
+     * completion and sets its task's done flag (dropping it here would
+     * hang task_await and strand g_live_procs above zero). */
+    march_proc_status expect = PROC_RUNNING;
+    if (!atomic_compare_exchange_strong_explicit(
+            &p->status, &expect, PROC_RUNNABLE,
+            memory_order_acq_rel, memory_order_acquire)) {
+        atomic_store_explicit(&p->status, PROC_RUNNABLE, memory_order_release);
+    }
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
