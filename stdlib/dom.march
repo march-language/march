@@ -82,6 +82,8 @@ mod Dom do
     fn dom_event_type(ev: Event)                : String = "march_dom_event_type"
     fn dom_prevent_default(ev: Event)           : Unit   = "march_dom_prevent_default"
     fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
+    fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
+    fn dom_event_y(ev: Event)                   : Int    = "march_dom_event_y"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
@@ -198,6 +200,12 @@ mod Dom do
 
   doc "Stop `ev` from bubbling up to parent elements."
   fn stop_propagation(ev)              do dom_stop_propagation(ev) end
+
+  doc "Return the x-coordinate of `ev` relative to the target element (`event.offsetX`). Useful for hit-testing pointer/click events against a `<canvas>`."
+  fn event_x(ev)                       do dom_event_x(ev) end
+
+  doc "Return the y-coordinate of `ev` relative to the target element (`event.offsetY`)."
+  fn event_y(ev)                       do dom_event_y(ev) end
 
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end

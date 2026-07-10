@@ -112,6 +112,8 @@ export function march_dom_event_target(ev) { return ev.target; }
 export function march_dom_event_type(ev) { return ev.type; }
 export function march_dom_prevent_default(ev) { ev.preventDefault(); }
 export function march_dom_stop_propagation(ev) { ev.stopPropagation(); }
+export function march_dom_event_x(ev) { return Math.trunc(ev.offsetX); }
+export function march_dom_event_y(ev) { return Math.trunc(ev.offsetY); }
 
 // ── Window ────────────────────────────────────────────────────────────────────
 
