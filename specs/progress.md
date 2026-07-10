@@ -283,6 +283,37 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, Core March widening slice 8 — `let?` Result-propagation, CLOSEOUT)
+
+**Slice 8 widens the conformance-tested references to `let?` Result-propagation**
+(`core-march-types.md` §2.10 typing, `core-march.md` §4.13 operational) — a
+small, self-contained docs/corpus slice (no compiler change; `let?` was already
+shipped natively as `ELetQ`). Survey confirmed the implementation matches the
+`let-propagation.md` design: `ELetQ` is typechecked natively in `infer_expr`
+(NOT desugared) and evaluated natively in `eval.ml`, with an Ok-bind-and-continue
+/ Err-short-circuit semantics that is byte-identical interpreted vs compiled.
+
+§2.10 pins `(T-LetQ)` — `let? p = result; body` with `result : Result(τ_ok, ε)`,
+`p : τ_ok` (irrefutable simple_pattern), `body : Result(τ_r, ε)` SAME error type,
+yielding `Result(τ_r, ε)` — plus three native diagnostics: (E-LetQ-Last) "cannot
+be the last expression in a block", (E-LetQ-RHS) "The right-hand side of `let?`
+must be a Result value.", (E-LetQ-Body) "must produce a Result with the same
+error type." §4.13 pins (E-LetQ-Ok) / (E-LetQ-Err).
+
+**Corpus:** types 135 → **142** (72 accept / 70 reject; `accept/t70`–`t72`
+chain-value/tuple/wildcard, `reject/t67`–`t70` last-expr/non-Result-RHS/
+non-Result-body/type-annotation, every diagnostic live-pinned); golden 41 → **42**
+(`g42_letq_short_circuit` — both Ok and Err paths, byte-identical both backends).
+`check_types.sh` 142/142; `verify.sh` 42/42; `check-docs` clean.
+
+**One finding filed (cosmetic, open):** the tutorial's dedicated "`let?` cannot
+have a type annotation" parser production (`let-propagation.md` §5.2) was never
+implemented — `let? x : T = e` is rejected by the generic missing-`=` recovery
+instead. Correct rejection, less-specific message; `reject/t70` pins the actual
+text. `let-propagation.md` reconciled to record the deviation and cross-ref the
+new §2.10 / §4.13 normative rules (it now reads "conformance-tested" instead of
+just "shipped").
+
 ## Current State (as of 2026-07-10, compiled fatal faults no longer wedge unkillably — _exit fault path)
 
 **A compiled fault could hang the process forever, immune to SIGKILL.** Found

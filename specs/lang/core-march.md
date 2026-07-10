@@ -2669,9 +2669,42 @@ its affine binding via a DIRECT match — the exact shape that was broken —
 as the permanent regression witness. Full writeup in `specs/todos.md`
 (Linearity section, L7 ✅).
 
+### 4.13 `let?` — Result-propagation (operational)
+
+`let? p = result; body` (typed by `core-march-types.md` §2.10) evaluates
+natively in the interpreter — `ELetQ` in `eval.ml` (`:7644`; re-grep) — with
+no desugaring to `match`. Two rules, and both backends agree byte-for-byte
+(golden `g42`):
+
+```
+        result ⇓ Ok(v)      body[p ↦ v] ⇓ w
+  (E-LetQ-Ok)  ──────────────────────────────────
+                  (let? p = result; body) ⇓ w
+
+        result ⇓ Err(w)
+  (E-LetQ-Err)  ─────────────────────────────────────
+                  (let? p = result; body) ⇓ Err(w)      -- body NOT evaluated
+```
+
+- **(E-LetQ-Ok)** — `result` reduces to `Ok(v)`; `p` is bound to `v` (the bind
+  cannot fail — `p` is an irrefutable `simple_pattern`, §2.10.1) and the
+  continuation runs.
+- **(E-LetQ-Err)** — `result` reduces to `Err(w)`; the whole `let?` returns
+  `Err(w)` **verbatim** and the continuation is never evaluated. This is the
+  short-circuit — `let?` always propagates the first `Err` upward with the
+  same error value. (A non-`Result` scrutinee is impossible in a well-typed
+  program, §2.10; the interpreter has a defensive `eval_error` for it.)
+
+Unlike a bare `with … do … end` (which desugars to an `Err`-arm-less `match`
+and `Match_failure`-panics on `Err`), `let?` is exhaustive by construction:
+the `Err` short-circuit is the rule itself, so `let?` can never crash on an
+`Err`. Golden `g42` witnesses both paths — `chain(5)` succeeds through two
+steps (`ok 70`), `chain(-1)` fails the first step so the second `let?` never
+runs (`err neg`) — identical interpreted and compiled.
+
 ## 5. Golden conformance corpus
 
-Forty-one programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-two programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original

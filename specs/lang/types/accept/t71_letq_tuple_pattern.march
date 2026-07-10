@@ -1,0 +1,16 @@
+-- `let?` with a tuple simple_pattern (widening slice 8, §2.10). The Ok payload
+-- is destructured by an irrefutable tuple pattern — the same simple_pattern a
+-- plain `let` accepts. Prints 7.
+mod Main do
+  fn pair() : Result((Int, Int), String) do Ok((3, 4)) end
+  fn run() : Result(Int, String) do
+    let? (a, b) = pair()
+    Ok(a + b)
+  end
+  fn main() do
+    match run() do
+      Ok(v)  -> println(int_to_string(v))
+      Err(_) -> println("err")
+    end
+  end
+end

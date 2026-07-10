@@ -4310,6 +4310,71 @@ capture, let-bound field double-access, affine double-use, `always_linear`
 drop, use-after-send). Pre-existing: `reject/t35` (session double-close via
 the same generic tracker).
 
+### 2.10 `let?` — Result-propagation binding (widening slice 8, 2026-07-10)
+
+`let? p = e` binds the `Ok` payload of a `Result`-typed `e` and short-circuits
+on `Err`. It is a distinct AST node, `ELetQ (p, result, body, span)`
+(`ast.ml`), **typechecked NATIVELY** in `infer_expr` (`typecheck.ml:4651`),
+not desugared to a `match` before typing — so the rule and its diagnostics can
+speak about `let?` precisely. All line numbers drift; re-grep `ELetQ`.
+
+The node is continuation-carrying: `body` is the *rest of the block*. The
+parser (`parser.mly:1003`, `LET QUESTION simple_pattern EQUALS expr`) emits an
+`ELetQ` with a placeholder empty body, and `block_body`'s fold splices each
+`let?`'s continuation into its `body` field, right-associatively.
+
+#### 2.10.1 (T-LetQ)
+
+For `let? p = result; body` with the whole expression at type `Result(τ_r, ε)`:
+
+```
+  Γ ⊢ result : Result(τ_ok, ε)      Γ ⊢ p : τ_ok ⊣ Γ'      Γ' ⊢ body : Result(τ_r, ε)
+  ────────────────────────────────────────────────────────────────────────────────────
+                          Γ ⊢ (let? p = result; body) : Result(τ_r, ε)
+```
+
+- `result` must unify with `Result(τ_ok, ε)` — a fresh Ok/Err pair.
+- `p` is a `simple_pattern` (var / wildcard / tuple / literal — the SAME
+  patterns plain `let` accepts, so the Ok-arm bind is irrefutable), bound at
+  `τ_ok` for `body`. No type annotation is permitted (§2.10.2).
+- `body` (the continuation) must ALSO be a `Result`, and with the **SAME error
+  type** `ε` as the RHS — because `let?` propagates that `Err` upward
+  unchanged. The whole expression yields `body`'s type.
+
+#### 2.10.2 Diagnostics
+
+Three native errors (all live-pinned 2026-07-10; corpus in §2.10.3):
+
+- **(E-LetQ-Last)** — a `let?` may not be the last expression in a block (its
+  `body` would be empty, nothing to return on Ok):
+  `` `let?` cannot be the last expression in a block. `` (`typecheck.ml:4658`).
+  The parser makes a trailing `let?` structurally impossible in a lambda body
+  (which always ends in a real `expr`), so this fires only in `block_body`.
+- **(E-LetQ-RHS)** — the RHS must be a `Result`:
+  `The right-hand side of `let?` must be a Result value.` (unification reason
+  at `:4671`).
+- **(E-LetQ-Body)** — the continuation must be a `Result` with the same error
+  type: `The code after `let?` must produce a Result with the same error
+  type.` (unification reason at `:4681`).
+
+**No type annotation.** `let? x : T = e` is rejected — but by the parser's
+GENERIC missing-`=` error recovery (`` I was expecting `=` in the let? binding
+here: ``, `parser.mly:1005`), NOT by a dedicated "cannot have a type
+annotation" message. The `let-propagation.md` tutorial §5.2 shows a dedicated
+`LET QUESTION simple_pattern COLON error` production that was never
+implemented; the annotation is still correctly rejected, just with the
+less-specific message. Filed and reconciled 2026-07-10 (see `specs/todos.md`).
+
+#### 2.10.3 Corpus witnesses
+
+Accept: `t70_letq_chain_value` (a two-step chain yielding a value),
+`t71_letq_tuple_pattern` (tuple `simple_pattern` on the Ok payload),
+`t72_letq_wildcard` (`let? _ =` — propagate-but-discard). Reject:
+`t67_letq_last_expr` (E-LetQ-Last), `t68_letq_rhs_not_result` (E-LetQ-RHS),
+`t69_letq_body_not_result` (E-LetQ-Body), `t70_letq_type_annotation` (no
+annotation). Operational witness + Err-short-circuit: golden `g42`
+(`core-march.md` §4.13).
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the

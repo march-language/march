@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g41)
+# Golden corpus index (g01–g42)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (41/41 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (42/42 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -74,6 +74,7 @@ consumed by a DIRECT match, the regression witness for finding L7 — FIXED
 | `g39_chan_choose_offer` | `Chan.choose`/`Chan.offer` branch selection over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule pitfall); chooser picks `:ok`, sends an odd `Int` (`43`) after the label | choose=send-atom / offer=recv-atom (§4.11.4, `eval.ml:5581/5588`) |
 | `g40_actor_foreign_msg_drop` | a `Logger` message (`Zlog(String)`) `send` to a `Counter` Pid is silently DROPPED (not misrouted) in both backends, sandwiched BETWEEN two count-changing messages (`Inc(3)`, drop, `Inc(4)`); `Counter` `Report`s `count=7`, the stray `Zlog` contributing nothing (a misroute would reinterpret the `String` payload as a garbage `Int`) — this shape used to be flaky (finding 20, an unrelated actor-struct FBIP/RC race, now fixed), so it now also witnesses that determinism | foreign-message drop: interp handler-name miss (§4.10, `eval.ml:7545`); compiled Boxed message + globally-unique tag + dispatch default arm (finding 19 fix, `lib/tir/lower_actor.ml`, `lib/tir/repr.ml`, `lib/tir/llvm_toplevel.ml`); actor-struct `EReuse` always-in-place (finding 20 fix, `lib/tir/llvm_emit.ml`) |
 | `g41_linear_annotations_erased` | all three linearity keyword surfaces in one deterministic program — a `linear` fn param (matched inside the callee), a `linear let` (consumed by the call), an `affine` type-modifier binding consumed by a DIRECT match — the direct match doubles as the L7 regression witness (FIXED 2026-07-10: escape analysis stack-promoted non-escaping erased-repr allocs into boxed stack cells that erased-convention consumers decoded as garbage; this golden's first run caught it); prints `42` / `done`, byte-identical, stable across repeated runs | linearity erasure (§4.12): no runtime use-accounting on either backend; `v_lin` is optimization-only compiled; static rules in `core-march-types.md` §2.9; escape-promotion gate `lib/tir/escape.ml` `alloc_emits_heap_cell` (slice 7 + L7 fix, 2026-07-10) |
+| `g42_letq_short_circuit` | a two-step `let?` Result chain: `chain(5)` succeeds through both steps (E-LetQ-Ok twice → `ok 70`), `chain(-1)` fails the first step so the second `let?` never runs (E-LetQ-Err short-circuits, returns Err verbatim → `err neg`); deterministic, no scheduler | `let?` Result-propagation (§4.13): native `ELetQ` eval, Ok-bind-and-continue / Err-short-circuit, byte-identical both backends; typing in `core-march-types.md` §2.10 (slice 8, 2026-07-10) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
