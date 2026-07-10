@@ -116,10 +116,16 @@ static _Atomic int      g_sched_shutdown = 0;
  * (recv returns MARCH_RECV_NO_MSG) and the scheduler can drain to 0. */
 static _Atomic int64_t  g_live_nondaemon = 0;
 
-/* Lock-free stack of procs spawned from outside any scheduler thread.
- * Workers drain this into their local deques each idle cycle.
- * Using march_proc::next as the intrusive link. */
-static _Atomic(march_proc *) g_ext_spawn_head = NULL;
+/* Global run queue: a lock-free MPMC Treiber stack (march_proc::next is the
+ * intrusive link) holding RUNNABLE procs enqueued by a thread that is not the
+ * proc's local-deque owner.  Chase-Lev deques are single-owner for push/pop —
+ * only steal is a sanctioned cross-thread operation — so EVERY cross-thread
+ * enqueue must land here instead of in another thread's deque:
+ *   - spawns from non-scheduler threads (e.g. the main OS thread), and
+ *   - wakes (WAITING→RUNNABLE), which may execute on any thread.
+ * Only same-thread enqueues (yield re-push, spawn from within a scheduler)
+ * use the local deque.  Schedulers drain one proc per idle cycle. */
+static _Atomic(march_proc *) g_global_runq_head = NULL;
 
 static _Thread_local march_scheduler *tl_sched = NULL;
 
@@ -430,7 +436,7 @@ void march_sched_init(void) {
     atomic_store_explicit(&g_live_procs,     0, memory_order_relaxed);
     atomic_store_explicit(&g_live_nondaemon, 0, memory_order_relaxed);
     atomic_store_explicit(&g_sched_shutdown, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_ext_spawn_head, (march_proc *)NULL, memory_order_relaxed);
+    atomic_store_explicit(&g_global_runq_head, (march_proc *)NULL, memory_order_relaxed);
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
 
@@ -522,10 +528,10 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     } else {
         march_proc *old_head;
         do {
-            old_head = atomic_load_explicit(&g_ext_spawn_head, memory_order_relaxed);
+            old_head = atomic_load_explicit(&g_global_runq_head, memory_order_relaxed);
             p->next  = old_head;
         } while (!atomic_compare_exchange_weak_explicit(
-                     &g_ext_spawn_head, &old_head, p,
+                     &g_global_runq_head, &old_head, p,
                      memory_order_release, memory_order_relaxed));
     }
 
@@ -629,11 +635,11 @@ static void sched_loop(march_scheduler *sched) {
             /* Check the external-spawn stack before yielding.  Tasks spawned
              * from non-scheduler threads (e.g. the main thread) land here to
              * avoid the Chase-Lev deque's single-owner constraint. */
-            march_proc *ext = atomic_load_explicit(&g_ext_spawn_head, memory_order_acquire);
+            march_proc *ext = atomic_load_explicit(&g_global_runq_head, memory_order_acquire);
             while (ext) {
                 march_proc *nxt = ext->next;
                 if (atomic_compare_exchange_weak_explicit(
-                        &g_ext_spawn_head, &ext, nxt,
+                        &g_global_runq_head, &ext, nxt,
                         memory_order_acq_rel, memory_order_acquire)) {
                     p = ext;  /* claimed — fall through to run it */
                     break;
