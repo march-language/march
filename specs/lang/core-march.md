@@ -2655,17 +2655,19 @@ What each layer actually does (all line numbers drift; re-grep):
   runtime backstop — same posture as the capability system (§2.8's
   runtime-erased `Cap(X)`).
 
-**Known compiled divergence excluded from the golden (finding L7,
-`specs/todos.md`):** a direct `match` on a `TyLinear`-ANNOTATED binding of a
-Newtype-shaped ADT (`let c : affine Res = R(22)` then `match c do ... end`,
-where `Res = R(Int)`) prints nondeterministic garbage compiled (interp `22`;
-compiled e.g. `2169571280`, varies per run) — both `linear` and `affine`
-annotation flavors; primitives (`affine Int`) and Boxed ADTs (two-field
-ctor) are unaffected, and consuming the same binding via a helper CALL is
-byte-identical. The repr classification of the annotated match scrutinee is
-the suspected locus. `g41` deliberately consumes its affine binding via a
-call, not a direct match, until L7 is fixed — the same
-witness-documents-around-the-bug pattern as §4.11.5's MPST exclusion.
+**Finding L7 (FIXED 2026-07-10 — was: direct `match` on a local
+Newtype-repr construction printed garbage compiled):** g41's first-ever run
+caught escape analysis stack-promoting a non-escaping ERASED-repr alloc
+(`let c = R(22)` — annotation irrelevant, the plain form was equally broken)
+into a boxed stack cell that the match then decoded under the erased
+convention (untagging the raw stack address). Erased-repr (Newtype/Niche)
+allocs are no longer stack-promotion candidates
+(`lib/tir/escape.ml` `alloc_emits_heap_cell` — they emit immediates, so
+promotion was also a strict pessimization), and `llvm_emit.ml`'s
+`EStackAlloc` arm fails loudly if one ever slips through. `g41` now consumes
+its affine binding via a DIRECT match — the exact shape that was broken —
+as the permanent regression witness. Full writeup in `specs/todos.md`
+(Linearity section, L7 ✅).
 
 ## 5. Golden conformance corpus
 

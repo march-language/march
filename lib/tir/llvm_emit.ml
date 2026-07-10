@@ -2444,6 +2444,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
+    (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
+       unconditionally, so it must never receive a Newtype- or Niche-repr
+       type — those "allocs" are erased immediates, and every consumer
+       decodes them under the erased convention (an ECase would untag the
+       stack POINTER → garbage). Escape.alloc_emits_heap_cell keeps such
+       allocs out of stack promotion; fail loudly if one slips through. *)
+    let sa_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (sa_type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ ->
+       failwith (Printf.sprintf
+         "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
+          construction would be boxed but consumers decode erased; \
+          escape analysis must not promote this alloc (finding L7)"
+         sa_type_name ctor)
+     | Repr.Boxed ->
+       if Repr.is_niche_shaped ctx.type_defs sa_type_name then
+         failwith (Printf.sprintf
+           "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
+            same erased-vs-boxed split as Newtype (finding L7)"
+           sa_type_name ctor));
     let entry = ctor_entry ctx ctor (List.length args) in
     let ptr = emit_stack_alloc ctx (List.length args) in
     emit_store_tag ctx ptr entry.ce_tag;

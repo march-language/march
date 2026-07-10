@@ -4285,9 +4285,12 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   `linear` keywords gets hard (T-LinDrop) errors — and the constructor
   namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
   against the user's own `H`). Avoid stdlib-colliding type names.
-- **L7** — COMPILED-only: a direct `match` on a `TyLinear`-annotated binding
-  of a Newtype-shaped ADT reads nondeterministic garbage (see `core-march.md`
-  §4.12 for the boundary; golden `g41` documents around it).
+- **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
+  (Newtype/Niche) allocs, so any non-escaping local construction consumed by
+  a direct `match` read garbage compiled (the annotation in the original
+  filing was a red herring — the plain form was equally broken). No longer
+  promotion candidates (`escape.ml`); `g41` regression-witnesses the fixed
+  direct-match shape (see `core-march.md` §4.12).
 - **L8** — a `linear` qualifier on a fn RETURN type does not propagate to a
   plain `let` of the result (§2.9.1's return-position caveat) —
   return-position `linear` is currently decorative.

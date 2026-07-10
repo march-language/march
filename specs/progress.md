@@ -283,6 +283,35 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
+
+**Slice-7 finding L7 is FIXED**, with a corrected diagnosis: the original
+filing blamed the `TyLinear` annotation, but the annotation was a red herring
+— ANY non-escaping local construction of a Newtype- (or Niche-) repr ADT
+consumed by a direct `match` read nondeterministic garbage compiled
+(`let c = R(22); match c do R(n) -> n end` printed the untagged stack
+address). Root cause (found by IR diff): `escape.ml` promoted the `EAlloc`
+to `EStackAlloc` (the match scrutinee is a non-escaping position), whose
+emission builds an unconditional BOXED stack cell — while every consumer of
+an erased-repr value decodes immediates. Construction and consumption
+disagreed on representation within one function. Fix: `alloc_emits_heap_cell`
+gates promotion candidacy to genuinely Boxed allocs (erased allocs emit NO
+cell — promoting them was also a strict pessimization), and `llvm_emit`'s
+`EStackAlloc` arm now fails loudly on an erased-repr type. Two pre-existing
+`escape_analysis` unit tests had used `Box(Int)` — a Newtype — as their
+vehicle and were asserting the broken behavior (invisible to them: they
+inspect TIR, never emitted IR); re-vehicled to Boxed `Box(Int, Int)` + a new
+L7 pin test. Golden `g41` now exercises the fixed direct-match shape.
+Suite green (compiler 503 / eval 232 / codegen 401 / stdlib 807); snapshots
+unchanged; verify.sh 41/41; `bench/list_ops` perf sanity normal.
+
+**New finding filed en route:** `bench/tree_transform.march` and
+`bench/binary_trees.march` no longer typecheck on main — their `ptype Tree`
+collides with the parameterized `Tree` types the merged stdlib work added to
+`ordered_map`/`sorted_set` (flat-namespace/L4 family; even `ptype` doesn't
+shield). Also filed post-merge: sibling-module constructor shadowing
+(`d95fe942` regression caught by `accept/t35`, reconciled).
+
 ## Current State (as of 2026-07-10, Core March widening slice 7 — linear/affine types, CLOSEOUT)
 
 **Slice 7 widens the conformance-tested references to the linear/affine type

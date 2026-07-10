@@ -27,9 +27,9 @@ compiled fix that forces actor message types Boxed with globally-unique tags and
 gives the dispatch a dropping default arm, replacing the prior memory-unsafe
 misroute); `g41` the linearity-erasure addition (§4.12 — linear/affine
 annotations are compile-time-erased, widening slice 7; its affine binding is
-deliberately consumed via a call, not a direct match, because a direct match
-on a `TyLinear`-annotated Newtype-repr binding reads garbage compiled —
-finding L7, `specs/todos.md`).
+consumed by a DIRECT match, the regression witness for finding L7 — FIXED
+2026-07-10: escape analysis no longer stack-promotes erased-repr allocs,
+`specs/todos.md`).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -73,7 +73,7 @@ finding L7, `specs/todos.md`).
 | `g38_chan_int_echo` | binary `Chan.new`/`send`/`recv`/`close` round-trip carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the value class the concurrent F1/F2 codegen fix made byte-identical compiled | `chan_new`/`chan_send`/`chan_recv`/`chan_close` (§4.11.2–.3, `eval.ml:2632/2645/2655/2666`) |
 | `g39_chan_choose_offer` | `Chan.choose`/`Chan.offer` branch selection over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule pitfall); chooser picks `:ok`, sends an odd `Int` (`43`) after the label | choose=send-atom / offer=recv-atom (§4.11.4, `eval.ml:5581/5588`) |
 | `g40_actor_foreign_msg_drop` | a `Logger` message (`Zlog(String)`) `send` to a `Counter` Pid is silently DROPPED (not misrouted) in both backends, sandwiched BETWEEN two count-changing messages (`Inc(3)`, drop, `Inc(4)`); `Counter` `Report`s `count=7`, the stray `Zlog` contributing nothing (a misroute would reinterpret the `String` payload as a garbage `Int`) — this shape used to be flaky (finding 20, an unrelated actor-struct FBIP/RC race, now fixed), so it now also witnesses that determinism | foreign-message drop: interp handler-name miss (§4.10, `eval.ml:7545`); compiled Boxed message + globally-unique tag + dispatch default arm (finding 19 fix, `lib/tir/lower_actor.ml`, `lib/tir/repr.ml`, `lib/tir/llvm_toplevel.ml`); actor-struct `EReuse` always-in-place (finding 20 fix, `lib/tir/llvm_emit.ml`) |
-| `g41_linear_annotations_erased` | all three linearity keyword surfaces in one deterministic program — a `linear` fn param (matched inside the callee), a `linear let` (consumed by the call), an `affine` type-modifier binding (consumed via a helper CALL — deliberately NOT a direct match: finding L7, a direct match on a `TyLinear`-annotated Newtype-repr binding reads garbage compiled); prints `42` / `done`, byte-identical, stable across repeated runs | linearity erasure (§4.12): no runtime use-accounting on either backend; `v_lin` is optimization-only compiled; static rules in `core-march-types.md` §2.9 (slice 7, 2026-07-10) |
+| `g41_linear_annotations_erased` | all three linearity keyword surfaces in one deterministic program — a `linear` fn param (matched inside the callee), a `linear let` (consumed by the call), an `affine` type-modifier binding consumed by a DIRECT match — the direct match doubles as the L7 regression witness (FIXED 2026-07-10: escape analysis stack-promoted non-escaping erased-repr allocs into boxed stack cells that erased-convention consumers decoded as garbage; this golden's first run caught it); prints `42` / `done`, byte-identical, stable across repeated runs | linearity erasure (§4.12): no runtime use-accounting on either backend; `v_lin` is optimization-only compiled; static rules in `core-march-types.md` §2.9; escape-promotion gate `lib/tir/escape.ml` `alloc_emits_heap_cell` (slice 7 + L7 fix, 2026-07-10) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
