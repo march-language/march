@@ -31,8 +31,22 @@
     truth (exited 0) but the compiled backend disagrees or dies badly.
     A divergence is a FAILURE unless the program is listed in
     [known_divergence] below, in which case it is reported loudly as
-    KNOWN_DIVERGENCE but does not fail the sweep. Everything else
-    (InterpFail, InterpTimeout, CompileTimeout, CompileFail(non-3),
+    KNOWN_DIVERGENCE but does not fail the sweep.
+
+    InterpFail is ALSO a failure (added 2026-07-10) even though it is not
+    a backend divergence: this corpus is by definition real, RUNNABLE
+    programs, so a clean interpreter failure means the program no longer
+    compiles/runs at all. Crucially, a typecheck rejection is
+    backend-SYMMETRIC (both paths share the typechecker), so a corpus
+    program regressing from working to NOT-COMPILING is invisible to
+    divergence comparison — exactly how the 2026-07-10 bench/ breakage
+    (stdlib ordered_map/sorted_set `Tree`/`Leaf`/`Node` colliding with the
+    benches' own `ptype Tree`) passed this sweep silently while
+    tree_transform and binary_trees were dead. An InterpFail requires the
+    same [known_divergence] triage as a divergence.
+
+    Everything else (InterpTimeout — fib-shaped programs legitimately
+    exceed the interpreter budget, CompileTimeout, CompileFail(non-3),
     RunFail(clean nonzero), RunTimeout, Skipped) is a non-failure: either
     there is no interpreter ground truth to compare against, or the
     program is an explicitly triaged, legitimately-skipped case. Nothing
@@ -111,8 +125,21 @@ let nondeterministic_allowlist =
     "debugger"; "read_file";
     (* Supervision trees (start actors / servers; scheduler-order-dependent) *)
     "supervision_basic"; "app_basic";
+    (* WebSocket echo server (binds a port, serves forever; interp exits 2
+       with EADDRINUSE if any other instance holds the port) *)
+    "ws_echo";
+    (* Islands perf HTTP server (binds a port, serves forever). Its stale
+       actor-init/record-update syntax was fixed 2026-07-10 when the new
+       InterpFail gate first flagged it — it must still TYPECHECK, but as a
+       server it can never produce comparable stdout. *)
+    "island_perf_server";
     (* Supervision/actor demo: pids and restart ordering vary across runs *)
     "supervision_strategies";
+    (* Monitor demo: Down-notification delivery timing / mailbox-size prints
+       are scheduler-order-dependent. Byte-identical when run in isolation,
+       but interleaves differently under the full-sweep process load. Same
+       class as the other supervision_* entries. *)
+    "supervision_monitor";
     (* IOList template outputs variable content *)
     "iolist_template";
     (* HTTP client requiring a WASM-only fetch shim; compiled link fails
@@ -148,12 +175,19 @@ let known_divergence =
     (* Sort family: compiled-only RC-underflow/misclassification crash
        family in the Sort module's merge/heap internals. Pre-existing,
        independent of every wave that has re-checked it.
-       specs/progress.md: "heapsort RC underflow". *)
-    "alphadev_sort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
-    "heapsort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
-    "mergesort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
-    "sort_nearly_sorted", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
-    "timsort", "sort RC-underflow crash family (specs/progress.md: \"heapsort RC underflow\")";
+       specs/progress.md: "heapsort RC underflow".
+       MODE CHANGE (2026-07-10): the family now manifests as an UNKILLABLE
+       kernel wedge instead of a crash — the compiled binary pins at
+       march_incrc inside a lambda apply, enters macOS `UE` (uninterruptible,
+       exiting) state, and ignores SIGKILL, so the sweep verdict is
+       RUN_TIMEOUT rather than RUN_FAIL(crashed). Same underlying RC bug
+       (garbage pointer reaching an RC op); the wedge escalation is filed in
+       specs/todos.md. These entries stay until the RC bug is fixed. *)
+    "alphadev_sort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+    "heapsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+    "mergesort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+    "sort_nearly_sorted", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+    "timsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
 
     (* DataFrame groupby+agg: a DISTINCT compiled-only RC-misclassification
        crash (EXC_BAD_ACCESS in march_incrc, called from Stats.mean via
@@ -163,6 +197,14 @@ let known_divergence =
        specs/todos.md P0: "DataFrame.group_by + Stats.mean: compiled-only
        RC-misclassification SIGSEGV". *)
     "dataframe_bench", "DataFrame group_by/Stats.mean RC-misclassification SIGSEGV (specs/todos.md, filed by this sweep)";
+    (* Same DataFrame RC-misclassification family as dataframe_bench: the
+       COMPILED binary crashes (exit 139) in the DataFrame internals while the
+       interpreter runs clean.  Surfaced 2026-07-10 once the InterpFail gate
+       drove the fix of its stale API-drift (it now interprets, giving ground
+       truth) AND is_divergence began treating the 128+signo crash exit as a
+       divergence — before both, its compiled crash was invisible. Not a new
+       bug; the same open DataFrame RC issue as dataframe_bench. *)
+    "dataframe_basic", "DataFrame RC-misclassification family: compiled crash (139), interp clean (same bug as dataframe_bench; specs/todos.md)";
 
     (* Monomorphization-limit ICE: compiling hits mono.ml's polymorphic-
        recursion specialization-count guard on a shape that is not
@@ -227,8 +269,29 @@ let run_shell_capture ?(timeout_s = 10.0) shell_cmd =
   let rec poll () =
     if Unix.gettimeofday () >= deadline then begin
       timed_out := true;
-      (try Unix.kill pid Sys.sigkill   with Unix.Unix_error _ -> ());
-      (try let _ = Unix.waitpid [] pid in () with Unix.Unix_error _ -> ())
+      (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+      (* Reap with a bounded WNOHANG grace loop — NEVER a blocking waitpid.
+         SIGKILL is not a guarantee: a process stuck in an UNINTERRUPTIBLE
+         kernel wait (macOS `ps` state `UE`) has the signal pending but
+         cannot act on it, and a blocking waitpid then hangs forever.
+         Observed live 2026-07-10: the compiled bench_alphadev_sort binary
+         wedged in `UE` while exiting; the sweep's blocking reap froze the
+         ENTIRE 105-program run at [1/105] for hours — twice.  If the child
+         has not been reaped after the grace window, LEAK it (a tiny,
+         already-signaled zombie) and let the sweep move on; the verdict is
+         `Timeout either way. *)
+      let reap_deadline = Unix.gettimeofday () +. 2.0 in
+      let rec reap () =
+        match Unix.waitpid [Unix.WNOHANG] pid with
+        | (0, _) ->
+          if Unix.gettimeofday () < reap_deadline
+          then (Unix.sleepf 0.05; reap ())
+          else Printf.eprintf
+                 "[oracle] WARNING: pid %d ignored SIGKILL (uninterruptible \
+                  kernel wait?) — leaking it and moving on\n%!" pid
+        | _ | exception Unix.Unix_error _ -> ()
+      in
+      reap ()
     end else
       match Unix.waitpid [Unix.WNOHANG] pid with
       | (0, _)                -> Unix.sleepf 0.05; poll ()
@@ -403,7 +466,16 @@ let verdict_label = function
     [known_divergence] triage — see [is_failure]. *)
 let is_divergence = function
   | Mismatch _                              -> true
-  | RunFail n when n = exit_signal_killed   -> true  (* compiled binary crashed *)
+  | RunFail n when n = exit_signal_killed   -> true  (* compiled binary crashed (WIFSIGNALED) *)
+  (* The runtime's fatal-fault handler now _exit(128+signo)s instead of
+     re-raising the signal (re-raise wedged the process unkillably over the
+     green-thread ucontext — see runtime/march_scheduler.c), so a compiled
+     crash arrives as a clean exit 139 (SIGSEGV) / 138 (SIGBUS) / 134
+     (SIGABRT) / 132 (SIGILL) / 136 (SIGFPE) rather than WIFSIGNALED.  Treat
+     those conventional 128+fatal-signo codes as crash divergences too, so a
+     NEW compiled segfault is still caught and not mistaken for a clean
+     nonzero exit. *)
+  | RunFail (139 | 138 | 134 | 132 | 136)    -> true  (* compiled binary crashed (_exit 128+signo) *)
   | CompileFail 3                            -> true  (* internal compiler error / ICE *)
   | _                                        -> false
 
@@ -412,9 +484,20 @@ let is_divergence = function
     case it is reported as KNOWN_DIVERGENCE instead. This is the whole
     point of the sweep: a newly-added or newly-regressed divergent
     program reddens `@oracle` until it is triaged into one of the two
-    named lists above. *)
+    named lists above.
+
+    A clean [InterpFail] gates identically (2026-07-10): not a backend
+    divergence, but on a real-runnable corpus it means the program no
+    longer compiles/runs at all — and a typecheck rejection is
+    backend-symmetric, so it can NEVER show up as a divergence (see the
+    header's classification contract for the bench/ Tree-collision
+    episode this closes). [InterpTimeout] deliberately stays a
+    non-failure: the fib-shaped bench programs legitimately exceed the
+    interpreter budget. *)
 let is_failure (path, verdict) =
-  is_divergence verdict && known_divergence_reason path = None
+  (is_divergence verdict
+   || (match verdict with InterpFail _ -> true | _ -> false))
+  && known_divergence_reason path = None
 
 (* ------------------------------------------------------------------ *)
 (* Main                                                               *)
@@ -523,6 +606,16 @@ let () =
       in
       match matching with
       | [] -> None (* program not found in this corpus run at all *)
+      (* A known-broken program that TIMES OUT (or is killed by a signal at
+         the run step) is still broken — it must not read as "no longer
+         reproduces / consider pruning".  Observed 2026-07-10: the sort
+         RC-underflow family and dataframe_bench changed failure MODE from
+         crash to an UNKILLABLE kernel wedge (macOS `UE` state, pinned at
+         march_incrc inside a lambda apply; SIGKILL pending but undeliverable
+         — see specs/todos.md), so their verdicts became RUN_TIMEOUT.  Only a
+         genuinely-clean verdict (Match, or a clean-exit run) marks an entry
+         prunable. *)
+      | (_, (RunTimeout | RunFail _ | CompileTimeout)) :: _ -> None
       | (name, v) :: _ when not (is_divergence v) -> Some (name, base, reason, v)
       | _ -> None
     ) known_divergence

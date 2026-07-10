@@ -462,19 +462,40 @@ fatal:
                         (void *)lo, (void *)q->stack_base);
             }
         }
-        abort();
+        /* NOT abort(): abort() raises SIGABRT, whose default action wedges
+         * the same way the fatal signal itself does over this alt-stack +
+         * green-thread-ucontext state (see the non-debug path below).  Use
+         * the same un-wedge-able _exit primitive so a MARCH_DEBUG crash also
+         * always terminates. */
+        _exit(128 + sig);
     }
 #endif
-    /* Not a stack-growth fault — restore the default handler for the signal
-     * that actually fired and re-raise it so the program terminates normally. */
-    {
-        struct sigaction sa;
-        sa.sa_handler = SIG_DFL;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(sig, &sa, NULL);
-        raise(sig);
-    }
+    /* Not a stack-growth fault — terminate the process, un-wedge-ably.
+     *
+     * We deliberately do NOT re-raise the signal.  The obvious "reset to
+     * SIG_DFL and raise(sig)" (or abort()) does NOT reliably kill here: the
+     * interrupted context is a green thread's ucontext (swapcontext'd stack)
+     * and this handler ran on the per-thread alternate signal stack, so the
+     * kernel's default terminate-by-signal action — which walks the thread
+     * state to generate a Mach exception / core dump — wedges the thread in
+     * an UNINTERRUPTIBLE in-kernel wait (macOS `ps` state `UE`): pinned at
+     * the faulting instruction, immune even to SIGKILL, unreapable without a
+     * reboot.  Verified 2026-07-10 on the sort-RC-underflow family (a garbage
+     * pointer reaching march_incrc from a lambda apply): the handler ran
+     * (its diagnostic printed), then raise()/abort()/pthread_kill(self)
+     * every one hung the process forever instead of killing it.  Because the
+     * re-raise blocks in-kernel, any code AFTER it (an _exit backstop) never
+     * runs — so the re-raise must be dropped entirely.
+     *
+     * _exit(2) is the only primitive that always works from here: a single
+     * syscall that cannot fault, block, recurse, or be masked.  We exit with
+     * the conventional 128+signo status (139 for SIGSEGV, 138 for SIGBUS),
+     * exactly the code a shell reports for a signal death, so `$?`-based
+     * callers still see "crashed."  The one thing lost vs a true signal death
+     * is WIFSIGNALED / a core dump — an acceptable trade for a fault path
+     * that must never hang.  The oracle sweep's is_divergence treats a
+     * 128+fatal-signo exit as a crash divergence to match. */
+    _exit(128 + sig);
 }
 
 static _Atomic int g_sigsegv_installed = 0;

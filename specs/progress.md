@@ -283,6 +283,35 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, compiled fatal faults no longer wedge unkillably — _exit fault path)
+
+**A compiled fault could hang the process forever, immune to SIGKILL.** Found
+retrying the oracle sweep: the sort-RC-underflow family (a pre-existing RC bug,
+garbage pointer reaching `march_incrc` from a lambda apply) had changed failure
+MODE from a clean SIGSEGV to an UNKILLABLE kernel wedge (macOS `ps` state `UE`).
+Root cause: `runtime/march_scheduler.c`'s fatal-fault handler re-raised the
+signal (`raise`/`abort`) to terminate — but over the alternate signal stack +
+a green thread's swapcontext'd ucontext, the kernel's default terminate-by-signal
+action (Mach exception / core-dump machinery) wedges in an uninterruptible
+in-kernel wait, pinned at the faulting instruction, unreapable without a reboot.
+Because the re-raise blocks in-kernel, no `_exit` backstop after it ever ran.
+Fix: the fatal path (non-debug tail AND the `MARCH_DEBUG` `abort()`) now
+`_exit(128 + signo)` — a single syscall that cannot fault, block, or recurse.
+The whole family now dies in <1s with exit 138/139 (128+SIGBUS/SIGSEGV), zero
+survivors. Trade-off: a compiled crash arrives as a clean `128+signo` exit
+rather than `WIFSIGNALED`/core-dump; the oracle's `is_divergence` treats
+139/138/134/132/136 as crash divergences to keep catching new segfaults.
+Two harness robustness fixes landed alongside (both in `test/test_oracle.ml`):
+the timeout path's blocking `waitpid`-after-SIGKILL (which froze the whole
+105-program sweep on the first unkillable child) is now a bounded WNOHANG
+leak-and-warn; and the known-divergence staleness WARN no longer treats a
+RUN_TIMEOUT/RunFail as "no longer reproduces." Two stale corpus programs
+(`dataframe_basic`, `island_perf_server`) surfaced by the new InterpFail gate
+were fixed (API/actor-syntax drift). Full six-runner suite green
+(compiler 503 / eval 232 / codegen 401 / stdlib 808); normal deep-stack
+programs (list_ops, tree_transform) unaffected. The underlying sort-RC-underflow
+bug itself remains open — these programs still crash, just cleanly now.
+
 ## Current State (as of 2026-07-10, sibling-ctor shadowing regression FIXED — add_ctor move-to-front)
 
 **The sibling-module constructor shadowing regression (from `d95fe942`,
@@ -301,8 +330,11 @@ regression tests stay green. Witnesses: `accept/t69_sibling_own_ctor`
 (the original `t35` shape, restored — runs, prints `7`; types corpus
 134 → **135**) + unit `test_tc_sibling_ctor_own_module_wins` (stdlib
 suite 807 → **808**). Full six-runner suite green; check-docs clean.
-Remaining from the same merge: the bench `ptype Tree` stdlib collision
-(filed, open).
+(Follow-up, same day: the bench `ptype Tree`/`Leaf`/`Node` stdlib collision
+turned out to be the SAME mechanism — A/B-verified fixed by this commit;
+both benchmarks compile and run correct again. The oracle sweep gained an
+InterpFail gate so a corpus program regressing to non-compiling can never
+again pass silently.)
 
 ## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
 
