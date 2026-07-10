@@ -1550,6 +1550,35 @@ typedef struct {
  * into word 4.  march_task_await acquire-loads word 4, never dereferencing
  * the proc ptr (word 2) after the proc may have been freed by sched_loop.
  */
+/* Foreign-thread task_await support: green threads yield-wait (they must
+ * never block an OS scheduler thread), but foreign threads (evloop pthreads)
+ * previously busy-spun with sched_yield, burning a core per in-flight
+ * request.  A single global condvar is broadcast on every task completion;
+ * foreign waiters do a timed wait and re-check their own done flag, so a
+ * broadcast that fires before a waiter registers is harmless (50ms bound). */
+static pthread_mutex_t g_task_done_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_task_done_cv = PTHREAD_COND_INITIALIZER;
+
+static void task_wait_done(int64_t *task) {
+    if (march_sched_in_scheduler()) {
+        while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                    memory_order_acquire) == 0) {
+            march_sched_yield();
+        }
+        return;
+    }
+    pthread_mutex_lock(&g_task_done_mu);
+    while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                memory_order_acquire) == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);          /* cond waits use REALTIME */
+        ts.tv_nsec += 50 * 1000000L;                  /* 50ms re-check bound */
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_task_done_cv, &g_task_done_mu, &ts);
+    }
+    pthread_mutex_unlock(&g_task_done_mu);
+}
+
 static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
@@ -1578,6 +1607,14 @@ static void march_thunk_trampoline(void *arg) {
         /* Release-store: ensures task[3] is visible before the done flag. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_release);
+        /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
+         * timed wait.  Must happen after the done-store above (so waiters that
+         * wake see done=1) and touches no task fields, so it is safe to do
+         * before or after the decrc below; placed here to keep the "signal
+         * completion" steps together. */
+        pthread_mutex_lock(&g_task_done_mu);
+        pthread_cond_broadcast(&g_task_done_cv);
+        pthread_mutex_unlock(&g_task_done_mu);
         /* Drop the trampoline's RC hold taken at spawn time (see incrc in
          * march_task_spawn_thunk).  If the caller already dropped their handle
          * (fire-and-forget), this is the last reference and frees the object.
@@ -1631,20 +1668,15 @@ void *march_task_spawn_thunk(void *clo_ptr) {
 
 /* Wait for a task to complete and return Ok(result).
  *
- * Spins on the task-embedded done flag (word 4) until the trampoline
- * release-stores 1 into it.  We never dereference the proc ptr (word 2)
- * after the proc may have been freed by sched_loop — doing so caused a
- * use-after-free where calloc reuse zeroed the freed memory, making
+ * Waits on the task-embedded done flag (word 4, via task_wait_done) until
+ * the trampoline release-stores 1 into it.  We never dereference the proc
+ * ptr (word 2) after the proc may have been freed by sched_loop — doing so
+ * caused a use-after-free where calloc reuse zeroed the freed memory, making
  * p->status read as PROC_READY (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        /* Yield the OS timeslice so we don't busy-wait when called from outside
-         * a green-thread context (march_sched_yield is a no-op in that case). */
-        sched_yield();
-    }
+    task_wait_done(task);
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -1656,10 +1688,7 @@ void *march_task_await(void *task_obj) {
 void *march_task_await_value(void *task_obj) {
     if (!task_obj) return (void *)1; /* tagged Unit/null */
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        sched_yield();
-    }
+    task_wait_done(task);
     return (void *)(uintptr_t)task[3]; /* tagged result */
 }
 
