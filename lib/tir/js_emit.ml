@@ -257,8 +257,9 @@ let literal_tag_js br_tag =
 (* Map built-in March runtime lib names to their JS module paths.
    These are shipped alongside march_runtime.mjs and imported automatically. *)
 let js_runtime_module_path = function
-  | "dom" -> Some "./march_dom.mjs"
-  | _     -> None
+  | "dom"    -> Some "./march_dom.mjs"
+  | "canvas" -> Some "./march_canvas.mjs"
+  | _        -> None
 
 (** True when the library name is a JS module specifier (not a C lib name).
     JS specifiers start with a scheme, relative path, or scoped npm prefix. *)
