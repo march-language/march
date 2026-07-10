@@ -181,6 +181,46 @@ from handler pthreads."
 
 Below this task, add `#### Diagnosis findings (Task 1)` with: observed failure output, whether the deque-race hypothesis was confirmed, and anything that changes later tasks. Commit with `docs(plan): record foreign-thread actor diagnosis`.
 
+#### Diagnosis findings (Task 1)
+
+**Adaptations to the brief's program (compiler-forced, minimal):**
+- `Response`/`Status` are constructors of `Http`, not `HttpTransport` (`stdlib/http.march:13,21`) — matched as `Http.Response(Http.Status(code), _, body)`.
+- `HttpTransport.simple_get`/`.request` do not link natively: `request_via_fetch` unconditionally references the js_of_ocaml-only `http_fetch`/`http_fetch_available` builtins, which have no native C implementation (`_http_fetch`, `_http_fetch_available` undefined at link time). This is a pre-existing, documented, unrelated gap (`specs/c-ffi-gaps.md:191`; `specs/progress.md` 2026-06-18 entry). Worked around with a local `simple_get_native` in the test file that calls `HttpTransport.connect` + `.request_on` directly (never references `request_via_fetch`, so it links).
+- The compiler requires explicit `needs IO.Spawn`, `needs IO.NetListen`, `needs IO.NetConnect` capability declarations on the module (not mentioned in the brief snippet, but a straightforward compile-error-driven addition).
+
+**Step 2 — observed failure (uninstrumented binary), multiple runs, `n=50`:**
+
+```
+$ /tmp/fah & sleep 1; FAH_MODE=client /tmp/fah; kill $SRV
+task_ok=17/50
+direct_ok=0/50
+```
+Repeat runs: `task_ok=8/50`, `task_ok=9/50`, one run produced **no output at all** — the client hung past the 65s watchdog and had to be `kill -9`'d, and the *server* itself survived a plain `kill` (SIGTERM) and was still consuming 190%+ CPU minutes later (see below). `direct_ok=0/50` in every run, deterministically (expected: `march_actor_call`, `runtime/march_runtime.c:1809-1816`, returns `Err("actor_call: not in scheduler context")` immediately because `march_sched_current()` is `NULL` on the foreign HTTP-evloop pthread — it never reaches `march_sched_wake` at all). The task-shim path is genuinely probabilistic, ranging from full pass (50/50) to a permanent whole-process wedge.
+
+**Step 3 — diagnostics: hypothesis NOT confirmed as stated.**
+
+Added the brief's exact `fprintf` to the foreign (`tl_sched == NULL`) branch of `march_sched_wake`, rebuilt, and re-ran Step 2 five times (including two runs that reproduced degraded `task_ok`). **Zero `[diag]` lines were printed in any run.** The foreign branch of `march_sched_wake` is never reached by this program's call graph:
+- `task_spawn` from the HTTP evloop pthread does *not* go through `march_sched_wake`/`march_deque_push` at all — `sched_spawn_common` (`runtime/march_scheduler.c:463-477`) already special-cases `tl_sched == NULL` and pushes onto the lock-free `g_ext_spawn_head` stack, which is safe for foreign threads.
+- Once the task-spawned green thread starts running, it executes on a real scheduler OS thread (`tl_sched` set). Its `Actor.call` send to the Counter actor, and the Counter's `Actor.reply` send back, are therefore both scheduler-thread→scheduler-thread operations — `march_sched_wake`'s `tl_sched` branch (push into the caller's *own* deque) is used, not the foreign branch.
+- `direct_ok` never reaches `march_sched_wake` either, per above (bails out earlier in `march_actor_call`).
+
+So for this program shape, the brief's literal mechanism (non-atomic `march_deque_push` into `g_scheds[0].local_queue` from a foreign thread) is not what's hanging things — that code path is cold.
+
+**Actual root cause, found by profiling a wedged server with `sample` (macOS):**
+
+Caught a server process wedged at ~190% CPU (`sample <pid> 3`). One thread was permanently (2229/2229 samples across the whole window) inside:
+```
+proc_trampoline -> Counter_GetValue$Counter_Actor$V__ -> march_sched_send
+```
+i.e. the Counter actor's own green thread, calling `Actor.reply` -> `march_actor_reply` -> `march_sched_send` -> `march_sched_wake`, permanently stuck in the **PARKED-wait spin** at the top of `march_sched_wake` (`runtime/march_scheduler.c`, the `do { cur = atomic_load(...); ... } while (cur == PROC_PARKED);` loop, immediately above the branch the brief instrumented) — not in the deque-push branch below it. Concurrently, another thread (an HTTP pool worker) was permanently spinning inside `march_task_await` (never observes the done flag), and the `HttpServer.listen` thread was blocked in `pthread_join` inside `march_http_pool_stop`, i.e. the graceful-shutdown path was itself deadlocked by the same wedge — explaining why `kill` (SIGTERM) did not terminate the server.
+
+Mechanism: `march_sched_recv`'s slow path (`runtime/march_scheduler.c:792-833`) sets `p->status = PROC_PARKED` (line ~814) and *then* calls `swapcontext(&p->ctx, &tl_sched->sched_ctx)` (line ~817). The transition `PROC_PARKED -> PROC_WAITING` only happens in `sched_loop`, on the *same OS thread*, immediately after that `swapcontext` call returns (`runtime/march_scheduler.c:616-628`). If the OS preempts the parking thread in the gap between the status store and the `swapcontext` call, any waker that observes `PROC_PARKED` must busy-spin — and the spin loop has **no `sched_yield()`/backoff of any kind**. Under this test's load — `MARCH_NUM_SCHEDULERS` defaults to 4 (`runtime/march_scheduler.h:40`) plus the 28-thread HTTP pool (`march: HTTP thread pool started (28 workers)`) plus the SIGUSR1 preemption daemon, i.e. 30+ OS threads contending even on this 14-core machine — that gap can be starved indefinitely: the spinning waker consumes a whole core without yielding, which can itself deprive the parking thread of the CPU time it needs to reach `swapcontext`, a genuine livelock rather than a short, bounded spin. Once the (single, serializing) Counter actor green thread is stuck here, it can never process another message, so all subsequent `Actor.call`s — task-shim and direct alike — back up behind it (confirmed via `lsof`: a connection sitting in `CLOSE_WAIT`).
+
+**What this changes for later tasks:**
+- Task 2 (routing the foreign branch of `march_sched_wake` through `g_ext_spawn_head`) is still correct and independently necessary — it's required for Task 4's direct-foreign `Actor.call` bridge, which *will* call `march_sched_wake` from a genuinely foreign thread and would hit the non-atomic-push race as originally hypothesized. Keep it as scoped.
+- **Task 2 alone will not fix the hang reproduced here.** The task-shim livelock never touches the foreign branch Task 2 rewrites; it lives in the PARKED-wait spin a few lines above, which Task 2's diff does not touch. Recommend the implementer of Task 2 (or a new task inserted before Task 3) also address the busy-wait-without-backoff in that `do { ... } while (cur == PROC_PARKED)` loop — at minimum a bounded `sched_yield()`/short-nanosleep backoff so a starved parking thread can regain CPU, and ideally reconsidering whether a spin is appropriate at all given this project's exact target workload (many foreign HTTP-evloop threads competing with a small, fixed scheduler-thread pool for cores).
+- Re-verify Task 2's "Expected: `task_ok=50/50`" claim (Step 4) empirically, multiple times under load — given what was found here, routing the foreign wake through `g_ext_spawn_head` may reduce failure probability (fewer foreign-thread deque pushes overall doesn't directly touch this spin) but should not be assumed to eliminate the livelock; plan for the possibility that Task 2's own repro run still shows degraded `task_ok` and needs the PARKED-spin fix folded in before Task 2 is considered complete.
+
 ---
 
 ### Task 2: Route foreign wakes through the external ready stack
