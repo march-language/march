@@ -2,4 +2,9 @@ cons 10
 cons 20
 cons 30
 nil at 3
+big 20
+big 30
+nil-if
+big b
+nil-rec
 done

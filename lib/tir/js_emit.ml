@@ -929,7 +929,18 @@ and emit_case_impl ctx result_var expr =
                emit ctx ";\n";
                emitl ctx "break;"
              | None ->
-               emit_stmts ctx br.Tir.br_body);
+               (* Statement position: emit_stmts does not always end in a
+                  `return` — when Perceus appends RC drops after a tail call
+                  (ESeq(EApp, EDecRC ...), e.g. any arm binding heap values),
+                  the RC-terminal arm emits nothing — and a JS case arm
+                  without break/return FALLS THROUGH into the next case or
+                  the non-exhaustive-match default throw. The break is
+                  unreachable (harmless) when the body did return.
+                  Regression history: added ad4c31ee, lost in the PR #21
+                  merge, re-applied 2026-07-10; pinned by the walk_rec shape
+                  in test/native/js_match_stmt_fallthrough.march. *)
+               emit_stmts ctx br.Tir.br_body;
+               emitl ctx "break;");
             unbind_br_vars ctx binds
           )
         );
@@ -945,7 +956,10 @@ and emit_case_impl ctx result_var expr =
                emit_indent ctx; emit ctx (rv ^ " = ");
                emit_val ctx d; emit ctx ";\n";
                emitl ctx "break;"
-             | None -> emit_stmts ctx d
+             | None ->
+               (* Same fallthrough hazard as the branch arms above. *)
+               emit_stmts ctx d;
+               emitl ctx "break;"
            )
          );
          emitl ctx "  }"
