@@ -119,9 +119,12 @@ note explaining why:
   `supervisor_rest_for_one_restart`), which serve the interp-vs-compiled
   anchoring role for this plane. The full 3-strategy
   `examples/supervision_strategies.march` demo remains excluded from BOTH
-  corpora because it intermittently crashes under the PRE-EXISTING
-  multi-scheduler kill+respawn race (filed in `specs/todos.md`; mitigation
-  `MARCH_NUM_SCHEDULERS=1`) — a flaky program cannot be a golden `MATCH`.
+  corpora — historically because of the multi-scheduler kill+respawn
+  stack-corruption crash (FIXED 2026-07-09/10: TLS migration barrier +
+  single-owner run queues, commits `9407cc6f`/`81adf1b1`; 200/200 clean at
+  N=4 and N=8), and PERMANENTLY because its concurrent workers' prints
+  interleave nondeterministically (30/30 runs byte-differ) — inherent to
+  parallel actors, so it can never be a byte-identical `MATCH`.
 - **Multi-party session types (`MPST.*`)** — the MPST runtime (§4.11.5) is
   complete and correct interpreted (a 3-role all-`String` relay runs cleanly),
   but **every** `MPST.*` program segfaults compiled (exit 139, filed as F3 in

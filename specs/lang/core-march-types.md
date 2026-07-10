@@ -4186,6 +4186,14 @@ param-keyword** — `affine` exists ONLY as the type modifier. Writing
 filed in `specs/todos.md`; the tutorial previously showed this unparseable
 form. The working spelling is `fn f(c : affine T)`.
 
+**Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
+for BINDING-site annotations (`let x : linear T = e` registers `x` linear,
+live-verified) but NOT for a callee's declared RETURN type — `fn mk() :
+linear Res` followed by a plain `let h = mk()` does not register `h` (a
+dropped `h` is silently accepted). The wrapper is stripped before the
+call-site result type reaches `bind_pattern_bindings`; return-position
+`linear` is currently decorative.
+
 #### 2.9.2 The tracker — (T-LinUse), (T-LinDrop), (T-AffDrop)
 
 The tracker is a list of mutable per-binding flags: `lin_entry = { le_name;
@@ -4266,6 +4274,12 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   `linear` keywords gets hard (T-LinDrop) errors — and the constructor
   namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
   against the user's own `H`). Avoid stdlib-colliding type names.
+- **L7** — COMPILED-only: a direct `match` on a `TyLinear`-annotated binding
+  of a Newtype-shaped ADT reads nondeterministic garbage (see `core-march.md`
+  §4.12 for the boundary; golden `g41` documents around it).
+- **L8** — a `linear` qualifier on a fn RETURN type does not propagate to a
+  plain `let` of the result (§2.9.1's return-position caveat) —
+  return-position `linear` is currently decorative.
 - **F7** (session types, §2.7.8) — session-channel linearity holds only for
   `let`-threaded continuations: reusing a linear PARAMETER endpoint at a
   coincidentally-matching state, and dropping an unclosed `SEnd` channel,

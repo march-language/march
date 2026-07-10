@@ -615,11 +615,15 @@ finding, and convention drift.  Listed in the recommended order.
 
 ### Compiler: Linearity (found during Core March widening slice 7, 2026-07-10)
 
-All found by the slice-7 survey (20 live probes; record in
-`specs/plans/2026-07-10-widening-linear-types-plan.md`); reference account in
-`core-march-types.md` §2.9. L2/L5 were FIXED in-slice (commit `64dae5c0`);
-L1/L3/L4 are OPEN; L6 was a documentation self-contradiction (behavior fine,
-tutorial fixed in the slice-7 closeout).
+All found by the slice-7 survey (20 live probes + closeout re-verification;
+record in `specs/plans/2026-07-10-widening-linear-types-plan.md`); reference
+account in `core-march-types.md` §2.9, runtime account in `core-march.md`
+§4.12. L2/L5 were FIXED in-slice (commit `64dae5c0`); L1/L3/L4/L7/L8 are
+OPEN; L6 was a documentation self-contradiction (behavior fine, tutorial
+fixed in the slice-7 closeout). L7 (compiled garbage read) and L8
+(return-position linear decorative) were both caught by the closeout's own
+verification steps — the golden's first run and the tutorial re-verification
+respectively.
 
 - [ ] **L1 — `affine` in fn-PARAM position is a PARSE error; the tutorial's own flagship affine example never parsed.** `fn maybe_connect(affine cap : NetworkCap)` (the shape `linear-types.md` §"Affine" formerly showed) fails with `I got stuck here` pointing at `affine` — only `LINEAR` has param productions (`parser.mly:418`/`:988`); `AFFINE` exists solely as a `ty_atom` modifier (`:939`). There is also no `affine let` production (deliberate or not — undocumented). The WORKING spelling is the type-modifier form `cap : affine NetworkCap` (witness `accept/t66`). Fix options: add an `AFFINE` param production + `affine let` mirroring `linear` (grammar work), or declare the type-modifier form the only surface and keep the docs honest (done for now). Filed from slice 7; see §2.9.1.
 
@@ -632,6 +636,8 @@ tutorial fixed in the slice-7 closeout).
 - ✅ **L5 (FIXED 2026-07-10, `64dae5c0`) — the internal `var#field` sentinel spelling leaked into user-facing diagnostics** (`The linear value `p#data` is used more than once here.`). `lin_display_name` now renders it as `p.data` in both the `record_use` double-use messages and the `check_linear_all_consumed` never-used message. Witness: `reject/t63`'s live output.
 
 - **L6 (RESOLVED as documentation, 2026-07-10) — the tutorial contradicted itself on linear actor sends, and the restrictive half was FALSE.** `linear-types.md` claimed both "sending a linear value transfers ownership (zero-copy move)" AND "a linear value cannot be sent as an actor message directly." Live verdict: `send(pid, Ctor(r))` with a linear `r` TYPECHECKS — the payload `EVar` is an ordinary consuming use — and using `r` after the send rejects as a double use. Witnesses: `accept/t68` + `reject/t66`. The zero-copy move is real but a compiled-backend optimization (`march_send_linear`, `llvm_emit.ml`), not a typing rule. Tutorial corrected in the slice-7 closeout; see §2.9.2.
+
+- [ ] **L8 — a `linear` qualifier on a fn RETURN type does not propagate to a plain `let` binding of the call result — return-position `linear T` is currently decorative.** Found 2026-07-10 while re-verifying the tutorial's "the type of `open_file` already carries the linear constraint" claim (FALSE — and the softened version was false too). Live repro: `fn mk() : linear Res do R(1) end; let h = mk(); ()` — exits 0, no `was never used` error; the same program with `linear let h = mk()` (or `let h : linear Res = mk()`) correctly rejects. So the TLin wrapper on a declared return type is stripped before the call-site result type reaches `bind_pattern_bindings`' TLin arm (suspect: fn-signature surface-ty processing or instantiation). Consequence: the tutorial's FFI idiom (`fn malloc(n : Int) : linear Ptr(a)` making leaks impossible) does NOT hold unless every caller re-annotates its binding. Fix: preserve TLin through return-type instantiation, or propagate at the ELet RHS-type path. Tutorial corrected to require binding-site qualifiers; §2.9.1 notes the gap.
 
 - [ ] **L7 — COMPILED-ONLY, memory-unsafe-class: a direct `match` on a `TyLinear`-ANNOTATED binding of a Newtype-shaped ADT reads nondeterministic GARBAGE.** Found 2026-07-10 while authoring golden `g41` (the witness caught it on its first run — interp `42`, compiled `2156423140`). Minimal repro: `type Res = R(Int)` (single unary ctor → Newtype/erased repr); `let c : affine Res = R(22)` then `let b = match c do R(n) -> n end` — interp prints `22`, compiled prints garbage that VARIES per run (e.g. `2169571280`, `2187519952` — an uninitialized/mis-repr'd read, not a stable mis-tag). **Boundary, all live-verified:** BOTH annotation flavors diverge (`: linear Res` identically); `: affine Int` (primitive) fine; `: affine Pair` with `P(Int, Int)` (Boxed repr) fine; `linear let c : Res` (keyword form, PLAIN type annotation) fine; and — the sharpest datum — passing the SAME annotated binding to a helper `fn get(q : Res)` that matches internally is byte-identical (`22`). So the corruption is specific to lowering a **match whose scrutinee's typecheck-type carries `TLin` over a Newtype-shaped ADT** — `lower_types.ml` strips `TLin` at both its entries (`:51` surface, `:92` typecheck-ty), so the scrutinee's ECase/repr classification must consult an UNSTRIPPED type through some other path (suspect: the ELet annotation type flowing into the case-lowering/`emit_case` newtype-recovery, cf. the Bytes/newtype classification history). Golden `g41` deliberately consumes its affine binding via a call, not a direct match, and documents the exclusion (`core-march.md` §4.12) — same pattern as the MPST exclusion. Fix is TIR/repr work: find the ECase scrutinee-type path that misses the strip; regression = the g41c/g41d probe shapes as a new golden or codegen test.
 
