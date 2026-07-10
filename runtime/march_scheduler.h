@@ -147,7 +147,8 @@ typedef struct march_proc {
     ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */
-    struct march_proc         *next;         /* Intrusive link (unused with deque, kept for compat) */
+    struct march_proc         *next;         /* Intrusive link for the global run queue (mutex FIFO);
+                                              * only valid while the proc is IN that queue. */
     struct march_scheduler    *owner_sched;  /* Scheduler that last ran this process */
     int                        is_daemon;    /* Daemon procs (actor recv loops) do not keep the
                                               * scheduler alive: at shutdown, once no non-daemon
@@ -178,6 +179,20 @@ typedef struct march_proc {
      * at spawn time and passed to __tsan_switch_to_fiber before every
      * swapcontext() that resumes it. Same rationale as asan_fake_stack. */
     void                       *tsan_fiber;
+#endif
+#ifdef MARCH_DEBUG
+    /* Regression tripwires for the single-owner run-queue invariant (build
+     * with -DMARCH_DEBUG to arm; zero release-mode cost).  In the fixed
+     * design these must NEVER fire:
+     *   dbg_queued     — 1 while the proc sits in exactly one run structure
+     *                    (a local deque or the global runq).  Enqueue sites
+     *                    assert 0→1; dequeue sites assert 1→0, so a
+     *                    double-enqueue aborts at the moment it happens.
+     *   dbg_running_on — scheduler id + 1 while one scheduler is dispatched
+     *                    (swapcontext-ed) into the proc, else 0.  A second
+     *                    dispatcher aborts instead of corrupting the stack. */
+    _Atomic int                 dbg_queued;
+    _Atomic int                 dbg_running_on;
 #endif
 } march_proc;
 
