@@ -134,6 +134,29 @@ export function march_dom_taps(el) {
   return list_of_array(buf.splice(0, buf.length));
 }
 
+let __key_buffer = null;
+
+export function march_dom_key_presses() {
+  if (__key_buffer === null) {
+    __key_buffer = [];
+    document.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key.startsWith("Arrow")) e.preventDefault();
+      __key_buffer.push(e.key);
+    });
+  }
+  return list_of_array(__key_buffer.splice(0, __key_buffer.length));
+}
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+
+export function march_dom_store_get(key) {
+  try { return opt(window.localStorage.getItem(key)); } catch (e) { return none; }
+}
+
+export function march_dom_store_set(key, val) {
+  try { window.localStorage.setItem(key, val); } catch (e) { }
+}
+
 // ── Window ────────────────────────────────────────────────────────────────────
 
 export function march_dom_alert(msg) { window.alert(msg); }

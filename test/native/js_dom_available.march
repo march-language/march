@@ -18,6 +18,12 @@ mod JsDomAvailable do
     ()
   end
 
+  fn input_storage_smoke() : Unit do
+    let _ = Dom.key_presses()
+    let _ = Dom.store_get("k")
+    Dom.store_set("k", "v")
+  end
+
   fn main() : Unit do
     println("dom available")
   end

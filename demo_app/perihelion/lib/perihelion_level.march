@@ -29,6 +29,11 @@ mod Perihelion.Level do
     out
   end
 
+  doc "Public LCG step for other Perihelion modules: (state) -> (state', uniform [0,1))."
+  fn lcg_next_pub(s : Int) : (Int, Float) do
+    lcg_next(s)
+  end
+
   pfn lerp(lo : Float, hi : Float, t : Float) : Float do
     lo + t * (hi - lo)
   end
