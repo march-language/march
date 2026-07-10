@@ -1,0 +1,19 @@
+mod Main do
+  -- Linearity widening slice 7 -- (T-LinMark) fn-param surface positive: a
+  -- `linear` parameter consumed exactly once in the body typechecks (the
+  -- param is registered Linear at bind_fn_param; the single `take(q)` use
+  -- satisfies (T-LinDrop) at fn-body close). See core-march-types.md §2.9.1.
+  type Res = R(Int)
+  fn take(r : Res) : Int do
+    match r do
+      R(n) -> n
+      _    -> 0
+    end
+  end
+  fn good(linear q : Res) : Int do
+    take(q)
+  end
+  fn main() : () do
+    ()
+  end
+end
