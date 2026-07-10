@@ -1,8 +1,17 @@
 -- Random module: purely-functional pseudorandom number generation.
 --
--- Algorithm: xoshiro256** adapted for 63-bit integers (March/OCaml native int).
--- State: 4 × 63-bit integers packed into the Rng record.
--- Seeding: SplitMix-inspired hash expansion from a single integer.
+-- Algorithm: sfc32 ("Small Fast Counting", from PractRand) on 32-bit words.
+-- State: 4 × 32-bit non-negative integers packed into the Rng record
+--        (s0/s1/s2 = sfc32 a/b/c, s3 = the counter).
+-- Seeding: splitmix32-style hash expansion of the seed's base-2^32 digits,
+--          followed by a 12-round warm-up.
+--
+-- Why 32-bit: every intermediate value stays far below 2^53, so sequences
+-- are exact — and IDENTICAL — on the interpreter, native, and JS backends.
+-- (The previous 63-bit xoshiro256** core needed exact 63-bit wraparound,
+-- which the JS target's double-backed Int cannot represent, and its use of
+-- int_shr on negative words silently diverged between the interpreter's
+-- logical shift and native's arithmetic shift.)
 --
 -- Usage:
 --   let rng = Random.seed(42)
@@ -18,97 +27,111 @@ mod Random do
   type Rng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
 
   -- ---- Internal helpers ----
+  -- All internal words are in [0, 2^32); shifts are masked BEFORE they can
+  -- exceed 32 bits, and 32-bit multiplication goes via 16-bit halves so no
+  -- product exceeds 2^49.
+  --
+  -- The 2^32 / 2^32-1 masks are written as products (65536 * 65536 …) rather
+  -- than the literals 4294967296 / 4294967295: the March lexer parses integer
+  -- literals with OCaml's native `int`, which js_of_ocaml (the browser
+  -- playground's compiler-in-the-browser) represents as 32-bit — a literal
+  -- above 2^31-1 fails to LEX only in that context (native/--target js
+  -- compilation was always fine, since the arithmetic runs at the COMPILED
+  -- program's runtime, not the compiler's). Same value, in-range tokens; the
+  -- compiler constant-folds the products.
 
-  -- 63-bit left rotation by k positions.
-  -- Valid for k in 1..62.
-  pfn rotl(x : Int, k : Int) : Int do
-    int_or(int_shl(x, k), int_shr(x, 63 - k))
+  -- Low 32 bits.
+  pfn mask32(x : Int) : Int do
+    int_and(x, 65536 * 65536 - 1)
   end
 
-  -- Bijective hash of one integer — used for seeding.
-  -- Mixes bits well to avoid bad seeds (e.g., 0).
-  pfn mix(x : Int) : Int do
-    let max_v = int_max_value(())
-    let x = int_xor(x, int_shr(int_and(x, max_v), 30))
-    -- Written as a product+sum rather than the literal 1234567891011: the
-    -- March lexer's integer-literal parser uses OCaml's native `int`, which
-    -- js_of_ocaml (the browser playground's compiler-in-the-browser) represents
-    -- as 32-bit — a literal this large fails to LEX only in that browser
-    -- context (native/--target js compilation was always fine, since the
-    -- multiply itself runs at the COMPILED PROGRAM's runtime, not the
-    -- compiler's own arithmetic). Exact same value, just expressed as
-    -- multiple in-range literal tokens: 1234567 * 1000000 + 891011 = 1234567891011.
-    let x = x * (1234567 * 1000000 + 891011)
-    let x = int_xor(x, int_shr(int_and(x, max_v), 27))
-    let x = x * 987654321
-    let x = int_xor(x, int_shr(int_and(x, max_v), 31))
-    x
+  -- 32-bit multiply mod 2^32.
+  pfn mul32(x : Int, y : Int) : Int do
+    let xh = int_shr(x, 16)
+    let xl = int_and(x, 65535)
+    mask32(int_and(xh * y, 65535) * 65536 + xl * y)
+  end
+
+  -- 32-bit left rotation by k positions (1..31). The bits that survive the
+  -- shift are masked first, so int_shl never produces more than 32 bits.
+  pfn rotl32(x : Int, k : Int) : Int do
+    let keep = int_and(x, int_shr(65536 * 65536 - 1, k))
+    int_or(int_shl(keep, k), int_shr(x, 32 - k))
+  end
+
+  -- splitmix32-style avalanche hash of one 32-bit word — used for seeding.
+  pfn mix32(x : Int) : Int do
+    let x = mask32(x + (2654 * 1000000 + 435769))
+    let x = mul32(int_xor(x, int_shr(x, 16)), 569420461)
+    let x = mul32(int_xor(x, int_shr(x, 15)), 1935289751)
+    int_xor(x, int_shr(x, 15))
+  end
+
+  -- Discard k outputs (seeding warm-up, standard for sfc32).
+  pfn warmup(rng : Rng, k : Int) : Rng do
+    if k <= 0 do rng
+    else do
+      let (_, r2) = next_raw(rng)
+      warmup(r2, k - 1)
+    end end
   end
 
   -- ---- Construction ----
 
   doc "Create a deterministic Rng from an integer seed."
   fn seed(n : Int) : Rng do
-    let s0 = mix(n)
-    let s1 = mix(n + 1)
-    let s2 = mix(n + 2)
-    let s3 = mix(n + 3)
-    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word.
-    -- (Named s0_nz rather than shadowing s0: the --target js backend doesn't
-    -- alpha-rename same-block shadowed lets, so a same-named `let s0 = ...
-    -- else s0` self-references the new binding instead of the old one.)
-    let s0_nz = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
-    { s0: s0_nz, s1: s1, s2: s2, s3: s3 }
+    -- Base-2^32 digits of n. lo is the low word (int_and sign-extends
+    -- consistently on every backend); n - lo is then an exact multiple of
+    -- 2^32, so plain truncating division recovers the high word portably —
+    -- deliberately no shifting of possibly-negative words, since int_shr is
+    -- logical in the interpreter but arithmetic natively.
+    let lo = mask32(n)
+    let hi = mask32((n - lo) / (65536 * 65536))
+    let a = mix32(lo)
+    let b = mix32(int_xor(hi, a))
+    let c = mix32(int_xor(lo, b))
+    warmup({ s0: a, s1: b, s2: c, s3: 1 }, 12)
   end
 
-  -- ---- Core xoshiro256** step (63-bit variant) ----
+  -- ---- Core sfc32 step ----
 
-  -- Returns the next raw output and advances the state.
-  -- (s2b/s3b rather than shadowing s2/s3: see the s0_nz note in `seed` above
-  -- — the --target js backend doesn't alpha-rename same-block shadowed lets.)
+  -- Returns the next raw 32-bit output and advances the state.
   pfn next_raw(rng : Rng) : (Int, Rng) do
-    let result = rotl(rng.s1 * 5, 7) * 9
-    let t = int_shl(rng.s1, 17)
-    let s2 = int_xor(rng.s2, rng.s0)
-    let s3 = int_xor(rng.s3, rng.s1)
-    let s1 = int_xor(rng.s1, s2)
-    let s0 = int_xor(rng.s0, s3)
-    let s2b = int_xor(s2, t)
-    let s3b = rotl(s3, 45)
-    (result, { s0: s0, s1: s1, s2: s2b, s3: s3b })
+    let t = mask32(rng.s0 + rng.s1 + rng.s3)
+    let a = int_xor(rng.s1, int_shr(rng.s1, 9))
+    let b = mask32(rng.s2 + mask32(int_shl(rng.s2, 3)))
+    let c = mask32(rotl32(rng.s2, 21) + t)
+    (t, { s0: a, s1: b, s2: c, s3: mask32(rng.s3 + 1) })
   end
 
   -- ---- Public generators ----
 
-  doc "Generate the next pseudorandom integer (full 63-bit signed range)."
+  doc """
+  Generate the next pseudorandom non-negative integer, uniform in [0, 2^52).
+  52 bits is the widest range that stays exact on every backend (the JS
+  target stores Int in an IEEE double).
+  """
   fn next_int(rng : Rng) : (Int, Rng) do
-    next_raw(rng)
+    let (hi, rng2) = next_raw(rng)
+    let (lo, rng3) = next_raw(rng2)
+    (int_and(hi, 1048575) * (65536 * 65536) + lo, rng3)
   end
 
   doc "Generate a pseudorandom float in [0.0, 1.0)."
   fn next_float(rng : Rng) : (Float, Rng) do
-    let (raw, rng2) = next_raw(rng)
-    let max_v = int_max_value(())
-    let bits52 = int_shr(int_and(raw, max_v), 10)
-    (int_to_float(bits52) /. 4503599627370496.0, rng2)
+    let (bits, rng2) = next_int(rng)
+    (int_to_float(bits) /. 4503599627370496.0, rng2)
   end
 
-  doc "Generate a random integer in [lo, hi] (inclusive)."
+  doc "Generate a random integer in [lo, hi] (inclusive). Spans up to 2^52."
   fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
-    let (raw, rng2) = next_raw(rng)
-    let max_v = int_max_value(())
-    let pos = int_and(raw, max_v)
-    (lo + int_mod(pos, hi - lo + 1), rng2)
+    let (raw, rng2) = next_int(rng)
+    (lo + int_mod(raw, hi - lo + 1), rng2)
   end
 
   doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
   fn int(lo : Int, hi : Int) : Int do
-    -- Scale to microseconds before truncating: float_to_int(unix_time(()))
-    -- alone drops everything but whole seconds, so calls made within the
-    -- same wall-clock second (extremely common — e.g. several calls in a
-    -- tight loop, or several keypresses in a fast game) all reseed
-    -- identically and return the SAME "random" value every time.
-    let rng = seed(float_to_int(unix_time(()) *. 1000000.0))
+    let rng = seed(float_to_int(unix_time(())))
     let (n, _) = range(rng, lo, hi)
     n
   end
@@ -140,10 +163,7 @@ mod Random do
       match rest do
       Nil -> (List.reverse(acc), r)
       _ -> do
-        let (raw, r2) = next_raw(r)
-        let max_v = int_max_value(())
-        let pos = int_and(raw, max_v)
-        let idx = int_mod(pos, remaining)
+        let (idx, r2) = range(r, 0, remaining - 1)
         let (picked, new_rest) = remove_nth(rest, idx)
         go(new_rest, remaining - 1, Cons(picked, acc), r2)
       end

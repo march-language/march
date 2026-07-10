@@ -1,0 +1,28 @@
+-- Golden: self-referencing block-`let` shadowing on --target js.
+-- `let x = <expr using x>` rebinds x while reading the previous x. On JS this
+-- previously emitted `const x = (...x...)` where the RHS's x resolved to the
+-- block-hoisted inner const in its temporal dead zone (ReferenceError); the
+-- shadowing const is now emitted under a fresh id (x$sN) so the RHS reads the
+-- outer binding. Values must match the interpreter/native backends exactly.
+-- Also covers: a binding read BEFORE it is shadowed (b = a + x, a still 100),
+-- and a pattern variable shadowing an outer local inside a match arm.
+mod JsLetShadowing do
+  fn main() : Unit do
+    let x = 10
+    let x = x + 5
+    let x = x * 2
+    let x = x - 1
+    println(int_to_string(x))          -- 29
+    let a = 100
+    let b = a + x
+    let a = a + 1
+    println(int_to_string(b))          -- 129
+    println(int_to_string(a))          -- 101
+    -- pattern var `a` shadows the outer `a` inside the arm
+    let r = match Some(7) do
+      Some(a) -> a + 1
+      None -> 0
+    end
+    println(int_to_string(r))          -- 8
+  end
+end

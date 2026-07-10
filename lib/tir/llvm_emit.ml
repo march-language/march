@@ -1599,7 +1599,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      BEFORE the var_slot guard so the specific match takes priority. *)
   | Tir.EApp (f, [a; b])
     when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" ->
+      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -1610,6 +1610,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
       | "int_mod_euclid" -> "march_checked_umod"
+      | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in
     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
@@ -2089,7 +2090,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
-      || f.Tir.v_name = "int_mod_euclid" ->
+      || f.Tir.v_name = "int_mod_euclid" || f.Tir.v_name = "int_div_euclid" ->
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
@@ -2098,6 +2099,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
       | "int_mod_euclid" -> "march_checked_umod"
+      | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in
     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);

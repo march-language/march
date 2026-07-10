@@ -283,6 +283,53 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, Random + int builtins on `--target js`; portable sfc32 Random core)
+
+Resolves the 2026-07-09 Starfling P1 ("`Random` unusable on `--target js`").
+
+- **JS-target mappings for the int builtins** (`lib/tir/js_emit.ml` +
+  `runtime/march_runtime.mjs`): `int_and/or/xor/not/shl/shr/popcount/mod/div/
+  mod_euclid/div_euclid` delegate to new checked runtime implementations that
+  mirror the interpreter's semantics (logical `int_shr` on the 63-bit pattern;
+  `int_popcount`'s sign-bit flip) exactly within the double-exact range
+  ±(2^53−1) and throw a descriptive RangeError beyond it — never a silent
+  rounding. Fast paths (int32; non-negative 2^32-radix split) keep 32-bit-domain
+  code off BigInt (~35 ns/op vs ~53 ns/op BigInt path). Also mapped:
+  `int_abs`, `unix_time`, `float_abs/floor/ceil`, and `float_round`
+  (half-away-from-zero, matching OCaml `Float.round`; JS `Math.round` differs
+  on negative halves). All get first-class `$clo` wrappers.
+- **Unmapped builtins on `--target js` are now a compile error** (sorted
+  `Js_emit_error` diagnostics, one per name; `int_max_value`/`int_min_value`
+  get a tailored "±2^62 is unrepresentable" message) instead of a silent
+  bare-call emit that threw `ReferenceError` at runtime. Negative golden:
+  `test/native/js_unmapped_builtin.{march,expected}`. The whole-stdlib
+  `test/whole_program/zoo.mjs` becomes a frozen pre-change artifact (its
+  re-emission now correctly fails on 98 C-backed builtins: tcp/tls/actors/
+  process/files/native-arrays).
+- **`stdlib/random.march` core rewritten: 63-bit xoshiro256\*\* → sfc32 on
+  32-bit words.** Public API and `Rng` record shape unchanged. Every
+  intermediate stays below 2^53, so sequences are exact and IDENTICAL on the
+  interpreter, native, and JS backends (verified: equal 200k-draw checksums;
+  ~0.10 µs/draw native `--opt 2`, ~0.70 µs/draw node). `next_int` is now
+  uniform in [0, 2^52) — the widest portable width; seeding is
+  splitmix32-style over base-2^32 seed digits, extracted without shifting
+  negative words. New golden `test/native/js_random_determinism.{march,
+  expected}` (three-rule js pattern in `test/dune`) pins determinism; its
+  .expected equals interpreter/native output byte-for-byte.
+- **Two compiler bugs found while building this, both since FIXED** (see the
+  dedicated Done entries in `specs/todos.md`): the self-referencing block-`let`
+  shadowing miscompile (`let x = x + 5` silently wrong on native + JS,
+  interpreter correct) — a `lib/tir/cprop.ml` shadow-env leak on the shared-TIR
+  side plus a `lib/tir/js_emit.ml` temporal-dead-zone on the JS side, each with
+  a regression test/golden — and `int_div_euclid`'s missing native codegen
+  mapping (`main` `cf604dcd`). With the shadowing bug fixed, `stdlib/
+  random.march`'s `mix32` was restored from its distinct-name workaround to the
+  classic self-shadowing splitmix32 idiom (`let x = f(x)` chain); the Random
+  golden stayed byte-identical.
+
+Full suite green: **451 compiler / 231 eval / 396 codegen / 807 stdlib** (the
+pre-existing full-suite baseline failures unchanged); all 11 js goldens (9
+positive + 2 negative) pass.
 ## Current State (as of 2026-07-10, sibling-ctor shadowing regression FIXED — add_ctor move-to-front)
 
 **The sibling-module constructor shadowing regression (from `d95fe942`,
@@ -3860,6 +3907,11 @@ Resolves the zero-arg-lambda follow-up filed by the Canvas 2D API work below (sp
 
 **Also fixed in passing:** `demo_app/canvas_demo/build.sh`'s `dune build` now passes `--root` and a specific target (`bin/main.exe`) — a plain `dune build` from a nested worktree (e.g. `.claude/worktrees/<name>`) escapes upward to the outer repo's project root and additionally pulls in the full test suite by default. `demo_app/dom_demo/build.sh` has the same latent issue, left as-is (out of scope for this change).
 
+## Current State (as of 2026-07-10, `int_div_euclid` native codegen)
+
+**`int_div_euclid` now compiles natively** — it was the last member of the `int_div`/`int_mod` family present in the interpreter and the JS backend but missing from the LLVM backend, so any `--compile` of a caller failed at link time with `Undefined symbols: _int_div_euclid`. New C runtime helper `march_checked_ediv` (`runtime/march_runtime.c`) implements the Euclidean quotient byte-for-byte with `eval.ml` (`q=a/b; r=a-q*b; if r<0 then (b>0 ? q-1 : q+1) else q`) and panics `int_div_euclid: division by zero` via the shared `march_div_by_zero` on a zero divisor. The March-name→C-symbol mapping was added to **both** `llvm_emit.ml` call-path sites (the `EApp` guard/helper and the `ECallPtr` twin), and the `declare`/`PDeclare` to `lib/tir/llvm_builtins.ml`'s preamble — `defun.ml`'s `builtin_names` already listed it, so no defun change was needed. Named `march_checked_ediv` (signed Euclidean) rather than paralleling the genuinely-unsigned `march_checked_umod`.
+
+**Validation:** new interpreter/compiled parity test `test_compiled_int_div_euclid_parity` (`test/test_codegen.ml`, `iface_impl_mono_codegen` group) covers all four sign quadrants — `[int_div_euclid(7,2), int_div_euclid(-7,2), int_div_euclid(-7,-2), int_div_euclid(7,-2)]` = `[3, -4, 4, -3]` — via `assert_compiled_interp_parity`. Manually confirmed interpreter and compiled agree on both the value list and the divide-by-zero panic message.
 ## Current State (as of 2026-07-09, Tetris playground: pause, layout fixes, time-travel debugger)
 
 Follow-up round on the Tetris live-compile playground (`docs/tetris-playground/`):
