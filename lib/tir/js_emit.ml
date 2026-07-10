@@ -36,6 +36,13 @@ type ctx = {
   (* fn_name → 1-indexed source line; looked up when recording source map segments *)
   segments     : (int * int) list ref;
   (* (output_line_0indexed, source_line_0indexed) segments collected during fn emission *)
+  local_fns    : (string, unit) Hashtbl.t;
+  (* ELetRec-local function names seen during emission — legitimate bare-call
+     targets that are not in fn_names *)
+  unmapped     : (string, unit) Hashtbl.t;
+  (* direct-call names that resolve to nothing (not a user fn, local fn,
+     extern, or mapped builtin): emitting them would produce a runtime
+     ReferenceError, so emit_module raises Js_emit_error instead *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -51,6 +58,8 @@ let create_ctx ?(fn_lines=[]) () = {
   fn_lines     = (let t = Hashtbl.create 16 in
                   List.iter (fun (n, l) -> Hashtbl.replace t n l) fn_lines; t);
   segments     = ref [];
+  local_fns    = Hashtbl.create 8;
+  unmapped     = Hashtbl.create 4;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -489,7 +498,13 @@ and emit_val_impl ctx expr =
           | "string_pad_right" | "string_index_of" | "string_last_index_of"
           | "char_from_int" | "byte_to_char" | "char_to_int"
           | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace"
-          | "list_append" | "list_concat" -> true | _ -> false) ->
+          | "list_append" | "list_concat"
+          (* Int builtins with 63-bit semantics — checked implementations in
+             march_runtime.mjs (exact within ±2^53, throw beyond) *)
+          | "int_and" | "int_or" | "int_xor" | "int_not"
+          | "int_shl" | "int_shr" | "int_popcount"
+          | "int_mod" | "int_div" | "int_mod_euclid" | "int_div_euclid"
+            -> true | _ -> false) ->
         let rt = "march_" ^ n in
         use_runtime ctx rt;
         emit ctx (rt ^ "(");
@@ -517,11 +532,34 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_abs", [a] -> emit ctx "Math.abs("; emit_atom ctx a; emit ctx ")"
+      | "float_abs",   [a] -> emit ctx "Math.abs(";   emit_atom ctx a; emit ctx ")"
+      (* float_floor/ceil/round return Int in March; the results are
+         integer-valued JS numbers, which IS the JS target's Int repr *)
+      | "float_floor", [a] -> emit ctx "Math.floor("; emit_atom ctx a; emit ctx ")"
+      | "float_ceil",  [a] -> emit ctx "Math.ceil(";  emit_atom ctx a; emit ctx ")"
+      | "float_round", [a] ->
+        (* OCaml Float.round rounds half AWAY FROM ZERO; JS Math.round rounds
+           half toward +inf — delegate to the runtime helper *)
+        use_runtime ctx "march_float_round";
+        emit ctx "march_float_round("; emit_atom ctx a; emit ctx ")"
+      (* unix_time takes a Unit argument in March; the JS runtime fn takes none *)
+      | "unix_time", _ ->
+        use_runtime ctx "march_unix_time";
+        emit ctx "march_unix_time()"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with
          | Some ed -> emit_extern_call ctx ed args
          | None ->
+           (* A direct call that is not a user fn, letrec-local fn, or
+              parameter can only be an unmapped builtin — the bare emit below
+              would be a guaranteed ReferenceError at runtime, so record it
+              and let emit_module fail the compile instead. *)
+           if not (Hashtbl.mem ctx.fn_names name)
+              && not (Hashtbl.mem ctx.local_fns name)
+              && not (Hashtbl.mem ctx.param_names name)
+           then Hashtbl.replace ctx.unmapped name ();
            let is_async_callee = Hashtbl.mem ctx.async_fns name in
            if is_async_callee then emit ctx "(await ";
            emit ctx (mangle name ^ "(");
@@ -668,6 +706,10 @@ and emit_stmts_impl ctx expr =
     emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELetRec (fns, body) ->
+    (* Register names first: mutually-recursive locals may call each other
+       (and themselves) before their own decl is emitted. *)
+    List.iter (fun (fn : Tir.fn_def) ->
+      Hashtbl.replace ctx.local_fns fn.Tir.fn_name ()) fns;
     List.iter (emit_fn_decl ctx) fns;
     emit_stmts ctx body
 
@@ -1089,6 +1131,9 @@ const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
 const negate_int      = { _0: ($_, x) => -x };
 const negate_float    = { _0: ($_, x) => -x };
+const float_abs       = { _0: ($_, x) => Math.abs(x) };
+const float_floor     = { _0: ($_, x) => Math.floor(x) };
+const float_ceil      = { _0: ($_, x) => Math.ceil(x) };
 |}
 
 (** Raised by [emit_module] when used C-backed externs are compiled with [--target js].
@@ -1124,19 +1169,41 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   ) m.Tir.tm_externs in
   (* Chunk C: reject used C-backed externs — they have no JS implementation *)
   let bad_externs = List.filter (fun ed -> classify_js_extern ed = CBacked) used_ed in
-  if bad_externs <> [] then begin
-    let msgs = List.map (fun (ed : Tir.extern_decl) ->
+  let extern_msgs = List.map (fun (ed : Tir.extern_decl) ->
+    Printf.sprintf
+      "error: extern \"%s\" function `%s` cannot be called on the JavaScript target.\n\
+       The JS backend supports only JS-module externs:\n\
+         extern \"node:fs\"   extern \"npm:lodash\"   extern \"./local.mjs\"\n\
+       `%s` is bound to the C symbol `%s`, which has no JS runtime\n\
+       implementation. To call it from JS, wrap it in a JS module, or build a\n\
+       native/wasm target."
+      ed.Tir.ed_lib_name ed.Tir.ed_march_name ed.Tir.ed_march_name ed.Tir.ed_c_name
+  ) bad_externs in
+  (* Unmapped builtins: previously these were emitted as bare calls that threw
+     ReferenceError at runtime; fail the compile with a diagnostic instead. *)
+  let unmapped_names =
+    List.sort String.compare
+      (Hashtbl.fold (fun k () acc -> k :: acc) ctx.unmapped []) in
+  let unmapped_msgs = List.map (fun name ->
+    match name with
+    | "int_max_value" | "int_min_value" ->
       Printf.sprintf
-        "error: extern \"%s\" function `%s` cannot be called on the JavaScript target.\n\
-         The JS backend supports only JS-module externs:\n\
-           extern \"node:fs\"   extern \"npm:lodash\"   extern \"./local.mjs\"\n\
-         `%s` is bound to the C symbol `%s`, which has no JS runtime\n\
-         implementation. To call it from JS, wrap it in a JS module, or build a\n\
-         native/wasm target."
-        ed.Tir.ed_lib_name ed.Tir.ed_march_name ed.Tir.ed_march_name ed.Tir.ed_c_name
-    ) bad_externs in
-    raise (Js_emit_error msgs)
-  end;
+        "error: builtin `%s` is not supported on the JavaScript target.\n\
+         Its value (±2^62) is not representable there: March Int is stored in\n\
+         a JS double, which is exact only within ±(2^53 - 1). Restructure the\n\
+         code to avoid full 63-bit values (e.g. stdlib Random uses a 32-bit\n\
+         core for exactly this reason), or build a native/wasm target."
+        name
+    | _ ->
+      Printf.sprintf
+        "error: builtin `%s` has no JavaScript-target implementation.\n\
+         The compiled call would throw ReferenceError at runtime. Add a\n\
+         mapping in lib/tir/js_emit.ml (+ runtime/march_runtime.mjs if it\n\
+         needs a helper), or build a native/wasm target."
+        name
+  ) unmapped_names in
+  if extern_msgs <> [] || unmapped_msgs <> [] then
+    raise (Js_emit_error (extern_msgs @ unmapped_msgs));
   let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
   (* Chunk B: __js_err_to helper — emitted only when at least one raises extern is used *)
   let raises_helper =
@@ -1150,10 +1217,27 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
   Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
+  let int_rt_builtins2 =   (* two-argument runtime-backed int builtins *)
+    [ "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr";
+      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid" ] in
+  let int_rt_builtins1 = [ "int_not"; "int_popcount" ] in
+  List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
+    (int_rt_builtins2 @ int_rt_builtins1);
+  Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
+  Hashtbl.replace ctx.runtime_uses "march_float_round" ();
   let runtime_wrappers =
     "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
-    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n"
+    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
+    String.concat "" (List.map (fun n ->
+      Printf.sprintf "const %s = { _0: ($_, a, b) => march_%s(a, b) };\n" n n)
+      int_rt_builtins2) ^
+    String.concat "" (List.map (fun n ->
+      Printf.sprintf "const %s = { _0: ($_, a) => march_%s(a) };\n" n n)
+      int_rt_builtins1) ^
+    "const int_abs     = { _0: ($_, a) => Math.abs(a) };\n" ^
+    "const unix_time   = { _0: ($_) => march_unix_time() };\n" ^
+    "const float_round = { _0: ($_, a) => march_float_round(a) };\n"
   in
   let runtime_import =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
