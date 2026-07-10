@@ -283,6 +283,29 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, grammar corpus count-guarded + widened — conformance backing completed)
+
+**The resolved-grammar conformance corpus (`specs/lang/grammar/`) is now
+count-guarded and CI-complete.** The harness already existed — 38 `--check`
+programs (`parse/` must parse+typecheck, `reject/` must fail with a pinned
+substring), a `check_grammar.sh` runner, and a `@grammar-check` dune alias run
+in CI's slow lane. But its INDEX count was NOT guarded by `check-docs.sh` Check
+C (which covered only the golden and types corpora), and had silently drifted:
+the header (`p01–p22/r01–r13`) and the "currently 35/35 — 22 parse, 13 reject"
+line were stale against the actual 38 programs. Fixed all stale sites AND
+extended Check C to guard the grammar INDEX's three authoritative count sites
+(title ranges, `currently N/N` run line, `N programs total` footer) — negative-
+tested: it now catches a broken grammar count exactly as it does golden/types.
+grammar.md's own prose count (also stale at 35) corrected too.
+
+Corpus widened 38 → **39**: added `parse/p25_letq_block_fold` — the positive
+`let?` parse witness §5.4 lacked (it had only the reject `r05`), showing a
+well-formed multi-`let?` block parses and `fold_letq` nests the continuations
+right-associatively (prints `70`). Ties the grammar layer to slice 8's `let?`
+typing work. §5.4's stale `typecheck.ml` line cites (`:4174`) corrected to the
+real `ELetQ` arm (`:4651`). `grammar-check` 39/39; `check-docs` Check C now
+reports `grammar: 39 = 25 parse + 14 reject`; doc-lint clean.
+
 ## Current State (as of 2026-07-10, Core March widening slice 8 — `let?` Result-propagation, CLOSEOUT)
 
 **Slice 8 widens the conformance-tested references to `let?` Result-propagation**
