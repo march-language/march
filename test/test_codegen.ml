@@ -1,6 +1,86 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
+
+let compile_to_js src =
+  let m = parse_and_desugar src in
+  March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
+    ~fn_lines:[] m
+
+let test_js_pipeline_simple_program_compiles () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn add(a: Int, b: Int) : Int do a + b end
+    fn main() : Unit do
+      let _ = add(1, 2)
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output mentions main" true
+      (Test_helpers.contains "main" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_typecheck_error_surfaces () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let _ = 1 + "not a number"
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a typecheck error, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "at least one error message" true (errs <> [])
+
+let test_js_pipeline_dom_extern_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    resource Node
+    resource Event
+    extern "dom" : Cap(Ffi) do
+      fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
+    end
+    fn main() : Unit do
+      let _ = dom_get_element_by_id("root")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references the extern symbol" true
+      (Test_helpers.contains "march_dom_get_element_by_id" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_dom_event_key_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    extern "dom" : Cap(Ffi) do
+      fn dom_event_key(ev: String) : String = "march_dom_event_key"
+    end
+    fn main() : Unit do
+      let _ = dom_event_key("x")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references march_dom_event_key" true
+      (Test_helpers.contains "march_dom_event_key" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -455,6 +535,125 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
     (ir_count ir "switch i32")
+
+(** Finding-19 memory-safety regression: two single-handler actors whose
+    messages, under the OLD per-actor 0-based Newtype encoding, were
+    indistinguishable at dispatch — a Logger message delivered to Counter's
+    mailbox was misrouted into Counter's Inc handler and its String payload
+    reinterpreted as an Int (memory-unsafe UB).
+
+    The fix forces each actor message type Boxed with a GLOBALLY-unique heap tag
+    and gives every dispatch ECase a dropping default arm. Assert the IR shape:
+      - Counter_dispatch switches on an i32 tag (Boxed decode — NOT a
+        tag-less Newtype value passed straight through), and
+      - has a case_default arm that decrefs the dropped message and returns
+        (the drop), rather than folding to `unreachable`, and
+      - Counter's and Logger's message ctor tags are DISTINCT (global numbering),
+        so a Logger message cannot match a Counter branch. *)
+let test_actor_foreign_msg_drop_boxed_dispatch () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    actor Logger do
+      state { seen : Int }
+      init  { seen: 0 }
+      on Log(m : String) do { seen: state.seen + 1 } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      send(c, Log("stray"))
+      run_until_idle()
+    end
+  end|} in
+  (* Boxed decode: the single-handler dispatch loads an i32 ctor tag and
+     switches on it (a tag-less Newtype would pass the value straight through
+     with no `switch i32`). *)
+  Alcotest.(check bool) "Counter dispatch switches on an i32 tag (Boxed, not Newtype)"
+    true (ir_contains ir "switch i32");
+  (* Dropping default arm: the dispatch has a case_default that releases the
+     message (via march_decrc) — the foreign-message drop, not `unreachable`. *)
+  Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
+    true (ir_contains ir "case_default");
+  (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
+     0x01000000+ actor-message tag space; distinctness is what makes a foreign
+     message fall to the default arm. The base tag 16777216 (0x01000000) is
+     assigned to the first message ctor; a second, distinct tag must also appear. *)
+  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
+    true (ir_contains ir "store i32 16777216");
+  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
+    true (ir_contains ir "store i32 16777217")
+
+(** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
+    actor's handler writes its new state back via an EReuse on the actor
+    struct. That EReuse must be UNCONDITIONAL — no refcount load/branch — or
+    the handler can race the caller's concurrent incrc/decrc on the actor
+    handle and silently lose the write (see specs/todos.md finding 20).
+    Assert the absence of the generic RC-conditional FBIP shape (an atomic RC
+    load + `icmp eq i64 _, 1` + the `fbip_fresh`/`fbip_reuse` block pair) in
+    the emitted module. *)
+let test_actor_struct_ereuse_unconditional () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      run_until_idle()
+    end
+  end|} in
+  Alcotest.(check bool) "no RC-conditional fbip_fresh block for the actor-struct reuse"
+    false (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "no atomic RC load guarding the actor-struct reuse"
+    false (ir_contains ir "load atomic i64")
+
+(** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
+    always-in-place gate must be STRUCTURAL (does this type's field 0 carry
+    the compiler-only "$d_dispatch" marker lower_actor.ml alone can construct
+    — see Repr.is_actor_struct_type), not a name-suffix heuristic. A prior
+    version gated on the type constructor name ending in "_Actor", which
+    false-positive-matched an ORDINARY user type coincidentally named
+    `Tree_Actor` — such a type's EReuse would then skip the refcount check,
+    silently corrupting a SHARED (RC>1) value in place. Assert a non-actor
+    `..._Actor`-named type's EReuse still takes the RC-conditional path. *)
+let test_actor_suffix_named_user_type_not_treated_as_actor () =
+  let ir = emit_actor_ir {|mod Test do
+    type Tree_Actor = TLeaf(Int) | TNode(Tree_Actor, Tree_Actor)
+    fn bump(t : Tree_Actor) : Tree_Actor do
+      match t do
+        TLeaf(n) -> TLeaf(n + 1)
+        TNode(l, r) -> TNode(bump(l), r)
+      end
+    end
+    fn main() : Unit do
+      let original = TNode(TLeaf(10), TLeaf(20))
+      let shared = original
+      let bumped = bump(original)
+      println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+    end
+    fn bumped_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> bumped_val(l)
+      end
+    end
+    fn shared_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> shared_val(l)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the RC-conditional fbip_fresh block"
+    true (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the atomic RC load"
+    true (ir_contains ir "load atomic i64")
 
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
@@ -7652,6 +7851,14 @@ let codegen_suites =
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
           Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
         ] );
+      ( "actor_dispatch_codegen", [
+          Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
+            `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
+            `Quick test_actor_struct_ereuse_unconditional;
+          Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
+            `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
+        ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
           Alcotest.test_case "fold loop emitted"        `Quick test_tco_fold_has_loop;
@@ -8182,6 +8389,12 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "js_pipeline", [
+          Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
+          Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
+          Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
+          Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)

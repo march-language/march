@@ -30,7 +30,15 @@ mod Random do
   pfn mix(x : Int) : Int do
     let max_v = int_max_value(())
     let x = int_xor(x, int_shr(int_and(x, max_v), 30))
-    let x = x * 1234567891011
+    -- Written as a product+sum rather than the literal 1234567891011: the
+    -- March lexer's integer-literal parser uses OCaml's native `int`, which
+    -- js_of_ocaml (the browser playground's compiler-in-the-browser) represents
+    -- as 32-bit — a literal this large fails to LEX only in that browser
+    -- context (native/--target js compilation was always fine, since the
+    -- multiply itself runs at the COMPILED PROGRAM's runtime, not the
+    -- compiler's own arithmetic). Exact same value, just expressed as
+    -- multiple in-range literal tokens: 1234567 * 1000000 + 891011 = 1234567891011.
+    let x = x * (1234567 * 1000000 + 891011)
     let x = int_xor(x, int_shr(int_and(x, max_v), 27))
     let x = x * 987654321
     let x = int_xor(x, int_shr(int_and(x, max_v), 31))
@@ -45,14 +53,19 @@ mod Random do
     let s1 = mix(n + 1)
     let s2 = mix(n + 2)
     let s3 = mix(n + 3)
-    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
-    let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
-    { s0: s0, s1: s1, s2: s2, s3: s3 }
+    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word.
+    -- (Named s0_nz rather than shadowing s0: the --target js backend doesn't
+    -- alpha-rename same-block shadowed lets, so a same-named `let s0 = ...
+    -- else s0` self-references the new binding instead of the old one.)
+    let s0_nz = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
+    { s0: s0_nz, s1: s1, s2: s2, s3: s3 }
   end
 
   -- ---- Core xoshiro256** step (63-bit variant) ----
 
   -- Returns the next raw output and advances the state.
+  -- (s2b/s3b rather than shadowing s2/s3: see the s0_nz note in `seed` above
+  -- — the --target js backend doesn't alpha-rename same-block shadowed lets.)
   pfn next_raw(rng : Rng) : (Int, Rng) do
     let result = rotl(rng.s1 * 5, 7) * 9
     let t = int_shl(rng.s1, 17)
@@ -60,9 +73,9 @@ mod Random do
     let s3 = int_xor(rng.s3, rng.s1)
     let s1 = int_xor(rng.s1, s2)
     let s0 = int_xor(rng.s0, s3)
-    let s2 = int_xor(s2, t)
-    let s3 = rotl(s3, 45)
-    (result, { s0: s0, s1: s1, s2: s2, s3: s3 })
+    let s2b = int_xor(s2, t)
+    let s3b = rotl(s3, 45)
+    (result, { s0: s0, s1: s1, s2: s2b, s3: s3b })
   end
 
   -- ---- Public generators ----
@@ -90,7 +103,12 @@ mod Random do
 
   doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
   fn int(lo : Int, hi : Int) : Int do
-    let rng = seed(float_to_int(unix_time(())))
+    -- Scale to microseconds before truncating: float_to_int(unix_time(()))
+    -- alone drops everything but whole seconds, so calls made within the
+    -- same wall-clock second (extremely common — e.g. several calls in a
+    -- tight loop, or several keypresses in a fast game) all reseed
+    -- identically and return the SAME "random" value every time.
+    let rng = seed(float_to_int(unix_time(()) *. 1000000.0))
     let (n, _) = range(rng, lo, hi)
     n
   end

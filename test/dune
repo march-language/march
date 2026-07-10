@@ -24,7 +24,7 @@
  (name march_test_codegen)
  (wrapped false)
  (modules test_codegen test_ir_verify)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
  (name march_test_stdlib_suite)
@@ -956,6 +956,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/let_tuple_destructure.expected native_let_tuple_destructure.out)))
 
+; ── Regression: shadowed same-block `let` rebinding a name off its own prior
+; value (`let x = 5 in let x = x + 1 in ...`). js_emit.ml did not alpha-rename
+; the second binding, so JS block-scope TDZ made the IIFE initializer's `x`
+; resolve to its own not-yet-initialized `const x` instead of the outer one.
+; Cprop.ml had a related bug: it never invalidated a name's known-literal
+; entry on a non-literal rebind, so downstream uses of the rebound name
+; silently substituted the STALE literal from before the rebind (wrong value,
+; not a crash) — this fired even in the native/LLVM backend since Cprop runs
+; in the opt-enabled default pipeline for every target. Both fixed together;
+; compile natively, run, diff stdout.
+(rule
+ (targets native_let_shadow_rebind native_let_shadow_rebind.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/let_shadow_rebind.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_let_shadow_rebind
+        native/let_shadow_rebind.march)
+   (with-stdout-to native_let_shadow_rebind.out
+        (system "./native_let_shadow_rebind")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/let_shadow_rebind.expected native_let_shadow_rebind.out)))
+
 ; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
 ; A module-nested fn with default-arg params AND a trailing zero-arg closure
 ; param desugars (general match-merge path) into a tuple build + destructure.
@@ -1780,6 +1813,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_let_tuple_destructure.out (run node js_let_tuple_destructure.mjs))))
 
 (rule (alias runtest) (action (diff native/let_tuple_destructure.expected js_let_tuple_destructure.out)))
+
+; ── Regression: shadowed same-block `let` under --target js (TDZ crash) ────
+; See the native_let_shadow_rebind rule above for the full writeup — this is
+; the JS-target half of the same regression.
+(rule
+ (targets js_let_shadow_rebind.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/let_shadow_rebind.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_shadow_rebind.mjs native/let_shadow_rebind.march)))
+
+(rule
+ (targets js_let_shadow_rebind.out)
+ (deps js_let_shadow_rebind.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_shadow_rebind.out (run node js_let_shadow_rebind.mjs))))
+
+(rule (alias runtest) (action (diff native/let_shadow_rebind.expected js_let_shadow_rebind.out)))
 
 (rule
  (targets js_newtype_counter.mjs)

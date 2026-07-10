@@ -85,6 +85,7 @@ mod Dom do
     -- ── Event properties ───────────────────────────────────────────────
     fn dom_event_target(ev: Event)              : Node   = "march_dom_event_target"
     fn dom_event_type(ev: Event)                : String = "march_dom_event_type"
+    fn dom_event_key(ev: Event)                 : String = "march_dom_event_key"
     fn dom_prevent_default(ev: Event)           : Unit   = "march_dom_prevent_default"
     fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
     fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
@@ -204,6 +205,9 @@ mod Dom do
 
   doc "Return the event type string for `ev` (e.g. \"click\", \"input\")."
   fn event_type(ev)                    do dom_event_type(ev) end
+
+  doc "Return the key that triggered a `\"keydown\"`/`\"keyup\"` event (e.g. \"ArrowLeft\", \"a\", \" \" for space)."
+  fn event_key(ev)                     do dom_event_key(ev) end
 
   doc "Prevent the browser's default action for `ev` (e.g. stop a link from navigating, a form from submitting)."
   fn prevent_default(ev)               do dom_prevent_default(ev) end

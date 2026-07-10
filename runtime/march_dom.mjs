@@ -110,6 +110,7 @@ export function march_dom_remove_event_listener(el, event_name, handler) {
 
 export function march_dom_event_target(ev) { return ev.target; }
 export function march_dom_event_type(ev) { return ev.type; }
+export function march_dom_event_key(ev) { return ev.key ?? ""; }
 export function march_dom_prevent_default(ev) { ev.preventDefault(); }
 export function march_dom_stop_propagation(ev) { ev.stopPropagation(); }
 export function march_dom_event_x(ev) { return Math.trunc(ev.offsetX); }
