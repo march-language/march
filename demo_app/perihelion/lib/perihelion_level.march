@@ -7,17 +7,21 @@ mod Perihelion.Level do
 
   -- ── Placement constants ──────────────────────────────────────────────
   fn margin() : Float do 60.0 end
-  fn gap_min() : Float do 120.0 end
-  fn gap_max() : Float do 200.0 end
-  fn radius_min() : Float do 14.0 end
-  fn radius_max() : Float do 22.0 end
-  fn capture_mult() : Float do 3.0 end
+  fn gap_min() : Float do 160.0 end
+  fn gap_max() : Float do 260.0 end
+  fn radius_min() : Float do 12.0 end
+  fn radius_max() : Float do 28.0 end
+  fn capture_mult_min() : Float do 2.2 end
+  fn capture_mult_max() : Float do 4.2 end
+  fn speed_mult_min() : Float do 0.7 end
+  fn speed_mult_max() : Float do 1.6 end
 
   -- Max horizontal jump from the previous star, bounded independent of
   -- view_w -- on a wide full-screen viewport, spanning the whole width would
   -- flatten the ladder into shallow near-horizontal hops. Kept comparable to
-  -- the vertical gap (120-200) so the path trends steeply vertical instead.
-  fn max_dx() : Float do 160.0 end
+  -- (but a bit under) the vertical gap so the path trends vertical while
+  -- still leaving real horizontal choice.
+  fn max_dx() : Float do 220.0 end
 
   -- ── Randomness ───────────────────────────────────────────────────────
   -- One uniform-[0,1) draw, threading the Rng. Adapts stdlib Random's
@@ -38,23 +42,27 @@ mod Perihelion.Level do
     lo + t * (hi - lo)
   end
 
-  doc "Place the next star 120-200px above `prev` (y-down world: smaller y), offset horizontally by at most max_dx() and clamped within margins of `view_w`."
+  doc "Place the next star above `prev` (y-down world: smaller y), offset horizontally by at most max_dx() and clamped within margins of `view_w`. Radius, orbit-ring size, and spin speed all vary independently per star."
   fn next_star(rng : Random.Rng, prev : Star, view_w : Float) : (Star, Random.Rng) do
     let (r1, ty) = draw(rng)
     let (r2, tx) = draw(r1)
     let (r3, tr) = draw(r2)
+    let (r4, tcm) = draw(r3)
+    let (r5, tsm) = draw(r4)
     let gap = lerp(gap_min(), gap_max(), ty)
     let dx = lerp(0.0 - max_dx(), max_dx(), tx)
     let x = Math.clamp_float(prev.x + dx, margin(), view_w - margin())
     let r = lerp(radius_min(), radius_max(), tr)
-    let s = { x: x, y: prev.y - gap, radius: r, capture_radius: r * capture_mult() }
-    let result = (s, r3)
+    let cm = lerp(capture_mult_min(), capture_mult_max(), tcm)
+    let sm = lerp(speed_mult_min(), speed_mult_max(), tsm)
+    let s = { x: x, y: prev.y - gap, radius: r, capture_radius: r * cm, speed_mult: sm }
+    let result = (s, r5)
     result
   end
 
   doc "The opening board: a fixed centered first star plus two generated above it. Bottom-first order."
   fn initial_stars(rng : Random.Rng, view_w : Float) : (List(Star), Random.Rng) do
-    let first = { x: view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let first = { x: view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0 }
     let (s2, rng2) = next_star(rng, first, view_w)
     let (s3, rng3) = next_star(rng2, s2, view_w)
     let stars = Cons(first, Cons(s2, Cons(s3, Nil)))

@@ -14,7 +14,7 @@ mod TestPerihelionCombat do
   end
 
   pfn mk_star(x : Float, y : Float) : Star do
-    { x: x, y: y, radius: 18.0, capture_radius: 54.0 }
+    { x: x, y: y, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0 }
   end
 
   -- Random.Rng is a plain record (no Eq impl), so compare its state fields.
@@ -132,18 +132,66 @@ mod TestPerihelionCombat do
       assert (g2.spawn_timer > 0.0)
     end
 
-    test "asteroids drift and shots age" do
+    test "asteroids drift, arc toward a nearby star, and shots age" do
       let g0 = base_game(0.0)
-      let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.step(g, dt())
       match g2.asteroids do
-        Cons(a, Nil) -> assert (a.x > 100.0)
+        Cons(a, Nil) ->
+          assert (a.x > 100.0)
+          -- star 1 (200, 360) is within gravity range and below-right of the
+          -- asteroid's straight-line path (vy started at 0.0): the arc bend
+          -- must have pulled some +y component into the velocity.
+          assert (a.vy > 0.0)
+          match a.mode do
+            AsteroidDrifting -> assert true
+            _ -> assert false
+          end
         _ -> assert false
       end
       let g3 = Perihelion.Combat.step(g2, dt())
       assert (List.is_empty(g3.player_shots))
+    end
+
+    test "an asteroid crossing a star's ring either keeps drifting or gets captured into orbit around it" do
+      let g0 = base_game(0.0)
+      -- Well inside star 1's (200, 360) capture ring (54px) from the start,
+      -- so arrived_star matches on the very first step regardless of the
+      -- gravity bend's exact direction.
+      let ast = { x: 200.0, y: 320.0, vx: 0.0, vy: 20.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil), rng: Random.seed(7) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          match a.mode do
+            AsteroidDrifting -> assert true
+            AsteroidOrbiting(idx, _) -> assert (idx == 1)
+          end
+        _ -> assert false
+      end
+    end
+
+    test "an orbiting asteroid advances its angle and stays pinned to its star's ring" do
+      let g0 = base_game(0.0)
+      let s1 = mk_star(200.0, 360.0)
+      let ast = { x: s1.x + s1.capture_radius, y: s1.y, vx: 0.0, vy: 0.0,
+                  radius: 10.0, shape_seed: 0.0, mode: AsteroidOrbiting(1, 0.0) }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          match a.mode do
+            AsteroidOrbiting(idx, angle) ->
+              assert (idx == 1)
+              assert (angle > 0.0)
+              let d = Math.sqrt((a.x - s1.x) * (a.x - s1.x) + (a.y - s1.y) * (a.y - s1.y))
+              assert (approx(d, s1.capture_radius))
+            AsteroidDrifting -> assert false
+          end
+        _ -> assert false
+      end
     end
 
     test "ship in range fires at the ball" do
@@ -171,7 +219,7 @@ mod TestPerihelionCombat do
   describe "collide" do
     test "player shot kills asteroid and scores multiplier" do
       let g0 = base_game(0.0)
-      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil), multiplier: 3 }
       let g2 = Perihelion.Combat.collide(g)
@@ -182,7 +230,7 @@ mod TestPerihelionCombat do
 
     test "shot misses outside radii sum" do
       let g0 = base_game(0.0)
-      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.collide(g)
@@ -211,7 +259,7 @@ mod TestPerihelionCombat do
 
     test "ball hit without shield ends the run" do
       let g0 = base_game(0.0)
-      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let g = { g0 with asteroids: Cons(ast, Nil) }
       let g2 = Perihelion.Combat.collide(g)
       assert (is_over(g2))
@@ -220,7 +268,7 @@ mod TestPerihelionCombat do
 
     test "shield absorbs the hit and despawns the hazard" do
       let g0 = base_game(0.0)
-      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let g = { g0 with asteroids: Cons(ast, Nil), shield: true }
       let g2 = Perihelion.Combat.collide(g)
       assert (!is_over(g2))

@@ -14,7 +14,7 @@ mod TestPerihelionCore do
   end
 
   pfn mk_star(x : Float, y : Float) : Star do
-    { x: x, y: y, radius: 18.0, capture_radius: 54.0 }
+    { x: x, y: y, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0 }
   end
 
   -- Game orbiting star 0 at the given angle. Star 0 at (200, 520), star 1 at (200, 360).
@@ -155,9 +155,9 @@ mod TestPerihelionCore do
       assert (approx(Math.sqrt(dx * dx + dy * dy), 54.0))
     end
 
-    test "orbit_dir alternates" do
+    test "orbit_dir is the same for every star (capturing never reverses spin)" do
       assert (approx(Perihelion.Core.orbit_dir(0), 1.0))
-      assert (approx(Perihelion.Core.orbit_dir(1), 0.0 - 1.0))
+      assert (approx(Perihelion.Core.orbit_dir(1), 1.0))
       assert (approx(Perihelion.Core.orbit_dir(2), 1.0))
     end
   end
@@ -400,7 +400,7 @@ mod TestPerihelionCore do
 
     test "asteroid contact ends the run through update" do
       let g0 = mk_game(0.0)
-      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0 }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
       let g = { g0 with asteroids: Cons(ast, Nil) }
       let g2 = Perihelion.Core.update(g, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
       assert (is_over(g2.phase))

@@ -5,7 +5,18 @@ mod Perihelion.Combat do
   -- shape_seed: a uniform [0,1) float drawn once at spawn, used to derive a
   -- deterministic jagged polygon outline in the shell's draw code (visual
   -- only — collision still treats every asteroid as a circle of `radius`).
-  type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float, shape_seed : Float }
+  --
+  -- mode: drifting asteroids arc toward nearby stars (gravity-like velocity
+  -- bend, see arc_velocity) and, on crossing a star's capture ring, roll a
+  -- chance to get pulled into a permanent orbit around it (AsteroidOrbiting)
+  -- instead of continuing to drift through — a new hazard the player must
+  -- shoot or dodge, same collision/shot rules as any other asteroid.
+  type AsteroidMode = AsteroidDrifting | AsteroidOrbiting(Int, Float)
+
+  type Asteroid = {
+    x : Float, y : Float, vx : Float, vy : Float,
+    radius : Float, shape_seed : Float, mode : AsteroidMode
+  }
 
   -- Ships migrate between stars the same way the player does: orbit for a
   -- while (ShipOrbiting), then release on a tangent toward another star
@@ -32,6 +43,15 @@ mod Perihelion.Combat do
   fn asteroid_jitter() : Float do 1.0 end
   fn asteroid_speed() : Float do 90.0 end
   fn asteroid_radius() : Float do 10.0 end
+  -- Gravity-like arc toward the nearest star within range (matches the
+  -- player's own assisted_velocity shape: bend, then renormalize so bending
+  -- never changes speed).
+  fn asteroid_gravity_range() : Float do 240.0 end
+  fn asteroid_gravity_strength() : Float do 500.0 end
+  -- Chance an arcing asteroid gets pulled into orbit when it crosses a
+  -- star's capture ring, instead of continuing to drift through.
+  fn asteroid_capture_chance() : Float do 0.35 end
+  fn asteroid_orbit_speed() : Float do 1.0 end
   fn ship_score_min() : Int do 6 end
   fn ship_orbit_mult() : Float do 1.6 end
   fn ship_orbit_speed() : Float do 1.4 end
@@ -98,7 +118,7 @@ mod Perihelion.Combat do
       let dir_x = if from_left do 1.0 else 0.0 - 1.0 end
       let vx = dir_x * asteroid_speed() * Math.cos(jitter)
       let vy = asteroid_speed() * Math.sin(jitter)
-      let a = { x: x, y: y, vx: vx, vy: vy, radius: asteroid_radius(), shape_seed: shape_f }
+      let a = { x: x, y: y, vx: vx, vy: vy, radius: asteroid_radius(), shape_seed: shape_f, mode: AsteroidDrifting }
       { game with
           asteroids: Cons(a, game.asteroids),
           rng: r5,
@@ -116,22 +136,125 @@ mod Perihelion.Combat do
   end
 
   pfn step_entities(game : Game, dt_s : Float) : Game do
-    let moved_ast = List.map(game.asteroids, fn a ->
-      { a with x: a.x + a.vx * dt_s, y: a.y + a.vy * dt_s })
-    let live_ast = List.filter(moved_ast, fn a -> in_band(game, a.x, a.y))
-    let p_shots = List.filter(List.map(game.player_shots, fn s -> age_shot(s, dt_s)),
-      fn s -> s.ttl > 0.0 && in_band(game, s.x, s.y))
-    let e_shots = List.filter(List.map(game.enemy_shots, fn s -> age_shot(s, dt_s)),
-      fn s -> s.ttl > 0.0 && in_band(game, s.x, s.y))
+    let g1 = step_asteroids(game, dt_s)
+    let p_shots = List.filter(List.map(g1.player_shots, fn s -> age_shot(s, dt_s)),
+      fn s -> s.ttl > 0.0 && in_band(g1, s.x, s.y))
+    let e_shots = List.filter(List.map(g1.enemy_shots, fn s -> age_shot(s, dt_s)),
+      fn s -> s.ttl > 0.0 && in_band(g1, s.x, s.y))
     let pickups = List.filter(
-      List.map(game.pickups, fn p -> { p with ttl: p.ttl - dt_s }),
+      List.map(g1.pickups, fn p -> { p with ttl: p.ttl - dt_s }),
       fn p -> p.ttl > 0.0)
-    { game with
-        asteroids: live_ast,
+    { g1 with
         player_shots: p_shots,
         enemy_shots: e_shots,
         pickups: pickups,
-        fire_cooldown: if game.fire_cooldown > 0.0 do game.fire_cooldown - dt_s else 0.0 end }
+        fire_cooldown: if g1.fire_cooldown > 0.0 do g1.fire_cooldown - dt_s else 0.0 end }
+  end
+
+  -- Nearest star to (x, y) within asteroid_gravity_range(), if any (plain
+  -- Euclidean nearest, no "approaching" filter — unlike the player's own
+  -- assist, an asteroid arcs toward whatever is nearby regardless of the
+  -- direction it happens to be moving).
+  pfn nearest_star_for_asteroid(x : Float, y : Float, stars : List(Star), best : Option(Star), best_d : Float) : Option(Star) do
+    match stars do
+      Nil -> best
+      Cons(s, rest) ->
+        let dx = s.x - x
+        let dy = s.y - y
+        let d = dx * dx + dy * dy
+        if d < best_d do
+          nearest_star_for_asteroid(x, y, rest, Some(s), d)
+        else
+          nearest_star_for_asteroid(x, y, rest, best, best_d)
+        end
+    end
+  end
+
+  -- Bend (vx, vy) toward the nearest in-range star, renormalized so the
+  -- bend never changes speed -- same shape as Core.assisted_velocity, which
+  -- is what makes an asteroid's path visibly arc as it passes a star.
+  pfn arc_velocity(x : Float, y : Float, vx : Float, vy : Float, stars : List(Star), dt_s : Float) : (Float, Float) do
+    let range = asteroid_gravity_range()
+    match nearest_star_for_asteroid(x, y, stars, None, range * range) do
+      None ->
+        let out = (vx, vy)
+        out
+      Some(s) ->
+        let dx = s.x - x
+        let dy = s.y - y
+        let dist = Math.sqrt(dx * dx + dy * dy)
+        if dist > 0.0 do
+          let speed = Math.sqrt(vx * vx + vy * vy)
+          let nvx = vx + dx / dist * asteroid_gravity_strength() * dt_s
+          let nvy = vy + dy / dist * asteroid_gravity_strength() * dt_s
+          let nspeed = Math.sqrt(nvx * nvx + nvy * nvy)
+          if nspeed > 0.0 do
+            (nvx / nspeed * speed, nvy / nspeed * speed)
+          else
+            (vx, vy)
+          end
+        else
+          let out = (vx, vy)
+          out
+        end
+    end
+  end
+
+  -- Walk asteroids: drifting ones arc toward nearby stars and roll a chance
+  -- to get captured into orbit on crossing a capture ring; orbiting ones
+  -- just advance their angle (a permanent hazard, immune to the in-band
+  -- despawn drifting asteroids are subject to). `game` threads as the fold
+  -- accumulator for its `rng` (capture rolls), same shape as step_ships_go.
+  pfn step_asteroids_go(game : Game, asteroids : List(Asteroid), acc : List(Asteroid), dt_s : Float) : Game do
+    match asteroids do
+      Nil -> { game with asteroids: List.reverse(acc) }
+      Cons(a, rest) ->
+        match a.mode do
+          AsteroidOrbiting(idx, angle) ->
+            match Perihelion.Core.star_at(game, idx) do
+              None -> step_asteroids_go(game, rest, acc, dt_s)
+              Some(s) ->
+                let angle2 = angle + asteroid_orbit_speed() * dt_s
+                let a2 = { a with
+                             x: s.x + Math.cos(angle2) * s.capture_radius,
+                             y: s.y + Math.sin(angle2) * s.capture_radius,
+                             mode: AsteroidOrbiting(idx, angle2) }
+                step_asteroids_go(game, rest, Cons(a2, acc), dt_s)
+            end
+          AsteroidDrifting ->
+            let vel = arc_velocity(a.x, a.y, a.vx, a.vy, game.stars, dt_s)
+            let (vx2, vy2) = vel
+            let x2 = a.x + vx2 * dt_s
+            let y2 = a.y + vy2 * dt_s
+            if !in_band(game, x2, y2) do
+              step_asteroids_go(game, rest, acc, dt_s)
+            else
+              match arrived_star(game.stars, x2, y2, 0) do
+                None ->
+                  let a2 = { a with x: x2, y: y2, vx: vx2, vy: vy2 }
+                  step_asteroids_go(game, rest, Cons(a2, acc), dt_s)
+                Some(pair) ->
+                  let (idx, s) = pair
+                  let (rng2, roll) = draw(game.rng)
+                  if roll < asteroid_capture_chance() do
+                    let angle = Math.atan2(y2 - s.y, x2 - s.x)
+                    let a2 = { a with
+                                 x: s.x + Math.cos(angle) * s.capture_radius,
+                                 y: s.y + Math.sin(angle) * s.capture_radius,
+                                 mode: AsteroidOrbiting(idx, angle) }
+                    step_asteroids_go({ game with rng: rng2 }, rest, Cons(a2, acc), dt_s)
+                  else
+                    let a2 = { a with x: x2, y: y2, vx: vx2, vy: vy2 }
+                    step_asteroids_go({ game with rng: rng2 }, rest, Cons(a2, acc), dt_s)
+                  end
+              end
+            end
+        end
+    end
+  end
+
+  pfn step_asteroids(game : Game, dt_s : Float) : Game do
+    step_asteroids_go(game, game.asteroids, Nil, dt_s)
   end
 
   pfn step_ships(game : Game, dt_s : Float) : Game do
