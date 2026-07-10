@@ -110,10 +110,52 @@ export function march_dom_remove_event_listener(el, event_name, handler) {
 
 export function march_dom_event_target(ev) { return ev.target; }
 export function march_dom_event_type(ev) { return ev.type; }
+export function march_dom_event_key(ev) { return ev.key ?? ""; }
 export function march_dom_prevent_default(ev) { ev.preventDefault(); }
 export function march_dom_stop_propagation(ev) { ev.stopPropagation(); }
 export function march_dom_event_x(ev) { return Math.trunc(ev.offsetX); }
 export function march_dom_event_y(ev) { return Math.trunc(ev.offsetY); }
+
+// ── Input polling ─────────────────────────────────────────────────────────────
+// Buffers pointerdown taps per element; march_dom_taps drains the buffer.
+// Poll once per animation frame for exactly-once delivery of each tap.
+
+const __tap_buffers = new WeakMap();
+
+export function march_dom_taps(el) {
+  let buf = __tap_buffers.get(el);
+  if (buf === undefined) {
+    buf = [];
+    __tap_buffers.set(el, buf);
+    el.addEventListener("pointerdown", (e) => {
+      buf.push({ _0: Math.trunc(e.offsetX), _1: Math.trunc(e.offsetY) });
+    });
+  }
+  return list_of_array(buf.splice(0, buf.length));
+}
+
+let __key_buffer = null;
+
+export function march_dom_key_presses() {
+  if (__key_buffer === null) {
+    __key_buffer = [];
+    document.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key.startsWith("Arrow")) e.preventDefault();
+      __key_buffer.push(e.key);
+    });
+  }
+  return list_of_array(__key_buffer.splice(0, __key_buffer.length));
+}
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+
+export function march_dom_store_get(key) {
+  try { return opt(window.localStorage.getItem(key)); } catch (e) { return none; }
+}
+
+export function march_dom_store_set(key, val) {
+  try { window.localStorage.setItem(key, val); } catch (e) { }
+}
 
 // ── Window ────────────────────────────────────────────────────────────────────
 
@@ -121,12 +163,15 @@ export function march_dom_alert(msg) { window.alert(msg); }
 export function march_dom_href() { return window.location.href; }
 export function march_dom_set_href(url) { window.location.href = url; }
 
+// cb : Int -> Unit — called with a dummy 0 argument (ignored). A true
+// zero-arg March closure can't be spelled at the extern boundary; see
+// stdlib/dom.march's module doc.
 export function march_dom_set_timeout(ms, cb) {
-  setTimeout(() => { cb._0(cb); }, ms);
+  setTimeout(() => { cb._0(cb, 0); }, ms);
 }
 export function march_dom_set_interval(ms, cb) {
-  setInterval(() => { cb._0(cb); }, ms);
+  setInterval(() => { cb._0(cb, 0); }, ms);
 }
 export function march_dom_request_animation_frame(cb) {
-  requestAnimationFrame(() => { cb._0(cb); });
+  requestAnimationFrame(() => { cb._0(cb, 0); });
 }

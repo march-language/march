@@ -707,6 +707,10 @@ Dom.on_keydown(el, fn ev -> ...)
 Dom.dispatch(el, "custom-event")
 Dom.prevent_default(ev)
 Dom.stop_propagation(ev)
+Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
+Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
+Dom.store_get("save")          -- Option(String) — localStorage read
+Dom.store_set("save", data)    -- localStorage write
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.

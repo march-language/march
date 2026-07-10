@@ -2687,11 +2687,19 @@ let test_atomic_rc_local_decrc_not_atomic () =
 let test_escape_local_discarded_promoted () =
   (* A value created but never returned or stored should be stack-promoted.
      After Perceus inserts EDecRC for the dead binding, escape analysis
-     recognises EDecRC as a non-escaping position and promotes to EStackAlloc. *)
+     recognises EDecRC as a non-escaping position and promotes to EStackAlloc.
+     HISTORY (L7 fix, 2026-07-10): this test originally used a single-ctor
+     unary `Box(Int)` — a NEWTYPE-repr type whose EAlloc emits an erased
+     immediate, no heap cell. Promoting it produced a boxed stack cell that
+     consumers decoded under the erased convention (garbage at runtime —
+     invisible here because these tests inspect TIR only, never emitted IR).
+     Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
+     is a 2-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2699,6 +2707,28 @@ let test_escape_local_discarded_promoted () =
             m.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "locally discarded value is stack-promoted"
     true (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_newtype_not_promoted () =
+  (* L7 pin: a Newtype-repr alloc (single-ctor unary ADT) must NOT be
+     stack-promoted even when it provably does not escape — its EAlloc emits
+     an erased immediate ((v<<1)|1), so EStackAlloc would create a boxed
+     construction that every consumer (ECase untag, field reads) decodes
+     under the erased convention. Live symptom pre-fix:
+     `let c = R(22); match c do R(n) -> n end` printed nondeterministic
+     garbage compiled (the untagged stack ADDRESS). *)
+  let m = escape_module {|mod Test do
+    type Res = R(Int)
+    fn make_and_match() : Int do
+      let c = R(22)
+      match c do
+        R(n) -> n
+      end
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_and_match")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "newtype-repr alloc is NOT stack-promoted"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
 
 let test_escape_returned_not_promoted () =
   (* A value that is returned from the function escapes — must stay on the heap. *)
@@ -2750,11 +2780,13 @@ let test_escape_match_field_promoted () =
 
 let test_escape_decrc_eliminated_after_promotion () =
   (* After stack-promotion of a discarded value, the EDecRC that Perceus
-     inserted for it should be removed (no RC needed for stack values). *)
+     inserted for it should be removed (no RC needed for stack values).
+     Vehicle is a 2-field (Boxed-repr) ctor — see the L7 note on
+     test_escape_local_discarded_promoted. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2966,14 +2998,14 @@ let test_actor_tir_supervisor_spawn_calls_register () =
       on DoWork() do { count: state.count + 1 } end
     end
     actor Supervisor do
-      state { count : Int }
-      init { count: 0 }
+      state { worker : Int }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
         Worker worker
       end
-      on Start() do { count: state.count } end
+      on Start() do { worker: state.worker } end
     end
     fn main() : Unit do () end
   end|} in
@@ -4428,6 +4460,7 @@ let eval_suites =
         ] );
       ( "escape_analysis", [
           Alcotest.test_case "local discarded promoted"      `Quick test_escape_local_discarded_promoted;
+          Alcotest.test_case "newtype not promoted (L7)"     `Quick test_escape_newtype_not_promoted;
           Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
           Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
           Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;

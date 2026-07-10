@@ -29,8 +29,8 @@ mod Cluster do
   Parse `MARCH_CLUSTER_NODES` into a list of peer addresses.
   Returns `[]` if the variable is unset or empty.
 
-      march> Cluster.from_env()  -- with MARCH_CLUSTER_NODES=127.0.0.1:29852
-      [{host: "127.0.0.1", port: 29852}]
+      march> Cluster.from_env()
+      []
   """
   fn from_env() : List(NodeAddr) do
     match System.env("MARCH_CLUSTER_NODES") do
@@ -47,7 +47,7 @@ mod Cluster do
   Useful in tests or when addresses are known at compile time.
 
       march> Cluster.from_list([("127.0.0.1", 29852), ("10.0.0.2", 29853)])
-      [{host: "127.0.0.1", port: 29852}, {host: "10.0.0.2", port: 29853}]
+      [{ host: "127.0.0.1", port: 29852 }, { host: "10.0.0.2", port: 29853 }]
   """
   fn from_list(pairs : List((String, Int))) : List(NodeAddr) do
     List.map(pairs, fn pair ->

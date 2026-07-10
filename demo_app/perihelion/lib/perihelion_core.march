@@ -1,0 +1,356 @@
+-- Perihelion.Core — pure game state + physics. No Dom/Canvas imports.
+-- All tuning constants live in the block below; nothing else is magic.
+-- World coords are y-down (canvas-native): climbing = decreasing y.
+-- The rng field is a 31-bit LCG state (Int) rather than Random.Rng:
+-- stdlib Random (xoshiro, 63-bit int ops) is broken on --target js —
+-- see specs/todos.md P1 "Random unusable on --target js" (2026-07-09).
+mod Perihelion.Core do
+
+  -- ── Tuning constants ─────────────────────────────────────────────────
+  fn view_w() : Float do 400.0 end
+  fn view_h() : Float do 640.0 end
+  fn dt() : Float do 0.0166667 end
+  fn orbit_speed() : Float do 2.4 end
+  fn fly_speed() : Float do 340.0 end
+  fn assist_strength() : Float do 900.0 end
+  fn assist_range_mult() : Float do 1.5 end
+  fn cam_ease() : Float do 3.0 end
+  fn cam_anchor() : Float do 0.6 end
+  fn kill_margin() : Float do 40.0 end
+  fn two_pi() : Float do 6.283185307179586 end
+  fn mult_cap() : Int do 5 end
+
+  doc "Orbit direction for the star at index `i`: alternates +1.0 / -1.0."
+  fn orbit_dir(i : Int) : Float do
+    if i % 2 == 0 do 1.0 else 0.0 - 1.0 end
+  end
+
+  -- ── Types ────────────────────────────────────────────────────────────
+  type Star = { x : Float, y : Float, radius : Float, capture_radius : Float }
+
+  type BallMode = Orbiting(Int, Float) | Flying(Float, Float)
+
+  type Phase = Ready | Playing | Over
+
+  type RunRecord = { score : Int, stars : Int, max_mult : Int }
+
+  type Game = {
+    phase : Phase,
+    ball_x : Float,
+    ball_y : Float,
+    mode : BallMode,
+    stars : List(Star),
+    current : Int,
+    score : Int,
+    best : Int,
+    camera_y : Float,
+    rng : Int,
+    asteroids : List(Asteroid),
+    ships : List(Ship),
+    player_shots : List(Shot),
+    enemy_shots : List(Shot),
+    pickups : List(Pickup),
+    shield : Bool,
+    multiplier : Int,
+    max_mult : Int,
+    stars_chained : Int,
+    loop_angle : Float,
+    fire_cooldown : Float,
+    spawn_timer : Float,
+    runs : List(RunRecord)
+  }
+
+  -- ── Helpers ──────────────────────────────────────────────────────────
+  doc "The star at index `i` of the ladder, if it exists."
+  fn star_at(game : Game, i : Int) : Option(Star) do
+    List.nth_opt(game.stars, i)
+  end
+
+  -- ── Update ───────────────────────────────────────────────────────────
+  doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps and key presses."
+  fn update(game : Game, taps : List((Int, Int)), keys : List(String), dt_s : Float) : Game do
+    let tapped = !List.is_empty(taps)
+    match game.phase do
+      Ready ->
+        if tapped do { game with phase: Playing } else game end
+      Over ->
+        if tapped do restart(game) else game end
+      Playing ->
+        step_playing(game, tapped, keys, dt_s)
+    end
+  end
+
+  pfn step_playing(game : Game, tapped : Bool, keys : List(String), dt_s : Float) : Game do
+    let g1 = match game.mode do
+      Orbiting(idx, angle) -> step_orbit(game, idx, angle, tapped, dt_s)
+      Flying(vx, vy)       -> step_flight(game, vx, vy, dt_s)
+    end
+    match g1.phase do
+      Playing ->
+        let g2 = Perihelion.Combat.step(g1, dt_s)
+        let g3 = Perihelion.Combat.fire(g2, keys, dt_s)
+        let g4 = Perihelion.Combat.collide(g3)
+        match g4.phase do
+          Playing -> step_camera(g4, dt_s)
+          _ -> g4
+        end
+      _ -> g1
+    end
+  end
+
+  pfn step_orbit(game : Game, idx : Int, angle : Float, tapped : Bool, dt_s : Float) : Game do
+    match star_at(game, idx) do
+      None -> game
+      Some(s) ->
+        if tapped do
+          release(game, idx, angle)
+        else
+          let a2 = angle + orbit_dir(idx) * orbit_speed() * dt_s
+          let r = s.capture_radius
+          { game with
+              mode: Orbiting(idx, a2),
+              loop_angle: game.loop_angle + orbit_speed() * dt_s,
+              ball_x: s.x + Math.cos(a2) * r,
+              ball_y: s.y + Math.sin(a2) * r }
+        end
+    end
+  end
+
+  -- Tangent release: position = center + r*(cos a, sin a), so the velocity
+  -- direction is d/da of that = dir * (-sin a, cos a), scaled to fly_speed.
+  pfn release(game : Game, idx : Int, angle : Float) : Game do
+    let d = orbit_dir(idx)
+    let vx = 0.0 - d * fly_speed() * Math.sin(angle)
+    let vy = d * fly_speed() * Math.cos(angle)
+    { game with mode: Flying(vx, vy) }
+  end
+
+  pfn renormalize(vx : Float, vy : Float) : (Float, Float) do
+    let m = Math.sqrt(vx * vx + vy * vy)
+    if m > 0.0 do
+      let out = (vx / m * fly_speed(), vy / m * fly_speed())
+      out
+    else
+      let out = (vx, vy)
+      out
+    end
+  end
+
+  -- Capture assist: inside assist_range_mult * capture_radius of the NEXT star,
+  -- bend velocity toward its center; renormalize so assist never adds speed.
+  pfn assisted_velocity(game : Game, vx : Float, vy : Float, dt_s : Float) : (Float, Float) do
+    match star_at(game, game.current + 1) do
+      None ->
+        let out = (vx, vy)
+        out
+      Some(t) ->
+        let dx = t.x - game.ball_x
+        let dy = t.y - game.ball_y
+        let dist = Math.sqrt(dx * dx + dy * dy)
+        if dist > 0.0 && dist < assist_range_mult() * t.capture_radius do
+          renormalize(vx + dx / dist * assist_strength() * dt_s,
+                      vy + dy / dist * assist_strength() * dt_s)
+        else
+          let out = (vx, vy)
+          out
+        end
+    end
+  end
+
+  pfn step_flight(game : Game, vx : Float, vy : Float, dt_s : Float) : Game do
+    let (vx2, vy2) = assisted_velocity(game, vx, vy, dt_s)
+    let g = { game with
+                ball_x: game.ball_x + vx2 * dt_s,
+                ball_y: game.ball_y + vy2 * dt_s,
+                mode: Flying(vx2, vy2) }
+    match star_at(g, g.current + 1) do
+      None -> check_death(g)
+      Some(t) ->
+        let dx = t.x - g.ball_x
+        let dy = t.y - g.ball_y
+        if Math.sqrt(dx * dx + dy * dy) <= t.capture_radius do
+          after_capture(on_capture(g, t, g.current + 1))
+        else
+          check_death(g)
+        end
+    end
+  end
+
+  -- THE scoring seam: every successful capture flows through here.
+  pfn on_capture(game : Game, captured : Star, idx : Int) : Game do
+    let angle = Math.atan2(game.ball_y - captured.y, game.ball_x - captured.x)
+    let top = top_star(game.stars, captured)
+    let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top)
+    let new_mult =
+      if game.loop_angle < two_pi() do
+        if game.multiplier + 1 > mult_cap() do mult_cap() else game.multiplier + 1 end
+      else
+        1
+      end
+    { game with
+        mode: Orbiting(idx, angle),
+        current: idx,
+        score: game.score + new_mult,
+        stars_chained: game.stars_chained + 1,
+        multiplier: new_mult,
+        max_mult: max2(game.max_mult, new_mult),
+        loop_angle: 0.0,
+        stars: List.append(game.stars, Cons(fresh, Nil)),
+        rng: rng2,
+        ball_x: captured.x + Math.cos(angle) * captured.capture_radius,
+        ball_y: captured.y + Math.sin(angle) * captured.capture_radius }
+  end
+
+  -- Post-capture hook: roll an enemy-ship spawn on the newly appended star.
+  pfn after_capture(game : Game) : Game do
+    Perihelion.Combat.maybe_spawn_ship(game, List.length(game.stars) - 1)
+  end
+
+  pfn top_star(stars : List(Star), fallback : Star) : Star do
+    match stars do
+      Nil -> fallback
+      Cons(s, Nil) -> s
+      Cons(_, rest) -> top_star(rest, fallback)
+    end
+  end
+
+  pfn max2(a : Int, b : Int) : Int do
+    if a > b do a else b end
+  end
+
+  doc "End the current run: record it, update best, enter Over. The ONLY writer of run records."
+  fn end_run(game : Game) : Game do
+    let rec = { score: game.score, stars: game.stars_chained, max_mult: game.max_mult }
+    { game with
+        phase: Over,
+        best: max2(game.best, game.score),
+        runs: List.take(Cons(rec, game.runs), 10) }
+  end
+
+  pfn check_death(game : Game) : Game do
+    let below = game.ball_y > game.camera_y + view_h() + kill_margin()
+    let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > view_w() + kill_margin()
+    if below || off_side do end_run(game) else game end
+  end
+
+  pfn step_camera(game : Game, dt_s : Float) : Game do
+    match star_at(game, game.current) do
+      None -> game
+      Some(s) ->
+        let target = s.y - cam_anchor() * view_h()
+        { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+    end
+  end
+
+  pfn fresh_run(rng : Int, best : Int, runs : List(RunRecord)) : Game do
+    let (stars, rng2) = Perihelion.Level.initial_stars(rng)
+    let start_angle = Math.pi() / 2.0
+    match stars do
+      Nil ->
+        -- unreachable: initial_stars always returns 3 stars
+        { phase: Ready, ball_x: 0.0, ball_y: 0.0, mode: Orbiting(0, start_angle),
+          stars: Nil, current: 0, score: 0, best: best,
+          camera_y: 0.0, rng: rng2,
+          asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
+          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          loop_angle: 0.0, fire_cooldown: 0.0,
+          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs }
+      Cons(s0, _) ->
+        { phase: Ready,
+          ball_x: s0.x + Math.cos(start_angle) * s0.capture_radius,
+          ball_y: s0.y + Math.sin(start_angle) * s0.capture_radius,
+          mode: Orbiting(0, start_angle),
+          stars: stars, current: 0, score: 0, best: best,
+          camera_y: s0.y - cam_anchor() * view_h(),
+          rng: rng2,
+          asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
+          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          loop_angle: 0.0, fire_cooldown: 0.0,
+          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs }
+    end
+  end
+
+  doc "A fresh game from an integer seed, phase Ready (tap to start)."
+  fn new_game(seed : Int) : Game do
+    new_game_saved(seed, 0, Nil)
+  end
+
+  doc "A fresh game seeded with persisted best + run history (from decode_save)."
+  fn new_game_saved(seed : Int, best : Int, runs : List(RunRecord)) : Game do
+    fresh_run(seed, best, runs)
+  end
+
+  pfn restart(game : Game) : Game do
+    let g = fresh_run(game.rng, game.best, game.runs)
+    { g with phase: Playing }
+  end
+
+  -- ── Persistence codec ────────────────────────────────────────────────
+  -- Format: "best|score:stars:maxmult;score:stars:maxmult;..." (runs newest
+  -- first, <= 10). Any malformed input decodes to (0, Nil) — a boot must
+  -- never crash on garbage storage.
+
+  pfn encode_run(r : RunRecord) : String do
+    int_to_string(r.score) ++ ":" ++ int_to_string(r.stars) ++ ":" ++ int_to_string(r.max_mult)
+  end
+
+  doc "Serialize best + run history for Dom.store_set."
+  fn encode_save(best : Int, runs : List(RunRecord)) : String do
+    int_to_string(best) ++ "|" ++ String.join(List.map(runs, fn r -> encode_run(r)), ";")
+  end
+
+  pfn decode_run(s : String) : Option(RunRecord) do
+    match String.split(s, ":") do
+      Cons(a, Cons(b, Cons(c, Nil))) ->
+        match string_to_int(a) do
+          None -> None
+          Some(score) ->
+            match string_to_int(b) do
+              None -> None
+              Some(stars) ->
+                match string_to_int(c) do
+                  None -> None
+                  Some(mm) -> Some({ score: score, stars: stars, max_mult: mm })
+                end
+            end
+        end
+      _ -> None
+    end
+  end
+
+  pfn decode_runs(parts : List(String), acc : List(RunRecord)) : Option(List(RunRecord)) do
+    match parts do
+      Nil -> Some(List.reverse(acc))
+      Cons(p, rest) ->
+        match decode_run(p) do
+          None -> None
+          Some(r) -> decode_runs(rest, Cons(r, acc))
+        end
+    end
+  end
+
+  doc "Parse a save string from Dom.store_get. Malformed input yields (0, Nil)."
+  fn decode_save(s : String) : (Int, List(RunRecord)) do
+    let zero = (0, Nil)
+    match String.split(s, "|") do
+      Cons(best_s, Cons(runs_s, Nil)) ->
+        match string_to_int(best_s) do
+          None -> zero
+          Some(best) ->
+            if runs_s == "" do
+              let ok = (best, Nil)
+              ok
+            else
+              match decode_runs(String.split(runs_s, ";"), Nil) do
+                None -> zero
+                Some(rs) ->
+                  let ok = (best, rs)
+                  ok
+              end
+            end
+        end
+      _ -> zero
+    end
+  end
+
+end

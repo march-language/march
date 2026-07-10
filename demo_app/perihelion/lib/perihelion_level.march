@@ -1,0 +1,64 @@
+-- Perihelion.Level — pure procedural star placement. Threads an Int LCG
+-- state explicitly; a fixed seed reproduces an identical star ladder.
+-- (Named Level, not Gen: stdlib already has a Gen module. Uses a local
+-- 31-bit LCG instead of stdlib Random: Random's xoshiro is broken on
+-- --target js — see specs/todos.md P1 "Random unusable on --target js".
+-- 31-bit arithmetic stays far below 2^53, so it is exact in JS doubles.)
+mod Perihelion.Level do
+
+  -- ── Placement constants ──────────────────────────────────────────────
+  fn margin() : Float do 60.0 end
+  fn gap_min() : Float do 120.0 end
+  fn gap_max() : Float do 200.0 end
+  fn radius_min() : Float do 14.0 end
+  fn radius_max() : Float do 22.0 end
+  fn capture_mult() : Float do 3.0 end
+
+  -- ── LCG (Park–Miller minstd) ─────────────────────────────────────────
+  -- s2 = s * 16807 mod 2147483647. The product stays below 2^46, so the
+  -- arithmetic is exact in JS doubles (glibc's 1103515245 multiplier would
+  -- overflow 2^53 — the same class of bug that breaks stdlib Random on JS).
+  -- State is always in [1, 2147483646]; any Int seed is normalized in.
+  pfn lcg_next(s : Int) : (Int, Float) do
+    let a = if s < 0 do 0 - s else s end
+    let m = a % 2147483647
+    let s1 = if m == 0 do 1 else m end
+    let s2 = (s1 * 16807) % 2147483647
+    let t = int_to_float(s2 - 1) / 2147483646.0
+    let out = (s2, t)
+    out
+  end
+
+  doc "Public LCG step for other Perihelion modules: (state) -> (state', uniform [0,1))."
+  fn lcg_next_pub(s : Int) : (Int, Float) do
+    lcg_next(s)
+  end
+
+  pfn lerp(lo : Float, hi : Float, t : Float) : Float do
+    lo + t * (hi - lo)
+  end
+
+  doc "Place the next star 120-200px above `prev` (y-down world: smaller y), x within margins."
+  fn next_star(rng : Int, prev : Star) : (Star, Int) do
+    let (r1, ty) = lcg_next(rng)
+    let (r2, tx) = lcg_next(r1)
+    let (r3, tr) = lcg_next(r2)
+    let gap = lerp(gap_min(), gap_max(), ty)
+    let x = lerp(margin(), Perihelion.Core.view_w() - margin(), tx)
+    let r = lerp(radius_min(), radius_max(), tr)
+    let s = { x: x, y: prev.y - gap, radius: r, capture_radius: r * capture_mult() }
+    let result = (s, r3)
+    result
+  end
+
+  doc "The opening board: a fixed centered first star plus two generated above it. Bottom-first order."
+  fn initial_stars(rng : Int) : (List(Star), Int) do
+    let first = { x: Perihelion.Core.view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let (s2, rng2) = next_star(rng, first)
+    let (s3, rng3) = next_star(rng2, s2)
+    let stars = Cons(first, Cons(s2, Cons(s3, Nil)))
+    let result = (stars, rng3)
+    result
+  end
+
+end

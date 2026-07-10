@@ -1,0 +1,327 @@
+-- Perihelion.Combat — pure combat logic: asteroids, enemy ships, shots,
+-- shield pickups. All randomness threads the Int LCG via Perihelion.Level.
+mod Perihelion.Combat do
+
+  type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float }
+
+  type Ship = { star_idx : Int, angle : Float, fire_cooldown : Float }
+
+  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float }
+
+  type Pickup = { x : Float, y : Float, ttl : Float }
+
+  -- ── Tuning constants ─────────────────────────────────────────────────
+  fn asteroid_interval() : Float do 4.0 end
+  fn asteroid_jitter() : Float do 1.0 end
+  fn asteroid_speed() : Float do 90.0 end
+  fn asteroid_radius() : Float do 10.0 end
+  fn ship_score_min() : Int do 3 end
+  fn ship_orbit_mult() : Float do 1.6 end
+  fn ship_orbit_speed() : Float do 1.4 end
+  fn ship_radius() : Float do 10.0 end
+  fn ship_fire_interval() : Float do 2.5 end
+  fn ship_fire_range() : Float do 380.0 end
+  fn enemy_shot_speed() : Float do 150.0 end
+  fn player_shot_speed() : Float do 420.0 end
+  fn shot_ttl() : Float do 3.0 end
+  fn shot_radius() : Float do 3.0 end
+  fn player_fire_cooldown() : Float do 0.4 end
+  fn drop_chance() : Float do 0.25 end
+  fn pickup_ttl() : Float do 8.0 end
+  fn pickup_radius() : Float do 12.0 end
+  fn ball_radius() : Float do 6.0 end
+
+  -- ── Derived positions ────────────────────────────────────────────────
+  doc "World position of a ship, derived from its star and angle."
+  fn ship_pos(game : Game, ship : Ship) : (Float, Float) do
+    match Perihelion.Core.star_at(game, ship.star_idx) do
+      None ->
+        let far = (0.0 - 9999.0, 0.0 - 9999.0)
+        far
+      Some(s) ->
+        let r = s.capture_radius * ship_orbit_mult()
+        let pos = (s.x + Math.cos(ship.angle) * r, s.y + Math.sin(ship.angle) * r)
+        pos
+    end
+  end
+
+  pfn dist2(x1 : Float, y1 : Float, x2 : Float, y2 : Float) : Float do
+    let dx = x2 - x1
+    let dy = y2 - y1
+    dx * dx + dy * dy
+  end
+
+  pfn hits(x1 : Float, y1 : Float, r1 : Float, x2 : Float, y2 : Float, r2 : Float) : Bool do
+    dist2(x1, y1, x2, y2) <= (r1 + r2) * (r1 + r2)
+  end
+
+  pfn lcg_float(s : Int) : (Int, Float) do
+    Perihelion.Level.lcg_next_pub(s)
+  end
+
+  -- ── step: timers, movement, ship fire, despawns ─────────────────────
+  doc "Advance combat entities by dt: spawn timers, movement, ship firing, despawns."
+  fn step(game : Game, dt_s : Float) : Game do
+    let g1 = step_spawn(game, dt_s)
+    let g2 = step_entities(g1, dt_s)
+    step_ships(g2, dt_s)
+  end
+
+  pfn step_spawn(game : Game, dt_s : Float) : Game do
+    let t = game.spawn_timer - dt_s
+    if t > 0.0 do
+      { game with spawn_timer: t }
+    else
+      let (r1, side_f) = lcg_float(game.rng)
+      let (r2, y_f) = lcg_float(r1)
+      let (r3, ang_f) = lcg_float(r2)
+      let (r4, next_f) = lcg_float(r3)
+      let from_left = side_f < 0.5
+      let x = if from_left do 0.0 - 20.0 else Perihelion.Core.view_w() + 20.0 end
+      let y = game.camera_y + y_f * Perihelion.Core.view_h()
+      -- aim across the screen with +/-30 degree vertical jitter
+      let jitter = (ang_f - 0.5) * 1.0472
+      let dir_x = if from_left do 1.0 else 0.0 - 1.0 end
+      let vx = dir_x * asteroid_speed() * Math.cos(jitter)
+      let vy = asteroid_speed() * Math.sin(jitter)
+      let a = { x: x, y: y, vx: vx, vy: vy, radius: asteroid_radius() }
+      { game with
+          asteroids: Cons(a, game.asteroids),
+          rng: r4,
+          spawn_timer: asteroid_interval() + (next_f - 0.5) * 2.0 * asteroid_jitter() }
+    end
+  end
+
+  pfn in_band(game : Game, x : Float, y : Float) : Bool do
+    y > game.camera_y - 100.0 && y < game.camera_y + Perihelion.Core.view_h() + 100.0
+    && x > 0.0 - 100.0 && x < Perihelion.Core.view_w() + 100.0
+  end
+
+  pfn age_shot(s : Shot, dt_s : Float) : Shot do
+    { s with x: s.x + s.vx * dt_s, y: s.y + s.vy * dt_s, ttl: s.ttl - dt_s }
+  end
+
+  pfn step_entities(game : Game, dt_s : Float) : Game do
+    let moved_ast = List.map(game.asteroids, fn a ->
+      { a with x: a.x + a.vx * dt_s, y: a.y + a.vy * dt_s })
+    let live_ast = List.filter(moved_ast, fn a -> in_band(game, a.x, a.y))
+    let p_shots = List.filter(List.map(game.player_shots, fn s -> age_shot(s, dt_s)),
+      fn s -> s.ttl > 0.0 && in_band(game, s.x, s.y))
+    let e_shots = List.filter(List.map(game.enemy_shots, fn s -> age_shot(s, dt_s)),
+      fn s -> s.ttl > 0.0 && in_band(game, s.x, s.y))
+    let pickups = List.filter(
+      List.map(game.pickups, fn p -> { p with ttl: p.ttl - dt_s }),
+      fn p -> p.ttl > 0.0)
+    { game with
+        asteroids: live_ast,
+        player_shots: p_shots,
+        enemy_shots: e_shots,
+        pickups: pickups,
+        fire_cooldown: if game.fire_cooldown > 0.0 do game.fire_cooldown - dt_s else 0.0 end }
+  end
+
+  pfn step_ships(game : Game, dt_s : Float) : Game do
+    step_ships_go(game, game.ships, Nil, Nil, dt_s)
+  end
+
+  -- Walk ships, advancing angle/cooldown and collecting fired shots.
+  pfn step_ships_go(game : Game, ships : List(Ship), acc : List(Ship), new_shots : List(Shot), dt_s : Float) : Game do
+    match ships do
+      Nil ->
+        { game with
+            ships: List.reverse(acc),
+            enemy_shots: List.append(new_shots, game.enemy_shots) }
+      Cons(sh, rest) ->
+        let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
+        let sh2 = { sh with
+                      angle: sh.angle + d * ship_orbit_speed() * dt_s,
+                      fire_cooldown: sh.fire_cooldown - dt_s }
+        let pos = ship_pos(game, sh2)
+        let (sx, sy) = pos
+        let in_range = dist2(sx, sy, game.ball_x, game.ball_y)
+                       <= ship_fire_range() * ship_fire_range()
+        if sh2.fire_cooldown <= 0.0 && in_range do
+          let dx = game.ball_x - sx
+          let dy = game.ball_y - sy
+          let dist = Math.sqrt(dist2(sx, sy, game.ball_x, game.ball_y))
+          let shot = if dist > 0.0 do
+            { x: sx, y: sy,
+              vx: dx / dist * enemy_shot_speed(),
+              vy: dy / dist * enemy_shot_speed(),
+              ttl: shot_ttl() }
+          else
+            { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl() }
+          end
+          let sh3 = { sh2 with fire_cooldown: ship_fire_interval() }
+          step_ships_go(game, rest, Cons(sh3, acc), Cons(shot, new_shots), dt_s)
+        else
+          step_ships_go(game, rest, Cons(sh2, acc), new_shots, dt_s)
+        end
+    end
+  end
+
+  -- ── fire: spacebar radial shot ───────────────────────────────────────
+  doc "Spacebar radial shot: only while orbiting and off cooldown; direction is star->ball."
+  fn fire(game : Game, keys : List(String), dt_s : Float) : Game do
+    let pressed = List.any(keys, fn k -> k == " ")
+    if !pressed || game.fire_cooldown > 0.0 do
+      game
+    else
+      match game.mode do
+        Flying(_, _) -> game
+        Orbiting(idx, _) ->
+          match Perihelion.Core.star_at(game, idx) do
+            None -> game
+            Some(s) ->
+              let dx = game.ball_x - s.x
+              let dy = game.ball_y - s.y
+              let dist = Math.sqrt(dx * dx + dy * dy)
+              if dist > 0.0 do
+                let shot = { x: game.ball_x, y: game.ball_y,
+                             vx: dx / dist * player_shot_speed(),
+                             vy: dy / dist * player_shot_speed(),
+                             ttl: shot_ttl() }
+                { game with
+                    player_shots: Cons(shot, game.player_shots),
+                    fire_cooldown: player_fire_cooldown() }
+              else
+                game
+              end
+          end
+      end
+    end
+  end
+
+  -- ── collide ──────────────────────────────────────────────────────────
+  doc "Resolve all collisions: shots vs hazards (score/drops), ball vs hazards (shield or end_run), ball vs pickups."
+  fn collide(game : Game) : Game do
+    let g1 = collide_shots_asteroids(game)
+    let g2 = collide_shots_ships(g1)
+    let g3 = collide_ball_pickups(g2)
+    collide_ball_hazards(g3)
+  end
+
+  pfn shot_hits_at(s : Shot, x : Float, y : Float, r : Float) : Bool do
+    hits(s.x, s.y, shot_radius(), x, y, r)
+  end
+
+  pfn collide_shots_asteroids(game : Game) : Game do
+    let (dead, alive) = List.partition(game.asteroids, fn a ->
+      List.any(game.player_shots, fn s -> shot_hits_at(s, a.x, a.y, a.radius)))
+    let shots = List.filter(game.player_shots, fn s ->
+      !List.any(game.asteroids, fn a -> shot_hits_at(s, a.x, a.y, a.radius)))
+    { game with
+        asteroids: alive,
+        player_shots: shots,
+        score: game.score + List.length(dead) * game.multiplier }
+  end
+
+  pfn ship_shot_hit(game : Game, sh : Ship, s : Shot) : Bool do
+    let pos = ship_pos(game, sh)
+    let (sx, sy) = pos
+    shot_hits_at(s, sx, sy, ship_radius())
+  end
+
+  pfn collide_shots_ships(game : Game) : Game do
+    let (dead, alive) = List.partition(game.ships, fn sh ->
+      List.any(game.player_shots, fn s -> ship_shot_hit(game, sh, s)))
+    let shots = List.filter(game.player_shots, fn s ->
+      !List.any(game.ships, fn sh -> ship_shot_hit(game, sh, s)))
+    let g2 = { game with
+        ships: alive,
+        player_shots: shots,
+        score: game.score + List.length(dead) * 2 * game.multiplier }
+    roll_drops(g2, dead)
+  end
+
+  pfn roll_drops(game : Game, dead : List(Ship)) : Game do
+    match dead do
+      Nil -> game
+      Cons(sh, rest) ->
+        let pos = ship_pos(game, sh)
+        let (sx, sy) = pos
+        let (rng2, roll) = lcg_float(game.rng)
+        let g2 = if roll < drop_chance() do
+          { game with
+              rng: rng2,
+              pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl() }, game.pickups) }
+        else
+          { game with rng: rng2 }
+        end
+        roll_drops(g2, rest)
+    end
+  end
+
+  pfn ball_on_pickup(game : Game, p : Pickup) : Bool do
+    hits(p.x, p.y, pickup_radius(), game.ball_x, game.ball_y, ball_radius())
+  end
+
+  pfn collide_ball_pickups(game : Game) : Game do
+    if game.shield do
+      game
+    else
+      let hit = List.any(game.pickups, fn p -> ball_on_pickup(game, p))
+      if hit do
+        { game with
+            shield: true,
+            pickups: List.filter(game.pickups, fn p -> !ball_on_pickup(game, p)) }
+      else
+        game
+      end
+    end
+  end
+
+  pfn ball_hits_ship(game : Game, sh : Ship) : Bool do
+    let pos = ship_pos(game, sh)
+    let (sx, sy) = pos
+    hits(sx, sy, ship_radius(), game.ball_x, game.ball_y, ball_radius())
+  end
+
+  pfn ball_hits_asteroid(game : Game, a : Asteroid) : Bool do
+    hits(a.x, a.y, a.radius, game.ball_x, game.ball_y, ball_radius())
+  end
+
+  pfn ball_hits_shot(game : Game, s : Shot) : Bool do
+    shot_hits_at(s, game.ball_x, game.ball_y, ball_radius())
+  end
+
+  pfn collide_ball_hazards(game : Game) : Game do
+    let ast_hit = List.any(game.asteroids, fn a -> ball_hits_asteroid(game, a))
+    let shot_hit = List.any(game.enemy_shots, fn s -> ball_hits_shot(game, s))
+    let ship_hit = List.any(game.ships, fn sh -> ball_hits_ship(game, sh))
+    if !(ast_hit || shot_hit || ship_hit) do
+      game
+    else
+      if game.shield do
+        -- consume shield; despawn every hazard overlapping this tick
+        { game with
+            shield: false,
+            asteroids: List.filter(game.asteroids, fn a -> !ball_hits_asteroid(game, a)),
+            enemy_shots: List.filter(game.enemy_shots, fn s -> !ball_hits_shot(game, s)),
+            ships: List.filter(game.ships, fn sh -> !ball_hits_ship(game, sh)) }
+      else
+        Perihelion.Core.end_run(game)
+      end
+    end
+  end
+
+  -- ── ship spawning (called from Core.on_capture) ──────────────────────
+  doc "Roll a chance to attach an enemy ship to the star at `star_idx` (score-gated, ramping)."
+  fn maybe_spawn_ship(game : Game, star_idx : Int) : Game do
+    if game.score < ship_score_min() do
+      game
+    else
+      let (rng2, roll) = lcg_float(game.rng)
+      let chance_raw = 0.25 + 0.05 * int_to_float(game.score - ship_score_min())
+      let chance = if chance_raw > 0.6 do 0.6 else chance_raw end
+      if roll < chance do
+        { game with
+            rng: rng2,
+            ships: Cons({ star_idx: star_idx, angle: 0.0, fire_cooldown: ship_fire_interval() }, game.ships) }
+      else
+        { game with rng: rng2 }
+      end
+    end
+  end
+
+end

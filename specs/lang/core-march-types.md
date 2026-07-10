@@ -147,9 +147,19 @@ describe F2/F3 as fixed, reconciled the `capabilities.md` tutorial, and filed
 two further findings (the proof-cap mint mismatch, deliberately unlabeled
 since `F1`–`F8` are all already in use elsewhere in this document, deferred
 to a later proof-caps slice — and a residual guarded-match exhaustiveness
-gap F3 inherits but does not introduce). Still deferred: proof-cap
-mint/forge (Check 6) itself remains unfixed (the proof-cap mint mismatch
-finding documents the gap, not a fix).
+gap F3 inherited but did not introduce). The guarded-match gap was
+subsequently FIXED (fix-campaign batch 3, 2026-07-07): `check_exhaustiveness`
+now computes coverage over the GUARDLESS branches of a guarded match and
+records the span when they are non-exhaustive, so a guarded non-exhaustive
+match in a `cap no_panic` module is now an ERROR (§2.8.11, §2.1a; witnesses
+`reject/t50`, `accept/t59`). **Proof-cap mint/forge is now FIXED too** (widening
+slice 6, 2026-07-08): a dedicated §2.8.13 gives proof capabilities their first
+rule-numbered treatment — Check 1 self-declaration, Check 6 pass-through, the
+gated `mint_cap` mint surface, and the `cap_narrow` proof-cap restriction — and
+§2.5.1's `(T-QualRef)` establishes the general soundness property (an
+intra-module reference is checked against the function's real body-checked
+scheme regardless of nesting) that the proof-cap forge's deepest exploitation
+depended on. Witnesses `reject/t51`–`t57`, `accept/t60`–`t63`.
 
 ## 1. The typing judgment
 
@@ -524,16 +534,26 @@ both `infer_match` and the `EMatch` arm of `check_expr`, typecheck.ml:
 4199/4288) and DOES emit a diagnostic for a missing case; that diagnostic is
 simply non-fatal by design.
 
-Exhaustiveness checking is also SKIPPED ENTIRELY (not merely downgraded) when
-ANY branch of the match carries a guard: `let has_guards = List.exists (…
-branch_guard <> None) branches in if has_guards then () else …`
-(typecheck.ml:3161–3164) — "coverage becomes undecidable" once a guard is
-present (the comment at typecheck.ml:3158), since a guard can make an
-otherwise-total pattern set partial at runtime (E-Match's guard-false
-fall-through, core-march.md:741–751). Redundancy checking, by contrast, only
-skips INDIVIDUAL guarded arms (`if br.branch_guard = None then …`,
-typecheck.ml:3136) while still checking the unguarded ones against the
-accumulated prefix.
+When ANY branch of the match carries a guard, the ordinary Warning is SKIPPED
+(exact coverage is undecidable once a guard is present — a guard can make an
+otherwise-total pattern set partial at runtime via E-Match's guard-false
+fall-through, core-march.md:741–751). But a guarded match can still DEFINITELY
+panic, so `check_exhaustiveness` no longer returns immediately in the guarded
+case: it computes coverage over the GUARDLESS branches ONLY (`let
+guardless_matrix = List.filter_map (fun br -> match br.branch_guard with None ->
+Some [norm_pat br.branch_pat] | Some _ -> None) branches`, typecheck.ml:3315–
+3332). A branch reachable only behind a guard cannot be relied on to match, so
+it contributes nothing to GUARANTEED coverage; if the guardless branches alone
+are non-exhaustive the match can panic when every guard fails at runtime. In
+that case the span is RECORDED into `env.nonexhaustive_match_spans` (so
+`check_no_panic_module` promotes it to an error inside a `cap no_panic` module,
+§2.8.11) but NO global Warning is emitted — guarded matches are common in
+ordinary code and get no warning today, so only `cap no_panic` modules (which
+opt into strictness) are made stricter. (An all-guarded match yields an empty
+guardless matrix, which `find_missing_mc` correctly reports as non-exhaustive
+rather than crashing.) Redundancy checking, by contrast, only skips INDIVIDUAL
+guarded arms (`if br.branch_guard = None then …`, typecheck.ml:3136) while still
+checking the unguarded ones against the accumulated prefix.
 
 **Conformance-corpus consequence:** an `accept/` program with a deliberately
 non-exhaustive `match` is CORRECT — it is SUPPOSED to typecheck
@@ -1881,8 +1901,8 @@ they are not merely similarly-named — they are typechecked as the identical
 nominal `TCon`.** `accept/t35` witnesses this precisely:
 
 ```march
-mod A do type Foo = Mk(Int) fn make() : Foo do Mk(1) end end
-mod B do type Foo = Mk(String) fn make() : Foo do Mk("x") end end
+mod A do type Foo = MkA(Int) fn make() : Foo do MkA(1) end end
+mod B do type Foo = MkB(String) fn make() : Foo do MkB("x") end end
 fn take_a(_x : A.Foo) : Int do 7 end
 fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo where A.Foo is annotated
 ```
@@ -1890,6 +1910,17 @@ fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo whe
 `--check` exits 0 with no diagnostic at all (re-confirmed live, exactly as
 the survey found), and running it prints `7` — proving the substitution is
 not merely un-flagged at check time but genuinely accepted end-to-end.
+
+> **Reconciled 2026-07-10 (post `d95fe942`, order-independent multi-module
+> resolution):** the witness originally named BOTH sibling ctors `Mk`. That
+> version no longer typechecks — not because per-module type identity
+> appeared (it did not; the design point above is unchanged), but because a
+> same-named constructor in a sibling module now shadows a module's OWN
+> constructor inside its own body (`Mk(1)` in `A.make` resolves against B's
+> `Mk(String)` → `expected `String` but got `Int``). Filed as
+> "sibling-module constructor shadowing" in `specs/todos.md`; the witness now
+> uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
+> fact this section documents.
 **This is documented here as ONE deliberate design point, not filed as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
@@ -1999,6 +2030,83 @@ a hard reject), confirmed live and pinned as
 `reject/t27_use_selector_private_name`. This is not a second, independent
 enforcement mechanism — it is the same `pub_set` absence surfacing through a
 second syntactic front door.
+
+#### 2.5.1 Intra-module reference soundness: `(T-QualRef)` — nesting does not weaken type checking
+
+This is the headline correctness property module nesting must satisfy, and it
+is worth stating as its own rule because it was for a time **not** true (a P0
+soundness fix, 2026-07-08, restored it):
+
+> **`(T-QualRef)`.** An intra-module reference to a function is checked against
+> that function's **real, body-checked scheme** — the possibly-polymorphic type
+> `check_fn` infers and generalizes for the function's actual body —
+> **regardless of module nesting depth, and regardless of whether the reference
+> is written bare (`id`) or module-qualified (`App.id`, `Main.id`).** Nesting a
+> function inside a `mod` never gives a caller a weaker (more permissive) view
+> of its type than a top-level definition would.
+
+**Why this needs saying — the mechanism.** March resolves names in two passes.
+A forward-reference *pre-pass* (`prebind_mod_members`, `lib/typecheck/typecheck.ml`)
+seeds every module member's **qualified** key (`App.id`, and for the entry
+module its own `Main.id`) into the environment so siblings can typecheck against
+each other before their own declarations are reached; for an *unannotated* fn,
+`prebind_fn_scheme` returns `None`, so the qualified key is seeded as a fresh
+`Mono (fresh_var)` **placeholder**. Meanwhile desugar's `qualify_module_refs`
+(`lib/desugar/desugar.ml`) rewrites every intra-nested-module reference to that
+qualified form. The main check pass then runs `check_fn` on each declaration and
+**reconciles** the placeholder to the real body-checked scheme. `(T-QualRef)`
+is the guarantee that this reconciliation reaches **every** qualified key the
+pre-pass can seed — at every nesting level, including the entry module's
+self-qualified key.
+
+**The hole `(T-QualRef)` closes (the P0 fix).** Before the fix, `check_decl`'s
+`DFn` branch reconciled only the **bare** name. A sibling resolving the
+desugar-qualified `App.id` reference therefore kept the stale
+`Mono '_v` placeholder, which `infer_app`'s `TVar` branch turns into a decoupled
+`?a -> ?b` — **erasing the type of anything laundered through the nested
+function.** This was not `Cap`-specific and not a `unify` bug (`unify`'s `TCon`
+arm is strict and never reached): a plain `Int` laundered through a nested
+unannotated `fn id(x) do x end` into a `String` parameter typechecked at
+`--check` exit 0 — a genuine memory-safety break. The same erasure hit ADT
+arguments (`Box(String)` → `Box(Int)`), IO-cap coercions, and proof caps
+(the proof-cap forge was one exploitation of this general hole). The fix
+(`check_decl` `DFn` branch, `reconcile_qkey`) binds every qualified fn key —
+both the enclosing-nested key (`cap_qual_prefix ^ "." ^ fn`) and the entry
+module's own self-qualified key (`current_module ^ "." ^ fn`, reached at the
+entry level where `cap_qual_prefix` is `""`) — to `check_fn`'s real scheme, and
+`dependency_order_dfn_run` orders forward references so the reconcile runs
+before a caller is checked. `unify` is untouched, so cap subsumption, the
+`needs` gate, and actor `Cap` dispatch are structurally unaffected.
+
+**Witnesses.** The reject corpus pins the erasure in every shape that was
+type-correct (hence ACCEPTED, exit 0) pre-fix and is now caught — IMPOSSIBLE to
+reject pre-fix, which is the whole point of these witnesses:
+
+- **`reject/t51_nested_id_launder_int_to_string`** — the clearest general
+  memory-safety witness: a nested unannotated `id` launders `Int` → `String`
+  (`takes_str(id(42))`, `takes_str` calling `string_length`). Pinned:
+  `` expected `String` but got `Int` ``.
+- **`reject/t52_nested_id_launder_box`** — the ADT-argument shape,
+  `Box(String)` → `Box(Int)`. Pinned: `` expected `Int` but got `String` ``.
+- **`reject/t53_nested_distinct_tvar_launder`** — a nested `fn launder(x:a):b`
+  whose two DISTINCT signature tvars give it an un-body-validated `a -> b`
+  prebind never unified against the body constraint `a ~ b`. Pinned:
+  `` expected `String` but got `Int` ``.
+- **`reject/t54_entry_self_qualified_launder`** — the entry-module variant:
+  `Main.id(42)` laundered through the entry module's own self-qualified key.
+  Pinned: `` expected `String` but got `Int` ``.
+
+And the positive counterpart proves the fix RESTORES (rather than over-
+restricts) legitimate polymorphism — nested `id` was accidentally *monomorphic*
+pre-fix (the placeholder pinned to its first use), so this ALSO errored before
+the fix:
+
+- **`accept/t60_nested_id_polymorphic`** — a nested unannotated `id` used at
+  both `Int` and `String` in the same nested module. `--check` exit 0.
+
+(Full root-cause narrative and the 25-case `nested_mod_prebind_erasure` unit
+group: `.superpowers/sdd/prebind-fix-report.md`; the `specs/todos.md`
+"Nested-module qualified-prebind type-erasure" Done entry.)
 
 ### 2.6 Actors: declaration, spawn, and `Pid` typing
 
@@ -2794,7 +2902,9 @@ call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
 keyword and the `Ast.DOpts` AST node: the five **behavioral module caps**
 (`no_panic`/`no_alloc`/`no_extern`/`pure`/`deterministic`) — per-module
 syntactic bans, not IO-permission accounting. Proof-cap minting/forging
-(Check 6) remains out of scope here.
+(Check 6, `mint_cap`, and the `cap_narrow` proof-cap restriction) is a THIRD,
+distinct use of the `Cap(...)` machinery — nominal per-module unforgeable
+tokens — and is treated in full in §2.8.13.
 
 #### 2.8.1 The capability hierarchy — 18 entries, a forest of trees
 
@@ -3294,7 +3404,7 @@ forms:
   value out of nothing; every other `Cap(X)` in a program must ultimately
   originate from `root_cap` (directly or through a chain of `cap_narrow`
   calls and ordinary parameter-passing) or from a proof-cap mint (a separate
-  mechanism, Check 6, out of this subsection's scope).
+  mechanism — `mint_cap` gated to the declaring module's public fns, §2.8.13).
 - **`cap_narrow : Cap(IO) -> Cap(a)`** takes the root capability and returns a
   value at a **polymorphic** result type `Cap(a)` — the type-application site
   (a `let`/parameter annotation, or the callee's declared parameter type)
@@ -3303,12 +3413,14 @@ forms:
   case documented here — `cap_narrow(root)` called where a `Cap(IO.Network)`
   is expected instantiates `a := IO.Network`; called where a
   `Cap(IO.Console)` is expected, the very same call instantiates
-  `a := IO.Console` — but it is also the mechanism a proof-cap mint
-  (`cap_narrow(some_cap) : Cap(Db.Migrated)`) uses to satisfy Check 6's
-  return-type rule, which is the substance of the **F4** finding (§4.1) that
-  a future proof-cap-focused task is expected to address. This subsection
-  notes the polymorphic-return reality factually, as context for that
-  deferred finding — **no fix to F4 is attempted here.**
+  `a := IO.Console` — the very same call instantiates `a := IO.Console`. This
+  polymorphic result is confined to IO-lattice narrowing: as of the proof-cap
+  slice (2026-07-08), **`cap_narrow`'s result can never be a nominal proof cap
+  in any position** (`(Cap-NoNarrowForge)`, §2.8.13). Proof caps are minted only
+  by the dedicated, gated `mint_cap` primitive; the earlier reality that
+  `cap_narrow(some_cap) : Cap(Db.Migrated)` could mint a proof cap to satisfy
+  Check 6 — the "proof-cap mint mismatch" finding — is now **closed** (see
+  §2.8.13 for the full mint/forge/unforgeability treatment).
 
 Both builtins are **compile-time-only and runtime-erased**, exactly like
 every other `Cap(X)` value (§2.8's opening determination, §1 above in the
@@ -3807,23 +3919,33 @@ pins the latter as a permanent regression guard: a bare non-exhaustive match
 outside a `cap no_panic` module must never be promoted). See §2.8.12 below
 for the REJECT corpus witness this fix made possible.
 
-**A residual gap F3 inherits, not introduces (open, filed in
-`specs/todos.md` as a distinct finding):** `check_exhaustiveness` skips its
-entire coverage computation — including recording a span into
-`nonexhaustive_match_spans` — whenever ANY arm of the match carries a
-pattern guard (`typecheck.ml:~3297`, `if has_guards then ()`; guard coverage
-is undecidable in general without a guard-aware SMT analysis, per the
-function's own doc comment). So a `cap no_panic` module containing a
-guarded, genuinely non-exhaustive match is invisible to *both* the ordinary
-warning and F3's new error path — `--check` exits 0 with zero diagnostics,
-live-verified (`x when x > 0 -> 1`, no catch-all, over an `Int`
-scrutinee), and calling it at a value that fails the guard panics at
-runtime exactly as the un-fixed F3 case did. This is **not a regression**
-and **not in F3's scope** — F3's fix correctly consumes whatever verdict
-`check_exhaustiveness` computes, and this blind spot predates and is
-independent of that fix; fixing it would need a guard-aware exhaustiveness
-analysis (substantially more than span-plumbing). Filed as its own open
-finding, distinct from F3.
+**The guarded-match gap F3 inherited — now FIXED (fix-campaign batch 3,
+2026-07-07):** originally, `check_exhaustiveness` skipped its entire coverage
+computation — including recording a span into `nonexhaustive_match_spans` —
+whenever ANY arm of the match carried a pattern guard, so a `cap no_panic`
+module containing a guarded, genuinely non-exhaustive match was invisible to
+*both* the ordinary warning and F3's error path (`--check` exited 0 with zero
+diagnostics). The conservative, sound fix: for a guarded match,
+`check_exhaustiveness` now computes coverage over the GUARDLESS branches ONLY
+(`guardless_matrix`, `typecheck.ml:~3315`). A branch reachable only behind a
+guard cannot be relied on to match, so it contributes nothing to GUARANTEED
+coverage; if the guardless branches alone are non-exhaustive, then when every
+guard fails at runtime no arm matches and the match panics — so the span is
+recorded (`nonexhaustive_match_spans`) and `check_no_panic_module` promotes it
+to an ERROR exactly as for a guard-free non-exhaustive match. Crucially, the
+guarded case RECORDS the span but emits **no global Warning** (guarded matches
+are common in ordinary code and get no warning today; only `cap no_panic`
+modules, which opt into strictness, are made stricter — so non-`cap no_panic`
+behavior is unchanged). If the guardless branches ARE exhaustive (e.g. a
+guarded arm followed by an unguarded catch-all), the match can never fall
+through and still accepts. Live-verified: `Some(v) when v > 0 -> v; None -> 0`
+(guardless arms `{None}`, non-exhaustive) in a `cap no_panic` module now
+REJECTS with the same `contains a non-exhaustive \`match\`` error; adding an
+unguarded `Some(v) -> …` arm makes it ACCEPT again. Witnesses:
+`reject/t50_cap_no_panic_guarded_nonexhaustive`, `accept/t59_cap_no_panic_
+guarded_guardless_catchall`. This was **not a regression** and **not in F3's
+original scope** — F3 correctly consumed whatever verdict `check_exhaustiveness`
+computed; batch 3 extended that verdict to the guarded case.
 
 **F5 (open, cosmetic, filed in `specs/todos.md`):** `println`/`print` are
 registered in `builtin_cap_table` under `IO.Console` and DO count as a
@@ -3905,6 +4027,288 @@ accept post-fix, confirming neither fix over-rejects.
 
 `check_types.sh`: **104/104 (56 accept, 48 reject)**, exit 0 — the corpus's
 current, final total for this widening slice (§3).
+
+#### 2.8.13 Proof capabilities — minting, forging, and unforgeability
+
+The subsections above cover **IO-permission** caps (`Cap(IO.Network)` and the
+18-entry lattice) and the five **behavioral** module caps. Proof capabilities
+are a THIRD, distinct use of the `Cap(...)` machinery: **nominal, per-module,
+unforgeable tokens** that encode a *fact about the system* — "migrations have
+run," "the request is authenticated" — rather than an IO permission. A proof
+cap is declared `proof cap Name` inside a `mod` (`DProofCap`,
+`lib/ast/ast.ml`), registered in `env.proof_caps : (string * string) list`
+(full cap path → declaring module, populated by the `DProofCap` arm of
+`check_decl`), consumed as a type argument `Cap(Mod.Name)`, and demanded via
+`needs Mod.Name`. Like every `Cap(X)`, a proof cap is **runtime-erased** (`null`
+in LLVM, `VUnit` in the interpreter) — it exists purely so the type system can
+gate who may produce and consume it. §2.8's opening previously deferred these
+rules ("(Check 6) remains out of scope here"); this subsection is where they
+are treated, and the deferral is now discharged.
+
+Four rules together make `Cap(P)` unforgeable. They are all enforced by
+`check_module_needs` and two post-checking sweeps in `lib/typecheck/typecheck.ml`.
+
+**`(Cap-SelfDeclare)` — Check 1's self-declaration exemption.** Check 1
+(§2.8.3, `(* Check 1:` in `check_module_needs`) requires every `Cap(X)` in a
+signature to be covered by a declared `needs` via subsumption. A proof cap is
+NOT in the IO lattice, so no `needs` line *subsumes* it — instead, a proof
+cap's own **declaring module implicitly satisfies its own `needs`**
+(`self_declared = List.assoc_opt cap_path env.proof_caps = Some mod_name`, the
+`(* Check 1:` arm; the same exemption repeats in the Check 1b body-scan). So
+`mod Db` may write functions taking or returning `Cap(Db.P)` without a
+`needs Db.P` line of its own; any OTHER module using `Cap(Db.P)` in a signature
+must declare `needs Db.P`. Cited by `accept/t62` (the declaring module needs no
+self-`needs`) and `accept/t63` (the external `relay` declares `needs
+Db.Migrated`).
+
+**`(Cap-Check6)` — the declared-return-type pass-through discipline.** Check 6
+(`(* Check 6:` in `check_module_needs`) governs what a function may declare as
+its **return type**: a `DFn` may not return a proof cap unless it either
+*received that exact cap as a parameter* OR is a **public (`fn`) function of the
+declaring module**. Consequences:
+
+- A **public fn of the declaring module** is the *minting surface* — it may
+  construct and return its own proof cap.
+- A **`pfn` (private) function of the declaring module** faces the same
+  restriction as external code: pass-through only. Diagnostic: `` private
+  function `F` in `M` cannot mint `Cap(X)`. Only public functions of `M` can
+  construct `Cap(X)`. `` — `reject/t57`.
+- An **external module's function** may only pass a received cap through.
+  Diagnostic: `` function `F` returns `Cap(X)` but `Cap(X)` is a proof
+  capability declared in `M`. Only public functions of `M` can construct
+  `Cap(X)`. `` — `reject/t56`.
+
+Check 6 inspects only *declared function return types*, so it structurally
+cannot see a proof cap produced in an *expression position* (an inline call
+argument, a `let` binding). That gap is closed by `(Cap-NoNarrowForge)` below.
+
+**`(Cap-Mint)` — the `mint_cap` rule.** `mint_cap(x) : Cap(P)` is the ONLY
+sanctioned way to *construct* a proof cap. Its builtin scheme matches
+`cap_narrow`'s (`Cap(IO) -> Cap(a)`), but a post-checking gate
+(`check_mint_cap_sites`, run once after the whole compilation is checked so the
+result type is fully pinned) accepts it **iff** the pinned result is `Cap(P)`
+with `P` a proof cap whose **declaring module == the enclosing module AND the
+enclosing function is public** (`cur_fn_public`). The enclosing-fn/module
+context is captured at the site (recorded in `mint_cap_sites`) because it is
+unavailable at sweep time. Rules that fall out:
+
+- A lambda body **inherits** the enclosing function's public-ness (a `mint_cap`
+  in a lambda inside a public declaring fn accepts, when the cap type is pinned
+  at the lambda's call site); a nested named `fn`/`mod` gets its own
+  `check_fn`/`current_module` and so resets the flag naturally.
+- A value that *cannot be pinned to a specific proof cap* — e.g. a
+  let-generalized `fn _ -> mint_cap(cap)` that generalizes to `∀a. _ -> Cap(a)`
+  — is **rejected**, because a polymorphic mint could produce ANY cap (the exact
+  forge vector); this is strictly sounder than accepting it.
+- `mint_cap` at a NON-proof (IO) cap target is rejected — attenuating IO caps
+  is `cap_narrow`'s job.
+- `mint_cap` is **runtime-erased**: it has no eval/codegen semantics of its own
+  and aliases `cap_narrow` for all downstream passes (interpreter `VUnit`,
+  `defun.ml` `builtin_names`, `llvm_builtins.ml` reusing `march_cap_narrow`), so
+  the security gate lives entirely in typecheck.
+
+Cited by `accept/t62` (public declaring fn mints — exit 0), `reject/t56`
+(external module), `reject/t57` (`pfn` in the declaring module).
+
+**`(Cap-NoNarrowForge)` — `cap_narrow` can never produce a proof cap.**
+`cap_narrow`'s type is polymorphic (`Cap(IO) -> Cap(a)`), which is exactly right
+for IO-lattice narrowing (§2.8.8) but was, before this slice, also a **forge**:
+at a `Cap(Db.P)`-typed call site it instantiated `a := Db.P` and minted a
+nominal proof cap from an ordinary `Cap(IO)`, in the very expression positions
+Check 6 cannot see. The fix restricts `cap_narrow` so its result is **never a
+nominal proof cap in ANY position**. Because `cap_narrow` is the only
+polymorphic cap producer, this closes the forge everywhere; the enforcement is a
+value restriction on the result var (`demote_to_monomorphic`, so a
+`let`-generalized launder cannot slip through) plus a use-site `unify` hook
+(`cap_producer_ivars`) that rejects the instant a `cap_narrow`-tagged var is
+unified with a nominal proof cap `TCon(p,[])`, with the taint propagated through
+calls/instantiation/factory functions (`cap_narrow_factory_fns`). The hook fires
+ONLY for proof caps (IO caps are never in `env.proof_caps`), so IO narrowing —
+in every position, including laundered through a polymorphic fn — is untouched.
+Diagnostic: `` cap_narrow cannot produce `Cap(X)` — `Cap(X)` is a proof
+capability, not an IO capability. `` — `reject/t55`. The regression guard
+`accept/t61` confirms IO narrowing (`cap_narrow(cap) : Cap(IO.Network)`) still
+accepts.
+
+**The unforgeability property.** Combining the four rules: the only ways to
+obtain a value of type `Cap(P)` for a proof cap `P` are
+
+1. **receive it as a parameter and pass it through** (`(Cap-Check6)`;
+   `accept/t63`), or
+2. **`mint_cap` it inside a public function of `P`'s declaring module**
+   (`(Cap-Mint)`; `accept/t62`).
+
+`root_cap` and `cap_narrow` cannot conjure a `Cap(P)` (`(Cap-NoNarrowForge)`),
+and — crucially, since the P0 nested-module fix (`(T-QualRef)`, §2.5.1) —
+**no polymorphic launder through a nested unannotated helper can erase the cap
+type either** (`consume(id(cap))` with a decoupled `?a -> ?b` `id` was the
+deeper exploitation; it is now caught). So a foreign module holding only an
+ordinary `Cap(IO)` genuinely cannot forge `Cap(P)` by name, matching the
+"unforgeable" guarantee `capabilities.md` documents.
+
+**Honest residuals (documented, not hidden).**
+
+- **Proof caps are runtime-erased.** Unforgeability is a *compile-time* property
+  of well-typed programs; there is no runtime capability object, so a party that
+  bypasses the typechecker (hand-written IR, FFI) is outside this guarantee — as
+  for every `Cap(X)`.
+- **The `cap_narrow` container-launder taint gap is still OPEN.**
+  `tag_cap_producer_result` (the `(Cap-NoNarrowForge)` taint tagger) is shallow
+  / non-recursive, so a `cap_narrow` result wrapped in a tuple/`Option` through a
+  polymorphic factory can still forge in some shapes the simple single-module
+  case happens to reject. This is distinct from the nested-module hole
+  `(T-QualRef)` closes (that is about reference *resolution*; this is about taint
+  *propagation* not recursing into `TTuple`/`TCon` payloads). Filed OPEN in
+  `specs/todos.md` (Capabilities/effects section) as a dedicated Batch-A-taint
+  follow-up; a fix would recurse the tagger into container payload positions.
+
+(Fix reports: `.superpowers/sdd/batch-a-report.md` for `mint_cap` +
+`cap_narrow`, `.superpowers/sdd/prebind-fix-report.md` for `(T-QualRef)`.
+Reconciles the §2.8.8 note that `cap_narrow` is "also the mechanism a proof-cap
+mint uses" — that is now `mint_cap`; `cap_narrow` is explicitly forbidden from
+producing proof caps.)
+
+### 2.9 Linear and affine types (widening slice 7, 2026-07-10)
+
+Everything in this section was live-verified against the checker on
+2026-07-10 (20-probe survey; see
+`specs/plans/2026-07-10-widening-linear-types-plan.md` for the survey
+record). Enforcement is **purely static** — the interpreter performs no
+use-accounting and the compiled runtime never re-checks (see `core-march.md`
+§4.12 for the operational account). All `typecheck.ml` line numbers drift;
+re-grep the cited identifiers.
+
+#### 2.9.1 Marking surfaces — (T-LinMark), (T-AlwaysLin)
+
+A binding is registered with a linearity (`Ast.linearity = Unrestricted |
+Linear | Affine`, `ast.ml:20-24`) through exactly these surfaces:
+
+| Surface | Grammar | Effect |
+|---|---|---|
+| `fn f(linear x : T)` | `parser.mly:418`/`:988` (`param_lin = Linear`) | param registered Linear at `bind_fn_param` |
+| `linear let x = e` | `parser.mly:1001` (+ lambda-body variant `:1117`) | binding registered Linear at the let arm |
+| `linear T` / `affine T` type modifier | `parser.mly:938-939` (`TyLinear (Linear\|Affine, t)`, a `ty_atom` prefix) | the TYPE carries a `TLin` wrapper; a binding whose (post-unification) type reprs to `TLin` is registered with that linearity (`bind_pattern_bindings`, `typecheck.ml:2858`) |
+| `type R = { linear f : T, ... }` | `parser.mly:978` (`fld_lin = Linear`) | field access tracked via sentinels (§2.9.3) |
+| `always_linear type H = ...` | `parser.mly:461-468` (`DAlwaysLinearType`) | **(T-AlwaysLin)** the type NAME (bare AND module-qualified) is added to `env.always_linear_types` (`typecheck.ml:7985-7997`); every binding whose type is `TCon(name,_)` with `name` in that list is AUTO-PROMOTED to Linear at let (`:4841`), fn-param (`:4940`), and lambda-param (`:5166`) sites |
+
+There is deliberately **no `affine let`** production and **no `affine`
+param-keyword** — `affine` exists ONLY as the type modifier. Writing
+`fn f(affine c : T)` is a PARSE error (`I got stuck here`) — finding **L1**,
+filed in `specs/todos.md`; the tutorial previously showed this unparseable
+form. The working spelling is `fn f(c : affine T)`.
+
+**Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
+for BINDING-site annotations (`let x : linear T = e` registers `x` linear,
+live-verified) but NOT for a callee's declared RETURN type — `fn mk() :
+linear Res` followed by a plain `let h = mk()` does not register `h` (a
+dropped `h` is silently accepted). The wrapper is stripped before the
+call-site result type reaches `bind_pattern_bindings`; return-position
+`linear` is currently decorative.
+
+#### 2.9.2 The tracker — (T-LinUse), (T-LinDrop), (T-AffDrop)
+
+The tracker is a list of mutable per-binding flags: `lin_entry = { le_name;
+le_lin; le_used : bool ref }` in `env.lin` (`typecheck.ml:401`), pushed by
+`bind_linear` (`:1005`). Note `le_used` is a has-been-used BOOLEAN, not a
+count — "exactly once" is enforced as (used at least once, checked at scope
+close) ∧ (a second use errors immediately).
+
+- **(T-LinUse)** — every `EVar` reference calls `record_use` (`:2807`, call
+  site `:3630`). If the entry is already used:
+  - Linear: `` The linear value `x` is used more than once here. `` +
+    `Linear values must be consumed exactly once — they cannot be copied or ignored.`
+  - Affine: `` The affine value `x` is used more than once here. `` +
+    `Affine values may be used at most once.`
+- **(T-LinDrop)** — at fn-body close and at `linear let` scope close,
+  `check_linear_all_consumed` (`:2891`) errors for every never-used entry
+  with `le_lin = Linear`:
+  `` The linear value `x` was never used. `` +
+  `Linear values must be consumed exactly once — did you mean to pass it somewhere?`
+- **(T-AffDrop)** — the same check FILTERS to `Linear` only: an affine value
+  may be silently dropped (verified accept: an unused `c : affine T` param).
+
+A message `send(pid, Ctor(x))` is an ordinary consuming use of `x` (the
+`EVar` inside the payload triggers `record_use`) — a linear value MAY be
+sent to an actor, and using it again after the send is a (T-LinUse)
+violation. (Witnesses: `accept/t68`, `reject/t66`. This corrects the
+tutorial's former claim that linear values cannot be sent — finding **L6**.)
+
+#### 2.9.3 Closures, match, fields — (T-LinClosure), (T-LinMatch), (T-LinField)
+
+- **(T-LinClosure)** — `ELam` snapshots the outer `le_used` flags before
+  checking the body and errors if a tracked outer linear var became used
+  inside (`:4265`): `` The linear value `x` cannot be captured by a closure. ``
+  (+ `A closure may be called multiple times, which would violate the
+  exactly-once guarantee.`)
+- **(T-LinMatch)** — matching on a tracked linear variable is itself a use
+  (the scrutinee `EVar` passes through `record_use`), and pattern-bound
+  variables INHERIT the scrutinee's linearity (`bind_pattern_bindings`,
+  `:2858`: a `TLin`-typed binding uses the wrapper's linearity; otherwise
+  bindings inherit from a linear scrutinee var). Using the original after
+  the match is a (T-LinUse) violation.
+- **(T-LinField)** — a `linear` record field is tracked via a phantom
+  sentinel entry named `var#field`, registered when the record is
+  **let-bound** (`bind_linear_field_sentinels`, call sites `:2846`/`:2882`);
+  each `EField` access calls `record_use` on the sentinel (`:4409`).
+  Diagnostics render the sentinel as `var.field` (`lin_display_name`,
+  `:2800`). **Honest caveat (finding L3, OPEN):** fn-param-bound records get
+  NO sentinel — a param's linear-field double access degrades to a WARNING
+  (`` Field `f` has a linear type but linearity tracking is not available
+  for `p` at this binding site. ``) and is NOT an error. Enforcement holds
+  only for locally-let-bound records.
+
+#### 2.9.4 Linearity transparency — (T-LinCoerce)
+
+`linear T` is transparent everywhere EXCEPT the tracker:
+
+- unification coerces `TLin` against bare types (the `TLin` arms near
+  `typecheck.ml:2420`) — a `linear Int` unifies with an expected `Int`;
+- impl matching strips it (`impl_matches_ty`'s `TLin`/`TLin` arm) —
+  `linear T` matches an `impl I(T)` and vice versa; linearity is NOT part of
+  type identity for impl search (§1's note on `TLin` still applies);
+- constraint discharge strips it (`discharge_constraints`' `strip_lin`,
+  `:5506`) — `linear Int` satisfies `Num`/`Ord`/interface constraints
+  exactly as `Int` does. **This third leg was MISSING until 2026-07-10**
+  (finding **L2**, FIXED in this slice): an expression-position `linear Int`
+  (a linear field access, or a `linear Int`-returning call, used in
+  arithmetic) rejected with `` `linear Int` does not implement Num. `` before
+  the tracker ever ran. Var-position `TLin` never leaked — binding sites
+  strip the wrapper and store the inner type.
+
+#### 2.9.5 Known gaps (all filed in `specs/todos.md`)
+
+- **L1** — `affine` param-keyword is a parse error (§2.9.1).
+- **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
+- **L4** — `always_linear_types` is NAME-keyed and GLOBAL: a user
+  `type Handle = H(Int)` silently inherits linearity from stdlib's
+  `always_linear type Handle` (`stdlib/handle.march`) — a program with zero
+  `linear` keywords gets hard (T-LinDrop) errors — and the constructor
+  namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
+  against the user's own `H`). Avoid stdlib-colliding type names.
+- **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
+  (Newtype/Niche) allocs, so any non-escaping local construction consumed by
+  a direct `match` read garbage compiled (the annotation in the original
+  filing was a red herring — the plain form was equally broken). No longer
+  promotion candidates (`escape.ml`); `g41` regression-witnesses the fixed
+  direct-match shape (see `core-march.md` §4.12).
+- **L8** — a `linear` qualifier on a fn RETURN type does not propagate to a
+  plain `let` of the result (§2.9.1's return-position caveat) —
+  return-position `linear` is currently decorative.
+- **F7** (session types, §2.7.8) — session-channel linearity holds only for
+  `let`-threaded continuations: reusing a linear PARAMETER endpoint at a
+  coincidentally-matching state, and dropping an unclosed `SEnd` channel,
+  both slip through. The generic tracker described here is the ONLY
+  session-linearity enforcement.
+
+#### 2.9.6 Corpus witnesses
+
+Accept: `t64_linear_let_single_use`, `t65_linear_param_single_use`,
+`t66_affine_ty_param_drop`, `t67_linear_field_arith_single` (requires the L2
+fix), `t68_linear_send_consumes`. Reject (with pinned diagnostics):
+`t58`–`t66` per `types/INDEX.md` (drop, double-use, match-reuse, closure
+capture, let-bound field double-access, affine double-use, `always_linear`
+drop, use-after-send). Pre-existing: `reject/t35` (session double-close via
+the same generic tracker).
 
 ## 3. Conformance corpus
 
@@ -4894,13 +5298,15 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   survey found — F2 (`cap pure`/`cap deterministic`'s banned-builtin sets
   now derived from `builtin_cap_table`, Task 5) and F3 (`cap no_panic` now
   rejects non-exhaustive matches via a recorded-span side-table, Task 6),
-  both gated on the full test suite. **Still deferred:** proof-cap
-  mint/forge (Check 6) itself — "the proof-cap mint mismatch" (filed in
-  `specs/todos.md`, deliberately unlabeled since every letter `F1`–`F8` is
-  already in use elsewhere in this document) documents a real mismatch
-  between `capabilities.md`'s documented mint idiom and the actual
-  (unrestricted) mechanism, filed but not fixed, expected to be the subject
-  of a dedicated later slice. Linear/uniqueness typing beyond the
+  both gated on the full test suite. **Proof-cap mint/forge — now LANDED
+  (widening slice 6, §2.5.1 + §2.8.13, 2026-07-08).** "The proof-cap mint
+  mismatch" is closed by two real compiler fixes: the gated `mint_cap` primitive
+  + the `cap_narrow` proof-cap restriction (Batch A), and the general
+  nested-module qualified-prebind soundness fix (`(T-QualRef)`) that closed the
+  deeper polymorphic-launder exploitation. `Cap(P)` is now genuinely
+  unforgeable. One documented residual stays OPEN — the `cap_narrow`
+  container-launder taint gap (`tag_cap_producer_result` is shallow), filed in
+  `specs/todos.md`. Linear/uniqueness typing beyond the
   session-channel linearity
   already covered in §2.7.6/§2.7.8 is not separately named in the roadmap
   and is narrower still; grouped with capabilities as a Phase-3-or-later

@@ -2397,6 +2397,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          let v_coerced = coerce ctx v_ty v_val field_ty in
          emit_store_field ctx ptr i field_ty v_coerced
        ) args;
+       (* Actor structs get a runtime shape id stamped into the header pad
+          word so get_actor_field's C implementation (march_get_actor_field,
+          runtime/march_extras.c) can look up a named state field by the
+          actor's own shape at runtime, regardless of whether the caller's
+          static Pid(a) type is concrete at that call site (it usually is
+          NOT — a call routed through a small generic helper like
+          child_int(sup, field) never resolves `a` past an abstract type
+          variable, since nothing in get_actor_field's own signature forces
+          monomorphization on it). Scoped to actor structs only via
+          is_actor_struct_name — not a general shape-stamping change for
+          every Boxed EAlloc/ctor-application site. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then
+         emit_set_shape ctx ptr (get_record_fields ctx (Tir.TCon (alloc_type_name, [])));
        (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
           after allocation so the actor green thread uses the hot-reload table.
           Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
@@ -2433,6 +2446,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
+    (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
+       unconditionally, so it must never receive a Newtype- or Niche-repr
+       type — those "allocs" are erased immediates, and every consumer
+       decodes them under the erased convention (an ECase would untag the
+       stack POINTER → garbage). Escape.alloc_emits_heap_cell keeps such
+       allocs out of stack promotion; fail loudly if one slips through. *)
+    let sa_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (sa_type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ ->
+       failwith (Printf.sprintf
+         "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
+          construction would be boxed but consumers decode erased; \
+          escape analysis must not promote this alloc (finding L7)"
+         sa_type_name ctor)
+     | Repr.Boxed ->
+       if Repr.is_niche_shaped ctx.type_defs sa_type_name then
+         failwith (Printf.sprintf
+           "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
+            same erased-vs-boxed split as Newtype (finding L7)"
+           sa_type_name ctor));
     let entry = ctor_entry ctx ctor (List.length args) in
     let ptr = emit_stack_alloc ctx (List.length args) in
     emit_store_tag ctx ptr entry.ce_tag;
@@ -2597,7 +2633,50 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
       ) args;
       ("ptr", ptr)
-    end else begin
+    end
+    else if Repr.is_actor_struct_type ctx.type_defs reuse_type_name then begin
+      (* Actor-state update (finding 20): an actor's message handler writes its
+         new state back into the actor struct via EReuse (see
+         lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
+         singleton mutated SOLELY by its own daemon green thread — the RC of the
+         actor *handle* (how many `Pid` references exist) has nothing to do with
+         whether an in-place state write is safe.  The generic RC-conditional
+         FBIP path below is actively WRONG here: the main thread legitimately
+         does atomic incrc/decrc on the actor handle as it passes the Pid to
+         successive `send`s, so the handler's `rc == 1` check races that and can
+         observe rc > 1, taking the "fresh" branch — which allocates a COPY,
+         writes the new state into the copy, and DISCARDS it (the handler's
+         result is unit), silently LOSING the state update (memory-safe: no
+         crash, just a wrong-but-valid count).  actor_green_thread's
+         `a[0]=1` force to defeat the check is itself racy against that concurrent
+         incrc and cannot be made safe.  The fix: for an actor struct, ALWAYS
+         mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+
+         Gate MUST be structural, not name-based: an adversarial review found
+         that a name-suffix check (the type con name ending in "_Actor") false-
+         positive-matched a user type coincidentally named e.g. `Tree_Actor`,
+         silently corrupting it under a shared (RC>1) FBIP reuse by skipping the
+         refcount check that shared-value safety depends on. [Repr.is_actor_struct_type]
+         instead confirms the type's field 0 is literally named "$d_dispatch" —
+         a name only [lower_actor.ml] can ever construct (user identifiers can
+         never start with `$`), so this cannot false-positive on user code. *)
+      let (_, rv) = emit_atom ctx reuse_atom in
+      let entry = ctor_entry ctx ctor (List.length args) in
+      emit_store_tag ctx rv entry.ce_tag;
+      List.iteri (fun i atom ->
+        let field_ty = match List.nth_opt entry.ce_fields i with
+          | Some t -> llvm_ty t
+          | None -> failwith (Printf.sprintf
+              "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
+               %d was requested (arity mismatch)"
+              ctor (List.length entry.ce_fields) i)
+        in
+        let (v_ty, v_val) = emit_atom ctx atom in
+        emit_store_field ctx rv i field_ty (coerce ctx v_ty v_val field_ty)
+      ) args;
+      ("ptr", rv)
+    end
+    else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)

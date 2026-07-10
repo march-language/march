@@ -1,0 +1,237 @@
+-- Tests for Perihelion.Combat — pure combat rules.
+-- Run from repo root:
+--   MARCH_STDLIB=$PWD/_build/default/stdlib \
+--   MARCH_LIB_PATH=$PWD/demo_app/perihelion/lib \
+--   ./_build/default/bin/main.exe test demo_app/perihelion/test/test_combat.march
+mod TestPerihelionCombat do
+
+  pfn fabs(x : Float) : Float do
+    if x < 0.0 do 0.0 - x else x end
+  end
+
+  pfn approx(a : Float, b : Float) : Bool do
+    fabs(a - b) < 0.001
+  end
+
+  pfn mk_star(x : Float, y : Float) : Star do
+    { x: x, y: y, radius: 18.0, capture_radius: 54.0 }
+  end
+
+  pfn base_game(angle : Float) : Game do
+    let s0 = mk_star(200.0, 520.0)
+    let s1 = mk_star(200.0, 360.0)
+    { phase: Playing,
+      ball_x: s0.x + Math.cos(angle) * s0.capture_radius,
+      ball_y: s0.y + Math.sin(angle) * s0.capture_radius,
+      mode: Orbiting(0, angle),
+      stars: Cons(s0, Cons(s1, Nil)),
+      current: 0, score: 0, best: 0,
+      camera_y: 136.0,
+      rng: 7,
+      asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
+      shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+      loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil }
+  end
+
+  pfn space() : List(String) do
+    Cons(" ", Nil)
+  end
+
+  pfn no_keys() : List(String) do
+    Nil
+  end
+
+  pfn dt() : Float do
+    Perihelion.Core.dt()
+  end
+
+  pfn is_over(g : Game) : Bool do
+    match g.phase do
+      Over -> true
+      _ -> false
+    end
+  end
+
+  describe "firing" do
+    test "spacebar while orbiting fires radially outward" do
+      -- angle 0: ball is at (254, 520), radial = +x
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, space(), dt())
+      assert (List.length(g2.player_shots) == 1)
+      match g2.player_shots do
+        Cons(s, Nil) ->
+          assert (s.vx > 0.0)
+          assert (approx(s.vy, 0.0))
+          assert (approx(Math.sqrt(s.vx * s.vx + s.vy * s.vy), Perihelion.Combat.player_shot_speed()))
+        _ -> assert false
+      end
+      assert (g2.fire_cooldown > 0.0)
+    end
+
+    test "cooldown blocks a second shot" do
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, space(), dt())
+      let g3 = Perihelion.Combat.fire(g2, space(), dt())
+      assert (List.length(g3.player_shots) == 1)
+    end
+
+    test "no fire while flying" do
+      let g0 = base_game(0.0)
+      let g = { g0 with mode: Flying(0.0, 0.0 - 300.0) }
+      let g2 = Perihelion.Combat.fire(g, space(), dt())
+      assert (List.is_empty(g2.player_shots))
+    end
+
+    test "no fire without spacebar" do
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, no_keys(), dt())
+      assert (List.is_empty(g2.player_shots))
+    end
+  end
+
+  describe "step" do
+    test "spawn timer eventually spawns an asteroid inside the band" do
+      let g0 = base_game(0.0)
+      let g = { g0 with spawn_timer: 0.01 }
+      let g2 = Perihelion.Combat.step(g, dt())
+      assert (List.length(g2.asteroids) == 1)
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          assert (a.y > g.camera_y - 1.0)
+          assert (a.y < g.camera_y + Perihelion.Core.view_h() + 1.0)
+          assert (fabs(a.vx) > 0.0)
+        _ -> assert false
+      end
+      assert (g2.spawn_timer > 0.0)
+    end
+
+    test "asteroids drift and shots age" do
+      let g0 = base_game(0.0)
+      let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0 }
+      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) -> assert (a.x > 100.0)
+        _ -> assert false
+      end
+      let g3 = Perihelion.Combat.step(g2, dt())
+      assert (List.is_empty(g3.player_shots))
+    end
+
+    test "ship in range fires at the ball" do
+      let g0 = base_game(0.0)
+      let ship = { star_idx: 1, angle: 0.0, fire_cooldown: 0.0 }
+      let g = { g0 with ships: Cons(ship, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      assert (List.length(g2.enemy_shots) == 1)
+      match g2.enemy_shots do
+        Cons(s, Nil) ->
+          -- ship orbits star 1 (200,360); ball at (254,520): aim has +y component
+          assert (s.vy > 0.0)
+        _ -> assert false
+      end
+      match g2.ships do
+        Cons(sh, Nil) -> assert (sh.fire_cooldown > 0.0)
+        _ -> assert false
+      end
+    end
+  end
+
+  describe "collide" do
+    test "player shot kills asteroid and scores multiplier" do
+      let g0 = base_game(0.0)
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil), multiplier: 3 }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.is_empty(g2.asteroids))
+      assert (List.is_empty(g2.player_shots))
+      assert (g2.score == 3)
+    end
+
+    test "shot misses outside radii sum" do
+      let g0 = base_game(0.0)
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.length(g2.asteroids) == 1)
+      assert (List.length(g2.player_shots) == 1)
+      assert (g2.score == 0)
+    end
+
+    test "shot kills ship, scores 2x multiplier, deterministic drop per seed" do
+      let g0 = base_game(0.0)
+      let ship = { star_idx: 1, angle: 0.0, fire_cooldown: 1.0 }
+      let pos = Perihelion.Combat.ship_pos(g0, ship)
+      let (sx, sy) = pos
+      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0 }
+      let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: 12345 }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.is_empty(g2.ships))
+      assert (g2.score == 4)
+      let drops = List.length(g2.pickups)
+      assert (drops == 0 || drops == 1)
+      assert (g2.rng != 12345)
+    end
+
+    test "ball hit without shield ends the run" do
+      let g0 = base_game(0.0)
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_over(g2))
+      assert (List.length(g2.runs) == 1)
+    end
+
+    test "shield absorbs the hit and despawns the hazard" do
+      let g0 = base_game(0.0)
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), shield: true }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+      assert (!g2.shield)
+      assert (List.is_empty(g2.asteroids))
+    end
+
+    test "ball collects a pickup" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield)
+      assert (List.is_empty(g2.pickups))
+    end
+
+    test "already-shielded ball leaves the pickup" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let g = { g0 with pickups: Cons(p, Nil), shield: true }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield)
+      assert (List.length(g2.pickups) == 1)
+    end
+  end
+
+  describe "maybe_spawn_ship" do
+    test "no ships below the score threshold" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 2 }
+      let g2 = Perihelion.Combat.maybe_spawn_ship(g, 1)
+      assert (List.is_empty(g2.ships))
+    end
+
+    test "spawns deterministically per seed at high score" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 50, rng: 999 }
+      let g2 = Perihelion.Combat.maybe_spawn_ship(g, 1)
+      let g3 = { g0 with score: 50, rng: 999 }
+      let g4 = Perihelion.Combat.maybe_spawn_ship(g3, 1)
+      assert (List.length(g2.ships) == List.length(g4.ships))
+      assert (g2.rng == g4.rng)
+      assert (g2.rng != 999)
+    end
+  end
+
+end

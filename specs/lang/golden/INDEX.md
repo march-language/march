@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g39)
+# Golden corpus index (g01–g41)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (39/39 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (41/41 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -20,7 +20,16 @@ prose finding, not a golden program); `g38`–`g39` the session-typed channel
 operational addition (§4.11 channel runtime — binary `Chan.new`/`send`/`recv`/
 `close` and `choose`/`offer`, ENABLED by the concurrent F1/F2 codegen fix that
 made odd-Int/Bool channel payloads byte-identical compiled; MPST is documented
-but diverges compiled — F3 — and is deliberately NOT a golden program).
+but diverges compiled — F3 — and is deliberately NOT a golden program); `g40`
+the actor foreign-message-drop addition (finding 19 — a message for a DIFFERENT
+actor `send` to this Pid is silently DROPPED in both backends, ENABLED by the
+compiled fix that forces actor message types Boxed with globally-unique tags and
+gives the dispatch a dropping default arm, replacing the prior memory-unsafe
+misroute); `g41` the linearity-erasure addition (§4.12 — linear/affine
+annotations are compile-time-erased, widening slice 7; its affine binding is
+consumed by a DIRECT match, the regression witness for finding L7 — FIXED
+2026-07-10: escape analysis no longer stack-promotes erased-repr allocs,
+`specs/todos.md`).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -63,6 +72,8 @@ but diverges compiled — F3 — and is deliberately NOT a golden program).
 | `g37_actor_lifecycle` | `spawn` → `is_alive` (`true`) → `kill` → `is_alive` (`false`), each printed via a `Bool→String` helper (registry-bool observation, SAFE compiled) | `kill`/`is_alive` + `crash_actor`/`ai_alive` (§4.10.6, `eval.ml:2961/2964/1766/1772`) |
 | `g38_chan_int_echo` | binary `Chan.new`/`send`/`recv`/`close` round-trip carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the value class the concurrent F1/F2 codegen fix made byte-identical compiled | `chan_new`/`chan_send`/`chan_recv`/`chan_close` (§4.11.2–.3, `eval.ml:2632/2645/2655/2666`) |
 | `g39_chan_choose_offer` | `Chan.choose`/`Chan.offer` branch selection over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule pitfall); chooser picks `:ok`, sends an odd `Int` (`43`) after the label | choose=send-atom / offer=recv-atom (§4.11.4, `eval.ml:5581/5588`) |
+| `g40_actor_foreign_msg_drop` | a `Logger` message (`Zlog(String)`) `send` to a `Counter` Pid is silently DROPPED (not misrouted) in both backends, sandwiched BETWEEN two count-changing messages (`Inc(3)`, drop, `Inc(4)`); `Counter` `Report`s `count=7`, the stray `Zlog` contributing nothing (a misroute would reinterpret the `String` payload as a garbage `Int`) — this shape used to be flaky (finding 20, an unrelated actor-struct FBIP/RC race, now fixed), so it now also witnesses that determinism | foreign-message drop: interp handler-name miss (§4.10, `eval.ml:7545`); compiled Boxed message + globally-unique tag + dispatch default arm (finding 19 fix, `lib/tir/lower_actor.ml`, `lib/tir/repr.ml`, `lib/tir/llvm_toplevel.ml`); actor-struct `EReuse` always-in-place (finding 20 fix, `lib/tir/llvm_emit.ml`) |
+| `g41_linear_annotations_erased` | all three linearity keyword surfaces in one deterministic program — a `linear` fn param (matched inside the callee), a `linear let` (consumed by the call), an `affine` type-modifier binding consumed by a DIRECT match — the direct match doubles as the L7 regression witness (FIXED 2026-07-10: escape analysis stack-promoted non-escaping erased-repr allocs into boxed stack cells that erased-convention consumers decoded as garbage; this golden's first run caught it); prints `42` / `done`, byte-identical, stable across repeated runs | linearity erasure (§4.12): no runtime use-accounting on either backend; `v_lin` is optimization-only compiled; static rules in `core-march-types.md` §2.9; escape-promotion gate `lib/tir/escape.ml` `alloc_emits_heap_cell` (slice 7 + L7 fix, 2026-07-10) |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
@@ -97,16 +108,23 @@ note explaining why:
   that is what `g37` witnesses. (`revoke_cap`/`is_cap_valid` are additionally not
   registered in the typechecker, so they are not even surface-callable — a second
   finding in §4.10.6.)
-- **The supervision / `one_for_one` restart plane** — supervisor declaration +
-  child restart + epoch invalidation (§4.10.7) is documented in prose + `eval.ml`
-  citations, NOT by a golden program, because the entire child-observation
-  surface diverges or crashes compiled (filed findings in `specs/todos.md`): the
-  only surface way to reach a supervised child, `get_actor_field`/`pid_of_int`,
-  SIGSEGVs compiled (`examples/supervision_strategies.march` exits 139), and even
-  a `get_actor_field`-free "supervisor spawns its declared children" witness
-  (observed via a printing child `init`) diverges — interp runs each child's
-  `init` at `spawn(Sup)`, compiled runs none. A divergent/crashing program cannot
-  be a golden `MATCH`, so no restart witness was added.
+- **The supervision / restart plane** — supervisor declaration + child restart
+  + epoch invalidation (§4.10.7) has no golden HERE, but the historical reason
+  changed (2026-07-08, compiled-actor-supervision plan): `get_actor_field`/
+  `pid_of_int` now WORK compiled, supervisors DO spawn their declared children,
+  and all three restart strategies are compiled — pinned by six stable native
+  golden tests in `test/native/` (`pid_of_int_roundtrip`,
+  `get_actor_field_direct`, `supervisor_spawn_children`, `supervisor_
+  one_for_one_restart`, `supervisor_one_for_all_restart`,
+  `supervisor_rest_for_one_restart`), which serve the interp-vs-compiled
+  anchoring role for this plane. The full 3-strategy
+  `examples/supervision_strategies.march` demo remains excluded from BOTH
+  corpora — historically because of the multi-scheduler kill+respawn
+  stack-corruption crash (FIXED 2026-07-09/10: TLS migration barrier +
+  single-owner run queues, commits `9407cc6f`/`81adf1b1`; 200/200 clean at
+  N=4 and N=8), and PERMANENTLY because its concurrent workers' prints
+  interleave nondeterministically (30/30 runs byte-differ) — inherent to
+  parallel actors, so it can never be a byte-identical `MATCH`.
 - **Multi-party session types (`MPST.*`)** — the MPST runtime (§4.11.5) is
   complete and correct interpreted (a 3-role all-`String` relay runs cleanly),
   but **every** `MPST.*` program segfaults compiled (exit 139, filed as F3 in

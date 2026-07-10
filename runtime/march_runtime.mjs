@@ -27,6 +27,26 @@ export function march_float_to_string(f) {
   return /^-?\d+$/.test(s) ? s + '.' : s;   // bare integer 1 -> "1."
 }
 
+/* int_div / int_mod / int_mod_euclid are defined below in the checked
+   "Int builtins (63-bit semantics)" section (exact within ±(2^53−1), throw
+   beyond). int_pow stays here — it is JS-target-only. */
+
+/** Integer exponentiation by squaring, matching march_runtime.c's
+ *  march_int_pow (negative exponents return 0, mirroring the native
+ *  backend rather than JS's fractional Math.pow). */
+export function march_int_pow(base, exp) {
+  if (exp < 0) return 0;
+  let result = 1;
+  while (exp > 0) {
+    if (exp & 1) result *= base;
+    base *= base;
+    exp >>= 1;
+  }
+  return result;
+}
+
+/* march_unix_time is defined below in the System section. */
+
 /** String byte length (UTF-8 bytes, matching the native backend) */
 export function march_string_byte_length(s) {
   return new TextEncoder().encode(s).length;

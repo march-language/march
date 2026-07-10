@@ -24,7 +24,7 @@
  (name march_test_codegen)
  (wrapped false)
  (modules test_codegen test_ir_verify)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
  (name march_test_stdlib_suite)
@@ -956,6 +956,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/let_tuple_destructure.expected native_let_tuple_destructure.out)))
 
+; ── Regression: shadowed same-block `let` rebinding a name off its own prior
+; value (`let x = 5 in let x = x + 1 in ...`). js_emit.ml did not alpha-rename
+; the second binding, so JS block-scope TDZ made the IIFE initializer's `x`
+; resolve to its own not-yet-initialized `const x` instead of the outer one.
+; Cprop.ml had a related bug: it never invalidated a name's known-literal
+; entry on a non-literal rebind, so downstream uses of the rebound name
+; silently substituted the STALE literal from before the rebind (wrong value,
+; not a crash) — this fired even in the native/LLVM backend since Cprop runs
+; in the opt-enabled default pipeline for every target. Both fixed together;
+; compile natively, run, diff stdout.
+(rule
+ (targets native_let_shadow_rebind native_let_shadow_rebind.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/let_shadow_rebind.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_let_shadow_rebind
+        native/let_shadow_rebind.march)
+   (with-stdout-to native_let_shadow_rebind.out
+        (system "./native_let_shadow_rebind")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/let_shadow_rebind.expected native_let_shadow_rebind.out)))
+
 ; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
 ; A module-nested fn with default-arg params AND a trailing zero-arg closure
 ; param desugars (general match-merge path) into a tuple build + destructure.
@@ -1268,6 +1301,162 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_counter.expected native_actor_counter.out)))
+
+; ── Regression: pid_of_int must return a real actor pointer, not a raw
+; int-to-ptr cast (compiled march_pid_of_int used to reinterpret a small
+; pid_index integer as a heap address, corrupting/hanging on any use).
+(rule
+ (targets native_pid_of_int_roundtrip native_pid_of_int_roundtrip.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/pid_of_int_roundtrip.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_of_int_roundtrip
+        native/pid_of_int_roundtrip.march)
+   (with-stdout-to native_pid_of_int_roundtrip.out
+        (system "./native_pid_of_int_roundtrip")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_of_int_roundtrip.expected native_pid_of_int_roundtrip.out)))
+
+; ── Regression: get_actor_field must resolve real state fields, not always
+; return None (the C stub march_get_actor_field always did) — this exercises
+; the compile-time field-resolution codegen directly on a non-supervised
+; actor's own Int fields, isolated from Task 3's spawn-injection.
+(rule
+ (targets native_get_actor_field_direct native_get_actor_field_direct.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/get_actor_field_direct.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_get_actor_field_direct
+        native/get_actor_field_direct.march)
+   (with-stdout-to native_get_actor_field_direct.out
+        (system "./native_get_actor_field_direct")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/get_actor_field_direct.expected native_get_actor_field_direct.out)))
+
+; ── Regression: a compiled supervisor must actually spawn its declared
+; children (the old lowering only registered the supervision strategy and
+; left child state fields at their literal init values, e.g. wa=0/wb=0).
+(rule
+ (targets native_supervisor_spawn_children native_supervisor_spawn_children.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_spawn_children.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_spawn_children
+        native/supervisor_spawn_children.march)
+   (with-stdout-to native_supervisor_spawn_children.out
+        (system "./native_supervisor_spawn_children")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
+
+; ── Regression: a panic inside a SUPERVISED actor's message handler must
+; not exit(1) the whole process — it must crash-isolate to that actor's own
+; green thread and trigger a one_for_one restart (before this fix, kill()
+; on a supervised child did nothing: no crash trap, no restart notify).
+(rule
+ (targets native_supervisor_one_for_one_restart native_supervisor_one_for_one_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_one_for_one_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_one_for_one_restart
+        native/supervisor_one_for_one_restart.march)
+   (with-stdout-to native_supervisor_one_for_one_restart.out
+        (system "./native_supervisor_one_for_one_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_one_for_one_restart.expected native_supervisor_one_for_one_restart.out)))
+
+; ── Regression: one_for_all — crashing any one supervised child must
+; restart ALL of them (siblings included), not just the crashed one.
+(rule
+ (targets native_supervisor_one_for_all_restart native_supervisor_one_for_all_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_one_for_all_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_one_for_all_restart
+        native/supervisor_one_for_all_restart.march)
+   (with-stdout-to native_supervisor_one_for_all_restart.out
+        (system "./native_supervisor_one_for_all_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_one_for_all_restart.expected native_supervisor_one_for_all_restart.out)))
+
+; ── Regression: rest_for_one — crashing a middle child must restart it and
+; every child declared AFTER it, but leave earlier siblings untouched.
+(rule
+ (targets native_supervisor_rest_for_one_restart native_supervisor_rest_for_one_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_rest_for_one_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_rest_for_one_restart
+        native/supervisor_rest_for_one_restart.march)
+   (with-stdout-to native_supervisor_rest_for_one_restart.out
+        (system "./native_supervisor_rest_for_one_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_rest_for_one_restart.expected native_supervisor_rest_for_one_restart.out)))
 
 ; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
 ; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
@@ -1704,6 +1893,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps (file ../runtime/march_runtime.mjs))
  (action (copy ../runtime/march_runtime.mjs march_runtime.mjs)))
 
+; Same for march_dom.mjs, needed by any JS test that actually calls a Dom
+; extern (the generated import is the relative specifier "./march_dom.mjs").
+(rule
+ (targets march_dom.mjs)
+ (deps (file ../runtime/march_dom.mjs))
+ (action (copy ../runtime/march_dom.mjs march_dom.mjs)))
+
 (rule
  (targets js_atom_ctor_field.mjs)
  (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
@@ -1773,6 +1969,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_let_tuple_destructure.out (run node js_let_tuple_destructure.mjs))))
 
 (rule (alias runtest) (action (diff native/let_tuple_destructure.expected js_let_tuple_destructure.out)))
+
+; ── Regression: shadowed same-block `let` under --target js (TDZ crash) ────
+; See the native_let_shadow_rebind rule above for the full writeup — this is
+; the JS-target half of the same regression.
+(rule
+ (targets js_let_shadow_rebind.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/let_shadow_rebind.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_shadow_rebind.mjs native/let_shadow_rebind.march)))
+
+(rule
+ (targets js_let_shadow_rebind.out)
+ (deps js_let_shadow_rebind.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_shadow_rebind.out (run node js_let_shadow_rebind.mjs))))
+
+(rule (alias runtest) (action (diff native/let_shadow_rebind.expected js_let_shadow_rebind.out)))
 
 (rule
  (targets js_newtype_counter.mjs)
@@ -1859,6 +2072,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))
 
+; js_dom_timeout_callback — verifies Dom.set_timeout's `Int -> Unit` callback
+; (dummy ignored arg, not `Unit -> Unit`) both typechecks with `fn _ -> ...`
+; and actually fires via the `cb._0(cb, 0)` ABI in march_dom.mjs.
+(rule
+ (targets js_dom_timeout_callback.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_dom_timeout_callback.march) march_runtime.mjs march_dom.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_dom_timeout_callback.mjs native/js_dom_timeout_callback.march)))
+
+(rule
+ (targets js_dom_timeout_callback.out)
+ (deps js_dom_timeout_callback.mjs march_runtime.mjs march_dom.mjs)
+ (action (with-stdout-to js_dom_timeout_callback.out (run node js_dom_timeout_callback.mjs))))
+
+(rule (alias runtest) (action (diff native/js_dom_timeout_callback.expected js_dom_timeout_callback.out)))
+
 ; js_canvas_available — verifies that canvas.march is auto-loaded for --target js builds
 (rule
  (targets js_canvas_available.mjs)
@@ -1908,6 +2138,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_let_shadowing.out (run node js_let_shadowing.mjs))))
 
 (rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
+; js_match_stmt_fallthrough — statement-position match arms must break, not fall
+; through the emitted switch into the non-exhaustive default throw
+(rule
+ (targets js_match_stmt_fallthrough.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_match_stmt_fallthrough.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_match_stmt_fallthrough.mjs native/js_match_stmt_fallthrough.march)))
+
+(rule
+ (targets js_match_stmt_fallthrough.out)
+ (deps js_match_stmt_fallthrough.mjs march_runtime.mjs)
+ (action (with-stdout-to js_match_stmt_fallthrough.out (run node js_match_stmt_fallthrough.mjs))))
+
+(rule (alias runtest) (action (diff native/js_match_stmt_fallthrough.expected js_match_stmt_fallthrough.out)))
 
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
@@ -2242,3 +2487,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/march_prefixed_local.expected native_march_prefixed_local.out)))
+
+; ── Regression: self-referencing block-let shadowing (`let x = x + 5`).
+; Lowering emitted both bindings under the source name `x`, so name-based TIR
+; passes (copy-prop/fold) captured across the shadow and folded the inner
+; USE site to the OUTER value (e.g. single(10) -> 10 instead of 15), silently
+; miscompiling on native (and JS) while the interpreter stayed correct. Fixed
+; by Lower_decls.uniquify_fn (alpha-rename shadowed local binders). Covers
+; single, chained, and match-arm-body shadows; compiled stdout must equal the
+; interpreter's (native/shadow_selfref_let.expected).
+(rule
+ (targets native_shadow_selfref_let native_shadow_selfref_let.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/shadow_selfref_let.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadow_selfref_let
+        native/shadow_selfref_let.march)
+   (with-stdout-to native_shadow_selfref_let.out
+        (system "./native_shadow_selfref_let")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadow_selfref_let.expected native_shadow_selfref_let.out)))

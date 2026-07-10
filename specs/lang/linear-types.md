@@ -43,8 +43,13 @@ If you forget to use a linear value, the compiler reports an error:
 
 ```march
 fn bad(linear h : Handle) : () do
-  ()    -- error: linear value `h` must be used
+  ()
 end
+```
+
+```
+The linear value `h` was never used.
+Linear values must be consumed exactly once — did you mean to pass it somewhere?
 ```
 
 If you try to use it twice:
@@ -52,9 +57,20 @@ If you try to use it twice:
 ```march
 fn also_bad(linear h : Handle) : () do
   close(h)
-  close(h)   -- error: linear value `h` used more than once
+  close(h)
 end
 ```
+
+```
+The linear value `h` is used more than once here.
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+```
+
+(Both verified live, 2026-07-10 — these are the exact diagnostics; corpus
+witnesses `specs/lang/types/reject/t58` and `t60`. Caveat for the name
+`Handle` specifically: because the stdlib declares `always_linear type
+Handle`, a user type NAMED `Handle` inherits linearity even without the
+`linear` keyword — see "always_linear types" below.)
 
 ### Linear Let Bindings
 
@@ -66,27 +82,39 @@ fn read_file(path : String) : String do
 end
 ```
 
-The `linear let` annotation tells the compiler this binding has linear semantics. You don't need to annotate everything — the type of `open_file` already carries the linear constraint.
+The `linear let` annotation tells the compiler this binding has linear semantics. **The qualifier must appear at the binding site** — either the `linear let` keyword form, or a type annotation on the binding (`let h : linear Handle = ...`). A `linear` qualifier on the *callee's return type* alone does NOT currently propagate to a plain `let` binding of the result (verified 2026-07-10 — a dropped `let h = open_file(p)` with `open_file : ... -> linear Handle` is silently accepted; finding L8, `specs/todos.md`). Earlier versions of this chapter claimed the return type was enough.
 
 ---
 
 ## Affine Values
 
-An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection):
+An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
+
+**Spelling matters:** `affine` is a *type modifier* only — write it inside the
+type annotation. Unlike `linear`, there is no `affine` parameter keyword (the
+form `fn f(affine cap : T)` is a **parse error**) and no `affine let`
+(finding L1, `specs/todos.md`):
 
 ```march
-fn maybe_connect(affine cap : NetworkCap) : () do
-  -- OK to drop cap without using it
+fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do
   if should_connect do
     connect(cap)
   else
-    ()
+    ()    -- OK: no error when cap goes unused on this path
   end
-  -- No error if cap goes unused on the else path
 end
 ```
 
-The key property: you still cannot use an affine value twice.
+The key property: you still cannot use an affine value twice. The second use
+rejects with:
+
+```
+The affine value `cap` is used more than once here.
+Affine values may be used at most once.
+```
+
+(Verified live; corpus witnesses `accept/t66` — affine drop accepted — and
+`reject/t64` — affine double-use rejected.)
 
 ---
 
@@ -101,32 +129,87 @@ type Resource = {
 }
 ```
 
-The compiler tracks each linear field independently. Accessing `r.fd` consumes that field — you cannot access it again.
+The compiler tracks each linear field independently. Accessing `r.fd` consumes that field — a second access rejects with `` The linear value `r.fd` is used more than once here. ``
+
+Two honest caveats (both live-verified, 2026-07-10):
+
+- **Field tracking only engages for locally-`let`-bound records.** If the
+  record arrives as a *function parameter*, the tracker has no sentinel for it
+  and a double field access degrades to a warning (`Field `fd` has a linear
+  type but linearity tracking is not available for `r` at this binding
+  site.`) — finding L3, open in `specs/todos.md`. Bind the record with a
+  `let` first to get real enforcement. Corpus witness: `reject/t63`.
+- **Arithmetic on linear primitive fields works** (e.g. `r.count + 1` for a
+  `linear count : Int` field) — but only since 2026-07-10: previously the
+  linearity wrapper leaked into `Num` resolution and rejected even a single,
+  correct use (finding L2, fixed). Corpus witness: `accept/t67`.
+
+---
+
+## always_linear Types
+
+The per-site qualifiers above have a whole-type sibling: `always_linear type`
+declares a type whose **every** binding is automatically tracked as linear —
+no `linear` keyword needed at any use site. This is the primary mechanism for
+typestate resource handles (the stdlib's `Handle` in `stdlib/handle.march` is
+the canonical example, combined with `tag` phantom states):
+
+```march
+always_linear type Token = Token(Int)
+
+fn main() : () do
+  let t = Token(1)
+  ()    -- error: The linear value `t` was never used.
+end
+```
+
+See `surface-syntax.md`'s always_linear/`tag` section for the full typestate
+pattern, and `core-march-types.md` §2.9.1 for the promotion rule.
+
+> **Name-collision warning (finding L4, `specs/todos.md`):** the
+> `always_linear` registry is keyed by the bare type NAME, globally. If your
+> program declares a plain type with the same name as any `always_linear`
+> type — including the stdlib's `Handle` — your type silently inherits
+> linearity, and its constructors confuse exhaustiveness checking. Until
+> this is fixed, avoid reusing such names.
 
 ---
 
 ## Linearity and Memory
 
-Linearity isn't only about correctness — it's the strongest case for March's
-in-place memory model. A `linear` value has **reference count 1 by
-construction**: the type system guarantees exactly one owner, so the compiler
-never has to emit a single reference-count adjustment for it. At the value's last
-use, it is simply freed — no scan, no count to check. This is the cleanest
-[Perceus]({{ site.baseurl }}/docs/memory-model/) case there is.
-
-The same guarantee makes actor message passing **zero-copy**. Sending an ordinary
-value to another actor copies its bytes (so the two heaps stay disjoint). A
-`linear` value can't be aliased, so sending it *transfers ownership* instead:
-the runtime hands the pointer over and adjusts bookkeeping, with no bytes copied.
-Uniqueness turns "send" from a copy into a move.
+Linearity isn't only about correctness — it also feeds March's in-place
+memory model. A `linear` value has a single owner by construction, which the
+compiled backend exploits as an **optimization**: the linearity flag on a TIR
+variable (`v_lin`) lets Perceus elide reference-count traffic where uniqueness
+is guaranteed, and a `send` of a linear message compiles to a zero-copy
+**ownership-transfer move** (`march_send_linear`) instead of a byte copy.
+These are performance facts, not semantic ones — linearity is
+**compile-time-erased**, and neither backend re-checks it at runtime (see
+`core-march.md` §4.12; golden witness `g41_linear_annotations_erased`). See
+[Perceus]({{ site.baseurl }}/docs/memory-model/) for the memory model.
 
 ---
 
 ## Linear Types and Actors
 
-Actors communicate by message passing. For safety, a linear value cannot be sent as a message directly — sending would require copying, and copying a linear value violates the uniqueness guarantee.
+Sending a linear value to an actor **is allowed, and the send is the
+consuming use**:
 
-The actor system uses session types (see below) for typed communication channels where linear values can be transferred safely via `Send`/`Recv` channel handles.
+```march
+linear let r : Res = R(7)
+send(pid, StoreRes(r))   -- consumes r
+take(r)                   -- error: The linear value `r` is used more than once here.
+```
+
+(Verified live; corpus witnesses `accept/t68` + `reject/t66`. Earlier
+versions of this chapter claimed a linear value "cannot be sent as a message
+directly" — that was never true, and it contradicted the zero-copy-move
+paragraph above; finding L6, `specs/todos.md`.) On the compiled backend the
+transfer is a zero-copy move; interpreted, it is an ordinary handoff — either
+way the type system prevents you from touching the value after the send.
+
+For richer typed interaction patterns, the channel system below layers
+session types on top of the same linearity machinery.
 
 ---
 
@@ -168,13 +251,19 @@ end
 
 The channel endpoints are linear — each `Chan.send`/`Chan.recv` operation
 consumes the old endpoint and returns a new one representing the next step of
-the protocol. The compiler verifies the full protocol is followed.
+the protocol.
 
-> **What session types catch:** sending when you should receive, receiving the
-> wrong type, abandoning a conversation half-finished, or letting the two ends
-> drift out of step — all become compile errors. See
-> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full protocol
-> syntax and duality rules.
+> **What session types catch — and the current enforcement scope:** sending
+> when you should receive, receiving the wrong type, and reusing a consumed
+> `let`-bound endpoint are compile errors. But enforcement rides the same
+> generic linear tracker described in this chapter, applied to `let`-threaded
+> continuations **in one scope** — two shapes currently slip through
+> (finding F7, `specs/todos.md`): reusing a linear *parameter* endpoint at a
+> state that coincidentally still matches, and abandoning an unclosed channel
+> (never calling `Chan.close`) both typecheck and run cleanly today. See
+> `core-march-types.md` §2.7.8 for the precise account, and
+> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full
+> protocol syntax and duality rules.
 
 ---
 
@@ -211,7 +300,7 @@ extern "libc": Cap(LibC) do
 end
 ```
 
-This makes memory management explicit in the type — you cannot forget to `free` a `linear Ptr`, and you cannot `free` it twice.
+This makes memory management explicit in the type — you cannot forget to `free` a `linear Ptr`, and you cannot `free` it twice. (Illustrative sketch — see the FFI reference for the verified extern-block surface; the linearity mechanics are the same `linear`-qualifier tracking described above.)
 
 ---
 
@@ -225,7 +314,9 @@ This makes memory management explicit in the type — you cannot forget to `free
 
 4. **Pattern matching on a linear value consumes it** — each branch must use it in a compatible way.
 
-5. **Linear fields in records** — accessing the field consumes it; you must use or explicitly drop each linear field.
+5. **Linear fields in records** — accessing the field consumes it. Enforcement engages for `let`-bound records; for parameter-bound records tracking currently degrades to a warning (finding L3 above).
+
+6. **Avoid type names that collide with stdlib `always_linear` types** (like `Handle`) until finding L4 is fixed — the collision silently makes your type linear.
 
 ---
 
@@ -236,13 +327,18 @@ Many systems have only one kind of linear type. March has both because they solv
 - `linear` ensures you can't **forget** to do something (close, release, respond)
 - `affine` ensures you can't **duplicate** something, while allowing graceful abandonment
 
-For example, a session channel must be completed (linear — you can't just drop it midway through a protocol). But an optional permission token might be affine — the operation is valid with or without it.
+For example, a session channel is *meant* to be completed — it is linear by
+construction (though note F7 above: the "can't abandon it midway" half is not
+fully enforced today for unclosed channels). An optional permission token
+might be affine — the operation is valid with or without it.
 
 ---
 
 ## Next Steps
 
-- [Type System](types.md) — the broader type system context
+- [Type System](type-system.md) — the broader type system context
+- `core-march-types.md` §2.9 — the rule-by-rule static-semantics account of everything in this chapter (with `typecheck.ml` citations and the conformance corpus)
+- `core-march.md` §4.12 — linearity at runtime (there is none: annotations are compile-time-erased; golden witness `g41`)
 - [Refinement Types](refinement-types.md) — the other compile-time safety layer: value predicates checked by an SMT solver
 - [Actors](actors.md) — how linear types interact with actor message passing
 - [Pattern Matching](pattern-matching.md) — destructuring linear values

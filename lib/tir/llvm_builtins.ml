@@ -617,6 +617,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_narrow(ptr %cap)" };
+  (* mint_cap — gated proof-cap mint; runtime-erased alias of cap_narrow. Reuses
+     the march_cap_narrow C symbol (declare emitted by the cap_narrow entry
+     above), so no new PDeclare/runtime symbol is needed. *)
+  { march_name = "mint_cap"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = None };
   { march_name = "demonitor"; c_name = Some "march_demonitor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
@@ -641,6 +646,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_unlink(ptr %actor_a, ptr %actor_b)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
+  { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx)" };
+  { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
@@ -1210,6 +1219,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_link";
   PDeclare "march_unlink";
   PDeclare "march_register_supervisor";
+  PDeclare "march_actor_register_child";
+  PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
   PComment "; Session-typed channel builtins (binary)";
   PDeclare "march_chan_new";

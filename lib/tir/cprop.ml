@@ -132,42 +132,41 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
 
   | Tir.ELet (v, rhs, body) ->
     let rhs' = cprop_expr ~changed env avar fenv rhs in
-    let name = v.Tir.v_name in
-    (* This binding SHADOWS any outer binding of the same name inside [body].
-       Drop the outer name's stale mappings first, so a shadow whose RHS is
-       NOT a literal/alias/record (e.g. `let x = x + 5`, an EApp) does not
-       leave the outer `x -> lit` mapping visible to the body — that leak
-       silently substituted the OLD value for the NEW `x` (mirrors the
-       shadow-filtering the ECase arm already does for branch-bound vars).
-       Look-ups for the incoming RHS still use the pre-removal envs so a
-       self-referential alias `let x = x` can still inherit the outer field
-       shape. remove_assoc on an absent name is a harmless no-op, so the
-       common non-shadowing case is unchanged. *)
-    let env0  = List.remove_assoc name env in
-    let avar0 = List.remove_assoc name avar in
-    let fenv0 = List.remove_assoc name fenv in
+    (* Shadow: drop any outer/prior knowledge about this name BEFORE deciding
+       whether to add new knowledge. TIR reuses the literal source name across
+       shadowed same-block `let`s (lower.ml does not alpha-rename), e.g.
+       `let x = 5 in let x = x + 1 in ... x ...`. Without this shadow step,
+       a rebind whose RHS isn't itself a bare literal/alias/record (like
+       `x + 1` above) left the OUTER "x" -> 5 mapping active for the rest of
+       the block, so later uses of the REBOUND x were wrongly substituted
+       with the stale literal 5 instead of the (unknown, un-folded) new value.
+       [rhs'] above is deliberately computed against the un-shadowed env/avar/
+       fenv, since the RHS itself must still see the outer/prior binding. *)
+    let env  = List.filter (fun (n, _) -> n <> v.Tir.v_name) env in
+    let avar = List.filter (fun (n, _) -> n <> v.Tir.v_name) avar in
+    let fenv = List.filter (fun (n, _) -> n <> v.Tir.v_name) fenv in
     (* Extend literal env when the RHS is a bare literal atom. *)
     let env' = match rhs' with
-      | Tir.EAtom (Tir.ALit lit) -> env_add name lit env0
-      | _                        -> env0
+      | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env
+      | _                        -> env
     in
     (* P12: extend avar_env when RHS is a non-closure variable alias. *)
     let avar' = match rhs' with
       | Tir.EAtom (Tir.AVar y) when not (is_closure_ty y.Tir.v_ty) ->
-        avar_add name y avar0
-      | _ -> avar0
+        avar_add v.Tir.v_name y avar
+      | _ -> avar
     in
     (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
     let fenv' = match rhs' with
       | Tir.ERecord fields ->
         (* [rhs'] is already fully substituted by the ERecord arm below, so
            [fields] here is post-substitution — store directly. *)
-        fenv_add name fields fenv0
+        fenv_add v.Tir.v_name fields fenv
       | Tir.EAtom (Tir.AVar base) ->
         (* Record alias: let r2 = r. If r has a known field list, copy it. *)
         (match fenv_find base.Tir.v_name fenv with
-         | Some fields -> fenv_add name fields fenv0
-         | None        -> fenv0)
+         | Some fields -> fenv_add v.Tir.v_name fields fenv
+         | None        -> fenv)
       | Tir.EUpdate (Tir.AVar base, new_fields) ->
         (* Merge: new_fields override the base record's known fields. *)
         (match fenv_find base.Tir.v_name fenv with
@@ -177,9 +176,9 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
              List.filter (fun (k, _) -> not (List.mem k new_keys)) base_fields
              @ new_fields
            in
-           fenv_add name merged fenv0
-         | None -> fenv0)
-      | _ -> fenv0
+           fenv_add v.Tir.v_name merged fenv
+         | None -> fenv)
+      | _ -> fenv
     in
     Tir.ELet (v, rhs', cprop_expr ~changed env' avar' fenv' body)
 
