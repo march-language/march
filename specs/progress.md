@@ -3345,3 +3345,9 @@ but on a different registration path.
 
 **Next queued widening slice:** actors (per the roadmap's Phase-2b/3
 phasing).
+
+## `Dom.set_timeout`/`set_interval`/`on_frame` callback signature fix (2026-07-09)
+
+- [x] **Fixed a never-satisfiable extern signature.** `stdlib/dom.march`'s three deferred-callback externs declared `cb: Unit -> Unit`, but a zero-arg March lambda (`fn -> body`) types to its body's result directly with no arrow wrapper (T-Abs), so it could never unify with a declared arrow type — these three callbacks were uncallable from real March source (no existing test exercised them). Changed `cb` to `Int -> Unit` (dummy ignored argument), matching the codebase's existing `task_spawn`/`pmap_threshold`/`task_cancel_token_new` idiom for this exact shape; callers now write `fn _ -> body`. `runtime/march_dom.mjs`'s three JS wrappers updated to call `cb._0(cb, 0)` (was `cb._0(cb)`), matching the `f._0(f, args...)` closure-call ABI for a 1-declared-param closure.
+- [x] Regression: `test/native/js_dom_timeout_callback.{march,expected}` + `test/dune` rule — compiles `--target js`, runs under `node`, verifies the callback typechecks with `fn _ -> ...` and actually fires (prints "fired") via the fixed ABI. Added a `march_dom.mjs` copy-rule to `test/dune` (this is the first JS test to actually invoke a `Dom` extern; the pre-existing `js_dom_available` test only referenced `Dom.body()` from dead code).
+- Full suite green: `scripts/run-tests.sh` (807 tests) + all `test/dune` JS-target golden diffs (`js_dom_available`, `js_dom_timeout_callback`, `js_extern_import`, `js_ffi_async`, `js_ffi_blocking_raises`, `js_ffi_raises`, `js_ffi_cbacked`).
