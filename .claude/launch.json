@@ -32,9 +32,9 @@
       "port": 4853
     },
     {
-      "name": "starfling",
+      "name": "perihelion",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "4855", "--directory", "/Users/80197052/code/march/.claude/worktrees/fervent-nightingale-d0cfe8/demo_app/starfling"],
+      "runtimeArgs": ["-m", "http.server", "4855", "--directory", "/Users/80197052/code/march/.claude/worktrees/fervent-nightingale-d0cfe8/demo_app/perihelion"],
       "port": 4855
     }
   ]

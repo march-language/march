@@ -1,9 +1,9 @@
--- Tests for Starfling.Core (part 1: orbit + release). Pure, interpreter-run.
+-- Tests for Perihelion.Core (part 1: orbit + release). Pure, interpreter-run.
 -- Run from repo root:
 --   MARCH_STDLIB=$PWD/_build/default/stdlib \
---   MARCH_LIB_PATH=$PWD/demo_app/starfling/lib \
---   ./_build/default/bin/main.exe test demo_app/starfling/test/test_core.march
-mod TestStarflingCore do
+--   MARCH_LIB_PATH=$PWD/demo_app/perihelion/lib \
+--   ./_build/default/bin/main.exe test demo_app/perihelion/test/test_core.march
+mod TestPerihelionCore do
 
   pfn fabs(x : Float) : Float do
     if x < 0.0 do 0.0 - x else x end
@@ -70,7 +70,7 @@ mod TestStarflingCore do
     if n == 0 do
       is_playing(g.phase)
     else
-      run_ticks(Starfling.Core.update(g, no_taps(), Starfling.Core.dt()), n - 1)
+      run_ticks(Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt()), n - 1)
     end
   end
 
@@ -85,13 +85,13 @@ mod TestStarflingCore do
   describe "phases" do
     test "Ready + tap starts Playing" do
       let g = { mk_game(0.0) with phase: Ready }
-      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), Perihelion.Core.dt())
       assert (is_playing(g2.phase))
     end
 
     test "Ready without tap stays Ready" do
       let g = { mk_game(0.0) with phase: Ready }
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (is_ready(g2.phase))
     end
   end
@@ -99,47 +99,47 @@ mod TestStarflingCore do
   describe "orbit" do
     test "no tap advances the orbit angle in dir(+) for star 0" do
       let g = mk_game(0.0)
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       match g2.mode do
         Orbiting(i, a) ->
           assert (i == 0)
           assert (a > 0.0)
-          assert (approx(a, Starfling.Core.orbit_speed() * Starfling.Core.dt()))
+          assert (approx(a, Perihelion.Core.orbit_speed() * Perihelion.Core.dt()))
         _ -> assert false
       end
     end
 
     test "ball position stays on the orbit circle" do
       let g = mk_game(1.0)
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       let dx = g2.ball_x - 200.0
       let dy = g2.ball_y - 520.0
       assert (approx(Math.sqrt(dx * dx + dy * dy), 54.0))
     end
 
     test "orbit_dir alternates" do
-      assert (approx(Starfling.Core.orbit_dir(0), 1.0))
-      assert (approx(Starfling.Core.orbit_dir(1), 0.0 - 1.0))
-      assert (approx(Starfling.Core.orbit_dir(2), 1.0))
+      assert (approx(Perihelion.Core.orbit_dir(0), 1.0))
+      assert (approx(Perihelion.Core.orbit_dir(1), 0.0 - 1.0))
+      assert (approx(Perihelion.Core.orbit_dir(2), 1.0))
     end
   end
 
   describe "release" do
     test "tap at angle pi releases upward (negative vy) at fly_speed" do
       let g = mk_game(Math.pi())
-      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           assert (vy < 0.0)
           assert (approx(fabs(vx), 0.0))
-          assert (approx(Math.sqrt(vx * vx + vy * vy), Starfling.Core.fly_speed()))
+          assert (approx(Math.sqrt(vx * vx + vy * vy), Perihelion.Core.fly_speed()))
         _ -> assert false
       end
     end
 
     test "tangent is perpendicular to the radius vector" do
       let g = mk_game(0.7)
-      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           -- radius vector at release = (cos 0.7, sin 0.7); dot with v must be ~0
@@ -152,8 +152,8 @@ mod TestStarflingCore do
 
   describe "flight and assist" do
     test "flight integrates position" do
-      let g = mk_flying(200.0, 500.0, 0.0, 0.0 - Starfling.Core.fly_speed())
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g = mk_flying(200.0, 500.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (g2.ball_y < 500.0)
       assert (approx(g2.ball_x, 200.0))
     end
@@ -161,19 +161,19 @@ mod TestStarflingCore do
     test "assist bends velocity toward the next star without changing speed" do
       -- next star (index 1) is at (200, 360), capture 54; assist range = 81.
       -- Ball 70px below it, offset 10px left, flying straight up: inside range.
-      let g = mk_flying(190.0, 430.0, 0.0, 0.0 - Starfling.Core.fly_speed())
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g = mk_flying(190.0, 430.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, vy) ->
           assert (vx > 0.0)
-          assert (approx(Math.sqrt(vx * vx + vy * vy), Starfling.Core.fly_speed()))
+          assert (approx(Math.sqrt(vx * vx + vy * vy), Perihelion.Core.fly_speed()))
         _ -> assert false
       end
     end
 
     test "no assist outside range" do
-      let g = mk_flying(200.0, 520.0, 0.0, 0.0 - Starfling.Core.fly_speed())
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g = mk_flying(200.0, 520.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       match g2.mode do
         Flying(vx, _) -> assert (approx(vx, 0.0))
         _ -> assert false
@@ -185,10 +185,10 @@ mod TestStarflingCore do
     test "entering capture radius re-orbits, scores, and grows the ladder" do
       -- Ball just outside star 1's capture radius (60px from center), flying
       -- straight at it at ~5.7px/tick; 3 ticks crosses the 54px boundary.
-      let g = mk_flying(200.0, 420.0, 0.0, 0.0 - Starfling.Core.fly_speed())
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
-      let g3 = Starfling.Core.update(g2, no_taps(), Starfling.Core.dt())
-      let g4 = Starfling.Core.update(g3, no_taps(), Starfling.Core.dt())
+      let g = mk_flying(200.0, 420.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
+      let g3 = Perihelion.Core.update(g2, no_taps(), Perihelion.Core.dt())
+      let g4 = Perihelion.Core.update(g3, no_taps(), Perihelion.Core.dt())
       assert (g4.score == 1)
       assert (g4.current == 1)
       assert (List.length(g4.stars) == 3)
@@ -198,30 +198,30 @@ mod TestStarflingCore do
 
   describe "death and restart" do
     test "exiting the viewport bottom ends the run and records best" do
-      let g0 = mk_flying(200.0, 815.0, 0.0, Starfling.Core.fly_speed())
+      let g0 = mk_flying(200.0, 815.0, 0.0, Perihelion.Core.fly_speed())
       let g = { g0 with score: 5, best: 3 }
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (is_over(g2.phase))
       assert (g2.best == 5)
     end
 
     test "exiting a side ends the run" do
-      let g = mk_flying(0.0 - 41.0, 400.0, 0.0 - Starfling.Core.fly_speed(), 0.0)
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g = mk_flying(0.0 - 41.0, 400.0, 0.0 - Perihelion.Core.fly_speed(), 0.0)
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (is_over(g2.phase))
     end
 
     test "best is not lowered by a worse run" do
-      let g0 = mk_flying(200.0, 815.0, 0.0, Starfling.Core.fly_speed())
+      let g0 = mk_flying(200.0, 815.0, 0.0, Perihelion.Core.fly_speed())
       let g = { g0 with score: 2, best: 9 }
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (g2.best == 9)
     end
 
     test "tap from Over starts a fresh Playing run keeping best" do
       let g0 = mk_game(0.0)
       let g = { g0 with phase: Over, score: 4, best: 7 }
-      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, one_tap(), Perihelion.Core.dt())
       assert (is_playing(g2.phase))
       assert (g2.score == 0)
       assert (g2.best == 7)
@@ -231,7 +231,7 @@ mod TestStarflingCore do
 
   describe "new_game and camera" do
     test "new_game starts Ready, orbiting star 0, 3 stars" do
-      let g = Starfling.Core.new_game(42)
+      let g = Perihelion.Core.new_game(42)
       assert (is_ready(g.phase))
       assert (is_orbiting_star(g.mode, 0))
       assert (List.length(g.stars) == 3)
@@ -242,13 +242,13 @@ mod TestStarflingCore do
       let g0 = mk_game(0.0)
       let g = { g0 with camera_y: 300.0 }
       -- target for star 0 (y=520) = 520 - 0.6*640 = 136 < 300, so camera_y must decrease
-      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let g2 = Perihelion.Core.update(g, no_taps(), Perihelion.Core.dt())
       assert (g2.camera_y < 300.0)
       assert (g2.camera_y > 136.0)
     end
 
     test "a long untapped run stays safely Playing (scripted-run smoke)" do
-      let g0 = Starfling.Core.new_game(42)
+      let g0 = Perihelion.Core.new_game(42)
       let g = { g0 with phase: Playing }
       assert (run_ticks(g, 600))
     end

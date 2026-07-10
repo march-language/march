@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build starfling to JS by invoking the dev march compiler directly.
-# starfling has no external forge dependencies (just stdlib), so it
+# Build perihelion to JS by invoking the dev march compiler directly.
+# perihelion has no external forge dependencies (just stdlib), so it
 # compiles straight from the dune build output rather than going through
 # `forge build` — forge resolves its own pinned toolchain version
 # (~/.march/versions/<tag>/bin/march) ahead of PATH, which would silently
@@ -23,13 +23,13 @@ echo "Building march..."
 # environment-dependent test/dune rules), which this script doesn't need.
 (cd "$ROOT" && dune build --root "$ROOT" bin/main.exe)
 
-echo "Compiling starfling → starfling.mjs..."
+echo "Compiling perihelion → perihelion.mjs..."
 MARCH_STDLIB="$MARCH_STDLIB" MARCH_LIB_PATH="$DEMO/lib" "$MARCH_EXE" --target js \
-  -o "$DEMO/starfling.mjs" "$DEMO/lib/starfling.march"
+  -o "$DEMO/perihelion.mjs" "$DEMO/lib/perihelion.march"
 
 echo "Copying runtimes..."
 cp "$ROOT/runtime/march_runtime.mjs" "$DEMO/"
 cp "$ROOT/runtime/march_dom.mjs" "$DEMO/"
 cp "$ROOT/runtime/march_canvas.mjs" "$DEMO/"
 
-echo "Done! Open demo_app/starfling/index.html in a browser."
+echo "Done! Open demo_app/perihelion/index.html in a browser."

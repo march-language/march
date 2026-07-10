@@ -1,10 +1,10 @@
--- Starfling.Level — pure procedural star placement. Threads an Int LCG
+-- Perihelion.Level — pure procedural star placement. Threads an Int LCG
 -- state explicitly; a fixed seed reproduces an identical star ladder.
 -- (Named Level, not Gen: stdlib already has a Gen module. Uses a local
 -- 31-bit LCG instead of stdlib Random: Random's xoshiro is broken on
 -- --target js — see specs/todos.md P1 "Random unusable on --target js".
 -- 31-bit arithmetic stays far below 2^53, so it is exact in JS doubles.)
-mod Starfling.Level do
+mod Perihelion.Level do
 
   -- ── Placement constants ──────────────────────────────────────────────
   fn margin() : Float do 60.0 end
@@ -39,7 +39,7 @@ mod Starfling.Level do
     let (r2, tx) = lcg_next(r1)
     let (r3, tr) = lcg_next(r2)
     let gap = lerp(gap_min(), gap_max(), ty)
-    let x = lerp(margin(), Starfling.Core.view_w() - margin(), tx)
+    let x = lerp(margin(), Perihelion.Core.view_w() - margin(), tx)
     let r = lerp(radius_min(), radius_max(), tr)
     let s = { x: x, y: prev.y - gap, radius: r, capture_radius: r * capture_mult() }
     let result = (s, r3)
@@ -48,7 +48,7 @@ mod Starfling.Level do
 
   doc "The opening board: a fixed centered first star plus two generated above it. Bottom-first order."
   fn initial_stars(rng : Int) : (List(Star), Int) do
-    let first = { x: Starfling.Core.view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let first = { x: Perihelion.Core.view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
     let (s2, rng2) = next_star(rng, first)
     let (s3, rng3) = next_star(rng2, s2)
     let stars = Cons(first, Cons(s2, Cons(s3, Nil)))
