@@ -1853,9 +1853,67 @@ void *march_send(void *actor, void *msg) {
  * RC contract: we consume one reference to inner_msg (via march_decrc after
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
-void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
-    (void)timeout_ms;  /* timeout not yet enforced; accepted for API compat */
+/* Perform the call protocol from the current green thread.
+ * Precondition: march_sched_current() != NULL.  timeout_ms handled in
+ * Task 5; <=0 means wait forever. */
+static void *actor_call_green(void *actor, march_actor_meta *meta,
+                              int32_t msg_tag, int64_t timeout_ms) {
+    (void)actor; (void)timeout_ms;
+    march_proc *caller = march_sched_current();
 
+    void *call_msg = march_alloc(24);
+    MARCH_SET_TAG(call_msg, msg_tag);
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+
+    march_sched_send(meta->green_thread, call_msg);
+
+    void *result = march_sched_recv();
+    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+    return mk_ok(result);
+}
+
+/* Foreign-caller bridge: the calling OS thread has no green-thread context,
+ * so a helper green thread performs the call protocol and hands the result
+ * back over a one-shot condvar.  The waiter enforces timeout_ms with
+ * pthread_cond_timedwait; on timeout it marks the ctx abandoned and the
+ * helper green thread frees it (and drops the unclaimed result) instead. */
+typedef struct {
+    void             *actor;
+    march_actor_meta *meta;
+    int32_t           msg_tag;
+    int64_t           timeout_ms;
+    void             *result;
+    int               done;
+    int               abandoned;
+    pthread_mutex_t   mu;
+    pthread_cond_t    cv;
+} foreign_call_ctx;
+
+static void foreign_call_entry(void *arg) {
+    foreign_call_ctx *ctx = (foreign_call_ctx *)arg;
+    /* Pass the same bound the waiter uses so a never-replying actor cannot
+     * leak this green thread: once Task 5 lands, actor_call_green returns
+     * Err(timeout) here, we see abandoned=1, and we free ctx.  (Until Task 5,
+     * timeout_ms is ignored on the green path — transitional, bounded by
+     * this plan's task ordering.) */
+    void *res = actor_call_green(ctx->actor, ctx->meta, ctx->msg_tag,
+                                 ctx->timeout_ms);
+    pthread_mutex_lock(&ctx->mu);
+    if (ctx->abandoned) {
+        pthread_mutex_unlock(&ctx->mu);
+        march_decrc(res);  /* unclaimed Ok/Err — drop our reference */
+        pthread_mutex_destroy(&ctx->mu);
+        pthread_cond_destroy(&ctx->cv);
+        free(ctx);
+        return;
+    }
+    ctx->result = res;
+    ctx->done   = 1;
+    pthread_cond_signal(&ctx->cv);
+    pthread_mutex_unlock(&ctx->mu);
+}
+
+void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     int64_t *a = (int64_t *)actor;
     if (!a[3]) {
         march_decrc(inner_msg);
@@ -1868,31 +1926,49 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_err_cstr("actor not found");
     }
 
-    march_proc *caller = march_sched_current();
-    if (!caller) {
-        march_decrc(inner_msg);
-        return mk_err_cstr("actor_call: not in scheduler context");
-    }
-
     /* Read the tag from inner_msg so we can reproduce it on the augmented msg.
      * inner_msg is assumed to be a zero-arg constructor (16 bytes: header only).
      * We decrc it now — the caller owned one reference. */
     int32_t msg_tag = ((march_hdr *)inner_msg)->tag;
     march_decrc(inner_msg);
 
-    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
-     * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
-    void *call_msg = march_alloc(24);
-    MARCH_SET_TAG(call_msg, msg_tag);
-    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+    if (!march_sched_current()) {
+        foreign_call_ctx *ctx = (foreign_call_ctx *)calloc(1, sizeof(*ctx));
+        if (!ctx) return mk_err_cstr("actor_call: oom");
+        ctx->actor = actor; ctx->meta = meta; ctx->msg_tag = msg_tag;
+        ctx->timeout_ms = timeout_ms > 0 ? timeout_ms : 5000;
+        pthread_mutex_init(&ctx->mu, NULL);
+        pthread_cond_init(&ctx->cv, NULL);
 
-    march_sched_send(meta->green_thread, call_msg);
+        march_ensure_sched_started();
+        march_sched_spawn(foreign_call_entry, ctx);
 
-    /* Block until the actor calls actor_reply. */
-    void *result = march_sched_recv();
-    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+        int64_t wait_ms = timeout_ms > 0 ? timeout_ms : 5000;
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec  += wait_ms / 1000;
+        deadline.tv_nsec += (wait_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L; }
 
-    return mk_ok(result);
+        pthread_mutex_lock(&ctx->mu);
+        int timed_out = 0;
+        while (!ctx->done && !timed_out) {
+            if (pthread_cond_timedwait(&ctx->cv, &ctx->mu, &deadline) == ETIMEDOUT)
+                timed_out = !ctx->done;
+        }
+        if (timed_out) {
+            ctx->abandoned = 1;   /* helper green thread now owns ctx */
+            pthread_mutex_unlock(&ctx->mu);
+            return mk_err_cstr("actor_call: timeout");
+        }
+        void *r = ctx->result;
+        pthread_mutex_unlock(&ctx->mu);
+        pthread_mutex_destroy(&ctx->mu);
+        pthread_cond_destroy(&ctx->cv);
+        free(ctx);
+        return r;
+    }
+    return actor_call_green(actor, meta, msg_tag, timeout_ms);
 }
 
 /*
