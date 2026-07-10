@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Starfling — March</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #05050d;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.8rem;
+      padding: 1rem;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.08em; color: #8892b0; }
+    #game-canvas { border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); cursor: pointer; }
+    .hint { font-size: 0.75rem; color: #4a5568; }
+  </style>
+</head>
+<body>
+  <h1>STARFLING</h1>
+  <canvas id="game-canvas" width="400" height="640"></canvas>
+  <p class="hint">tap to release · chain the stars · Compiled from March with --target js</p>
+  <script type="module" src="starfling.mjs"></script>
+</body>
+</html>
