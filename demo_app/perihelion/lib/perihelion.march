@@ -52,11 +52,98 @@ mod Perihelion do
     end
   end
 
+
+  pfn draw_asteroids(ctx, asteroids : List(Asteroid)) : Unit do
+    match asteroids do
+      Nil -> ()
+      Cons(a, rest) ->
+        Canvas.set_fill_style(ctx, "#8a8a94")
+        Canvas.begin_path(ctx)
+        Canvas.arc(ctx, a.x, a.y, a.radius, 0.0, two_pi())
+        Canvas.fill(ctx)
+        draw_asteroids(ctx, rest)
+    end
+  end
+
+  pfn draw_shots(ctx, shots : List(Shot), color : String, r : Float) : Unit do
+    match shots do
+      Nil -> ()
+      Cons(s, rest) ->
+        Canvas.set_fill_style(ctx, color)
+        Canvas.begin_path(ctx)
+        Canvas.arc(ctx, s.x, s.y, r, 0.0, two_pi())
+        Canvas.fill(ctx)
+        draw_shots(ctx, rest, color, r)
+    end
+  end
+
+  pfn draw_ships(ctx, game : Game, ships : List(Ship)) : Unit do
+    match ships do
+      Nil -> ()
+      Cons(sh, rest) ->
+        let pos = Perihelion.Combat.ship_pos(game, sh)
+        let (sx, sy) = pos
+        let d = 0.0 - Perihelion.Core.orbit_dir(sh.star_idx)
+        let heading = sh.angle + d * 1.5707963
+        Canvas.save(ctx)
+        Canvas.translate(ctx, sx, sy)
+        Canvas.rotate(ctx, heading)
+        Canvas.set_fill_style(ctx, "#e74c3c")
+        Canvas.begin_path(ctx)
+        Canvas.move_to(ctx, 9.0, 0.0)
+        Canvas.line_to(ctx, 0.0 - 6.0, 5.0)
+        Canvas.line_to(ctx, 0.0 - 6.0, 0.0 - 5.0)
+        Canvas.close_path(ctx)
+        Canvas.fill(ctx)
+        Canvas.restore(ctx)
+        draw_ships(ctx, game, rest)
+    end
+  end
+
+  pfn draw_pickups(ctx, pickups : List(Pickup)) : Unit do
+    match pickups do
+      Nil -> ()
+      Cons(pk, rest) ->
+        Canvas.set_stroke_style(ctx, "#7cf7d4")
+        Canvas.set_line_width(ctx, 2.0)
+        Canvas.begin_path(ctx)
+        Canvas.arc(ctx, pk.x, pk.y, 8.0, 0.0, two_pi())
+        Canvas.stroke(ctx)
+        draw_pickups(ctx, rest)
+    end
+  end
+
+  pfn draw_runs(ctx, runs : List(RunRecord), y : Float, i : Int) : Unit do
+    if i >= 5 do
+      ()
+    else
+      match runs do
+        Nil -> ()
+        Cons(r, rest) ->
+          Canvas.set_font(ctx, "14px sans-serif")
+          Canvas.fill_text(ctx,
+            int_to_string(r.score) ++ " x" ++ int_to_string(r.max_mult)
+              ++ " · " ++ int_to_string(r.stars) ++ " stars",
+            Perihelion.Core.view_w() / 2.0, y)
+          draw_runs(ctx, rest, y + 20.0, i + 1)
+      end
+    end
+  end
+
   pfn draw_ball(ctx, game : Game) : Unit do
     Canvas.set_fill_style(ctx, "#ffffff")
     Canvas.begin_path(ctx)
     Canvas.arc(ctx, game.ball_x, game.ball_y, 6.0, 0.0, two_pi())
     Canvas.fill(ctx)
+    if game.shield do
+      Canvas.set_stroke_style(ctx, "#7cf7d4")
+      Canvas.set_line_width(ctx, 2.0)
+      Canvas.begin_path(ctx)
+      Canvas.arc(ctx, game.ball_x, game.ball_y, 10.0, 0.0, two_pi())
+      Canvas.stroke(ctx)
+    else
+      ()
+    end
   end
 
   pfn draw_hud(ctx, game : Game) : Unit do
@@ -67,6 +154,12 @@ mod Perihelion do
     Canvas.set_text_align(ctx, "right")
     Canvas.fill_text(ctx, "best " ++ int_to_string(game.best),
                      Perihelion.Core.view_w() - 14.0, 28.0)
+    if game.multiplier > 1 do
+      Canvas.set_text_align(ctx, "left")
+      Canvas.fill_text(ctx, "x" ++ int_to_string(game.multiplier), 14.0, 52.0)
+    else
+      ()
+    end
     Canvas.set_text_align(ctx, "center")
     match game.phase do
       Ready ->
@@ -77,6 +170,7 @@ mod Perihelion do
         Canvas.set_font(ctx, "22px sans-serif")
         Canvas.fill_text(ctx, "score " ++ int_to_string(game.score) ++ " — tap to retry",
                          Perihelion.Core.view_w() / 2.0, Perihelion.Core.view_h() / 2.0)
+        draw_runs(ctx, game.runs, Perihelion.Core.view_h() / 2.0 + 36.0, 0)
       Playing -> ()
     end
   end
@@ -89,15 +183,39 @@ mod Perihelion do
     Canvas.translate(ctx, 0.0, 0.0 - game.camera_y)
     draw_stars(ctx, game.stars, game.camera_y)
     draw_tether(ctx, game)
+    draw_asteroids(ctx, game.asteroids)
+    draw_ships(ctx, game, game.ships)
+    draw_shots(ctx, game.player_shots, "#7cf7d4", 3.0)
+    draw_shots(ctx, game.enemy_shots, "#ff6b6b", 2.5)
+    draw_pickups(ctx, game.pickups)
     draw_ball(ctx, game)
     Canvas.restore(ctx)
     draw_hud(ctx, game)
+  end
+
+  pfn was_playing(g : Game) : Bool do
+    match g.phase do
+      Playing -> true
+      _ -> false
+    end
+  end
+
+  pfn is_over_phase(g : Game) : Bool do
+    match g.phase do
+      Over -> true
+      _ -> false
+    end
   end
 
   pfn tick(ctx, el, game : Game) : Unit do
     let taps = Dom.taps(el)
     let keys = Dom.key_presses()
     let g2 = Perihelion.Core.update(game, taps, keys, Perihelion.Core.dt())
+    if was_playing(game) && is_over_phase(g2) do
+      Dom.store_set("perihelion.v1", Perihelion.Core.encode_save(g2.best, g2.runs))
+    else
+      ()
+    end
     draw(ctx, g2)
     Dom.on_frame(fn _ -> tick(ctx, el, g2))
   end
@@ -109,7 +227,12 @@ mod Perihelion do
         match Canvas.get_context(node) do
           None -> println("2d context unavailable")
           Some(ctx) ->
-            tick(ctx, node, Perihelion.Core.new_game(42))
+            let saved = match Dom.store_get("perihelion.v1") do
+              None -> ""
+              Some(sv) -> sv
+            end
+            let (best, runs) = Perihelion.Core.decode_save(saved)
+            tick(ctx, node, Perihelion.Core.new_game_saved(42, best, runs))
         end
     end
   end
