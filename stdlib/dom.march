@@ -84,6 +84,7 @@ mod Dom do
     fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
     fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
     fn dom_event_y(ev: Event)                   : Int    = "march_dom_event_y"
+    fn dom_taps(el: Node)                       : List((Int, Int)) = "march_dom_taps"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
@@ -206,6 +207,9 @@ mod Dom do
 
   doc "Return the y-coordinate of `ev` relative to the target element (`event.offsetY`)."
   fn event_y(ev)                       do dom_event_y(ev) end
+
+  doc "Drain and return the pointer taps (pointerdown events) on `el` since the last call, as element-relative `(x, y)` integer pairs. The first call installs the buffering listener. Poll this once per animation frame for game input."
+  fn taps(el)                          do dom_taps(el) end
 
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end

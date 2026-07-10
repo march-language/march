@@ -115,6 +115,24 @@ export function march_dom_stop_propagation(ev) { ev.stopPropagation(); }
 export function march_dom_event_x(ev) { return Math.trunc(ev.offsetX); }
 export function march_dom_event_y(ev) { return Math.trunc(ev.offsetY); }
 
+// ── Input polling ─────────────────────────────────────────────────────────────
+// Buffers pointerdown taps per element; march_dom_taps drains the buffer.
+// Poll once per animation frame for exactly-once delivery of each tap.
+
+const __tap_buffers = new WeakMap();
+
+export function march_dom_taps(el) {
+  let buf = __tap_buffers.get(el);
+  if (buf === undefined) {
+    buf = [];
+    __tap_buffers.set(el, buf);
+    el.addEventListener("pointerdown", (e) => {
+      buf.push({ _0: Math.trunc(e.offsetX), _1: Math.trunc(e.offsetY) });
+    });
+  }
+  return list_of_array(buf.splice(0, buf.length));
+}
+
 // ── Window ────────────────────────────────────────────────────────────────────
 
 export function march_dom_alert(msg) { window.alert(msg); }

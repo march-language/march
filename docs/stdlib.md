@@ -707,6 +707,7 @@ Dom.on_keydown(el, fn ev -> ...)
 Dom.dispatch(el, "custom-event")
 Dom.prevent_default(ev)
 Dom.stop_propagation(ev)
+Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
