@@ -1854,11 +1854,11 @@ void *march_send(void *actor, void *msg) {
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
 /* Perform the call protocol from the current green thread.
- * Precondition: march_sched_current() != NULL.  timeout_ms handled in
- * Task 5; <=0 means wait forever. */
+ * Precondition: march_sched_current() != NULL.  timeout_ms <= 0 means wait
+ * forever; otherwise the wait is a deadline-bounded yield-poll (see below). */
 static void *actor_call_green(void *actor, march_actor_meta *meta,
                               int32_t msg_tag, int64_t timeout_ms) {
-    (void)actor; (void)timeout_ms;
+    (void)actor;
     march_proc *caller = march_sched_current();
 
     void *call_msg = march_alloc(24);
@@ -1867,9 +1867,39 @@ static void *actor_call_green(void *actor, march_actor_meta *meta,
 
     march_sched_send(meta->green_thread, call_msg);
 
-    void *result = march_sched_recv();
-    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
-    return mk_ok(result);
+    if (timeout_ms <= 0) {
+        /* Preserve wait-forever semantics for callers that opt out. */
+        void *result = march_sched_recv();
+        if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+        return mk_ok(result);
+    }
+
+    /* Timed wait: poll the mailbox with cooperative yields until the
+     * deadline.  A parked-with-deadline mechanism needs timer support the
+     * scheduler doesn't have; replies are normally immediate, so the yield
+     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+     *
+     * Known limitation: on timeout, a late reply still lands in the
+     * caller's mailbox. Safe for per-call task green threads (the thread
+     * exits and sends to dead procs are dropped); a long-lived green thread
+     * mixing Actor.call and raw receive could observe a stale reply after
+     * a timeout. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
+                          + timeout_ms;
+    for (;;) {
+        void *msg = NULL;
+        if (march_sched_try_recv2(&msg)) {
+            if (msg == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+            return mk_ok(msg);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            return mk_err_cstr("actor_call: timeout");
+        march_sched_yield();
+    }
 }
 
 /* Foreign-caller bridge: the calling OS thread has no green-thread context,
@@ -1892,10 +1922,9 @@ typedef struct {
 static void foreign_call_entry(void *arg) {
     foreign_call_ctx *ctx = (foreign_call_ctx *)arg;
     /* Pass the same bound the waiter uses so a never-replying actor cannot
-     * leak this green thread: once Task 5 lands, actor_call_green returns
-     * Err(timeout) here, we see abandoned=1, and we free ctx.  (Until Task 5,
-     * timeout_ms is ignored on the green path — transitional, bounded by
-     * this plan's task ordering.) */
+     * leak this green thread: actor_call_green enforces timeout_ms itself
+     * (deadline-bounded yield-poll) and returns Err(timeout) here, we see
+     * abandoned=1, and we free ctx. */
     void *res = actor_call_green(ctx->actor, ctx->meta, ctx->msg_tag,
                                  ctx->timeout_ms);
     pthread_mutex_lock(&ctx->mu);

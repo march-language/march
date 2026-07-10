@@ -853,6 +853,19 @@ void *march_sched_try_recv(void) {
     return msg;
 }
 
+int march_sched_try_recv2(void **out) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p) return 0;
+    mbox_lock_acquire(p);
+    if (!p->mailbox) {          /* node existence, not message value */
+        mbox_lock_release(p);
+        return 0;
+    }
+    *out = mbox_pop(p);
+    mbox_lock_release(p);
+    return 1;
+}
+
 void march_sched_wake(march_proc *target) {
     if (!target) return;
 
