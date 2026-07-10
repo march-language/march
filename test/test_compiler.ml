@@ -916,16 +916,28 @@ let test_protocol_duplicate_error () =
 (* ── H6: Linear types through record fields (direct field access) ─────────── *)
 
 let test_linear_field_double_access_error () =
-  (* Accessing a linear record field twice directly on a named variable should error.
-     The sentinel "r#data" is created when r is bound, and record_use is called
-     on it each time r.data is evaluated. *)
+  (* Accessing a linear record field twice must error for a LET-BOUND record —
+     the sentinel "p#data" is created when p is let-bound
+     (bind_linear_field_sentinels) and record_use fires on each p.data.
+     HISTORY (slice 7): this test originally used a fn-PARAM-bound record
+     (`fn bad(r: Packet) do r.data + r.data end`) and passed VACUOUSLY on the
+     L2 constraint-discharge leak ("`linear Int` does not implement Num") —
+     params never get field sentinels (L3), so no double-use error ever fired.
+     Rewritten to the let-bound shape, where the real double-use check runs;
+     the param shape is pinned by test_linear_field_param_warning_only. *)
   let ctx = typecheck {|mod Test do
     type Packet = { linear data: Int, size: Int }
-    fn bad(r: Packet) : Int do
-      r.data + r.data
+    fn mk() : Packet do
+      { data: 1, size: 2 }
+    end
+    fn bad() : Int do
+      let p = mk()
+      let x = p.data
+      let y = p.data
+      x + y
     end
   end|} in
-  Alcotest.(check bool) "linear field direct double-access: error" true (has_errors ctx)
+  Alcotest.(check bool) "linear field let-bound double-access: error" true (has_errors ctx)
 
 let test_linear_field_single_access_ok () =
   (* Accessing a linear record field exactly once should be fine. *)
@@ -936,6 +948,55 @@ let test_linear_field_single_access_ok () =
     end
   end|} in
   Alcotest.(check bool) "linear field single access: no error" false (has_errors ctx)
+
+(* ── Slice 7 (L2): TLin must be transparent to constraint discharge ──────── *)
+
+let test_linear_field_arith_single_use_ok () =
+  (* L2: a single arithmetic use of a linear Int field must typecheck —
+     constraint discharge must strip the TLin wrapper (like impl_matches_ty
+     already does) instead of rejecting `linear Int` as not-Num.  The leak
+     bites expression-position TLin: the EField result type reaches the Num
+     constraint still wrapped (var-position TLin is already stripped at
+     binding time by bind_pattern_bindings/bind_linear). *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn ok2(p: Packet) : Int do
+      p.data + 1
+    end
+  end|} in
+  Alcotest.(check bool) "linear Int field arithmetic: no error" false (has_errors ctx)
+
+let test_linear_return_arith_ok () =
+  (* L2, second expression-position shape: a call whose declared return type
+     is `linear Int`, used directly in arithmetic (the tutorial's FFI
+     `malloc : linear Ptr(a)` pattern). *)
+  let ctx = typecheck {|mod Test do
+    fn mk() : linear Int do
+      1
+    end
+    fn f() : Int do
+      mk() + 1
+    end
+  end|} in
+  Alcotest.(check bool) "linear return type arithmetic: no error" false (has_errors ctx)
+
+let test_linear_field_param_warning_only () =
+  (* L3 pin: for a fn-PARAM-bound record, linear-field tracking degrades to a
+     WARNING — field sentinels are only registered at let-binding sites
+     (bind_linear_field_sentinels), so double access through a param is not
+     an error today.  Each let below consumes its own (inherited-linear)
+     binding exactly once; only the missing p sentinel is at issue.  If this
+     test starts failing because an error now fires, L3 got fixed: update the
+     finding in specs/todos.md and flip this expectation. *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn bad(p: Packet) : Int do
+      let x = p.data
+      let y = p.data
+      x + y
+    end
+  end|} in
+  Alcotest.(check bool) "param-bound linear field: warning-only (L3)" false (has_errors ctx)
 
 (* ── H8: Protocol participant cross-checking ─────────────────────────────── *)
 
@@ -7532,6 +7593,10 @@ let compiler_suites =
           (* H6: Linear field direct field-access tracking *)
           Alcotest.test_case "linear field double access"    `Quick test_linear_field_double_access_error;
           Alcotest.test_case "linear field single access ok" `Quick test_linear_field_single_access_ok;
+          (* Slice 7 (L2/L3): TLin transparent to constraint discharge *)
+          Alcotest.test_case "linear field arith single use" `Quick test_linear_field_arith_single_use_ok;
+          Alcotest.test_case "linear return arith"           `Quick test_linear_return_arith_ok;
+          Alcotest.test_case "linear field param warning only (L3)" `Quick test_linear_field_param_warning_only;
           (* Fix 3/H8: Session type validation + participant cross-check *)
           Alcotest.test_case "protocol self-message"         `Quick test_protocol_self_message_error;
           Alcotest.test_case "protocol empty loop"           `Quick test_protocol_empty_loop_error;

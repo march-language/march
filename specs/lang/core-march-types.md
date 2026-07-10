@@ -1901,8 +1901,8 @@ they are not merely similarly-named — they are typechecked as the identical
 nominal `TCon`.** `accept/t35` witnesses this precisely:
 
 ```march
-mod A do type Foo = Mk(Int) fn make() : Foo do Mk(1) end end
-mod B do type Foo = Mk(String) fn make() : Foo do Mk("x") end end
+mod A do type Foo = MkA(Int) fn make() : Foo do MkA(1) end end
+mod B do type Foo = MkB(String) fn make() : Foo do MkB("x") end end
 fn take_a(_x : A.Foo) : Int do 7 end
 fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo where A.Foo is annotated
 ```
@@ -1910,6 +1910,17 @@ fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo whe
 `--check` exits 0 with no diagnostic at all (re-confirmed live, exactly as
 the survey found), and running it prints `7` — proving the substitution is
 not merely un-flagged at check time but genuinely accepted end-to-end.
+
+> **Reconciled 2026-07-10 (post `d95fe942`, order-independent multi-module
+> resolution):** the witness originally named BOTH sibling ctors `Mk`. That
+> version no longer typechecks — not because per-module type identity
+> appeared (it did not; the design point above is unchanged), but because a
+> same-named constructor in a sibling module now shadows a module's OWN
+> constructor inside its own body (`Mk(1)` in `A.make` resolves against B's
+> `Mk(String)` → `expected `String` but got `Int``). Filed as
+> "sibling-module constructor shadowing" in `specs/todos.md`; the witness now
+> uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
+> fact this section documents.
 **This is documented here as ONE deliberate design point, not filed as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
@@ -4156,6 +4167,148 @@ ordinary `Cap(IO)` genuinely cannot forge `Cap(P)` by name, matching the
 Reconciles the §2.8.8 note that `cap_narrow` is "also the mechanism a proof-cap
 mint uses" — that is now `mint_cap`; `cap_narrow` is explicitly forbidden from
 producing proof caps.)
+
+### 2.9 Linear and affine types (widening slice 7, 2026-07-10)
+
+Everything in this section was live-verified against the checker on
+2026-07-10 (20-probe survey; see
+`specs/plans/2026-07-10-widening-linear-types-plan.md` for the survey
+record). Enforcement is **purely static** — the interpreter performs no
+use-accounting and the compiled runtime never re-checks (see `core-march.md`
+§4.12 for the operational account). All `typecheck.ml` line numbers drift;
+re-grep the cited identifiers.
+
+#### 2.9.1 Marking surfaces — (T-LinMark), (T-AlwaysLin)
+
+A binding is registered with a linearity (`Ast.linearity = Unrestricted |
+Linear | Affine`, `ast.ml:20-24`) through exactly these surfaces:
+
+| Surface | Grammar | Effect |
+|---|---|---|
+| `fn f(linear x : T)` | `parser.mly:418`/`:988` (`param_lin = Linear`) | param registered Linear at `bind_fn_param` |
+| `linear let x = e` | `parser.mly:1001` (+ lambda-body variant `:1117`) | binding registered Linear at the let arm |
+| `linear T` / `affine T` type modifier | `parser.mly:938-939` (`TyLinear (Linear\|Affine, t)`, a `ty_atom` prefix) | the TYPE carries a `TLin` wrapper; a binding whose (post-unification) type reprs to `TLin` is registered with that linearity (`bind_pattern_bindings`, `typecheck.ml:2858`) |
+| `type R = { linear f : T, ... }` | `parser.mly:978` (`fld_lin = Linear`) | field access tracked via sentinels (§2.9.3) |
+| `always_linear type H = ...` | `parser.mly:461-468` (`DAlwaysLinearType`) | **(T-AlwaysLin)** the type NAME (bare AND module-qualified) is added to `env.always_linear_types` (`typecheck.ml:7985-7997`); every binding whose type is `TCon(name,_)` with `name` in that list is AUTO-PROMOTED to Linear at let (`:4841`), fn-param (`:4940`), and lambda-param (`:5166`) sites |
+
+There is deliberately **no `affine let`** production and **no `affine`
+param-keyword** — `affine` exists ONLY as the type modifier. Writing
+`fn f(affine c : T)` is a PARSE error (`I got stuck here`) — finding **L1**,
+filed in `specs/todos.md`; the tutorial previously showed this unparseable
+form. The working spelling is `fn f(c : affine T)`.
+
+**Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
+for BINDING-site annotations (`let x : linear T = e` registers `x` linear,
+live-verified) but NOT for a callee's declared RETURN type — `fn mk() :
+linear Res` followed by a plain `let h = mk()` does not register `h` (a
+dropped `h` is silently accepted). The wrapper is stripped before the
+call-site result type reaches `bind_pattern_bindings`; return-position
+`linear` is currently decorative.
+
+#### 2.9.2 The tracker — (T-LinUse), (T-LinDrop), (T-AffDrop)
+
+The tracker is a list of mutable per-binding flags: `lin_entry = { le_name;
+le_lin; le_used : bool ref }` in `env.lin` (`typecheck.ml:401`), pushed by
+`bind_linear` (`:1005`). Note `le_used` is a has-been-used BOOLEAN, not a
+count — "exactly once" is enforced as (used at least once, checked at scope
+close) ∧ (a second use errors immediately).
+
+- **(T-LinUse)** — every `EVar` reference calls `record_use` (`:2807`, call
+  site `:3630`). If the entry is already used:
+  - Linear: `` The linear value `x` is used more than once here. `` +
+    `Linear values must be consumed exactly once — they cannot be copied or ignored.`
+  - Affine: `` The affine value `x` is used more than once here. `` +
+    `Affine values may be used at most once.`
+- **(T-LinDrop)** — at fn-body close and at `linear let` scope close,
+  `check_linear_all_consumed` (`:2891`) errors for every never-used entry
+  with `le_lin = Linear`:
+  `` The linear value `x` was never used. `` +
+  `Linear values must be consumed exactly once — did you mean to pass it somewhere?`
+- **(T-AffDrop)** — the same check FILTERS to `Linear` only: an affine value
+  may be silently dropped (verified accept: an unused `c : affine T` param).
+
+A message `send(pid, Ctor(x))` is an ordinary consuming use of `x` (the
+`EVar` inside the payload triggers `record_use`) — a linear value MAY be
+sent to an actor, and using it again after the send is a (T-LinUse)
+violation. (Witnesses: `accept/t68`, `reject/t66`. This corrects the
+tutorial's former claim that linear values cannot be sent — finding **L6**.)
+
+#### 2.9.3 Closures, match, fields — (T-LinClosure), (T-LinMatch), (T-LinField)
+
+- **(T-LinClosure)** — `ELam` snapshots the outer `le_used` flags before
+  checking the body and errors if a tracked outer linear var became used
+  inside (`:4265`): `` The linear value `x` cannot be captured by a closure. ``
+  (+ `A closure may be called multiple times, which would violate the
+  exactly-once guarantee.`)
+- **(T-LinMatch)** — matching on a tracked linear variable is itself a use
+  (the scrutinee `EVar` passes through `record_use`), and pattern-bound
+  variables INHERIT the scrutinee's linearity (`bind_pattern_bindings`,
+  `:2858`: a `TLin`-typed binding uses the wrapper's linearity; otherwise
+  bindings inherit from a linear scrutinee var). Using the original after
+  the match is a (T-LinUse) violation.
+- **(T-LinField)** — a `linear` record field is tracked via a phantom
+  sentinel entry named `var#field`, registered when the record is
+  **let-bound** (`bind_linear_field_sentinels`, call sites `:2846`/`:2882`);
+  each `EField` access calls `record_use` on the sentinel (`:4409`).
+  Diagnostics render the sentinel as `var.field` (`lin_display_name`,
+  `:2800`). **Honest caveat (finding L3, OPEN):** fn-param-bound records get
+  NO sentinel — a param's linear-field double access degrades to a WARNING
+  (`` Field `f` has a linear type but linearity tracking is not available
+  for `p` at this binding site. ``) and is NOT an error. Enforcement holds
+  only for locally-let-bound records.
+
+#### 2.9.4 Linearity transparency — (T-LinCoerce)
+
+`linear T` is transparent everywhere EXCEPT the tracker:
+
+- unification coerces `TLin` against bare types (the `TLin` arms near
+  `typecheck.ml:2420`) — a `linear Int` unifies with an expected `Int`;
+- impl matching strips it (`impl_matches_ty`'s `TLin`/`TLin` arm) —
+  `linear T` matches an `impl I(T)` and vice versa; linearity is NOT part of
+  type identity for impl search (§1's note on `TLin` still applies);
+- constraint discharge strips it (`discharge_constraints`' `strip_lin`,
+  `:5506`) — `linear Int` satisfies `Num`/`Ord`/interface constraints
+  exactly as `Int` does. **This third leg was MISSING until 2026-07-10**
+  (finding **L2**, FIXED in this slice): an expression-position `linear Int`
+  (a linear field access, or a `linear Int`-returning call, used in
+  arithmetic) rejected with `` `linear Int` does not implement Num. `` before
+  the tracker ever ran. Var-position `TLin` never leaked — binding sites
+  strip the wrapper and store the inner type.
+
+#### 2.9.5 Known gaps (all filed in `specs/todos.md`)
+
+- **L1** — `affine` param-keyword is a parse error (§2.9.1).
+- **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
+- **L4** — `always_linear_types` is NAME-keyed and GLOBAL: a user
+  `type Handle = H(Int)` silently inherits linearity from stdlib's
+  `always_linear type Handle` (`stdlib/handle.march`) — a program with zero
+  `linear` keywords gets hard (T-LinDrop) errors — and the constructor
+  namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
+  against the user's own `H`). Avoid stdlib-colliding type names.
+- **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
+  (Newtype/Niche) allocs, so any non-escaping local construction consumed by
+  a direct `match` read garbage compiled (the annotation in the original
+  filing was a red herring — the plain form was equally broken). No longer
+  promotion candidates (`escape.ml`); `g41` regression-witnesses the fixed
+  direct-match shape (see `core-march.md` §4.12).
+- **L8** — a `linear` qualifier on a fn RETURN type does not propagate to a
+  plain `let` of the result (§2.9.1's return-position caveat) —
+  return-position `linear` is currently decorative.
+- **F7** (session types, §2.7.8) — session-channel linearity holds only for
+  `let`-threaded continuations: reusing a linear PARAMETER endpoint at a
+  coincidentally-matching state, and dropping an unclosed `SEnd` channel,
+  both slip through. The generic tracker described here is the ONLY
+  session-linearity enforcement.
+
+#### 2.9.6 Corpus witnesses
+
+Accept: `t64_linear_let_single_use`, `t65_linear_param_single_use`,
+`t66_affine_ty_param_drop`, `t67_linear_field_arith_single` (requires the L2
+fix), `t68_linear_send_consumes`. Reject (with pinned diagnostics):
+`t58`–`t66` per `types/INDEX.md` (drop, double-use, match-reuse, closure
+capture, let-bound field double-access, affine double-use, `always_linear`
+drop, use-after-send). Pre-existing: `reject/t35` (session double-close via
+the same generic tracker).
 
 ## 3. Conformance corpus
 

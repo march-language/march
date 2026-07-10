@@ -1,0 +1,22 @@
+mod Main do
+  -- Linearity widening slice 7 -- (T-LinUse) send-consumes positive: a
+  -- linear value MAY be sent to an actor -- the payload EVar is an ordinary
+  -- consuming use (this corrects the tutorial's former "cannot be sent"
+  -- claim, finding L6). Reject twin: reject/t66 uses r again after the send.
+  -- Ctor named StoreRes to avoid the flat-namespace collision with stdlib
+  -- Method.Put. See core-march-types.md §2.9.2.
+  type Res = R(Int)
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    on StoreRes(r : Res) do
+      { n: 1 }
+    end
+  end
+  fn main() do
+    let pid = spawn(Sink)
+    linear let r : Res = R(7)
+    send(pid, StoreRes(r))
+    run_until_idle()
+  end
+end

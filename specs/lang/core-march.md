@@ -2623,9 +2623,55 @@ comparison. Declaring protocol roles as their own nullary types (as `g38`/
 `g39` do, `type Client = Client`) silences it, but that is optional hygiene,
 not a golden requirement.
 
+### 4.12 Linearity at runtime (operational: there is none)
+
+Linearity (`core-march-types.md` §2.9) is **compile-time-erased**. Neither
+backend performs any use-accounting at runtime; a linearity-correct program
+behaves identically to the same program with every `linear`/`affine`
+annotation deleted. Golden witness: `g41_linear_annotations_erased` (all
+three keyword surfaces — `linear` param, `linear let`, `affine`
+type-modifier binding — prints `42` / `done`, byte-identical, MATCH).
+
+What each layer actually does (all line numbers drift; re-grep):
+
+- **Interpreter** (`eval.ml`): no tracking. `DAlwaysLinearType` is handled
+  identically to `DType` (`eval.ml:~8412`); `chan_send` passes the endpoint
+  through with the comment "the type system ensures linearity; here we just
+  pass it through" (`:~2686`). The only linear-labeled machinery is actor
+  **Drop-on-crash cleanup** — `ai_linear_values` (value, drop-fn pairs,
+  `:~119`), registered by the `own(pid, value)` builtin (`:~3088`) and run in
+  reverse acquisition order at actor death (`:~1827`) — which is resource
+  management, not enforcement.
+- **Compiled backend** (TIR): the surface linearity is lowered onto TIR vars
+  as `v_lin : Lin | Aff | Unr` (`tir.ml:17`, via `lower_types.ml:58-61`) and
+  used ONLY for optimization, never checks: a `send` of a `v_lin = Lin`
+  message emits `march_send_linear` (zero-copy move instead of copy,
+  `llvm_emit.ml:~1576`), and the implicit `$actor` param is marked `Lin` so
+  Perceus elides incrc on field loads (FBIP in-place mutation,
+  `lower_actor.ml:~92`). The *type*-level `TLin` wrapper is stripped at both
+  lowering entries (`lower_types.ml:51` surface, `:92` typecheck-ty).
+- **Consequence**: any program the static tracker fails to reject (the L3/L4
+  param-field and F7 session-parameter gaps, `specs/todos.md`) runs with NO
+  runtime backstop — same posture as the capability system (§2.8's
+  runtime-erased `Cap(X)`).
+
+**Finding L7 (FIXED 2026-07-10 — was: direct `match` on a local
+Newtype-repr construction printed garbage compiled):** g41's first-ever run
+caught escape analysis stack-promoting a non-escaping ERASED-repr alloc
+(`let c = R(22)` — annotation irrelevant, the plain form was equally broken)
+into a boxed stack cell that the match then decoded under the erased
+convention (untagging the raw stack address). Erased-repr (Newtype/Niche)
+allocs are no longer stack-promotion candidates
+(`lib/tir/escape.ml` `alloc_emits_heap_cell` — they emit immediates, so
+promotion was also a strict pessimization), and `llvm_emit.ml`'s
+`EStackAlloc` arm fails loudly if one ever slips through. `g41` now consumes
+its affine binding via a DIRECT match — the exact shape that was broken —
+as the permanent regression witness. Full writeup in `specs/todos.md`
+(Linearity section, L7 ✅).
+
 ## 5. Golden conformance corpus
 
-Thirty-nine programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-one programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original

@@ -283,6 +283,154 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
+
+**Slice-7 finding L7 is FIXED**, with a corrected diagnosis: the original
+filing blamed the `TyLinear` annotation, but the annotation was a red herring
+— ANY non-escaping local construction of a Newtype- (or Niche-) repr ADT
+consumed by a direct `match` read nondeterministic garbage compiled
+(`let c = R(22); match c do R(n) -> n end` printed the untagged stack
+address). Root cause (found by IR diff): `escape.ml` promoted the `EAlloc`
+to `EStackAlloc` (the match scrutinee is a non-escaping position), whose
+emission builds an unconditional BOXED stack cell — while every consumer of
+an erased-repr value decodes immediates. Construction and consumption
+disagreed on representation within one function. Fix: `alloc_emits_heap_cell`
+gates promotion candidacy to genuinely Boxed allocs (erased allocs emit NO
+cell — promoting them was also a strict pessimization), and `llvm_emit`'s
+`EStackAlloc` arm now fails loudly on an erased-repr type. Two pre-existing
+`escape_analysis` unit tests had used `Box(Int)` — a Newtype — as their
+vehicle and were asserting the broken behavior (invisible to them: they
+inspect TIR, never emitted IR); re-vehicled to Boxed `Box(Int, Int)` + a new
+L7 pin test. Golden `g41` now exercises the fixed direct-match shape.
+Suite green (compiler 503 / eval 232 / codegen 401 / stdlib 807); snapshots
+unchanged; verify.sh 41/41; `bench/list_ops` perf sanity normal.
+
+**New finding filed en route:** `bench/tree_transform.march` and
+`bench/binary_trees.march` no longer typecheck on main — their `ptype Tree`
+collides with the parameterized `Tree` types the merged stdlib work added to
+`ordered_map`/`sorted_set` (flat-namespace/L4 family; even `ptype` doesn't
+shield). Also filed post-merge: sibling-module constructor shadowing
+(`d95fe942` regression caught by `accept/t35`, reconciled).
+
+## Current State (as of 2026-07-10, Core March widening slice 7 — linear/affine types, CLOSEOUT)
+
+**Slice 7 widens the conformance-tested references to the linear/affine type
+system** (`core-march-types.md` §2.9 static rules, `core-march.md` §4.12
+runtime-erasure account; six tasks: one compiler fix + docs/corpus). Survey:
+20 live probes + two parallel doc/impl surveys
+(`specs/plans/2026-07-10-widening-linear-types-plan.md`).
+
+**In-slice compiler fix (L2, `64dae5c0`):** `discharge_constraints` never
+stripped `TLin`, so an expression-position `linear Int` (a linear field
+access, or a `linear Int`-returning call, used in arithmetic) rejected with
+`` `linear Int` does not implement Num `` even for a single correct use —
+linear primitive fields were unusable with operators. `strip_lin` now applied
+at all three discharge sites, completing the TLin-transparency triad (unify
+coercion + `impl_matches_ty` already stripped it). Also fixed: the `p#data`
+sentinel leaking into diagnostics (L5), and the PRE-EXISTING unit test
+`test_linear_field_double_access_error` passing VACUOUSLY on the L2 error
+(rewritten to the let-bound shape; the param shape pinned as warning-only).
+Compiler suite 486 → 489.
+
+**Corpus:** types 120 → **134** (68 accept / 66 reject; `accept/t64`–`t68`,
+`reject/t58`–`t66`, every diagnostic live-pinned); golden 40 → **41**
+(`g41_linear_annotations_erased` — linearity is compile-time-erased,
+byte-identical both backends). `check_types.sh` 134/134; `verify.sh` 41/41.
+
+**Eight findings (L1–L8), all live-verified, filed in `specs/todos.md`:**
+L2/L5 FIXED in-slice; L6 resolved (tutorial self-contradiction — linear
+values CAN be sent to actors; send is the consuming use); OPEN: L1 (`affine`
+param-keyword is a parse error — the tutorial's own affine example never
+parsed), L3 (param-bound linear-field tracking is warning-only), L4
+(`always_linear_types` is name-keyed globally — a user type named `Handle`
+silently inherits linearity from stdlib), **L7 (compiled, memory-unsafe-class:
+a direct `match` on a `TyLinear`-annotated Newtype-repr binding reads
+nondeterministic garbage — caught by golden g41's FIRST run; g41 documents
+around it, MPST-exclusion style)**, and L8 (return-position `linear` is
+decorative — does not propagate to a plain `let` of the result; caught by the
+closeout's tutorial re-verification). Existing F7 (session-parameter reuse /
+unclosed-drop) reconfirmed and cross-referenced as the same generic tracker's
+blind spots.
+
+**`specs/lang/linear-types.md` (the canonical tutorial) reconciled:** the
+unparseable affine-param example rewritten to the type-modifier form (L1);
+both flagship error texts replaced with the real diagnostics; the
+send-to-actor self-contradiction resolved to send-consumes (L6); the false
+"the callee's return type carries the constraint" claim corrected (L8);
+linear-field caveats (L3, post-L2 arithmetic) added; a previously-missing
+`always_linear type` section added with the L4 collision warning; the
+session-types claims scoped to F7's honest enforcement reality; the broken
+`types.md` link fixed to `type-system.md`. Every edited example live-verified.
+
+## Current State (as of 2026-07-09, multi-scheduler stack-corruption crash FIXED — TLS migration barrier + single-owner run queues)
+
+**The pre-existing multi-scheduler kill+respawn stack-corruption crash is
+FIXED** (plan `specs/plans/2026-07-09-scheduler-single-owner-fix.md`; commits
+dd9e293f, b1e050a2, 9407cc6f, 81adf1b1 — `runtime/march_scheduler.{c,h}` only).
+The actual root cause was NOT the suspected deque double-dispatch: clang -O2
+inlined `march_sched_yield` into `march_sched_wait_idle`'s loop and hoisted the
+`tl_sched` thread-local address out of the loop, so after a yield migrated the
+green thread to another OS thread (work stealing), later iterations operated on
+the ORIGINAL thread's scheduler — forcing the wrong (running) proc to RUNNABLE,
+overwriting its live ucontext, and resuming the wrong scheduler's `sched_ctx`
+on the wrong thread (two OS threads in one `sched_loop`). Fixed by making
+`march_sched_yield`/`march_sched_recv` `noinline` **migration barriers**, plus
+pre-materializing `march_tls_reductions` before SIGUSR1 preemption can
+first-touch it inside a signal handler (Darwin lazy-TLV mallocs). Hardening
+landed with it: cross-thread Chase-Lev pushes eliminated (all wakes go through
+a new mutex-FIFO global run queue, drained first each dispatch iteration),
+dispatch claims procs via CAS `RUNNABLE→RUNNING` (`PROC_READY` renamed
+`PROC_RUNNABLE`), and permanent `MARCH_DEBUG` tripwires (`dbg_queued`,
+`dbg_running_on`, fatal-fault triage) abort at the moment a single-membership /
+single-dispatcher violation happens. Evidence: `examples/supervision_strategies.march`
+and the supervision-free minimal repro each 200/200 clean at
+`MARCH_NUM_SCHEDULERS=4` and 200/200 at N=8 (baseline ~46–52% crash/hang per
+run); the compile-time default remains 4; the `=1` mitigation is obsolete. The
+demo remains a demo, not a golden — concurrent worker prints interleave
+nondeterministically (30/30 runs byte-differ), inherent to parallel actors.
+
+Six-runner suite green (804 stdlib tests; compiler/eval/codegen/native all
+passing); no regressions from the runtime changes.
+
+## Current State (as of 2026-07-09, compiled actor supervision implemented + scheduler race characterized)
+
+**Compiled actor supervision now works.** The six-task plan
+`specs/plans/2026-07-08-compiled-actor-supervision-plan.md` closed the last
+big interp-vs-compiled supervision gap: pid encoding (`march_pid_of_int` +
+dead-actor sentinel), external actor-state inspection (`march_get_actor_field`
+via the runtime shape-registry + spawn-time `emit_set_shape` stamping),
+spawn-time child injection (`lower_actor.ml` + `march_actor_register_child`),
+per-`march_proc` `crash_jmp` crash isolation, and all three restart strategies
+(`one_for_one`/`one_for_all`/`rest_for_one`) are compiled and byte-identical to
+the interpreter for the deterministic single-restart witnesses. **6 native
+golden tests** (`test/native/{pid_of_int_roundtrip, get_actor_field_direct,
+supervisor_spawn_children, supervisor_one_for_one_restart,
+supervisor_one_for_all_restart, supervisor_rest_for_one_restart}`), each
+stress-verified stable. Two genuine bugs fixed en route: `<ActorName>_spawn`
+referenced as a value is ALWAYS a March closure (offset-16 wrapper dance), not a
+bare C fn pointer; and the crash-trap pointer must live on `march_proc`, not a
+`_Thread_local` (this scheduler steals procs across OS threads).
+
+**Pre-existing multi-scheduler race characterized + verified fixes landed.**
+The full 3-strategy demo `examples/supervision_strategies.march` exposed a
+PRE-EXISTING (proven via a supervision-free repro at commit `e355aeff`),
+intermittent, MEMORY-UNSAFE crash under the default 4-OS-thread work-stealing
+scheduler — a green thread's stack corrupted by confirmed DOUBLE-DISPATCH
+(same `march_proc` run by two scheduler threads at once). Proven
+scheduler-count-dependent: `MARCH_NUM_SCHEDULERS=1` → 40/40 clean; that env
+override is the mitigation for rapid-kill+respawn compiled programs. Four
+TSan/ASan-confirmed real races were fixed this session (mailbox unlocked
+fast-path; proc-lifecycle UAF via leak-don't-free; `meta->supervisor`
+unsynchronized publish; and the ASan+TSan **fiber-switch annotations** the
+sanitizer integration was missing entirely around `swapcontext`). The core
+double-dispatch double-enqueue remains open (a CAS claim cut crashes ~50%→~30%
+but had its own gap; reverted). Full writeup + next avenues (valgrind/helgrind,
+double-enqueue source, or `NUM_SCHEDULERS=1` compile-time default) in
+`specs/todos.md`. The demo is deliberately NOT a golden (flaky under the
+pre-existing race); the 6 smaller supervision goldens are stable.
+
+Six-runner suite green (compiler 486 / eval 231 / codegen 394 / stdlib 804);
+no regressions from the runtime changes.
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type

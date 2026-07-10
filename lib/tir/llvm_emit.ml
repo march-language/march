@@ -2395,6 +2395,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          let v_coerced = coerce ctx v_ty v_val field_ty in
          emit_store_field ctx ptr i field_ty v_coerced
        ) args;
+       (* Actor structs get a runtime shape id stamped into the header pad
+          word so get_actor_field's C implementation (march_get_actor_field,
+          runtime/march_extras.c) can look up a named state field by the
+          actor's own shape at runtime, regardless of whether the caller's
+          static Pid(a) type is concrete at that call site (it usually is
+          NOT — a call routed through a small generic helper like
+          child_int(sup, field) never resolves `a` past an abstract type
+          variable, since nothing in get_actor_field's own signature forces
+          monomorphization on it). Scoped to actor structs only via
+          is_actor_struct_name — not a general shape-stamping change for
+          every Boxed EAlloc/ctor-application site. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then
+         emit_set_shape ctx ptr (get_record_fields ctx (Tir.TCon (alloc_type_name, [])));
        (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
           after allocation so the actor green thread uses the hot-reload table.
           Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
@@ -2431,6 +2444,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
+    (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
+       unconditionally, so it must never receive a Newtype- or Niche-repr
+       type — those "allocs" are erased immediates, and every consumer
+       decodes them under the erased convention (an ECase would untag the
+       stack POINTER → garbage). Escape.alloc_emits_heap_cell keeps such
+       allocs out of stack promotion; fail loudly if one slips through. *)
+    let sa_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (sa_type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ ->
+       failwith (Printf.sprintf
+         "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
+          construction would be boxed but consumers decode erased; \
+          escape analysis must not promote this alloc (finding L7)"
+         sa_type_name ctor)
+     | Repr.Boxed ->
+       if Repr.is_niche_shaped ctx.type_defs sa_type_name then
+         failwith (Printf.sprintf
+           "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
+            same erased-vs-boxed split as Newtype (finding L7)"
+           sa_type_name ctor));
     let entry = ctor_entry ctx ctor (List.length args) in
     let ptr = emit_stack_alloc ctx (List.length args) in
     emit_store_tag ctx ptr entry.ce_tag;
