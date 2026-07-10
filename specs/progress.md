@@ -283,6 +283,49 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, Random + int builtins on `--target js`; portable sfc32 Random core)
+
+Resolves the 2026-07-09 Starfling P1 ("`Random` unusable on `--target js`").
+
+- **JS-target mappings for the int builtins** (`lib/tir/js_emit.ml` +
+  `runtime/march_runtime.mjs`): `int_and/or/xor/not/shl/shr/popcount/mod/div/
+  mod_euclid/div_euclid` delegate to new checked runtime implementations that
+  mirror the interpreter's semantics (logical `int_shr` on the 63-bit pattern;
+  `int_popcount`'s sign-bit flip) exactly within the double-exact range
+  ±(2^53−1) and throw a descriptive RangeError beyond it — never a silent
+  rounding. Fast paths (int32; non-negative 2^32-radix split) keep 32-bit-domain
+  code off BigInt (~35 ns/op vs ~53 ns/op BigInt path). Also mapped:
+  `int_abs`, `unix_time`, `float_abs/floor/ceil`, and `float_round`
+  (half-away-from-zero, matching OCaml `Float.round`; JS `Math.round` differs
+  on negative halves). All get first-class `$clo` wrappers.
+- **Unmapped builtins on `--target js` are now a compile error** (sorted
+  `Js_emit_error` diagnostics, one per name; `int_max_value`/`int_min_value`
+  get a tailored "±2^62 is unrepresentable" message) instead of a silent
+  bare-call emit that threw `ReferenceError` at runtime. Negative golden:
+  `test/native/js_unmapped_builtin.{march,expected}`. The whole-stdlib
+  `test/whole_program/zoo.mjs` becomes a frozen pre-change artifact (its
+  re-emission now correctly fails on 98 C-backed builtins: tcp/tls/actors/
+  process/files/native-arrays).
+- **`stdlib/random.march` core rewritten: 63-bit xoshiro256\*\* → sfc32 on
+  32-bit words.** Public API and `Rng` record shape unchanged. Every
+  intermediate stays below 2^53, so sequences are exact and IDENTICAL on the
+  interpreter, native, and JS backends (verified: equal 200k-draw checksums;
+  ~0.10 µs/draw native `--opt 2`, ~0.70 µs/draw node). `next_int` is now
+  uniform in [0, 2^52) — the widest portable width; seeding is
+  splitmix32-style over base-2^32 seed digits, extracted without shifting
+  negative words. New golden `test/native/js_random_determinism.{march,
+  expected}` (three-rule js pattern in `test/dune`) pins determinism; its
+  .expected equals interpreter/native output byte-for-byte.
+- **Found and filed (P1, not fixed here):** self-referencing block-`let`
+  shadowing (`let x = x + 5`) miscompiles to silently wrong values on BOTH
+  compiled backends (interpreter correct) — shared-TIR bug, spawn_task
+  `task_259907b1`; `int_div_euclid` has no native codegen mapping (link
+  error), spawn_task `task_2ebbf5da`.
+
+Full suite green: **451 compiler / 231 eval / 394 codegen / 807 stdlib** (the
+pre-existing full-suite baseline failures unchanged); all 8 js goldens +
+2 negative js goldens pass.
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type

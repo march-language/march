@@ -1874,10 +1874,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
 
-; js_random_determinism: native/js_random_determinism.march is a KNOWN-BROKEN
-; repro (Random crashes on --target js — missing int_max_value mapping + 63-bit
-; ints don't fit JS doubles; see specs/todos.md P1). No rule on purpose; wire it
-; up as a golden once fixed.
+; js_random_determinism — pins stdlib Random on the JS target: the fixture
+; self-checks range/distinctness and the golden diff pins cross-run
+; determinism. Random's sfc32 core is exact on every backend, so the
+; .expected values are identical to the interpreter's and native's output.
+(rule
+ (targets js_random_determinism.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_random_determinism.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_random_determinism.mjs native/js_random_determinism.march)))
+
+(rule
+ (targets js_random_determinism.out)
+ (deps js_random_determinism.mjs march_runtime.mjs)
+ (action (with-stdout-to js_random_determinism.out (run node js_random_determinism.mjs))))
+
+(rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
 
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
@@ -1946,6 +1959,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
          -o js_ffi_cbacked.mjs native/js_ffi_cbacked.march)))))
 
 (rule (alias runtest) (action (diff native/js_ffi_cbacked.expected js_ffi_cbacked.err)))
+
+; js_unmapped_builtin — negative test: a builtin with no JS mapping must be a
+; compile error (previously a silent bare-call emit → runtime ReferenceError)
+(rule
+ (targets js_unmapped_builtin.err)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_unmapped_builtin.march))
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to js_unmapped_builtin.err
+    (run %{exe:../bin/main.exe} --target js
+         -o js_unmapped_builtin.mjs native/js_unmapped_builtin.march)))))
+
+(rule (alias runtest) (action (diff native/js_unmapped_builtin.expected js_unmapped_builtin.err)))
 
 ; js_ffi_blocking_raises — both flags set: await + try/catch → Ok/Err
 (rule
