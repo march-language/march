@@ -371,6 +371,59 @@ let test_lib_path_env_walks_transitive_path_deps () =
                     through midb, got Error: " ^ m)
               | Ok _ -> ())))
 
+(** Regression for the direct-vs-transitive same-name dep precedence bug.
+
+    A depends DIRECTLY (path) on both [midb] and [leafc]; [midb] itself
+    depends on [leafc] via a GIT dep (which resolves to the empty CAS dir
+    and contributes NO lib path).  [collect_transitive_deps] used to walk
+    DEPTH-FIRST: for [deps = [midb; leafc]] it descended into midb's deps and
+    claimed midb's git `leafc` FIRST, so A's own direct path `leafc` was
+    dropped as already-visited — leaving leafc's lib entirely off
+    MARCH_LIB_PATH.  A's own code calling [Leaf.value()] then failed with
+    "Unknown module Leaf" even though A directly path-deps leafc.
+
+    This is the minimal shape of the observed bastion+depot+march_doc failure:
+    bastion git-deps depot, the consumer path-deps depot, and depot's modules
+    (Depot/Connection/Db/Pool + their constructors) all went unresolvable.
+
+    The fix walks BREADTH-FIRST by depth, so every DIRECT dep is claimed
+    before any transitive dep — the direct path dep wins. *)
+let test_direct_path_dep_beats_transitive_git_dep () =
+  let c_root = make_path_dep_project ~name:"leafc" ~deps:[] in
+  Fun.protect ~finally:(fun () ->
+      let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote c_root)) in ())
+    (fun () ->
+      write_file (Filename.concat c_root (Filename.concat "lib" "leaf.march"))
+        "mod Leaf do\n\n  fn value() : Int do\n    99\n  end\n\nend\n";
+      (* midb: same-named [leafc] dep, but via GIT (unresolvable — empty CAS). *)
+      let b_root = Filename.temp_dir "forge_transdep_midb_" "" in
+      Unix.mkdir (Filename.concat b_root "lib") 0o755;
+      write_file (Filename.concat b_root "forge.toml")
+        "[package]\nname = \"midb\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n\
+         [deps]\nleafc = { git = \"https://example.invalid/leafc.git\", branch = \"main\" }\n";
+      write_file (Filename.concat b_root (Filename.concat "lib" "mid.march"))
+        "mod Mid do\n\n  fn value() : Int do\n    1\n  end\n\nend\n";
+      Fun.protect ~finally:(fun () ->
+          let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote b_root)) in ())
+        (fun () ->
+          with_project ~project_type:Project.Lib (fun _name root ->
+              let toml_path = Filename.concat root "forge.toml" in
+              let oc = open_out_gen [Open_append] 0o644 toml_path in
+              (* midb declared BEFORE leafc so a depth-first walk hits midb's
+                 transitive git `leafc` before A's own direct path `leafc`. *)
+              Printf.fprintf oc "\n[deps.midb]\npath = %S\n" b_root;
+              Printf.fprintf oc "\n[deps.leafc]\npath = %S\n" c_root;
+              close_out oc;
+              let user_mod = Filename.concat root (Filename.concat "lib" "user_mod.march") in
+              write_file user_mod
+                "mod UserMod do\n\n  fn use_leaf() : Int do\n    Leaf.value()\n  end\n\nend\n";
+              match Cmd_check.check () with
+              | Error m ->
+                Alcotest.fail
+                  ("expected A's DIRECT path dep leafc to win over midb's \
+                    transitive git leafc, got Error: " ^ m)
+              | Ok _ -> ())))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -392,6 +445,8 @@ let () =
         test_check_qualified_cycle_does_not_break_bare_ctor_ordering;
       Alcotest.test_case "lib_path_env walks transitive path deps" `Quick
         test_lib_path_env_walks_transitive_path_deps;
+      Alcotest.test_case "direct path dep beats transitive git dep of same name" `Quick
+        test_direct_path_dep_beats_transitive_git_dep;
     ];
     "forge build", [
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
