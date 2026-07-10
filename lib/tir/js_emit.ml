@@ -43,6 +43,15 @@ type ctx = {
   (* direct-call names that resolve to nothing (not a user fn, local fn,
      extern, or mapped builtin): emitting them would produce a runtime
      ReferenceError, so emit_module raises Js_emit_error instead *)
+  name_env     : (string, string) Hashtbl.t;
+  (* source local-binding name → the JS identifier it is currently emitted as.
+     A `let x = …` that SHADOWS an in-scope `x` is emitted under a fresh unique
+     JS name (x$sN) so the RHS — evaluated while the outer `x` is still the
+     live one — never resolves to the block-hoisted inner `const x` in its
+     temporal dead zone. Populated with params (identity) at fn entry, then
+     pushed/popped around each ELet body. *)
+  mutable shadow_ctr : int;
+  (* monotonic counter minting the $sN suffix for shadowing rebindings *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -60,6 +69,8 @@ let create_ctx ?(fn_lines=[]) () = {
   segments     = ref [];
   local_fns    = Hashtbl.create 8;
   unmapped     = Hashtbl.create 4;
+  name_env     = Hashtbl.create 16;
+  shadow_ctr   = 0;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -148,6 +159,53 @@ let emit_atom_raw ctx = function
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
   | Tir.ALit l    -> emit_literal ctx l
 
+(** The JS identifier a source local name is currently emitted as.
+    Falls back to the plain mangling for anything not in [name_env]
+    (closure free-vars accessed via EField, or top-level names). *)
+let js_local ctx name =
+  match Hashtbl.find_opt ctx.name_env name with
+  | Some js -> js
+  | None    -> mangle name
+
+(** Mint the JS identifier for a NEW local binding of [name]. When [name] is
+    already in scope the binding SHADOWS it, so we mint a fresh unique id
+    (name$sN) — this is what makes a self-referential rebinding safe on JS:
+    the RHS (emitted before [install_local]) still resolves the source name to
+    the outer binding, and the fresh inner id never collides with it (no
+    temporal-dead-zone read of a same-named block-hoisted const). *)
+let fresh_local_name ctx name =
+  if Hashtbl.mem ctx.name_env name then begin
+    ctx.shadow_ctr <- ctx.shadow_ctr + 1;
+    mangle name ^ "$s" ^ string_of_int ctx.shadow_ctr
+  end else mangle name
+
+(** Install [js] as the current emission of source [name]; returns the previous
+    mapping so [unbind_local] can restore it when the binding leaves scope. *)
+let install_local ctx name js =
+  let prev = Hashtbl.find_opt ctx.name_env name in
+  Hashtbl.replace ctx.name_env name js;
+  prev
+
+let unbind_local ctx name prev =
+  match prev with
+  | Some o -> Hashtbl.replace ctx.name_env name o
+  | None   -> Hashtbl.remove ctx.name_env name
+
+(** Bind a case branch's pattern variables: emit `const <js> = <scrut>._i` for
+    each and register it (shadow-renaming an outer same-named local), so the
+    branch body's uses resolve to the pattern binding rather than any outer
+    rename. Returns the restore list for [unbind_br_vars] after the body. *)
+let bind_br_vars ctx scrut_name br_vars =
+  List.mapi (fun i bv ->
+    let nm = bv.Tir.v_name in
+    let js = fresh_local_name ctx nm in
+    emitl ctx (Printf.sprintf "const %s = %s._%d;" js scrut_name i);
+    (nm, install_local ctx nm js)
+  ) br_vars
+
+let unbind_br_vars ctx binds =
+  List.iter (fun (nm, prev) -> unbind_local ctx nm prev) (List.rev binds)
+
 (* Standard atom emission: user-defined function names use their $clo wrapper
    so that ECallPtr dispatch (f._0(f, args)) works when they're first-class.
    Both AVar and ADefRef can hold a module-level function reference — check fn_names.
@@ -163,7 +221,8 @@ let emit_atom ctx = function
     end else if Hashtbl.mem ctx.fn_names v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
     then emit ctx (n ^ "$clo")
-    else emit ctx n
+    (* Local binding: honour any active shadow-rename. *)
+    else emit ctx (js_local ctx v.Tir.v_name)
   | Tir.ADefRef d ->
     let n = mangle d.Tir.did_name in
     if Hashtbl.mem ctx.extern_fns d.Tir.did_name then begin
@@ -684,24 +743,38 @@ and emit_stmts_impl ctx expr =
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
-       Wrap in a block so this binding can shadow an outer variable of the same name. *)
+       Wrap in a block so this binding can shadow an outer variable of the same
+       name; [js] is a fresh id when v shadows, so the case (which sees the
+       OUTER v) and [rest] (which sees the new v) never collide. *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
-    emitl ctx ("let " ^ mangle v.Tir.v_name ^ ";");
-    emit_case ctx (Some (mangle v.Tir.v_name)) case_expr;
+    emitl ctx ("let " ^ js ^ ";");
+    emit_case ctx (Some js) case_expr;
+    let prev = install_local ctx name js in
     emit_stmts ctx rest;
+    unbind_local ctx name prev;
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELet (v, e1, e2) ->
-    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name. *)
+    (* Wrap in a block so this binding can shadow a parameter or outer let of
+       the same name. The RHS [e1] is emitted BEFORE [install_local], so a
+       self-referential rebinding (`let x = x + 1`) resolves its `x` to the
+       OUTER binding; [js] is a fresh id when shadowing, so the inner const
+       never shadows that read in its temporal dead zone. *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emit_indent ctx;
-    emit ctx ("const " ^ mangle v.Tir.v_name ^ " = ");
+    emit ctx ("const " ^ js ^ " = ");
     emit_val ctx e1;
     emit ctx ";\n";
+    let prev = install_local ctx name js in
     emit_stmts ctx e2;
+    unbind_local ctx name prev;
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
@@ -777,7 +850,7 @@ and emit_case_impl ctx result_var expr =
       (* Tuple: exactly one branch, directly destructure _0, _1, ... *)
       List.iter (fun br ->
         let scrut_name = match scrutinee with
-          | Tir.AVar sv -> mangle sv.Tir.v_name
+          | Tir.AVar sv -> js_local ctx sv.Tir.v_name
           | _ ->
             let tmp = "_tup" in
             emit_indent ctx;
@@ -786,15 +859,13 @@ and emit_case_impl ctx result_var expr =
             emit ctx ";\n";
             tmp
         in
-        List.iteri (fun i bv ->
-          emitl ctx (Printf.sprintf "const %s = %s._%d;"
-            (mangle bv.Tir.v_name) scrut_name i)
-        ) br.Tir.br_vars;
+        let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
         (match result_var with
          | Some rv ->
            emit_indent ctx; emit ctx (rv ^ " = ");
            emit_val ctx br.Tir.br_body; emit ctx ";\n"
-         | None -> emit_stmts ctx br.Tir.br_body)
+         | None -> emit_stmts ctx br.Tir.br_body);
+        unbind_br_vars ctx binds
       ) branches;
       (match default with
        | Some d ->
@@ -814,13 +885,11 @@ and emit_case_impl ctx result_var expr =
         emit ctx (" === " ^ literal_tag_js br.Tir.br_tag ^ ") {\n");
         with_indent ctx (fun () ->
           (* bind branch vars (rare for literal patterns, but possible) *)
-          List.iteri (fun j bv ->
-            let scrut_name = match scrutinee with
-              | Tir.AVar sv -> mangle sv.Tir.v_name | _ -> "_s" in
-            emitl ctx (Printf.sprintf "const %s = %s._%d;"
-              (mangle bv.Tir.v_name) scrut_name j)
-          ) br.Tir.br_vars;
-          emit_result br.Tir.br_body)
+          let scrut_name = match scrutinee with
+            | Tir.AVar sv -> js_local ctx sv.Tir.v_name | _ -> "_s" in
+          let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
+          emit_result br.Tir.br_body;
+          unbind_br_vars ctx binds)
       ) branches;
       (match default with
        | Some d ->
@@ -842,7 +911,7 @@ and emit_case_impl ctx result_var expr =
           with_indent ctx (fun () ->
             (* Bind constructor fields to br_vars *)
             let scrut_name = match scrutinee with
-              | Tir.AVar sv -> mangle sv.Tir.v_name
+              | Tir.AVar sv -> js_local ctx sv.Tir.v_name
               | _ ->
                 let tmp = "_scrut" in
                 emit_indent ctx;
@@ -851,10 +920,7 @@ and emit_case_impl ctx result_var expr =
                 emit ctx ";\n";
                 tmp
             in
-            List.iteri (fun i bv ->
-              emitl ctx (Printf.sprintf "const %s = %s._%d;"
-                (mangle bv.Tir.v_name) scrut_name i)
-            ) br.Tir.br_vars;
+            let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
             (match result_var with
              | Some rv ->
                emit_indent ctx;
@@ -863,7 +929,8 @@ and emit_case_impl ctx result_var expr =
                emit ctx ";\n";
                emitl ctx "break;"
              | None ->
-               emit_stmts ctx br.Tir.br_body)
+               emit_stmts ctx br.Tir.br_body);
+            unbind_br_vars ctx binds
           )
         );
         emitl ctx "  }"
@@ -908,7 +975,18 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
      that happen to share a name with a module-level function. *)
   Hashtbl.clear ctx.param_names;
   List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
+  (* Seed the shadow-rename scope with the params (identity mapping) and, for
+     a nested (ELetRec) fn, SAVE the enclosing fn's local scope so it can be
+     restored — a nested fn's body reaches outer values via $fv closure fields,
+     never by their source names, so it only needs its own params in scope. *)
+  let saved_names = Hashtbl.copy ctx.name_env in
+  Hashtbl.clear ctx.name_env;
+  List.iter (fun p ->
+    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name))
+    fn.Tir.fn_params;
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  Hashtbl.clear ctx.name_env;
+  Hashtbl.iter (fun k v -> Hashtbl.replace ctx.name_env k v) saved_names;
   Hashtbl.clear ctx.param_names;
   emit_indent ctx;
   emit ctx "}\n";

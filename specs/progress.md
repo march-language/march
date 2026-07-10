@@ -316,15 +316,20 @@ Resolves the 2026-07-09 Starfling P1 ("`Random` unusable on `--target js`").
   negative words. New golden `test/native/js_random_determinism.{march,
   expected}` (three-rule js pattern in `test/dune`) pins determinism; its
   .expected equals interpreter/native output byte-for-byte.
-- **Found and filed (P1, not fixed here):** self-referencing block-`let`
-  shadowing (`let x = x + 5`) miscompiles to silently wrong values on BOTH
-  compiled backends (interpreter correct) — shared-TIR bug, spawn_task
-  `task_259907b1`; `int_div_euclid` has no native codegen mapping (link
-  error), spawn_task `task_2ebbf5da`.
+- **Two compiler bugs found while building this, both since FIXED** (see the
+  dedicated Done entries in `specs/todos.md`): the self-referencing block-`let`
+  shadowing miscompile (`let x = x + 5` silently wrong on native + JS,
+  interpreter correct) — a `lib/tir/cprop.ml` shadow-env leak on the shared-TIR
+  side plus a `lib/tir/js_emit.ml` temporal-dead-zone on the JS side, each with
+  a regression test/golden — and `int_div_euclid`'s missing native codegen
+  mapping (`main` `cf604dcd`). With the shadowing bug fixed, `stdlib/
+  random.march`'s `mix32` was restored from its distinct-name workaround to the
+  classic self-shadowing splitmix32 idiom (`let x = f(x)` chain); the Random
+  golden stayed byte-identical.
 
-Full suite green: **451 compiler / 231 eval / 394 codegen / 807 stdlib** (the
-pre-existing full-suite baseline failures unchanged); all 8 js goldens +
-2 negative js goldens pass.
+Full suite green: **451 compiler / 231 eval / 396 codegen / 807 stdlib** (the
+pre-existing full-suite baseline failures unchanged); all 11 js goldens (9
+positive + 2 negative) pass.
 
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 

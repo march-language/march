@@ -51,14 +51,11 @@ mod Random do
   end
 
   -- splitmix32-style avalanche hash of one 32-bit word — used for seeding.
-  -- (Distinct binding names on purpose: self-referencing `let x = f(x)`
-  -- shadowing currently miscompiles on the native/JS backends — the RHS
-  -- reads the wrong binding. See specs/todos.md, filed 2026-07-10.)
   pfn mix32(x : Int) : Int do
-    let a = mask32(x + 2654435769)
-    let b = mul32(int_xor(a, int_shr(a, 16)), 569420461)
-    let c = mul32(int_xor(b, int_shr(b, 15)), 1935289751)
-    int_xor(c, int_shr(c, 15))
+    let x = mask32(x + 2654435769)
+    let x = mul32(int_xor(x, int_shr(x, 16)), 569420461)
+    let x = mul32(int_xor(x, int_shr(x, 15)), 1935289751)
+    int_xor(x, int_shr(x, 15))
   end
 
   -- Discard k outputs (seeding warm-up, standard for sfc32).
@@ -77,9 +74,8 @@ mod Random do
     -- Base-2^32 digits of n. lo is the low word (int_and sign-extends
     -- consistently on every backend); n - lo is then an exact multiple of
     -- 2^32, so plain truncating division recovers the high word portably —
-    -- deliberately no shifting of possibly-negative words (int_shr is
-    -- logical in the interpreter but arithmetic natively), and no
-    -- int_div_euclid (no native codegen mapping yet).
+    -- deliberately no shifting of possibly-negative words, since int_shr is
+    -- logical in the interpreter but arithmetic natively.
     let lo = mask32(n)
     let hi = mask32((n - lo) / 4294967296)
     let a = mix32(lo)

@@ -6508,6 +6508,28 @@ let test_compiled_int_div_euclid_parity () =
     ~expected:"[3, -4, 4, -3]"
     ()
 
+(** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
+    the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
+    left the outer binding's literal mapping (`x -> 10`) in scope when the
+    shadowing RHS was not itself a literal/alias/record, so the body's uses of
+    the *new* `x` were substituted with the *old* value — a silently-wrong
+    compile on BOTH the native and JS backends (interpreter was correct). The
+    chain `((10 + 5) * 2)` discriminates cleanly: correct = 30, buggy = 10
+    (every shadow kept reading the original 10). *)
+let test_compiled_let_shadowing_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_let_shadowing"
+    ~src:"mod LetShadowParity do\n\
+         \  fn main() do\n\
+         \    let x = 10\n\
+         \    let x = x + 5\n\
+         \    let x = x * 2\n\
+         \    println(int_to_string(x))\n\
+         \  end\n\
+          end\n"
+    ~expected:"30"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -8140,6 +8162,8 @@ let codegen_suites =
       ( "iface_impl_mono_codegen", [
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
+            test_compiled_let_shadowing_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
