@@ -508,6 +508,43 @@ was *constructed boxed* but *tuple-nested-destructured as a newtype*, so compile
   RC benchmarks unchanged. Compiled `Bytes.concat` byte-correct AND native forgepm clears
   the live Postgres handshake on the deploy droplet → unblocks the native deploy.
 
+## Current State (as of 2026-07-10, self-referencing block-let shadow miscompile fixed)
+
+Block-let lowering (`lib/tir/lower.ml`) emitted a shadowing rebinding under the
+SAME source name — `let x = 10; let x = x + 5; …` lowered to
+`let x = 10 in let x = +(x,5) in int_to_string(x)`. That tree is structurally
+correct (proper lexical nesting), and native codegen (`llvm_emit`) copes by
+renaming colliding alloca slots (verified: `--emit-llvm --no-opt` is correct).
+But every NAME-BASED TIR pass captures across the shadow: copy-prop/fold (on at
+all `--opt` levels — `opt_enabled` is orthogonal to the clang `--opt N` level)
+records `x -> 10` from the OUTER binding and substitutes it into the inner
+binding's USE site `int_to_string(x)`, folding to `int_to_string(10)` (the
+inner binding then dies and is DCE'd). So `--compile` printed `10`, `--target js`
+folded to `String(10)`, and a non-foldable chain emitted nested
+`{ const x = (…x…) }` that TDZ-faults in JS — all three silently wrong while the
+interpreter (lexical scoping) printed the correct `15`.
+
+- **Fix:** new `Lower_decls.uniquify_fn`, mapped over every function at the end
+  of `Lower.lower_module`. A scope-aware walk (over `ELet`, `ELetRec`
+  fn-names+params, `ECase` `br_vars`, and `fn_params`) alpha-renames any local
+  binder that SHADOWS a name already in scope to a fresh unique name
+  (`orig ^ "$sh" ^ N`) and rewrites references within that binder's scope. A
+  non-shadowing binder keeps its source name, so non-shadowing code is
+  byte-for-byte unchanged and only genuinely-shadowing functions shift. This
+  kills the whole capture class at once (cprop/fold/inline/dce + the JS `const`
+  emitter) and aligns the compiled backends with the interpreter. Post-lower TIR
+  is now `let x = 10 in let x$sh1 = +(x,5) in int_to_string(x$sh1)`.
+- **Regression:** `test/native/shadow_selfref_let.march` compile-and-run golden
+  (single, chained, and match-arm-body shadows) — native, JS, and interpreter
+  all print `15 / 70 / 107 / 0`. One intended snapshot shift (`guard_match`): the
+  two guarded arms each bind `n = x` and the guard-fallthrough nesting made the
+  second a genuine shadow → `n$sh1` (behavior-preserving; both bind `x`).
+- **Verification:** 451 compiler / 231 eval / 394 codegen / 807 stdlib / 53
+  test_stdlib_march / 29 snapshots, 0 new failures. The lone
+  `task_await_int`/`task_await_ptr` ir-verify-gate failure is PRE-EXISTING — a
+  CWD-dependent tmp-dir emit artifact that reproduces identically with the fix
+  disabled; the task_await compile-and-run golden itself passes.
+
 ## Current State (as of 2026-07-08, monomorphization nested-fn/top-level name-collision fixed)
 
 Monomorphization (`lib/tir/mono.ml` `rewrite_calls`) resolved a call's callee by

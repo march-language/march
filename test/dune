@@ -2288,3 +2288,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/march_prefixed_local.expected native_march_prefixed_local.out)))
+
+; ── Regression: self-referencing block-let shadowing (`let x = x + 5`).
+; Lowering emitted both bindings under the source name `x`, so name-based TIR
+; passes (copy-prop/fold) captured across the shadow and folded the inner
+; USE site to the OUTER value (e.g. single(10) -> 10 instead of 15), silently
+; miscompiling on native (and JS) while the interpreter stayed correct. Fixed
+; by Lower_decls.uniquify_fn (alpha-rename shadowed local binders). Covers
+; single, chained, and match-arm-body shadows; compiled stdout must equal the
+; interpreter's (native/shadow_selfref_let.expected).
+(rule
+ (targets native_shadow_selfref_let native_shadow_selfref_let.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/shadow_selfref_let.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadow_selfref_let
+        native/shadow_selfref_let.march)
+   (with-stdout-to native_shadow_selfref_let.out
+        (system "./native_shadow_selfref_let")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadow_selfref_let.expected native_shadow_selfref_let.out)))

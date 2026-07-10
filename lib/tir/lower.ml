@@ -84,6 +84,7 @@ let note_alias_candidate = Lower_state.note_alias_candidate
 let lower_type_def = Lower_decls.lower_type_def
 let lower_fn_def = Lower_decls.lower_fn_def
 let rename_tir_vars = Lower_decls.rename_tir_vars
+let uniquify_fn = Lower_decls.uniquify_fn
 
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
@@ -1448,6 +1449,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             { fn with fn_body = body }
         ) all_fns
   in
+  (* Alpha-rename any shadowed local binder to a fresh unique name so that
+     every name-based downstream pass (cprop/fold/inline/dce and the JS
+     [const] emitter) is immune to variable capture across shadowing.  A
+     non-shadowing binder keeps its source name, so only genuinely-shadowing
+     functions change shape.  See [Lower_decls.uniquify_fn]. *)
+  let all_fns = List.map uniquify_fn all_fns in
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = all_fns;
     tm_types = builtin_type_defs @ List.rev !types;
