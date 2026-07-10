@@ -777,10 +777,25 @@ let lookup_ctor_in_type name type_name env =
   | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
-    Deduplicates: if a ctor_info structurally identical (same ci_type,
-    ci_params, and ci_arg_tys) already exists, no-op.  Two types with
-    the same short name but different arity (e.g. stdlib's `Tree(a)` and
-    a user's `Tree`) are kept as distinct candidates. *)
+    Deduplicates STRUCTURALLY (same ci_type, ci_params, and ci_arg_tys) —
+    but by MOVING the existing entry to the FRONT rather than no-op'ing.
+    Two types with the same short name but different arity (e.g. stdlib's
+    `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+
+    Why move-to-front matters (sibling-ctor shadowing regression,
+    2026-07-10): Pass-1 prebind seeds every nested module's bare ctor keys
+    for order-independent cross-module resolution (d95fe942), in module
+    declaration order — so a later sibling `mod B`'s `Mk` sits AHEAD of
+    `mod A`'s same-named `Mk`.  Pass-2 then re-registers each module's own
+    ctors (check_decl DType) right before checking that module's bodies —
+    but the re-registration is structurally identical to the Pass-1 seed,
+    so a no-op dedup left B's candidate at the head and A's OWN body
+    resolved `Mk(1)` against B's `Mk(String)` ("expected String but got
+    Int" pointing inside A).  Moving the re-registered entry to the front
+    restores the declaring module's recency for its own body check (the
+    pre-d95fe942 semantics) while keeping the Pass-1 seeds — and therefore
+    the cross-module order-independence — intact.  A singleton list is
+    unaffected; only genuinely shared names reorder. *)
 let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
   let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
   let same c =
@@ -788,7 +803,10 @@ let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
     && c.ci_params = ci.ci_params
     && c.ci_arg_tys = ci.ci_arg_tys
   in
-  if List.exists same lst then ctors
+  if List.exists same lst then
+    (match lst with
+     | first :: _ when same first -> ctors   (* already at the front *)
+     | _ -> StrMap.add key (ci :: List.filter (fun c -> not (same c)) lst) ctors)
   else StrMap.add key (ci :: lst) ctors
 
 (* ── Qualified module resolution ─────────────────────────────────────

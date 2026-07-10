@@ -283,6 +283,27 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, sibling-ctor shadowing regression FIXED — add_ctor move-to-front)
+
+**The sibling-module constructor shadowing regression (from `d95fe942`,
+order-independent resolution) is FIXED.** A module can again use its OWN
+constructor when a sibling declares a same-named one with a different
+payload: Pass-1 prebind seeds every nested module's bare ctor keys in
+declaration order (later sibling at the candidate head), and Pass-2's
+own-module re-registration was a structural-dedup NO-OP — so both
+`lookup_ctor` (head pick) and `lookup_ctor_in_type` (first bare-`ci_type`
+match) committed to the sibling's ctor inside the declaring module's own
+body. `add_ctor`'s dedup now MOVES a re-registered entry to the front:
+the definer's Pass-2 registration runs right before its own bodies are
+checked, restoring declaring-module recency (pre-`d95fe942` semantics)
+while keeping the Pass-1 seeds — `d95fe942`'s three order-independence
+regression tests stay green. Witnesses: `accept/t69_sibling_own_ctor`
+(the original `t35` shape, restored — runs, prints `7`; types corpus
+134 → **135**) + unit `test_tc_sibling_ctor_own_module_wins` (stdlib
+suite 807 → **808**). Full six-runner suite green; check-docs clean.
+Remaining from the same merge: the bench `ptype Tree` stdlib collision
+(filed, open).
+
 ## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
 
 **Slice-7 finding L7 is FIXED**, with a corrected diagnosis: the original
