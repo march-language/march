@@ -21,10 +21,39 @@ let find_variant (type_defs : Tir.type_def list) (name : string)
     | Tir.TDVariant (n, variants) when n = name -> Some variants
     | _ -> None) type_defs
 
+(** True if [name] is a genuine actor struct — STRUCTURAL check, not a name
+    heuristic.  [lower_actor.ml] always constructs an actor's state record as
+    [TDRecord (name, ("$d_dispatch", TPtr TUnit) :: ("$e_alive", TBool) :: ...)],
+    field 0 literally named ["$d_dispatch"].  Surface identifiers can never
+    start with [$] (the lexer's [ident] rule is [alpha (alpha|digit|'\'')*]),
+    so no user-declared record can ever have a field with this name — this
+    predicate cannot false-positive on a user type, unlike a name-suffix check
+    (e.g. [Tir_names.is_actor_struct_name] on a literal ["_Actor"] suffix, which
+    a user-named type like [Tree_Actor] can coincidentally match).
+
+    Used by [llvm_emit.ml]'s [EReuse] case (finding 20) to gate the actor-struct
+    always-in-place mutation: that branch is UNSOUND for a non-actor value (it
+    skips the refcount check FBIP relies on for shared-value safety), so the
+    gate must never admit a false positive. *)
+let is_actor_struct_type (type_defs : Tir.type_def list) (name : string) : bool =
+  List.exists (function
+    | Tir.TDRecord (n, (fname, _) :: _) -> n = name && fname = "$d_dispatch"
+    | _ -> false) type_defs
+
 (** True if [name] has the Option-shaped pattern: exactly one nullary ctor and
     exactly one single-field ctor (in either order).  Does NOT check whether the
-    payload is niche-safe; use [niche_payload_ok] for that. *)
+    payload is niche-safe; use [niche_payload_ok] for that.
+
+    Finding-19: actor message types (<Actor>_Msg) are excluded — they are FORCED
+    Boxed (see repr_of_ty) so a foreign message can be told apart at dispatch by
+    its globally-unique heap tag.  This predicate gates the EAlloc niche ENCODE
+    path (llvm_emit.ml) and the llvm_case niche DECODE path; returning false here
+    keeps BOTH on the Boxed path in lock-step, so a two-handler-one-nullary
+    message shape is encoded and decoded as a tagged heap cell (no crash from an
+    encode/decode repr split). *)
 let is_niche_shaped (type_defs : Tir.type_def list) (name : string) : bool =
+  if Tir_names.is_actor_msg_name name then false
+  else
   match find_variant type_defs name with
   | Some [ (_nullary, []); (_single, [_]) ]
   | Some [ (_single, [_]); (_nullary, []) ] -> true
@@ -59,6 +88,20 @@ let rec niche_payload_ok (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
     [is_niche_shaped] + [niche_payload_ok] directly instead. *)
 and repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
   match ty with
+  (* Finding-19 memory-safety fix: force actor message variant types (<Actor>_Msg)
+     to Boxed regardless of their ctor shape.  A single-handler actor's message
+     would otherwise classify Newtype (raw payload, NO tag) and a two-handler
+     one-nullary shape would classify Niche (null/non-null, no real tag) — in
+     both cases a foreign message delivered to the wrong actor's mailbox carries
+     no discriminant to distinguish it, so the dispatch would misroute its
+     payload at the wrong type (memory-unsafe UB).  Boxed gives every message a
+     heap-cell constructor tag; combined with globally-unique message tags
+     (Llvm_toplevel.build_ctor_info) and the dispatch ECase's dropping default
+     arm (lib/tir/lower_actor.ml), a foreign message's tag matches no branch and
+     is dropped — parity with the interpreter's silent foreign-message drop.
+     Consulted uniformly by EAlloc/ECase/Perceus/borrow, so encode, decode, and
+     RC all agree on Boxed for these types. *)
+  | Tir.TCon (name, _) when Tir_names.is_actor_msg_name name -> Boxed
   | Tir.TCon (name, params) ->
     (match find_variant type_defs name with
      (* Float-payload newtype: stay boxed (can't tag float bits safely). *)
@@ -105,6 +148,12 @@ and payload_needs_tag (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
     the branch body (observed as count = 21 + 11 instead of 10 + 5). *)
 let niche_repr_of_concrete (type_defs : Tir.type_def list) (name : string)
     : repr option =
+  (* Finding-19: actor message types are Boxed (see repr_of_ty) — never niche.
+     Returning None keeps emit_case's concrete-niche recovery path on the Boxed
+     heap-tag strategy for a two-handler-one-nullary message shape, matching the
+     Boxed EAlloc encode. *)
+  if Tir_names.is_actor_msg_name name then None
+  else
   match find_variant type_defs name with
   | Some [ (_nullary, []); (_single, [ p ]) ]
   | Some [ (_single, [ p ]); (_nullary, []) ] ->

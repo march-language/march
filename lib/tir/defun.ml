@@ -75,7 +75,7 @@ let builtin_names : StringSet.t =
       (* Resource ownership *)
       "own";
       (* Capability builtins *)
-      "cap_narrow"; "root_cap";
+      "cap_narrow"; "root_cap"; "mint_cap";
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size";
       "run_until_idle"; "register_resource"; "get_cap";

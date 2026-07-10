@@ -320,6 +320,53 @@ adversarial-regressions). New regression tests
 module-system group); `test_tc_sig_opaque_hides_ctors` guards the opacity
 carve-out.
 
+## Current State (as of 2026-07-08, shadowed same-block `let` rebinding fixed — js_emit TDZ crash + a silent-corruption Cprop bug)
+
+A shadowed same-block `let` rebinding a name off its own prior value
+(`let x = 5 in let x = x + 1 in ...`, or the `Random.seed` idiom
+`let s0 = ... in let s0 = if s0 == 0 do 1 else s0 end`) hit two independent
+bugs sharing one root cause: TIR (`lower.ml`) deliberately does not
+alpha-rename a shadowed binding — the second `let x` keeps the literal
+source name `"x"` in its `Tir.var.v_name` — and two different downstream
+consumers assumed names were unique within a function.
+
+- **`lib/tir/js_emit.ml` (crash, `--target js` only):** the second binding
+  emitted as `const x = ...` inside a fresh `{ }` block, relying on JS block
+  scoping alone for "shadowing." When the initializer referenced the prior
+  `x`, JS `const`/`let` TDZ (which covers a declaration's own initializer)
+  made the reference resolve to the not-yet-initialized new `x`, throwing
+  `ReferenceError: Cannot access 'x' before initialization` at runtime.
+- **`lib/tir/cprop.ml` (silent wrong VALUE, every target, default flags):**
+  the constant-propagation `env` (name → known literal) was extended on a
+  literal rebind but never invalidated on a later non-literal rebind of the
+  same name, so the stale literal stayed active and every later reference to
+  the rebound name was substituted with the OLD value. This ran in the
+  post-Perceus `Opt.run` fixpoint, which every target (native, wasm, js) goes
+  through by default (`opt_enabled = true` unless `--no-opt`) — confirmed via
+  a standalone per-pass TIR dump that `let x = 5 in let x = x + 1 in
+  int_to_string(x)` was still correct through `Escape`, then `Opt.run` folded
+  it to `int_to_string(5)`.
+- **Fix:** `js_emit.ml` now tracks a per-function shadow map (`ctx.var_names`
+  / `ctx.var_counters`) — a shadowing `let` mints a fresh JS identifier
+  (`x$1`, `x$2`, ...) and commits it only AFTER its initializer is emitted, so
+  the initializer still resolves against the prior binding; function params
+  seed the map too, so `fn f(x) { let x = x + 1; ... }` is covered.
+  `cprop.ml`'s `ELet` case now drops any existing `env`/`avar`/`fenv` entry
+  for the rebound name before conditionally adding new knowledge — the RHS
+  is still evaluated against the un-shadowed tables first.
+- **New dual-target golden test:** `test/native/let_shadow_rebind.march` /
+  `.expected` (+ `native_let_shadow_rebind` / `js_let_shadow_rebind` rules in
+  `test/dune`) — arithmetic rebind, the `Random.seed` if/else shape, a
+  4-deep shadow chain, and a parameter shadow; both native (default `--opt`)
+  and JS (`--target js`, default opt) must match the interpreter.
+- **Stdlib audit:** grepped all of `stdlib/*.march` for repeated same-name
+  `let`s; `stdlib/random.march`'s `mix`/`seed` were the only genuine
+  same-scope self-referential shadows (everything else flagged was separate
+  `match`/`if-else` arms, not a real hazard) — both now compile correctly
+  under `--target js` with no source workaround needed.
+- **805 tests** (`scripts/run-tests.sh`, quick + slow) plus the two new
+  golden rules all pass.
+
 ## Current State (as of 2026-07-08, compiled HTTP server request buffer grows on demand)
 
 `runtime/march_http.c`'s per-connection read buffer was a fixed 64KB
@@ -340,44 +387,92 @@ publish → 413 → the `forge publish` client saw it as a 502 through Cloudflar
   `non-exhaustive pattern match` parsing the publish *success* response — the
   publish completes server-side but the CLI reports failure. Client-side only.
 
-## Current State (as of 2026-07-08, entry-module self-qualified `--check` type-erasure closed)
+## Current State (as of 2026-07-08, stdlib curried-vs-tuple-arrow HOF callback annotation bug fixed)
 
-An unannotated (or distinct-tvar-annotated) fn at the **entry module's** top level,
-referenced through the entry-module-qualified name (`EntryMod.fn`), erased the type of
-anything laundered through it, so `march --check` exited 0 on a memory-unsafe mismatch
-(`need_str(Main.id(42))` — an `Int` into a `String` parameter — typechecked clean, while
-the bare `need_str(id(42))` correctly rejected).
+Six stdlib functions annotated a callback/comparator parameter as a TUPLE-arrow
+type (`f : (b, a) -> b`, i.e. `TArrow(TTuple[b;a], b)`) while calling it with
+N-ary uncurried call syntax (`f(acc, h)`). `infer_app` (`lib/typecheck/typecheck.ml`)
+is purely curried with no auto-tupling special case, so the first call argument
+got checked against the whole tuple type and failed — a real, self-contained
+internal type error, reproducible with the offending file typechecked completely
+alone (no sibling modules involved).
 
-- **Root cause:** the entry module is UNWRAPPED at the combined module's top level, so —
-  unlike a wrapped sibling module, whose public members are re-exported under `Sib.fn` with
-  their real body-checked schemes when its `DMod` is checked — the entry's own top-level
-  fns are only ever seeded by `check_module_core`'s Pass 1b (`prebind_mod_members
-  m.mod_name.txt`) as a bare `Mono (fresh_var 1)` placeholder (`prebind_fn_scheme` returns
-  None for an unannotated fn; a distinct-tvar annotation `fn f(x:a):b` seeds an
-  un-body-validated `a -> b`). That decoupled `?a -> ?b` was never reconciled with the fn's
-  real scheme, so an `EntryMod.fn` reference (produced by desugar's `qualify_module_refs`,
-  or hand-written to disambiguate a shadowing nested local) instantiated it and erased the
-  laundered type; the pinned placeholder also spuriously over-rejected legitimate
-  polymorphism.
-- **Fix:** the DFn branch of `check_decl` (`lib/typecheck/typecheck.ml`) now rebinds the
-  entry-qualified name to `sch` — the scheme `check_fn` validated against the body — so it
-  is exactly as polymorphic as the bare name. Guarded to the ENTRY level (`cap_qual_prefix
-  = "" && current_module <> ""`) and to an already-seeded key (`Some _`), so nested/loaded
-  modules, private `pfn`s, and the incremental `check_module_with_env` path are untouched.
-  Codegen-safe: mono/TIR key on the per-span `type_map`, not this env scheme.
-- **Scope:** this closes the `--check` type-erasure aspect only; the sibling link-time
-  finding (an entry file self-qualifying its own top-level mod name → undefined symbols at
-  link time) shares the `entry_prefix = "" / cap_qual_prefix = ""` root but is a
-  codegen/lowering gap and remains open (see `specs/todos.md`).
-- **Regression:** `test/test_compiler.ml` group `entry_mod_qual_erasure` (8 non-vacuous
-  cases): the `Int`→`String`, `Box(String)`→`Box(Int)`, and `Cap(IO)`→`Cap(Db.P)` launder
-  shapes, the C2 distinct-tvar variant, and a nested-sibling `T.id` shape (all flip
-  clean→rejected), plus three green guards (single-type use stays clean, polymorphic use
-  restored to clean, annotated `a->a` stays clean).
-- **Verification:** full suite green — 451 compiler (+8) / 231 eval / 394 codegen
-  (`llvm_ir_validity_gate` 0 failures) / 805 stdlib / 29 snapshots, 0 failures
-  (`test_stdlib_march`'s lone `global_registry` `unbound variable` failure is pre-existing —
-  identical at HEAD without this change).
+- **Not a module-scoping bug.** Originally reported as a suspected
+  `lib/typecheck/typecheck.ml` pass-1/1b bare-name cross-module leak (`fold_left`
+  exists in both `prelude.march` and `list.march`); that hypothesis was
+  investigated and falsified by direct reproduction — `stdlib/prelude.march`
+  alone, with zero siblings in the merge, reproduces the identical error. No
+  compiler code changed.
+- **Why it was invisible:** `bin/main.ml`'s `is_user_file` diagnostic filter
+  (both the single-file `--check`/`--compile` path and `run_check_cmd`'s
+  multi-file path) drops every diagnostic whose span points into a stdlib
+  file, by design — so this silently passed on every `march --compile` for the
+  bug's entire lifetime. A downstream pipeline that skips that filter (a
+  browser live-compile target) is what originally surfaced it.
+- **Fixed the annotation** (tuple-arrow → curried arrow chain) in `fold_left`
+  (`stdlib/prelude.march`, `stdlib/iterable.march`), `cmp`/`fold` callbacks
+  (`stdlib/ordered_map.march`, `stdlib/sorted_set.march`), and `reduce`
+  (`stdlib/range.march`). Also fixed one unrelated pre-existing bug uncovered
+  while verifying end-to-end: `range.march`'s `reduce` called
+  `List.fold_left` with the collection/accumulator arguments swapped.
+- **Verified via the real `bin/main.exe --check` CLI**, not just an isolated
+  test harness: previously `fold_left(xs, 0, fn (acc, x) -> acc + x)` in a
+  user's own program produced a user-visible cascading `` `(<error>, Int)`
+  does not implement Num `` error — this bug DID leak past the stdlib-file
+  filter into real user-facing diagnostics, not just hidden internal noise.
+  Now typechecks/compiles clean.
+- Regression coverage: 5 new `test/test_compiler.ml` tests, each typechecking
+  one fixed stdlib file completely standalone via `check_module_core` and
+  asserting zero errors.
+
+
+## Current State (as of 2026-07-08, Tetris live-compile playground + 3 JS-backend/typecheck fixes)
+
+Browser Tetris demo compiled from live-editable March source: `docs/tetris-playground/`
+runs a real trip through the compiler (parse → typecheck → lower → optimize → js_emit)
+entirely in the browser, driven by a new js_of_ocaml entry point,
+`js/march_browser_compile.ml` (`marchCompileToJs`), built on a new shared library,
+`lib/driver/js_pipeline.ml`, that both it and future tooling can call without going
+through `bin/main.ml`'s CLI. The game itself: `demo_app/tetris_logic/` (pure rules,
+14 forge unit tests, native-safe) + `demo_app/tetris/` (Dom wiring, depends on
+`tetris_logic` via a `forge.toml` path dep so `forge test` never touches Dom externs
+natively). State lives in the DOM itself (a `#game-state` element's `data-*` attrs) since
+March has no mutable-cell primitive reachable across independent event callbacks
+(keydown vs. the gravity-tick interval).
+
+Getting the real game through both the `--target js` codegen backend AND, separately,
+the browser-hosted typechecker surfaced genuine pre-existing compiler bugs, fixed here:
+
+- **`lib/tir/js_emit.ml` had no case at all** for `int_div`/`int_mod`/`int_mod_euclid`
+  (emitted as calls to a nonexistent JS function — any `Array` growth past 32 elements
+  hits this via the PVec trie), the bitwise family (`int_and`/`int_or`/`int_xor`/
+  `int_shl`/`int_shr` — same PVec trie), `unix_time` (`Random`'s default seed), and
+  `int_pow`/`int_abs`/`int_max_value`/`int_min_value`. All added, either as new
+  `runtime/march_runtime.mjs` helpers (matching `march_runtime.c`'s checked/panic-on-zero
+  semantics) or inline JS operators.
+- **`lib/typecheck/typecheck.ml` never registered `string_from_codepoint`/
+  `string_to_codepoints`** — real interpreter builtins (`lib/eval/eval.ml`), just never
+  wired into the type env, so any strict typecheck of `stdlib/string.march` (not just
+  this playground) would have failed on them. Added.
+- **`stdlib/random.march`'s `mix()` had a bare integer literal (`1234567891011`)**
+  exceeding the March lexer's `max_int` — but only when the *compiler itself* runs as
+  browser JS (js_of_ocaml represents OCaml's native `int` as 32-bit; native/`--target js`
+  compilation was always fine since the multiply runs at the *compiled program's*
+  runtime). Rewritten as an exactly-equal `1234567 * 1000000 + 891011` (deferred to
+  runtime, never lexed as one token) — a real fix for the existing interpreter REPL
+  playground too, not just this new one.
+
+**Filed, not fixed:** `check_module_full`'s pass-1 registers unqualified names into one
+flat table when many stdlib files are merged as top-level siblings (both browser tools'
+approach — never previously run through the real typechecker, since the interpreter
+skips typecheck and the CLI lazy-loads per file). A same-named function in two merged
+modules (`fold_left`, in both `prelude.march` and `list.march`/`array.march`) can shadow
+across module boundaries, producing a bogus type error inside the *other* module's own
+body. Worked around in `js/march_browser_compile.ml` by dropping `prelude.march`'s bare
+`fold_left` from that bundle specifically.
+
+Full suite green throughout: 451 compiler / 231 eval / 398 codegen / 773 stdlib (quick).
+Plan: `docs/superpowers/plans/2026-07-08-tetris-playground.md` (gitignored, per this
 
 ## Current State (as of 2026-07-08, non-entry-module single-field ADT repr mismatch fixed)
 
@@ -736,6 +831,146 @@ reproduce through the real `forge check` path, hence `zcore.march`).
 **Test counts:** `forge/test/test_build_check.exe` gains 1 more case (12
 total, up from 11). Standard runners unaffected: 424 compiler / 231 eval /
 391 codegen, all exit 0 (stdlib runner not re-verified this pass).
+
+## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
+
+The filed "container/factory `cap_narrow`-taint gap" is closed, with a
+corrected diagnosis. `tag_cap_producer_result` (typecheck.ml) was genuinely
+shallow — it tagged a bare `Cap(a)`/`TVar` only, while the paired detector
+`ty_has_tagged_cap_producer` already recursed into tuples/records/`TCon`
+args. Investigation reproduced the exact historically-filed repro
+(`box(x) = (x, 0)` called as `box(cap_narrow(cap))`, destructured, consumed
+as a proof cap) plus 11 further container shapes (Option-wrap, forward-ref,
+single-module, cross-module, closure/thunk, record-wrap, 3-layer wrap) — none
+forge on this tree. A live source A/B against the actual historical commit
+(`66b6716a`) shows why: the identical program forges there and rejects on
+every later commit — the original escape was actually the (separately fixed,
+three commits later) nested-module qualified-prebind type-erasure bug, since
+`box` is an unannotated nested-module helper, exactly the shape that bug
+corrupted; the reviewer's shallow-tagger attribution was plausible but
+incorrect. Independent of exploitability, `demote_to_monomorphic`'s value
+restriction plus `unify`'s own tag-propagation-on-bind already make the
+shallow/recursive tagger distinction moot for every constructible shape
+(the original tainted var is pinned monomorphic at production and flows by
+reference through arbitrary wrapping). The architectural asymmetry was fixed
+anyway, as hardening: `tag_cap_producer_result` now recurses identically to
+`ty_has_tagged_cap_producer`, at zero rejection cost (tagging only ever marks
+a still-unbound var, never anything already resolved to a concrete type via
+ordinary unification — verified with a devious over-rejection probe: a
+tainted IO narrow tupled with an unrelated, already-legitimate proof-cap
+passthrough still accepts). 4 new tests in `test/test_compiler.ml`'s
+`proof_cap_mint` group, honestly documented as passing with or without the
+recursive fix on this tree (value restriction already covers every shape
+tried) rather than overclaiming independent necessity. Six-runner suite green
+(compiler 486 / eval 231 / codegen 394 / stdlib 804); `check_types.sh`
+120/120; `check-docs.sh` clean. See `specs/todos.md`'s "Container/factory
+`cap_narrow`-taint gap" entry for the full investigation.
+
+## Current State (as of 2026-07-08, finding 20 — compiled actor-struct FBIP/RC race fixed)
+
+**Finding 20** (compiled actor scheduler intermittently losing a legitimate
+message, filed during the finding-19 fix review) is FIXED. Root cause was
+**not** the mailbox drain the original hypothesis pointed at — it was FBIP
+in-place reuse racing an actor handle's refcount: an actor handler writes its
+new state back via a Perceus `EReuse`, and the generic emit path is
+RC-conditional (mutate in place iff `rc == 1`, else allocate a fresh copy and
+discard the old). The actor object is a stable daemon-owned singleton mutated
+solely by its own thread, but its *handle* refcount is concurrently,
+atomically incremented/decremented by the caller thread as it passes the
+`Pid` through successive `send`s — a handler observing a transient `rc > 1`
+took the "fresh" branch and silently discarded its state write (memory-safe:
+a wrong-but-valid count, never a crash). Fix (`lib/tir/llvm_emit.ml`
+`emit_expr`'s `EReuse` case): a new branch makes an actor-struct `EReuse`
+ALWAYS mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+Verified deterministic over 200 compiled runs of the repro (0 failures, was
+~5–17%); golden `g40_actor_foreign_msg_drop.march` restored to the fuller
+`Inc(3)/Zlog/Inc(4)/Report → count=7` shape now that it's deterministic
+(`verify.sh` MATCH). Six-runner suite green; the pre-existing
+`examples/actors.march` dead-actor-drop ordering divergence is unrelated
+(confirmed identical pre-fix/post-fix via file-copy A/B, not caused by this
+change).
+
+**Same-day follow-up (adversarial review):** the fix's first cut gated the
+always-in-place branch on `Tir_names.is_actor_struct_name` — a NAME-suffix
+check (`"_Actor"`) — which was a Critical false-positive vector: an ordinary
+user type coincidentally named `Foo_Actor` would also take the unconditional
+path and silently corrupt a SHARED (`RC > 1`) value under FBIP (verified live
+with a `Tree_Actor` ADT). Fixed by making the gate STRUCTURAL:
+`Repr.is_actor_struct_type` (`lib/tir/repr.ml`) checks the type's field 0 for
+the literal, compiler-only `"$d_dispatch"` marker (`lower_actor.ml`'s
+`TDRecord` construction) instead of pattern-matching the type name — March
+identifiers can never start with `$`, so no user type can forge this. Two new
+regression tests in `test/test_codegen.ml` (RED on the name-based gate / GREEN
+after, confirmed via file-copy A/B). Six-runner green again (compiler 482 /
+eval 231 / codegen 394, IR-gate clean / stdlib 804); `verify.sh` 40/40;
+`check-docs.sh` clean. See `specs/todos.md`'s finding 20 entry (both cuts).
+
+## Current State (as of 2026-07-08, Core March widening slice 6 — proof caps + nested-module type-erasure soundness fix, CLOSEOUT)
+
+Slice 6 lands **two soundness properties** in `lib/typecheck/typecheck.ml` (both
+real compiler fixes, gated on the full six-runner suite), then documents and
+witnesses them across `specs/lang/core-march-types.md` §2.8.13,
+`specs/lang/capabilities.md`, the `specs/lang/types/` corpus, and `INDEX.md`.
+
+- **The P0 nested-module type-erasure fix (GENERAL soundness).** Nesting no
+  longer weakens type checking: an intra-module reference to a function is now
+  checked against that function's real, body-checked (possibly polymorphic)
+  scheme at every nesting level, INCLUDING the entry module. Root cause (see
+  `.superpowers/sdd/prebind-fix-report.md`): an unannotated public fn in a
+  nested `mod` was prebound under its QUALIFIED name (`App.id`) to a fresh
+  placeholder that `check_decl`'s DFn branch reconciled only under the BARE
+  name, so a sibling resolving the desugar-qualified reference got a decoupled
+  `?a -> ?b` that **erased the type of anything laundered through it** — base
+  types (`Int`→`String`, a genuine memory-safety break), ADT args
+  (`Box(String)`→`Box(Int)`), and `Cap` alike. The proof-cap forge was one
+  exploitation of this general hole. The fix reconciles every qualified fn key
+  (both the `cap_qual_prefix` nested key and the `current_module` entry-self
+  key) to `check_fn`'s real scheme, and orders forward references so the rebind
+  runs in time; `unify` is untouched. 25 NON-VACUOUS unit tests
+  (`nested_mod_prebind_erasure` group, RED pre-fix / GREEN after), fixed across
+  three adversarial-review rounds (`10249488`, `d19dc519`, `cbbf99a8`).
+- **The proof-cap minting discipline.** Proof capabilities (`proof cap Name` in
+  a `mod`, consumed as `Cap(Mod.Name)`) are now genuinely unforgeable. The
+  gated `mint_cap` primitive is the ONLY way to construct a proof cap and
+  typechecks iff used in a PUBLIC (`fn`, not `pfn`) function of the cap's
+  declaring module; `cap_narrow` — the ordinary IO-lattice narrower — can no
+  longer produce a proof cap in ANY expression position (Batch-A: value
+  restriction + a use-site `unify` proof-cap hook + call/instantiate/factory
+  taint propagation). Both are runtime-erased (`mint_cap` aliases `cap_narrow`
+  downstream). The only two ways to obtain `Cap(P)` are now receive-and-pass-
+  through or `mint_cap` in P's declaring module's public fns. See
+  `.superpowers/sdd/batch-a-report.md`; 12 `proof_cap_mint` unit tests.
+
+- **Reference:** `core-march-types.md` gains a general typing-soundness rule
+  ((T-QualRef): intra-module references reconcile to the real body-checked
+  scheme regardless of nesting) and a dedicated proof-capabilities subsection
+  §2.8.13 (Check 1 self-declaration, Check 6 pass-through, the `mint_cap` rule,
+  the `cap_narrow` restriction, and the unforgeability property), reconciling
+  §2.8's opening "(Check 6) out of scope here" and §2.8.8's stale `cap_narrow`-
+  mints-a-proof-cap note. The still-OPEN `cap_narrow` container-launder taint
+  follow-up is noted as a documented residual.
+- **Tutorial:** `capabilities.md`'s proof-caps section replaces the
+  non-typechecking `; ()` mint idiom with `mint_cap`, updates the "unforgeable"
+  claims to the now-enforced mechanism, and replaces the "Known mismatch, being
+  reconciled in a later slice" callout with the resolved mechanism.
+- **Corpus:** `specs/lang/types/` grew from 109 to **120 programs** (63 accept /
+  57 reject). New reject witnesses (`t51`–`t57`) each type-correct so they were
+  ACCEPTED pre-fix (IMPOSSIBLE to reject pre-fix): nested `id`-launder
+  `Int`→`String`/`Box`, distinct-tvar launder, entry-module self-qualified
+  launder, `cap_narrow` proof-cap forge, `mint_cap` external, `mint_cap` in a
+  `pfn`. New accept witnesses (`t60`–`t63`): legit nested polymorphism, legit IO
+  narrow, legit `mint_cap` in the declaring module's public fn, proof-cap
+  pass-through. `check_types.sh`: **120 passed, 0 failed**, exit 0;
+  `check-docs.sh` exit 0.
+- **Findings:** `specs/todos.md`'s "proof-cap mint mismatch" reflects the
+  resolved state (mint_cap + cap_narrow restriction landed; general erasure
+  closed by the prebind fix); the container-launder taint gap and the
+  `global_registry` parser finding remain filed OPEN.
+- **Compiler unchanged in this closeout** — the fixes already landed on `main`
+  (HEAD `cbbf99a8`); this slice is the docs + `.march` corpus + specs finish
+  work. run_compiler is now **482** (with the 25+12 new unit tests).
+- **Next queued widening slice:** linear/affine types (per the survey's
+  scoping recommendation and the roadmap's Phase-2b/3 phasing).
 
 ## Current State (as of 2026-07-06, `Task.await` i64 Ok-payload untag in native codegen + `actor_stress` fixture restored)
 
@@ -3207,8 +3442,10 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
      match inside a `cap no_panic` module is invisible to both the
      ordinary warning and F3's new error path — live-verified to panic at
      runtime uncaught. Pre-existing behavior F3 correctly inherits rather
-     than introduces; not in F3's scope; would need a guard-aware
-     (Z3-backed) exhaustiveness analysis to close.
+     than introduces; not in F3's scope. **(Subsequently FIXED, fix-campaign
+     batch 3, 2026-07-07 — see the dedicated entry below; a guard-aware SMT
+     analysis turned out NOT to be needed: computing coverage over the
+     GUARDLESS branches only is a sound, conservative, bounded fix.)**
 - **`specs/lang/capabilities.md` (the pre-existing 692-line tutorial,
   already wired into `specs/lang/index.md`'s chapter map before this slice)
   reconciled (Task 7).** The F1 tutorial overclaims are corrected to state
@@ -3239,6 +3476,53 @@ fixes** (Tasks 5 and 6), each gated on the full six-runner test suite.
 
 Next queued widening slice: **proof caps** (closing the proof-cap mint
 mismatch), or **linear types** (per the roadmap) — see `specs/todos.md`.
+
+## Fix-campaign batch 3 — `cap no_panic` guarded-match exhaustiveness gap (2026-07-07)
+
+Closes the residual soundness gap slice 5 (above) filed OPEN as finding 6: a
+`match` with a `when` guard used to short-circuit `check_exhaustiveness`
+entirely (`if has_guards then ()`), so a guarded, genuinely non-exhaustive
+match inside a `cap no_panic` module was recorded by NEITHER the ordinary
+Warning NOR F3's `env.nonexhaustive_match_spans` side-table — `--check` exited
+0 with zero diagnostics, then panicked at runtime ("no matching clause") on a
+value that failed every guard. Exactly the failure class `cap no_panic` exists
+to rule out.
+
+- **The fix (`lib/typecheck/typecheck.ml`, `check_exhaustiveness`).** For a
+  guarded match, the function no longer returns immediately. It computes
+  coverage over the GUARDLESS branches ONLY (`guardless_matrix` = the
+  `norm_pat`s of the arms with `branch_guard = None`). A branch reachable only
+  behind a guard cannot be relied on to match, so it contributes nothing to
+  GUARANTEED coverage; if the guardless branches alone are non-exhaustive, the
+  match can panic when every guard fails at runtime → the span is recorded into
+  `env.nonexhaustive_match_spans` and `check_no_panic_module` promotes it to an
+  ERROR, exactly as for the guard-free case. If the guardless branches ARE
+  exhaustive (a guarded arm followed by an unguarded catch-all), nothing is
+  recorded and the match still accepts. `find_missing_mc` already handles an
+  empty matrix (all-guarded match) correctly, so an all-guarded match reports
+  non-exhaustive rather than crashing.
+- **Minimal blast radius.** The guarded case RECORDS the span but emits **no
+  global Warning** — guarded matches are common in ordinary code and get no
+  such warning today, so only `cap no_panic` modules (which opt into
+  strictness) are made stricter. The guard-FREE path is untouched (still
+  Warning + record). No non-`cap no_panic` behavior changed — the
+  record-without-warning split is clean, regression-guarded by a new
+  plain-module guarded-non-exhaustive unit test that stays silent.
+- **Corpus.** types 107 → **109** (58 → **59** accept, 49 → **50** reject):
+  `reject/t50_cap_no_panic_guarded_nonexhaustive` (guardless arms `{None}`,
+  non-exhaustive — IMPOSSIBLE to reject pre-fix, accepted exit 0) and
+  `accept/t59_cap_no_panic_guarded_guardless_catchall` (adds an unguarded
+  `Some(v)` arm → guardless-exhaustive → still accepts, proving no
+  over-rejection). `check_types.sh` 109/109, exit 0; `check-docs.sh` exit 0.
+- **Unit tests.** 3 new NON-VACUOUS cases in `test/test_compiler.ml`'s
+  `cap_no_panic` group (RED pre-fix / GREEN after): `cap no_panic` + guarded
+  non-exhaustive → `has_errors` true; `cap no_panic` + guarded guardless-catch-
+  all → no error; plain (non-cap) guarded non-exhaustive → no error (the
+  record-without-warning regression guard).
+- **Docs.** `core-march-types.md` §2.8.11's residual-gap paragraph and §2.1a's
+  guard-short-circuit paragraph flipped from "open gap" to FIXED with the
+  guardless-matrix mechanism; the §2.8 preamble roadmap note updated.
+  `specs/todos.md` finding 6 converted from OPEN to a ✅ FIXED entry.
 
 ## Core March widening slice 2 — modules, imports, and visibility (2026-07-06, CLOSEOUT)
 
@@ -3346,6 +3630,14 @@ but on a different registration path.
 **Next queued widening slice:** actors (per the roadmap's Phase-2b/3
 phasing).
 
+## `Dom.set_timeout`/`set_interval`/`on_frame` callback signature fix (2026-07-09)
+
+Resolves the zero-arg-lambda follow-up filed by the Canvas 2D API work below (spawn_task `task_f422fd93`).
+
+- [x] **Fixed a never-satisfiable extern signature.** `stdlib/dom.march`'s three deferred-callback externs declared `cb: Unit -> Unit`, but a zero-arg March lambda (`fn -> body`) types to its body's result directly with no arrow wrapper (T-Abs), so it could never unify with a declared arrow type — these three callbacks were uncallable from real March source (no existing test exercised them). Changed `cb` to `Int -> Unit` (dummy ignored argument), matching the codebase's existing `task_spawn`/`pmap_threshold`/`task_cancel_token_new` idiom for this exact shape; callers now write `fn _ -> body`. `runtime/march_dom.mjs`'s three JS wrappers updated to call `cb._0(cb, 0)` (was `cb._0(cb)`), matching the `f._0(f, args...)` closure-call ABI for a 1-declared-param closure.
+- [x] Regression: `test/native/js_dom_timeout_callback.{march,expected}` + `test/dune` rule — compiles `--target js`, runs under `node`, verifies the callback typechecks with `fn _ -> ...` and actually fires (prints "fired") via the fixed ABI. Added a `march_dom.mjs` copy-rule to `test/dune` (this is the first JS test to actually invoke a `Dom` extern; the pre-existing `js_dom_available` test only referenced `Dom.body()` from dead code).
+- Full suite green: `scripts/run-tests.sh` (807 tests) + all `test/dune` JS-target golden diffs (`js_dom_available`, `js_dom_timeout_callback`, `js_extern_import`, `js_ffi_async`, `js_ffi_blocking_raises`, `js_ffi_raises`, `js_ffi_cbacked`).
+
 ## Current State (as of 2026-07-09, Canvas 2D API for JS target)
 
 **New `Canvas` stdlib module (`stdlib/canvas.march` + `runtime/march_canvas.mjs`)** — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Mirrors `Dom`'s existing extern-block pattern: `resource Context`/`resource Image`, `needs Ffi`, JS-target-only (registered in `bin/main.ml`'s `js_only_stdlib_file_list`; native/JIT calls panic). Covers state (`save`/`restore`/`translate`/`rotate`/`scale`), style (`set_fill_style`/`set_stroke_style`/`set_line_width`/`set_global_alpha`/`set_font`), rects, paths (`begin_path`/`move_to`/`line_to`/`arc`/`quadratic_curve_to`/`bezier_curve_to`/`fill`/`stroke`), text, and images (`load_image` — a `blocking raises` extern returning `Result(Image, String)`, so callers write `let? img = Canvas.load_image(url)` with no callback API). One new line in `lib/tir/js_emit.ml`'s `js_runtime_module_path` maps the `"canvas"` extern lib to `./march_canvas.mjs`.
@@ -3361,3 +3653,108 @@ phasing).
 **Docs:** `docs/stdlib.md` gains a `## Canvas (JS only)` section (mirroring `## Dom (JS only)`) and a summary-table row; stdlib module count bumped 108 → 109 across `docs/stdlib.md`, `CLAUDE.md`, and `.claude/skills/march-lang/SKILL.md` (two spots) to keep `scripts/check-docs.sh` green. Design doc: `docs/superpowers/specs/2026-07-09-canvas-api-design.md`; plan: `docs/superpowers/plans/2026-07-09-canvas-2d-api.md` (both uncommitted — `docs/superpowers/` is gitignored in this repo).
 
 **Also fixed in passing:** `demo_app/canvas_demo/build.sh`'s `dune build` now passes `--root` and a specific target (`bin/main.exe`) — a plain `dune build` from a nested worktree (e.g. `.claude/worktrees/<name>`) escapes upward to the outer repo's project root and additionally pulls in the full test suite by default. `demo_app/dom_demo/build.sh` has the same latent issue, left as-is (out of scope for this change).
+
+## Current State (as of 2026-07-09, Tetris playground: pause, layout fixes, time-travel debugger)
+
+Follow-up round on the Tetris live-compile playground (`docs/tetris-playground/`):
+
+- **Pause** (`demo_app/tetris/lib/tetris.march`): `P` key or a HUD button toggles
+  `data-paused` on `#game-state`; every gameplay function (`tick`/`try_move`/
+  `try_rotate`/`hard_drop`) already reads state through `with_state`, so a single
+  `is_paused()` guard in `handle_key` and `tick` was enough — no per-action changes.
+- **Layout bugs found and fixed** (`docs/_includes/tetris-playground.html`,
+  `docs/assets/tetris-playground.js`): the live syntax-highlight overlay `<pre>`
+  inherited `docs.html`'s global `.d-content pre` rule (meant for markdown fenced
+  code blocks) since it has higher specificity than the overlay's own class
+  selector — silently overriding font-size/line-height/padding/tab-size and
+  making the *visible* highlighted text render at a different scale than the
+  *real* (invisible) textarea underneath it, so clicks landed on the wrong
+  character. Fixed by switching the overlay's shared rules to ID selectors.
+  Separately, the board rendered at a fixed 16px/cell regardless of the actual
+  (now full-height) panel size — `computeCellSize()` now measures
+  `#tp-iframe-host`'s real dimensions per Run and sizes cells to fill it
+  (clamped 12–44px).
+- **Game focus**: the game iframe never received keyboard focus after mount, so
+  arrow keys only worked after manually clicking into the board. `mountJs` now
+  calls `iframe.contentWindow.focus()` on load.
+- **Time-travel debugger**: extends the existing "state lives in the DOM"
+  architecture with zero compiler changes. `#game-state` gains a `data-seq`
+  counter bumped only by real gameplay-advancing paths (`with_state`'s commit,
+  `restart`). The host page's `MutationObserver` watches `data-seq` alone and
+  records a full attribute snapshot into an in-memory history array (capped at
+  3000) every time it changes — pausing or scrubbing never records, since
+  neither touches `data-seq`. A new `restore_from_request()` (`tetris.march`)
+  reads a hidden `#restore-request` element's attributes and applies them as
+  the live `#game-state`, re-rendering — the only way host JS can push a
+  historical frame back in, since `js_emit` doesn't export top-level March
+  functions today; this goes through the DOM instead, the same bridge keyboard
+  input already uses. A slider + step buttons scrub through history (forcing
+  `data-paused=true`, which the existing pause guard already makes airtight);
+  a "Resume from here" button truncates history to the current frame and
+  restores it unpaused, branching play forward exactly like undo-then-edit.
+  Rewinding past a game-over and resuming un-game-overs it for free — no
+  special case needed. Design: `docs/superpowers/specs/2026-07-09-tetris-time-travel-design.md`
+  (gitignored, per this repo's `docs/superpowers/` convention).
+
+No compiler/stdlib changes this round — `demo_app/tetris/lib/tetris.march` and
+`docs/assets/tetris-playground.js` only. Verified live in a local Jekyll preview
+(desktop + mobile) and deployed to `march-lang.org`.
+
+## Current State (as of 2026-07-09, Tetris playground follow-up + real JS-backend Int `/` compiler bug fixed)
+
+Further Tetris Playground follow-up, plus one genuine compiler bug found and fixed:
+
+- **Scrubbing UX**: throttled the time-travel slider's restore calls to one per
+  animation frame (verified via a real Chrome performance trace that the
+  reported "jitter" was NOT DOM reflow — a single restore is ~0.7ms, zero
+  forced-reflow/CLS signal on a simulated fast drag — the actual cause was
+  restoring every un-throttled `input` event, flashing through many
+  genuinely-different recorded frames faster than the eye tracks); gave the
+  slider its own full-width row (matching the board's actual pixel width)
+  instead of squeezing it into one row with the step buttons/frame count/
+  "Resume from here", which left it almost no space to shrink into; hid the
+  redundant Pause/Resume toggle while scrubbed off the live tip (it and
+  "Resume from here" both read "Resume" at once, and toggling plain pause
+  means nothing while inspecting a past frame); shortened "Resume from here"
+  to "Resume" and switched its show/hide to `visibility` instead of `display`
+  so appearing never shifts the row's height and moves the game underneath.
+- **Arrow keys/Space no longer scroll the page** while the game is focused —
+  `handle_key` now calls the existing `Dom.prevent_default` for those keys
+  unconditionally (mid-move, paused, or time-traveling).
+- **Tetris source reorganized to invite tweaking** (`demo_app/tetris_logic/lib/tetris_logic.march`):
+  piece shapes (`piece_cells`), colors, and game-speed knobs
+  (`level_for_lines`/`drop_interval_ms`) moved to the top of the file under a
+  "Tweak me" banner; board mechanics (collision, locking, line-clearing) moved
+  below under a separate heading. `drop_interval_ms(level)` existed and was
+  tested but was **dead code** — `main()` hardcoded a fixed 500ms
+  `Dom.set_interval` — so editing it as a "knob" would have silently done
+  nothing. Wired it up for real: `tetris.march`'s tick loop is now a
+  self-rescheduling `Dom.set_timeout` (`schedule_tick`) that re-reads the
+  current level fresh before every tick, so the drop rate genuinely speeds up
+  as lines clear.
+- **Compiler bug found while wiring the above, fixed at the root**
+  (`lib/tir/js_emit.ml`): `inline_binop`'s fast-path table matched the bare
+  `"/"` operator name and unconditionally emitted raw JS `(a / b)` — true
+  division — for **every** `/` call, Int or Float, completely shadowing the
+  correct type-aware `Math.trunc` guard a few lines below (which checks
+  `atom_ty a = TInt` but was unreachable dead code for that name). Minimal
+  repro: `fn half(n: Int): Int do n / 10 end` compiled with `--target js`
+  printed `1.5` for `half(15)` (correct: `1`, and correct natively/
+  interpreted). Fix: removed `"/"` from that fast-path arm (kept `"/."`,
+  float division needing no truncation), forcing all Int `/` through the
+  existing type-aware match arm. Full suite verified green after the fix:
+  805 tests, exit 0, including the existing adversarial-regressions
+  division-by-zero cases. Likely impact: any `--target js` program dividing
+  two `Int`s via bare `/` (not the separately-named `div_int` builtin) with a
+  non-exact result got a fractional JS value silently — no compiler warning,
+  no runtime type distinction to catch it. Plausibly latent since the `/`
+  Int-truncation guard was added; first surfaced here because the Tetris
+  playground is the first `--target js` consumer in this repo to divide by a
+  divisor that doesn't evenly divide its dividend during normal use.
+  Full finding: `specs/todos.md` "Compiler bug — JS backend Int `/` never
+  truncated".
+
+Rebuilt after the compiler fix: `docs/assets/march_compile.js` (the
+js_of_ocaml browser-compiler bundle used by the live-editable playground) and
+`docs/assets/tetris/tetris.mjs` (the static pre-compiled fallback), both via
+their existing build steps, no manual patching.

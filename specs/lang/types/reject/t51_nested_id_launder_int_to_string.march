@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: expected `String` but got `Int`
+-- Slice 6 (proof caps + nested-module soundness), the HEADLINE reject -- an
+-- UNANNOTATED public fn `id` defined in a NESTED `mod` launders an `Int`
+-- through to a `String` parameter, a general memory-safety break that
+-- typechecked (exit 0) PRE-FIX. Root cause (see core-march-types.md §2.8.13
+-- "General soundness rule" + `specs/todos.md` Done "Nested-module
+-- qualified-prebind type-erasure"): the nested fn's QUALIFIED name (`App.id`)
+-- was prebound to a fresh `Mono (fresh_var)` placeholder that `check_decl`'s
+-- DFn branch reconciled only under the BARE name, so a sibling resolving the
+-- desugar-qualified `App.id` reference got a decoupled `?a -> ?b` that ERASED
+-- the type of anything laundered through it -- base types, ADTs, and `Cap`
+-- alike. The P0 fix reconciles every qualified fn key to the fn's real
+-- body-checked scheme at every nesting level, so `id` is now the genuine
+-- polymorphic `a -> a` and the `Int`->`String` coercion is caught. Uses
+-- `string_length` (a real `String -> Int` builtin), NOT `String.length`
+-- (which resolves to a List-expecting builtin and would error for the wrong
+-- reason). IMPOSSIBLE to reject pre-fix. See core-march-types.md §2.8.13.
+mod Outer do
+  mod App do
+    fn id(x) do x end
+
+    fn takes_str(s : String) : Int do string_length(s) end
+
+    fn attack() : Int do takes_str(id(42)) end
+  end
+end
