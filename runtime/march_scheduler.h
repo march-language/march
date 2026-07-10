@@ -14,6 +14,35 @@
 
 #include "march_deque.h"
 
+/* Portable AddressSanitizer detection (clang's __has_feature vs. GCC's
+ * __SANITIZE_ADDRESS__ define) — guards the fiber-switch annotations below. */
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define MARCH_ASAN_BUILD 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(MARCH_ASAN_BUILD)
+#  define MARCH_ASAN_BUILD 1
+#endif
+#ifdef MARCH_ASAN_BUILD
+#  include <sanitizer/common_interface_defs.h>
+#endif
+
+/* Portable ThreadSanitizer detection — same rationale as MARCH_ASAN_BUILD
+ * above, but TSan has its own dedicated fiber API (__tsan_create_fiber /
+ * __tsan_switch_to_fiber), distinct from ASan's start/finish_switch_fiber. */
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define MARCH_TSAN_BUILD 1
+#  endif
+#endif
+#if defined(__SANITIZE_THREAD__) && !defined(MARCH_TSAN_BUILD)
+#  define MARCH_TSAN_BUILD 1
+#endif
+#ifdef MARCH_TSAN_BUILD
+#  include <sanitizer/tsan_interface.h>
+#endif
+
 /* ── Constants ────────────────────────────────────────────────────────── */
 
 /* Initial usable stack per green thread (Phase 4: lazy growth).
@@ -109,6 +138,21 @@ typedef struct march_proc {
      * thread-local would read the wrong (or another proc's) value after
      * such a migration. This field migrates with the proc itself. */
     jmp_buf                   *crash_jmp;
+#ifdef MARCH_ASAN_BUILD
+    /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
+     * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
+     * around every swapcontext() call that suspends or resumes it. Without
+     * this, ASan is unaware that march's raw ucontext-based green threads
+     * hop between independently-mmap'd stacks, and cannot correctly track
+     * stack-use-after-return / stack-buffer-overflow across a switch. */
+    void                       *asan_fake_stack;
+#endif
+#ifdef MARCH_TSAN_BUILD
+    /* TSan fiber handle for this proc, created once (via __tsan_create_fiber)
+     * at spawn time and passed to __tsan_switch_to_fiber before every
+     * swapcontext() that resumes it. Same rationale as asan_fake_stack. */
+    void                       *tsan_fiber;
+#endif
 } march_proc;
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
@@ -119,6 +163,16 @@ typedef struct march_scheduler {
     int             running;      /* Non-zero while scheduler loop is active     */
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
+#ifdef MARCH_ASAN_BUILD
+    /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
+     * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
+    void           *asan_fake_stack;
+#endif
+#ifdef MARCH_TSAN_BUILD
+    /* TSan fiber handle for THIS scheduler's own native OS-thread execution,
+     * captured once via __tsan_get_current_fiber() at the top of sched_loop. */
+    void           *tsan_fiber;
+#endif
 } march_scheduler;
 
 /* ── Public API ───────────────────────────────────────────────────────── */

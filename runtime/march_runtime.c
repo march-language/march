@@ -1366,12 +1366,25 @@ static void actor_green_thread(void *arg) {
     march_proc *self = march_sched_current();
     jmp_buf crash_jmp;
     jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
-    if (meta->supervisor && self) {
+    /* Read meta->supervisor once, under g_tbl_mu, and cache it in a local —
+     * march_actor_register_child (called by the supervisor, on a DIFFERENT
+     * thread, right after this child's march_spawn already started this
+     * green thread running) writes meta->supervisor under the same lock.
+     * Without this, an unlocked read here races with that write (confirmed
+     * via ThreadSanitizer): reading stale NULL just misses installing the
+     * crash trap for that specific child on that specific timing window —
+     * not memory-unsafe, but silently defeats supervision for it. Caching
+     * one snapshot also avoids a TOCTOU between the two "meta->supervisor"
+     * checks below (register_child could run in between two separate reads). */
+    pthread_mutex_lock(&g_tbl_mu);
+    int has_supervisor = meta->supervisor != NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (has_supervisor && self) {
         /* Only a supervised child gets crash-isolated — an unsupervised
          * actor's panic keeps today's exit(1) behavior (see march_panic). */
         self->crash_jmp = &crash_jmp;
     }
-    if (meta->supervisor && self && setjmp(crash_jmp) != 0) {
+    if (has_supervisor && self && setjmp(crash_jmp) != 0) {
         /* march_panic longjmp'd here instead of exit(1)-ing the process.
          * do_actor_death mirrors what march_kill would have done, and
          * (since this actor has a supervisor) triggers a restart — kill/
@@ -3399,7 +3412,13 @@ void march_actor_register_child(void *supervisor, void *child,
                                  void *spawn_clo, int64_t word_idx) {
     march_actor_meta *sup_meta = find_or_create_meta(supervisor);
     march_actor_meta *child_meta = find_or_create_meta(child);
+    /* The child's green thread is already running by this point (march_spawn
+     * started it before this registration call) and reads meta->supervisor
+     * at its own startup under the same g_tbl_mu (see actor_green_thread) —
+     * confirmed via ThreadSanitizer as an unsynchronized publish otherwise. */
+    pthread_mutex_lock(&g_tbl_mu);
     child_meta->supervisor = supervisor;
+    pthread_mutex_unlock(&g_tbl_mu);
     child_meta->sup_child_index = sup_meta->sup_num_children;
     int idx = sup_meta->sup_num_children;
     sup_meta->sup_children = realloc(sup_meta->sup_children,

@@ -64,6 +64,43 @@
 #  pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
 
+/* ASan is otherwise unaware that swapcontext() below hops between
+ * independently-mmap'd stacks (the scheduler's own native stack and each
+ * green thread's dedicated stack) — without telling it, it cannot correctly
+ * track stack-use-after-return/stack-buffer-overflow across a switch, and
+ * may misattribute or miss corruption entirely. Every swapcontext() call
+ * site is paired with a _TO_PROC/_TO_SCHED before it and a _DONE after it,
+ * except the three "never returns" call sites (proc_trampoline's normal
+ * exit and march_sched_exit), which by design never resume this fiber. */
+#ifdef MARCH_ASAN_BUILD
+#  define MARCH_ASAN_SWITCH_TO_PROC(from_fiber, target_proc) \
+      __sanitizer_start_switch_fiber(&(from_fiber)->asan_fake_stack, \
+          (target_proc)->stack_mmap_base, (target_proc)->stack_alloc)
+#  define MARCH_ASAN_SWITCH_TO_SCHED(from_fiber) \
+      __sanitizer_start_switch_fiber(&(from_fiber)->asan_fake_stack, NULL, 0)
+#  define MARCH_ASAN_SWITCH_DONE(fiber) \
+      __sanitizer_finish_switch_fiber((fiber)->asan_fake_stack, NULL, NULL)
+#else
+#  define MARCH_ASAN_SWITCH_TO_PROC(from_fiber, target_proc) ((void)0)
+#  define MARCH_ASAN_SWITCH_TO_SCHED(from_fiber) ((void)0)
+#  define MARCH_ASAN_SWITCH_DONE(fiber) ((void)0)
+#endif
+
+/* TSan's fiber API is simpler than ASan's: one __tsan_switch_to_fiber call,
+ * naming the fiber we are ABOUT to become, immediately before the actual
+ * swapcontext() jump — no matching "done" call on the other side. Each
+ * march_proc/march_scheduler owns a persistent fiber handle (created once,
+ * at spawn / at the top of sched_loop respectively). */
+#ifdef MARCH_TSAN_BUILD
+#  define MARCH_TSAN_SWITCH_TO_PROC(target_proc) \
+      __tsan_switch_to_fiber((target_proc)->tsan_fiber, 0)
+#  define MARCH_TSAN_SWITCH_TO_SCHED(sched) \
+      __tsan_switch_to_fiber((sched)->tsan_fiber, 0)
+#else
+#  define MARCH_TSAN_SWITCH_TO_PROC(target_proc) ((void)0)
+#  define MARCH_TSAN_SWITCH_TO_SCHED(sched) ((void)0)
+#endif
+
 /* ── Global state ─────────────────────────────────────────────────────── */
 
 static march_scheduler  g_scheds[MARCH_NUM_SCHEDULERS + 1];
@@ -358,11 +395,24 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
                    | ((uintptr_t)(uint32_t)arg_lo);
     march_proc *proc = (march_proc *)(void *)addr;
 
+    /* This proc's very first execution resumes here (via makecontext), not
+     * at "the instruction after its own swapcontext-away call" like every
+     * later resume — so it must complete the handoff that sched_loop's
+     * MARCH_ASAN_SWITCH_TO_PROC started, exactly once, before it can safely
+     * start its own switch-away later (else ASan sees back-to-back
+     * start_switch_fiber calls with no finish in between and aborts with
+     * "starting fiber switch while in fiber switch"). */
+    MARCH_ASAN_SWITCH_DONE(proc);
+
     /* Run the user-supplied function. */
     proc->fn(proc->arg);
 
-    /* Function returned — mark dead and hand control back to the scheduler. */
+    /* Function returned — mark dead and hand control back to the scheduler.
+     * This proc never resumes after this switch, so there is no matching
+     * MARCH_ASAN_SWITCH_DONE call. */
     atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
+    MARCH_ASAN_SWITCH_TO_SCHED(proc);
+    MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
     swapcontext(&proc->ctx, &proc->owner_sched->sched_ctx);
     /* If we ever return here the OS context is gone — abort defensively. */
     abort();
@@ -427,6 +477,9 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     p->mbox_count = 0;
     atomic_init(&p->mbox_lock, 0);
     p->owner_sched = NULL;
+#ifdef MARCH_TSAN_BUILD
+    p->tsan_fiber = __tsan_create_fiber(0);
+#endif
 
     /* Allocate the stack: reserve MARCH_STACK_MAX virtual memory, make only
      * the top MARCH_STACK_INITIAL bytes read/write initially.  The rest grows
@@ -521,6 +574,12 @@ static void sched_loop(march_scheduler *sched) {
      * so it can run even when the green thread's stack is exhausted. */
     setup_alt_stack();
 
+#ifdef MARCH_TSAN_BUILD
+    /* Capture this OS thread's own native execution as a TSan fiber, once,
+     * so every swapcontext() that resumes it can name it explicitly. */
+    sched->tsan_fiber = __tsan_get_current_fiber();
+#endif
+
     tl_sched = sched;
     sched->running = 1;
     unsigned int steal_seed = (unsigned int)sched->id;
@@ -609,7 +668,10 @@ static void sched_loop(march_scheduler *sched) {
         p->owner_sched  = sched;
         sched->current  = p;
 
+        MARCH_ASAN_SWITCH_TO_PROC(sched, p);
+        MARCH_TSAN_SWITCH_TO_PROC(p);
         swapcontext(&sched->sched_ctx, &p->ctx);
+        MARCH_ASAN_SWITCH_DONE(sched);
 
         sched->current = NULL;
 
@@ -631,8 +693,34 @@ static void sched_loop(march_scheduler *sched) {
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
-            munmap(p->stack_mmap_base, p->stack_alloc);
-            free(p);
+            /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
+             *
+             * march_actor_meta.green_thread (march_runtime.c) holds a
+             * march_proc* that is read from OTHER OS threads (do_actor_death,
+             * march_actor_broadcast_migrate, march_actor_call/reply) with NO
+             * synchronization against this thread's registry_remove/free —
+             * only the SEPARATE g_proc_registry array (walked by
+             * march_sched_wait_idle / wake_idle_daemons, under g_registry_mu)
+             * had that protection. A reader on another thread can therefore
+             * still be mid-dereference of `p` (or about to dereference it)
+             * at the exact moment this branch would have freed it and a
+             * later spawn's calloc reused the same address for an unrelated
+             * proc — confirmed via ThreadSanitizer as a genuine, not
+             * benign, data race causing heap corruption (intermittent
+             * SIGSEGV/SIGBUS/hangs) under supervision's kill-then-
+             * immediately-respawn pattern, and reproducible with plain
+             * kill()+spawn() with no supervision involved at all.
+             *
+             * Leaving `p` (and its stack mmap) allocated forever makes every
+             * stale reader safe: p->status still correctly reads PROC_DEAD
+             * (already-dead handling is required everywhere regardless, so
+             * this adds no new cases to handle), and the memory is never
+             * repurposed out from under a reader that hasn't yet noticed
+             * the process died. This trades an unreclaimed-memory leak
+             * (bounded by total actors ever spawned+killed over a program's
+             * lifetime) for eliminating the crash; proper reclamation
+             * (e.g. reference counting or an epoch/hazard-pointer scheme)
+             * is a separate, larger undertaking — see specs/todos.md. */
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }
@@ -686,7 +774,10 @@ void march_sched_yield(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
     atomic_store_explicit(&p->status, PROC_READY, memory_order_release);
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
     /* Execution resumes here after the scheduler re-schedules us. */
 }
 
@@ -730,6 +821,10 @@ void march_sched_exit(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
+    /* This proc never resumes after this switch, so there is no matching
+     * MARCH_ASAN_SWITCH_DONE call. */
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
     abort(); /* Should never be reached. */
 }
@@ -793,12 +888,18 @@ void *march_sched_recv(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
 
-    /* Fast path: check node existence, not message value.
-     * March zero-arg constructors are valid msg=NULL (inttoptr i64 0), so we
-     * MUST NOT use "if (msg)" to detect "has message" — we use the node ptr. */
-    if (p->mailbox) return mbox_pop(p);
-
-    /* Slow path: check mailbox under lock, then park if truly empty. */
+    /* Check the mailbox under lock, then park if truly empty. There used to
+     * be an unlocked "fast path" here (`if (p->mailbox) return mbox_pop(p);`)
+     * that bypassed the mbox_lock spinlock entirely. mbox_push (called by
+     * senders, under the lock) and mbox_pop both read AND WRITE the shared
+     * mailbox/mbox_tail/mbox_count linked-list state — the unlocked fast
+     * path let a sender's locked mbox_push race against this receiver's
+     * unlocked mbox_pop, corrupting the list (confirmed via
+     * ThreadSanitizer: this was a genuine data race, not a benign one — it
+     * caused intermittent heap corruption and crashes at unrelated,
+     * seemingly-random locations under load). The lock is cheap when
+     * uncontended (the common case), so always taking it here is the
+     * correct, minimal fix. */
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
@@ -814,7 +915,10 @@ void *march_sched_recv(void) {
     atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
     mbox_lock_release(p);
 
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
     /* Context is now saved.  The scheduler (sched_loop) transitions us from
      * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
      * its side, making it safe for a waker to push us to a deque. */

@@ -2270,8 +2270,10 @@ let compile filename =
             let math_flag = if Sys.unix then " -lm" else "" in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag =
-              if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined"
-              else ""
+              match Sys.getenv_opt "MARCH_SANITIZE" with
+              | Some "thread" -> " -fsanitize=thread -g"
+              | Some _ -> " -fsanitize=address,undefined"
+              | None -> ""
             in
             (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
                guarded by not !compile_so above, same as march_reload.c). *)
