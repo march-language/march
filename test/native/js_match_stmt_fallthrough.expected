@@ -1,0 +1,5 @@
+cons 10
+cons 20
+cons 30
+nil at 3
+done

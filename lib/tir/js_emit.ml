@@ -918,7 +918,14 @@ and emit_case_impl ctx result_var expr =
                emit ctx ";\n";
                emitl ctx "break;"
              | None ->
-               emit_stmts ctx br.Tir.br_body)
+               (* Statement position: emit_stmts does not always end in a
+                  `return` (e.g. a trailing Unit-typed call emits as a bare
+                  statement), and a JS case arm without break/return FALLS
+                  THROUGH — into the next case or the non-exhaustive-match
+                  default throw. The break is unreachable (harmless) when
+                  the body did return. *)
+               emit_stmts ctx br.Tir.br_body;
+               emitl ctx "break;")
           )
         );
         emitl ctx "  }"
@@ -933,7 +940,10 @@ and emit_case_impl ctx result_var expr =
                emit_indent ctx; emit ctx (rv ^ " = ");
                emit_val ctx d; emit ctx ";\n";
                emitl ctx "break;"
-             | None -> emit_stmts ctx d
+             | None ->
+               (* Same fallthrough hazard as the branch arms above. *)
+               emit_stmts ctx d;
+               emitl ctx "break;"
            )
          );
          emitl ctx "  }"
