@@ -1,0 +1,57 @@
+-- Regression (2026-07-10, found via perihelion Combat.nearest_other_star):
+-- a self-recursive tail call that drops a heap-allocated (RC'd) binding it
+-- never used silently returned `undefined` on the JS target, crashing every
+-- caller that pattern-matched the result ("can't access property '$' of
+-- undefined").
+--
+-- Root cause: Perceus keeps a self-tail-call in the shape
+-- ESeq(call, EDecRC(dead_var)...) specifically so llvm_emit.ml's
+-- has_self_tail_call can recognize and TCO-rewrite it on the native
+-- backend (see perceus.ml's "EXCEPTION: self-recursive tail calls"
+-- comment) — after TCO emits the loop back-edge, the trailing EDecRC is
+-- dead code. The JS backend has no such TCO rewrite: it emitted the call
+-- as a bare statement (discarding its return value) and the trailing
+-- EDecRC as a true no-op, so the function fell off the end and implicitly
+-- returned `undefined` instead of the recursive call's actual result.
+--
+-- Trigger shape: a Cons(head, rest) branch that (a) recurses into itself
+-- with a non-Unit return type, and (b) binds `head` to a HEAP-allocated
+-- (RC-needing) value it never reads in that branch, so Perceus must drop it
+-- with a post-call EDecRC. An Int head (unboxed, no RC) cannot trigger this.
+mod JsSelfTailCallRcDrop do
+  type Item = { v : Int }
+
+  -- Skip index `skip`; otherwise walk past every item without reading it
+  -- (deliberately dead on entry) until Nil.
+  fn find(skip : Int, xs : List(Item), i : Int) : Option(Int) do
+    match xs do
+      Nil -> None
+      Cons(it, rest) ->
+        if i == skip do
+          find(skip, rest, i + 1)
+        else
+          -- `it` is read here in ONE branch only, so the OTHER two
+          -- recursive-call sites below still drop it unused, and the
+          -- `it == skip` branch above drops it unused entirely.
+          let d = it.v
+          if d > 1000 do
+            find(skip, rest, i + 1)
+          else
+            find(skip, rest, i + 1)
+          end
+        end
+    end
+  end
+
+  fn main() : Unit do
+    let xs = Cons({ v: 1 }, Cons({ v: 2 }, Cons({ v: 3 }, Nil)))
+    match find(0, xs, 0) do
+      None -> println("none")
+      Some(v) -> println("some " ++ int_to_string(v))
+    end
+    match find(99, xs, 0) do
+      None -> println("none")
+      Some(v) -> println("some " ++ int_to_string(v))
+    end
+  end
+end
