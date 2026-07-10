@@ -283,6 +283,46 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-09, compiled actor supervision implemented + scheduler race characterized)
+
+**Compiled actor supervision now works.** The six-task plan
+`specs/plans/2026-07-08-compiled-actor-supervision-plan.md` closed the last
+big interp-vs-compiled supervision gap: pid encoding (`march_pid_of_int` +
+dead-actor sentinel), external actor-state inspection (`march_get_actor_field`
+via the runtime shape-registry + spawn-time `emit_set_shape` stamping),
+spawn-time child injection (`lower_actor.ml` + `march_actor_register_child`),
+per-`march_proc` `crash_jmp` crash isolation, and all three restart strategies
+(`one_for_one`/`one_for_all`/`rest_for_one`) are compiled and byte-identical to
+the interpreter for the deterministic single-restart witnesses. **6 native
+golden tests** (`test/native/{pid_of_int_roundtrip, get_actor_field_direct,
+supervisor_spawn_children, supervisor_one_for_one_restart,
+supervisor_one_for_all_restart, supervisor_rest_for_one_restart}`), each
+stress-verified stable. Two genuine bugs fixed en route: `<ActorName>_spawn`
+referenced as a value is ALWAYS a March closure (offset-16 wrapper dance), not a
+bare C fn pointer; and the crash-trap pointer must live on `march_proc`, not a
+`_Thread_local` (this scheduler steals procs across OS threads).
+
+**Pre-existing multi-scheduler race characterized + verified fixes landed.**
+The full 3-strategy demo `examples/supervision_strategies.march` exposed a
+PRE-EXISTING (proven via a supervision-free repro at commit `e355aeff`),
+intermittent, MEMORY-UNSAFE crash under the default 4-OS-thread work-stealing
+scheduler — a green thread's stack corrupted by confirmed DOUBLE-DISPATCH
+(same `march_proc` run by two scheduler threads at once). Proven
+scheduler-count-dependent: `MARCH_NUM_SCHEDULERS=1` → 40/40 clean; that env
+override is the mitigation for rapid-kill+respawn compiled programs. Four
+TSan/ASan-confirmed real races were fixed this session (mailbox unlocked
+fast-path; proc-lifecycle UAF via leak-don't-free; `meta->supervisor`
+unsynchronized publish; and the ASan+TSan **fiber-switch annotations** the
+sanitizer integration was missing entirely around `swapcontext`). The core
+double-dispatch double-enqueue remains open (a CAS claim cut crashes ~50%→~30%
+but had its own gap; reverted). Full writeup + next avenues (valgrind/helgrind,
+double-enqueue source, or `NUM_SCHEDULERS=1` compile-time default) in
+`specs/todos.md`. The demo is deliberately NOT a golden (flaky under the
+pre-existing race); the 6 smaller supervision goldens are stable.
+
+Six-runner suite green (compiler 486 / eval 231 / codegen 394 / stdlib 804);
+no regressions from the runtime changes.
+
 ## Current State (as of 2026-07-08, `cap_narrow` container-launder taint gap resolved)
 
 The filed "container/factory `cap_narrow`-taint gap" is closed, with a
