@@ -1901,8 +1901,8 @@ they are not merely similarly-named — they are typechecked as the identical
 nominal `TCon`.** `accept/t35` witnesses this precisely:
 
 ```march
-mod A do type Foo = Mk(Int) fn make() : Foo do Mk(1) end end
-mod B do type Foo = Mk(String) fn make() : Foo do Mk("x") end end
+mod A do type Foo = MkA(Int) fn make() : Foo do MkA(1) end end
+mod B do type Foo = MkB(String) fn make() : Foo do MkB("x") end end
 fn take_a(_x : A.Foo) : Int do 7 end
 fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo where A.Foo is annotated
 ```
@@ -1910,6 +1910,17 @@ fn main() do println(int_to_string(take_a(B.make()))) end   -- accepts B.Foo whe
 `--check` exits 0 with no diagnostic at all (re-confirmed live, exactly as
 the survey found), and running it prints `7` — proving the substitution is
 not merely un-flagged at check time but genuinely accepted end-to-end.
+
+> **Reconciled 2026-07-10 (post `d95fe942`, order-independent multi-module
+> resolution):** the witness originally named BOTH sibling ctors `Mk`. That
+> version no longer typechecks — not because per-module type identity
+> appeared (it did not; the design point above is unchanged), but because a
+> same-named constructor in a sibling module now shadows a module's OWN
+> constructor inside its own body (`Mk(1)` in `A.make` resolves against B's
+> `Mk(String)` → `expected `String` but got `Int``). Filed as
+> "sibling-module constructor shadowing" in `specs/todos.md`; the witness now
+> uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
+> fact this section documents.
 **This is documented here as ONE deliberate design point, not filed as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
