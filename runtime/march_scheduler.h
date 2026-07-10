@@ -79,14 +79,40 @@
 #endif
 
 /* ── Process status ───────────────────────────────────────────────────── */
+/* Queue-membership invariant (the heart of the scheduler's memory safety):
+ *
+ *   A march_proc is in AT MOST ONE run structure (one scheduler's local
+ *   Chase-Lev deque, or the global run queue) at any instant.  Membership is
+ *   authorized by exactly one atomic transition INTO PROC_RUNNABLE; only the
+ *   thread that wins that transition performs the enqueue.  A scheduler runs
+ *   a proc only after claiming it RUNNABLE→RUNNING; because a runnable proc
+ *   is single-membership, no two OS threads can ever swapcontext into the
+ *   same proc (= the same green-thread stack) concurrently.
+ *
+ *   State         | in a run queue? | meaning
+ *   ------------- | --------------- | -------------------------------------
+ *   PROC_RUNNABLE | yes, exactly one| Enqueued, waiting for a CPU.
+ *   PROC_RUNNING  | no              | Claimed by one scheduler; that
+ *                 |                 | scheduler is swapcontext-ed into it.
+ *   PROC_WAITING  | no              | Parked on recv, context saved.  A
+ *                 |                 | waker moves it WAITING→RUNNABLE.
+ *   PROC_PARKED   | no              | Transient: recv set it, swapcontext
+ *                 |                 | not yet returned to the scheduler.
+ *   PROC_DEAD     | no              | Finished.  Never re-enqueued.
+ *
+ *   Authorized transitions into RUNNABLE (winner, and only winner, enqueues):
+ *     NEW     → RUNNABLE   at spawn
+ *     WAITING → RUNNABLE   at wake (message arrival, kill-wake, shutdown wake)
+ *     RUNNING → RUNNABLE   at yield (only the running proc itself does this)
+ */
 typedef enum {
-    PROC_READY   = 0,  /* In run queue, waiting for a CPU turn              */
-    PROC_RUNNING = 1,  /* Currently executing on the scheduler thread       */
-    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in run queue          */
-    PROC_DEAD    = 3,  /* Finished; resources will be freed by the scheduler */
+    PROC_RUNNABLE = 0, /* In exactly one run queue, waiting for a CPU turn  */
+    PROC_RUNNING = 1,  /* Currently executing on one scheduler thread       */
+    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in any run queue      */
+    PROC_DEAD    = 3,  /* Finished; never re-enqueued (leak-don't-free)     */
     PROC_PARKED  = 4   /* Transitioning to WAITING: status set but swapcontext
                         * not yet called.  Wakers must spin-wait on this state
-                        * before pushing to a deque, to avoid resuming a process
+                        * before enqueueing, to avoid resuming a process
                         * whose context has not yet been saved.              */
 } march_proc_status;
 
@@ -157,7 +183,7 @@ typedef struct march_proc {
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
-    march_deque     local_queue;  /* Work-stealing deque of READY processes      */
+    march_deque     local_queue;  /* Work-stealing deque of RUNNABLE processes   */
     march_proc     *current;      /* Currently running process (NULL = in sched) */
     ucontext_t      sched_ctx;    /* Scheduler context; processes yield here     */
     int             running;      /* Non-zero while scheduler loop is active     */
@@ -204,7 +230,7 @@ march_proc  *march_sched_spawn_daemon(void (*fn)(void *), void *arg);
 void         march_sched_yield(void);
 
 /* Cooperatively yield until no OTHER process is runnable or mid-work
- * (READY, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is
+ * (RUNNABLE, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is
  * the in-scheduler implementation of run_until_idle(): callable only from
  * inside a green thread; a no-op otherwise. */
 void         march_sched_wait_idle(void);

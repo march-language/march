@@ -1890,7 +1890,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
  * release-stores 1 into it.  We never dereference the proc ptr (word 2)
  * after the proc may have been freed by sched_loop — doing so caused a
  * use-after-free where calloc reuse zeroed the freed memory, making
- * p->status read as PROC_READY (0) forever. */
+ * p->status read as PROC_RUNNABLE (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
