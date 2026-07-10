@@ -6491,6 +6491,23 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** int_div_euclid: native codegen must route through march_checked_ediv and
+    match the interpreter's Euclidean quotient across all four sign quadrants.
+    Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
+    at link time with `Undefined symbols: _int_div_euclid`. The negative-operand
+    cases exercise the truncated→Euclidean correction step (r<0 → q∓1). *)
+let test_compiled_int_div_euclid_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_div_euclid"
+    ~src:"mod IntDivEuclidParity do\n\
+         \  fn main() do\n\
+         \    println([int_div_euclid(7, 2), int_div_euclid(-7, 2), \
+                        int_div_euclid(-7, -2), int_div_euclid(7, -2)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[3, -4, 4, -3]"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -7075,6 +7092,7 @@ declare double @march_checked_fdiv(double %a, double %b)
 declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
 declare i64    @march_checked_umod(i64 %a, i64 %b)
+declare i64    @march_checked_ediv(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
@@ -8120,6 +8138,8 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
+            test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick

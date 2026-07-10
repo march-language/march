@@ -704,8 +704,9 @@ void march_panic(void *s) {
 
 /* ── Checked integer division / remainder ────────────────────────────────── */
 /*
- * The compiled backend lowers int_div / int_mod / int_mod_euclid through
- * these helpers instead of emitting a raw sdiv/srem/urem so that a zero
+ * The compiled backend lowers int_div / int_mod / int_mod_euclid /
+ * int_div_euclid through these helpers instead of emitting a raw
+ * sdiv/srem/urem so that a zero
  * divisor traps via march_panic — matching the interpreter, which raises
  * "<op>: division by zero" (see eval.ml).  Raw hardware division by zero is
  * undefined (SIGFPE on x86, garbage on some ARM paths); pre-fix, compiled
@@ -740,6 +741,20 @@ int64_t march_checked_imod(int64_t a, int64_t b) {
 int64_t march_checked_umod(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_mod_euclid");
     return (int64_t)((uint64_t)a % (uint64_t)b);
+}
+
+/* Euclidean division (int_div_euclid): the quotient q such that the Euclidean
+ * remainder a - q*b is always non-negative. Mirrors eval.ml byte-for-byte:
+ *   q = a / b; r = a - q*b; if r < 0 then (b > 0 ? q-1 : q+1) else q
+ * C's `/` truncates toward zero like OCaml's, so the correction step is what
+ * turns truncated division into Euclidean division. Signed throughout —
+ * unlike the umod sibling above, which is genuinely unsigned. */
+int64_t march_checked_ediv(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_div_euclid");
+    int64_t q = a / b;
+    int64_t r = a - q * b;
+    if (r < 0) return (b > 0) ? q - 1 : q + 1;
+    return q;
 }
 
 /* The `/` and `%` infix operators (is_int_arith in llvm_emit.ml) lower to these
