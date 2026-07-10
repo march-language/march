@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>March Canvas Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f0f1a;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      padding: 2rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #a0aec0;
+    }
+
+    #game-canvas {
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      cursor: crosshair;
+    }
+
+    .hint {
+      font-size: 0.8rem;
+      color: #4a5568;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>March Canvas Demo</h1>
+  <canvas id="game-canvas" width="480" height="360"></canvas>
+  <p class="hint">Click/tap the canvas to drop a marker &nbsp;·&nbsp; Compiled from March with --target js</p>
+
+  <script type="module" src="canvas_demo.mjs"></script>
+</body>
+</html>

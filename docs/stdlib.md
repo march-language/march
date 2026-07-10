@@ -762,7 +762,7 @@ Canvas.draw_image(ctx, img, 0.0, 0.0)
 Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
 ```
 
-`Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.on_frame(cb)` for an animation loop and `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
+`Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
 
 ---
 

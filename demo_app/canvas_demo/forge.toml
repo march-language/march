@@ -1,0 +1,5 @@
+[package]
+name = "canvas_demo"
+version = "0.1.0"
+type = "app"
+description = "March Canvas demo — static shapes, a rotating bar, tap markers, and a loaded sprite, compiled to JS"
