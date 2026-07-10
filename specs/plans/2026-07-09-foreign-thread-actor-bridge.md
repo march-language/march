@@ -319,6 +319,30 @@ Replace `march_scheduler.c:755-759`:
 
 Also update the comment at `march_scheduler.c:76-78` to say the stack carries foreign spawns AND foreign wakes.
 
+- [ ] **Step 3b: Fix the PARKED-wait livelock (the actual reproduced hang — see Diagnosis findings under Task 1)**
+
+Task 1 refuted the foreign-push hypothesis for the observed hang: the repro never reaches the foreign branch. The reproduced wedge is the PARKED-wait spin at the TOP of `march_sched_wake` — `do { cur = atomic_load(...); } while (cur == PROC_PARKED);` — which has no yield/backoff. If the OS preempts the parking thread between its `PROC_PARKED` store and its `swapcontext` call, a waker spinning at 100% on the same oversubscribed CPU set (4 scheduler threads + 28 HTTP pool threads + preempt daemon) can starve the parking thread indefinitely: a livelock that permanently wedges the single actor green thread (observed surviving SIGTERM).
+
+Fix: yield the OS timeslice inside the spin so the parking thread can reach `swapcontext`:
+
+```c
+    march_proc_status cur;
+    for (;;) {
+        cur = atomic_load_explicit(&target->status, memory_order_acquire);
+        if (cur == PROC_DEAD || cur == PROC_READY || cur == PROC_RUNNING)
+            return; /* Not WAITING — no need to wake. */
+        if (cur == PROC_WAITING) break;
+        /* PROC_PARKED: the parking thread has stored PARKED but not yet
+         * reached swapcontext.  Yield so it can get CPU time — a bare spin
+         * here livelocks under thread oversubscription (Task 1 diagnosis). */
+        sched_yield();
+    }
+```
+
+`sched_yield` needs `<sched.h>` — already included in `march_scheduler.c`. Check for other yield-less PARKED-wait spins in the file (e.g. in send/kill paths) and apply the same treatment if present.
+
+The foreign-branch fix (Step 3) remains required: it is a latent owner-only-deque violation for any true foreign wake (e.g. `send()` from an evloop thread, which conduit/forgepm handlers will do), even though this repro never exercised it.
+
 - [ ] **Step 4: Run the repro — task-shim path passes**
 
 ```bash
@@ -330,7 +354,7 @@ FAH_MODE=client timeout 60 /tmp/fah
 kill $SRV 2>/dev/null
 ```
 
-Expected: `task_ok=50/50`. (`direct_ok=0/50` still — that's Task 4.) Re-run the client 3 times against a fresh server to shake out flakes.
+Expected: `task_ok=50/50`. (`direct_ok=0/50` still — that's Task 4.) The Task 1 hang was probabilistic (17/50, 8/50, 9/50, one full wedge): run the client at least 5 times against fresh servers, and once with `n` raised to 500 (edit the test locally, revert after), before declaring the livelock fixed. Use a watchdog (`(sleep 65; kill -9 $PID) &`) — a wedged server survived SIGTERM in Task 1. Note dune commands need `--root .` inside the worktree.
 
 - [ ] **Step 5: Run the full suite**
 
