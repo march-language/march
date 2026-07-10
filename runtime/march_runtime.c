@@ -1193,6 +1193,12 @@ static _Atomic int64_t g_next_monitor_ref = 0;
  * the scheduler; the outer loop will pick up newly-queued actors. */
 static _Thread_local int g_in_scheduler = 0;
 
+/* Process-wide: an inline march_sched_run() is executing on some thread.
+ * (g_in_scheduler is _Thread_local — a re-entrancy guard only — so foreign
+ * threads cannot see it; without this flag they would start a second,
+ * concurrent scheduler set over the same g_scheds globals.) */
+static _Atomic int g_sched_inline_running = 0;
+
 /* Lazy initialization flag for the green thread scheduler.
  * _Atomic so concurrent first-spawns don't double-init via a plain read-write
  * race on a non-atomic int. */
@@ -1220,6 +1226,8 @@ static void *sched_bg_entry(void *arg) {
  * inline scheduler loop is already handling all green threads. */
 static void march_ensure_sched_started(void) {
     if (march_sched_in_scheduler()) return;  /* already inside the scheduler — no background thread needed */
+    if (atomic_load_explicit(&g_sched_inline_running, memory_order_acquire))
+        return;  /* inline scheduler already running — it runs all green threads */
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &g_sched_bg_started, &expected, 1,
@@ -1557,6 +1565,35 @@ typedef struct {
  * into word 4.  march_task_await acquire-loads word 4, never dereferencing
  * the proc ptr (word 2) after the proc may have been freed by sched_loop.
  */
+/* Foreign-thread task_await support: green threads yield-wait (they must
+ * never block an OS scheduler thread), but foreign threads (evloop pthreads)
+ * previously busy-spun with sched_yield, burning a core per in-flight
+ * request.  A single global condvar is broadcast on every task completion;
+ * foreign waiters do a timed wait and re-check their own done flag, so a
+ * broadcast that fires before a waiter registers is harmless (50ms bound). */
+static pthread_mutex_t g_task_done_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_task_done_cv = PTHREAD_COND_INITIALIZER;
+
+static void task_wait_done(int64_t *task) {
+    if (march_sched_in_scheduler()) {
+        while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                    memory_order_acquire) == 0) {
+            march_sched_yield();
+        }
+        return;
+    }
+    pthread_mutex_lock(&g_task_done_mu);
+    while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                memory_order_acquire) == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);          /* cond waits use REALTIME */
+        ts.tv_nsec += 50 * 1000000L;                  /* 50ms re-check bound */
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_task_done_cv, &g_task_done_mu, &ts);
+    }
+    pthread_mutex_unlock(&g_task_done_mu);
+}
+
 static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
@@ -1585,6 +1622,14 @@ static void march_thunk_trampoline(void *arg) {
         /* Release-store: ensures task[3] is visible before the done flag. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_release);
+        /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
+         * timed wait.  Must happen after the done-store above (so waiters that
+         * wake see done=1) and touches no task fields, so it is safe to do
+         * before or after the decrc below; placed here to keep the "signal
+         * completion" steps together. */
+        pthread_mutex_lock(&g_task_done_mu);
+        pthread_cond_broadcast(&g_task_done_cv);
+        pthread_mutex_unlock(&g_task_done_mu);
         /* Drop the trampoline's RC hold taken at spawn time (see incrc in
          * march_task_spawn_thunk).  If the caller already dropped their handle
          * (fire-and-forget), this is the last reference and frees the object.
@@ -1638,20 +1683,15 @@ void *march_task_spawn_thunk(void *clo_ptr) {
 
 /* Wait for a task to complete and return Ok(result).
  *
- * Spins on the task-embedded done flag (word 4) until the trampoline
- * release-stores 1 into it.  We never dereference the proc ptr (word 2)
- * after the proc may have been freed by sched_loop — doing so caused a
- * use-after-free where calloc reuse zeroed the freed memory, making
+ * Waits on the task-embedded done flag (word 4, via task_wait_done) until
+ * the trampoline release-stores 1 into it.  We never dereference the proc
+ * ptr (word 2) after the proc may have been freed by sched_loop — doing so
+ * caused a use-after-free where calloc reuse zeroed the freed memory, making
  * p->status read as PROC_READY (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        /* Yield the OS timeslice so we don't busy-wait when called from outside
-         * a green-thread context (march_sched_yield is a no-op in that case). */
-        sched_yield();
-    }
+    task_wait_done(task);
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -1663,10 +1703,7 @@ void *march_task_await(void *task_obj) {
 void *march_task_await_value(void *task_obj) {
     if (!task_obj) return (void *)1; /* tagged Unit/null */
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        sched_yield();
-    }
+    task_wait_done(task);
     return (void *)(uintptr_t)task[3]; /* tagged result */
 }
 
@@ -1752,8 +1789,18 @@ void march_run_scheduler(void) {
     }
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
+    /* Publish that an inline scheduler is running BEFORE march_sched_run()
+     * starts workers.  Ordering: this store happens-before the workers start,
+     * which happens-before the main green thread runs, which happens-before
+     * any evloop pthread exists — so evloop-origin march_ensure_sched_started
+     * calls always observe the flag.  A theoretical window exists only for
+     * foreign threads created before march_run_scheduler() is entered, which
+     * do not occur in compiled-program startup (main itself is the first
+     * green thread). */
+    atomic_store_explicit(&g_sched_inline_running, 1, memory_order_release);
     march_sched_request_shutdown();
     march_sched_run();
+    atomic_store_explicit(&g_sched_inline_running, 0, memory_order_release);
     g_in_scheduler = 0;
     atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
 }
@@ -1821,9 +1868,96 @@ void *march_send(void *actor, void *msg) {
  * RC contract: we consume one reference to inner_msg (via march_decrc after
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
-void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
-    (void)timeout_ms;  /* timeout not yet enforced; accepted for API compat */
+/* Perform the call protocol from the current green thread.
+ * Precondition: march_sched_current() != NULL.  timeout_ms <= 0 means wait
+ * forever; otherwise the wait is a deadline-bounded yield-poll (see below). */
+static void *actor_call_green(void *actor, march_actor_meta *meta,
+                              int32_t msg_tag, int64_t timeout_ms) {
+    (void)actor;
+    march_proc *caller = march_sched_current();
 
+    void *call_msg = march_alloc(24);
+    MARCH_SET_TAG(call_msg, msg_tag);
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+
+    march_sched_send(meta->green_thread, call_msg);
+
+    if (timeout_ms <= 0) {
+        /* Preserve wait-forever semantics for callers that opt out. */
+        void *result = march_sched_recv();
+        if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+        return mk_ok(result);
+    }
+
+    /* Timed wait: poll the mailbox with cooperative yields until the
+     * deadline.  A parked-with-deadline mechanism needs timer support the
+     * scheduler doesn't have; replies are normally immediate, so the yield
+     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+     *
+     * Known limitation: on timeout, a late reply still lands in the
+     * caller's mailbox. Safe for per-call task green threads (the thread
+     * exits and sends to dead procs are dropped); a long-lived green thread
+     * mixing Actor.call and raw receive could observe a stale reply after
+     * a timeout. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
+                          + timeout_ms;
+    for (;;) {
+        void *msg = NULL;
+        if (march_sched_try_recv2(&msg)) {
+            if (msg == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+            return mk_ok(msg);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            return mk_err_cstr("actor_call: timeout");
+        march_sched_yield();
+    }
+}
+
+/* Foreign-caller bridge: the calling OS thread has no green-thread context,
+ * so a helper green thread performs the call protocol and hands the result
+ * back over a one-shot condvar.  The waiter enforces timeout_ms with
+ * pthread_cond_timedwait; on timeout it marks the ctx abandoned and the
+ * helper green thread frees it (and drops the unclaimed result) instead. */
+typedef struct {
+    void             *actor;
+    march_actor_meta *meta;
+    int32_t           msg_tag;
+    int64_t           timeout_ms;
+    void             *result;
+    int               done;
+    int               abandoned;
+    pthread_mutex_t   mu;
+    pthread_cond_t    cv;
+} foreign_call_ctx;
+
+static void foreign_call_entry(void *arg) {
+    foreign_call_ctx *ctx = (foreign_call_ctx *)arg;
+    /* Pass the same bound the waiter uses so a never-replying actor cannot
+     * leak this green thread: actor_call_green enforces timeout_ms itself
+     * (deadline-bounded yield-poll) and returns Err(timeout) here, we see
+     * abandoned=1, and we free ctx. */
+    void *res = actor_call_green(ctx->actor, ctx->meta, ctx->msg_tag,
+                                 ctx->timeout_ms);
+    pthread_mutex_lock(&ctx->mu);
+    if (ctx->abandoned) {
+        pthread_mutex_unlock(&ctx->mu);
+        march_decrc(res);  /* unclaimed Ok/Err — drop our reference */
+        pthread_mutex_destroy(&ctx->mu);
+        pthread_cond_destroy(&ctx->cv);
+        free(ctx);
+        return;
+    }
+    ctx->result = res;
+    ctx->done   = 1;
+    pthread_cond_signal(&ctx->cv);
+    pthread_mutex_unlock(&ctx->mu);
+}
+
+void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     int64_t *a = (int64_t *)actor;
     if (!a[3]) {
         march_decrc(inner_msg);
@@ -1836,31 +1970,49 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_err_cstr("actor not found");
     }
 
-    march_proc *caller = march_sched_current();
-    if (!caller) {
-        march_decrc(inner_msg);
-        return mk_err_cstr("actor_call: not in scheduler context");
-    }
-
     /* Read the tag from inner_msg so we can reproduce it on the augmented msg.
      * inner_msg is assumed to be a zero-arg constructor (16 bytes: header only).
      * We decrc it now — the caller owned one reference. */
     int32_t msg_tag = ((march_hdr *)inner_msg)->tag;
     march_decrc(inner_msg);
 
-    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
-     * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
-    void *call_msg = march_alloc(24);
-    MARCH_SET_TAG(call_msg, msg_tag);
-    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+    if (!march_sched_current()) {
+        foreign_call_ctx *ctx = (foreign_call_ctx *)calloc(1, sizeof(*ctx));
+        if (!ctx) return mk_err_cstr("actor_call: oom");
+        ctx->actor = actor; ctx->meta = meta; ctx->msg_tag = msg_tag;
+        ctx->timeout_ms = timeout_ms > 0 ? timeout_ms : 5000;
+        pthread_mutex_init(&ctx->mu, NULL);
+        pthread_cond_init(&ctx->cv, NULL);
 
-    march_sched_send(meta->green_thread, call_msg);
+        march_ensure_sched_started();
+        march_sched_spawn(foreign_call_entry, ctx);
 
-    /* Block until the actor calls actor_reply. */
-    void *result = march_sched_recv();
-    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+        int64_t wait_ms = timeout_ms > 0 ? timeout_ms : 5000;
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec  += wait_ms / 1000;
+        deadline.tv_nsec += (wait_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L; }
 
-    return mk_ok(result);
+        pthread_mutex_lock(&ctx->mu);
+        int timed_out = 0;
+        while (!ctx->done && !timed_out) {
+            if (pthread_cond_timedwait(&ctx->cv, &ctx->mu, &deadline) == ETIMEDOUT)
+                timed_out = !ctx->done;
+        }
+        if (timed_out) {
+            ctx->abandoned = 1;   /* helper green thread now owns ctx */
+            pthread_mutex_unlock(&ctx->mu);
+            return mk_err_cstr("actor_call: timeout");
+        }
+        void *r = ctx->result;
+        pthread_mutex_unlock(&ctx->mu);
+        pthread_mutex_destroy(&ctx->mu);
+        pthread_cond_destroy(&ctx->cv);
+        free(ctx);
+        return r;
+    }
+    return actor_call_green(actor, meta, msg_tag, timeout_ms);
 }
 
 /*

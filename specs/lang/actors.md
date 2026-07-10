@@ -16,7 +16,7 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 **What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). Three *other* planes **diverge compiled** and are documented interpreter-first below, each a filed open finding (`specs/todos.md`):
 
 - **Capabilities / dead-`send`** (`get_cap`, `send_checked`, plain `send` to a *dead* pid): compiled `send_checked` performs no epoch validation and returns an uninterned garbage atom for every cap; a plain `send` to a dead pid returns `Some` compiled but `None` interpreted. See [`core-march.md`](core-march.md) §4.10.6.
-- **`Actor.call` timeout**: the `timeout_ms` argument is accepted for API compatibility but **not enforced** in the compiled runtime (`runtime/march_runtime.c:1809–1810`) — a `call` cannot actually time out compiled.
+- **`Actor.call` timeout**: `timeout_ms` **is enforced** in the compiled runtime via a deadline-bounded yield-poll (`actor_call_green`, `runtime/march_runtime.c`); `timeout_ms <= 0` still means wait forever. Known caveat: on timeout, a late reply still lands in the caller's mailbox — safe for per-call task green threads (the thread exits and sends to dead procs are dropped), but a long-lived green thread mixing `Actor.call` and raw `receive` could observe a stale reply after a timeout.
 - **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` (the only surface way to reach a supervised child) **SIGSEGV compiled** (`examples/supervision_strategies.march` exits 139), and the compiled supervisor does not run its children's `init` at `spawn`. See [`core-march.md`](core-march.md) §4.10.7.
 
 The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
@@ -264,10 +264,13 @@ Two consequences of the tag-selects-the-handler rule:
 There is no `Call` wrapper constructor, and the call handler takes exactly one argument
 (the reply channel).
 
-> **Two caveats.** (1) The `timeout_ms` argument is accepted for API compatibility but is
-> **not enforced in the compiled runtime** (`runtime/march_runtime.c:1809–1810`) — a `call`
-> that blocks indefinitely will not be interrupted by its stated timeout compiled (a filed
-> open finding, `specs/todos.md`). (2) The **interpreter dispatches `Actor.call`
+> **Two caveats.** (1) `timeout_ms` **is enforced in the compiled runtime** via a
+> deadline-bounded yield-poll (`actor_call_green`, `runtime/march_runtime.c`); a `call`
+> that never receives a reply returns `Err(...)` once the deadline passes. A late reply
+> that arrives after the timeout still lands in the caller's mailbox — safe for per-call
+> task green threads (the thread exits and sends to dead procs are dropped), but a
+> long-lived green thread mixing `Actor.call` and raw `receive` could observe a stale
+> reply after a timeout. (2) The **interpreter dispatches `Actor.call`
 > differently**: it wraps the message as `Call(ref, msg)` and delivers it to a two-argument
 > handler matching `on Call(ref, msg)` (`lib/eval/eval.ml`), rather than tag-routing a
 > zero-arg sentinel to a one-argument handler. The compiled-canonical example above

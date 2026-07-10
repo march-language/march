@@ -191,6 +191,11 @@ void        *march_sched_recv(void);
  * NULL if mailbox is empty. Does not yield. */
 void        *march_sched_try_recv(void);
 
+/* Non-blocking receive that distinguishes "empty mailbox" from a legitimate
+ * NULL message (zero-arg constructors are msg=NULL).  Returns 1 and writes
+ * the message to *out if a mailbox node existed, else returns 0. */
+int          march_sched_try_recv2(void **out);
+
 /* Wake a WAITING process and re-enqueue it. No-op if not WAITING.
  * Safe to call from any context. */
 void         march_sched_wake(march_proc *target);
