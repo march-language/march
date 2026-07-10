@@ -56,17 +56,18 @@ mod Starfling.Core do
       Ready ->
         if tapped do { game with phase: Playing } else game end
       Over ->
-        game
+        if tapped do restart(game) else game end
       Playing ->
         step_playing(game, tapped, dt_s)
     end
   end
 
   pfn step_playing(game : Game, tapped : Bool, dt_s : Float) : Game do
-    match game.mode do
+    let g = match game.mode do
       Orbiting(idx, angle) -> step_orbit(game, idx, angle, tapped, dt_s)
-      Flying(vx, vy)       -> game
+      Flying(vx, vy)       -> step_flight(game, vx, vy, dt_s)
     end
+    step_camera(g, dt_s)
   end
 
   pfn step_orbit(game : Game, idx : Int, angle : Float, tapped : Bool, dt_s : Float) : Game do
@@ -93,6 +94,133 @@ mod Starfling.Core do
     let vx = 0.0 - d * fly_speed() * Math.sin(angle)
     let vy = d * fly_speed() * Math.cos(angle)
     { game with mode: Flying(vx, vy) }
+  end
+
+  pfn renormalize(vx : Float, vy : Float) : (Float, Float) do
+    let m = Math.sqrt(vx * vx + vy * vy)
+    if m > 0.0 do
+      let out = (vx / m * fly_speed(), vy / m * fly_speed())
+      out
+    else
+      let out = (vx, vy)
+      out
+    end
+  end
+
+  -- Capture assist: inside assist_range_mult * capture_radius of the NEXT star,
+  -- bend velocity toward its center; renormalize so assist never adds speed.
+  pfn assisted_velocity(game : Game, vx : Float, vy : Float, dt_s : Float) : (Float, Float) do
+    match star_at(game, game.current + 1) do
+      None ->
+        let out = (vx, vy)
+        out
+      Some(t) ->
+        let dx = t.x - game.ball_x
+        let dy = t.y - game.ball_y
+        let dist = Math.sqrt(dx * dx + dy * dy)
+        if dist > 0.0 && dist < assist_range_mult() * t.capture_radius do
+          renormalize(vx + dx / dist * assist_strength() * dt_s,
+                      vy + dy / dist * assist_strength() * dt_s)
+        else
+          let out = (vx, vy)
+          out
+        end
+    end
+  end
+
+  pfn step_flight(game : Game, vx : Float, vy : Float, dt_s : Float) : Game do
+    let (vx2, vy2) = assisted_velocity(game, vx, vy, dt_s)
+    let g = { game with
+                ball_x: game.ball_x + vx2 * dt_s,
+                ball_y: game.ball_y + vy2 * dt_s,
+                mode: Flying(vx2, vy2) }
+    match star_at(g, g.current + 1) do
+      None -> check_death(g)
+      Some(t) ->
+        let dx = t.x - g.ball_x
+        let dy = t.y - g.ball_y
+        if Math.sqrt(dx * dx + dy * dy) <= t.capture_radius do
+          on_capture(g, t, g.current + 1)
+        else
+          check_death(g)
+        end
+    end
+  end
+
+  -- THE scoring seam: every successful capture flows through here.
+  pfn on_capture(game : Game, captured : Star, idx : Int) : Game do
+    let angle = Math.atan2(game.ball_y - captured.y, game.ball_x - captured.x)
+    let top = top_star(game.stars, captured)
+    let (fresh, rng2) = Starfling.Level.next_star(game.rng, top)
+    { game with
+        mode: Orbiting(idx, angle),
+        current: idx,
+        score: game.score + 1,
+        stars: List.append(game.stars, Cons(fresh, Nil)),
+        rng: rng2,
+        ball_x: captured.x + Math.cos(angle) * captured.capture_radius,
+        ball_y: captured.y + Math.sin(angle) * captured.capture_radius }
+  end
+
+  pfn top_star(stars : List(Star), fallback : Star) : Star do
+    match stars do
+      Nil -> fallback
+      Cons(s, Nil) -> s
+      Cons(_, rest) -> top_star(rest, fallback)
+    end
+  end
+
+  pfn max2(a : Int, b : Int) : Int do
+    if a > b do a else b end
+  end
+
+  pfn check_death(game : Game) : Game do
+    let below = game.ball_y > game.camera_y + view_h() + kill_margin()
+    let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > view_w() + kill_margin()
+    if below || off_side do
+      { game with phase: Over, best: max2(game.best, game.score) }
+    else
+      game
+    end
+  end
+
+  pfn step_camera(game : Game, dt_s : Float) : Game do
+    match star_at(game, game.current) do
+      None -> game
+      Some(s) ->
+        let target = s.y - cam_anchor() * view_h()
+        { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+    end
+  end
+
+  pfn fresh_run(rng : Int, best : Int) : Game do
+    let (stars, rng2) = Starfling.Level.initial_stars(rng)
+    let start_angle = Math.pi() / 2.0
+    match stars do
+      Nil ->
+        -- unreachable: initial_stars always returns 3 stars
+        { phase: Ready, ball_x: 0.0, ball_y: 0.0, mode: Orbiting(0, start_angle),
+          stars: Nil, current: 0, score: 0, best: best,
+          camera_y: 0.0, rng: rng2 }
+      Cons(s0, _) ->
+        { phase: Ready,
+          ball_x: s0.x + Math.cos(start_angle) * s0.capture_radius,
+          ball_y: s0.y + Math.sin(start_angle) * s0.capture_radius,
+          mode: Orbiting(0, start_angle),
+          stars: stars, current: 0, score: 0, best: best,
+          camera_y: s0.y - cam_anchor() * view_h(),
+          rng: rng2 }
+    end
+  end
+
+  doc "A fresh game from an integer seed, phase Ready (tap to start)."
+  fn new_game(seed : Int) : Game do
+    fresh_run(seed, 0)
+  end
+
+  pfn restart(game : Game) : Game do
+    let g = fresh_run(game.rng, game.best)
+    { g with phase: Playing }
   end
 
 end
