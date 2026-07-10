@@ -3347,6 +3347,30 @@ let test_tc_qualified_sig_type_order_independent () =
   Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
     false (has_errors ctx)
 
+(* Regression (2026-07-10): a module must be able to use its OWN constructor
+   when a SIBLING module declares a same-named one with a different payload.
+   d95fe942's Pass-1 bare-ctor seeding put the later sibling's `Mk` at the
+   head of the candidate list, and Pass-2's own-module re-registration was a
+   structural-dedup NO-OP — so `A.make`'s `Mk(1)` resolved against B's
+   `Mk(String)` ("expected String but got Int" pointing inside A).  add_ctor
+   now moves a re-registered entry to the FRONT, restoring the declaring
+   module's recency for its own body check while keeping the Pass-1 seeds
+   (and thus cross-module order-independence) intact.  Caught by the types
+   corpus (accept/t35 went red at merge time); witnessed by accept/t69. *)
+let test_tc_sibling_ctor_own_module_wins () =
+  let ctx = typecheck {|mod Main do
+    mod A do
+      type Foo = Mk(Int)
+      fn make() : Foo do Mk(1) end
+    end
+    mod B do
+      type Foo = Mk(String)
+      fn make() : Foo do Mk("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "own-module ctor wins over same-named sibling — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11691,6 +11715,7 @@ let stdlib_suites =
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
+        Alcotest.test_case "sibling ctor: own module wins" `Quick test_tc_sibling_ctor_own_module_wins;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
       ]);
       ("app_shutdown", [

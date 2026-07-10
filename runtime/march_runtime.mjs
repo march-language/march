@@ -27,10 +27,9 @@ export function march_float_to_string(f) {
   return /^-?\d+$/.test(s) ? s + '.' : s;   // bare integer 1 -> "1."
 }
 
-/* NOTE: march_int_div / march_int_mod / march_int_mod_euclid are defined
- * below alongside the other checked int builtins (the sfc32-Random work's
- * range-checked versions, which are exact near 2^53 and mirror the
- * interpreter). Only march_int_pow lives here — it has no counterpart there. */
+/* int_div / int_mod / int_mod_euclid are defined below in the checked
+   "Int builtins (63-bit semantics)" section (exact within ±(2^53−1), throw
+   beyond). int_pow stays here — it is JS-target-only. */
 
 /** Integer exponentiation by squaring, matching march_runtime.c's
  *  march_int_pow (negative exponents return 0, mirroring the native
@@ -46,7 +45,7 @@ export function march_int_pow(base, exp) {
   return result;
 }
 
-/* march_unix_time is defined below alongside the other checked builtins. */
+/* march_unix_time is defined below in the System section. */
 
 /** String byte length (UTF-8 bytes, matching the native backend) */
 export function march_string_byte_length(s) {

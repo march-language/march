@@ -2104,22 +2104,6 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
 
-; js_match_stmt_fallthrough — statement-position match arms must break, not fall
-; through the emitted switch into the non-exhaustive default throw
-(rule
- (targets js_match_stmt_fallthrough.mjs)
- (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
-       (file native/js_match_stmt_fallthrough.march) march_runtime.mjs)
- (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
-              -o js_match_stmt_fallthrough.mjs native/js_match_stmt_fallthrough.march)))
-
-(rule
- (targets js_match_stmt_fallthrough.out)
- (deps js_match_stmt_fallthrough.mjs march_runtime.mjs)
- (action (with-stdout-to js_match_stmt_fallthrough.out (run node js_match_stmt_fallthrough.mjs))))
-
-(rule (alias runtest) (action (diff native/js_match_stmt_fallthrough.expected js_match_stmt_fallthrough.out)))
-
 ; js_random_determinism — pins stdlib Random on the JS target: the fixture
 ; self-checks range/distinctness and the golden diff pins cross-run
 ; determinism. Random's sfc32 core is exact on every backend, so the
@@ -2137,6 +2121,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_random_determinism.out (run node js_random_determinism.mjs))))
 
 (rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
+
+; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
+; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
+; const. Pins native/JS parity with the interpreter (values in the fixture).
+(rule
+ (targets js_let_shadowing.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_let_shadowing.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_shadowing.mjs native/js_let_shadowing.march)))
+
+(rule
+ (targets js_let_shadowing.out)
+ (deps js_let_shadowing.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_shadowing.out (run node js_let_shadowing.mjs))))
+
+(rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
+; js_match_stmt_fallthrough — statement-position match arms must break, not fall
+; through the emitted switch into the non-exhaustive default throw
+(rule
+ (targets js_match_stmt_fallthrough.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_match_stmt_fallthrough.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_match_stmt_fallthrough.mjs native/js_match_stmt_fallthrough.march)))
+
+(rule
+ (targets js_match_stmt_fallthrough.out)
+ (deps js_match_stmt_fallthrough.mjs march_runtime.mjs)
+ (action (with-stdout-to js_match_stmt_fallthrough.out (run node js_match_stmt_fallthrough.mjs))))
+
+(rule (alias runtest) (action (diff native/js_match_stmt_fallthrough.expected js_match_stmt_fallthrough.out)))
 
 ; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
 ; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner

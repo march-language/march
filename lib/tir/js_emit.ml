@@ -592,6 +592,12 @@ and emit_val_impl ctx expr =
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       | "int_abs", [a] -> emit ctx "Math.abs("; emit_atom ctx a; emit ctx ")"
+      (* int_pow: exponentiation by squaring in the runtime (negative exponent
+         -> 0, mirroring the native backend, not JS's fractional Math.pow).
+         From origin/main. *)
+      | "int_pow", [a; b] ->
+        use_runtime ctx "march_int_pow";
+        emit ctx "march_int_pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       | "float_abs",   [a] -> emit ctx "Math.abs(";   emit_atom ctx a; emit ctx ")"
       (* float_floor/ceil/round return Int in March; the results are
          integer-valued JS numbers, which IS the JS target's Int repr *)
@@ -930,15 +936,11 @@ and emit_case_impl ctx result_var expr =
                emitl ctx "break;"
              | None ->
                (* Statement position: emit_stmts does not always end in a
-                  `return` — when Perceus appends RC drops after a tail call
-                  (ESeq(EApp, EDecRC ...), e.g. any arm binding heap values),
-                  the RC-terminal arm emits nothing — and a JS case arm
-                  without break/return FALLS THROUGH into the next case or
-                  the non-exhaustive-match default throw. The break is
-                  unreachable (harmless) when the body did return.
-                  Regression history: added ad4c31ee, lost in the PR #21
-                  merge, re-applied 2026-07-10; pinned by the walk_rec shape
-                  in test/native/js_match_stmt_fallthrough.march. *)
+                  `return` (e.g. a trailing Unit-typed call emits as a bare
+                  statement), and a JS case arm without break/return FALLS
+                  THROUGH into the next case or the non-exhaustive-match
+                  default throw. The break is unreachable (harmless) when the
+                  body did return. (from origin/main) *)
                emit_stmts ctx br.Tir.br_body;
                emitl ctx "break;");
             unbind_br_vars ctx binds
@@ -956,10 +958,7 @@ and emit_case_impl ctx result_var expr =
                emit_indent ctx; emit ctx (rv ^ " = ");
                emit_val ctx d; emit ctx ";\n";
                emitl ctx "break;"
-             | None ->
-               (* Same fallthrough hazard as the branch arms above. *)
-               emit_stmts ctx d;
-               emitl ctx "break;"
+             | None -> emit_stmts ctx d
            )
          );
          emitl ctx "  }"
