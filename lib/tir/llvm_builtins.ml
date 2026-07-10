@@ -781,7 +781,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_fdiv", "declare double @march_checked_fdiv(double %a, double %b)");
   ("march_checked_idiv", "declare i64    @march_checked_idiv(i64 %a, i64 %b)");
   ("march_checked_imod", "declare i64    @march_checked_imod(i64 %a, i64 %b)");
-  ("march_checked_umod", "declare i64    @march_checked_umod(i64 %a, i64 %b)");
+  ("march_checked_emod", "declare i64    @march_checked_emod(i64 %a, i64 %b)");
   ("march_checked_ediv", "declare i64    @march_checked_ediv(i64 %a, i64 %b)");
   ("march_checked_div_op", "declare i64    @march_checked_div_op(i64 %a, i64 %b)");
   ("march_checked_mod_op", "declare i64    @march_checked_mod_op(i64 %a, i64 %b)");
@@ -898,7 +898,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Checked integer division/remainder — panic on a zero divisor (matches interpreter)";
   PDeclare "march_checked_idiv";
   PDeclare "march_checked_imod";
-  PDeclare "march_checked_umod";
+  PDeclare "march_checked_emod";
   PDeclare "march_checked_ediv";
   PComment "; Operator forms of / and % — bare \"division by zero\" / \"modulo by zero\" messages";
   PDeclare "march_checked_div_op";

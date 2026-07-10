@@ -1609,7 +1609,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let helper = match f.Tir.v_name with
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_umod"
+      | "int_mod_euclid" -> "march_checked_emod"
       | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in
@@ -2098,7 +2098,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let helper = match f.Tir.v_name with
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_umod"
+      | "int_mod_euclid" -> "march_checked_emod"
       | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in

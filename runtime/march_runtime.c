@@ -718,9 +718,9 @@ void march_panic(void *s) {
  * exits 1.  The message text matches the interpreter byte-for-byte so the
  * two backends agree under the oracle.
  *
- * Non-zero behaviour is unchanged: idiv/imod use signed C operators
- * (matching sdiv/srem) and umod uses unsigned (matching the prior urem
- * lowering of int_mod_euclid). */
+ * Non-zero behaviour: idiv/imod use signed C operators (matching sdiv/srem);
+ * ediv/emod implement signed Euclidean division/remainder (non-negative
+ * remainder), mirroring eval.ml's int_div_euclid/int_mod_euclid. */
 static int64_t march_div_by_zero(const char *op) {
     char buf[64];
     int  n = snprintf(buf, sizeof buf, "%s: division by zero", op);
@@ -738,17 +738,28 @@ int64_t march_checked_imod(int64_t a, int64_t b) {
     return a % b;
 }
 
-int64_t march_checked_umod(int64_t a, int64_t b) {
+/* Euclidean remainder (int_mod_euclid): the remainder is always non-negative
+ * and strictly less than |b|. Mirrors eval.ml byte-for-byte:
+ *   r = a mod b; if r < 0 then r + abs b else r
+ * The previous lowering used unsigned `%`, which agrees with this only when the
+ * divisor is positive; for a NEGATIVE divisor it diverged from the interpreter
+ * (e.g. int_mod_euclid(-7, -3) → -7 unsigned vs. 2 Euclidean). Signed `%` gives
+ * a remainder with the dividend's sign, so the correction adds |b| when it is
+ * negative. (abs(b) for b == INT64_MIN is unrepresentable, matching eval.ml's
+ * own OCaml `abs min_int` edge — not defended here, no caller reaches it.) */
+int64_t march_checked_emod(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_mod_euclid");
-    return (int64_t)((uint64_t)a % (uint64_t)b);
+    int64_t r = a % b;
+    if (r < 0) return r + (b < 0 ? -b : b);
+    return r;
 }
 
 /* Euclidean division (int_div_euclid): the quotient q such that the Euclidean
  * remainder a - q*b is always non-negative. Mirrors eval.ml byte-for-byte:
  *   q = a / b; r = a - q*b; if r < 0 then (b > 0 ? q-1 : q+1) else q
  * C's `/` truncates toward zero like OCaml's, so the correction step is what
- * turns truncated division into Euclidean division. Signed throughout —
- * unlike the umod sibling above, which is genuinely unsigned. */
+ * turns truncated division into Euclidean division. Signed throughout, the
+ * div-side pair of march_checked_emod above. */
 int64_t march_checked_ediv(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_div_euclid");
     int64_t q = a / b;
