@@ -3443,6 +3443,38 @@ let test_tc_same_module_ctor_precedence_nested () =
   Alcotest.(check bool) "nested-module same-module ctor precedence — no errors"
     false (has_errors ctx)
 
+(* Same-module precedence for an OPAQUE type whose module leaf name coincides
+   with another package's regular type name.  `mod Gate` defines `opaque type
+   Gate = Gate(Int,Int,Int)`; a sibling `OtherPkg` defines a distinct regular
+   `type Gate = Gate(Int×5)`.  The opaque module's own module-qualified key
+   `Gate.Gate` shares its string namespace with OtherPkg's `Type.Ctor`
+   disambiguation key (also `Gate.Gate`), so that bucket holds BOTH ctors —
+   [lookup_ctor_same_module]'s uniqueness guard must decline the ambiguous key
+   and let the module's own bare-`Gate` head (seeded by its Pass-2 check, never
+   displaced because an opaque type's private ctor is not prebind-seeded into
+   the bare key) win.  Without the guard, `Gate.Gate`'s order-dependent head
+   resolves to OtherPkg's 5-arg ctor → "Constructor Gate expects 5 argument(s)
+   but I got 3".  (Real instance: bastion `mod Gate` vs depot `mod Depot.Gate`.) *)
+let test_tc_same_module_opaque_ctor_precedence () =
+  (* `OtherPkg` must be seeded AFTER `mod Gate` so its `Type.Ctor` form is the
+     order-dependent head of the shared `Gate.Gate` bucket — the arrangement
+     that reproduces the pollution (declaration order = prebind seed order). *)
+  let ctx = typecheck {|mod Root do
+    mod Gate do
+      opaque type Gate = Gate(Int, Int, Int)
+      fn make(a : Int, b : Int, c : Int) : Gate do Gate(a, b, c) end
+      fn first(g : Gate) : Int do
+        match g do Gate(a, _, _) -> a end
+      end
+    end
+    mod OtherPkg do
+      type Gate = Gate(Int, Int, Int, Int, Int)
+      fn o_make() : Gate do Gate(1, 2, 3, 4, 5) end
+    end
+  end|} in
+  Alcotest.(check bool) "opaque module ctor outranks same-named regular type — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -11791,6 +11823,7 @@ let stdlib_suites =
         Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
         Alcotest.test_case "expected type beats same-module" `Quick test_tc_expected_type_beats_same_module;
         Alcotest.test_case "nested same-module ctor precedence" `Quick test_tc_same_module_ctor_precedence_nested;
+        Alcotest.test_case "opaque same-module ctor precedence" `Quick test_tc_same_module_opaque_ctor_precedence;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;

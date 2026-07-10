@@ -660,12 +660,27 @@ let lookup_ctor name env =
     If the current module does not define [name] the key is absent and we fall
     through to the existing resolution — preserving imported names and
     d95fe942's order-independence for genuinely cross-module bare references,
-    whose module path does not match the definer's. *)
+    whose module path does not match the definer's.
+
+    Ambiguity guard: the `Module.Ctor` key shares its STRING namespace with the
+    `Type.Ctor` disambiguation form prebind also seeds (see the `bare_type_qctor`
+    site).  When a module's leaf name coincides with a DIFFERENT package's TYPE
+    name (real case: bastion `mod Gate` with an opaque `type Gate`, vs depot's
+    `mod Depot.Gate` whose regular `type Gate` seeds the disambiguation key
+    `Gate.Gate`), the `Gate.Gate` bucket holds BOTH ctors and the head is
+    order-dependent — exactly the pollution same-module precedence is meant to
+    avoid.  So only trust this key when it resolves UNAMBIGUOUSLY to one ctor;
+    otherwise return None and let the caller fall through.  For an opaque type
+    the module's own bare-`Ctor` key wins the head during its Pass-2 check (its
+    private ctor is never prebind-seeded into the bare key, so nothing displaces
+    it), making the bare fallback correct there. *)
 let lookup_ctor_same_module name env =
   let self = if env.cap_qual_prefix <> "" then env.cap_qual_prefix
              else env.current_module in
   if self = "" || String.contains name '.' then None
-  else lookup_ctor (self ^ "." ^ name) env
+  else match StrMap.find_opt (self ^ "." ^ name) env.ctors with
+    | Some [ci] -> Some ci
+    | _ -> None
 
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
