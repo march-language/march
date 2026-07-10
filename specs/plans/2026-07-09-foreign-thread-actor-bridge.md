@@ -343,6 +343,43 @@ Fix: yield the OS timeslice inside the spin so the parking thread can reach `swa
 
 The foreign-branch fix (Step 3) remains required: it is a latent owner-only-deque violation for any true foreign wake (e.g. `send()` from an evloop thread, which conduit/forgepm handlers will do), even though this repro never exercised it.
 
+- [ ] **Step 3c: Fix the concurrent double scheduler start (found during Task 2 verification)**
+
+`march_run_scheduler`'s inline path (`runtime/march_runtime.c`, the `g_in_scheduler` branch) never sets `g_sched_bg_started`, and `g_in_scheduler` is `_Thread_local` — invisible to other threads. So when compiled `main` runs as a green thread inside an INLINE `march_sched_run()` and an HTTP evloop pthread later calls `task_spawn`, `march_ensure_sched_started()` sees `g_sched_bg_started == 0`, CAS-succeeds, and launches a SECOND concurrent `march_sched_run()` — two scheduler thread-sets racing over the same `g_scheds` globals (duplicate scheduler ids, corrupted deque ownership, lost procs). This is the wedge that persisted after Steps 3/3b.
+
+Fix in `runtime/march_runtime.c`: add a process-wide atomic flag for the inline scheduler and check it in `march_ensure_sched_started`:
+
+```c
+/* Process-wide: an inline march_sched_run() is executing on some thread.
+ * (g_in_scheduler is _Thread_local — a re-entrancy guard only — so foreign
+ * threads cannot see it; without this flag they would start a second,
+ * concurrent scheduler set over the same g_scheds globals.) */
+static _Atomic int g_sched_inline_running = 0;
+```
+
+In `march_run_scheduler`'s inline branch:
+
+```c
+    if (g_in_scheduler) return;
+    g_in_scheduler = 1;
+    atomic_store_explicit(&g_sched_inline_running, 1, memory_order_release);
+    march_sched_request_shutdown();
+    march_sched_run();
+    atomic_store_explicit(&g_sched_inline_running, 0, memory_order_release);
+    g_in_scheduler = 0;
+```
+
+In `march_ensure_sched_started`, after the `march_sched_in_scheduler()` check:
+
+```c
+    if (atomic_load_explicit(&g_sched_inline_running, memory_order_acquire))
+        return;  /* inline scheduler already running — it runs all green threads */
+```
+
+Ordering argument (record in the commit): the store of `g_sched_inline_running = 1` happens-before `march_sched_run()` starts workers, which happens-before the main green thread runs, which happens-before any evloop pthread exists — so evloop-origin calls always observe the flag. A theoretical window exists only for foreign threads created before `march_run_scheduler()` is entered, which do not occur in compiled-program startup (main itself is the first green thread); note this in the code comment.
+
+Commit separately: `fix(runtime): prevent foreign threads starting a second concurrent scheduler`.
+
 - [ ] **Step 4: Run the repro — task-shim path passes**
 
 ```bash
