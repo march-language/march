@@ -1,0 +1,5 @@
+[package]
+name = "starfling"
+version = "0.1.0"
+type = "app"
+description = "Starfling clone — one-tap orbit game in March, compiled to JS"

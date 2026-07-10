@@ -1,0 +1,124 @@
+-- Tests for Starfling.Core (part 1: orbit + release). Pure, interpreter-run.
+-- Run from repo root:
+--   MARCH_STDLIB=$PWD/_build/default/stdlib \
+--   MARCH_LIB_PATH=$PWD/demo_app/starfling/lib \
+--   ./_build/default/bin/main.exe test demo_app/starfling/test/test_core.march
+mod TestStarflingCore do
+
+  pfn fabs(x : Float) : Float do
+    if x < 0.0 do 0.0 - x else x end
+  end
+
+  pfn approx(a : Float, b : Float) : Bool do
+    fabs(a - b) < 0.001
+  end
+
+  pfn mk_star(x : Float, y : Float) : Star do
+    { x: x, y: y, radius: 18.0, capture_radius: 54.0 }
+  end
+
+  -- Game orbiting star 0 at the given angle. Star 0 at (200, 520), star 1 at (200, 360).
+  pfn mk_game(angle : Float) : Game do
+    let s0 = mk_star(200.0, 520.0)
+    let s1 = mk_star(200.0, 360.0)
+    { phase: Playing,
+      ball_x: s0.x + Math.cos(angle) * s0.capture_radius,
+      ball_y: s0.y + Math.sin(angle) * s0.capture_radius,
+      mode: Orbiting(0, angle),
+      stars: Cons(s0, Cons(s1, Nil)),
+      current: 0, score: 0, best: 0,
+      camera_y: 136.0,
+      rng: 7 }
+  end
+
+  pfn is_playing(p : Phase) : Bool do
+    match p do
+      Playing -> true
+      _ -> false
+    end
+  end
+
+  pfn is_ready(p : Phase) : Bool do
+    match p do
+      Ready -> true
+      _ -> false
+    end
+  end
+
+  pfn no_taps() : List((Int, Int)) do
+    Nil
+  end
+
+  pfn one_tap() : List((Int, Int)) do
+    Cons((100, 100), Nil)
+  end
+
+  describe "phases" do
+    test "Ready + tap starts Playing" do
+      let g = { mk_game(0.0) with phase: Ready }
+      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      assert (is_playing(g2.phase))
+    end
+
+    test "Ready without tap stays Ready" do
+      let g = { mk_game(0.0) with phase: Ready }
+      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      assert (is_ready(g2.phase))
+    end
+  end
+
+  describe "orbit" do
+    test "no tap advances the orbit angle in dir(+) for star 0" do
+      let g = mk_game(0.0)
+      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      match g2.mode do
+        Orbiting(i, a) ->
+          assert (i == 0)
+          assert (a > 0.0)
+          assert (approx(a, Starfling.Core.orbit_speed() * Starfling.Core.dt()))
+        _ -> assert false
+      end
+    end
+
+    test "ball position stays on the orbit circle" do
+      let g = mk_game(1.0)
+      let g2 = Starfling.Core.update(g, no_taps(), Starfling.Core.dt())
+      let dx = g2.ball_x - 200.0
+      let dy = g2.ball_y - 520.0
+      assert (approx(Math.sqrt(dx * dx + dy * dy), 54.0))
+    end
+
+    test "orbit_dir alternates" do
+      assert (approx(Starfling.Core.orbit_dir(0), 1.0))
+      assert (approx(Starfling.Core.orbit_dir(1), 0.0 - 1.0))
+      assert (approx(Starfling.Core.orbit_dir(2), 1.0))
+    end
+  end
+
+  describe "release" do
+    test "tap at angle pi releases upward (negative vy) at fly_speed" do
+      let g = mk_game(Math.pi())
+      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      match g2.mode do
+        Flying(vx, vy) ->
+          assert (vy < 0.0)
+          assert (approx(fabs(vx), 0.0))
+          assert (approx(Math.sqrt(vx * vx + vy * vy), Starfling.Core.fly_speed()))
+        _ -> assert false
+      end
+    end
+
+    test "tangent is perpendicular to the radius vector" do
+      let g = mk_game(0.7)
+      let g2 = Starfling.Core.update(g, one_tap(), Starfling.Core.dt())
+      match g2.mode do
+        Flying(vx, vy) ->
+          -- radius vector at release = (cos 0.7, sin 0.7); dot with v must be ~0
+          let dot = vx * Math.cos(0.7) + vy * Math.sin(0.7)
+          assert (approx(dot, 0.0))
+        _ -> assert false
+      end
+    end
+  end
+
+end

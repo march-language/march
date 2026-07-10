@@ -1,0 +1,98 @@
+-- Starfling.Core — pure game state + physics. No Dom/Canvas imports.
+-- All tuning constants live in the block below; nothing else is magic.
+-- World coords are y-down (canvas-native): climbing = decreasing y.
+-- The rng field is a 31-bit LCG state (Int) rather than Random.Rng:
+-- stdlib Random (xoshiro, 63-bit int ops) is broken on --target js —
+-- see specs/todos.md P1 "Random unusable on --target js" (2026-07-09).
+mod Starfling.Core do
+
+  -- ── Tuning constants ─────────────────────────────────────────────────
+  fn view_w() : Float do 400.0 end
+  fn view_h() : Float do 640.0 end
+  fn dt() : Float do 0.0166667 end
+  fn orbit_speed() : Float do 2.4 end
+  fn fly_speed() : Float do 340.0 end
+  fn assist_strength() : Float do 900.0 end
+  fn assist_range_mult() : Float do 1.5 end
+  fn cam_ease() : Float do 3.0 end
+  fn cam_anchor() : Float do 0.6 end
+  fn kill_margin() : Float do 40.0 end
+
+  doc "Orbit direction for the star at index `i`: alternates +1.0 / -1.0."
+  fn orbit_dir(i : Int) : Float do
+    if i % 2 == 0 do 1.0 else 0.0 - 1.0 end
+  end
+
+  -- ── Types ────────────────────────────────────────────────────────────
+  type Star = { x : Float, y : Float, radius : Float, capture_radius : Float }
+
+  type BallMode = Orbiting(Int, Float) | Flying(Float, Float)
+
+  type Phase = Ready | Playing | Over
+
+  type Game = {
+    phase : Phase,
+    ball_x : Float,
+    ball_y : Float,
+    mode : BallMode,
+    stars : List(Star),
+    current : Int,
+    score : Int,
+    best : Int,
+    camera_y : Float,
+    rng : Int
+  }
+
+  -- ── Helpers ──────────────────────────────────────────────────────────
+  pfn star_at(game : Game, i : Int) : Option(Star) do
+    List.nth_opt(game.stars, i)
+  end
+
+  -- ── Update ───────────────────────────────────────────────────────────
+  doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps."
+  fn update(game : Game, taps : List((Int, Int)), dt_s : Float) : Game do
+    let tapped = !List.is_empty(taps)
+    match game.phase do
+      Ready ->
+        if tapped do { game with phase: Playing } else game end
+      Over ->
+        game
+      Playing ->
+        step_playing(game, tapped, dt_s)
+    end
+  end
+
+  pfn step_playing(game : Game, tapped : Bool, dt_s : Float) : Game do
+    match game.mode do
+      Orbiting(idx, angle) -> step_orbit(game, idx, angle, tapped, dt_s)
+      Flying(vx, vy)       -> game
+    end
+  end
+
+  pfn step_orbit(game : Game, idx : Int, angle : Float, tapped : Bool, dt_s : Float) : Game do
+    match star_at(game, idx) do
+      None -> game
+      Some(s) ->
+        if tapped do
+          release(game, idx, angle)
+        else
+          let a2 = angle + orbit_dir(idx) * orbit_speed() * dt_s
+          let r = s.capture_radius
+          { game with
+              mode: Orbiting(idx, a2),
+              ball_x: s.x + Math.cos(a2) * r,
+              ball_y: s.y + Math.sin(a2) * r }
+        end
+    end
+  end
+
+  -- Tangent release: position = center + r*(cos a, sin a), so the velocity
+  -- direction is d/da of that = dir * (-sin a, cos a), scaled to fly_speed.
+  pfn release(game : Game, idx : Int, angle : Float) : Game do
+    let d = orbit_dir(idx)
+    let vx = 0.0 - d * fly_speed() * Math.sin(angle)
+    let vy = d * fly_speed() * Math.cos(angle)
+    { game with mode: Flying(vx, vy) }
+  end
+
+end
