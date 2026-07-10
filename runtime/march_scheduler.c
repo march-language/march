@@ -79,9 +79,13 @@ static _Atomic int      g_sched_shutdown = 0;
  * (recv returns MARCH_RECV_NO_MSG) and the scheduler can drain to 0. */
 static _Atomic int64_t  g_live_nondaemon = 0;
 
-/* Lock-free stack of procs spawned from outside any scheduler thread.
- * Workers drain this into their local deques each idle cycle.
- * Using march_proc::next as the intrusive link. */
+/* Lock-free stack of procs enqueued from outside their target scheduler
+ * thread: both foreign spawns (march_sched_spawn from a non-scheduler
+ * thread) and foreign wakes (march_sched_wake called for a target whose
+ * owner is not the calling thread).  Chase-Lev deques are owner-push-only,
+ * so any push from another thread must go through this stack instead;
+ * scheduler threads claim from it via try_claim_external(), checked every
+ * sched_loop iteration.  Using march_proc::next as the intrusive link. */
 static _Atomic(march_proc *) g_ext_spawn_head = NULL;
 
 static _Thread_local march_scheduler *tl_sched = NULL;
@@ -515,6 +519,25 @@ static int wake_idle_daemons(void) {
     return woken;
 }
 
+/* Claim one proc pushed by a non-scheduler thread (foreign spawn OR foreign
+ * wake).  Chase-Lev deques are owner-push-only, so foreign threads enqueue
+ * here and scheduler threads claim from it.  Checked every loop iteration
+ * (one acquire load when empty) so foreign work is not starved while local
+ * deques stay busy. */
+static march_proc *try_claim_external(void) {
+    march_proc *ext = atomic_load_explicit(&g_ext_spawn_head, memory_order_acquire);
+    while (ext) {
+        march_proc *nxt = ext->next;
+        if (atomic_compare_exchange_weak_explicit(
+                &g_ext_spawn_head, &ext, nxt,
+                memory_order_acq_rel, memory_order_acquire)) {
+            return ext;  /* claimed */
+        }
+        /* CAS failed; ext was refreshed by the failed CAS — retry. */
+    }
+    return NULL;
+}
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -532,26 +555,32 @@ static void sched_loop(march_scheduler *sched) {
     int last_yielded = 0;
 
     while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
+        /* Foreign spawns/wakes first: they have no other path onto a
+         * scheduler, and under load the old idle-only check starved them
+         * (a busy worker never reached the idle branch, so a foreign wake
+         * could sit on the external stack indefinitely). */
+        march_proc *p = try_claim_external();
+
         /* Single-scheduler: use steal (FIFO) for fairness and compatibility.
          * Multi-scheduler: use pop (LIFO) for cache locality; steal from others.
          * Exception: if the previous task yielded, try to steal first to avoid
          * the LIFO livelock described above. */
-        march_proc *p;
-        if (g_num_scheds <= 1) {
-            p = (march_proc *)march_deque_steal(&sched->local_queue);
-        } else if (last_yielded) {
-            /* Yielded task goes back; steal from others to make progress. */
-            p = NULL;
-            for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
-                steal_seed = steal_seed * 1103515245 + 12345;
-                int victim = (int)((steal_seed >> 16) % g_num_scheds);
-                if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
-                p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
-                if (p) break;
+        if (!p) {
+            if (g_num_scheds <= 1) {
+                p = (march_proc *)march_deque_steal(&sched->local_queue);
+            } else if (last_yielded) {
+                /* Yielded task goes back; steal from others to make progress. */
+                for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
+                    steal_seed = steal_seed * 1103515245 + 12345;
+                    int victim = (int)((steal_seed >> 16) % g_num_scheds);
+                    if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
+                    p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
+                    if (p) break;
+                }
+                if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
+            } else {
+                p = (march_proc *)march_deque_pop(&sched->local_queue);
             }
-            if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
-        } else {
-            p = (march_proc *)march_deque_pop(&sched->local_queue);
         }
         last_yielded = 0;
 
@@ -563,23 +592,6 @@ static void sched_loop(march_scheduler *sched) {
                 if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
                 p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
                 if (p) break;
-            }
-        }
-
-        if (!p) {
-            /* Check the external-spawn stack before yielding.  Tasks spawned
-             * from non-scheduler threads (e.g. the main thread) land here to
-             * avoid the Chase-Lev deque's single-owner constraint. */
-            march_proc *ext = atomic_load_explicit(&g_ext_spawn_head, memory_order_acquire);
-            while (ext) {
-                march_proc *nxt = ext->next;
-                if (atomic_compare_exchange_weak_explicit(
-                        &g_ext_spawn_head, &ext, nxt,
-                        memory_order_acq_rel, memory_order_acquire)) {
-                    p = ext;  /* claimed — fall through to run it */
-                    break;
-                }
-                /* CAS failed; ext refreshed by failed CAS — retry. */
             }
         }
 
@@ -848,14 +860,25 @@ void march_sched_wake(march_proc *target) {
      * swapcontext.  We must wait until the scheduler transitions it to
      * PROC_WAITING before we can push it to a deque; otherwise two
      * scheduler threads would try to resume the same process simultaneously.
-     * The transition is O(1) so this spin is extremely short. */
+     * The transition is O(1) so this spin is normally extremely short — but
+     * it is not bounded: if the OS preempts the parking thread between its
+     * PROC_PARKED store and its swapcontext call, a waker that busy-spins
+     * here without yielding can starve the parking thread of the CPU time it
+     * needs to reach swapcontext, livelocking both threads under thread
+     * oversubscription (see specs/plans/2026-07-09-foreign-thread-actor-bridge.md,
+     * "Diagnosis findings (Task 1)"). sched_yield() gives the parking thread
+     * a chance to run. */
     march_proc_status cur;
-    do {
+    for (;;) {
         cur = atomic_load_explicit(&target->status, memory_order_acquire);
         if (cur == PROC_DEAD || cur == PROC_READY || cur == PROC_RUNNING)
             return; /* Not WAITING — no need to wake. */
-        /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
-    } while (cur == PROC_PARKED);
+        if (cur == PROC_WAITING) break;
+        /* cur is PROC_PARKED: yield so the parking thread can get CPU time
+         * and reach swapcontext — a bare spin here livelocks under thread
+         * oversubscription. */
+        sched_yield();
+    }
 
     /* Use CAS to atomically transition WAITING→READY so that concurrent
      * senders cannot both succeed and push the process to the deque twice. */
@@ -865,9 +888,22 @@ void march_sched_wake(march_proc *target) {
             memory_order_acq_rel, memory_order_acquire))
         return; /* Not WAITING (already woken by another sender). */
     if (tl_sched) {
+        /* Called from a scheduler thread (possibly not target's owner —
+         * that's fine, any scheduler thread may push onto its OWN local
+         * deque; Chase-Lev only requires the push to come from the deque's
+         * owner, not from target's owner). */
         march_deque_push(&tl_sched->local_queue, target);
     } else {
-        march_deque_push(&g_scheds[0].local_queue, target);
+        /* Foreign thread (evloop pthread, FFI thread, main before scheduler):
+         * deques are owner-push-only, so push onto the external ready stack.
+         * Same protocol as the foreign-spawn path in sched_spawn_common. */
+        march_proc *old_head;
+        do {
+            old_head = atomic_load_explicit(&g_ext_spawn_head, memory_order_relaxed);
+            target->next = old_head;
+        } while (!atomic_compare_exchange_weak_explicit(
+                     &g_ext_spawn_head, &old_head, target,
+                     memory_order_release, memory_order_relaxed));
     }
 }
 
