@@ -59,8 +59,8 @@ case $guard10 of
   true() -> "pos"
   _ -> let $jp_clo7 : () -> '_ = alloc $Clo_$jp6$4($jp6$apply$4) in
 dec_rc $jp_clo7;
-let n : Int = x in
-let $guard5 : Bool = <(n, 0) in
+let n$sh1 : Int = x in
+let $guard5 : Bool = <(n$sh1, 0) in
 case $guard5 of
   true() -> "neg"
   _ -> let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$6($jp1$apply$6) in
