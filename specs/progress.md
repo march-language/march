@@ -283,6 +283,33 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, Perihelion swapped onto stdlib Random + a merge-regression js_emit fix)
+
+**`demo_app/perihelion/` now uses stdlib `Random` instead of a hand-rolled 31-bit
+LCG.** The portable sfc32 `Random` core (PR #21, `claude/happy-hellman-86eddc`) was
+merged into this branch, so `Random` is bit-identical across the interpreter, native,
+and `--target js` — the reason the game had carried a local Park–Miller LCG as a
+JS-only workaround. `Game.rng : Int` became `Game.rng : Random.Rng` (seeded via
+`Random.seed`); `Perihelion.Level.lcg_next` / `Perihelion.Combat.lcg_float` became thin
+`draw` adapters over `Random.next_float` that preserve the module's (rng, value)
+threading order, so the call sites were unchanged. The three test files updated their
+integer seeds to `Random.seed(...)` (and added an `rng_eq` field-comparison helper,
+since `Random.Rng` has no `Eq` impl). Verified: `test_{level,core,combat}` pass under
+the interpreter; a **seed-42 star ladder is byte-identical between the interpreter and
+`--target js`/node**; the game boots and plays in a real browser with **zero console
+errors** (HUD, orbiting ball, and combat entities all render).
+
+**Merge-regression fix (`lib/tir/js_emit.ml`).** Pulling PR #21 in early took its
+`js_emit.ml` wholesale, which dropped the doom branch's statement-position
+match-fallthrough fix (`ad4c31ee`) — reintroducing `non-exhaustive pattern match`
+crashes in the game's per-frame entity draw loop (a recursive walk over heap records
+whose tail call is followed by Perceus RC-drops, so the emitted `case` arm had no
+terminating `break;` and fell through into the switch's default throw). Re-applied the
+unconditional `break;` to both the branch and default statement-position arms;
+`test/native/js_match_stmt_fallthrough.march` gained the `walk_if` / `walk_rec`
+(RC-record) shapes that specifically catch it. The `js_random_determinism`,
+`js_let_shadowing`, and `js_match_stmt_fallthrough` JS goldens all pass.
+
 ## Current State (as of 2026-07-10, L7 FIXED — escape analysis no longer stack-promotes erased-repr allocs)
 
 **Slice-7 finding L7 is FIXED**, with a corrected diagnosis: the original

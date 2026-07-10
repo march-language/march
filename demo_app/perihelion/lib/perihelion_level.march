@@ -1,9 +1,8 @@
--- Perihelion.Level — pure procedural star placement. Threads an Int LCG
--- state explicitly; a fixed seed reproduces an identical star ladder.
--- (Named Level, not Gen: stdlib already has a Gen module. Uses a local
--- 31-bit LCG instead of stdlib Random: Random's xoshiro is broken on
--- --target js — see specs/todos.md P1 "Random unusable on --target js".
--- 31-bit arithmetic stays far below 2^53, so it is exact in JS doubles.)
+-- Perihelion.Level — pure procedural star placement. Threads a Random.Rng
+-- explicitly; a fixed seed reproduces an identical star ladder.
+-- (Named Level, not Gen: stdlib already has a Gen module.) Uses stdlib
+-- Random, whose sfc32 core is bit-identical across the interpreter, native,
+-- and --target js backends, so a seeded ladder is the same on every backend.
 mod Perihelion.Level do
 
   -- ── Placement constants ──────────────────────────────────────────────
@@ -14,24 +13,19 @@ mod Perihelion.Level do
   fn radius_max() : Float do 22.0 end
   fn capture_mult() : Float do 3.0 end
 
-  -- ── LCG (Park–Miller minstd) ─────────────────────────────────────────
-  -- s2 = s * 16807 mod 2147483647. The product stays below 2^46, so the
-  -- arithmetic is exact in JS doubles (glibc's 1103515245 multiplier would
-  -- overflow 2^53 — the same class of bug that breaks stdlib Random on JS).
-  -- State is always in [1, 2147483646]; any Int seed is normalized in.
-  pfn lcg_next(s : Int) : (Int, Float) do
-    let a = if s < 0 do 0 - s else s end
-    let m = a % 2147483647
-    let s1 = if m == 0 do 1 else m end
-    let s2 = (s1 * 16807) % 2147483647
-    let t = int_to_float(s2 - 1) / 2147483646.0
-    let out = (s2, t)
+  -- ── Randomness ───────────────────────────────────────────────────────
+  -- One uniform-[0,1) draw, threading the Rng. Adapts stdlib Random's
+  -- (value, rng) return order to this module's (rng, value) threading order,
+  -- so every call site reads `let (rng', t) = draw(rng)`.
+  pfn draw(rng : Random.Rng) : (Random.Rng, Float) do
+    let (t, rng2) = Random.next_float(rng)
+    let out = (rng2, t)
     out
   end
 
-  doc "Public LCG step for other Perihelion modules: (state) -> (state', uniform [0,1))."
-  fn lcg_next_pub(s : Int) : (Int, Float) do
-    lcg_next(s)
+  doc "Public uniform-[0,1) draw for other Perihelion modules: (rng) -> (rng', t in [0,1))."
+  fn draw_pub(rng : Random.Rng) : (Random.Rng, Float) do
+    draw(rng)
   end
 
   pfn lerp(lo : Float, hi : Float, t : Float) : Float do
@@ -39,10 +33,10 @@ mod Perihelion.Level do
   end
 
   doc "Place the next star 120-200px above `prev` (y-down world: smaller y), x within margins."
-  fn next_star(rng : Int, prev : Star) : (Star, Int) do
-    let (r1, ty) = lcg_next(rng)
-    let (r2, tx) = lcg_next(r1)
-    let (r3, tr) = lcg_next(r2)
+  fn next_star(rng : Random.Rng, prev : Star) : (Star, Random.Rng) do
+    let (r1, ty) = draw(rng)
+    let (r2, tx) = draw(r1)
+    let (r3, tr) = draw(r2)
     let gap = lerp(gap_min(), gap_max(), ty)
     let x = lerp(margin(), Perihelion.Core.view_w() - margin(), tx)
     let r = lerp(radius_min(), radius_max(), tr)
@@ -52,7 +46,7 @@ mod Perihelion.Level do
   end
 
   doc "The opening board: a fixed centered first star plus two generated above it. Bottom-first order."
-  fn initial_stars(rng : Int) : (List(Star), Int) do
+  fn initial_stars(rng : Random.Rng) : (List(Star), Random.Rng) do
     let first = { x: Perihelion.Core.view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
     let (s2, rng2) = next_star(rng, first)
     let (s3, rng3) = next_star(rng2, s2)

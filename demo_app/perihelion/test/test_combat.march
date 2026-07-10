@@ -17,6 +17,11 @@ mod TestPerihelionCombat do
     { x: x, y: y, radius: 18.0, capture_radius: 54.0 }
   end
 
+  -- Random.Rng is a plain record (no Eq impl), so compare its state fields.
+  pfn rng_eq(a : Random.Rng, b : Random.Rng) : Bool do
+    a.s0 == b.s0 && a.s1 == b.s1 && a.s2 == b.s2 && a.s3 == b.s3
+  end
+
   pfn base_game(angle : Float) : Game do
     let s0 = mk_star(200.0, 520.0)
     let s1 = mk_star(200.0, 360.0)
@@ -27,7 +32,7 @@ mod TestPerihelionCombat do
       stars: Cons(s0, Cons(s1, Nil)),
       current: 0, score: 0, best: 0,
       camera_y: 136.0,
-      rng: 7,
+      rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
       shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
       loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil }
@@ -167,13 +172,13 @@ mod TestPerihelionCombat do
       let pos = Perihelion.Combat.ship_pos(g0, ship)
       let (sx, sy) = pos
       let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0 }
-      let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: 12345 }
+      let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: Random.seed(12345) }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.is_empty(g2.ships))
       assert (g2.score == 4)
       let drops = List.length(g2.pickups)
       assert (drops == 0 || drops == 1)
-      assert (g2.rng != 12345)
+      assert (!rng_eq(g2.rng, Random.seed(12345)))
     end
 
     test "ball hit without shield ends the run" do
@@ -224,13 +229,13 @@ mod TestPerihelionCombat do
 
     test "spawns deterministically per seed at high score" do
       let g0 = base_game(0.0)
-      let g = { g0 with score: 50, rng: 999 }
+      let g = { g0 with score: 50, rng: Random.seed(999) }
       let g2 = Perihelion.Combat.maybe_spawn_ship(g, 1)
-      let g3 = { g0 with score: 50, rng: 999 }
+      let g3 = { g0 with score: 50, rng: Random.seed(999) }
       let g4 = Perihelion.Combat.maybe_spawn_ship(g3, 1)
       assert (List.length(g2.ships) == List.length(g4.ships))
-      assert (g2.rng == g4.rng)
-      assert (g2.rng != 999)
+      assert (rng_eq(g2.rng, g4.rng))
+      assert (!rng_eq(g2.rng, Random.seed(999)))
     end
   end
 

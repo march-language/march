@@ -1,5 +1,5 @@
 -- Perihelion.Combat — pure combat logic: asteroids, enemy ships, shots,
--- shield pickups. All randomness threads the Int LCG via Perihelion.Level.
+-- shield pickups. All randomness threads a Random.Rng via Perihelion.Level.
 mod Perihelion.Combat do
 
   type Asteroid = { x : Float, y : Float, vx : Float, vy : Float, radius : Float }
@@ -55,8 +55,8 @@ mod Perihelion.Combat do
     dist2(x1, y1, x2, y2) <= (r1 + r2) * (r1 + r2)
   end
 
-  pfn lcg_float(s : Int) : (Int, Float) do
-    Perihelion.Level.lcg_next_pub(s)
+  pfn draw(rng : Random.Rng) : (Random.Rng, Float) do
+    Perihelion.Level.draw_pub(rng)
   end
 
   -- ── step: timers, movement, ship fire, despawns ─────────────────────
@@ -72,10 +72,10 @@ mod Perihelion.Combat do
     if t > 0.0 do
       { game with spawn_timer: t }
     else
-      let (r1, side_f) = lcg_float(game.rng)
-      let (r2, y_f) = lcg_float(r1)
-      let (r3, ang_f) = lcg_float(r2)
-      let (r4, next_f) = lcg_float(r3)
+      let (r1, side_f) = draw(game.rng)
+      let (r2, y_f) = draw(r1)
+      let (r3, ang_f) = draw(r2)
+      let (r4, next_f) = draw(r3)
       let from_left = side_f < 0.5
       let x = if from_left do 0.0 - 20.0 else Perihelion.Core.view_w() + 20.0 end
       let y = game.camera_y + y_f * Perihelion.Core.view_h()
@@ -240,7 +240,7 @@ mod Perihelion.Combat do
       Cons(sh, rest) ->
         let pos = ship_pos(game, sh)
         let (sx, sy) = pos
-        let (rng2, roll) = lcg_float(game.rng)
+        let (rng2, roll) = draw(game.rng)
         let g2 = if roll < drop_chance() do
           { game with
               rng: rng2,
@@ -311,7 +311,7 @@ mod Perihelion.Combat do
     if game.score < ship_score_min() do
       game
     else
-      let (rng2, roll) = lcg_float(game.rng)
+      let (rng2, roll) = draw(game.rng)
       let chance_raw = 0.25 + 0.05 * int_to_float(game.score - ship_score_min())
       let chance = if chance_raw > 0.6 do 0.6 else chance_raw end
       if roll < chance do
