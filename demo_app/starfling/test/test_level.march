@@ -1,0 +1,66 @@
+-- Tests for Starfling.Level — deterministic, bounded star generation.
+-- Run from repo root:
+--   MARCH_STDLIB=$PWD/_build/default/stdlib \
+--   MARCH_LIB_PATH=$PWD/demo_app/starfling/lib \
+--   ./_build/default/bin/main.exe test demo_app/starfling/test/test_level.march
+mod TestStarflingLevel do
+
+  pfn star_eq(a : Star, b : Star) : Bool do
+    a.x == b.x && a.y == b.y && a.radius == b.radius && a.capture_radius == b.capture_radius
+  end
+
+  pfn base_star() : Star do
+    { x: 200.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+  end
+
+  -- Generate a chain of n stars, asserting bounds on each link.
+  pfn check_chain(rng : Int, prev : Star, n : Int) : Bool do
+    if n == 0 do
+      true
+    else
+      let (s, rng2) = Starfling.Level.next_star(rng, prev)
+      let gap = prev.y - s.y
+      let in_bounds =
+        gap >= Starfling.Level.gap_min() && gap <= Starfling.Level.gap_max()
+        && s.x >= Starfling.Level.margin()
+        && s.x <= Starfling.Core.view_w() - Starfling.Level.margin()
+        && s.radius >= Starfling.Level.radius_min()
+        && s.radius <= Starfling.Level.radius_max()
+        && s.capture_radius == s.radius * Starfling.Level.capture_mult()
+      if in_bounds do check_chain(rng2, s, n - 1) else false end
+    end
+  end
+
+  describe "next_star" do
+    test "same seed produces the same star" do
+      let (a, _) = Starfling.Level.next_star(42, base_star())
+      let (b, _) = Starfling.Level.next_star(42, base_star())
+      assert (star_eq(a, b))
+    end
+
+    test "different rng states produce different stars" do
+      let (a, rng2) = Starfling.Level.next_star(42, base_star())
+      let (b, _) = Starfling.Level.next_star(rng2, base_star())
+      assert (!star_eq(a, b))
+    end
+
+    test "a 50-star chain stays in bounds" do
+      assert (check_chain(7, base_star(), 50))
+    end
+  end
+
+  describe "initial_stars" do
+    test "produces 3 stars, bottom-first, strictly climbing" do
+      let (stars, _) = Starfling.Level.initial_stars(42)
+      assert (List.length(stars) == 3)
+      match stars do
+        Cons(s0, Cons(s1, Cons(s2, Nil))) ->
+          assert (s0.y > s1.y)
+          assert (s1.y > s2.y)
+          assert (s0.x == Starfling.Core.view_w() / 2.0)
+        _ -> assert false
+      end
+    end
+  end
+
+end
