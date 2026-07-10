@@ -1178,6 +1178,12 @@ static _Atomic int64_t g_next_monitor_ref = 0;
  * the scheduler; the outer loop will pick up newly-queued actors. */
 static _Thread_local int g_in_scheduler = 0;
 
+/* Process-wide: an inline march_sched_run() is executing on some thread.
+ * (g_in_scheduler is _Thread_local — a re-entrancy guard only — so foreign
+ * threads cannot see it; without this flag they would start a second,
+ * concurrent scheduler set over the same g_scheds globals.) */
+static _Atomic int g_sched_inline_running = 0;
+
 /* Lazy initialization flag for the green thread scheduler.
  * _Atomic so concurrent first-spawns don't double-init via a plain read-write
  * race on a non-atomic int. */
@@ -1205,6 +1211,8 @@ static void *sched_bg_entry(void *arg) {
  * inline scheduler loop is already handling all green threads. */
 static void march_ensure_sched_started(void) {
     if (march_sched_in_scheduler()) return;  /* already inside the scheduler — no background thread needed */
+    if (atomic_load_explicit(&g_sched_inline_running, memory_order_acquire))
+        return;  /* inline scheduler already running — it runs all green threads */
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &g_sched_bg_started, &expected, 1,
@@ -1737,8 +1745,18 @@ void march_run_scheduler(void) {
     }
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
+    /* Publish that an inline scheduler is running BEFORE march_sched_run()
+     * starts workers.  Ordering: this store happens-before the workers start,
+     * which happens-before the main green thread runs, which happens-before
+     * any evloop pthread exists — so evloop-origin march_ensure_sched_started
+     * calls always observe the flag.  A theoretical window exists only for
+     * foreign threads created before march_run_scheduler() is entered, which
+     * do not occur in compiled-program startup (main itself is the first
+     * green thread). */
+    atomic_store_explicit(&g_sched_inline_running, 1, memory_order_release);
     march_sched_request_shutdown();
     march_sched_run();
+    atomic_store_explicit(&g_sched_inline_running, 0, memory_order_release);
     g_in_scheduler = 0;
     atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
 }
