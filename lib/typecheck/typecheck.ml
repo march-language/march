@@ -2793,6 +2793,17 @@ let bind_linear_field_sentinels varname ty env =
 
 (** Record a use of variable [name].  Errors if a linear var is used
     more than once. *)
+(* Linear-field sentinels are tracked under the internal name
+   "varname#fieldname" (see bind_linear_field_sentinels).  Diagnostics must
+   not leak that internal spelling (slice-7 finding L5) — render it as the
+   user-facing field-access form instead. *)
+let lin_display_name n =
+  match String.index_opt n '#' with
+  | Some i ->
+    Printf.sprintf "%s.%s"
+      (String.sub n 0 i) (String.sub n (i + 1) (String.length n - i - 1))
+  | None -> n
+
 let record_use name span env =
   (* Mark any import entry that matches this name as used. *)
   if !(env.import_tracker) <> [] then
@@ -2807,12 +2818,12 @@ let record_use name span env =
          (Printf.sprintf
             "The linear value `%s` is used more than once here.\n\
              Linear values must be consumed exactly once — they cannot \
-             be copied or ignored." name)
+             be copied or ignored." (lin_display_name name))
      | Ast.Affine when !(le.le_used) ->
        Err.error env.errors ~span
          (Printf.sprintf
             "The affine value `%s` is used more than once here.\n\
-             Affine values may be used at most once." name)
+             Affine values may be used at most once." (lin_display_name name))
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true
      | Ast.Unrestricted -> ())
@@ -2886,7 +2897,7 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
           (Printf.sprintf
              "The linear value `%s` was never used.\n\
               Linear values must be consumed exactly once — did you \
-              mean to pass it somewhere?" le.le_name)
+              mean to pass it somewhere?" (lin_display_name le.le_name))
     ) env.lin
 
 (* =================================================================
@@ -5483,6 +5494,19 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
 let discharge_constraints env span =
+  (* Linearity is transparent to constraint discharge: `linear T` satisfies
+     exactly the constraints `T` satisfies.  impl_matches_ty already strips
+     TLin (its TLin/TLin arm) and unification coerces TLin transparently —
+     but the discharge arms below match on the repr'd type directly, so
+     without this strip an expression-position `linear Int` (a linear
+     record-field access, or a `linear Int`-returning call, used in
+     arithmetic) falls to the catch-all and rejects with "`linear Int` does
+     not implement Num" before the linearity tracker ever runs (slice-7
+     finding L2). *)
+  let rec strip_lin t = match repr t with
+    | TLin (_, inner) -> strip_lin inner
+    | t' -> t'
+  in
   (* Dedup CInterface constraints: when the same concrete type is constrained
      on the same interface multiple times (e.g., 10 calls to Storage.get on
      the same storage variable), we only need to check the impl once.
@@ -5491,7 +5515,7 @@ let discharge_constraints env span =
   List.iter (fun c ->
       let dominated = match c with
         | CInterface (name, t) ->
-          let rt = repr t in
+          let rt = strip_lin t in
           (match rt with
            | TVar _ -> false  (* polymorphic -- will be skipped anyway *)
            | _ ->
@@ -5503,7 +5527,7 @@ let discharge_constraints env span =
       if not dominated then
       match c with
       | CNum t | COrd t ->
-        let ty   = repr t in
+        let ty   = strip_lin t in
         let kind = match c with CNum _ -> "Num" | COrd _ -> "Ord" | _ -> assert false in
         (match ty with
          | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
@@ -5521,7 +5545,7 @@ let discharge_constraints env span =
            Err.error env.errors ~span
              (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
       | CInterface (iface_name, t) ->
-        let ty = repr t in
+        let ty = strip_lin t in
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
