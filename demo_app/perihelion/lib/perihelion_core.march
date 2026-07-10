@@ -1,9 +1,11 @@
 -- Perihelion.Core — pure game state + physics. No Dom/Canvas imports.
 -- All tuning constants live in the block below; nothing else is magic.
 -- World coords are y-down (canvas-native): climbing = decreasing y.
--- The rng field is a 31-bit LCG state (Int) rather than Random.Rng:
--- stdlib Random (xoshiro, 63-bit int ops) is broken on --target js —
--- see specs/todos.md P1 "Random unusable on --target js" (2026-07-09).
+-- The rng field is a stdlib Random.Rng, seeded from an Int in new_game.
+-- Random's sfc32 core is bit-identical on the interpreter, native, and
+-- --target js backends, so a seeded run replays the same star ladder
+-- everywhere (it replaced a hand-rolled 31-bit LCG once Random became
+-- JS-portable; see specs/progress.md, sfc32 Random core).
 mod Perihelion.Core do
 
   -- ── Tuning constants ─────────────────────────────────────────────────
@@ -12,11 +14,13 @@ mod Perihelion.Core do
   fn dt() : Float do 0.0166667 end
   fn orbit_speed() : Float do 2.4 end
   fn fly_speed() : Float do 340.0 end
-  fn assist_strength() : Float do 900.0 end
-  fn assist_range_mult() : Float do 1.5 end
+  fn assist_strength() : Float do 1600.0 end
+  fn assist_range_mult() : Float do 2.4 end
   fn cam_ease() : Float do 3.0 end
   fn cam_anchor() : Float do 0.6 end
   fn kill_margin() : Float do 40.0 end
+  fn overshoot_margin() : Float do 150.0 end
+  fn fall_margin() : Float do 200.0 end
   fn two_pi() : Float do 6.283185307179586 end
   fn mult_cap() : Int do 5 end
 
@@ -44,7 +48,7 @@ mod Perihelion.Core do
     score : Int,
     best : Int,
     camera_y : Float,
-    rng : Int,
+    rng : Random.Rng,
     asteroids : List(Asteroid),
     ships : List(Ship),
     player_shots : List(Shot),
@@ -230,19 +234,38 @@ mod Perihelion.Core do
   pfn check_death(game : Game) : Game do
     let below = game.ball_y > game.camera_y + view_h() + kill_margin()
     let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > view_w() + kill_margin()
-    if below || off_side do end_run(game) else game end
-  end
-
-  pfn step_camera(game : Game, dt_s : Float) : Game do
-    match star_at(game, game.current) do
-      None -> game
-      Some(s) ->
-        let target = s.y - cam_anchor() * view_h()
-        { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+    -- Overshoot: sailed well past the target star with no capture — without
+    -- this, an upward miss never triggers ANY end state (no gravity, no top
+    -- kill) and the run dangles forever off-screen.
+    let overshot = match star_at(game, game.current + 1) do
+      None -> false
+      Some(t) -> game.ball_y < t.y - overshoot_margin()
     end
+    -- Falling below the current star is equally unrecoverable (no gravity,
+    -- nothing below) — and the flying camera CHASES the ball, so the
+    -- viewport-bottom kill above can no longer fire on its own.
+    let fallen = match star_at(game, game.current) do
+      None -> false
+      Some(c) -> game.ball_y > c.y + fall_margin()
+    end
+    if below || off_side || overshot || fallen do end_run(game) else game end
   end
 
-  pfn fresh_run(rng : Int, best : Int, runs : List(RunRecord)) : Game do
+  -- Camera: anchored to the current star while orbiting; chases the BALL
+  -- while flying so the player can watch the shot (and its miss/capture).
+  pfn step_camera(game : Game, dt_s : Float) : Game do
+    let target = match game.mode do
+      Flying(_, _) -> game.ball_y - cam_anchor() * view_h()
+      Orbiting(_, _) ->
+        match star_at(game, game.current) do
+          None -> game.camera_y
+          Some(s) -> s.y - cam_anchor() * view_h()
+        end
+    end
+    { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+  end
+
+  pfn fresh_run(rng : Random.Rng, best : Int, runs : List(RunRecord)) : Game do
     let (stars, rng2) = Perihelion.Level.initial_stars(rng)
     let start_angle = Math.pi() / 2.0
     match stars do
@@ -277,7 +300,7 @@ mod Perihelion.Core do
 
   doc "A fresh game seeded with persisted best + run history (from decode_save)."
   fn new_game_saved(seed : Int, best : Int, runs : List(RunRecord)) : Game do
-    fresh_run(seed, best, runs)
+    fresh_run(Random.seed(seed), best, runs)
   end
 
   pfn restart(game : Game) : Game do
