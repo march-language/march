@@ -116,8 +116,25 @@
   function syncHighlightScroll() {
     var editor = document.getElementById("tp-editor");
     var hl = document.getElementById("tp-highlight");
+    var lineno = document.getElementById("tp-lineno");
     hl.scrollTop = editor.scrollTop;
     hl.scrollLeft = editor.scrollLeft;
+    // #tp-lineno never scrolls horizontally (numbers are right-aligned in a
+    // fixed-width gutter) — only vertical position needs to track the editor.
+    lineno.scrollTop = editor.scrollTop;
+  }
+
+  // Compile errors are reported as "playground.march:LINE:COL" — this is
+  // what lets you actually find the line one of those points at. One number
+  // per source line, so it stays aligned with the highlight/editor overlay
+  // (which share the exact same line-height) without any per-line lookup.
+  function renderLineNumbers() {
+    var editor = document.getElementById("tp-editor");
+    var lineno = document.getElementById("tp-lineno");
+    var n = editor.value.split("\n").length;
+    var nums = new Array(n);
+    for (var i = 0; i < n; i++) nums[i] = i + 1;
+    lineno.textContent = nums.join("\n");
   }
 
   function showErrors(errs) {
@@ -410,9 +427,14 @@
     });
   };
 
+  function renderEditorChrome() {
+    renderHighlight();
+    renderLineNumbers();
+  }
+
   (function () {
     var editor = document.getElementById("tp-editor");
-    editor.addEventListener("input", renderHighlight);
+    editor.addEventListener("input", renderEditorChrome);
     editor.addEventListener("scroll", syncHighlightScroll);
     // Tab inserts a literal tab instead of moving focus, matching a real
     // code editor (and keeping March's 2-space-indent convention easy to
@@ -424,7 +446,7 @@
       var start = editor.selectionStart, end = editor.selectionEnd;
       editor.value = editor.value.slice(0, start) + "  " + editor.value.slice(end);
       editor.selectionStart = editor.selectionEnd = start + 2;
-      renderHighlight();
+      renderEditorChrome();
     });
   })();
 
@@ -432,7 +454,7 @@
     .then(function (r) { return r.text(); })
     .then(function (src) {
       document.getElementById("tp-editor").value = src;
-      renderHighlight();
+      renderEditorChrome();
     });
 
   window.addEventListener("load", mountStatic);
