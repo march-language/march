@@ -101,8 +101,7 @@ mod Tetris do
     end
 
     fn drop_interval_ms(level: Int) : Int do
-      let raw = 500 - level * 40
-      if raw < 100 do 100 else raw end
+      Math.max_int(500 - level * 40, 100)
     end
 
     -- Points awarded for clearing 1/2/3/4 lines at once.
@@ -148,8 +147,9 @@ mod Tetris do
           (dx, dy) ->
             let x = origin_x + dx
             let y = origin_y + dy
-            if !cell_in_bounds(x, y) do true
-            else Array.get(board, cell_index(x, y)) != 0
+            match cell_in_bounds(x, y) do
+              false -> true
+              true  -> Array.get(board, cell_index(x, y)) != 0
             end
         end
       )
@@ -161,8 +161,9 @@ mod Tetris do
           (dx, dy) ->
             let x = origin_x + dx
             let y = origin_y + dy
-            if cell_in_bounds(x, y) do Array.set(b, cell_index(x, y), color_idx)
-            else b
+            match cell_in_bounds(x, y) do
+              true  -> Array.set(b, cell_index(x, y), color_idx)
+              false -> b
             end
         end
       )
@@ -206,7 +207,10 @@ mod Tetris do
 
   fn lcg_seed() : Int do
     let raw = int_mod(float_to_int(unix_time(()) *. 1000000.0), 2147483646)
-    if raw <= 0 do raw + 2147483646 else raw end
+    match raw <= 0 do
+      true  -> raw + 2147483646
+      false -> raw
+    end
   end
 
   fn piece_from_string(s: String) : TetrisLogic.Piece do
@@ -264,11 +268,11 @@ mod Tetris do
     end
   end
 
-  fn rotate_n(cells, n: Int) do
-    if n <= 0 do cells
-    else rotate_n(TetrisLogic.rotate_cells(cells), n - 1)
-    end
-  end
+  -- Multi-head: the base case (no rotation left) and the recursive step are
+  -- two separate clauses matched on `n`'s own shape, rather than a single
+  -- body branching on `n <= 0`.
+  fn rotate_n(cells, 0) do cells end
+  fn rotate_n(cells, n) do rotate_n(TetrisLogic.rotate_cells(cells), n - 1) end
 
   -- Spawns a new falling piece at the top-center. Returns
   -- (piece, rot, x, y, next_piece, new_rng, game_over).
@@ -291,8 +295,9 @@ mod Tetris do
         match Dom.find(id) do
           None -> ()
           Some(cell) ->
-            if v == 0 do Dom.set_style(cell, "background", "")
-            else Dom.set_style(cell, "background", TetrisLogic.color_of_index(v))
+            match v == 0 do
+              true  -> Dom.set_style(cell, "background", "")
+              false -> Dom.set_style(cell, "background", TetrisLogic.color_of_index(v))
             end
         end
       )
@@ -307,13 +312,14 @@ mod Tetris do
         (dx, dy) ->
           let x = ox + dx
           let y = oy + dy
-          if x >= 0 && x < TetrisLogic.board_width() && y >= 0 && y < TetrisLogic.board_height() do
-            let id = "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y)
-            match Dom.find(id) do
-              None -> ()
-              Some(cell) -> Dom.set_style(cell, "background", TetrisLogic.piece_color(piece))
-            end
-          else ()
+          match x >= 0 && x < TetrisLogic.board_width() && y >= 0 && y < TetrisLogic.board_height() do
+            false -> ()
+            true ->
+              let id = "cell-" ++ int_to_string(x) ++ "-" ++ int_to_string(y)
+              match Dom.find(id) do
+                None -> ()
+                Some(cell) -> Dom.set_style(cell, "background", TetrisLogic.piece_color(piece))
+              end
           end
       end
     )
@@ -332,44 +338,54 @@ mod Tetris do
   fn with_state(f) : Unit do
     let el = state_el()
     let over = get_str_attr(el, "data-over", "false") == "true"
-    if over do ()
-    else
-      let board = Array.from_list(string_to_int_list(get_str_attr(el, "data-board", "")))
-      let piece = piece_from_string(get_str_attr(el, "data-piece", "I"))
-      let rot = get_int_attr(el, "data-rot", 0)
-      let x = get_int_attr(el, "data-x", 3)
-      let y = get_int_attr(el, "data-y", 0)
-      let next = piece_from_string(get_str_attr(el, "data-next", "O"))
-      let score = get_int_attr(el, "data-score", 0)
-      let lines = get_int_attr(el, "data-lines", 0)
-      let rng = get_int_attr(el, "data-rng", 1)
-      let seq = get_int_attr(el, "data-seq", 0)
-      match f(board, piece, rot, x, y, next, score, lines, rng) do
-        (board2, piece2, rot2, x2, y2, next2, score2, lines2, rng2, over2) ->
-          render_board(board2)
-          if !over2 do render_falling(piece2, rot2, x2, y2) else () end
-          set_text_if_found("score", "Score: " ++ int_to_string(score2))
-          set_text_if_found("level", "Level: " ++ int_to_string(TetrisLogic.level_for_lines(lines2)))
-          set_text_if_found("next", "Next: " ++ piece_to_string(next2))
-          if over2 do set_text_if_found("game-over", "Game Over — press R to restart")
-          else set_text_if_found("game-over", "")
-          end
-          Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board2)))
-          Dom.set_attr(el, "data-piece", piece_to_string(piece2))
-          Dom.set_attr(el, "data-rot", int_to_string(rot2))
-          Dom.set_attr(el, "data-x", int_to_string(x2))
-          Dom.set_attr(el, "data-y", int_to_string(y2))
-          Dom.set_attr(el, "data-next", piece_to_string(next2))
-          Dom.set_attr(el, "data-score", int_to_string(score2))
-          Dom.set_attr(el, "data-lines", int_to_string(lines2))
-          Dom.set_attr(el, "data-rng", int_to_string(rng2))
-          Dom.set_attr(el, "data-over", if over2 do "true" else "false" end)
-          -- Bumped ONLY here and in restart — the two paths that genuinely
-          -- advance gameplay. The time-travel history recorder (host JS,
-          -- tetris-playground.js) watches this attribute alone to decide
-          -- when to snapshot, so pausing/scrubbing/restoring never records.
-          Dom.set_attr(el, "data-seq", int_to_string(seq + 1))
-      end
+    match over do
+      true -> ()
+      false ->
+        let board = Array.from_list(string_to_int_list(get_str_attr(el, "data-board", "")))
+        let piece = piece_from_string(get_str_attr(el, "data-piece", "I"))
+        let rot = get_int_attr(el, "data-rot", 0)
+        let x = get_int_attr(el, "data-x", 3)
+        let y = get_int_attr(el, "data-y", 0)
+        let next = piece_from_string(get_str_attr(el, "data-next", "O"))
+        let score = get_int_attr(el, "data-score", 0)
+        let lines = get_int_attr(el, "data-lines", 0)
+        let rng = get_int_attr(el, "data-rng", 1)
+        let seq = get_int_attr(el, "data-seq", 0)
+        match f(board, piece, rot, x, y, next, score, lines, rng) do
+          (board2, piece2, rot2, x2, y2, next2, score2, lines2, rng2, over2) ->
+            render_board(board2)
+            match over2 do
+              false -> render_falling(piece2, rot2, x2, y2)
+              true  -> ()
+            end
+            set_text_if_found("score", "Score: " ++ int_to_string(score2))
+            set_text_if_found("level", "Level: " ++ int_to_string(TetrisLogic.level_for_lines(lines2)))
+            set_text_if_found("next", "Next: " ++ piece_to_string(next2))
+            let game_over_text = match over2 do
+              true  -> "Game Over — press R to restart"
+              false -> ""
+            end
+            set_text_if_found("game-over", game_over_text)
+            Dom.set_attr(el, "data-board", int_list_to_string(Array.to_list(board2)))
+            Dom.set_attr(el, "data-piece", piece_to_string(piece2))
+            Dom.set_attr(el, "data-rot", int_to_string(rot2))
+            Dom.set_attr(el, "data-x", int_to_string(x2))
+            Dom.set_attr(el, "data-y", int_to_string(y2))
+            Dom.set_attr(el, "data-next", piece_to_string(next2))
+            Dom.set_attr(el, "data-score", int_to_string(score2))
+            Dom.set_attr(el, "data-lines", int_to_string(lines2))
+            Dom.set_attr(el, "data-rng", int_to_string(rng2))
+            let over2_s = match over2 do
+              true  -> "true"
+              false -> "false"
+            end
+            Dom.set_attr(el, "data-over", over2_s)
+            -- Bumped ONLY here and in restart — the two paths that genuinely
+            -- advance gameplay. The time-travel history recorder (host JS,
+            -- tetris-playground.js) watches this attribute alone to decide
+            -- when to snapshot, so pausing/scrubbing/restoring never records.
+            Dom.set_attr(el, "data-seq", int_to_string(seq + 1))
+        end
     end
   end
 
@@ -394,8 +410,16 @@ mod Tetris do
   end
 
   fn set_paused(el, paused: Bool) : Unit do
-    Dom.set_attr(el, "data-paused", if paused do "true" else "false" end)
-    set_text_if_found("pause-status", if paused do "Paused — press P to resume" else "" end)
+    let paused_s = match paused do
+      true  -> "true"
+      false -> "false"
+    end
+    let status_s = match paused do
+      true  -> "Paused — press P to resume"
+      false -> ""
+    end
+    Dom.set_attr(el, "data-paused", paused_s)
+    set_text_if_found("pause-status", status_s)
   end
 
   -- No-op when the game is already over, so a stray "p" doesn't paste a
@@ -403,22 +427,23 @@ mod Tetris do
   fn toggle_pause() : Unit do
     let el = state_el()
     let over = get_str_attr(el, "data-over", "false") == "true"
-    if over do ()
-    else set_paused(el, !is_paused())
+    match over do
+      true  -> ()
+      false -> set_paused(el, !is_paused())
     end
   end
 
   fn tick() : Unit do
-    if is_paused() do ()
-    else
-      with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
-        let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
-        if TetrisLogic.collides(board, cells, x, y + 1) do
-          lock_and_advance(board, piece, rot, x, y, next, score, lines, rng)
-        else
-          (board, piece, rot, x, y + 1, next, score, lines, rng, false)
-        end
-      )
+    match is_paused() do
+      true -> ()
+      false ->
+        with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
+          let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
+          match TetrisLogic.collides(board, cells, x, y + 1) do
+            true  -> lock_and_advance(board, piece, rot, x, y, next, score, lines, rng)
+            false -> (board, piece, rot, x, y + 1, next, score, lines, rng, false)
+          end
+        )
     end
   end
 
@@ -438,10 +463,9 @@ mod Tetris do
   fn try_move(dx: Int, dy: Int) : Unit do
     with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let cells = rotate_n(TetrisLogic.piece_cells(piece), rot)
-      if TetrisLogic.collides(board, cells, x + dx, y + dy) do
-        (board, piece, rot, x, y, next, score, lines, rng, false)
-      else
-        (board, piece, rot, x + dx, y + dy, next, score, lines, rng, false)
+      match TetrisLogic.collides(board, cells, x + dx, y + dy) do
+        true  -> (board, piece, rot, x, y, next, score, lines, rng, false)
+        false -> (board, piece, rot, x + dx, y + dy, next, score, lines, rng, false)
       end
     )
   end
@@ -450,17 +474,17 @@ mod Tetris do
     with_state(fn (board, piece, rot, x, y, next, score, lines, rng) ->
       let new_rot = (rot + 1) % 4
       let cells = rotate_n(TetrisLogic.piece_cells(piece), new_rot)
-      if TetrisLogic.collides(board, cells, x, y) do
-        (board, piece, rot, x, y, next, score, lines, rng, false)
-      else
-        (board, piece, new_rot, x, y, next, score, lines, rng, false)
+      match TetrisLogic.collides(board, cells, x, y) do
+        true  -> (board, piece, rot, x, y, next, score, lines, rng, false)
+        false -> (board, piece, new_rot, x, y, next, score, lines, rng, false)
       end
     )
   end
 
   fn fall_from(board, cells, x: Int, cur_y: Int) : Int do
-    if TetrisLogic.collides(board, cells, x, cur_y + 1) do cur_y
-    else fall_from(board, cells, x, cur_y + 1)
+    match TetrisLogic.collides(board, cells, x, cur_y + 1) do
+      true  -> cur_y
+      false -> fall_from(board, cells, x, cur_y + 1)
     end
   end
 
@@ -528,13 +552,18 @@ mod Tetris do
         let piece = piece_from_string(piece_s)
         let next = piece_from_string(next_s)
         render_board(board)
-        if !over do render_falling(piece, rot, x, y) else () end
+        match over do
+          false -> render_falling(piece, rot, x, y)
+          true  -> ()
+        end
         set_text_if_found("score", "Score: " ++ int_to_string(score))
         set_text_if_found("level", "Level: " ++ int_to_string(TetrisLogic.level_for_lines(lines)))
         set_text_if_found("next", "Next: " ++ piece_to_string(next))
-        if over do set_text_if_found("game-over", "Game Over — press R to restart")
-        else set_text_if_found("game-over", "")
+        let game_over_text = match over do
+          true  -> "Game Over — press R to restart"
+          false -> ""
         end
+        set_text_if_found("game-over", game_over_text)
         set_paused(el, paused)
         Dom.set_attr(el, "data-board", board_s)
         Dom.set_attr(el, "data-piece", piece_s)
@@ -545,7 +574,11 @@ mod Tetris do
         Dom.set_attr(el, "data-score", int_to_string(score))
         Dom.set_attr(el, "data-lines", int_to_string(lines))
         Dom.set_attr(el, "data-rng", rng_s)
-        Dom.set_attr(el, "data-over", if over do "true" else "false" end)
+        let over_s = match over do
+          true  -> "true"
+          false -> "false"
+        end
+        Dom.set_attr(el, "data-over", over_s)
         -- data-seq is deliberately left untouched: restoring a snapshot is
         -- never itself a new gameplay event, whether it's a passive scrub
         -- (paused=true) or a resume-and-branch (paused=false) — the very
@@ -584,23 +617,27 @@ mod Tetris do
     -- Arrow keys and Space scroll the page by default; prevented
     -- unconditionally (not just while an action fires) so the game stays
     -- put whether it's mid-move, paused, or time-traveling.
-    if is_scroll_key(key) do Dom.prevent_default(ev) else () end
+    match is_scroll_key(key) do
+      true  -> Dom.prevent_default(ev)
+      false -> ()
+    end
     match key do
       "r" -> restart()
       "R" -> restart()
       "p" -> toggle_pause()
       "P" -> toggle_pause()
       k ->
-        if is_paused() do ()
-        else
-          match k do
-            "ArrowLeft"  -> try_move(-1, 0)
-            "ArrowRight" -> try_move(1, 0)
-            "ArrowDown"  -> try_move(0, 1)
-            "ArrowUp"    -> try_rotate()
-            " "          -> hard_drop()
-            _            -> ()
-          end
+        match is_paused() do
+          true -> ()
+          false ->
+            match k do
+              "ArrowLeft"  -> try_move(-1, 0)
+              "ArrowRight" -> try_move(1, 0)
+              "ArrowDown"  -> try_move(0, 1)
+              "ArrowUp"    -> try_rotate()
+              " "          -> hard_drop()
+              _            -> ()
+            end
         end
     end
   end

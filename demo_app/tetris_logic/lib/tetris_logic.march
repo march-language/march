@@ -74,8 +74,7 @@ mod TetrisLogic do
   end
 
   fn drop_interval_ms(level: Int) : Int do
-    let raw = 500 - level * 40
-    if raw < 100 do 100 else raw end
+    Math.max_int(500 - level * 40, 100)
   end
 
   -- Points awarded for clearing 1/2/3/4 lines at once.
@@ -121,8 +120,9 @@ mod TetrisLogic do
         (dx, dy) ->
           let x = origin_x + dx
           let y = origin_y + dy
-          if !cell_in_bounds(x, y) do true
-          else Array.get(board, cell_index(x, y)) != 0
+          match cell_in_bounds(x, y) do
+            false -> true
+            true  -> Array.get(board, cell_index(x, y)) != 0
           end
       end
     )
@@ -134,8 +134,9 @@ mod TetrisLogic do
         (dx, dy) ->
           let x = origin_x + dx
           let y = origin_y + dy
-          if cell_in_bounds(x, y) do Array.set(b, cell_index(x, y), color_idx)
-          else b
+          match cell_in_bounds(x, y) do
+            true  -> Array.set(b, cell_index(x, y), color_idx)
+            false -> b
           end
       end
     )
