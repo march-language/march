@@ -115,11 +115,41 @@
      different character than the one visually under the pointer. ID
      selectors trivially outrank `.d-content pre` and keep both elements
      pixel-identical regardless of what the surrounding page's CSS does. */
-  #tp-highlight, #tp-editor {
+  /* Line-number gutter: a separate element, not part of the highlight/editor
+     overlay pair, so it can't disturb their mutual character-for-character
+     alignment (see the ID-selector note above — that alignment is load-
+     bearing) as long as both get the exact same left offset to make room
+     for it. Compile errors are reported as march:LINE:COL, so this is what
+     lets you actually find the line a "playground.march:46:8" error means. */
+  #tp-lineno {
     position: absolute;
     inset: 0;
+    width: 2.75em;
+    padding: 12px 6px 12px 0;
     margin: 0;
-    padding: 12px;
+    box-sizing: border-box;
+    font: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    white-space: pre;
+    text-align: right;
+    color: var(--text-faint);
+    background: var(--bg-code);
+    border-right: 1px solid var(--border);
+    -webkit-user-select: none;
+    user-select: none;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  #tp-highlight, #tp-editor {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 2.75em;
+    margin: 0;
+    padding: 12px 12px 12px 8px;
     border: 0;
     box-sizing: border-box;
     font: inherit;
@@ -201,6 +231,7 @@
         <button class="tp-run-btn" onclick="tpRun()">Run &#9654;</button>
       </div>
       <div class="tp-editor-wrap">
+        <pre id="tp-lineno" aria-hidden="true"></pre>
         <pre class="tp-highlight" id="tp-highlight" aria-hidden="true"></pre>
         <textarea class="tp-editor" id="tp-editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
       </div>

@@ -330,13 +330,36 @@ static void *make_none(void) { return (void *)0; }
  * cases (Float 0.0 and raw-0 Unit read as None) — the same trade the
  * compiled convention already makes; consistency wins. */
 
+/* Float is the one record kind that is NOT niche-safe: 0.0's bits are 0, which
+ * collides with the None niche, and a nonzero float's bits are not a valid heap
+ * pointer.  llvm_emit decodes a *concrete* Option(Float) as BOXED
+ * (Repr.niche_payload_ok TFloat = false): None = tag-0 heap cell, Some(f) =
+ * tag-1 cell with the double at offset 16 (see EAlloc alloc-none-boxed /
+ * alloc-some-boxed).  So for an 'f' *call site* we must return that boxed shape;
+ * the uniform niche return would read stored 0.0 back as None and make the boxed
+ * decoder dereference raw float bits as a pointer → SIGSEGV.
+ *
+ * Keyed on the CALL-SITE expected_kind, never the stored kind: an erased ('g')
+ * read still gets the niche encoding both sides expect, so this does not
+ * reintroduce the boxed-cell-misread-by-niche-decoder regression (the "74 depot
+ * failures" that motivated niche-for-erased). */
+static void *rec_box_none_float(void) {
+    return march_alloc(16);                     /* tag=0 (None), no fields */
+}
+static void *rec_box_some_float(int64_t bits) {
+    void *r = march_alloc(16 + 8);
+    *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
+    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
+    return r;
+}
+
 static void *rec_some_k(int64_t bits, char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_some_float(bits);
     return (void *)(uintptr_t)bits;
 }
 
 static void *rec_none_k(char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_none_float();
     return (void *)0;
 }
 
@@ -1992,7 +2015,9 @@ void *march_record_get(void *rec, void *key, int64_t expected_kind) {
     march_string *ks = (march_string *)key;
     int32_t i = rec_find_field(s, ks->data, ks->len);
     if (i < 0) return rec_none_k((char)expected_kind);
-    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), s->kinds[i]);
+    /* Representation must match the call-site decoder (expected_kind), which for
+     * a concrete Option(Float) is BOXED — not the stored kind. */
+    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), (char)expected_kind);
 }
 
 /* record_has_key(rec, key) -> Bool (i64 0/1). */
