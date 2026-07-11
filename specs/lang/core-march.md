@@ -2935,9 +2935,91 @@ correctness content of its own to formalize (its one correctness
 obligation — never stack-promote an erased-repr alloc — was already the L7
 finding fixed in slice 7, §4.12).
 
+### 4.17 Argument and element evaluation order (widening slice 14, 2026-07-11)
+
+**Scope note — this is a narrower claim than "effects and IO ordering"
+sounds.** `eval.ml` is a tree-walking interpreter, so it already has *some*
+definite, deterministic evaluation order by construction — the open
+question this section closes is whether that order is ever *stated* as a
+rule, and whether the compiled backend provably preserves it. It is
+unrelated to `core-march-types.md`'s separately-deferred "Effects" item
+(§6) — that item names a *typed effect-polymorphism* mechanism (row
+effects/algebraic effects, Koka/OCaml-5-style), which March does not have
+by design (`specs/design.md`: "side effects are tracked via capability
+types, not an effect system"). Nothing here adds or implies such a system;
+this section is purely about the ORDER side effects run in, not a type-level
+tracking of which effects a function may perform (that is capabilities,
+§2.8, already landed).
+
+Also not a gap: block/statement sequencing. `(E-Blk-Let)` and `(E-Blk-Seq)`
+(§4.2) already fully specify that each block statement's effects complete
+before the next begins — `eval_block`'s `e :: rest` case evaluates `e`
+completely before recursing on `rest` (`eval.ml:7245–7246`), and `ELet`'s
+RHS is fully evaluated (`eval.ml:7221`) before the continuation runs
+(`eval.ml:7228`). What was never stated is the analogous rule for a single
+expression's *element list* — a call's arguments, a tuple's components, a
+record's field values, a constructor's payload:
+
+```
+        e₀ ⇓ v₀ (with e₀'s effects)   e₁ ⇓ v₁ (with e₁'s effects, AFTER e₀'s)   …
+  (E-Elts-LTR)  ──────────────────────────────────────────────────────────────
+        [e₀; e₁; …] ⇓ [v₀; v₁; …]     -- each element's effects complete
+                                          strictly before the next begins
+```
+
+**(E-Elts-LTR) applies to `EApp`'s argument list, `ETuple`'s elements,
+`ERecord`'s field values, and `ECon`'s payload** — `eval.ml` evaluates the
+callee/tag first, then folds the element list with `List.map (eval_expr
+env)` in every one of these arms (`EApp`: `eval.ml:7331–7332`; `ECon`:
+`:7343`; `ETuple`: `:7373`; `ERecord`: `eval.ml:7376`, `List.map (fun (n,
+ex) -> (n.txt, eval_expr env ex)) fields`). This relies on a fact about
+OCaml's `List.map` that is worth stating explicitly rather than assuming:
+`List.map`'s *documented* signature does not promise an evaluation order in
+the abstract, but the actual shipped implementation in the project's
+pinned OCaml 5.3.0 toolchain (the `march` opam switch's own copy of the
+compiler-distributed `list.ml`, not a file in this repo) forces it via
+`let`-sequencing: `` let r1 = f a1 in let r2 = f a2 in r1 :: r2 :: map f
+l `` — so this rule is a real, verified fact about the toolchain actually
+in use, not an unstated assumption research
+would need to re-derive.
+
+**The compiled backend preserves the same order — a structural invariant
+of the lowering algorithm, not merely something a golden happens to
+confirm.** `lib/tir/lower.ml`'s ANF-lowering CPS helpers process an element
+list by lowering the head to an atom and passing the *rest's* lowering as
+that head's own continuation: `lower_atoms_k` (`lower.ml:127–133`) —
+`` lower_to_atom_k env e (fun a -> lower_atoms_k env rest (fun rest_atoms ->
+k (a :: rest_atoms))) `` — a non-trivial head becomes `Tir.ELet(v, rhs,
+k(...))` (`lower_to_atom_k`, `:121–124`), which structurally *nests* every
+later element's lowering inside the earlier element's binding. The generic
+`EApp` case (`lower.ml:480–481`) composes exactly this: `` lower_to_atom_k
+env resolved_f (fun f_atom -> lower_atoms_k env args (fun arg_atoms ->
+...)) ``. So left-to-right order for the compiled backend isn't merely
+empirically observed — it follows from how ANF lowering is built.
+
+**Actors are a genuinely separate concern, not covered here.** §4.10's
+mailbox-FIFO/`run_until_idle` determinism property is about the ORDER
+MESSAGES a mailbox receives, not the scalar expression-evaluation order
+this section states — `send`/`receive` themselves evaluate their own
+arguments via the identical `EApp` machinery this section covers, but
+§4.10 never says so explicitly; the two "order" facts share a word, not a
+mechanism.
+
+**Optimization passes do not reorder observable effects.** `lib/tir/
+fusion.ml`'s stream-fusion rewrite (map/filter chained into a fold) only
+fires when BOTH the producer and consumer are proven pure (`Purity.is_pure`,
+checked at every fusion site, `fusion.ml:350–351,438–440,504,516,575`) —
+effectful operations are never fused, so this pass cannot perturb effect
+order by construction.
+
+Golden `g48_argument_evaluation_order` witnesses (E-Elts-LTR) for `EApp`
+and `ETuple` with genuinely side-effecting elements (a `trace(label, v)`
+helper that prints then returns), the same idiom golden `g17` already uses
+for `ERecord`'s field order.
+
 ## 5. Golden conformance corpus
 
-Forty-seven programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-eight programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -3003,7 +3085,11 @@ byte-identically, since neither backend inserts any runtime predicate check.
 byte-identically both backends, across all three interpolation cases plus
 an embedded `IOList` partial; `~toml`/`~yaml` are deliberately excluded
 (both diverge compiled on their own parser logic, unrelated to sigils —
-findings filed in `specs/todos.md`, not fixed):
+findings filed in `specs/todos.md`, not fixed). `g48` is the argument/
+element evaluation-order addition (§4.17, widening slice 14), witnessing
+(E-Elts-LTR) for `EApp` and `ETuple` with side-effecting elements — a
+structural invariant of `lower.ml`'s CPS-nested ANF lowering for the
+compiled backend, not merely an empirical fact:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -3047,8 +3133,8 @@ findings filed in `specs/todos.md`, not fixed):
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 47 / 47 matched, 0 divergences in the committed corpus** (the table
-above enumerates `g01`–`g39`; `g40`–`g47` are documented in their respective §4
+**Result: 48 / 48 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g48` are documented in their respective §4
 sections (or, for `g46`, `core-march-types.md` §2.14; for `g47`, §3).
 These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation

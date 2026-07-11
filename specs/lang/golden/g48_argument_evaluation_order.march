@@ -1,0 +1,26 @@
+mod Main do
+  -- Operational evaluation-order witness (core-march.md §4.17 — widening
+  -- slice 14): a call's arguments and a tuple's elements each evaluate FULLY
+  -- (including side effects) strictly left-to-right before the next begins,
+  -- both interpreted (eval.ml's List.map over the element list, relying on
+  -- this toolchain's actual left-to-right List.map implementation) and
+  -- compiled (a structural invariant of lower.ml's CPS-nested ANF lowering,
+  -- not merely an empirical fact). `trace` prints its label then returns its
+  -- value -- the same idiom golden g17 already uses to witness ERecord field
+  -- order; this golden extends it to EApp and ETuple, the two element-list
+  -- forms g17 didn't cover.
+  fn trace(label : String, v : Int) : Int do
+    println(label)
+    v
+  end
+  fn add3(a : Int, b : Int, c : Int) : Int do
+    a + b + c
+  end
+  fn main() do
+    let r = add3(trace("call-a", 1), trace("call-b", 2), trace("call-c", 3))
+    println(int_to_string(r))
+    let (x, y, z) = (trace("tuple-a", 1), trace("tuple-b", 2), trace("tuple-c", 3))
+    println(int_to_string(x + y + z))
+    println("done")
+  end
+end
