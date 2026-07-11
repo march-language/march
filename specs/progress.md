@@ -283,6 +283,53 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, finding C1 FIXED — `strip_scrut_decrc` scrutinee-dec ordering bug)
+
+**The compiled memory-safety bug filed as finding C1 (slice 10) is fixed.**
+Root cause, found by dumping TIR (`--dump-tir`) for a minimal repro and
+manually tracing refcounts through `Map.get`/`Map.insert`/`Map.node_insert`:
+`lib/tir/llvm_case.ml`'s `strip_scrut_decrc` — the codegen helper that
+detects a dying match-arm scrutinee and installs a runtime shared-vs-unique
+check (on the shared path, `IncRC` each extracted heap field to account for
+the alias that survives) — required the scrutinee's own `EDecRC` to be the
+LITERAL head of the branch body. Perceus's `add_cross_decrcs` can prepend
+OTHER cross-branch-dead variables' decs in front of it (`Map.node_insert`'s
+`HLeaf` arm: `dec_rc eq; dec_rc node; ...` — an unused comparator closure
+dec'd before the scrutinee), silently defeating the shared-path protection
+whenever that happened. The read-then-update map idiom (`Map.insert(m, k,
+f(Map.get_or(m, k, ...)), cmp)`) routinely makes its map parameter shared
+(the `inc_rc m` needed to hand `get_or` a temporary copy while `insert`
+still needs the original), landing exactly in this gap — an extracted
+String key's refcount went uncounted, freed prematurely, and later hashed
+as a use-after-free.
+
+**Fix:** generalized `strip_scrut_decrc` to scan a leading run of bare
+`EDecRC`/`EAtomicDecRC` ops for the scrutinee's own wherever it falls,
+preserving the others in their original order — a single-function change,
+identical behavior for the original literal-head case. **Verified:** the
+minimal repro and the original `VectorClock.compare` disjoint-clock scenario
+both go from 100%-crash to byte-identical-with-interpreter (0 crashes across
+repeated runs); `MARCH_SANITIZE=1` clean on both; the TIR snapshot suite is
+UNCHANGED (pure codegen fix — Perceus's TIR emission itself never changed);
+full six-runner suite (808 tests) and the `tree_transform`/`binary_trees`
+benchmarks unaffected; oracle sweep `UN-TRIAGED FAILURE: 0` before and after
+across 3 runs (some run-to-run count drift in `INTERP_TIMEOUT`/`MATCH` is
+pre-existing sweep flakiness on a borderline-slow program, `timsort`,
+unrelated to this fix).
+
+**Docs updated:** `specs/perceus-invariants.md` gains §9 (the full account,
+in the doc's established governing-module + fix-lineage + probe format).
+Golden `g44_crdt_convergence` now includes the disjoint-key
+`VectorClock.compare`/`.concurrent` case unconditionally (previously
+excluded, scoped around this bug) — stress-verified 0/20 crashes. All
+docs/INDEX references to finding C1 (`core-march.md` §4.15/§4.16,
+`core-march-types.md` §2.12, `specs/lang/clustering.md`,
+`specs/lang/golden/INDEX.md`, `specs/lang/types/INDEX.md`) updated from
+"scoped around" to "FIXED." `specs/todos.md`'s C1 entry marked ✅ with the
+root cause and verification trail. `check-docs`/`verify.sh`/`check_types.sh`
+all clean; corpus counts unchanged (46 golden, 151 types) since this was a
+compiler fix, not a corpus addition.
+
 ## Current State (as of 2026-07-11, Core March widening slices 11 + 12 — Perceus RC discipline + refinement types conformance)
 
 **Widening slice 11 (Perceus RC) breaks the pattern every prior slice used**:

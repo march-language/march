@@ -4420,9 +4420,11 @@ reference:
   this surface must lean on inference rather than annotating with qualified
   paths (both accept witnesses do).
 
-Accept witness: `t74_crdt_identity_typed` (typecheck-only — its
-`VectorClock.compare` crashes *compiled* on disjoint clocks, finding C1; the
-`--check` harness never runs it). Convergence is operational — golden `g44`.
+Accept witness: `t74_crdt_identity_typed` (was typecheck-only when written —
+its `VectorClock.compare` crashed *compiled* on disjoint clocks, finding C1,
+FIXED 2026-07-11, `lib/tir/llvm_case.ml`'s `strip_scrut_decrc`; the `--check`
+harness never ran it compiled either way). Convergence is operational —
+golden `g44`, now including the disjoint-clock case unconditionally.
 
 ### 2.13 Perceus reference counting: no new typing rules (widening slice 11, 2026-07-11)
 

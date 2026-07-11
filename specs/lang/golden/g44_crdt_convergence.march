@@ -8,16 +8,23 @@ mod Main do
   -- are documented as a prose scope boundary in §4.15, exercised only by the
   -- native TCP-loopback tests under test/native/.
   --
-  -- SCOPED AROUND finding C1 (specs/todos.md): the read-then-update map idiom
-  -- `Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)` -- which underlies
-  -- VectorClock.increment and CRDT counter updates -- miscompiles into a
-  -- use-after-free that surfaces when the resulting map is later read by
-  -- folding its own keys and looking them up (e.g. VectorClock.compare on
-  -- clocks with disjoint / partial key sets). This golden therefore exercises
-  -- only the paths proven byte-identical AND crash-free (stress-tested 0/20):
-  -- GCounter/PNCounter/ORSet merge laws and VectorClock.happens_before on
-  -- causally-ORDERED clocks. VectorClock.compare on disjoint clocks is a
-  -- documented compiled divergence, not a golden program, until C1 is fixed.
+  -- Finding C1 (specs/todos.md, FIXED 2026-07-11): the read-then-update map
+  -- idiom `Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)` -- which
+  -- underlies VectorClock.increment and CRDT counter updates -- used to
+  -- miscompile into a use-after-free that surfaced when the resulting map
+  -- was later read by folding its own keys and looking them up (e.g.
+  -- VectorClock.compare on clocks with disjoint/partial key sets). Root
+  -- cause: `lib/tir/llvm_case.ml`'s `strip_scrut_decrc` only recognized the
+  -- scrutinee's own EDecRC as the LITERAL head of a match arm's body, but
+  -- `add_cross_decrcs` can prepend OTHER cross-branch-dead variables' decs
+  -- in front of it (e.g. Map.node_insert's HLeaf arm: `dec_rc eq; dec_rc
+  -- node; ...`), silently defeating the shared-path field-protection that
+  -- keeps an extracted String key's refcount correct when the scrutinee is
+  -- shared. Fixed by generalizing `strip_scrut_decrc` to scan through a
+  -- leading run of bare dec_rc ops for the scrutinee's own, preserving the
+  -- others. This golden now includes the disjoint-key `VectorClock.compare`
+  -- case that used to be excluded (below) -- the full CRDT/lattice core is
+  -- unconditionally byte-identical and crash-free, not scoped around a bug.
   fn main() do
     -- Grow-only counter: a join-semilattice. Merge is commutative + idempotent.
     let a = CRDT.GCounter.add(CRDT.GCounter.increment(CRDT.GCounter.new(), "n1"), "n1", 4)  -- n1 -> 5
@@ -47,6 +54,14 @@ mod Main do
     let v2 = VectorClock.increment(v1, "n1")
     println("vclock.v1_before_v2=" ++ bool_to_string(VectorClock.happens_before(v1, v2)))
     println("vclock.not_v2_before_v1=" ++ bool_to_string(VectorClock.happens_before(v2, v1) == false))
+
+    -- Vector-clock causality on CONCURRENT clocks with disjoint actor-id
+    -- sets -- the case finding C1 used to make compiled-only unsafe. Neither
+    -- clock's slot dominates the other's, so `compare` classifies them
+    -- Concurrent (neither happens_before nor equal).
+    let cx = VectorClock.increment(VectorClock.new(), "x")
+    let cy = VectorClock.increment(VectorClock.new(), "y")
+    println("vclock.disjoint_concurrent=" ++ bool_to_string(VectorClock.concurrent(cx, cy)))
     println("done")
   end
 end

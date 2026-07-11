@@ -464,19 +464,20 @@ single-process golden. True multi-*machine* failure semantics (netsplit,
 node restart/incarnation, clock skew across hosts) remain undocumented in
 executable form.
 
-**A compiled memory-safety gap (finding C1, `specs/todos.md`).**
+**A compiled memory-safety gap, FIXED (finding C1, `specs/todos.md`, 2026-07-11).**
 `VectorClock.compare` — and, transitively, `.concurrent`/`.happens_before` on
-clocks with disjoint or partial actor-id sets — **crashes when compiled**
+clocks with disjoint or partial actor-id sets — used to **crash when compiled**
 (a use-after-free freeing a `String` map key, SIGSEGV) while running
-correctly interpreted. The root cause is the read-then-update idiom
+correctly interpreted. The root cause was the read-then-update idiom
 `Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)`, which both
 `VectorClock.increment` and the `CRDT` counter updates use — a compiler
-Perceus/borrow refcount defect, not a bug in this module's logic. Until it's
-fixed, avoid comparing vector clocks built by different actors in compiled
-code (same-actor / single-key clocks are unaffected — `g44`'s
-`happens_before` witness stays in that safe zone). Prefer the interpreter for
-any workload that calls `VectorClock.compare` on multi-actor clocks until C1
-is resolved.
+Perceus/borrow refcount defect (`lib/tir/llvm_case.ml`'s `strip_scrut_decrc`
+only recognized a match arm's own scrutinee-dying dec_rc as the literal head
+of the branch body, missing it — and silently skipping the shared-path field
+refcount protection — whenever another cross-branch-dead variable's dec_rc
+was emitted first), not a bug in this module's logic. Comparing vector
+clocks built by different actors in compiled code is now safe — `g44`
+includes the disjoint-key case unconditionally.
 
 ---
 

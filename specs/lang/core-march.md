@@ -2801,20 +2801,27 @@ cross-node monitor firing (`march_monitor_registry.c` writes to fds). True
 multi-*machine* semantics (netsplit, node restart/incarnation, cross-host clock
 skew) remain prose-only.
 
-**The honest divergence (finding C1).** `VectorClock.compare` — and any code
+**Finding C1 — FIXED (2026-07-11).** `VectorClock.compare` — and any code
 that folds a map's own keys and looks each one up in that map, after the map was
 built by the read-then-update idiom `Map.insert(m, k, f(Map.get_or(m, k, …)), cmp)`
-— **crashes compiled** (use-after-free of a String key in `march_hash_string`,
-SIGSEGV or hang) while running correctly interpreted. This is a compiler
-Perceus/borrow refcount defect, not a runtime bug: `Map.get_or`/`keys`/`str_cmp`
-are pure March stdlib, so the fault is in how the built map's keys are
-refcounted. The idiom underlies `VectorClock.increment` and the CRDT counter
-updates, so the corruption is *latent* in any increment-built clock and surfaces
-on `compare` over clocks with disjoint/partial key sets. `g44` is deliberately
-scoped around it (counters, sets, and `happens_before` on causally-ordered
-same-key clocks — all stress-verified 0/20 crashes); `VectorClock.compare` on
-disjoint clocks is a documented compiled divergence, not a golden program, until
-C1 is fixed.
+— used to **crash compiled** (use-after-free of a String key in `march_hash_string`,
+SIGSEGV or hang) while running correctly interpreted. Root cause: `lib/tir/
+llvm_case.ml`'s `strip_scrut_decrc` recognized a match arm's scrutinee-dying
+`EDecRC` only as the LITERAL head of the branch body — but Perceus's
+`add_cross_decrcs` can prepend OTHER cross-branch-dead variables' `EDecRC`s in
+front of it (e.g. `Map.node_insert`'s `HLeaf` arm emits `dec_rc eq; dec_rc node;
+…`, an unrelated comparator param dec'd before the scrutinee). When that
+literal-head match failed, the shared-path field-protection (an `IncRC` on
+each extracted heap field when the scrutinee's refcount is >1, keeping a
+field's count correct when the scrutinee survives) never fired — silently
+under-counting an extracted String key's refcount whenever the map argument
+was shared, which the read-then-update idiom on a function parameter used at
+both a borrowed (`get_or`) and owned (`insert`) position routinely produces.
+Fixed by generalizing `strip_scrut_decrc` to scan through a leading run of
+bare `dec_rc` ops for the scrutinee's own, preserving the others in place.
+`g44` now includes the disjoint-key `VectorClock.compare`/`.concurrent` case
+that used to be excluded — the full CRDT/lattice core is unconditionally
+byte-identical and crash-free (stress-verified 0/20), not scoped around a bug.
 
 ### 4.16 Perceus reference counting: the compiled backend's own operational discipline (widening slice 11, 2026-07-11)
 
@@ -2977,8 +2984,9 @@ witnessing the data-parallel determinism guarantee — `List.pmap == List.map`
 plus the RRB `Parallel` integer/bool reductions, the first compiled witness for
 that module. `g44` is the distributed-CRDT addition (§4.15), witnessing the
 convergence laws of the single-process-testable CRDT core (GCounter/PNCounter/
-ORSet merge, VectorClock causality), deliberately scoped around the compiled
-`VectorClock.compare` use-after-free (finding C1). `g45` is the Perceus RC
+ORSet merge, VectorClock causality including the disjoint-key `compare`/
+`.concurrent` case that used to crash compiled — finding C1, fixed
+2026-07-11). `g45` is the Perceus RC
 addition (§4.16), witnessing the dual-position dup/drop invariant (B1) —
 verified interp==compiled, against a committed TIR snapshot, AND clean under
 `MARCH_SANITIZE=1`. `g46` is the refinement-types addition

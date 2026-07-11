@@ -610,16 +610,34 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     end
   end;
 
-  (* Helper: if body = ESeq(EDecRC(v)|EAtomicDecRC(v), rest) where
-     v.v_name = scrut_name, return (v, rest).
-     Both atomic and non-atomic DecRC qualify — the decrc_freed path handles
-     the conditional IncRC of children either way. *)
+  (* Helper: find the scrutinee's own EDecRC/EAtomicDecRC within a leading
+     run of bare DecRC ops and return (v, rest) with the OTHER leading decs
+     preserved in their original order around the extraction point.
+
+     The scrutinee's dec is not always the literal head of the branch body:
+     [add_cross_decrcs] in perceus.ml prepends OTHER cross-branch-dead
+     variables' EDecRC/EAtomicDecRC ops in front of it whenever the branch
+     also has, say, a closure parameter that's unused on this specific arm
+     (e.g. Map.node_insert's HLeaf arm: `dec_rc eq; dec_rc node; ...` — the
+     scrutinee `node`'s dec is SECOND, not first). A literal head-only match
+     here silently falls through to the plain (unprotected) EDecRC codegen
+     below, leaving extracted heap fields under-refcounted whenever the
+     scrutinee is actually shared at that point — this was finding C1: a
+     String map key's refcount under-counted this way, freed prematurely,
+     surfacing as a use-after-free in march_hash_string when a later
+     Map.keys/get_or traversal read it. Fixed 2026-07-11. *)
   let strip_scrut_decrc scrut_name body =
-    match body with
-    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
-    | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
-      when String.equal v.Tir.v_name scrut_name -> Some (v, rest)
-    | _ -> None
+    let rec go acc e =
+      match e with
+      | Tir.ESeq (((Tir.EDecRC (Tir.AVar v)) as op), rest)
+      | Tir.ESeq (((Tir.EAtomicDecRC (Tir.AVar v)) as op), rest) ->
+        if String.equal v.Tir.v_name scrut_name then
+          Some (v, List.fold_left (fun inner o -> Tir.ESeq (o, inner)) rest acc)
+        else
+          go (op :: acc) rest
+      | _ -> None
+    in
+    go [] body
   in
 
   (* True iff [body] reuses the scrutinee's own storage via an
