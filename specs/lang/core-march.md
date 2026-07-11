@@ -2702,9 +2702,123 @@ the `Err` short-circuit is the rule itself, so `let?` can never crash on an
 steps (`ok 70`), `chain(-1)` fails the first step so the second `let?` never
 runs (`err neg`) — identical interpreted and compiled.
 
+### 4.14 Data parallelism: the determinism guarantee (operational)
+
+March's data-parallel combinators — `List.pmap`/`pfilter`/`preduce` (list-based,
+`stdlib/list.march`) and the RRB-`Vec` `Parallel` module (`pmap`/`pmap_n`/
+`preduce`/`preduce_n` plus `psum`/`pcount`/`pany`/`pall`) — are **not new core
+constructs**. They are ordinary polymorphic stdlib functions built on
+`task_spawn`/`task_await_unwrap` (§4.10). Their conformance content is a single
+*operational guarantee*: **a data-parallel operation produces exactly the same
+result — same values, same order — as its sequential counterpart, and that
+result is byte-identical interpreted and compiled**, even though the interpreter
+runs the task thunks eagerly and sequentially while the compiled backend runs
+them on the real multi-core work-stealing scheduler.
+
+```
+  map f xs ⇓ ys
+  ─────────────────────────  (E-PMap)   pmap preserves order
+  pmap f xs ⇓ ys
+
+  merge associative,  z identity of merge,  fold_left (merge ∘ f) z xs ⇓ w
+  ────────────────────────────────────────────────────────────────────────  (E-PReduce)
+  preduce z f merge xs ⇓ w
+```
+
+- **(E-PMap)** — the gather reads task results in **spawn order** via a
+  per-handle `await` (not completion order), so the output vector's order equals
+  the input's regardless of how many workers ran or how the scheduler
+  interleaved them. `pmap`/`pmap_n` are therefore order-preserving
+  *unconditionally*.
+- **(E-PReduce)** — `preduce` splits the input into contiguous chunks, folds
+  each chunk, then merges the partials left-to-right. When `merge` is
+  **associative** and `z` is its **identity** (the documented contract), the
+  result is independent of the chunk boundaries — and the chunk count differs
+  between backends (the interpreter's worker count comes from
+  `Domain.recommended_domain_count`, the compiled runtime's from the physical
+  CPU count), so associativity is exactly what makes the two backends agree.
+  `psum`/`pcount` (integer `+`), `pany`/`pall` (`||`/`&&`, no short-circuit) all
+  satisfy this and are deterministic.
+
+**The honest exclusion (finding P1).** `Parallel.psum_float` is **not**
+backend-portable: IEEE-754 `+.` is not associative, so the differing chunk
+counts can reorder the additions and change the last bit. It is deliberately
+absent from the golden. The same caveat applies to any `preduce` with a
+non-associative `merge` (subtraction, average): the result becomes worker-count-
+dependent, hence backend-dependent, and is outside the guarantee. Programs whose
+`f`/`pred` performs observable **side effects** also fall outside it — the
+*returned value* stays deterministic, but under compiled execution the effects
+run concurrently on up to N OS threads, so their ordering is not.
+
+Golden `g43_parallel_determinism` witnesses the guarantee: `List.pmap == List.map`
+on 199 elements, and `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` over the
+same data — all byte-identical interpreted and compiled, stress-verified 0/15
+crashes. It is the first compiled conformance witness for the RRB `Parallel`
+module (the suite's `test_compiled_pmap_matches_map` covers only `List.pmap`/
+`pfilter`).
+
+### 4.15 Distributed CRDTs: convergence laws, and the single-process boundary (operational)
+
+The distributed/OTP stack (`stdlib/crdt.march`, `vector_clock.march`,
+`membership.march`, `global_registry.march`, `merkle.march`,
+`consistent_hash.march`, and the RPC/identity layer) splits cleanly into a
+**pure, single-process-testable core** and a **live-network shell**. Only the
+core is a conformance subject here; the shell is a documented scope boundary.
+
+**Conformance-testable in one process (the CRDT / lattice laws).** These are
+pure functions over data structures and run byte-identically on both backends:
+
+```
+  merge commutative:   merge a b  =  merge b a
+  merge associative:   merge (merge a b) c  =  merge a (merge b c)     -- join-semilattice
+  merge idempotent:    merge a a  =  a
+  ──────────────────────────────────────────────────────────────────  (CRDT-Converge)
+  replicas that have seen the same set of updates hold equal state,
+  independent of the order in which updates and merges were applied
+```
+
+This covers `GCounter`/`PNCounter`/`LWWRegister`/`ORSet.merge`, `Membership` and
+`GlobalRegistry.merge` (incarnation-/vector-clock-ordered CRDT views),
+`VectorClock` causality (`happens_before` is the partial order induced by
+component-wise `≤`; `compare` classifies Before/After/Concurrent/Equal),
+`Merkle.root_hash`/`diff`, `ConsistentHash` ring placement, and `RingBuf`
+FIFO/overwrite invariants — plus the wire codecs (`NetFrame`, `NodeIdentity`,
+`GlobalPid`, `Handshake`, `RemoteCall`, `SwimDriver`) whose `decode ∘ encode = id`,
+`ClusterAuth`'s HMAC challenge/response, and `RemoteCall.verify`'s content-
+addressed admission (TypeMismatch/VersionSkew/NoTarget). Golden
+`g44_crdt_convergence` witnesses the GCounter/PNCounter/ORSet merge laws and
+VectorClock causality on causally-ordered clocks.
+
+**Prose-only scope boundary (needs a live multi-node harness).** The following
+are **not** single-process conformance subjects and are exercised only by the
+native TCP-loopback tests under `test/native/` (two logical nodes over
+`127.0.0.1`, golden `.expected` diffs) — never by the eval harness or the oracle:
+the net-kernel handshake (`NetKernel.handshake`, `ClusterConn`), synchronous RPC
+transport (`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds
+(`SwimDriver.dispatch*`), the compiler-emitted `__rpc_stub` → C-registry
+dispatch (a no-op under the interpreter, `eval.ml` `remote_check`→0), and
+cross-node monitor firing (`march_monitor_registry.c` writes to fds). True
+multi-*machine* semantics (netsplit, node restart/incarnation, cross-host clock
+skew) remain prose-only.
+
+**The honest divergence (finding C1).** `VectorClock.compare` — and any code
+that folds a map's own keys and looks each one up in that map, after the map was
+built by the read-then-update idiom `Map.insert(m, k, f(Map.get_or(m, k, …)), cmp)`
+— **crashes compiled** (use-after-free of a String key in `march_hash_string`,
+SIGSEGV or hang) while running correctly interpreted. This is a compiler
+Perceus/borrow refcount defect, not a runtime bug: `Map.get_or`/`keys`/`str_cmp`
+are pure March stdlib, so the fault is in how the built map's keys are
+refcounted. The idiom underlies `VectorClock.increment` and the CRDT counter
+updates, so the corruption is *latent* in any increment-built clock and surfaces
+on `compare` over clocks with disjoint/partial key sets. `g44` is deliberately
+scoped around it (counters, sets, and `happens_before` on causally-ordered
+same-key clocks — all stress-verified 0/20 crashes); `VectorClock.compare` on
+disjoint clocks is a documented compiled divergence, not a golden program, until
+C1 is fixed.
+
 ## 5. Golden conformance corpus
 
-Forty-two programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-four programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2748,7 +2862,15 @@ SIGSEGVs compiled; `g37` is the actor-lifecycle addition, covering the
 `spawn → kill → is_alive` liveness slice of §4.10.6 (a pure registry-bool
 observation, the only lifecycle plane byte-identical compiled — the capability /
 dead-`send` plane diverges and is documented as a finding in §4.10.6, not as a
-golden program):
+golden program). `g38`–`g42` are the session-channel (§4.11), actor-foreign-drop
+(§4.10), linearity-erasure (§4.12), and `let?` (§4.13) additions, each
+documented in its own section above. `g43` is the parallelism addition (§4.14),
+witnessing the data-parallel determinism guarantee — `List.pmap == List.map`
+plus the RRB `Parallel` integer/bool reductions, the first compiled witness for
+that module. `g44` is the distributed-CRDT addition (§4.15), witnessing the
+convergence laws of the single-process-testable CRDT core (GCounter/PNCounter/
+ORSet merge, VectorClock causality), deliberately scoped around the compiled
+`VectorClock.compare` use-after-free (finding C1):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -2792,7 +2914,9 @@ golden program):
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 39 / 39 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 44 / 44 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g44` are documented in their §4 sections.
+These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not

@@ -283,6 +283,66 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-10, Core March widening slices 9 + 10 — parallelism + clustering conformance, plus a filed compiled memory-safety bug C1)
+
+**Widening slices 9 (data parallelism) and 10 (distributed CRDTs) both add
+zero new typing rules** — both surfaces are ordinary polymorphic stdlib
+functions and ADTs typed by the existing §2.1 application/HOF/constructor
+rules — so both slices are primarily docs + golden, landing `core-march.md`
+§4.14/§4.15 and `core-march-types.md` §2.11/§2.12, two new goldens (`g43`
+parallelism, `g44` distributed CRDT), and two accept-corpus witnesses (`t73`,
+`t74`).
+
+**Slice 9 (parallelism):** `core-march.md` §4.14 documents the operational
+determinism guarantee that already exists for `List.pmap`/`pfilter`/`preduce`
+and the RRB `Parallel` module (`pmap`/`pmap_n`/`preduce`/`preduce_n`,
+`psum`/`pcount`/`pany`/`pall`) — parallel output is byte-identical to
+sequential, both in value and order, on both backends, because `pmap`
+gathers in spawn order (not completion order) and associative-merge
+reductions are chunk-count-independent. Golden `g43_parallel_determinism`
+witnesses `List.pmap == List.map` plus the RRB reductions — the **first**
+compiled conformance witness for the RRB `Parallel` module (the existing
+suite test covers only `List.pmap`/`pfilter`). Filed finding **P1**:
+`Parallel.psum_float` is NOT backend-portable (IEEE-754 `+.` non-associativity
+× differing interp/compiled chunk counts) and is deliberately excluded from
+the golden.
+
+**Slice 10 (clustering):** `core-march.md` §4.15 draws the honest scope
+boundary for the distributed/OTP stack — the pure CRDT/lattice core
+(`CRDT`, `Membership`, `GlobalRegistry.merge`, `VectorClock` causality,
+`Merkle`, `ConsistentHash`, `RingBuf`, plus the wire codecs and
+`RemoteCall.verify`) is single-process-testable and golden-witnessed
+(`g44_crdt_convergence`: GCounter/PNCounter/ORSet merge laws +
+`happens_before` on causally-ordered clocks); the live-network layers
+(`NetKernel`/`ClusterConn` handshake, `NodeCall` RPC transport, SWIM gossip
+dispatch, cross-node monitor firing) stay prose-only, exercised only by the
+native TCP-loopback tests under `test/native/`.
+
+**Filed finding C1 (P0, compiled memory-safety), NOT fixed this slice.**
+Live-probing `VectorClock.compare` to write `g44` surfaced a genuine
+compiled-only use-after-free: the read-then-update map idiom
+`Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)` — used by
+`VectorClock.increment` and the `CRDT.GCounter` counter updates — leaves the
+built map's keys refcount-deficient. The corruption is latent and surfaces
+only when the map is later read by folding its own keys and looking each up
+(`VectorClock.compare` on clocks with disjoint/partial actor-id sets),
+crashing with a use-after-free in `march_hash_string` (SIGSEGV, sometimes a
+hang). Interpreted execution is correct throughout — this is a compiler
+Perceus/borrow refcount defect (`Map.get_or`/`keys`/`str_cmp` are pure March
+stdlib), the same bug class as the earlier toml RC cluster's "borrow
+over-ownership." Bisected to a ~10-line minimal repro (no newtype, no stdlib
+beyond `Map`/`List`); `g44` is deliberately scoped around it (counters, sets,
+and same-key `happens_before` only, stress-verified 0/20 crashes). Filed in
+`specs/todos.md` for a dedicated Perceus/borrow fix session (RC/borrow is the
+compiler's highest-regression-risk subsystem — not attempted inline in a
+docs-widening slice).
+
+**Corpus:** golden 42 → **44** (`g43_parallel_determinism`,
+`g44_crdt_convergence`); types 142 → **144** (72→74 accept: `t73`, `t74`;
+reject unchanged at 70). `verify.sh` 44/44; `check_types.sh` 144/144;
+`grammar-check` 39/39 (unchanged); `check-docs` clean; full six-runner suite
+(808 tests) green, 0 failures.
+
 ## Current State (as of 2026-07-10, grammar corpus count-guarded + widened — conformance backing completed)
 
 **The resolved-grammar conformance corpus (`specs/lang/grammar/`) is now

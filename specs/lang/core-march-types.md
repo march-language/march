@@ -4375,6 +4375,55 @@ Accept: `t70_letq_chain_value` (a two-step chain yielding a value),
 annotation). Operational witness + Err-short-circuit: golden `g42`
 (`core-march.md` §4.13).
 
+### 2.11 Data parallelism: no new typing rules (widening slice 9, 2026-07-10)
+
+The data-parallel combinators — `List.pmap`/`pfilter`/`preduce` and the RRB
+`Parallel` module (`pmap`/`pmap_n`/`preduce`/`preduce_n`, `psum`/`pcount`/
+`pany`/`pall`) — **add no typing rules**. They are ordinary polymorphic stdlib
+functions, typed by the existing application/HOF rules (§2.1). The load-bearing
+type-level fact is an *identity*:
+
+```
+  List.pmap : (List(a), a -> b) -> List(b)          -- same scheme as List.map
+  Parallel.preduce : (Vec(a), b, a -> b, (b,b) -> b) -> b   -- a fold's scheme
+```
+
+`List.pmap` is interchangeable with `List.map` at the type level (so a program
+comparing their results, `pmap xs f == map xs f`, is well-typed at `List(b)`).
+The **associativity of `merge`** that `preduce` requires for a deterministic
+result (`core-march.md` §4.14) is a *semantic* obligation, **not** enforced by
+the type system — the checker accepts a non-associative `merge` of the right
+type, and the resulting backend-dependence is a runtime concern (finding P1),
+not a type error. Accept witness: `t73_parallel_typed_as_sequential`. The
+determinism guarantee itself is operational — golden `g43`.
+
+### 2.12 Distributed CRDTs and node identity: no new typing rules (widening slice 10, 2026-07-10)
+
+The distributed/OTP surface — CRDT states (`GCounter`/`PNCounter`/`LWWRegister`/
+`ORSet`), `VectorClock`/`ClockOrder`, `Membership`, `GlobalRegistry`,
+`GlobalPid`, and the `RemoteCall` verdicts (`CallError`, `Verdict`) — is a set
+of **ordinary ADTs** typed by the §2.1 constructor/`match` rules; it introduces
+no new typing judgment. Two honesty notes belong in a *static-semantics*
+reference:
+
+- **Cross-node type-safety is not a static property.** A `RemoteCall.RemoteRef`
+  carries a `sig_hash`/`impl_hash`; `RemoteCall.verify` admits a call only when
+  those content-addressed digests match (rejecting `TypeMismatch`/`VersionSkew`/
+  `NoTarget`). This is the mechanism that keeps a remote invocation type-safe
+  across a node boundary the local type-checker cannot see — it runs at
+  **runtime**, not in the type system. The type system's job ends at the local
+  `RemoteRef` ADT; the digest check is what a distributed program relies on.
+- **The qualified-type-path limitation bites here.** Nested-module type paths
+  like `CRDT.GCounter.T`, `RRB.Vec(Int)`, or `VectorClock.ClockOrder` do **not**
+  resolve in a type annotation (they report "Unknown module" / wrong arity) —
+  the same global-type-namespace limitation noted for app types. Programs over
+  this surface must lean on inference rather than annotating with qualified
+  paths (both accept witnesses do).
+
+Accept witness: `t74_crdt_identity_typed` (typecheck-only — its
+`VectorClock.compare` crashes *compiled* on disjoint clocks, finding C1; the
+`--check` harness never runs it). Convergence is operational — golden `g44`.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the

@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t72 accept, t01–t70 reject)
+# Typing corpus index (t01–t74 accept, t01–t70 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 142/142 — 72 accept, 70
+Exit 0 iff every program behaves as declared (currently 144/144 — 74 accept, 70
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -370,6 +370,8 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t70_letq_chain_value` | **`let?` Result-propagation, happy path (widening slice 8, §2.10)** — a two-step `let?` chain threading Ok payloads; each RHS is `Result(_, String)`, body is `Result(_, String)` with the SAME error type (T-LetQ). Golden `g42` value-witnesses it | `--check` exit 0 |
 | `t71_letq_tuple_pattern` | **`let?` with a tuple `simple_pattern` (slice 8, §2.10)** — the Ok payload destructured by an irrefutable tuple pattern (same patterns plain `let` accepts); runs, prints `7` | `--check` exit 0 |
 | `t72_letq_wildcard` | **`let? _ =` propagate-but-discard (slice 8, §2.10)** — wildcard binds nothing but still short-circuits Err; the must-succeed / sequence-for-effect idiom, still needs a Result body after | `--check` exit 0 |
+| `t73_parallel_typed_as_sequential` | **data parallelism adds no typing rules (slice 9, §2.11)** — `List.pmap` types identically to `List.map` (so `sq == m` is well-typed at `List(Int)`), RRB `Parallel.preduce`/`psum` type like folds; merge-associativity is a semantic obligation, not a typed one. Operational witness golden `g43` | `--check` exit 0 |
+| `t74_crdt_identity_typed` | **distributed CRDT / identity adds no typing rules (slice 10, §2.12)** — CRDT states, VectorClock, GlobalPid, RemoteCall verdicts are ordinary ADTs; cross-node type-safety rests on RUNTIME content-addressed admission (`RemoteCall.verify`), not the type system. Typecheck-only (its `VectorClock.compare` crashes compiled, finding C1). Operational witness golden `g44` | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -447,7 +449,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t65_always_linear_drop` | **(T-AlwaysLin) + (T-LinDrop) (slice 7, §2.9.1)** — a binding of an `always_linear type Tok` is auto-promoted to Linear with no per-site annotation; dropping it unused rejects. Named `Tok` NOT `Handle` — `always_linear_types` is name-keyed globally and stdlib `handle.march` claims `Handle` (finding L4) | `was never used` |
 | `t66_linear_use_after_send` | **(T-LinUse) send-consumes, reject twin of `accept/t68` (slice 7, §2.9.2)** — `send(pid, StoreRes(r))` consumes linear `r`; `take(r)` after the send is a double use | `is used more than once here` |
 
-**Result: 142 / 142 (72 accept, 70 reject).**
+**Result: 144 / 144 (74 accept, 70 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
