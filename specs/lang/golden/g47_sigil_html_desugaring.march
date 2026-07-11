@@ -1,0 +1,34 @@
+mod Main do
+  -- Desugaring-map witness (core-march.md §3 — widening slice 15): sigils
+  -- add no new operational rule -- `ESigil` never reaches eval.ml (a hard
+  -- failwith guards this, eval.ml:7482) or the compiled TIR lowerer
+  -- (lower.ml:774-775); desugar.ml eliminates every sigil into ordinary core
+  -- nodes before either backend sees it. `~H` is the one sigil with a
+  -- specially-elaborated desugaring (html_interp_to_iolist: island-tag
+  -- processing, lexically-conn-gated CSRF injection, html_auto_escape
+  -- substitution per interpolated segment) rather than a plain
+  -- `Sigil.<name>(content)` call -- this golden exercises all three
+  -- interpolation cases (static text, String interpolation requiring
+  -- escaping, Int interpolation) plus an embedded IOList partial, proving
+  -- the elaborated desugaring still terminates in ordinary EApp/ECon nodes
+  -- that run byte-identically both backends.
+  --
+  -- NOT included: `~toml`/`~yaml` alongside `~H` in this golden. Both were
+  -- live-probed while scoping this slice and found to diverge compiled on
+  -- their OWN parser logic (multi-digit TOML integers truncate to one
+  -- digit; a flat Yaml key lookup returns None compiled) -- pre-existing
+  -- bugs in those stdlib parsers, unrelated to the sigil mechanism itself
+  -- (confirmed: the identical divergence reproduces via the plain
+  -- `Toml.parse_exn`/`Yaml.parse` calls, no sigil involved). Filed in
+  -- specs/todos.md, not fixed here -- this golden is deliberately scoped to
+  -- the one sigil proven clean.
+  fn main() do
+    println(IOList.to_string(~H"<p>HHH</p>"))
+    let s = "a<b"
+    println(IOList.to_string(~H"<p>${s}</p>"))
+    let n = 42
+    println(IOList.to_string(~H"<p>n=${n}</p>"))
+    let rows = ~H"<li>x</li>"
+    println(IOList.to_string(~H"<ul>${rows}</ul>"))
+  end
+end

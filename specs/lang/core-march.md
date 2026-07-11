@@ -351,6 +351,8 @@ the parser) and multi-clause functions.
 | `match do c -> b, … end` (`ECond`) | **identity** — recurse into each arm's condition and body; arm order preserved verbatim, NOT rewritten to nested `EIf`s. (The `_ -> b` catch-all was already turned into a `true`-condition arm by the *parser*, `parser.mly:1295–1296`, before desugar sees it.) | `desugar.ml:638–639` |
 | `ELit`, `EVar` | identity | `desugar.ml:548` |
 | `type C = A \| B` (`DType`) | identity — the desugarer never touches type declarations or constructors | `desugar.ml:798–800` |
+| `~toml"…"`, `~xml"…"`, `~yaml"…"`, any `~name"…"` (`ESigil`, widening slice 15) | **eliminated entirely** — rewritten to the plain call `EApp(EVar "Sigil.<lowercase name>", [content'])` before typecheck/eval ever see an `ESigil` node (both stages `failwith`/`eval_error` if one somehow arrives, `typecheck.ml:4574`, `eval.ml:7482` — the same guard `EPipe` gets). An unimplemented sigil name (e.g. `~R"…"`) parses fine (the lexer accepts any single uppercase letter or lowercase identifier as a sigil prefix) and is rejected only because the DESUGARED call is unbound — ordinary name resolution, no sigil-specific check | `desugar.ml:669–680` |
+| `~H"…"` (`ESigil`, the ONE specially-elaborated case) | **not** a plain `Sigil.h` call — a multi-step rewrite (`html_interp_to_iolist`): decomposes the interpolated content into static/dynamic segments, rewrites `<island>` tags, injects a CSRF token into `<form method=post/put/patch/delete>` segments ONLY when `conn` is lexically bound in scope at this point (`with_conn_scope`/`csrf_conn_in_scope`, gated per-binding-site — a `let`/`let?`/fn-param that binds `conn` toggles the flag for its body), replaces each dynamic segment with `html_auto_escape(x)`, and builds a `Cons`/`Nil` list wrapped in `IOList.from_strings(...)`. Still terminates in ordinary `EApp`/`ECon` nodes — no new value or judgment form, just a richer rewrite | `desugar.ml:260–307` (conn-scope gating), `:416–` (`html_interp_to_iolist`) |
 
 The surface language's meaning is therefore: **desugar to core, then evaluate
 the core by §4.**
@@ -2935,7 +2937,7 @@ finding fixed in slice 7, §4.12).
 
 ## 5. Golden conformance corpus
 
-Forty-six programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-seven programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2994,7 +2996,14 @@ verified interp==compiled, against a committed TIR snapshot, AND clean under
 `MARCH_SANITIZE=1`. `g46` is the refinement-types addition
 (`core-march-types.md` §2.14), witnessing that a program whose refinement
 obligations are all provably discharged at `--check` time runs
-byte-identically, since neither backend inserts any runtime predicate check:
+byte-identically, since neither backend inserts any runtime predicate check.
+`g47` is the sigils addition (§3, widening slice 15), witnessing that
+`~H`'s specially-elaborated desugaring — the one sigil that isn't a plain
+`Sigil.<name>` call — still terminates in ordinary core nodes that run
+byte-identically both backends, across all three interpolation cases plus
+an embedded `IOList` partial; `~toml`/`~yaml` are deliberately excluded
+(both diverge compiled on their own parser logic, unrelated to sigils —
+findings filed in `specs/todos.md`, not fixed):
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -3038,9 +3047,9 @@ byte-identically, since neither backend inserts any runtime predicate check:
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 46 / 46 matched, 0 divergences in the committed corpus** (the table
-above enumerates `g01`–`g39`; `g40`–`g46` are documented in their respective §4
-sections (or, for `g46`, `core-march-types.md` §2.14).
+**Result: 47 / 47 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g47` are documented in their respective §4
+sections (or, for `g46`, `core-march-types.md` §2.14; for `g47`, §3).
 These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure

@@ -4531,6 +4531,33 @@ byte-identically interpreted and compiled — the same erasure property golden
 whose postcondition and precondition both provably hold, run interp vs
 compiled, byte-identical.
 
+### 2.15 Sigils: no new typing rules (widening slice 15, 2026-07-11)
+
+`~name"…"` (`ESigil`) adds no typing judgment because it never reaches the
+typechecker at all: `desugar.ml` eliminates every sigil into an ordinary
+`EApp`/`ECon` before typecheck runs (a hard `failwith` guards the
+impossible case, `typecheck.ml:4574` — the identical treatment `EPipe`
+gets). A sigil's result type is therefore whatever its desugared callee's
+declared signature says, via the ordinary `(T-App)` rule (§2.1) — nothing
+sigil-specific:
+
+| Sigil | Desugars to | Result type |
+|---|---|---|
+| `~toml"…"` | `Sigil.toml(content)` | `TomlValue` |
+| `~xml"…"` | `Sigil.xml(content)` | `XmlDoc` |
+| `~yaml"…"` | `Sigil.yaml(content)` | `YamlValue` |
+| `~H"…"` | `html_interp_to_iolist(…)` (elaborated, `core-march.md` §3) | `IOList` |
+| `~h"…"` (legacy, unescaped) | `Sigil.h(content)` | `IOList` |
+
+An unimplemented sigil name (e.g. `~R"…"`) parses fine — the lexer accepts
+any single uppercase letter or lowercase identifier as a sigil prefix — and
+is rejected only because the desugared call (`Sigil.r`) is unbound, the
+same as any other unresolved qualified name; there is no sigil-specific
+validation to bypass or forge. Witnesses: accept
+`t79_sigil_toml_desugars_to_call`, `t80_sigil_h_desugars_to_iolist`; reject
+`t74_sigil_unimplemented_name`. Operational account (the desugaring itself,
+including `~H`'s elaborated rewrite): `core-march.md` §3.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the

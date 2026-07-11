@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g46)
+# Golden corpus index (g01–g47)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (46/46 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (47/47 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -46,7 +46,11 @@ snapshot, AND `MARCH_SANITIZE=1` clean); `g46` the refinement-types addition
 discharged entirely at `--check` time by a separate pass, `lib/refinecheck`,
 that erases to nothing at runtime; a program whose obligations all provably
 hold therefore runs byte-identically, the same erasure property golden g41
-established for linear/affine annotations).
+established for linear/affine annotations); `g47` the sigils addition (§3,
+widening slice 15 — `ESigil` is eliminated entirely by desugaring before
+either backend sees it; `~H`'s specially-elaborated rewrite still
+terminates in ordinary core nodes; `~toml`/`~yaml` excluded, both diverge
+compiled on unrelated pre-existing parser bugs, `specs/todos.md`).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -96,6 +100,7 @@ established for linear/affine annotations).
 | `g44_crdt_convergence` | distributed CRDT convergence laws (single-process core): GCounter/PNCounter/ORSet merge commutative + idempotent + value; VectorClock `happens_before` on causally-ordered clocks AND `.concurrent` on disjoint-key clocks — byte-identical both backends, stress-verified 0/20 crashes. The disjoint-key case used to crash compiled (finding C1, a `strip_scrut_decrc` scrutinee-dec ordering bug in `lib/tir/llvm_case.ml`); FIXED 2026-07-11 and now included unconditionally | CRDT-Converge (§4.15): join-semilattice merge laws; VectorClock partial order; live-network layers are a prose scope boundary |
 | `g45_dual_position_borrow` | Perceus dual-position dup/drop invariant (B1, `specs/perceus-invariants.md` §2.1): `both(a: owned, b: borrowed, n: owned)` called as `both(s, s, 1)` — the exact shape that used to RC-underflow (owned-side and borrowed-side accounting each independently believing they alone consumed the one reference). Verified three ways: interp==compiled byte-identical; post-Perceus TIR matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly (one `inc_rc s` before the call, one `dec_rc` after); compiled binary clean under `MARCH_SANITIZE=1` (ASan+UBSan), exit 0, no leak/UAF report | E-Call-Dual-Position (§4.16): exactly one balancing `EIncRC`/`EDecRC` pair for a variable at both an owned and a borrowed position of the same call |
 | `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair whose postcondition and precondition both provably hold (`--check` exit 0) therefore runs byte-identically — same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is ever inserted |
+| `g47_sigil_html_desugaring` | sigils (§3) add no operational rule: `ESigil` is eliminated entirely by `desugar.ml` before either backend sees it. `~H` is the one sigil with a specially-elaborated desugaring (island-tag processing, conn-gated CSRF injection, `html_auto_escape` substitution) rather than a plain `Sigil.<name>` call — exercised across all three interpolation cases (static, String, Int) plus an embedded `IOList` partial, byte-identical both backends. `~toml`/`~yaml` deliberately excluded — both diverge compiled on their own parser logic, unrelated to sigils (findings filed, not fixed) | desugaring-map ESigil rows (§3): every sigil rewrites to an ordinary `EApp`/`ECon` before typecheck/eval; `~H`'s elaboration still terminates there |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 

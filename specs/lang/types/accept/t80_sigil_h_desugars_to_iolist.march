@@ -1,0 +1,16 @@
+-- Sigils (widening slice 15, core-march.md §3). `~H"..."` is the ONE sigil
+-- name with a specially-elaborated desugaring (desugar.ml:669-675, calling
+-- html_interp_to_iolist, not a plain Sigil.h call): island-tag processing,
+-- lexically-conn-gated CSRF token injection (desugar.ml:260-307 -- present
+-- only where `conn` is bound in scope; absent here since `main` never binds
+-- one), and `html_auto_escape` substitution for each interpolated segment
+-- -- but it STILL terminates in ordinary core nodes (EApp/ECon Cons/Nil), so
+-- it adds no new typing judgment either, just a richer desugaring. The
+-- result types `IOList` via `IOList.from_strings`, exactly the declared
+-- return type of that ordinary call -- (T-App), same as every other sigil.
+mod Main do
+  fn main() do
+    let rendered = ~H"<p>hello</p>"
+    println(IOList.to_string(rendered))
+  end
+end

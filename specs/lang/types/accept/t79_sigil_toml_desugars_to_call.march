@@ -1,0 +1,21 @@
+-- Sigils (widening slice 15, core-march.md §3). `~toml"..."` is surface
+-- sugar, not a new core construct: the parser produces `ESigil("toml",
+-- content)` (lib/parser/parser.mly), and desugar.ml eliminates it BEFORE
+-- typecheck ever runs, rewriting to the plain call `Sigil.toml(content')`
+-- (desugar.ml:669-680). `ESigil` never reaches the typechecker (a hard
+-- failwith guards this, typecheck.ml:4574) or the evaluator (eval.ml:7482)
+-- -- every sigil types via the ordinary (T-App) rule against its desugared
+-- callee's declared signature, `Sigil.toml : String -> TomlValue`. No new
+-- typing rule is added; this witness proves the general-case desugaring is
+-- real and type-checked. Reject companion: reject/t74 (an unimplemented
+-- sigil name fails because the DESUGARED call is unbound, not because of
+-- any sigil-specific check).
+mod Main do
+  fn main() do
+    let cfg = ~toml"port = 8080"
+    match Toml.get_int(cfg, "port") do
+      Some(n) -> println(int_to_string(n))
+      None -> println("none")
+    end
+  end
+end

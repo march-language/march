@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: Module `Sigil` does not export `r`
+-- Sigils (widening slice 15, core-march.md §3). `~R"..."` parses fine (the
+-- lexer accepts ANY single uppercase letter or lowercase identifier as a
+-- SIGIL_PREFIX, lib/lexer/lexer.mll) and desugars to the general-case call
+-- `Sigil.r(content')` (desugar.ml:669-680) -- but no `Sigil.r` exists in
+-- stdlib/sigil.march, so the rejection happens at the ORDINARY qualified-
+-- name-resolution step, not from any sigil-specific validation. This is the
+-- honest proof that "every sigil types via (T-App) against its desugared
+-- callee" cuts both ways: an unimplemented name is rejected the same way an
+-- unbound qualified call always is. Accept companion: accept/t79 (`~toml`,
+-- an implemented name, resolves and types cleanly).
+mod Main do
+  fn main() do
+    let v = ~R"abc"
+    println("ok")
+  end
+end
