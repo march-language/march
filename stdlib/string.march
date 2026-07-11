@@ -1,8 +1,10 @@
 -- String module: functions for working with UTF-8 encoded strings.
 --
--- March strings are immutable UTF-8 byte sequences.  The runtime uses a
--- fat-pointer representation with small-string optimisation (SSO): strings
--- of 15 bytes or fewer are stored inline without a heap allocation.
+-- March strings are immutable UTF-8 byte sequences. The runtime represents
+-- every string as a length-prefixed heap allocation (rc + tag + length +
+-- byte data, runtime/march_runtime.h's march_string struct) -- there is no
+-- small-string optimisation; all strings, including short ones, are
+-- heap-allocated via march_string_alloc.
 --
 -- Key naming conventions:
 -- - Functions with `byte_` in their name operate on raw byte offsets (O(1)).

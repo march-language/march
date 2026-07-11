@@ -69,15 +69,17 @@ this-module) is not the same, narrower gate typecheck applies (`pub_set`,
 declared-PUBLIC-by-this-module), so privacy is enforced before eval ever
 runs, not by eval itself.
 
-**It is not** the whole language semantics. The CORE covers the pure,
-value-level reduction fragment; everything outside it was originally deferred
-to Phase 2/3 (see §6) as its own widening slice. Of that original list,
+**It is not** the whole language semantics — but every group ORIGINALLY
+deferred to Phase 2/3 (see §6) as its own widening slice has now LANDED:
 `to_string`/`show` + the interface-dispatch machinery (§4.4.2–§4.4.4), actors
 (§4.10, `core-march-types.md` §2.6), session types (§4.11, §2.7), capabilities
-(§2.8), refinements (`core-march-types.md` §2.14), and the Perceus RC
-discipline (§4.16, §2.13) have all since LANDED. Only three groups remain
-genuinely deferred: **strings as first-class data** (beyond their appearance
-in the value grammar), **effects/IO ordering**, and **sigils**.
+(§2.8), refinements (`core-march-types.md` §2.14), the Perceus RC discipline
+(§4.16, §2.13), strings as first-class data (§4.18), argument/element
+evaluation order (§4.17), and sigils (§3, `core-march-types.md` §2.15). The
+Phase 2/3 queue at this Level-1/2 (descriptive + conformance-tested) tier is
+now EMPTY (see §6) — what remains is Level 3 (machine-checked metatheory in
+Lean 4, per `specs/2026-07-04-language-specification-roadmap-design.md`),
+a separate, much longer research track this reference does not attempt.
 
 Every rule below is grounded in a specific line of the implementation. Where a
 rule says "faithful to `eval.ml:N`", that citation *is* the correctness
@@ -3017,9 +3019,63 @@ and `ETuple` with genuinely side-effecting elements (a `trace(label, v)`
 helper that prints then returns), the same idiom golden `g17` already uses
 for `ERecord`'s field order.
 
+### 4.18 Strings as first-class data (widening slice 13, 2026-07-11)
+
+**Scope note.** §0/§2's core grammar and δ-rule table already cover `String`
+as a primitive: literals, `++` (`(δ-Concat)`), and the full `Eq`/`Ord`
+comparison family. What was deferred was genuinely "beyond their appearance
+in the value grammar" — this section closes two concrete gaps, chosen
+because they are both TRUE TODAY and previously unstated: `String`'s role
+as an aggregate key (directly motivated by finding C1, this slice's own
+predecessor), and the byte-vs-codepoint semantics of the operations most
+likely to surprise a reader reasoning about Unicode text. `String`'s
+TYPE-level treatment needs no new rule here — it is already a full member
+of `Eq`/`Ord`/`Show`/`Hash` in the seed table `core-march-types.md` cites
+(`builtin_impls`, `typecheck.ml:1150–1167`); this section is purely
+operational.
+
+**String as a `Map`/`Set` key: hashing, equality, and refcount correctness.**
+A `String` used as an aggregate key participates in three runtime
+mechanisms that must all agree: `march_string_eq` (byte-for-byte `memcmp`,
+`runtime/march_runtime.c:462–466`), `march_hash_string` (FNV-1a 64-bit,
+`:449–458`), and ordinary Perceus refcounting on the key's own heap cell.
+This was exactly finding **C1** (§4.16, `specs/todos.md`, fixed
+2026-07-11): a compiled-only bug in a shared scrutinee's field-refcount
+protection under-counted a String key's refcount whenever the map argument
+was itself shared (the read-then-update idiom `Map.insert(m, k, f(Map.get_or(
+m, k, ...)), cmp)` on a function parameter), freeing the key prematurely and
+surfacing as a use-after-free the next time the map's keys were folded and
+looked up. With C1 fixed, this is now a positive, testable claim rather
+than a caveat: a `Map` built via the read-then-update idiom, later read by
+folding its own keys back through `Map.get_or`, is byte-identical
+interpreted and compiled.
+
+**Byte-vs-codepoint semantics: `reverse` and case-conversion operate on
+bytes, not codepoints or graphemes.** `String.reverse` (`stdlib/string.march:
+229`) and `String.to_uppercase`/`to_lowercase` (`:194,205`) are documented in
+their own doc comments as byte-level/ASCII-only operations — this section
+makes that a formal, testable operational claim rather than leaving it as
+stdlib prose. `String.byte_size` counts UTF-8 bytes; `String.codepoint_count`
+counts codepoints — for `"café"` (the `é` is a 2-byte UTF-8 sequence) these
+are **5** and **4** respectively, live-verified identical both backends.
+`String.reverse("café")` byte-reverses the 5-byte sequence — **not** the
+4 grapheme sequence — and can produce a byte string that is not valid UTF-8
+(a continuation byte, `0xA9`, ends up in lead-byte position): the reversed
+bytes are `A9 C3 66 61 63`, byte-identical both backends even though the
+result isn't printable text. `String.to_uppercase("café")` upper-cases only
+the three ASCII letters, leaving `é` untouched (`"CAFé"`) — confirming
+case-conversion is ASCII-only, not full Unicode case mapping, exactly as
+`stdlib/string.march`'s own doc comment states.
+
+Golden `g49_string_map_key_and_unicode` witnesses both claims: a
+read-then-update-built `Map(String, Int)` read back via `keys`+`get_or`
+(the exact C1 shape, now safe), and the `byte_size`/`codepoint_count`/
+`reverse`/`to_uppercase` facts above on a genuine multi-byte-codepoint
+string — all byte-identical interpreted and compiled.
+
 ## 5. Golden conformance corpus
 
-Forty-eight programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-nine programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -3089,7 +3145,12 @@ findings filed in `specs/todos.md`, not fixed). `g48` is the argument/
 element evaluation-order addition (§4.17, widening slice 14), witnessing
 (E-Elts-LTR) for `EApp` and `ETuple` with side-effecting elements — a
 structural invariant of `lower.ml`'s CPS-nested ANF lowering for the
-compiled backend, not merely an empirical fact:
+compiled backend, not merely an empirical fact. `g49` is the
+strings-as-first-class-data addition (§4.18, widening slice 13),
+witnessing String-as-`Map`-key correctness (the exact read-then-update
+shape finding C1 fixed, now a positive claim) and the byte-vs-codepoint
+semantics of `reverse`/`to_uppercase` on a genuine multi-byte-codepoint
+string:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -3133,8 +3194,8 @@ compiled backend, not merely an empirical fact:
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 48 / 48 matched, 0 divergences in the committed corpus** (the table
-above enumerates `g01`–`g39`; `g40`–`g48` are documented in their respective §4
+**Result: 49 / 49 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g49` are documented in their respective §4
 sections (or, for `g46`, `core-march-types.md` §2.14; for `g47`, §3).
 These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
@@ -3282,17 +3343,10 @@ converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
   golden table — proved a workable template, replicated cleanly across all
   seven slices and assembled here into one reference.
 
-**Still deferred (each group becomes a widening slice like the Phase-1 tasks
-did):**
-
-- **strings as first-class data** (beyond their appearance in the value
-  grammar) — concatenation/comparison semantics, Unicode/byte-vs-grapheme
-  boundaries;
-- **effects and IO ordering** — evaluation/effect sequencing, distinct from
-  the capabilities permission LATTICE (§2.8, landed) which governs what IO is
-  allowed, not what order side effects occur in;
-- **sigils** — the `h"…"`/`toml`/`xml`/`yaml` sigil mechanism has no dedicated
-  section yet.
+**Still deferred: NONE at this Level-1/2 tier.** Every group originally named
+in the v0 deferred line has now landed — this queue's job is done; what
+remains beyond it is Level 3 (Lean 4 metatheory, a separate research track,
+see the "Next steps" note below).
 
 **Landed since the original v0 deferred line** (kept here as pointers, not
 re-litigated):
@@ -3323,9 +3377,25 @@ re-litigated):
   no rules — codegen-only over already-typed TIR);
 - **refinement types** — `core-march-types.md` §2.14 (`{T | pred}` erasure in
   `typecheck.ml`, checked by the separate `lib/refinecheck` pass; direct-call
-  preconditions/postconditions + `cap no_panic` division-safety).
+  preconditions/postconditions + `cap no_panic` division-safety);
+- **argument/element evaluation order** — §4.17 (E-Elts-LTR: `EApp`/`ETuple`/
+  `ERecord`/`ECon` elements evaluate strictly left-to-right, verified against
+  this toolchain's actual `List.map` implementation AND `lower.ml`'s
+  CPS-nested ANF lowering as a structural invariant for the compiled
+  backend — explicitly distinct from `core-march-types.md`'s separately-named
+  typed-effects item, which March does not implement by design);
+- **sigils** — §3 (desugaring-map: `ESigil` is eliminated entirely before
+  either backend sees it; `~H` gets a specially-elaborated rewrite, every
+  other sigil name a plain `Sigil.<name>` call), `core-march-types.md` §2.15
+  (typing: adds no rules — every sigil types via ordinary `(T-App)` against
+  its desugared callee);
+- **strings as first-class data** — §4.18 (String-as-`Map`-key hashing/
+  equality/refcount correctness, directly closing finding C1's blast radius;
+  the byte-vs-codepoint semantics of `reverse`/`to_uppercase`). String's
+  type-level treatment needed no new rule — it was already a full member of
+  `Eq`/`Ord`/`Show`/`Hash` in `core-march-types.md`'s existing seed table.
 
-(Keep this list and §0's in lockstep as Phase-2/3 slices land.)
+(Keep this list and §0's in lockstep as any future slice lands.)
 
 **Next steps (the Phase-1 closeout track):**
 

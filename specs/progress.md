@@ -283,6 +283,68 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, Core March widening slices 13 + 14 + 15 — strings, evaluation order, sigils; Level 1-2 deferred queue now EMPTY)
+
+**The three remaining groups from the original v0 deferred list all landed
+this session, closing out the Level 1-2 (descriptive + conformance-tested)
+tier of the language-specification roadmap.** `core-march.md` §0/§6 updated
+accordingly: every group ever named in the deferred queue is now LANDED;
+what remains beyond it is Level 3 (Lean 4 metatheory — a 982-line planning
+doc with zero `.lean` files, a separate research track this reference does
+not attempt).
+
+**Slice 15 (sigils, done first — narrowest).** `ESigil` never survives
+desugaring (`typecheck.ml`/`eval.ml` both `failwith` on it), so this is
+`core-march.md` §3 (desugaring-map) content, not a new §4 section: every
+sigil rewrites to a plain `Sigil.<name>(content)` call except `~H`, which
+gets a specially-elaborated rewrite (island-tag processing, conn-gated CSRF
+injection, `html_auto_escape`) that still terminates in ordinary core
+nodes. `core-march-types.md` gains a short §2.15 (no new typing rule — every
+sigil types via ordinary `(T-App)`). Golden `g47` witnesses `~H` alone;
+`~toml`/`~yaml` were live-probed while scoping this slice and found to
+diverge compiled on their OWN parser logic — a multi-digit TOML integer
+truncates to its first digit, and a flat Yaml key lookup returns `None`,
+both unrelated to sigils — filed in `specs/todos.md`, not fixed.
+
+**Slice 14 (argument/element evaluation order).** Lands `core-march.md`
+§4.17 (E-Elts-LTR): a call's arguments, a tuple's elements, a record's
+field values, and a constructor's payload each evaluate fully — including
+side effects — strictly left-to-right. Verified two ways rather than
+assumed: `eval.ml`'s `List.map` usage relies on this pinned OCaml 5.3.0
+toolchain's actual left-to-right `List.map` implementation (checked
+directly against the shipped `list.ml`, not just its abstract signature);
+the compiled backend's order is a structural invariant of `lower.ml`'s
+CPS-nested ANF lowering (`lower_atoms_k`), not merely empirically observed.
+Explicitly scoped apart from `core-march-types.md`'s separately-deferred
+typed-effects item (row/algebraic effects — unrelated; March has no such
+system by design) and §4.10's actor mailbox-FIFO ordering (a different
+mechanism sharing only the word "order"). Golden `g48` extends the `g17`
+idiom from `ERecord` to `EApp`/`ETuple`.
+
+**Slice 13 (strings as first-class data).** Lands `core-march.md` §4.18,
+covering two gaps chosen because they are both true today and previously
+unstated: (1) **String as a `Map`/`Set` key** — hashing (`march_hash_string`),
+equality (`march_string_eq`), and Perceus refcounting must all agree; this
+is exactly finding C1's blast radius (§4.16, fixed earlier this session),
+now a positive, testable claim instead of a caveat. (2) **Byte-vs-codepoint
+semantics** — `String.reverse`/`to_uppercase`/`to_lowercase` operate on
+bytes, not codepoints or graphemes (`"café"` is 5 bytes but 4 codepoints;
+reversing it byte-reverses the 5-byte sequence, which can produce a byte
+string that is not valid UTF-8) — already documented in `stdlib/
+string.march`'s own doc comments, now a formal operational claim. String's
+type-level treatment needed no new rule — already a full `Eq`/`Ord`/`Show`/
+`Hash` member in `core-march-types.md`'s existing seed table. Golden `g49`
+witnesses both, stress-verified 0/15 crashes + `MARCH_SANITIZE=1` clean.
+Also fixed in passing: a stale `stdlib/string.march` doc comment claiming a
+small-string-optimisation (SSO) representation that doesn't match the
+actual runtime (`march_string` is always heap-allocated, no inline SSO).
+
+**Corpus:** golden 46 → **49** (`g47`, `g48`, `g49`); types 154 → **154**
+(sigils added 2 accept/1 reject, net +2 accept/+1 reject: 78→80 accept,
+73→74 reject — no change from slices 13/14, which added no typing corpus).
+`verify.sh` 49/49; `check_types.sh` 154/154; `check-docs` clean; full
+six-runner suite (808 tests) green.
+
 ## Current State (as of 2026-07-11, finding C1 FIXED — `strip_scrut_decrc` scrutinee-dec ordering bug)
 
 **The compiled memory-safety bug filed as finding C1 (slice 10) is fixed.**

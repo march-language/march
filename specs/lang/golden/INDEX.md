@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g48)
+# Golden corpus index (g01–g49)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (48/48 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (49/49 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -56,7 +56,12 @@ the argument/element evaluation-order addition (§4.17, widening slice 14
 each with its side effects, both interpreted (verified against this
 toolchain's actual `List.map` implementation) and compiled (a structural
 invariant of `lower.ml`'s CPS-nested ANF lowering, not just empirically
-observed)).
+observed)); `g49` the strings-as-first-class-data addition (§4.18, widening
+slice 13 — String-as-`Map`-key correctness, the exact read-then-update
+shape finding C1 fixed, now a positive claim; and the byte-vs-codepoint
+semantics of `reverse`/`to_uppercase`, which operate on bytes, not
+codepoints or graphemes, and can produce invalid UTF-8 — documented in
+`stdlib/string.march`'s own doc comments, now a formal testable claim).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -108,6 +113,7 @@ observed)).
 | `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair whose postcondition and precondition both provably hold (`--check` exit 0) therefore runs byte-identically — same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is ever inserted |
 | `g47_sigil_html_desugaring` | sigils (§3) add no operational rule: `ESigil` is eliminated entirely by `desugar.ml` before either backend sees it. `~H` is the one sigil with a specially-elaborated desugaring (island-tag processing, conn-gated CSRF injection, `html_auto_escape` substitution) rather than a plain `Sigil.<name>` call — exercised across all three interpolation cases (static, String, Int) plus an embedded `IOList` partial, byte-identical both backends. `~toml`/`~yaml` deliberately excluded — both diverge compiled on their own parser logic, unrelated to sigils (findings filed, not fixed) | desugaring-map ESigil rows (§3): every sigil rewrites to an ordinary `EApp`/`ECon` before typecheck/eval; `~H`'s elaboration still terminates there |
 | `g48_argument_evaluation_order` | a call's arguments and a tuple's elements evaluate strictly left-to-right, each with its side effects completing before the next begins — `trace(label, v)` (prints then returns) at both a 3-arg call and a 3-element tuple, byte-identical both backends. Extends the idiom golden `g17` already used for `ERecord` field order to the two element-list forms it didn't cover | E-Elts-LTR (§4.17): verified against this toolchain's actual `List.map` (interp) and `lower.ml`'s CPS-nested ANF lowering (compiled, a structural invariant, not just empirical) |
+| `g49_string_map_key_and_unicode` | strings as first-class data: (1) a `Map(String, Int)` built via the read-then-update idiom, read back via `keys`+`get_or` — the exact shape finding C1 used to crash (§4.16, FIXED 2026-07-11), now a positive byte-identical claim, stress-verified 0/15 crashes + `MARCH_SANITIZE=1` clean; (2) `"café"`'s `byte_size`(5)/`codepoint_count`(4) diverge since `é` is a 2-byte UTF-8 sequence, and `reverse`/`to_uppercase` operate on BYTES not codepoints/graphemes (reverse can produce invalid UTF-8; to_uppercase leaves `é` untouched) — all byte-identical both backends | §4.18: String-as-Map-key hashing/equality/refcount correctness; byte-vs-codepoint semantics of `reverse`/`to_uppercase` |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 

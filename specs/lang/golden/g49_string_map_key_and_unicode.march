@@ -1,0 +1,31 @@
+mod Main do
+  -- Operational strings-as-first-class-data witness (core-march.md §4.18 —
+  -- widening slice 13). Two claims:
+  --
+  -- 1. String as a Map key: hashing (march_hash_string), equality
+  --    (march_string_eq), and Perceus refcounting must all agree. This is
+  --    exactly the read-then-update idiom that used to be finding C1 (§4.16,
+  --    FIXED 2026-07-11) -- a compiled-only use-after-free freeing a String
+  --    key prematurely. Now a positive claim: byte-identical both backends.
+  --
+  -- 2. Byte-vs-codepoint semantics: `reverse`/`to_uppercase` operate on
+  --    BYTES, not codepoints or graphemes -- "café" is 5 bytes (é is a
+  --    2-byte UTF-8 sequence) but 4 codepoints; reversing it byte-reverses
+  --    the 5-byte sequence (producing a byte string that is NOT valid
+  --    UTF-8 -- a continuation byte ends up in lead-byte position -- but is
+  --    still byte-identical both backends); to_uppercase only affects the
+  --    three ASCII letters, leaving é untouched.
+  fn main() do
+    let m = Map.insert(Map.insert(Map.empty(), "alpha", 1, Map.str_cmp), "beta", 2, Map.str_cmp)
+    let total = List.fold_left(Map.keys(m), 0, fn (acc, k) -> acc + Map.get_or(m, k, 0, Map.str_cmp))
+    println("map_key_total=" ++ int_to_string(total))
+    println("map_key_alpha_ok=" ++ bool_to_string(Map.get_or(m, "alpha", 0, Map.str_cmp) == 1))
+
+    let s = "café"
+    println("byte_size=" ++ int_to_string(String.byte_size(s)))
+    println("codepoint_count=" ++ int_to_string(String.codepoint_count(s)))
+    println("reverse_byte_size=" ++ int_to_string(String.byte_size(String.reverse(s))))
+    println("to_uppercase=" ++ String.to_uppercase(s))
+    println("done")
+  end
+end
