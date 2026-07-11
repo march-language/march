@@ -272,6 +272,26 @@ operations the compiler already wrote — not a collector you have to wait for.
 
 ---
 
+## Conformance status
+
+Two of this page's operational claims are now mechanically checked
+(widening slice 11; reference in `core-march.md` §4.16, `core-march-types.md`
+§2.13). Unlike every other conformance-tested topic, there's no `eval.ml`
+behavior to diff against here — the interpreter does no explicit
+refcounting at all — so verification instead pins the compiled backend's
+own post-Perceus IR against a committed snapshot and additionally checks
+the compiled binary under `MARCH_SANITIZE=1` (ASan+UBSan).
+
+Golden `g45_dual_position_borrow` witnesses the **dual-position** case this
+page doesn't call out explicitly: a value passed to the same call at both
+an owned and a borrowed position gets exactly one dup/drop pair, not zero
+(underflow) or two (leak) — verified interp==compiled, against
+`test/snapshots/perceus/mixed_owned_borrowed_args.expected`, and clean
+under the sanitizer. FBIP/reuse and the atomic-RC design sketched nowhere
+on this page are explicitly OUT of scope for now — reuse needs a "preserves
+semantics" proof beyond today's arity check, and atomic RC mode-selection
+(`specs/atomic-rc-design.md`) remains an undesigned draft, not implemented.
+
 ## Next Steps
 
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/) — ownership that

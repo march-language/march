@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t74 accept, t01–t70 reject)
+# Typing corpus index (t01–t78 accept, t01–t73 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 144/144 — 74 accept, 70
+Exit 0 iff every program behaves as declared (currently 151/151 — 78 accept, 73
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -372,6 +372,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t72_letq_wildcard` | **`let? _ =` propagate-but-discard (slice 8, §2.10)** — wildcard binds nothing but still short-circuits Err; the must-succeed / sequence-for-effect idiom, still needs a Result body after | `--check` exit 0 |
 | `t73_parallel_typed_as_sequential` | **data parallelism adds no typing rules (slice 9, §2.11)** — `List.pmap` types identically to `List.map` (so `sq == m` is well-typed at `List(Int)`), RRB `Parallel.preduce`/`psum` type like folds; merge-associativity is a semantic obligation, not a typed one. Operational witness golden `g43` | `--check` exit 0 |
 | `t74_crdt_identity_typed` | **distributed CRDT / identity adds no typing rules (slice 10, §2.12)** — CRDT states, VectorClock, GlobalPid, RemoteCall verdicts are ordinary ADTs; cross-node type-safety rests on RUNTIME content-addressed admission (`RemoteCall.verify`), not the type system. Typecheck-only (its `VectorClock.compare` crashes compiled, finding C1). Operational witness golden `g44` | `--check` exit 0 |
+| `t75_refine_precondition_satisfied` | **refinement precondition satisfied at a direct call (slice 12, §2.14)** — `{Int \| _ >= 0}` is transparent to `typecheck.ml` (repr strips it); `take_n(5)` is checked by the separate `lib/refinecheck` pass and provably satisfies the predicate. Reject companion `t71`. Operational witness golden `g46` | `--check` exit 0 |
+| `t76_refine_postcondition_satisfied` | **refinement postcondition satisfied on every path (slice 12, §2.14)** — a refined RETURN type is checked at the function's OWN definition site; `good`'s exhaustive guard makes both branches satisfy `_ >= 0`, independent of what any caller passes. Reject companion `t72` | `--check` exit 0 |
+| `t77_refine_hof_bypass_limitation` | **the "direct calls only" scope boundary (slice 12, §2.14)** — `apply(take_n, -3)` calls `take_n` INDIRECTLY through a HOF parameter; `refine_check` never associates `-3` with `take_n`'s precondition through the indirection, so `--check` accepts even though the identical literal at a direct call (`t71`) is rejected. Honest limitation, not unsoundness — no runtime check is promised either | `--check` exit 0 |
+| `t78_refine_divsafety_approved` | **`cap no_panic` division-safety: refined divisor approved (slice 12, §2.14)** — a second, specialized `Refine.discharge` consumer (`lib/refinecheck/division_safety.ml`); `{Int \| _ != 0}` matches the fast syntactic path directly. Reject companion `t73` | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -439,6 +443,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t68_letq_rhs_not_result` | **(E-LetQ-RHS) (slice 8, §2.10.2)** — `let? x = 42`: the RHS must unify with `Result(_, _)`; a bare Int is rejected with the RHS-must-be-Result reason | `The right-hand side of \`let?\` must be a Result value.` |
 | `t69_letq_body_not_result` | **(E-LetQ-Body) (slice 8, §2.10.2)** — the continuation after a `let?` must itself be a Result (same error type); a bare Int body is rejected | `must produce a Result with the same error type` |
 | `t70_letq_type_annotation` | **no type annotation on `let?` (slice 8, §2.10.2)** — `let? x : Int = e` is a parse error. Caught by the GENERIC missing-`=` recovery, NOT the tutorial's promised dedicated message (never implemented — filed); the reject still fires | `expecting \`=\` in the let? binding` |
+| `t71_refine_precondition_violated` | **refinement precondition violated at a direct call (slice 12, §2.14)** — `take_n(-3)` violates `{Int \| _ >= 0}` with a literal argument; Z3 refutes it. Accept companion `t75` | `refinement violation: argument does not satisfy precondition` |
+| `t72_refine_postcondition_violated` | **refinement postcondition violated on some path (slice 12, §2.14)** — `bad`'s unguarded `n < 0` branch returns `n` itself, directly violating `{Int \| _ >= 0}`; Z3 supplies a concrete counterexample (`n = -1`). Accept companion `t76` | `does not satisfy its return type constraint on all code paths` |
+| `t73_refine_divsafety_insufficient` | **`cap no_panic` division-safety: real but insufficient predicate (slice 12, §2.14)** — `{Int \| _ >= 0}` does not exclude zero (0 satisfies it), so the divisor is rejected as unproven-safe. Accept companion `t78` | `refinement does not rule out zero` |
 | `t58_linear_param_drop` | **(T-LinDrop), fn-param surface (linearity slice 7, §2.9.2, 2026-07-10)** — a `linear r : Res` param the body never consumes; rejected at fn-body close by `check_linear_all_consumed` | `was never used` |
 | `t59_linear_let_drop` | **(T-LinDrop), `linear let` surface (slice 7, §2.9.2)** — a `linear let` binding never consumed before scope close | `was never used` |
 | `t60_linear_param_double_use` | **(T-LinUse), fn-param surface (slice 7, §2.9.2)** — a `linear q : Res` param passed to a callee twice; the SECOND `q` reference trips `record_use`. Callee consumes its own plain param via an exhaustive match so this is the only diagnostic | `is used more than once here` |
@@ -449,7 +456,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t65_always_linear_drop` | **(T-AlwaysLin) + (T-LinDrop) (slice 7, §2.9.1)** — a binding of an `always_linear type Tok` is auto-promoted to Linear with no per-site annotation; dropping it unused rejects. Named `Tok` NOT `Handle` — `always_linear_types` is name-keyed globally and stdlib `handle.march` claims `Handle` (finding L4) | `was never used` |
 | `t66_linear_use_after_send` | **(T-LinUse) send-consumes, reject twin of `accept/t68` (slice 7, §2.9.2)** — `send(pid, StoreRes(r))` consumes linear `r`; `take(r)` after the send is a double use | `is used more than once here` |
 
-**Result: 144 / 144 (74 accept, 70 reject).**
+**Result: 151 / 151 (78 accept, 73 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

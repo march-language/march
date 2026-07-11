@@ -1,0 +1,15 @@
+-- Refinement types (widening slice 12, §2.14). `{T | pred}` on a parameter
+-- is TRANSPARENT to typecheck.ml's own unification -- `TRefine`'s `repr`
+-- strips straight to the base type (typecheck.ml:168), so the annotation
+-- adds NO typing rule of its own; it is a proof obligation layered on top,
+-- discharged by a separate post-typecheck AST walk (lib/refinecheck). For a
+-- DIRECT call, that walk symbolically evaluates the argument against `pred`
+-- (Z3, Int/Bool linear arithmetic + EUF, BLAKE3-cached) and only proceeds
+-- past --check when the predicate is PROVABLY satisfied. `take_n(5)`
+-- satisfies `_ >= 0` trivially. Reject companion: reject/t71 (`take_n(-3)`).
+mod M do
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn main() do
+    println(int_to_string(take_n(5)))
+  end
+end

@@ -4424,6 +4424,111 @@ Accept witness: `t74_crdt_identity_typed` (typecheck-only — its
 `VectorClock.compare` crashes *compiled* on disjoint clocks, finding C1; the
 `--check` harness never runs it). Convergence is operational — golden `g44`.
 
+### 2.13 Perceus reference counting: no new typing rules (widening slice 11, 2026-07-11)
+
+The Perceus RC discipline — `dup`/`drop` (`EIncRC`/`EDecRC`) insertion,
+owned-vs-borrowed parameter classification, and functional-but-in-place
+reuse (FBIP) — **adds no typing rules**. It operates entirely on **TIR**,
+the already-monomorphized, already-erased intermediate form Lower/Mono/
+Defun produce, several passes downstream of `typecheck.ml`. Nothing in the
+surface type system (`Ast.ty`, the bidirectional rules of §2.1, or any
+interface/capability/linearity annotation) constrains or is constrained by
+RC insertion — a well-typed program's RC discipline is entirely a
+*codegen* concern, not a *typing* one.
+
+The one place representation and RC genuinely interact is `lib/tir/
+rc_types.ml`'s two predicates, `needs_rc` and `borrow_eligible`, which
+**deliberately disagree** on four constructor patterns (`TFn`/bare `TVar`:
+RC yes, borrow-eligible no — closures are always Perceus-managed, never
+borrow-inferred; `TTuple`/`TRecord`: RC no at the aggregate level, borrow-
+eligible yes — fields are reconciled individually). This divergence is a
+property of `Tir.ty` (the erased representation), not `Ast.ty`, so even
+this lives downstream of typing — see `core-march.md` §4.16 for the
+operational account and `specs/perceus-invariants.md` §1 for the full
+fix-history-backed truth table.
+
+### 2.14 Refinement types: erasure in `typecheck.ml`, checked by a separate pass (widening slice 12, 2026-07-11)
+
+`{T | predicate}` and `{v : T | predicate}` (surface `Ast.TyRefine`,
+internal `TRefine of ty * string * Ast.expr`) are, from `typecheck.ml`'s own
+point of view, **completely transparent**: `repr (TRefine (base,_,_)) =
+repr base` (`typecheck.ml:168`), so every unification, subsumption, and
+inference decision in the bidirectional core (§2.1) treats a refined type
+identically to its base type. A refinement annotation therefore adds **no
+typing rule of its own** — it is a *proof obligation* layered on top of an
+otherwise unaffected typing derivation, discharged (or not) by a wholly
+separate mechanism.
+
+```
+        Γ ⊢ e : T          (ordinary bidirectional typing, §2.1, erasing {T | p})
+  (T-Refine-Erase)  ──────────────────────────────────────────────────────
+        Γ ⊢ e : {T | p}     ⟺     Γ ⊢ e : T     (identical derivation)
+```
+
+**The separate discharge pass (`lib/refinecheck`).** After `typecheck.ml`
+finishes, an independent walk over the (already desugared) AST re-parses
+`TyRefine` annotations and proves obligations against them via Z3
+(`March_refine.Refine.discharge` — an Int/Bool linear-arithmetic + EUF
+fragment, BLAKE3-cached under `.march/cas/vc/`). Two obligations are
+checked, at two different sites:
+
+- **(Check-Refine-Precond)** — a **direct** call `f(e)` where `f`'s
+  parameter is declared `{T | p}`: the argument `e` is symbolically
+  evaluated and `p[e/v]` must be provably true (`Verified`), else `--check`
+  rejects (`Refuted`, or conservatively on `Unverified` — no Z3, or the
+  fragment can't decide). Live-verified (2026-07-11): `take_n(n : {Int |
+  _ >= 0})` called as `take_n(5)` accepts; `take_n(-3)` rejects with
+  `refinement violation: argument does not satisfy precondition`. Witnesses:
+  accept `t75_refine_precondition_satisfied`, reject
+  `t71_refine_precondition_violated`.
+- **(Check-Refine-Postcond)** — a function declared with a refined
+  **return** type `{T | p}`: **every path through the function's own body**
+  must provably satisfy `p`, checked once at the function's definition site,
+  independent of any caller. Live-verified: a body guarded so both branches
+  satisfy `_ >= 0` accepts; an unguarded branch that can return a negative
+  value rejects with `` `f` does not satisfy its return type constraint on
+  all code paths `` — and Z3 supplies a concrete counterexample (e.g. `n =
+  -1`) in the diagnostic. Witnesses: accept
+  `t76_refine_postcondition_satisfied`, reject
+  `t72_refine_postcondition_violated`.
+
+**The honest scope boundary: direct calls only.** `refine_check` recognizes
+a **named** direct call — it does not trace a refined function passed as a
+first-class value through a higher-order call or interface dispatch.
+Live-verified: `apply(take_n, -3)` (calling `take_n` indirectly through a
+`HOF` parameter `f`) **accepts**, even though the identical literal at a
+direct `take_n(-3)` call site is rejected (reject/t71) — because
+`refine_check` never associates `-3` with `take_n`'s precondition through
+the indirection. This is a real, documented limitation
+(`specs/lang/refinement-types.md`'s own "Limitations" section), not
+unsoundness: per (T-Refine-Erase) above, no runtime check is promised
+either, so an unverified call is merely *unverified*, never *unsafe*.
+Witness: accept `t77_refine_hof_bypass_limitation`.
+
+**A second, specialized consumer: `cap no_panic`'s division-safety check**
+(`lib/refinecheck/division_safety.ml`) reuses the identical
+`Refine.discharge` machinery to approve `a / d` inside a `cap no_panic`
+module only when `d`'s refinement provably excludes zero — a hybrid pass
+(fast syntactic matching for common shapes like `_ != 0`/`_ > 0`, falling
+back to Z3 for anything the fast path doesn't recognize). This is
+*independent* of, not a special case of, (Check-Refine-Precond) — it is
+gated by the `cap no_panic` module annotation (§2.8.11 already covers that
+capability's exhaustiveness plane; this is its refinement-discharge plane).
+Live-verified: `{Int | _ != 0}` divisor accepts; `{Int | _ >= 0}` (a real
+predicate that simply doesn't rule out zero) rejects with `` division by
+`d` in `cap no_panic` module: refinement does not rule out zero ``.
+Witnesses: accept `t78_refine_divsafety_approved`, reject
+`t73_refine_divsafety_insufficient`.
+
+**Zero runtime footprint.** Since (T-Refine-Erase) holds throughout typing
+and neither backend inserts any runtime predicate check, a program that
+*passes* `--check` (every obligation provably discharged) must run
+byte-identically interpreted and compiled — the same erasure property golden
+`g41` established for linear/affine annotations. Golden
+`g46_refinement_erasure` witnesses this: a `clamp_nonneg`/`take_n` pair
+whose postcondition and precondition both provably hold, run interp vs
+compiled, byte-identical.
+
 ## 3. Conformance corpus
 
 `specs/lang/types/` — split by expected outcome, run by `check_types.sh` (the

@@ -283,6 +283,59 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, Core March widening slices 11 + 12 — Perceus RC discipline + refinement types conformance)
+
+**Widening slice 11 (Perceus RC) breaks the pattern every prior slice used**:
+`eval.ml` performs no explicit refcounting at all, so there is no interpreter
+behavior to diff the compiled backend's RC insertion against. `core-march.md`
+§4.16 states this explicitly and pins two already-governed invariants from
+`specs/perceus-invariants.md` — the `needs_rc`/`borrow_eligible` divergence
+(closures always Perceus-managed, tuples/records reconciled per-field) and
+the dual-position dup/drop invariant (B1: a variable at both an owned and a
+borrowed position of the same call, dead after, needs exactly one balancing
+`inc_rc`/`dec_rc` pair, not zero or two) — as premise/conclusion rules, verified
+THREE ways instead of the usual interp-vs-compiled diff: byte-identical output,
+a byte-for-byte match against the committed TIR snapshot
+(`test/snapshots/perceus/mixed_owned_borrowed_args.expected`), and (live-
+verified, 2026-07-11) a clean `MARCH_SANITIZE=1` (ASan+UBSan) run — no leak, no
+UAF. Golden `g45_dual_position_borrow` carries all three. `core-march-types.md`
+gains a short §2.13 stating Perceus adds no typing rules (it operates entirely
+on already-erased TIR). Filed **R1**: no broad ASan sweep exists over the
+RC-sensitive corpus yet — only one smoke test exercises `MARCH_SANITIZE`; a
+future `sanitize.sh` closing this gap is exactly the kind of guard that would
+have caught finding C1 (slice 10) sooner. FBIP/reuse and the atomic-RC design
+(`specs/atomic-rc-design.md`, an undesigned draft — no code implements it)
+are explicitly excluded from this slice, pending more groundwork.
+
+**Widening slice 12 (refinement types)** lands `core-march-types.md` §2.14:
+`{T | pred}` is completely transparent to `typecheck.ml`'s own unification
+(`repr` strips `TRefine` to its base type, `typecheck.ml:168`) — a refinement
+adds no typing rule, only a proof obligation discharged by a wholly separate
+post-typecheck pass (`lib/refinecheck`, backed by `lib/refine`'s Z3 bridge).
+Two obligations, both live-verified and both richer than "just division
+safety": a **precondition** at a direct call (`take_n(-3)` rejects with
+`refinement violation: argument does not satisfy precondition`; `take_n(5)`
+accepts) and a **postcondition** on the function's own body, checked once at
+definition time independent of any caller (an unguarded branch that can
+return negative rejects with a Z3-supplied counterexample; an exhaustively-
+guarded body accepts). `cap no_panic`'s division-safety check
+(`division_safety.ml`) is confirmed as a second, independent
+`Refine.discharge` consumer. The tutorial's own documented "direct calls
+only" limitation is now a passing corpus fact, not just prose:
+`accept/t77_refine_hof_bypass_limitation` proves a refined function called
+*through* a HOF is unchecked, even though the identical literal at a direct
+call is rejected — an honest completeness gap, not unsoundness (no runtime
+check is promised for any refinement either way). Golden
+`g46_refinement_erasure` witnesses the zero-runtime-footprint consequence:
+a program whose obligations all provably hold at `--check` time runs
+byte-identical interpreted and compiled.
+
+**Corpus:** golden 44 → **46** (`g45_dual_position_borrow`,
+`g46_refinement_erasure`); types 144 → **151** (74→78 accept: `t75`–`t78`;
+70→73 reject: `t71`–`t73`). `verify.sh` 46/46; `check_types.sh` 151/151;
+`grammar-check` 39/39 (unchanged); `check-docs` clean. Both slices are
+docs-only — no compiler code changed.
+
 ## Current State (as of 2026-07-10, Core March widening slices 9 + 10 — parallelism + clustering conformance, plus a filed compiled memory-safety bug C1)
 
 **Widening slices 9 (data parallelism) and 10 (distributed CRDTs) both add

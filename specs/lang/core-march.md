@@ -2816,9 +2816,117 @@ same-key clocks — all stress-verified 0/20 crashes); `VectorClock.compare` on
 disjoint clocks is a documented compiled divergence, not a golden program, until
 C1 is fixed.
 
+### 4.16 Perceus reference counting: the compiled backend's own operational discipline (widening slice 11, 2026-07-11)
+
+**Why this section looks different from every other one in §4.** Every prior
+slice states its rules as big-step reductions on the *core AST*, with
+`eval.ml` as the reference implementation and a golden program's job to prove
+the compiled backend agrees with it. Perceus RC insertion has no such anchor:
+`eval.ml` uses OCaml's own GC and performs **no explicit refcounting at
+all** — there is nothing in the interpreter to compare the compiled
+backend's RC behavior against. This section therefore states RC discipline
+as invariants over **TIR** (the compiled backend's own post-Perceus
+intermediate form), verified two ways that together substitute for the
+interp-vs-compiled diff every other section relies on: (1) byte-for-byte
+pinning of the emitted TIR against a committed snapshot
+(`test/snapshots/perceus/*.expected`, `test/test_snapshots.ml`), which
+catches any drift in *where* `dup`/`drop`/`reuse` land; and (2) running the
+compiled binary under `MARCH_SANITIZE=1` (ASan+UBSan), which catches
+whether that placement is actually *correct* (no leak, no use-after-free) —
+something a snapshot alone cannot prove. Full governing detail lives in
+`specs/perceus-invariants.md`; this section states the two invariants that
+already have both forms of pinning, in the same premise/conclusion style as
+the rest of §4.
+
+**RC applicability (`lib/tir/rc_types.ml`).** Two predicates over `Tir.ty`,
+`needs_rc` (must Perceus emit `EIncRC`/`EDecRC` for this type?) and
+`borrow_eligible` (may a parameter of this type be borrow-inferred?),
+deliberately **disagree** on two constructor families:
+
+```
+  needs_rc(TFn _) = true       borrow_eligible(TFn _) = false     -- closures: Perceus-only
+  needs_rc(TTuple/TRecord) = false   borrow_eligible(TTuple/TRecord) = true  -- fields reconciled individually
+```
+
+Closures are always heap-allocated post-defun (`llvm_ty (TFn _) = "ptr"`), so
+Perceus must track their lifetime — but letting the borrow fixpoint
+reclassify a closure parameter as borrowed would leave capture-site
+accounting and call-site accounting disagreeing about who owns the closure
+and its captured free variables. Tuples/records get the opposite treatment:
+Perceus never emits an *aggregate*-level `dup`/`drop` for a tuple or record
+cell (ownership is reconciled per-field via `borrowed_field_vars`), but the
+aggregate parameter itself must still be borrow-*eligible* so the fixpoint
+can infer a function that only reads fields as fully borrowed.
+
+**The owned/borrowed call-boundary contract and the dual-position invariant
+(B1).** `lib/tir/borrow.ml`'s fixpoint classifies each function parameter
+**owned** or **borrowed** (borrowed iff every use is read-only — matched,
+field-accessed, or passed to another borrowed position — never stored,
+returned, or passed to an owning position of an unknown callee). The
+contract at a call boundary:
+
+```
+        param p classified borrowed by Borrow's fixpoint
+  (E-Call-Borrowed-Callee)  ─────────────────────────────────────
+        callee emits NO `EDecRC` for p at its last use
+
+        arg a passed at p (borrowed), a still live after the call
+  (E-Call-Borrowed-Caller-Live)  ─────────────────────────────────
+        caller emits NO `EIncRC` for a
+
+        arg a passed at p (borrowed), a is the caller's last use of a
+  (E-Call-Borrowed-Caller-Dead)  ─────────────────────────────────
+        caller emits `EDecRC(a)` AFTER the call
+        (the callee will never dec it — someone still must)
+```
+
+The dual-position invariant closes the one case these three rules alone get
+wrong: **a variable passed at BOTH an owned and a borrowed position of the
+same call, dead afterward, must be dup'd exactly once.**
+
+```
+        call C(..., a:owned, ..., a:borrowed, ...);  a dead after C
+  (E-Call-Dual-Position)  ─────────────────────────────────────────
+        exactly one `EIncRC(a)` emitted before C, one `EDecRC(a)` after
+```
+
+Naively, the owned-position accounting (`find_inc_vars`) and the borrowed-
+position accounting (`post_dec_vars`) are computed independently — the
+owned side sees only one occurrence of `a` and emits zero dups (it thinks
+the single owned reference transfers), while the borrowed side
+independently schedules its own post-call dec. Both fire: net two
+consumptions against one owned reference — RC underflow, a use-after-free
+the moment the callee returns a value built from `a`. The fix
+(`lib/tir/perceus.ml`'s `EApp` case, mirrored for `ECallPtr`-extern)
+partitions the post-dec set into `dual_pos_vars` (also owned-positioned in
+the *same* call) and emits one balancing `EIncRC` for exactly those,
+keeping the value alive across the whole call regardless of which
+occurrence the callee consumes first.
+
+**Golden `g45_dual_position_borrow`** witnesses `both(a: owned, b:
+borrowed, n: owned)` called as `both(s, s, 1)` — the exact shape that
+underflowed pre-fix. It is verified three ways: interp==compiled
+byte-identical output (this corpus's usual check); the post-Perceus TIR
+matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly
+(one `inc_rc s` before the call, one `dec_rc` after); and the compiled
+binary runs clean under `MARCH_SANITIZE=1` — exit 0, no ASan/UBSan report
+(live-verified 2026-07-11; not yet a standing CI gate — no broad sanitizer
+sweep exists over the corpus, a documented gap, not built in this
+docs-only slice).
+
+**What this section deliberately excludes.** FBIP/reuse (`lib/tir/
+perceus_fbip.ml`) needs an "reuse preserves semantics" theorem to state as a
+real rule, not just an arity-compatibility check — excluded pending that
+metatheory. Atomic RC mode-selection (`specs/atomic-rc-design.md`) is an
+undesigned draft — no code implements it today. Escape-analysis stack
+promotion (`lib/tir/escape.ml`) is an orthogonal optimization with no
+correctness content of its own to formalize (its one correctness
+obligation — never stack-promote an erased-repr alloc — was already the L7
+finding fixed in slice 7, §4.12).
+
 ## 5. Golden conformance corpus
 
-Forty-four programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-six programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2870,7 +2978,13 @@ plus the RRB `Parallel` integer/bool reductions, the first compiled witness for
 that module. `g44` is the distributed-CRDT addition (§4.15), witnessing the
 convergence laws of the single-process-testable CRDT core (GCounter/PNCounter/
 ORSet merge, VectorClock causality), deliberately scoped around the compiled
-`VectorClock.compare` use-after-free (finding C1):
+`VectorClock.compare` use-after-free (finding C1). `g45` is the Perceus RC
+addition (§4.16), witnessing the dual-position dup/drop invariant (B1) —
+verified interp==compiled, against a committed TIR snapshot, AND clean under
+`MARCH_SANITIZE=1`. `g46` is the refinement-types addition
+(`core-march-types.md` §2.14), witnessing that a program whose refinement
+obligations are all provably discharged at `--check` time runs
+byte-identically, since neither backend inserts any runtime predicate check:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -2914,8 +3028,9 @@ ORSet merge, VectorClock causality), deliberately scoped around the compiled
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 44 / 44 matched, 0 divergences in the committed corpus** (the table
-above enumerates `g01`–`g39`; `g40`–`g44` are documented in their §4 sections.
+**Result: 46 / 46 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g46` are documented in their respective §4
+sections (or, for `g46`, `core-march-types.md` §2.14).
 These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure

@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g44)
+# Golden corpus index (g01–g46)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (44/44 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (46/46 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -37,7 +37,15 @@ finding P1); `g44` the distributed-CRDT addition (§4.15, widening slice 10 —
 the convergence laws of the single-process-testable CRDT core: GCounter/
 PNCounter/ORSet merge + VectorClock causality on causally-ordered clocks;
 scoped AROUND the compiled `VectorClock.compare` read-then-update-map
-use-after-free, finding C1, `specs/todos.md`).
+use-after-free, finding C1, `specs/todos.md`); `g45` the Perceus RC addition
+(§4.16, widening slice 11 — the dual-position dup/drop invariant B1, the ONE
+rule in this corpus verified three ways: interp==compiled, a committed TIR
+snapshot, AND `MARCH_SANITIZE=1` clean); `g46` the refinement-types addition
+(`core-march-types.md` §2.14, widening slice 12 — refinement obligations are
+discharged entirely at `--check` time by a separate pass, `lib/refinecheck`,
+that erases to nothing at runtime; a program whose obligations all provably
+hold therefore runs byte-identically, the same erasure property golden g41
+established for linear/affine annotations).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -85,6 +93,8 @@ use-after-free, finding C1, `specs/todos.md`).
 | `g42_letq_short_circuit` | a two-step `let?` Result chain: `chain(5)` succeeds through both steps (E-LetQ-Ok twice → `ok 70`), `chain(-1)` fails the first step so the second `let?` never runs (E-LetQ-Err short-circuits, returns Err verbatim → `err neg`); deterministic, no scheduler | `let?` Result-propagation (§4.13): native `ELetQ` eval, Ok-bind-and-continue / Err-short-circuit, byte-identical both backends; typing in `core-march-types.md` §2.10 (slice 8, 2026-07-10) |
 | `g43_parallel_determinism` | data-parallel determinism guarantee: `List.pmap == List.map` (order-preserving) on 199 elements plus `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` over the same RRB `Vec` (associative merges + identities) — same result interp (eager/sequential tasks) and compiled (real multi-core scheduler), stress-verified 0/15 crashes; first compiled witness for the RRB `Parallel` module. `psum_float` excluded (IEEE non-associativity, finding P1) | E-PMap / E-PReduce (§4.14): pmap gathers in spawn order; associative-merge reduce is chunk-count-independent |
 | `g44_crdt_convergence` | distributed CRDT convergence laws (single-process core): GCounter/PNCounter/ORSet merge commutative + idempotent + value; VectorClock `happens_before` on causally-ordered clocks — byte-identical both backends, stress-verified 0/20 crashes. Scoped AROUND the compiled `VectorClock.compare` use-after-free (finding C1): disjoint-clock `compare` is a documented divergence, not a golden program | CRDT-Converge (§4.15): join-semilattice merge laws; VectorClock partial order; live-network layers are a prose scope boundary |
+| `g45_dual_position_borrow` | Perceus dual-position dup/drop invariant (B1, `specs/perceus-invariants.md` §2.1): `both(a: owned, b: borrowed, n: owned)` called as `both(s, s, 1)` — the exact shape that used to RC-underflow (owned-side and borrowed-side accounting each independently believing they alone consumed the one reference). Verified three ways: interp==compiled byte-identical; post-Perceus TIR matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly (one `inc_rc s` before the call, one `dec_rc` after); compiled binary clean under `MARCH_SANITIZE=1` (ASan+UBSan), exit 0, no leak/UAF report | E-Call-Dual-Position (§4.16): exactly one balancing `EIncRC`/`EDecRC` pair for a variable at both an owned and a borrowed position of the same call |
+| `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair whose postcondition and precondition both provably hold (`--check` exit 0) therefore runs byte-identically — same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is ever inserted |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
