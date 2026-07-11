@@ -70,12 +70,14 @@ declared-PUBLIC-by-this-module), so privacy is enforced before eval ever
 runs, not by eval itself.
 
 **It is not** the whole language semantics. The CORE covers the pure,
-value-level reduction fragment; everything outside it — strings as first-class
-data (beyond their appearance in the value grammar), `to_string`/`show` and the
-interface-dispatch machinery, effects/IO ordering, actors, refinements,
-capabilities, the Perceus RC discipline, session types, sigils — is explicitly
-**deferred** to Phase 2/3 (see §6). Each deferred group becomes a widening slice
-like Tasks 1–7 did.
+value-level reduction fragment; everything outside it was originally deferred
+to Phase 2/3 (see §6) as its own widening slice. Of that original list,
+`to_string`/`show` + the interface-dispatch machinery (§4.4.2–§4.4.4), actors
+(§4.10, `core-march-types.md` §2.6), session types (§4.11, §2.7), capabilities
+(§2.8), refinements (`core-march-types.md` §2.14), and the Perceus RC
+discipline (§4.16, §2.13) have all since LANDED. Only three groups remain
+genuinely deferred: **strings as first-class data** (beyond their appearance
+in the value grammar), **effects/IO ordering**, and **sigils**.
 
 Every rule below is grounded in a specific line of the implementation. Where a
 rule says "faithful to `eval.ml:N`", that citation *is* the correctness
@@ -3185,49 +3187,50 @@ converged (§4.2.1). The golden corpus is 32/32 MATCH, 0 divergences (§5).
   golden table — proved a workable template, replicated cleanly across all
   seven slices and assembled here into one reference.
 
-**Deferred — the Phase-2/3 queue (each group becomes a widening slice like the
-Phase-1 tasks did):**
+**Still deferred (each group becomes a widening slice like the Phase-1 tasks
+did):**
 
-- strings as first-class data (beyond their appearance in the value grammar);
-- `to_string`/`show` and the interface-dispatch machinery — **LANDED
-  (§4.4.2–§4.4.4, 2026-07-06).** §4.4.2 documents the runtime METHOD DISPATCH
-  mechanism itself: the four-name `impl_tbl` type-directed lookup for
+- **strings as first-class data** (beyond their appearance in the value
+  grammar) — concatenation/comparison semantics, Unicode/byte-vs-grapheme
+  boundaries;
+- **effects and IO ordering** — evaluation/effect sequencing, distinct from
+  the capabilities permission LATTICE (§2.8, landed) which governs what IO is
+  allowed, not what order side effects occur in;
+- **sigils** — the `h"…"`/`toml`/`xml`/`yaml` sigil mechanism has no dedicated
+  section yet.
+
+**Landed since the original v0 deferred line** (kept here as pointers, not
+re-litigated):
+
+- `to_string`/`show` and the interface-dispatch machinery — **§4.4.2–§4.4.4,
+  2026-07-06.** §4.4.2 documents the runtime METHOD DISPATCH mechanism
+  itself: the four-name `impl_tbl` type-directed lookup for
   `Show`/`Eq`/`Ord`/`Hash`, and the ordinary lexical `env`-binding path every
   user-defined interface takes instead. §4.4.3 documents the coherence/overlap
   divergence between the two backends when the SAME `(iface, type)` has more
   than one impl in scope (last-registered-wins interpreted vs.
   first-registered-wins compiled — an OPEN, deliberately-left-unfixed
   divergence, filed in `specs/todos.md`, not a corpus accept/reject). §4.4.4
-  documents `derive`/`satisfy`'s operational consequence — a generated impl
-  runs through the identical dispatch rules as a hand-written one, plus
-  `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case
-  (`core-march-types.md` §2.3/§2.4 cover the typing/desugar side of all of
-  this). The known container-`to_string`/`hash`/atom-`_show` divergences §5
-  routes around are UNCHANGED by this landing — those are bugs in the fallback
-  arms §4.4.2 explicitly does not re-litigate, not in the dispatch mechanism
-  §4.4.2 newly specifies;
-- effects and IO ordering;
-- actors;
-- refinements;
-- capabilities;
-- the Perceus RC discipline (its own Level-3 track);
-- session types — **LANDED (§4.11, 2026-07-06).** §4.11 documents the
-  channel-runtime operational model: the crossed-FIFO-queue representation
-  (`VChan`/`chan_endpoint`), `Chan.new`/`send`/`recv`/`close`,
-  `Chan.choose`/`offer` as literal send/recv of a label atom, the
-  interp==compiled property for the binary channel plane now that the
-  concurrent F1/F2 codegen fix lands (witnessed by `g38`/`g39`), and the MPST
-  compiled-segfault (F3), no-scheduler-deadlock (F6), partial-linearity (F7),
-  and HINT-noise (F8) findings. The typing side (`protocol`/projection/
-  duality/per-op session-state typing) is `core-march-types.md` §2.7;
-  MPST remains interp-only and out of the golden corpus (F3);
-- sigils.
+  documents `derive`/`satisfy`'s operational consequence;
+- **actors** — §4.10 (operational: spawn/send/receive/`run_until_idle`,
+  lifecycle, supervision), `core-march-types.md` §2.6 (typing);
+- **session types** — §4.11 (channel-runtime operational model, the
+  crossed-FIFO-queue representation, binary `Chan.new`/`send`/`recv`/`close`,
+  `Chan.choose`/`offer`), `core-march-types.md` §2.7 (typing, protocol
+  decl/projection/duality). MPST remains interp-only and out of the golden
+  corpus (F3);
+- **capabilities** — `core-march-types.md` §2.8 (the IO permission lattice,
+  `needs`/`cap_narrow`, the five behavioral module caps, proof-cap
+  mint/forge);
+- **the Perceus RC discipline** — §4.16 (operational: `needs_rc`/
+  `borrow_eligible`, the dual-position dup/drop invariant, verified against a
+  TIR snapshot + `MARCH_SANITIZE`), `core-march-types.md` §2.13 (typing: adds
+  no rules — codegen-only over already-typed TIR);
+- **refinement types** — `core-march-types.md` §2.14 (`{T | pred}` erasure in
+  `typecheck.ml`, checked by the separate `lib/refinecheck` pass; direct-call
+  preconditions/postconditions + `cap no_panic` division-safety).
 
-(This is the same deferred set §0 now names. Everything that was on the ORIGINAL
-v0 deferred line but is now *covered* — tuples (Task 2), records (Task 3), atoms
-(Task 4), the full pattern language + guards + exhaustiveness (Task 5), local
-recursive functions (Task 6), and conditionals (Task 7) — has been removed from
-this queue; keep this list and §0's in lockstep as Phase-2/3 slices land.)
+(Keep this list and §0's in lockstep as Phase-2/3 slices land.)
 
 **Next steps (the Phase-1 closeout track):**
 

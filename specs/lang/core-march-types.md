@@ -5500,11 +5500,20 @@ each item resurfaces in the roadmap's phasing (§5 of the roadmap doc):
   to the value parameter's own type variable, so it survives generalization and
   is re-checked at call sites. The general `impl Iface(T)` declaration-checking
   machinery (previous bullet) remains the Phase-2 widening item.
-- **Refinement types (z3-discharged).** Roadmap Phase 3 (§4.5/§6): "the
-  refinement/capability soundness claims are machine-checked in Lean 4" is the
-  acceptance criterion; this document's bidirectional HM judgment (§1) is the
-  Level-1 substrate that Phase 3's refinement layer would extend, not
-  something this pass attempts.
+- **Refinement types (z3-discharged) — LANDED at Level 1–2 (§2.14, widening
+  slice 12, 2026-07-11).** `{T | pred}` erases completely in `typecheck.ml`
+  (repr strips `TRefine` to its base type); the actual checking is a separate
+  post-typecheck pass (`lib/refinecheck`) discharging two kinds of obligation
+  against Z3 — direct-call preconditions/postconditions, and `cap no_panic`'s
+  division-safety special case — both live-verified with accept/reject
+  witnesses (`t71`–`t78`) and a zero-runtime-footprint golden (`g46`). The
+  "direct calls only" scope boundary (no HOF/interface-dispatch checking) is
+  itself a passing corpus fact (`accept/t77`), not just documentation. What
+  remains at Roadmap Phase 3 (Level 3): "the refinement/capability soundness
+  claims are machine-checked in Lean 4" — no Lean proof exists yet (see
+  `specs/lean4-metatheory-plan.md`, prose-only, zero `.lean` files); this
+  document's bidirectional HM judgment (§1) is the Level-1 substrate that
+  layer would extend.
 - **Linearity/capabilities — MOSTLY LANDED (§2.8, capabilities widening
   Tasks 1-7, 2026-07-07).** The capability lattice (`lib/caps/`) is named
   explicitly in the roadmap's Phase 3 scope (§4.5, "refinement/capability
