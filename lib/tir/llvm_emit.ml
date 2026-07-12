@@ -608,6 +608,24 @@ let emit_raises_wrapper = Llvm_calls.emit_raises_wrapper
 let is_trivial_dec_chain_returning = Llvm_tco.is_trivial_dec_chain_returning
 let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
 
+(* Loads the CURRENT (pre-overwrite) value out of every TCO parameter slot,
+   paired with each slot's LLVM type — MUST run before the new argument
+   values are stored into these same slots (step 3 of each TCO-intercept
+   arm below), so it captures what is about to be superseded rather than
+   what replaces it.  Consumed by [emit_tco_redirected_dec_chain] (defined
+   as part of [emit_expr]'s mutual-recursion group below, since it falls
+   back to [emit_expr] for non-redirected ops) — see that function's doc
+   comment for why the superseded value, not the replacement value, is the
+   one a TCO'd tail-call's post-call dec-chain must actually release
+   (finding B18). *)
+let load_tco_old_slot_vals ctx (param_info : (string * string * string) list)
+  : (string * string) list =
+  List.map (fun (_vname, slot, param_ty) ->
+    let v = fresh ctx "tco_old" in
+    emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" v param_ty slot);
+    (param_ty, v)
+  ) param_info
+
 (* fail_if_unresolved_iface_method moved to [Llvm_calls] (Wave 3 Task 6,
    chunk 2): called from BOTH unqualified_fns consumers in [emit_expr] below
    (the general EApp call path and the ECallPtr no-var-slot catch-all) —
@@ -687,18 +705,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         let (arg_ty, arg_val) = emit_atom ctx a in
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
+    (* 1b. Snapshot the OLD (pre-overwrite) slot values — see
+          [emit_tco_redirected_dec_chain]'s doc comment (finding B18). *)
+    let old_slot_vals = load_tco_old_slot_vals ctx ctx.tco_param_info in
     (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
           old slot values (the consumed container wrappers) which are still valid.
           Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire. *)
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
+    emit_tco_redirected_dec_chain ctx args old_slot_vals body;
     ctx.tco_in_tail <- saved_tail;
     (* 3. Store each new argument into the corresponding parameter alloca slot. *)
     List.iter2 (fun (_vname, slot, param_ty) new_v ->
@@ -737,21 +752,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         let (arg_ty, arg_val) = emit_atom ctx a in
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
+    (* 1b. Snapshot the OLD (pre-overwrite) slot values — see
+          [emit_tco_redirected_dec_chain]'s doc comment (finding B18). *)
+    let old_slot_vals = load_tco_old_slot_vals ctx ctx.tco_param_info in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same
           ordering rationale as the ELet-wrapped case above. *)
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
+    emit_tco_redirected_dec_chain ctx args old_slot_vals dec_chain;
     ctx.tco_in_tail <- saved_tail;
     (* 3. Store each new argument into the corresponding parameter alloca slot. *)
     List.iter2 (fun (_vname, slot, param_ty) new_v ->
@@ -800,17 +808,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         let (arg_ty, arg_val) = emit_atom ctx a in
         coerce ctx arg_ty arg_val param_ty
       ) target_slots args in
+    (* 1b. Snapshot the OLD (pre-overwrite) slot values — see
+          [emit_tco_redirected_dec_chain]'s doc comment (finding B18). *)
+    let old_slot_vals = load_tco_old_slot_vals ctx target_slots in
     (* 2. Emit the DecRC/Free chain before overwriting slots — same ordering
           rationale as the self-TCO ELet-wrapped case. *)
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
+    emit_tco_redirected_dec_chain ctx args old_slot_vals body;
     ctx.tco_in_tail <- saved_tail;
     (* 3. Update the dispatch tag. *)
     emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
@@ -853,21 +858,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         let (arg_ty, arg_val) = emit_atom ctx a in
         coerce ctx arg_ty arg_val param_ty
       ) target_slots args in
+    (* 1b. Snapshot the OLD (pre-overwrite) slot values — see
+          [emit_tco_redirected_dec_chain]'s doc comment (finding B18). *)
+    let old_slot_vals = load_tco_old_slot_vals ctx target_slots in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same ordering
           rationale as the ELet-wrapped case above. *)
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
+    emit_tco_redirected_dec_chain ctx args old_slot_vals dec_chain;
     ctx.tco_in_tail <- saved_tail;
     (* 3. Update the dispatch tag. *)
     emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
@@ -3056,6 +3054,132 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* ── LetRec (inner lambdas after defun — just emit the body) ───────── *)
   | Tir.ELetRec (_fns, body) ->
     emit_expr ctx body
+
+(** Walks a TCO tail-call's post-call dec/free chain (the shape
+    [is_trivial_dec_chain]/[is_trivial_dec_chain_returning] recognise: a
+    run of [EDecRC]/[EAtomicDecRC]/[EFree]/[EIncRC]/[EAtomicIncRC] ops), for
+    a decrement/free that targets one of [args] — i.e. one of the NEW
+    values about to be installed as the next iteration's live parameters —
+    choosing AT RUNTIME whether to release that new value (as originally
+    written) or to redirect the release to the OLD value at that same
+    parameter position (from [old_slot_vals], produced by
+    [load_tco_old_slot_vals] before the slots were overwritten).
+
+    Why a decrement of a new argument value can be WRONG under TCO: Perceus
+    emits a post-call [dec_rc]/[free] for an argument passed at a BORROWED
+    callee-parameter position when that argument is dead after the call —
+    correct for a real call, where the callee's borrow window is scoped to
+    its own (nested) activation, which fully unwinds before the caller's
+    post-call decrement runs. TCO collapses "call, callee runs, returns,
+    caller releases" into "overwrite my own parameter slots and jump back"
+    — there is no nested activation, so releasing the argument value HERE
+    can free it one instruction before the very next iteration reads it
+    back out of the slot it was just stored into (finding B18; minimal
+    repro: a `drain(s, n)` that rebinds `s` each iteration to
+    `String.slice_bytes(s, ...)`, a FRESH, exclusively-owned allocation
+    with RC 1 — decrementing it here would free it right before the loop
+    reads it back, so the fix must instead release whatever PREVIOUSLY
+    occupied that slot, now safely superseded).
+
+    Why a blind redirect is ALSO wrong for a different, superficially
+    identical shape: `Toml.table_get`'s self-tail-recursive walk over its
+    own borrowed `pairs` parameter pattern-matches `Cons(p, rest) -> ...
+    table_get(rest, key)`, and Perceus extracts `rest` via an EXPLICIT
+    `inc_rc` on the Cons cell's own tail field (since `rest` aliases memory
+    the BORROWED, PERSISTENT list still owns — reused independently by
+    later, unrelated calls, e.g. sibling `get_str` calls over the same
+    table). The trailing `dec_rc rest` there only cancels that one extra
+    `inc_rc`; the list's own baseline reference (held by whoever owns
+    `pairs`, e.g. the parsed document) keeps the node alive regardless, so
+    releasing `rest` (the NEW value) is ALREADY correct and safe — RC never
+    reaches 0. Redirecting it would instead release `pairs` itself (the
+    OLD, this-iteration value) — a reference `table_get` never owned in
+    the first place, corrupting the shared list other independent calls
+    still need (confirmed by reproducing the regression this fix caused
+    before this runtime check was added: a later, sibling `get_str` call
+    over the same parsed table panicked with "non-exhaustive pattern
+    match" on a corrupted spine).
+
+    The two shapes are distinguished by a single fact: does the NEW value
+    have any OTHER live reference besides the one about to be released?
+    Drain's fresh allocation has none (RC == 1 — the local variable is the
+    sole owner); table_get's aliased field always has at least one (the
+    persistent structure's own embedded pointer, RC >= 2 after the extra
+    inc_rc) as long as the container that produced it is itself alive,
+    which it must be to have been matched on at all. So: load the new
+    value's OWN current refcount; if it is 1, no other owner exists and
+    releasing it now WOULD be premature — redirect to the old (superseded)
+    value instead (drain's case). If it is greater than 1, releasing it now
+    is safe and already correct — emit exactly the original, unredirected
+    op (table_get's case). This mirrors the FBIP reuse-check pattern
+    already used elsewhere in this file (load the header word, branch on
+    uniqueness) rather than inventing a new mechanism.
+
+    [EIncRC]/[EAtomicIncRC] are never redirected or runtime-checked — only
+    decrements/frees can prematurely free a value, so only they need this
+    treatment. Ops that don't target one of [args] (e.g. releasing an
+    unrelated dead local) fall through to plain [emit_expr], unchanged from
+    pre-fix behavior. *)
+and emit_tco_redirected_dec_chain ctx (args : Tir.atom list)
+    (old_slot_vals : (string * string) list) (dec_chain : Tir.expr) : unit =
+  let redirect_target (v : Tir.var) : (string * string) option =
+    let rec find i = function
+      | [] -> None
+      | (Tir.AVar av) :: _ when String.equal av.Tir.v_name v.Tir.v_name ->
+        List.nth_opt old_slot_vals i
+      | _ :: rest -> find (i + 1) rest
+    in
+    find 0 args
+  in
+  (* The runtime call this dec/free op makes on a ptr — matches emit_expr's
+     own EDecRC/EAtomicDecRC/EFree cases exactly, so both branches below
+     stay behaviorally identical to the un-redirected op, differing only in
+     which pointer they release. *)
+  let release_fn = function
+    | Tir.EDecRC _       -> "march_decrc_local"
+    | Tir.EAtomicDecRC _ -> "march_decrc"
+    | Tir.EFree _        -> "march_free"
+    | _ -> assert false
+  in
+  let emit_conditional_release op v old_v =
+    let fn = release_fn op in
+    let (_, v_val) = emit_atom ctx (Tir.AVar v) in
+    let rc = fresh ctx "tco_rc" in
+    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc v_val);
+    let is_unique = fresh ctx "tco_uniq" in
+    emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
+    let redirect_lbl = fresh_block ctx "tco_redirect_dec" in
+    let orig_lbl = fresh_block ctx "tco_orig_dec" in
+    let merge_lbl = fresh_block ctx "tco_dec_merge" in
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                     is_unique redirect_lbl orig_lbl);
+    emit_label ctx redirect_lbl;
+    emit ctx (Printf.sprintf "call void @%s(ptr %s)" fn old_v);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    emit_label ctx orig_lbl;
+    emit ctx (Printf.sprintf "call void @%s(ptr %s)" fn v_val);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    emit_label ctx merge_lbl
+  in
+  let emit_one op = match op with
+    | Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+    | Tir.EFree (Tir.AVar v) ->
+      (match redirect_target v with
+       | Some (ty, old_v) when ty = "ptr" -> emit_conditional_release op v old_v
+       | _ -> ignore (emit_expr ctx op))
+    | Tir.EIncRC _ | Tir.EAtomicIncRC _ -> ignore (emit_expr ctx op)
+    | _ -> ()
+  in
+  let rec go = function
+    | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+                | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
+      emit_one op; go rest
+    | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+      | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
+      emit_one op
+    | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
+  in
+  go dec_chain
 
 (* emit_case's definition (formerly here, joined to emit_expr via [and]) now
    lives in [Llvm_case.emit_case]; see the ECase arm above. *)

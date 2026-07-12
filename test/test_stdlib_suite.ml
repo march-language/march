@@ -10511,6 +10511,106 @@ let test_compiled_toml_section_4keys () =
       "compiled Toml 4-key [package]: every get_str returns its own value"
       0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
 
+(* Regression (finding B18): a self-tail-recursive function that rebinds its
+   own borrowed parameter each iteration to a FRESH value derived from it
+   (e.g. `String.slice_bytes`) corrupted that value when COMPILED.  Perceus
+   emits a post-call `dec_rc <new value>` for the borrowed argument (correct
+   for a real call, where the callee's borrow window fully unwinds before the
+   caller's post-call decrement runs) but TCO turns the "call" into a
+   loop-back-edge with no return boundary, so the decrement fired one
+   instruction before the very next iteration read the same value back out of
+   the parameter slot it had just been stored into — silently corrupting the
+   walk (observed: `drain("8080", 0)` returned 1 instead of 4, i.e. the walk
+   stopped after one iteration once the freed memory read back as
+   byte_size 0).  Toml.get_str's discovery of this bug (test above) has a
+   DIFFERENT shape (a value inc_rc'd out of a persistent, shared structure,
+   where the un-redirected original decrement was already correct) that a
+   naive "always redirect" fix regressed — this test guards the narrower,
+   general case specifically: no scrutinee, no shared structure, just a
+   fresh, exclusively-owned value flowing through a borrowed self-tail-call
+   parameter position.  Guard: walk a 4-byte string one byte at a time,
+   assert the loop reaches all 4 bytes and the original binding is untouched
+   (aliasing check) both interpreted and compiled. *)
+let test_compiled_tco_borrowed_fresh_value_no_premature_free () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_tco_fresh" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "tco_fresh.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod TcoFreshRegress do\n\
+    \  fn drain(s, n) do\n\
+    \    if String.byte_size(s) == 0 do n\n\
+    \    else\n\
+    \      let rest = String.slice_bytes(s, 1, String.byte_size(s))\n\
+    \      drain(rest, n + 1)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let original = \"8080\"\n\
+    \    let result = drain(original, 0)\n\
+    \    if result == 4 && original == \"8080\" do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "tcofreshbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled TCO'd self-tail-call: rebinding a borrowed param to a fresh \
+       derived value doesn't free it prematurely (B18)"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+
+(* Regression (finding B18, Yaml-specific manifestation): compiled
+   Yaml.get_str hung INDEFINITELY (not merely a wrong value) on the same
+   general TCO/RC release-timing bug as the Toml regression above — the
+   corrupted map spine formed an accidental cycle / never reached its Nil
+   base case, so the compiled binary looped forever.  Guard under a 15s
+   alarm (a fixed compiled binary returns near-instantly; the historical
+   hang would exhaust it) and require an exit 0 output match with the
+   interpreter across FOUR independent get_str calls over the same parsed
+   document — the Toml regression's actual corruption only appeared past the
+   first lookup. *)
+let test_compiled_yaml_get_str_no_hang () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_yaml_hang" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "yaml_hang.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod YamlHangRegress do\n\
+    \  pfn check(opt, want) : Unit do\n\
+    \    match opt do\n\
+    \      Some(s) -> if s == want do () else process_exit(1) end\n\
+    \      None -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let y = Yaml.parse_exn(\"k1: v1\\nk2: v2\\nk3: v3\\nk4: v4\\n\")\n\
+    \    check(Yaml.get_str(y, \"k1\"), \"v1\")\n\
+    \    check(Yaml.get_str(y, \"k2\"), \"v2\")\n\
+    \    check(Yaml.get_str(y, \"k3\"), \"v3\")\n\
+    \    check(Yaml.get_str(y, \"k4\"), \"v4\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 15 " ^ cmd in
+  let (interp_rc, _) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter exits without kill()" 0 interp_rc;
+  let bin = Filename.concat tmp "yamlhangbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Yaml.get_str over 4 keys terminates (exit 0, no hang, B18)"
+      0 run_rc
+
 (* Regression: a generic helper that projects a record field carrying a
    polymorphic element and feeds it to another generic function under-specialised
    that callee, producing a representation mismatch that crashed when COMPILED.
@@ -12373,6 +12473,10 @@ let stdlib_suites =
           test_compiled_actor_program_exits_without_kill;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
+        Alcotest.test_case "B18: TCO'd self-tail-call rebinding a borrowed param to a fresh value, no premature free (compiled)" `Slow
+          test_compiled_tco_borrowed_fresh_value_no_premature_free;
+        Alcotest.test_case "B18: compiled Yaml.get_str over 4 keys terminates, no hang" `Slow
+          test_compiled_yaml_get_str_no_hang;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow

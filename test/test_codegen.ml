@@ -858,34 +858,57 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
   Alcotest.(check bool) "mutual-tco borrowed-arg: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
   (* For each "br label %mutual_loop..." back-edge, find the LLVM basic block
-     that contains it (the text since the nearest preceding "label:") and
-     require a live "march_decrc" call inside that same block — i.e. on the
-     reachable path, executed before the branch. Before the fix, the
-     mutual-tail-call back-edge block has NO decrc (it is stranded in the
-     unreachable "mutco_cont" block emitted just after the branch instead). *)
+     that contains it and require a live "march_decrc" call reachable on
+     every path into it — i.e. on the reachable path, executed before the
+     branch. Before the fix, the mutual-tail-call back-edge block has NO
+     decrc (it is stranded in the unreachable "mutco_cont" block emitted
+     just after the branch instead).
+
+     The B18 runtime-uniqueness fix (redirecting a premature release to the
+     superseded old value only when the new value's own RC is 1) splits what
+     used to be a single straight-line block into a small diamond ending at
+     the back-edge's own block: [decision] -> {tco_redirect_dec, tco_orig_dec}
+     -> tco_dec_merge -> back-edge, with march_decrc in BOTH diamond arms
+     (never in the merge block itself). So the search window walks back
+     through up to 6 preceding labeled blocks (comfortably covering that
+     diamond plus its decision point) rather than just the single
+     immediately-preceding block, and requires a live decrc somewhere in
+     that whole span — still failing if the decrc is missing entirely or
+     stranded after the branch, which is what this regression guards. *)
   let re_label = Str.regexp "\n[A-Za-z_][A-Za-z0-9_.]*:" in
   let re_backedge = Str.regexp "br label %mutual_loop[0-9]*" in
-  let block_start_before pos =
-    let rec find_last start acc =
-      match Str.search_forward re_label ir start with
-      | exception Not_found -> acc
-      | i when i >= pos -> acc
-      | i -> find_last (i + 1) (Str.match_end ())
+  let window_start_before pos =
+    (* Walk back up to 6 labels, keeping the EARLIEST one found (so the
+       returned window spans from there through [pos]). *)
+    let rec walk start furthest n =
+      if n <= 0 then furthest
+      else
+        match Str.search_forward re_label ir start with
+        | exception Not_found -> furthest
+        | i when i >= pos -> furthest
+        | i -> walk (i + 1) (Str.match_end ()) (n - 1)
     in
-    find_last 0 0
+    walk 0 0 6
   in
   let rec scan_backedges start acc =
     match Str.search_forward re_backedge ir start with
     | exception Not_found -> acc
     | i ->
-      let block_start = block_start_before i in
-      let block = String.sub ir block_start (i - block_start) in
-      scan_backedges (Str.match_end ()) (block :: acc)
+      (* Capture match_end IMMEDIATELY: Str's match_beginning/match_end are
+         global mutable state shared across ALL Str.search_forward calls,
+         and window_start_before below runs its OWN re_label searches —
+         calling Str.match_end() after that would read re_label's last
+         match position instead of re_backedge's, breaking scan_backedges'
+         progress and looping forever on the same match. *)
+      let next_start = Str.match_end () in
+      let window_start = window_start_before i in
+      let window = String.sub ir window_start (i - window_start) in
+      scan_backedges next_start (window :: acc)
   in
-  let backedge_blocks = scan_backedges 0 [] in
+  let backedge_windows = scan_backedges 0 [] in
   Alcotest.(check bool) "mutual-tco borrowed-arg: at least one back-edge found" true
-    (List.length backedge_blocks > 0);
-  let live_decrefs = List.filter (fun b -> ir_contains b "march_decrc") backedge_blocks in
+    (List.length backedge_windows > 0);
+  let live_decrefs = List.filter (fun b -> ir_contains b "march_decrc") backedge_windows in
   Alcotest.(check bool)
     "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
     true (List.length live_decrefs > 0)
