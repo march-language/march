@@ -283,6 +283,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-12, finding B18 INVESTIGATED (not fixed) — TCO loop-carried-value release-timing bug; a general compiler bug hiding behind the "Toml integer truncation" filing)
+
+**The "Toml multi-digit integer truncates to its first digit when compiled" bug turned out to be one narrow instance of a general, stdlib-independent TCO/RC bug** — reproducible in ~10 lines with zero Toml involved: a self-tail-recursive function whose parameter gets rebound each iteration to a freshly-derived value (e.g. `let rest = String.slice_bytes(s, ...); drain(rest, n+1)`) runs exactly one real iteration then reads freed memory, compiled-only.
+
+**Root cause:** `lib/tir/llvm_emit.ml`'s TCO loop-back-edge codegen executes a Perceus-emitted trailing `dec_rc rest` *before* installing `rest` as the next iteration's parameter — but `rest` IS that next value. Under the borrowed-argument convention, that decrement is only sound once a real call/return boundary has passed (true recursion: the decrement fires only after the entire nested call has returned, by which point nothing needs the value anymore); TCO replaces the call with a jump, erasing that boundary, so the decrement frees the value one instruction before the loop reads it back.
+
+**Attempted fix and why it was reverted:** redirecting the decrement to the OLD (pre-overwrite) parameter value fixes the exact repro above cleanly, but is unsound in general — it introduced a real regression in the pre-existing `test_compiled_toml_section_4keys` test. `Toml.table_get`'s tail-recursive walk destructures its own `pairs` parameter (`Cons(p, rest) -> ...`), and that `rest` is a Perceus-inserted alias into a *shared, persistent* list — the same parsed table gets walked from the top again by every subsequent `get_str` call. Redirecting the decrement there releases a cons cell a later, independent call still needs. The two shapes (exclusively-owned-and-transient vs. shared-and-borrowed-from-outside) are indistinguishable from surface TIR/codegen alone; only Perceus's own borrow-inference (`lib/tir/perceus.ml`/`borrow.ml`) can tell them apart. The fix was reverted rather than trade one memory-safety bug for a different, less-well-understood one.
+
+**Also found:** `Yaml.get_str`'s divergence, originally filed as "returns `None` compiled vs `Some(...)` interpreted," is actually a compiled-only **infinite hang** (confirmed via bounded-timeout kill) — a separate, distinct, not-yet-investigated bug, unrelated to the TCO shape above (it hangs rather than terminating with a wrong value).
+
+**Status:** genuinely investigated in depth, root-caused precisely, and explicitly NOT fixed — filed as finding B18 in `specs/todos.md` with the full analysis and a recommendation to design the fix at the Perceus ownership-inference level before attempting another codegen patch.
+
 ## Current State (as of 2026-07-12, finding L8 FIXED — return-position `linear` propagates to a plain `let`)
 
 **A `linear`/`affine` qualifier on a fn's declared RETURN type now propagates to a plain `let x = call()` binding of the result — previously it was decorative.** `fn mk() : linear Res do R(1) end; let h = mk(); ()` used to exit 0 silently (no `was never used` error), while the explicit `linear let h = mk()` / `let h : linear Res = mk()` forms already worked. The tutorial's FFI idiom (`fn malloc(n : Int) : linear Ptr(a)` making leaks impossible without every caller re-annotating) did not actually hold.
