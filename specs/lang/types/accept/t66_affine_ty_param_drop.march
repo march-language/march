@@ -1,9 +1,9 @@
 mod Main do
   -- Linearity widening slice 7 -- (T-AffDrop) positive: an AFFINE value may
   -- be dropped unused (check_linear_all_consumed filters to Linear only).
-  -- NOTE the spelling: `c : affine Cap2` (type-modifier form) -- the
-  -- param-keyword form `fn ok(affine c : Cap2)` is a PARSE error (finding
-  -- L1). See core-march-types.md §2.9.1-§2.9.2.
+  -- Uses the type-modifier spelling `c : affine Cap2`; the param-keyword
+  -- form `fn ok(affine c : Cap2)` also works since finding L1 was FIXED
+  -- 2026-07-11 -- see accept/t81. See core-march-types.md §2.9.1-§2.9.2.
   type Cap2 = C(Int)
   fn ok(c : affine Cap2) : () do
     ()

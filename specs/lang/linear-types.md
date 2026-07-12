@@ -90,10 +90,11 @@ The `linear let` annotation tells the compiler this binding has linear semantics
 
 An affine type may be used zero or one times. This is useful for values that have a cleanup operation but where "not using" is acceptable (e.g., an optional connection).
 
-**Spelling matters:** `affine` is a *type modifier* only — write it inside the
-type annotation. Unlike `linear`, there is no `affine` parameter keyword (the
-form `fn f(affine cap : T)` is a **parse error**) and no `affine let`
-(finding L1, `specs/todos.md`):
+`affine` has the same three marking surfaces as `linear`: a type modifier
+(`cap : affine T`), a parameter keyword (`fn f(affine cap : T)`), and an
+`affine let` binding form. (Prior to 2026-07-11 only the type-modifier
+spelling parsed — finding L1, `specs/todos.md` — fixed by adding `AFFINE`
+grammar productions mirroring `LINEAR`'s.)
 
 ```march
 fn maybe_connect(cap : affine NetworkCap, should_connect : Bool) : () do

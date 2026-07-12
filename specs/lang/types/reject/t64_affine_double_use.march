@@ -3,9 +3,10 @@ mod Main do
   -- Linearity slice 7 -- (T-LinUse), affine flavor: an `affine`-typed binding
   -- may be dropped but NOT used twice. Second use of `c` trips record_use
   -- with the affine message: "The affine value `c` is used more than once
-  -- here. Affine values may be used at most once." Spelling note: affine is
-  -- a TYPE modifier (`c : affine Cap2`); there is no `affine let` and no
-  -- affine param-keyword (finding L1). See §2.9.1-§2.9.2.
+  -- here. Affine values may be used at most once." Uses the type modifier
+  -- spelling (`c : affine Cap2`); the keyword forms (`affine let`, param
+  -- `affine c : T`) also work since finding L1 was FIXED 2026-07-11 --
+  -- see reject/t75 (param-keyword double-use twin). See §2.9.1-§2.9.2.
   type Cap2 = C(Int)
   fn use_it(c : Cap2) : Int do
     match c do

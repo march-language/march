@@ -1,0 +1,19 @@
+mod Main do
+  -- Linearity finding L1 FIX witness (2026-07-11) -- the `affine`
+  -- param-keyword form, `fn f(affine c : T)`, used to be a PARSE error
+  -- (only the type-modifier spelling `c : affine T` worked -- see
+  -- accept/t66). `parser.mly`'s `fn_param` rule now has an AFFINE
+  -- production mirroring LINEAR's. Positive claim: the param is
+  -- registered Affine at `bind_fn_param` exactly like the type-modifier
+  -- spelling, so a SINGLE use typechecks, same as t66/t65.
+  type Cap2 = C(Int)
+  fn take_once(affine c : Cap2) : Int do
+    match c do
+      C(n) -> n
+    end
+  end
+  fn main() : () do
+    let _ = take_once(C(1))
+    ()
+  end
+end

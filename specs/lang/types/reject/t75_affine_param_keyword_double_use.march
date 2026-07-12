@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: The affine value
+mod Main do
+  -- Linearity finding L1 FIX witness, reject twin of accept/t81 (2026-07-11)
+  -- -- proves the NEW param-keyword surface (`affine c : T`) feeds the
+  -- SAME tracker as the type-modifier spelling (reject/t64): a second use
+  -- of an affine param still rejects, droppable-but-not-duplicable
+  -- (T-LinUse) holds regardless of which grammar surface marked it.
+  type Cap2 = C(Int)
+  fn bad(affine c : Cap2) : Int do
+    let a = match c do
+      C(n) -> n
+    end
+    let b = match c do
+      C(n) -> n
+    end
+    a + b
+  end
+  fn main() : () do
+    println(int_to_string(bad(C(1))))
+  end
+end

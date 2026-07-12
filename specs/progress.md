@@ -283,6 +283,42 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, finding L1 FIXED — affine param-keyword + `affine let` grammar)
+
+**`affine` now has all three marking surfaces `linear` has:** type modifier
+(`c : affine T`, pre-existing), param keyword (`fn f(affine c : T)`), and
+`affine let`. Before this fix only the type modifier parsed — the
+param-keyword form was a hard parse error (`I got stuck here`) and `affine
+let` had no grammar production at all (not even droppable — it simply
+never parsed). The tutorial's own flagship affine example
+(`fn maybe_connect(affine cap : NetworkCap)`) never actually worked.
+
+**Root cause:** pure grammar gap in `lib/parser/parser.mly` — `Ast.linearity`
+already had an `Affine` constructor and the `AFFINE` token already existed
+(used only in `ty_atom` position, `linear T` / `affine T`), but `LINEAR` had
+four param/let productions (`fn_param`, `param`, `block_expr`,
+`lambda_stmts`) that `AFFINE` never got mirrored into.
+
+**Fix:** added one `AFFINE` production per site, each identical in shape to
+its `LINEAR` sibling but constructing `param_lin = Affine` / `bind_lin =
+Affine`. No typechecker or codegen change — `bind_fn_param` and the let-arm
+binding logic already handle `Affine` identically to `Linear` (dispatch is
+on the `linearity` value, not the surface spelling), so the semantic
+(T-AffDrop)/(T-LinUse) rules apply unchanged to the newly-grammatical
+surfaces.
+
+**Verification:** live-probed a combined param + `affine let` + lambda-param
+program, interp==compiled byte-identical (`param_result=7`,
+`let_result=9`, `lambda_result=6`); confirmed the affine double-use
+rejection still fires correctly through the new surfaces (not just the old
+type-modifier one). New corpus: `types/accept/t81` (param-keyword),
+`types/accept/t82` (`affine let`), `types/reject/t75` (param-keyword
+double-use, twin of the pre-existing `reject/t64`). Full 157/157
+`check_types.sh` pass. Docs reconciled: `core-march-types.md`
+§2.9.1/§2.9.5/§2.9.6, `linear-types.md`, `types/INDEX.md` (`t64`/`t66`
+stale "parse error" comments corrected). Finding L1 in `specs/todos.md`
+marked ✅ FIXED.
+
 ## Current State (as of 2026-07-11, Core March widening slices 13 + 14 + 15 — strings, evaluation order, sigils; Level 1-2 deferred queue now EMPTY)
 
 **The three remaining groups from the original v0 deferred list all landed

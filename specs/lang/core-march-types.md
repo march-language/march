@@ -4185,17 +4185,25 @@ Linear | Affine`, `ast.ml:20-24`) through exactly these surfaces:
 
 | Surface | Grammar | Effect |
 |---|---|---|
-| `fn f(linear x : T)` | `parser.mly:418`/`:988` (`param_lin = Linear`) | param registered Linear at `bind_fn_param` |
-| `linear let x = e` | `parser.mly:1001` (+ lambda-body variant `:1117`) | binding registered Linear at the let arm |
+| `fn f(linear x : T)` / `fn f(affine x : T)` | `parser.mly:417`/`:419` (`fn_param`), `:989`/`:991` (`param`) (`param_lin = Linear\|Affine`) | param registered Linear/Affine at `bind_fn_param` |
+| `linear let x = e` / `affine let x = e` | `parser.mly:1004`/`:1007` (+ lambda-body variants `:1123`/`:1126`) | binding registered Linear/Affine at the let arm |
 | `linear T` / `affine T` type modifier | `parser.mly:938-939` (`TyLinear (Linear\|Affine, t)`, a `ty_atom` prefix) | the TYPE carries a `TLin` wrapper; a binding whose (post-unification) type reprs to `TLin` is registered with that linearity (`bind_pattern_bindings`, `typecheck.ml:2858`) |
 | `type R = { linear f : T, ... }` | `parser.mly:978` (`fld_lin = Linear`) | field access tracked via sentinels (§2.9.3) |
 | `always_linear type H = ...` | `parser.mly:461-468` (`DAlwaysLinearType`) | **(T-AlwaysLin)** the type NAME (bare AND module-qualified) is added to `env.always_linear_types` (`typecheck.ml:7985-7997`); every binding whose type is `TCon(name,_)` with `name` in that list is AUTO-PROMOTED to Linear at let (`:4841`), fn-param (`:4940`), and lambda-param (`:5166`) sites |
 
-There is deliberately **no `affine let`** production and **no `affine`
-param-keyword** — `affine` exists ONLY as the type modifier. Writing
-`fn f(affine c : T)` is a PARSE error (`I got stuck here`) — finding **L1**,
-filed in `specs/todos.md`; the tutorial previously showed this unparseable
-form. The working spelling is `fn f(c : affine T)`.
+**FIXED 2026-07-11 (finding L1):** the `affine` param-keyword and `affine
+let` productions did not exist — only the type-modifier spelling (`c :
+affine T`) worked; `fn f(affine c : T)` was a PARSE error (`I got stuck
+here`) and there was no `affine let` at all. `parser.mly`'s `fn_param`,
+`param`, `block_expr`, and `lambda_stmts` rules each gained an `AFFINE`
+production mirroring their existing `LINEAR` one (`Affine` was already a
+valid `Ast.linearity` constructor and the `AFFINE` token already existed,
+used only in `ty_atom` position — a pure grammar gap, no typechecker
+change needed). All three surfaces (param-keyword, `affine let`, and the
+type modifier) now register identically via `bind_fn_param`/the let arm.
+Witnesses: `accept/t81` (param-keyword), `accept/t82` (`affine let`),
+`reject/t75` (param-keyword double-use, twin of `reject/t64`'s
+type-modifier double-use).
 
 **Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
 for BINDING-site annotations (`let x : linear T = e` registers `x` linear,
@@ -4277,7 +4285,8 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 
 #### 2.9.5 Known gaps (all filed in `specs/todos.md`)
 
-- **L1** — `affine` param-keyword is a parse error (§2.9.1).
+- **L1** — FIXED 2026-07-11: `affine` param-keyword and `affine let` now
+  have grammar productions mirroring `linear`'s (§2.9.1).
 - **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
 - **L4** — `always_linear_types` is NAME-keyed and GLOBAL: a user
   `type Handle = H(Int)` silently inherits linearity from stdlib's
@@ -4304,11 +4313,13 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 
 Accept: `t64_linear_let_single_use`, `t65_linear_param_single_use`,
 `t66_affine_ty_param_drop`, `t67_linear_field_arith_single` (requires the L2
-fix), `t68_linear_send_consumes`. Reject (with pinned diagnostics):
-`t58`–`t66` per `types/INDEX.md` (drop, double-use, match-reuse, closure
-capture, let-bound field double-access, affine double-use, `always_linear`
-drop, use-after-send). Pre-existing: `reject/t35` (session double-close via
-the same generic tracker).
+fix), `t68_linear_send_consumes`, `t81_affine_param_keyword` +
+`t82_affine_let` (L1 FIX witnesses, 2026-07-11). Reject (with pinned
+diagnostics): `t58`–`t66` per `types/INDEX.md` (drop, double-use,
+match-reuse, closure capture, let-bound field double-access, affine
+double-use, `always_linear` drop, use-after-send), plus `t75` (L1 FIX
+witness: param-keyword affine double-use, twin of `t64`). Pre-existing:
+`reject/t35` (session double-close via the same generic tracker).
 
 ### 2.10 `let?` — Result-propagation binding (widening slice 8, 2026-07-10)
 

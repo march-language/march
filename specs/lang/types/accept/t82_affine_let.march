@@ -1,0 +1,13 @@
+mod Main do
+  -- Linearity finding L1 FIX witness (2026-07-11) -- `affine let` used to
+  -- have no grammar production at all (neither dropped nor consumed --
+  -- it simply never parsed). `parser.mly`'s `block_expr` and
+  -- `lambda_stmts` rules now have an AFFINE LET production mirroring
+  -- LINEAR LET's. Positive claim: `affine let c = ...` registers `c`
+  -- Affine, and (T-AffDrop) still applies -- dropping it unused is fine.
+  type Cap2 = C(Int)
+  fn main() : () do
+    affine let c = C(1)
+    ()
+  end
+end

@@ -416,6 +416,8 @@ fn_param:
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
   | LINEAR; name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
+  | AFFINE; name = soft_lower_name; COLON; t = ty
+    { FPNamed { param_name = name; param_ty = Some t; param_lin = Affine } }
   | name = soft_lower_name; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
   | name = soft_lower_name; COLON; t = ty; DSLASH; default_e = expr
@@ -986,6 +988,8 @@ param:
     { { param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted } }
   | LINEAR; name = soft_lower_name; COLON; t = ty
     { { param_name = name; param_ty = Some t; param_lin = Linear } }
+  | AFFINE; name = soft_lower_name; COLON; t = ty
+    { { param_name = name; param_ty = Some t; param_lin = Affine } }
 
 (* ---- Expressions ---- *)
 
@@ -999,6 +1003,9 @@ block_expr:
             mk_span ($loc)) }
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = e },
+            mk_span ($loc)) }
+  | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = e },
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
@@ -1102,8 +1109,8 @@ lambda_params:
     This mirrors [block_body] but uses a right-recursive rule so it can appear after
     [->] without requiring [do...end] delimiters.  NL tokens are already suppressed
     outside match contexts, so the token stream is flat; the grammar terminates
-    greedily: all leading [let]/[linear let] tokens are consumed as bindings, and the
-    first non-[let] token starts the final expression. *)
+    greedily: all leading [let]/[linear let]/[affine let] tokens are consumed as bindings,
+    and the first non-[let] token starts the final expression. *)
 lambda_body:
   | stmts = lambda_stmts; e = expr
     { fold_letq (stmts @ [e]) (mk_span ($loc)) }
@@ -1115,6 +1122,9 @@ lambda_stmts:
             mk_span ($loc)) :: rest }
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = ev },
+            mk_span ($loc)) :: rest }
+  | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = ev },
             mk_span ($loc)) :: rest }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
