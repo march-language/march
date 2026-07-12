@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t82 accept, t01–t75 reject)
+# Typing corpus index (t01–t83 accept, t01–t76 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 157/157 — 82 accept, 75
+Exit 0 iff every program behaves as declared (currently 159/159 — 83 accept, 76
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -381,6 +381,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t80_sigil_h_desugars_to_iolist` | **sigils: `~H`'s elaborated desugaring still types via `(T-App)` (slice 15, §2.15)** — island/CSRF/escape rewrite terminates in ordinary core nodes; types at `IOList`, same as every other sigil | `--check` exit 0 |
 | `t81_affine_param_keyword` | **(T-LinMark) affine param-keyword positive — finding L1 FIX witness (2026-07-11, §2.9.1)** — `fn take_once(affine c : Cap2)`, single use; `parser.mly`'s `fn_param` rule gained an `AFFINE` production mirroring `LINEAR`'s (was a PARSE error before the fix). Type-modifier twin: `t66` | `--check` exit 0 |
 | `t82_affine_let` | **(T-LinMark) `affine let` positive — finding L1 FIX witness (2026-07-11, §2.9.1)** — `affine let c = C(1)` dropped unused, (T-AffDrop) applies; this production did not exist at ALL before the fix (not even droppable — it simply never parsed) | `--check` exit 0 |
+| `t83_always_linear_no_false_collision` | **finding L4 FIX witness, no-false-positive control (2026-07-11, §2.9.5)** — a `type MyToken = T(Int)` whose bare name does NOT collide with any `always_linear type` typechecks with no spurious error; confirms the new collision check (`reject/t76`) is a targeted collision detector, not a blanket restriction | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -462,8 +463,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t65_always_linear_drop` | **(T-AlwaysLin) + (T-LinDrop) (slice 7, §2.9.1)** — a binding of an `always_linear type Tok` is auto-promoted to Linear with no per-site annotation; dropping it unused rejects. Named `Tok` NOT `Handle` — `always_linear_types` is name-keyed globally and stdlib `handle.march` claims `Handle` (finding L4) | `was never used` |
 | `t66_linear_use_after_send` | **(T-LinUse) send-consumes, reject twin of `accept/t68` (slice 7, §2.9.2)** — `send(pid, StoreRes(r))` consumes linear `r`; `take(r)` after the send is a double use | `is used more than once here` |
 | `t75_affine_param_keyword_double_use` | **(T-LinUse), affine param-keyword flavor — finding L1 FIX witness (2026-07-11, §2.9.1-§2.9.2)** — reject twin of `accept/t81`: `fn bad(affine c : Cap2)` used twice inside the body; proves the newly-grammatical param-keyword surface feeds the SAME tracker as the type-modifier spelling (`t64`) | `The affine value` |
+| `t76_always_linear_name_collision` | **finding L4 FIX witness (2026-07-11, §2.9.5)** — a plain `type Handle = H(Int)` sharing stdlib's `always_linear type Handle` (`stdlib/handle.march`) bare name is now a hard, actionable error at THIS type's own declaration site, instead of silently inheriting linear semantics and surfacing later as a confusing `was never used`/non-exhaustive-match error. Accept twin: `t83` (non-colliding control) | `has the same name as \`always_linear type Handle\`` |
 
-**Result: 157 / 157 (82 accept, 75 reject).**
+**Result: 159 / 159 (83 accept, 76 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

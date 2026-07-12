@@ -283,6 +283,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, finding L4 FIXED — always_linear_types cross-module name-collision detection)
+
+**A plain user type sharing a bare name with a stdlib `always_linear type` (only one exists: `Handle`, `stdlib/handle.march`) no longer silently inherits linear semantics — it's now a loud, actionable error at the type's own declaration site.** Root cause: `always_linear_types` was a flat, bare-name-keyed list with no declaring-module identity, and `env.types` itself has no module-qualified type identity anywhere in this typechecker (a broader, documented design boundary — see `project_march_app_type_namespace` in memory — that this fix does NOT touch). A user's own `type Handle = H(Int)` used to get zero `linear` keywords in the source but a hard `was never used` (T-LinDrop) error downstream, plus an unrelated exhaustiveness warning from the constructor-namespace cross-talk — genuinely confusing, since neither diagnostic points at the actual mistake.
+
+**Fix (`lib/typecheck/typecheck.ml`):** `always_linear_types` changed from `string list` to `(string * string) list` — `(name, declaring module)` pairs; the three auto-promotion consumption sites switched `List.mem` → `List.mem_assoc` (unchanged promotion behavior). The `DType` arm now checks, at THIS type's own declaration, whether its bare name is already always-linear under a DIFFERENT module — if so, rejects with a message naming the colliding module. `DAlwaysLinearType` gets the symmetric check. Scope boundary: only catches the collision in the practical ordering (plain type declared after the always_linear one is already registered, which holds whenever stdlib's `Handle` is in the picture, since stdlib auto-loads); does not retroactively handle the reverse order, which would need declaring-module tracking for every type, not just always_linear ones.
+
+**Found in passing:** fixing this surfaced a real, pre-existing latent collision in the corpus itself — `specs/lang/grammar/parse/p21_transitions_state_machine.march` (an unrelated phantom-typestate demo) also happened to name its type `Handle`; renamed to `Conn`.
+
+**Verification:** live probes confirm the collision error fires correctly, a non-colliding control case has no false positive, and legitimate stdlib `Handle` auto-promotion still works. Full suite green: compiler/eval/codegen (404 tests)/stdlib (808 tests) all 0 failures, 159/159 types corpus (added `accept/t83`, `reject/t76`), 39/39 grammar corpus (after the `p21` rename), 49/49 golden, 29/29 TIR snapshots unchanged.
+
 ## Current State (as of 2026-07-11, finding L1 FIXED — affine param-keyword + `affine let` grammar)
 
 **`affine` now has all three marking surfaces `linear` has:** type modifier

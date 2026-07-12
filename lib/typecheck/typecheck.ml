@@ -515,10 +515,19 @@ type env = {
   proof_caps : (string * string) list;
   (** Proof cap registry: full cap path → declaring module name.
       Populated by [DProofCap] during check_decl; checked by check_module_needs. *)
-  always_linear_types : string list;
-  (** Set of type constructor names declared with [always_linear type].
-      Any binding whose inferred type is [TCon(name, _)] with [name] in this list
-      is automatically tracked as linear — no per-site [linear] annotation needed. *)
+  always_linear_types : (string * string) list;
+  (** [(type-constructor name, declaring module)] pairs for every type declared
+      with [always_linear type] — both the bare name and the module-qualified
+      name are stored (see [DAlwaysLinearType]), each paired with the SAME
+      declaring module. Any binding whose inferred type is [TCon(name, _)]
+      with [name] a key in this list (via [List.mem_assoc]) is automatically
+      tracked as linear — no per-site [linear] annotation needed.
+      The declaring-module column exists ONLY to detect finding-L4-style
+      cross-module bare-name collisions (e.g. a user's own unrelated
+      [type Handle = H(Int)] silently inheriting linearity from stdlib's
+      [always_linear type Handle]) at the OTHER type's [DType]/
+      [DAlwaysLinearType] registration site — see the collision check there.
+      It does not change which bindings get promoted. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
   cur_fn_public : bool;
@@ -4919,7 +4928,7 @@ and infer_block env exprs =
         let rty = repr rhs_ty in
         (match rty with
          | TCon (name, _) ->
-           if List.mem name env.always_linear_types then Ast.Linear else Ast.Unrestricted
+           if List.mem_assoc name env.always_linear_types then Ast.Linear else Ast.Unrestricted
          | _ -> Ast.Unrestricted)
       | lin -> lin
     in
@@ -5018,7 +5027,7 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   let effective_lin = match p.param_lin with
     | Ast.Unrestricted ->
       (match repr t with
-       | TCon (name, _) when List.mem name env.always_linear_types -> Ast.Linear
+       | TCon (name, _) when List.mem_assoc name env.always_linear_types -> Ast.Linear
        | _ -> Ast.Unrestricted)
     | lin -> lin
   in
@@ -5244,7 +5253,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               let effective_lin = match p.param_lin with
                 | Ast.Unrestricted ->
                   (match repr t with
-                   | TCon (tname, _) when List.mem tname env'.always_linear_types -> Ast.Linear
+                   | TCon (tname, _) when List.mem_assoc tname env'.always_linear_types -> Ast.Linear
                    | _ -> Ast.Unrestricted)
                 | lin -> lin
               in
@@ -7447,7 +7456,30 @@ let rec check_decl env (d : Ast.decl) : env =
     in
     bind_vars bindings' env
 
-  | Ast.DType (_vis, name, params, typedef, _sp) ->
+  | Ast.DType (_vis, name, params, typedef, sp) ->
+    (* Finding L4: `always_linear_types` is keyed by the BARE type-constructor
+       name (types have no module-qualified identity anywhere in this
+       typechecker — env.types itself is a flat bare-name map). A plain type
+       declared in one module with the SAME bare name as an `always_linear
+       type` declared in a DIFFERENT module (e.g. a user's own unrelated
+       `type Handle = H(Int)` next to stdlib's `always_linear type Handle`)
+       would otherwise silently inherit linear semantics with no `linear`
+       keyword anywhere in the user's program. Detect the collision here,
+       at THIS type's declaration site, and reject loudly instead — the
+       promotion itself still isn't module-aware (that would need real
+       type identity, out of scope), but the previously-silent hazard is
+       now a hard, actionable error at the point the user can fix it. *)
+    (match List.assoc_opt name.txt env.always_linear_types with
+     | Some owner when owner <> env.current_module ->
+       Err.error env.errors ~span:sp
+         (Printf.sprintf
+            "Type `%s` has the same name as `always_linear type %s` declared \
+             in module `%s`.\n\
+             Bindings of this type would silently inherit linear semantics \
+             from the unrelated always_linear type in `%s` — rename this \
+             type to avoid the collision."
+            name.txt name.txt owner owner)
+     | _ -> ());
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
     (match typedef with
      | Ast.TDVariant variants ->
@@ -8213,17 +8245,30 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Process the type definition exactly like DType (registers constructors, records, etc.),
        then register both the bare name and the qualified name in always_linear_types.
        TCon internals use the bare name (e.g. "Handle"), while type annotations after module
-       export may use the qualified name (e.g. "Handle.Handle") — store both so List.mem
-       matches regardless of which form repr produces at a given call site. *)
+       export may use the qualified name (e.g. "Handle.Handle") — store both so
+       List.mem_assoc matches regardless of which form repr produces at a given call site. *)
     let bare_name = name.txt in
     let qual_name =
       if env.current_module = "" then name.txt
       else env.current_module ^ "." ^ name.txt
     in
+    (* Finding L4: reject if this bare name is already always_linear under a
+       DIFFERENT declaring module (two distinct always_linear types sharing a
+       name) — same collision class as the DType-arm check, other direction. *)
+    (match List.assoc_opt bare_name env.always_linear_types with
+     | Some owner when owner <> env.current_module ->
+       Err.error env.errors ~span:sp
+         (Printf.sprintf
+            "`always_linear type %s` has the same name as another \
+             always_linear type declared in module `%s`.\n\
+             Rename one of them to avoid the collision."
+            bare_name owner)
+     | _ -> ());
     let env1 = check_decl env (Ast.DType (vis, name, params, typedef, sp)) in
     let names = if bare_name = qual_name then [bare_name]
                 else [bare_name; qual_name] in
-    { env1 with always_linear_types = names @ env1.always_linear_types }
+    let owned_names = List.map (fun n -> (n, env.current_module)) names in
+    { env1 with always_linear_types = owned_names @ env1.always_linear_types }
 
   | Ast.DApp _ ->
     (* DApp is desugared to DFn(__app_init__) before typecheck; reaching here is a bug. *)

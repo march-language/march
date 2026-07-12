@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: has the same name as `always_linear type Handle`
+mod Main do
+  -- Linearity finding L4 FIX witness (2026-07-11) -- a plain, unrelated
+  -- user type sharing stdlib's `always_linear type Handle` (stdlib/handle.march)
+  -- bare name used to silently inherit linear semantics (no `linear` keyword
+  -- anywhere in this program) because always_linear_types was a flat,
+  -- bare-name-keyed list with no notion of declaring-module identity.
+  -- Now a loud, actionable error at THIS type's own declaration site instead
+  -- of a confusing downstream "was never used"/non-exhaustive-match error.
+  type Handle = H(Int)
+
+  fn use_it(h : Handle) : Int do
+    match h do
+      H(n) -> n
+    end
+  end
+
+  fn main() : () do
+    println(int_to_string(use_it(H(5))))
+  end
+end

@@ -4288,12 +4288,41 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 - **L1** — FIXED 2026-07-11: `affine` param-keyword and `affine let` now
   have grammar productions mirroring `linear`'s (§2.9.1).
 - **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
-- **L4** — `always_linear_types` is NAME-keyed and GLOBAL: a user
-  `type Handle = H(Int)` silently inherits linearity from stdlib's
-  `always_linear type Handle` (`stdlib/handle.march`) — a program with zero
-  `linear` keywords gets hard (T-LinDrop) errors — and the constructor
-  namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
-  against the user's own `H`). Avoid stdlib-colliding type names.
+- **L4** — FIXED 2026-07-11 (declaration-time collision check; the
+  underlying flat namespace is unchanged — see below): `always_linear_types`
+  is keyed by BARE type-constructor name with no notion of declaring-module
+  identity (`env.types` itself is a flat, bare-name-keyed map — types have
+  no module-qualified identity anywhere in this typechecker, a broader,
+  documented design boundary this fix does NOT touch). A user's own
+  `type Handle = H(Int)` used to silently inherit linearity from stdlib's
+  `always_linear type Handle` (`stdlib/handle.march`) with zero `linear`
+  keywords anywhere in the program, surfacing later as a confusing
+  (T-LinDrop) `was never used` error or a non-exhaustive-match warning
+  (`missing case: Handle(_)`, the constructor namespace cross-talk — a
+  SEPARATE, still-open manifestation of the same flat-namespace boundary).
+  **Fix (`lib/typecheck/typecheck.ml`):** `always_linear_types` is now
+  `(string * string) list` — `(name, declaring module)` pairs, both the bare
+  and qualified name forms as before, each paired with the SAME declaring
+  module (the 3 consumption sites switched `List.mem` → `List.mem_assoc`,
+  unchanged promotion behavior). The `DType` arm now checks, at THIS type's
+  own declaration site, whether its bare name is already always-linear under
+  a DIFFERENT declaring module — if so, a hard, actionable error naming the
+  colliding module, instead of the silent inheritance. `DAlwaysLinearType`
+  gets the symmetric check (two distinct always_linear types sharing a bare
+  name). **Scope boundary:** this catches the collision when the PLAIN type
+  is declared after the always_linear one is already registered (the
+  practical case, since stdlib's `Handle` is always auto-loaded); it does
+  NOT retroactively catch the reverse order, since that would require
+  declaring-module tracking for ALL types, not just always_linear ones — a
+  larger change than this finding's scope. **Regression note:** fixing this
+  surfaced a genuine collision already latent in
+  `specs/lang/grammar/parse/p21_transitions_state_machine.march` (an
+  unrelated phantom-typestate demo that happened to also name its type
+  `Handle`) — renamed to `Conn`. **Witnesses:** `reject/t76` (the collision,
+  live-verified against the ACTUAL stdlib `Handle`), `accept/t83`
+  (non-colliding control, no false positive), plus a live positive-path
+  check that legitimate stdlib `Handle` auto-promotion (unused binding →
+  `was never used`) still fires correctly.
 - **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
   (Newtype/Niche) allocs, so any non-escaping local construction consumed by
   a direct `match` read garbage compiled (the annotation in the original
@@ -4314,11 +4343,14 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 Accept: `t64_linear_let_single_use`, `t65_linear_param_single_use`,
 `t66_affine_ty_param_drop`, `t67_linear_field_arith_single` (requires the L2
 fix), `t68_linear_send_consumes`, `t81_affine_param_keyword` +
-`t82_affine_let` (L1 FIX witnesses, 2026-07-11). Reject (with pinned
+`t82_affine_let` (L1 FIX witnesses, 2026-07-11), `t83_always_linear_no_false_collision`
+(L4 FIX no-false-positive control, 2026-07-11). Reject (with pinned
 diagnostics): `t58`–`t66` per `types/INDEX.md` (drop, double-use,
 match-reuse, closure capture, let-bound field double-access, affine
 double-use, `always_linear` drop, use-after-send), plus `t75` (L1 FIX
-witness: param-keyword affine double-use, twin of `t64`). Pre-existing:
+witness: param-keyword affine double-use, twin of `t64`) and `t76` (L4 FIX
+witness: bare-name collision with stdlib's `always_linear type Handle`).
+Pre-existing:
 `reject/t35` (session double-close via the same generic tracker).
 
 ### 2.10 `let?` — Result-propagation binding (widening slice 8, 2026-07-10)

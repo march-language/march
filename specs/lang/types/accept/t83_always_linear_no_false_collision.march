@@ -1,0 +1,17 @@
+mod Main do
+  -- Linearity finding L4 FIX witness (2026-07-11) -- the new bare-name
+  -- collision check (see reject/t76) must NOT fire for a type whose name
+  -- does not collide with any always_linear type. Confirms the check is a
+  -- targeted collision detector, not a blanket restriction on user types.
+  type MyToken = T(Int)
+
+  fn use_it(t : MyToken) : Int do
+    match t do
+      T(n) -> n
+    end
+  end
+
+  fn main() : () do
+    println(int_to_string(use_it(T(5))))
+  end
+end
