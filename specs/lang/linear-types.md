@@ -82,7 +82,7 @@ fn read_file(path : String) : String do
 end
 ```
 
-The `linear let` annotation tells the compiler this binding has linear semantics. **The qualifier must appear at the binding site** — either the `linear let` keyword form, or a type annotation on the binding (`let h : linear Handle = ...`). A `linear` qualifier on the *callee's return type* alone does NOT currently propagate to a plain `let` binding of the result (verified 2026-07-10 — a dropped `let h = open_file(p)` with `open_file : ... -> linear Handle` is silently accepted; finding L8, `specs/todos.md`). Earlier versions of this chapter claimed the return type was enough.
+The `linear let` annotation tells the compiler this binding has linear semantics. A `linear` qualifier can appear at the binding site — the `linear let` keyword form, or a type annotation on the binding (`let h : linear Handle = ...`) — or on the *callee's return type*: `fn open_file(path : String) : linear Handle do ... end` followed by a plain `let h = open_file(path)` also registers `h` as linear (fixed 2026-07-12, finding L8, `specs/todos.md`) — a dropped `h` now correctly rejects.
 
 ---
 

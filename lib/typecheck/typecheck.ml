@@ -4927,6 +4927,19 @@ and infer_block env exprs =
       | Ast.Unrestricted ->
         let rty = repr rhs_ty in
         (match rty with
+         | TLin (lin, inner) ->
+           (match repr inner with
+            | TChan _ ->
+              (* Session-channel endpoints are internally TLin-wrapped by
+                 every Chan.*/MPST.* builtin (finding L8's fix must not touch
+                 this) — channel linearity has its own, separately-scoped,
+                 still-open enforcement story (finding F7: dropping an
+                 unclosed channel currently slips through). Auto-promoting
+                 here via the generic TLin mechanism would be an ad-hoc,
+                 untested change to session semantics, not what L8 was filed
+                 to fix. *)
+              Ast.Unrestricted
+            | _ -> lin)
          | TCon (name, _) ->
            if List.mem_assoc name env.always_linear_types then Ast.Linear else Ast.Unrestricted
          | _ -> Ast.Unrestricted)

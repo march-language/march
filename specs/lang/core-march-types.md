@@ -4205,13 +4205,28 @@ Witnesses: `accept/t81` (param-keyword), `accept/t82` (`affine let`),
 `reject/t75` (param-keyword double-use, twin of `reject/t64`'s
 type-modifier double-use).
 
-**Return-position caveat (finding L8, OPEN):** the `TyLinear` row above holds
-for BINDING-site annotations (`let x : linear T = e` registers `x` linear,
-live-verified) but NOT for a callee's declared RETURN type — `fn mk() :
-linear Res` followed by a plain `let h = mk()` does not register `h` (a
-dropped `h` is silently accepted). The wrapper is stripped before the
-call-site result type reaches `bind_pattern_bindings`; return-position
-`linear` is currently decorative.
+**Return-position (finding L8, FIXED 2026-07-12):** the `TyLinear` row above
+holds for BINDING-site annotations (`let x : linear T = e` registers `x`
+linear) AND, since this fix, for a callee's declared RETURN type too — `fn
+mk() : linear Res` followed by a plain `let h = mk()` (no keyword, no
+annotation) now registers `h` linear, exactly like `linear let h = mk()` or
+`let h : linear Res = mk()`. Root cause was NOT the suspected one (the
+wrapper being stripped before the call site): `instantiate` (`typecheck.ml`)
+already preserves `TLin` correctly through a function's scheme (`TLin (l, t)
+-> TLin (l, inst t)`), so a `linear`-returning function's call-site result
+type genuinely does carry `TLin`. The actual gap was in the CONSUMER: the
+`auto_lin` computation in `infer_block`'s `ELet` arm only matched `TCon`
+(for `always_linear_types` promotion) and silently fell through to
+`Unrestricted` for any other shape, including a `TLin`-wrapped RHS. **Fix:**
+added a `TLin (lin, _) -> lin` arm. **Scope boundary (found via a live
+regression during verification):** every `Chan.*`/`MPST.*` builtin
+internally returns `TLin (Ast.Linear, TChan (ref cont))` — session-channel
+endpoints are ALSO TLin-wrapped, but their linearity has its own,
+separately-scoped, still-open enforcement story (finding F7 — dropping an
+unclosed channel currently slips through, a deliberate gap, not something
+this fix should silently start enforcing). The fix special-cases `TLin (_,
+inner)` where `repr inner` is `TChan _` to stay `Unrestricted`, leaving
+channel-drop behavior untouched. Witnesses: `reject/t78`, `accept/t84`.
 
 #### 2.9.2 The tracker — (T-LinUse), (T-LinDrop), (T-AffDrop)
 
@@ -4333,9 +4348,10 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   filing was a red herring — the plain form was equally broken). No longer
   promotion candidates (`escape.ml`); `g41` regression-witnesses the fixed
   direct-match shape (see `core-march.md` §4.12).
-- **L8** — a `linear` qualifier on a fn RETURN type does not propagate to a
-  plain `let` of the result (§2.9.1's return-position caveat) —
-  return-position `linear` is currently decorative.
+- **L8** — FIXED 2026-07-12: a `linear`/`affine` qualifier on a fn RETURN
+  type now propagates to a plain `let` of the result (§2.9.1's
+  return-position note). Session-channel `TLin` (Chan.*/MPST.*) is
+  deliberately excluded — see F7 below.
 - **F7** (session types, §2.7.8) — session-channel linearity holds only for
   `let`-threaded continuations: reusing a linear PARAMETER endpoint at a
   coincidentally-matching state, and dropping an unclosed `SEnd` channel,
@@ -4348,14 +4364,16 @@ Accept: `t64_linear_let_single_use`, `t65_linear_param_single_use`,
 `t66_affine_ty_param_drop`, `t67_linear_field_arith_single` (requires the L2
 fix), `t68_linear_send_consumes`, `t81_affine_param_keyword` +
 `t82_affine_let` (L1 FIX witnesses, 2026-07-11), `t83_always_linear_no_false_collision`
-(L4 FIX no-false-positive control, 2026-07-11). Reject (with pinned
+(L4 FIX no-false-positive control, 2026-07-11), `t84_linear_return_type_consumed`
+(L8 FIX witness, 2026-07-12). Reject (with pinned
 diagnostics): `t58`–`t66` per `types/INDEX.md` (drop, double-use,
 match-reuse, closure capture, let-bound field double-access, affine
 double-use, `always_linear` drop, use-after-send), plus `t75` (L1 FIX
 witness: param-keyword affine double-use, twin of `t64`), `t76` (L4 FIX
 witness: bare-name collision with stdlib's `always_linear type Handle`),
-and `t77` (L3 FIX witness: fn-param-bound linear-field double-access,
-twin of `t63`). Pre-existing:
+`t77` (L3 FIX witness: fn-param-bound linear-field double-access,
+twin of `t63`), and `t78` (L8 FIX witness: return-position `linear`
+dropped via a plain `let`). Pre-existing:
 `reject/t35` (session double-close via the same generic tracker).
 
 ### 2.10 `let?` — Result-propagation binding (widening slice 8, 2026-07-10)

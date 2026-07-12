@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: The linear value `h` was never used.
+mod Main do
+  -- Linearity finding L8 FIX witness (2026-07-12) -- a `linear` qualifier
+  -- on a fn's RETURN type used to be decorative: a plain `let h = mk()`
+  -- (no keyword, no annotation) dropped the result silently, exit 0. The
+  -- `auto_lin` computation in `infer_block`'s ELet arm only checked for a
+  -- `TCon` matching `always_linear_types` and fell through to Unrestricted
+  -- for any other shape -- including a `TLin`-wrapped return type, even
+  -- though `instantiate` (typecheck.ml) already preserves TLin correctly
+  -- through the function's scheme. Now a `TLin` RHS type propagates its
+  -- linearity to the binding, same as the explicit `linear let` / `let h :
+  -- linear T = ...` forms. See §2.9.1.
+  type Res = R(Int)
+  fn mk() : linear Res do
+    R(1)
+  end
+  fn main() : () do
+    let h = mk()
+    ()
+  end
+end

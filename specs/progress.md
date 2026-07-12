@@ -283,6 +283,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-12, finding L8 FIXED — return-position `linear` propagates to a plain `let`)
+
+**A `linear`/`affine` qualifier on a fn's declared RETURN type now propagates to a plain `let x = call()` binding of the result — previously it was decorative.** `fn mk() : linear Res do R(1) end; let h = mk(); ()` used to exit 0 silently (no `was never used` error), while the explicit `linear let h = mk()` / `let h : linear Res = mk()` forms already worked. The tutorial's FFI idiom (`fn malloc(n : Int) : linear Ptr(a)` making leaks impossible without every caller re-annotating) did not actually hold.
+
+**Root cause was NOT the originally-suspected one.** The finding's own filing suspected the `TLin` wrapper got stripped before the call-site result type reached the binding logic. Investigation showed `instantiate` (`typecheck.ml`) already preserves `TLin` correctly through a function's scheme — the call-site result type genuinely carries `TLin`. The real bug was downstream: `infer_block`'s `ELet` arm computes an `auto_lin` value that only matched `TCon` (for `always_linear_types` promotion) and silently fell through to `Unrestricted` for every other shape, including a `TLin`-wrapped RHS.
+
+**Fix (`lib/typecheck/typecheck.ml`):** added a `TLin (lin, _) -> lin` arm to the `auto_lin` match.
+
+**A regression surfaced during verification that reshaped the fix's scope:** every `Chan.*`/`MPST.*` builtin internally returns `TLin (Ast.Linear, TChan (ref cont))` — session-channel endpoints are ALSO TLin-wrapped, as an internal implementation detail unrelated to user-facing `linear`/`affine` annotations. The naive fix broke `test_mpst_send_ok` (which intentionally drops an intermediate channel value) because channel-drop enforcement is a SEPARATE, deliberately open gap (finding F7 — "dropping an unclosed channel currently slips through"), not something L8 was scoped to fix. Added an exclusion: a `TLin` whose inner type reprs to `TChan _` stays `Unrestricted`, leaving session-channel linearity untouched.
+
+**Witnesses:** `reject/t78_linear_return_type_drop` (the fix), `accept/t84_linear_return_type_consumed` (consumed-once + plain-non-linear-return control). Live-verified: consumption works, non-linear returns unaffected, explicit `linear let`/annotated forms still correctly reject when dropped (no regression), interp==compiled byte-identical, and the MPST regression is resolved. Full suite green: compiler/eval (232 tests)/codegen (404 tests)/stdlib (808 tests) all 0 failures, 162/162 types corpus (added `t78`/`t84`), 39/39 grammar corpus, 49/49 golden, 29/29 TIR snapshots unchanged.
+
 ## Current State (as of 2026-07-11, finding L3 FIXED — linear record-field tracking for fn-params)
 
 **A `linear` record field accessed twice through a fn-PARAM-bound record now errors, exactly like the let-bound case — previously it silently degraded to a warning.** Root cause was a one-line gap: `bind_linear_field_sentinels` (which registers the `var#field` phantom sentinel that `record_use` checks on each `EField` access) was called from the let-binding path AND from `bind_lam_param` (lambda params), but not from `check_fn`'s clause-param fold (the binder for ordinary `fn`-declaration params) — so a param-bound record's linear field had no sentinel at all, and the fallback diagnostic ("linearity tracking is not available for `p`") fired instead of the real double-use error.

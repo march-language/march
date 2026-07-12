@@ -1,0 +1,24 @@
+mod Main do
+  -- Linearity finding L8 FIX witness (2026-07-12) -- accept twin of
+  -- `reject/t78`: the auto-promoted binding still typechecks fine when
+  -- consumed exactly once, and a PLAIN (non-linear-returning) function's
+  -- result can still be dropped with no spurious promotion.
+  type Res = R(Int)
+  fn mk() : linear Res do
+    R(1)
+  end
+  fn plain() : Int do
+    5
+  end
+  fn use_it(r : Res) : Int do
+    match r do
+      R(n) -> n
+    end
+  end
+  fn main() : () do
+    let h = mk()
+    let _ = use_it(h)
+    let p = plain()
+    ()
+  end
+end
