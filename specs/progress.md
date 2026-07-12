@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-12, Task.race/Task.any/cancel-token compiled support FIXED — builtin registration + CancelToken RC exemption)
+
+**FIXED — the `task_cancel_by_id` link error blocking every compiled `Task.race`/`Task.any`/cancel-token program, plus a second bug hiding behind it.** (1) The five cancel-family builtins had llvm_emit EApp special cases but were missing from `defun.ml`'s `builtin_names` and `llvm_builtins.ml`'s table — a lambda-wrapped call (`fn t -> task_cancel_by_id(t)` in Task.race's loser-cancellation) became ECallPtr, bypassed the special case, and the first-class fallback emitted a `$clo_wrap` to the bare undefined symbol. Registered all five. (2) Immediately behind the link fix: a fresh cancel token read `is_cancelled = true` compiled — the token is bare-malloc'd with the atomic `cancelled` flag as its FIRST field, so Perceus's `march_incrc_local` on it flipped the flag. Exempted `CancelToken` from `needs_rc`/`borrow_eligible` (`lib/tir/rc_types.ml`, same as `Atom`); runtime manages the token's own refcount, March-side reference deliberately leaked (leak-not-crash). `actor_stress.march`'s long-omitted Task.race/any + cancel-token coverage restored and its golden regenerated (deterministic across 6 runs). Also closed the stale `int_div_euclid` entry (verified already fixed, full parity).
+
 ## Current State (as of 2026-07-12, five-bug compiled-crash batch: 2 FIXED, 2 stale entries closed, 1 investigated-and-parked)
 
 Batch requested as "fix: Task.await heap OOM / DataFrame SIGSEGV / tcp_recv_http panic / default-method wrong answer / mono-limit ICE". Outcomes:

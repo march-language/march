@@ -12,9 +12,10 @@
 -- single-thread mode serialises them (and is the only race-free config for
 -- the runtime's non-atomic local refcounting — see march_scheduler.c).
 --
--- Task.race / Task.any and the cancel-token builtins are exercised only in
--- the interpreter, not here — the native backend can't link the
--- `task_cancel_by_id` helper they rely on (see the NOTEs below).
+-- Task.race / Task.any and the cancel-token builtins ARE covered here as of
+-- 2026-07-12 (the cancel-family builtins were registered in defun
+-- builtin_names + llvm_builtins, and CancelToken exempted from Perceus RC
+-- ops — see specs/todos.md).
 -- Run manually with:  dune exec march -- test/apps/actor_stress.march
 
 mod ActorStress do
@@ -265,12 +266,30 @@ mod ActorStress do
     println("sum=" ++ int_to_string(total))             -- expect 60
   end
 
-  -- NOTE: Task.race / Task.any coverage is intentionally omitted here.  Both
-  -- combinators cancel their losing tasks via `task_cancel_by_id` internally
-  -- (stdlib/task.march), and the native backend emits no closure-wrapper for
-  -- that builtin, so a compiled binary fails to link.  They run fine in the
-  -- interpreter.  Kept for the same reason as the cancel-token tests below:
-  -- this is a native compiled-run golden.
+  -- ── Test: Task.race / Task.any ────────────────────────────────────────
+  -- Both combinators cancel their losing tasks via `task_cancel_by_id`
+  -- (stdlib/task.march) — compilable since the 2026-07-12 builtin
+  -- registration fix (defun builtin_names + llvm_builtins entries; the
+  -- lambda-wrapped call used to emit a $clo_wrap calling the bare,
+  -- undefined @task_cancel_by_id and fail to link).  Every contender
+  -- computes the SAME value so the winner's identity (scheduling-
+  -- dependent) never changes the golden's output.
+
+  pfn test_tasks_race_any() : Unit do
+    section("tasks: race/any")
+    let r1 = Task.async(fn () -> 3 + 4)
+    let r2 = Task.async(fn () -> 14 - 7)
+    match Task.race([r1, r2]) do
+      Ok(v)  -> println("race=" ++ int_to_string(v))
+      Err(e) -> println("race_err=" ++ e)
+    end
+    let a1 = Task.async(fn () -> 2 + 3)
+    let a2 = Task.async(fn () -> 10 - 5)
+    match Task.any([a1, a2]) do
+      Ok(v)   -> println("any=" ++ int_to_string(v))
+      Err(es) -> println("any_errs=" ++ int_to_string(List.length(es)))
+    end
+  end
 
   -- ── Test: Task.async_stream (parallel map) ────────────────────────────
 
@@ -320,12 +339,21 @@ mod ActorStress do
     -- expect "query+answer=12"
   end
 
-  -- NOTE: cancel-token coverage (task_cancel_token_new / task_spawn_with_cancel
-  -- / task_cancel / task_is_cancelled) is intentionally omitted here.  Those
-  -- builtins work in the interpreter but the native backend has no
-  -- `task_cancel_by_id` symbol, so a compiled binary fails to link.  This
-  -- fixture is a *native compiled-run* golden, so it sticks to what the LLVM
-  -- backend supports.  The interpreter exercises cancel tokens elsewhere.
+  -- ── Test: cancel tokens ──────────────────────────────────────────────
+  -- task_cancel_token_new / task_is_cancelled / task_cancel — compilable
+  -- since the same 2026-07-12 fix as Task.race/any above; that fix also
+  -- exempted CancelToken from Perceus RC ops (rc_types.ml): the token is a
+  -- BARE-malloc'd runtime struct whose first field is the atomic
+  -- `cancelled` flag, so a march_incrc_local on it flipped a fresh token
+  -- to "cancelled" (this test's first line printed true pre-fix).
+
+  pfn test_cancel_token() : Unit do
+    section("cancel token")
+    let tok = task_cancel_token_new()
+    println("cancelled_before=" ++ bool_to_string(task_is_cancelled(tok)))
+    task_cancel(tok)
+    println("cancelled_after=" ++ bool_to_string(task_is_cancelled(tok)))
+  end
 
   -- ── Test: Large message volume ─────────────────────────────────────────
 
@@ -349,9 +377,11 @@ mod ActorStress do
     test_collector()
     test_tasks_basic()
     test_tasks_many()
+    test_tasks_race_any()
     test_tasks_stream()
     test_message_order()
     test_receive_in_handler()
+    test_cancel_token()
     test_bulk()
     println("")
     println("done")

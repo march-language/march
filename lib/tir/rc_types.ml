@@ -112,6 +112,16 @@
     ANY arm. *)
 let needs_rc : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
+  | Tir.TCon ("CancelToken", []) -> false
+    (* Cancel tokens are BARE-malloc'd runtime handles (march_cancel_token_new,
+       runtime/march_scheduler.c) with NO march RC header: the struct's first
+       field is the atomic `cancelled` flag, so march_incrc_local on the token
+       literally flipped a fresh token to "cancelled" (compiled
+       task_is_cancelled returned true for a token that was never cancelled).
+       The token's lifetime is managed by the runtime's OWN refcount field
+       (march_cancel_token_ref/unref in the spawn thunk / proc trampoline);
+       the March-side reference is deliberately leaked (one small malloc per
+       token) — leak-not-crash. *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
   | Tir.TVar _ -> true    (* unresolved cross-module type-var: heap ptr at runtime
@@ -130,6 +140,11 @@ let needs_rc : Tir.ty -> bool = function
     see the module doc before changing ANY arm. *)
 let borrow_eligible : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
+  | Tir.TCon ("CancelToken", []) -> false
+    (* Bare-malloc'd runtime handle without a march RC header — see the
+       matching [needs_rc] arm above; must never enter borrow inference
+       (a borrowed classification would still route it through RC ops at
+       call boundaries). *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
   | Tir.TRecord _ | Tir.TTuple _ -> true

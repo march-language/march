@@ -33,12 +33,20 @@ collected count=5 total=55
 === tasks: await_many ===
 sum=60
 
+=== tasks: race/any ===
+race=7
+any=5
+
 === tasks: async_stream ===
 sum_squares=385
 
 === message order ===
 
 === receive() in handler ===
+
+=== cancel token ===
+cancelled_before=false
+cancelled_after=true
 
 === bulk messages ===
 

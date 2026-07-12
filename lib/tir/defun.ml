@@ -28,6 +28,16 @@ let builtin_names : StringSet.t =
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";
+      (* Cancel-token family: each has a dedicated EApp special case in
+         llvm_emit.ml (march_cancel_token_* / march_task_cancel_by_id).
+         Without these entries, a call inside a lambda (e.g. Task.race's
+         `List.each(rest, fn t -> task_cancel_by_id(t))`) was rewritten to
+         ECallPtr by defun, bypassing the special case — the first-class
+         fallback then emitted a $clo_wrap calling the bare, undefined
+         `@task_cancel_by_id` → link error on every compiled Task.race/
+         Task.any/cancel-token program. *)
+      "task_cancel_token_new"; "task_cancel"; "task_is_cancelled";
+      "task_spawn_with_cancel"; "task_cancel_by_id";
       "get_work_pool";
       (* Float builtins *)
       "float_abs"; "float_ceil"; "float_floor"; "float_round";

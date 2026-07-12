@@ -714,6 +714,22 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = None };
   { march_name = "task_reductions"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
+  (* Cancel-token family — dedicated EApp special cases in llvm_emit.ml
+     (march_cancel_token_* / march_task_cancel_by_id / the _thunk spawn);
+     registered here so is_builtin_fn recognises them (RC-op skip guards,
+     atom_is_builtin) exactly like their task_* siblings above.  Paired
+     with defun.ml's builtin_names entries (same fix) — see the Task.race
+     link-error regression in specs/todos.md. *)
+  { march_name = "task_cancel_token_new"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
+  { march_name = "task_cancel"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
+  { march_name = "task_is_cancelled"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
+  { march_name = "task_spawn_with_cancel"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
+  { march_name = "task_cancel_by_id"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "pmap_threshold"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
   { march_name = "get_work_pool"; c_name = None; ret_ty = None;
