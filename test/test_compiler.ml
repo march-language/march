@@ -922,9 +922,10 @@ let test_linear_field_double_access_error () =
      HISTORY (slice 7): this test originally used a fn-PARAM-bound record
      (`fn bad(r: Packet) do r.data + r.data end`) and passed VACUOUSLY on the
      L2 constraint-discharge leak ("`linear Int` does not implement Num") —
-     params never get field sentinels (L3), so no double-use error ever fired.
+     params never got field sentinels (L3), so no double-use error ever fired.
      Rewritten to the let-bound shape, where the real double-use check runs;
-     the param shape is pinned by test_linear_field_param_warning_only. *)
+     the param shape (now ALSO an error since L3 was fixed 2026-07-11) is
+     covered by test_linear_field_param_double_access_error. *)
   let ctx = typecheck {|mod Test do
     type Packet = { linear data: Int, size: Int }
     fn mk() : Packet do
@@ -980,14 +981,15 @@ let test_linear_return_arith_ok () =
   end|} in
   Alcotest.(check bool) "linear return type arithmetic: no error" false (has_errors ctx)
 
-let test_linear_field_param_warning_only () =
-  (* L3 pin: for a fn-PARAM-bound record, linear-field tracking degrades to a
-     WARNING — field sentinels are only registered at let-binding sites
-     (bind_linear_field_sentinels), so double access through a param is not
-     an error today.  Each let below consumes its own (inherited-linear)
-     binding exactly once; only the missing p sentinel is at issue.  If this
-     test starts failing because an error now fires, L3 got fixed: update the
-     finding in specs/todos.md and flip this expectation. *)
+let test_linear_field_param_double_access_error () =
+  (* L3 FIXED 2026-07-11: a fn-PARAM-bound record now gets field sentinels too
+     (the same Unrestricted-branch binding code path in check_fn's clause-param
+     fold now calls bind_linear_field_sentinels, mirroring bind_lam_param) —
+     double access through a param is a hard error, same as the let-bound
+     twin (test_linear_field_double_access_error). Previously this degraded to
+     a WARNING ("linearity tracking is not available for `p`") and this test
+     asserted `false` (no error) — the exact vacuous-test trap flagged in the
+     original L3 filing. *)
   let ctx = typecheck {|mod Test do
     type Packet = { linear data: Int, size: Int }
     fn bad(p: Packet) : Int do
@@ -996,7 +998,7 @@ let test_linear_field_param_warning_only () =
       x + y
     end
   end|} in
-  Alcotest.(check bool) "param-bound linear field: warning-only (L3)" false (has_errors ctx)
+  Alcotest.(check bool) "param-bound linear field double-access: error (L3 fixed)" true (has_errors ctx)
 
 (* ── H8: Protocol participant cross-checking ─────────────────────────────── *)
 
@@ -7596,7 +7598,7 @@ let compiler_suites =
           (* Slice 7 (L2/L3): TLin transparent to constraint discharge *)
           Alcotest.test_case "linear field arith single use" `Quick test_linear_field_arith_single_use_ok;
           Alcotest.test_case "linear return arith"           `Quick test_linear_return_arith_ok;
-          Alcotest.test_case "linear field param warning only (L3)" `Quick test_linear_field_param_warning_only;
+          Alcotest.test_case "linear field param double access (L3 fixed)" `Quick test_linear_field_param_double_access_error;
           (* Fix 3/H8: Session type validation + participant cross-check *)
           Alcotest.test_case "protocol self-message"         `Quick test_protocol_self_message_error;
           Alcotest.test_case "protocol empty loop"           `Quick test_protocol_empty_loop_error;

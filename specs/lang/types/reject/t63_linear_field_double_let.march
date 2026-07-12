@@ -3,9 +3,9 @@ mod Main do
   -- Linearity slice 7 -- (T-LinField): a `linear` record field of a
   -- LET-BOUND record is tracked via the `p#data` sentinel; the second
   -- `p.data` access trips record_use. Diagnostics render the sentinel as
-  -- `p.data` (lin_display_name, finding L5 fixed 2026-07-10). NOTE the
-  -- fn-PARAM-bound twin of this program is NOT rejected today (finding L3,
-  -- warning-only) -- this witness deliberately uses the let-bound shape.
+  -- `p.data` (lin_display_name, finding L5 fixed 2026-07-10). The
+  -- fn-PARAM-bound twin also rejects since finding L3 was FIXED 2026-07-11
+  -- (see reject/t77) -- this witness deliberately uses the let-bound shape.
   -- See §2.9.3.
   type Packet = { linear data : Int, size : Int }
   fn mk() : Packet do

@@ -5258,7 +5258,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | lin -> lin
               in
               let env' = match effective_lin with
-                | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
+                | Ast.Unrestricted ->
+                  let env1 = bind_var p.param_name.txt (Mono t) env in
+                  bind_linear_field_sentinels p.param_name.txt t env1
                 | lin              -> bind_linear p.param_name.txt lin t env
               in
               (t :: tys, env')

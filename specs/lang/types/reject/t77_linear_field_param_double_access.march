@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Linearity finding L3 FIX witness (2026-07-11) -- reject twin of `t63`,
+  -- but for a fn-PARAM-bound record instead of a let-bound one. Before the
+  -- fix, `bind_fn_param`'s (Unrestricted-branch) binding code never called
+  -- `bind_linear_field_sentinels`, so this program's second `p.data` access
+  -- degraded to a WARNING ("linearity tracking is not available for `p`")
+  -- and typechecked with exit 0 -- the exact gap that made the pre-slice
+  -- unit test `test_linear_field_double_access_error` vacuous when it used
+  -- this shape. Now the param gets a sentinel too, same as a let-bound
+  -- record, and the second access trips `record_use` like `t63`.
+  type Packet = { linear data : Int, size : Int }
+  fn bad(p : Packet) : Int do
+    let x = p.data
+    let y = p.data
+    x + y
+  end
+  fn main() : () do
+    println(int_to_string(bad({ data: 1, size: 2 })))
+  end
+end

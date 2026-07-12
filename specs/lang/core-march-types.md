@@ -4255,15 +4255,18 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   bindings inherit from a linear scrutinee var). Using the original after
   the match is a (T-LinUse) violation.
 - **(T-LinField)** — a `linear` record field is tracked via a phantom
-  sentinel entry named `var#field`, registered when the record is
-  **let-bound** (`bind_linear_field_sentinels`, call sites `:2846`/`:2882`);
-  each `EField` access calls `record_use` on the sentinel (`:4409`).
-  Diagnostics render the sentinel as `var.field` (`lin_display_name`,
-  `:2800`). **Honest caveat (finding L3, OPEN):** fn-param-bound records get
-  NO sentinel — a param's linear-field double access degrades to a WARNING
-  (`` Field `f` has a linear type but linearity tracking is not available
-  for `p` at this binding site. ``) and is NOT an error. Enforcement holds
-  only for locally-let-bound records.
+  sentinel entry named `var#field`, registered both when the record is
+  **let-bound** (`bind_linear_field_sentinels`, call sites `:2936`/`:2972`/`:2977`)
+  and, since finding L3 was FIXED 2026-07-11, when it's **fn-param-bound**
+  too (`:5263`, the `check_fn` clause-param fold's `Unrestricted` branch —
+  previously only lambda-params called this, `:5037`); each `EField` access
+  calls `record_use` on the sentinel (`:4499`). Diagnostics render the
+  sentinel as `var.field` (`lin_display_name`, `:2800`). **L3 fix scope:**
+  purely a missing-call fix (`bind_fn_param`'s binding code never called
+  `bind_linear_field_sentinels`, unlike `bind_lam_param`, which already did)
+  — no new tracking machinery. Enforcement now holds for both let-bound and
+  fn-param-bound records identically; witnesses: `reject/t63` (let-bound),
+  `reject/t77` (fn-param-bound, L3 FIX).
 
 #### 2.9.4 Linearity transparency — (T-LinCoerce)
 
@@ -4287,7 +4290,8 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 
 - **L1** — FIXED 2026-07-11: `affine` param-keyword and `affine let` now
   have grammar productions mirroring `linear`'s (§2.9.1).
-- **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
+- **L3** — FIXED 2026-07-11: param-bound linear-field tracking now errors
+  identically to the let-bound case (§2.9.3).
 - **L4** — FIXED 2026-07-11 (declaration-time collision check; the
   underlying flat namespace is unchanged — see below): `always_linear_types`
   is keyed by BARE type-constructor name with no notion of declaring-module
@@ -4348,9 +4352,10 @@ fix), `t68_linear_send_consumes`, `t81_affine_param_keyword` +
 diagnostics): `t58`–`t66` per `types/INDEX.md` (drop, double-use,
 match-reuse, closure capture, let-bound field double-access, affine
 double-use, `always_linear` drop, use-after-send), plus `t75` (L1 FIX
-witness: param-keyword affine double-use, twin of `t64`) and `t76` (L4 FIX
-witness: bare-name collision with stdlib's `always_linear type Handle`).
-Pre-existing:
+witness: param-keyword affine double-use, twin of `t64`), `t76` (L4 FIX
+witness: bare-name collision with stdlib's `always_linear type Handle`),
+and `t77` (L3 FIX witness: fn-param-bound linear-field double-access,
+twin of `t63`). Pre-existing:
 `reject/t35` (session double-close via the same generic tracker).
 
 ### 2.10 `let?` — Result-propagation binding (widening slice 8, 2026-07-10)

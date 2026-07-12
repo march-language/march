@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t83 accept, t01–t76 reject)
+# Typing corpus index (t01–t83 accept, t01–t77 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 159/159 — 83 accept, 76
+Exit 0 iff every program behaves as declared (currently 160/160 — 83 accept, 77
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -458,14 +458,15 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t60_linear_param_double_use` | **(T-LinUse), fn-param surface (slice 7, §2.9.2)** — a `linear q : Res` param passed to a callee twice; the SECOND `q` reference trips `record_use`. Callee consumes its own plain param via an exhaustive match so this is the only diagnostic | `is used more than once here` |
 | `t61_linear_match_then_reuse` | **(T-LinMatch) (slice 7, §2.9.3)** — matching on a tracked linear variable is itself a consuming use; touching `r` after the match is a double use | `is used more than once here` |
 | `t62_linear_closure_capture` | **(T-LinClosure) (slice 7, §2.9.3)** — a zero-arg closure capturing a `linear let` binding; the `ELam` snapshot check rejects the capture (a closure may run many times) | `cannot be captured by a closure` |
-| `t63_linear_field_double_let` | **(T-LinField), let-bound sentinel path (slice 7, §2.9.3)** — second `p.data` access on a LET-bound record with a `linear data : Int` field trips the `p#data` sentinel; diagnostic renders it `p.data` (L5 fixed). The fn-PARAM-bound twin is NOT rejected today (finding L3, warning-only) — deliberately let-bound here | `is used more than once here` |
+| `t63_linear_field_double_let` | **(T-LinField), let-bound sentinel path (slice 7, §2.9.3)** — second `p.data` access on a LET-bound record with a `linear data : Int` field trips the `p#data` sentinel; diagnostic renders it `p.data` (L5 fixed). The fn-PARAM-bound twin also rejects since finding L3 was FIXED 2026-07-11 — see `t77` — deliberately let-bound here | `is used more than once here` |
 | `t64_affine_double_use` | **(T-LinUse), affine flavor (slice 7, §2.9.2)** — `let c : affine Cap2` used twice; droppable but not duplicable. Uses the type-modifier spelling; the param-keyword/`affine let` forms also work since finding L1 was FIXED 2026-07-11 — see `t75` | `The affine value` |
 | `t65_always_linear_drop` | **(T-AlwaysLin) + (T-LinDrop) (slice 7, §2.9.1)** — a binding of an `always_linear type Tok` is auto-promoted to Linear with no per-site annotation; dropping it unused rejects. Named `Tok` NOT `Handle` — `always_linear_types` is name-keyed globally and stdlib `handle.march` claims `Handle` (finding L4) | `was never used` |
 | `t66_linear_use_after_send` | **(T-LinUse) send-consumes, reject twin of `accept/t68` (slice 7, §2.9.2)** — `send(pid, StoreRes(r))` consumes linear `r`; `take(r)` after the send is a double use | `is used more than once here` |
 | `t75_affine_param_keyword_double_use` | **(T-LinUse), affine param-keyword flavor — finding L1 FIX witness (2026-07-11, §2.9.1-§2.9.2)** — reject twin of `accept/t81`: `fn bad(affine c : Cap2)` used twice inside the body; proves the newly-grammatical param-keyword surface feeds the SAME tracker as the type-modifier spelling (`t64`) | `The affine value` |
 | `t76_always_linear_name_collision` | **finding L4 FIX witness (2026-07-11, §2.9.5)** — a plain `type Handle = H(Int)` sharing stdlib's `always_linear type Handle` (`stdlib/handle.march`) bare name is now a hard, actionable error at THIS type's own declaration site, instead of silently inheriting linear semantics and surfacing later as a confusing `was never used`/non-exhaustive-match error. Accept twin: `t83` (non-colliding control) | `has the same name as \`always_linear type Handle\`` |
+| `t77_linear_field_param_double_access` | **(T-LinField), fn-PARAM sentinel path — finding L3 FIX witness (2026-07-11, §2.9.3)** — reject twin of `t63`, but the record is fn-PARAM-bound instead of let-bound. Before the fix, the param never got a `p#data` sentinel and this degraded to a WARNING (the exact gap that made the pre-slice unit test `test_linear_field_double_access_error` vacuous); now the param gets a sentinel too and the second access trips `record_use` identically to the let-bound case | `is used more than once here` |
 
-**Result: 159 / 159 (83 accept, 76 reject).**
+**Result: 160 / 160 (83 accept, 77 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

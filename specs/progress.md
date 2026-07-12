@@ -283,6 +283,16 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-11, finding L3 FIXED — linear record-field tracking for fn-params)
+
+**A `linear` record field accessed twice through a fn-PARAM-bound record now errors, exactly like the let-bound case — previously it silently degraded to a warning.** Root cause was a one-line gap: `bind_linear_field_sentinels` (which registers the `var#field` phantom sentinel that `record_use` checks on each `EField` access) was called from the let-binding path AND from `bind_lam_param` (lambda params), but not from `check_fn`'s clause-param fold (the binder for ordinary `fn`-declaration params) — so a param-bound record's linear field had no sentinel at all, and the fallback diagnostic ("linearity tracking is not available for `p`") fired instead of the real double-use error.
+
+**Fix (`lib/typecheck/typecheck.ml`):** the clause-param fold's `Unrestricted` branch now calls `bind_linear_field_sentinels p.param_name.txt t env1`, mirroring `bind_lam_param`'s existing call. No new tracking machinery — purely a missing call.
+
+**This gap had made a pre-existing unit test vacuous:** `test_linear_field_double_access_error` originally used the param shape and passed on an unrelated (now-fixed) L2 bug, never actually exercising the double-use check; it was rewritten to the let-bound shape in an earlier session, with the param shape pinned as warning-only by `test_linear_field_param_warning_only`. That test is now flipped (renamed `test_linear_field_param_double_access_error`, asserts `has_errors ctx = true`), per the original filing's own instruction to flip it once fixed.
+
+**Witnesses:** `reject/t77_linear_field_param_double_access` (twin of `reject/t63`, the let-bound case). Full suite green: compiler/eval/codegen (404 tests)/stdlib (808 tests) all 0 failures, 160/160 types corpus (added `reject/t77`), 39/39 grammar corpus, 29/29 TIR snapshots unchanged.
+
 ## Current State (as of 2026-07-11, finding L4 FIXED — always_linear_types cross-module name-collision detection)
 
 **A plain user type sharing a bare name with a stdlib `always_linear type` (only one exists: `Handle`, `stdlib/handle.march`) no longer silently inherits linear semantics — it's now a loud, actionable error at the type's own declaration site.** Root cause: `always_linear_types` was a flat, bare-name-keyed list with no declaring-module identity, and `env.types` itself has no module-qualified type identity anywhere in this typechecker (a broader, documented design boundary — see `project_march_app_type_namespace` in memory — that this fix does NOT touch). A user's own `type Handle = H(Int)` used to get zero `linear` keywords in the source but a hard `was never used` (T-LinDrop) error downstream, plus an unrelated exhaustiveness warning from the constructor-namespace cross-talk — genuinely confusing, since neither diagnostic points at the actual mistake.
