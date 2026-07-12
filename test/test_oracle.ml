@@ -206,12 +206,15 @@ let known_divergence =
        bug; the same open DataFrame RC issue as dataframe_bench. *)
     "dataframe_basic", "DataFrame RC-misclassification family: compiled crash (139), interp clean (same bug as dataframe_bench; specs/todos.md)";
 
-    (* Monomorphization-limit ICE: compiling hits mono.ml's polymorphic-
-       recursion specialization-count guard on a shape that is not
-       actually polymorphic-recursive in the source.
-       specs/todos.md P0: "Monomorphization limit reached compiling a
-       self-recursive nested closure". *)
-    "stats_basic", "Monomorphization limit reached ICE, exit 3 (specs/todos.md: \"Monomorphization limit reached compiling a self-recursive nested closure\"; stats_basic is a newly-confirmed trigger of the same P0)";
+    (* stats_basic's former "Monomorphization limit reached" ICE was FIXED
+       2026-07-12 (typecheck.ml fn_arities shadowing — a user `fn f(m)`
+       colliding with stdlib fold_left's local param `f` produced a
+       silently-filtered false arity error whose TError recovery poisoned
+       the type_map; see specs/todos.md).  It now COMPILES and runs — but
+       its output still diverges via the SEPARATE, still-open
+       to_string-on-container bug (prints "#<tag:1>" for the data list),
+       same reason as "hello"/"list_lib" above. *)
+    "stats_basic", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\"; its former mono-limit ICE was fixed 2026-07-12)";
   ]
 
 let known_divergence_tbl =

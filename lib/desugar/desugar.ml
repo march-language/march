@@ -906,9 +906,33 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
            else match m.md_default with
              | None -> None
              | Some default_expr ->
-               (* Synthesise a fn_def for the default: fn method_name = default_expr
-                  The default body is a value of the method type (often a lambda),
-                  so wrap it in a zero-param clause. *)
+               (* Synthesise a fn_def for the default.  The default body is a
+                  value of the method type — in practice a lambda
+                  (`fn (x, y) -> ...`).  Eta-expand a lambda default into a
+                  regular n-param method clause (the exact shape of a
+                  hand-written impl method) instead of wrapping it in a
+                  zero-param clause returning the closure: the zero-param
+                  shape lowered compiled to a 0-arity TIR function, while
+                  interface-dispatch call sites (lower.ml's
+                  resolve_iface_method rewrite) call the mangled impl fn at
+                  the METHOD's arity — the args were silently dropped and
+                  the returned closure POINTER was bound as the result
+                  value, always truthy: the "default method always returns
+                  the same answer" compiled-only wrong-answer bug.  The
+                  interpreter was unaffected only because its call path
+                  handles over-application of a 0-param closure.  Only
+                  DIRECTLY nested lambdas are peeled (no intervening
+                  computation), so evaluation order is preserved exactly.
+                  A non-lambda default (rare) keeps the zero-param wrapper,
+                  which typecheck.ml's [fc_params = []] default-method
+                  special case still handles. *)
+               let rec peel_lams acc e = match e with
+                 | ELam (ps, lam_body, _) when ps <> [] ->
+                   peel_lams (acc @ ps) lam_body
+                 | other -> (acc, other)
+               in
+               let (lam_params, lam_body) =
+                 peel_lams [] (desugar_expr default_expr) in
                let fn_def : fn_def = {
                  fn_name = m.md_name;
                  fn_vis = Private;
@@ -916,9 +940,9 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                  fn_attrs = [];
                  fn_ret_ty = None;
                  fn_clauses = [{
-                   fc_params = [];
+                   fc_params = List.map (fun p -> FPNamed p) lam_params;
                    fc_guard = None;
-                   fc_body = desugar_expr default_expr;
+                   fc_body = lam_body;
                    fc_span = m.md_name.span;
                  }];
                  fn_bounds = [];

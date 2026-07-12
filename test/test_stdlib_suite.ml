@@ -10141,14 +10141,24 @@ let test_compiled_recursive_closure_capture () =
   | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
   | `Failed (_, output)
     when ir_contains output "Monomorphization limit reached" ->
-    (* KNOWN PRODUCT BUG (W2 Task2 Step 3 exposure, NOT fixed here — this is
-       a harness-only task; see specs/todos.md "Monomorphization limit
-       reached compiling a self-recursive nested closure (2026-07-02)").
-       This test used to pass vacuously: the old `if compile_rc <> 0 then
-       ()` guard silently swallowed this exact crash for years. Loud,
-       documented skip — never a silent no-op — until lib/tir/mono.ml is
-       fixed in a follow-up session. *)
-    Alcotest.skip ()
+    (* FIXED 2026-07-12: the "Monomorphization limit reached: List.fold_left
+       > 512 specializations" ICE was never a mono bug at all — the
+       typechecker's scope-blind [fn_arities] direct-call arity check saw
+       the user's top-level `fn f(m)` (arity 1) while checking STDLIB code
+       whose local param `f : b -> a -> b` shadowed the name, reported a
+       false arity error at a stdlib span (silently filtered by
+       bin/main.ml's is_user_file), "recovered" the call as a partial
+       application, and the resulting occurs-check failure linked the type
+       var to TError — poisoning the type_map fold_left was lowered from
+       (function-typed accumulator temp → runaway self-feeding
+       specializations).  Fixed in typecheck.ml: [bind_var]/[bind_linear]
+       remove the bound name from [fn_arities] (a local binding shadows the
+       module fn for the arity check), with the top-level registration
+       sites re-adding their own entries.  This arm is now a HARD FAILURE:
+       if the ICE ever reappears, the shadowing fix has regressed. *)
+    Alcotest.failf
+      "Monomorphization limit ICE reappeared (fn_arities shadowing fix \
+       regressed — see typecheck.ml bind_var):\n%s" output
   | `Failed (rc, output) ->
     Alcotest.failf
       "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
@@ -10609,6 +10619,97 @@ let test_compiled_yaml_get_str_no_hang () =
     let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
     Alcotest.(check int)
       "compiled Yaml.get_str over 4 keys terminates (exit 0, no hang, B18)"
+      0 run_rc
+
+(* Regression: an interface DEFAULT method whose body calls a sibling
+   interface method compiled to a wrong-arity call — desugar's
+   inject_defaults wrapped the default's lambda body in a ZERO-param clause
+   (fn mylt() = fn (x,y) -> ...), which lowered to a 0-arity TIR fn, while
+   interface-dispatch call sites called the mangled impl at the METHOD's
+   arity: the args were silently dropped and the returned closure POINTER
+   was bound as the Bool result — always truthy, so `mylt(Red, Green)` and
+   `mylt(Green, Red)` both printed "true" compiled (interpreter correct:
+   its call path handles over-application of a 0-param closure).  Fixed by
+   eta-expanding lambda defaults into regular n-param method clauses in
+   inject_defaults (lib/desugar/desugar.ml).  Guard: both call orders of a
+   cmp-derived `mylt` default; process_exit(1) on any wrong answer. *)
+let test_compiled_default_method_sibling_call () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_defmeth" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "defmeth.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod DefMethRegress do\n\
+    \  interface MyOrd(a) do\n\
+    \    fn mycmp : a -> a -> Int\n\
+    \    fn mylt  : a -> a -> Bool do fn (x, y) -> mycmp(x, y) < 0 end\n\
+    \  end\n\
+    \  type AppColor = Red | Green | Blue\n\
+    \  fn color_rank(c) do\n\
+    \    match c do\n\
+    \      Red -> 0\n\
+    \      Green -> 1\n\
+    \      Blue -> 2\n\
+    \    end\n\
+    \  end\n\
+    \  impl MyOrd(AppColor) do\n\
+    \    fn mycmp(a, b) do\n\
+    \      color_rank(a) - color_rank(b)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    if mylt(Red, Green) do () else process_exit(1) end\n\
+    \    if mylt(Green, Red) do process_exit(1) else () end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "defmethbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled default method calling sibling method returns per-call answers"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+
+(* Regression pin: compiled Task.await on a HEAP-value payload (String past
+   the 15-byte inline threshold, List) used to crash with "march: out of
+   memory" (the Result path's Ok payload was mis-tagged; the i64 half was
+   fixed by f89b8711 and the ptr half by the widened guard, 2026-07-06 —
+   this test pins the ptr half, which previously had no dedicated guard;
+   the specs/todos.md entry filed before that fix landed was stale). *)
+let test_compiled_task_await_heap_payload () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_await_ptr" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "await_ptr.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod AwaitPtrRegress do\n\
+    \  fn main() : Unit do\n\
+    \    let t = Task.async(fn () -> \"the quick brown fox jumps over\" ++ \" the lazy dog\")\n\
+    \    match Task.await(t) do\n\
+    \      Ok(s) -> if String.byte_size(s) == 43 do () else process_exit(1) end\n\
+    \      Err(_) -> process_exit(1)\n\
+    \    end\n\
+    \    let t2 = Task.async(fn () -> [1, 2, 3, 4, 5])\n\
+    \    match Task.await(t2) do\n\
+    \      Ok(xs) -> if List.length(xs) == 5 do () else process_exit(1) end\n\
+    \      Err(_) -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "awaitptrbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
 (* Regression: a generic helper that projects a record field carrying a
@@ -12477,6 +12578,10 @@ let stdlib_suites =
           test_compiled_tco_borrowed_fresh_value_no_premature_free;
         Alcotest.test_case "B18: compiled Yaml.get_str over 4 keys terminates, no hang" `Slow
           test_compiled_yaml_get_str_no_hang;
+        Alcotest.test_case "interface default method calling sibling: per-call answers (compiled)" `Slow
+          test_compiled_default_method_sibling_call;
+        Alcotest.test_case "Task.await heap payload (String >15B, List): no OOM (compiled)" `Slow
+          test_compiled_task_await_heap_payload;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
