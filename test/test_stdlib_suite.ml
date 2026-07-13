@@ -10409,6 +10409,45 @@ let test_compiled_hot_reload_dispatch () =
     end
   end
 
+(* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
+   Compiled end-to-end (not eval-mode) because it exercises the real
+   runtime read(0, &c, 1) syscall wrapper, not the interpreter. *)
+let test_compiled_io_read_byte () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_read_byte" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "rb.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod App do\n\
+      \  fn main() do\n\
+      \    let a = IO.read_byte()\n\
+      \    let b = IO.read_byte()\n\
+      \    let c = IO.read_byte()\n\
+      \    println(int_to_string(a) ++ \",\" ++ int_to_string(b) ++ \",\" ++ int_to_string(c))\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "rbbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    if compile_rc <> 0 then
+      Alcotest.fail "IO.read_byte: compiled test program failed to compile"
+    else begin
+      let ic = Unix.open_process_in
+        (Printf.sprintf "printf 'AB' | %s" (Filename.quote bin)) in
+      let out = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      Alcotest.(check string)
+        "IO.read_byte reads 'A','B' then -1 on EOF" "65,66,-1" out
+    end
+  end
+
 (* Regression: a user top-level function whose name collides with a stdlib
    internal helper (the canonical accumulator name `go`) silently broke the
    stdlib function.  Root cause: a local recursive fn's name was excluded from
@@ -11615,5 +11654,7 @@ let stdlib_suites =
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
+        Alcotest.test_case "IO.read_byte: reads raw stdin bytes, -1 on EOF (compiled)" `Slow
+          test_compiled_io_read_byte;
       ]);
     ]
