@@ -36,6 +36,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "4855", "--directory", "/Users/80197052/code/march/.claude/worktrees/fervent-nightingale-d0cfe8/demo_app/perihelion"],
       "port": 4855
+    },
+    {
+      "name": "perihelion-site-preview",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4856", "--directory", "/tmp/perihelion-site-preview"],
+      "port": 4856
     }
   ]
 }
