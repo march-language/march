@@ -673,10 +673,14 @@ mod Perihelion do
     end
     match game.mode do
       Orbiting(idx, ring, angle) ->
-        if game.special == Some(Perihelion.Upgrades.TrajectoryPreview) do
-          draw_trajectory_preview(ctx, Perihelion.Core.predict_trajectory(game, idx, ring, angle))
-        else
-          ()
+        -- match, not `==`, on purpose: the JS backend compiles `Option(ADT)
+        -- == Option(ADT)` to JS reference equality (===) instead of
+        -- structural equality, so a freshly-constructed `Some(...)` never
+        -- compares equal on the JS target even when contents match.
+        match game.special do
+          Some(TrajectoryPreview) ->
+            draw_trajectory_preview(ctx, Perihelion.Core.predict_trajectory(game, idx, ring, angle))
+          _ -> ()
         end
       Flying(_, _) -> () -- only meaningful while aiming, not mid-flight
     end
