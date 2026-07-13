@@ -97,6 +97,11 @@ mod Perihelion.Combat do
     if reduced < fire_rate_cooldown_floor() do fire_rate_cooldown_floor() else reduced end
   end
   fn drop_chance() : Float do 0.25 end
+  -- Star-killer is drop-only (never offered at a milestone -- see
+  -- Perihelion.Upgrades.milestone_pool), so it needs its own independent,
+  -- meaningfully-rarer roll layered on top of the base drop_chance() roll
+  -- in roll_drops -- see that function for the actual draw.
+  fn starkiller_drop_chance() : Float do 0.08 end
   fn pickup_ttl() : Float do 8.0 end
   fn pickup_radius() : Float do 12.0 end
   fn ball_radius() : Float do 6.0 end
@@ -758,10 +763,23 @@ mod Perihelion.Combat do
         let (sx, sy) = pos
         let (rng2, roll) = draw(game.rng)
         let g2 = if roll < drop_chance() do
-          let (rng3, upgrade) = Perihelion.Upgrades.roll_one(rng2, game.owned_weapons, game.special)
-          { game with
-              rng: rng3,
-              pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl(), kind: upgrade }, game.pickups) }
+          -- Star-killer's own independent, rarer roll -- see
+          -- starkiller_drop_chance() above. Only rolled for when the ship
+          -- isn't already carrying it; on success the pickup is StarKiller
+          -- directly instead of whatever roll_one would have drawn (and
+          -- roll_one's draw is skipped so the RNG isn't double-consumed).
+          let owns_starkiller = List.member(game.owned_weapons, Perihelion.Upgrades.StarKiller)
+          let (rng3, sk_roll) = draw(rng2)
+          if !owns_starkiller && sk_roll < starkiller_drop_chance() do
+            { game with
+                rng: rng3,
+                pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl(), kind: Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.StarKiller) }, game.pickups) }
+          else
+            let (rng4, upgrade) = Perihelion.Upgrades.roll_one(rng3, game.owned_weapons, game.special)
+            { game with
+                rng: rng4,
+                pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl(), kind: upgrade }, game.pickups) }
+          end
         else
           { game with rng: rng2 }
         end

@@ -628,6 +628,34 @@ mod TestPerihelionCombat do
       end
     end
 
+    -- Star-killer is drop-only (excluded from milestone_pool/roll_one), so it
+    -- needs its own independent rare roll layered on top of the base
+    -- drop_chance() roll in roll_drops -- see starkiller_drop_chance() in
+    -- perihelion_combat.march. Seed 87 empirically lands BOTH the base
+    -- drop_chance() roll (~0.032, well under 0.25) and the star-killer roll
+    -- (~0.0018, well under starkiller_drop_chance()'s 0.08) as successes
+    -- (swept seeds 0..500 against Perihelion.Level.draw_pub's first two
+    -- draws), same seed-pinning convention as the test above.
+    test "roll_drops can drop StarKiller via its own rare roll when not owned" do
+      let g0 = { base_game(0.0) with rng: Random.seed(87) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      match g2.pickups do
+        Cons(p, Nil) -> assert (p.kind == Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.StarKiller))
+        _ -> assert false
+      end
+    end
+
+    test "roll_drops never drops a duplicate StarKiller once already owned, even on the same lucky seed" do
+      let g0 = { base_game(0.0) with rng: Random.seed(87), owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      match g2.pickups do
+        Cons(p, Nil) -> assert (p.kind != Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.StarKiller))
+        _ -> assert false
+      end
+    end
+
     test "collecting an offense pickup adds the weapon, not a shield" do
       let g0 = base_game(0.0)
       let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.Homing) }

@@ -111,8 +111,11 @@ mod Perihelion.Upgrades do
     end
   end
 
-  -- Random-drop single draw: same pool as milestones (star killer handled
-  -- separately by its own rare roll in Combat -- see Task 9).
+  -- Random-drop single draw: same pool as milestones. Star killer is
+  -- deliberately absent from this pool (see milestone_pool above) and is
+  -- handled separately, by its own rare roll layered on top of the call
+  -- site's drop_chance() roll -- see Perihelion.Combat.roll_drops (and
+  -- its starkiller_drop_chance() constant) in perihelion_combat.march.
   fn roll_one(rng : Random.Rng, owned_weapons : List(WeaponKind), current_special : Option(SpecialKind)) : (Random.Rng, UpgradeKind) do
     let (rng2, picked, _) = pick_and_remove(rng, milestone_pool(owned_weapons))
     (rng2, picked)
