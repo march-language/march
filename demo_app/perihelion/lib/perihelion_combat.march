@@ -40,7 +40,7 @@ mod Perihelion.Combat do
     hunter : Bool
   }
 
-  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float, homing : Bool }
+  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float, homing : Bool, star_killer : Bool }
 
   type Pickup = { x : Float, y : Float, ttl : Float }
 
@@ -92,6 +92,15 @@ mod Perihelion.Combat do
   fn pickup_ttl() : Float do 8.0 end
   fn pickup_radius() : Float do 12.0 end
   fn ball_radius() : Float do 6.0 end
+  fn starkiller_cooldown_seconds() : Float do 12.0 end
+  fn star_kill_radius() : Float do 20.0 end
+
+  doc "Which ladder index the star-killer reticle currently sits on: current+1..current+3, clamped to the ladder's real length."
+  fn starkiller_target_idx(game : Game) : Int do
+    let raw = game.current + 1 + game.starkiller_target_offset
+    let max_idx = List.length(game.stars) - 1
+    if raw > max_idx do max_idx else raw end
+  end
 
   -- ── Derived positions ────────────────────────────────────────────────
   doc "A ship's current world position."
@@ -238,7 +247,8 @@ mod Perihelion.Combat do
         player_shots: p_shots,
         enemy_shots: e_shots,
         pickups: pickups,
-        fire_cooldown: if g1.fire_cooldown > 0.0 do g1.fire_cooldown - dt_s else 0.0 end }
+        fire_cooldown: if g1.fire_cooldown > 0.0 do g1.fire_cooldown - dt_s else 0.0 end,
+        starkiller_cooldown: if g1.starkiller_cooldown > 0.0 do g1.starkiller_cooldown - dt_s else 0.0 end }
   end
 
   -- Nearest star to (x, y) within asteroid_gravity_range(), if any (plain
@@ -396,9 +406,9 @@ mod Perihelion.Combat do
     let dy = game.ball_y - sy
     let dist = Math.sqrt(dx * dx + dy * dy)
     if dist > 0.0 do
-      { x: sx, y: sy, vx: dx / dist * enemy_shot_speed(), vy: dy / dist * enemy_shot_speed(), ttl: shot_ttl(), homing: false }
+      { x: sx, y: sy, vx: dx / dist * enemy_shot_speed(), vy: dy / dist * enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
     else
-      { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl(), homing: false }
+      { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
     end
   end
 
@@ -533,11 +543,11 @@ mod Perihelion.Combat do
   fn spread_angle_step() : Float do 0.5236 end -- 30 degrees in radians
 
   pfn make_shot(x : Float, y : Float, ax : Float, ay : Float) : Shot do
-    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: false }
+    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
   end
 
   pfn make_homing_shot(x : Float, y : Float, ax : Float, ay : Float) : Shot do
-    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: true }
+    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: true, star_killer: false }
   end
 
   pfn rotate(ax : Float, ay : Float, angle : Float) : (Float, Float) do
@@ -577,11 +587,39 @@ mod Perihelion.Combat do
             Base -> Cons(make_shot(game.ball_x, game.ball_y, ax, ay), Nil)
             Homing -> Cons(make_homing_shot(game.ball_x, game.ball_y, ax, ay), Nil)
             Spread -> spread_shots(game.ball_x, game.ball_y, ax, ay)
-            StarKiller -> Nil -- built in Task 6
+            StarKiller ->
+              if game.starkiller_cooldown > 0.0 do
+                Nil
+              else
+                match Perihelion.Core.star_at(game, starkiller_target_idx(game)) do
+                  None -> Nil
+                  Some(target) ->
+                    let tdx = target.x - game.ball_x
+                    let tdy = target.y - game.ball_y
+                    let tdist = Math.sqrt(tdx * tdx + tdy * tdy)
+                    if tdist <= 0.0 do Nil else
+                      Cons({ x: game.ball_x, y: game.ball_y,
+                             vx: (tdx / tdist) * player_shot_speed(),
+                             vy: (tdy / tdist) * player_shot_speed(),
+                             ttl: shot_ttl() * 3.0, homing: false, star_killer: true }, Nil)
+                    end
+                end
+              end
+          end
+          -- StarKiller shouldn't ALSO reset the normal fire_cooldown -- it
+          -- has its own, much longer cooldown that gates it instead.
+          let cooldown2 = match Perihelion.Core.active_weapon(game) do
+            StarKiller -> game.fire_cooldown -- unchanged; starkiller_cooldown gates it instead
+            _ -> effective_fire_cooldown(game)
+          end
+          let starkiller_cd2 = match Perihelion.Core.active_weapon(game) do
+            StarKiller -> if List.is_empty(new_shots) do game.starkiller_cooldown else starkiller_cooldown_seconds() end
+            _ -> game.starkiller_cooldown
           end
           { g2 with
               player_shots: List.append(g2.player_shots, new_shots),
-              fire_cooldown: effective_fire_cooldown(game) }
+              fire_cooldown: cooldown2,
+              starkiller_cooldown: starkiller_cd2 }
       end
     end
   end
@@ -589,10 +627,49 @@ mod Perihelion.Combat do
   -- ── collide ──────────────────────────────────────────────────────────
   doc "Resolve all collisions: shots vs hazards (score/drops), ball vs hazards (shield or end_run), ball vs pickups."
   fn collide(game : Game) : Game do
-    let g1 = collide_shots_asteroids(game)
+    let g0 = collide_shots_stars(game)
+    let g1 = collide_shots_asteroids(g0)
     let g2 = collide_shots_ships(g1)
     let g3 = collide_ball_pickups(g2)
     collide_ball_hazards(g3)
+  end
+
+  -- Ship.star_idx is a positional index into game.stars -- after remove_star
+  -- shifts everything past `tidx` down by one, a surviving ship parked
+  -- further up the ladder would silently reattach to the WRONG star unless
+  -- its index is shifted too. Ships AT tidx die with their star; ships
+  -- BEFORE tidx are untouched (removal only ever targets current+1..+3, so
+  -- nothing before it moves).
+  pfn retarget_ships_past_removal(ships : List(Ship), tidx : Int) : List(Ship) do
+    List.map(
+      List.filter(ships, fn sh -> sh.star_idx != tidx),
+      fn sh -> if sh.star_idx > tidx do { sh with star_idx: sh.star_idx - 1 } else sh end)
+  end
+
+  -- Star-killer shots have no distinguishing target reference (unlike
+  -- homing), so this checks the current star-killer shot(s) against the
+  -- CURRENT reticle target: since the reticle only ever advances forward
+  -- (never past a still-alive star), a live star-killer shot is always aimed
+  -- at whatever starkiller_target_idx resolves to right now.
+  pfn collide_shots_stars(game : Game) : Game do
+    let sk_shots = List.filter(game.player_shots, fn s -> s.star_killer)
+    match sk_shots do
+      Nil -> game
+      Cons(s, _) ->
+        let tidx = starkiller_target_idx(game)
+        match Perihelion.Core.star_at(game, tidx) do
+          None -> game
+          Some(target) ->
+            if hits(s.x, s.y, star_kill_radius(), target.x, target.y, 0.0) do
+              let g2 = Perihelion.Core.remove_star(game, tidx)
+              { g2 with
+                  ships: retarget_ships_past_removal(g2.ships, tidx),
+                  player_shots: List.filter(game.player_shots, fn sh -> !sh.star_killer) }
+            else
+              game
+            end
+        end
+    end
   end
 
   pfn shot_hits_at(s : Shot, x : Float, y : Float, r : Float) : Bool do

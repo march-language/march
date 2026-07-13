@@ -751,4 +751,43 @@ mod TestPerihelionCore do
     end
   end
 
+  describe "star killer targeting (W/D)" do
+    test "D advances the target offset, wrapping 0/1/2" do
+      let g0 = mk_game(0.0)
+      let g2 = step_keys(g0, Cons("d", Nil))
+      assert (g2.starkiller_target_offset == 1)
+      let g3 = step_keys(g2, Cons("d", Nil))
+      assert (g3.starkiller_target_offset == 2)
+      let g4 = step_keys(g3, Cons("d", Nil))
+      assert (g4.starkiller_target_offset == 0)
+    end
+
+    test "W also decrements the target offset (in addition to its existing ring-out effect)" do
+      let g0 = { mk_game(0.0) with starkiller_target_offset: 2 }
+      let g2 = step_keys(g0, Cons("w", Nil))
+      assert (g2.starkiller_target_offset == 1)
+    end
+  end
+
+  describe "remove_star" do
+    test "removing a future star shrinks the ladder and shifts later stars down" do
+      let g0 = mk_game(0.0) -- stars: [s0 (idx 0), s1 (idx 1)]
+      let g2 = { g0 with stars: List.append(g0.stars, Cons(mk_star(200.0, 200.0), Nil)) } -- add s2 (idx 2)
+      let g3 = Perihelion.Core.remove_star(g2, 1)
+      assert (List.length(g3.stars) == 2)
+      -- old s2 (at 200,200) is now index 1
+      match List.nth_opt(g3.stars, 1) do
+        Some(s) -> assert (approx(s.y, 200.0))
+        None -> assert false
+      end
+    end
+
+    test "removing the player's immediate next star does not change `current`" do
+      let g0 = mk_game(0.0) -- current = 0
+      let g2 = Perihelion.Core.remove_star(g0, 1)
+      assert (g2.current == 0)
+      assert (List.length(g2.stars) == 1)
+    end
+  end
+
 end

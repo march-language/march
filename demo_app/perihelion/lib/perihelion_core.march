@@ -137,6 +137,17 @@ mod Perihelion.Core do
     List.nth_opt(game.stars, i)
   end
 
+  -- No List.filter_indexed in stdlib -- List.take/List.drop compose to the
+  -- same "everything except index i" result.
+  pfn remove_at(xs : List(Star), idx : Int) : List(Star) do
+    List.append(List.take(xs, idx), List.drop(xs, idx + 1))
+  end
+
+  doc "Remove the star at ladder index `idx` (star-killer's effect). Anything orbiting/targeting it is the CALLER's responsibility to clean up (Combat does this for ships, since Core doesn't know about Ship)."
+  fn remove_star(game : Game, idx : Int) : Game do
+    { game with stars: remove_at(game.stars, idx) }
+  end
+
   doc "How many orbit rings star `s` has."
   fn ring_count(s : Star) : Int do
     List.length(s.orbits)
@@ -187,6 +198,20 @@ mod Perihelion.Core do
     if raw < 0 do raw + n else raw end
   end
 
+  -- D advances the star-killer reticle (targets a farther star), W pulls it
+  -- back in -- edge-triggered, same convention as adjust_ring/adjust_weapon.
+  -- W does double duty here: it ALSO steps the orbit ring outward (see
+  -- adjust_ring/step_orbit) -- the two effects are orthogonal (ring-stepping
+  -- only matters while orbiting normally; retargeting only matters/is drawn
+  -- when StarKiller is the active weapon), so both firing unconditionally is
+  -- intentional, not a bug.
+  pfn adjust_starkiller_target(offset : Int, keys : List(String)) : Int do
+    let dn = List.any(keys, fn k -> k == "d" || k == "D")
+    let up = List.any(keys, fn k -> k == "w" || k == "W")
+    let delta = (if dn do 1 else 0 end) - (if up do 1 else 0 end)
+    int_mod(offset + delta + 3, 3) -- +3 before mod to keep it non-negative for delta = -1
+  end
+
   -- ── Update ───────────────────────────────────────────────────────────
   doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
   fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
@@ -228,7 +253,8 @@ mod Perihelion.Core do
       Flying(vx, vy)             -> step_flight(game, vx, vy, dt_s)
     end
     let n = List.length(g0.owned_weapons)
-    let g1 = { g0 with active_weapon_idx: adjust_weapon(g0.active_weapon_idx, keys, n) }
+    let g1a = { g0 with active_weapon_idx: adjust_weapon(g0.active_weapon_idx, keys, n) }
+    let g1 = { g1a with starkiller_target_offset: adjust_starkiller_target(g1a.starkiller_target_offset, keys) }
     match g1.phase do
       Playing ->
         let g2 = Perihelion.Combat.step(g1, dt_s)

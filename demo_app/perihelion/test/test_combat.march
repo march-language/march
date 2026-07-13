@@ -66,6 +66,17 @@ mod TestPerihelionCombat do
     end
   end
 
+  -- Step Combat (step + collide) `n` times without touching Core.update --
+  -- this file tests Combat in isolation.
+  pfn run_n_ticks(game : Game, n : Int) : Game do
+    if n == 0 do
+      game
+    else
+      let g2 = Perihelion.Combat.collide(Perihelion.Combat.step(game, dt()))
+      run_n_ticks(g2, n - 1)
+    end
+  end
+
   pfn no_keys() : List(String) do
     Nil
   end
@@ -206,7 +217,7 @@ mod TestPerihelionCombat do
     test "asteroids drift, arc toward a nearby star, and shots age" do
       let g0 = base_game(0.0)
       let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01, homing: false }
+      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01, homing: false, star_killer: false }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.step(g, dt())
       match g2.asteroids do
@@ -356,7 +367,7 @@ mod TestPerihelionCombat do
     test "player shot kills asteroid and scores multiplier" do
       let g0 = base_game(0.0)
       let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false }
+      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil), multiplier: 3 }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.is_empty(g2.asteroids))
@@ -367,7 +378,7 @@ mod TestPerihelionCombat do
     test "shot misses outside radii sum" do
       let g0 = base_game(0.0)
       let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false }
+      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.length(g2.asteroids) == 1)
@@ -383,7 +394,7 @@ mod TestPerihelionCombat do
                    mode: ShipOrbiting(0.0), fire_cooldown: 1.0, idle_timer: 10.0, hunter: false }
       let pos = Perihelion.Combat.ship_pos(ship)
       let (sx, sy) = pos
-      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false }
+      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
       let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: Random.seed(12345) }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.is_empty(g2.ships))
@@ -448,6 +459,45 @@ mod TestPerihelionCombat do
       assert (List.length(g2.ships) == List.length(g4.ships))
       assert (rng_eq(g2.rng, g4.rng))
       assert (!rng_eq(g2.rng, Random.seed(999)))
+    end
+  end
+
+  describe "star killer" do
+    test "firing while StarKiller is active spawns exactly one shot aimed at the targeted star" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)), active_weapon_idx: 1 }
+      -- targets current+1 = star index 1 (star at 200, 360)
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (List.length(g2.player_shots) == 1)
+      assert (g2.starkiller_cooldown > 0.0)
+    end
+
+    test "star-killer projectile reaching its target star destroys it and shifts the ladder" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)), active_weapon_idx: 1 }
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      -- run enough steps for the shot to reach star 1 (200, 360) from the fire point
+      let g3 = run_n_ticks(g2, 200)
+      assert (List.length(g3.stars) == 1)
+    end
+
+    test "a ship parked further up the ladder than the destroyed star is re-indexed, not silently reattached to the wrong star" do
+      let s2 = mk_star(200.0, 100.0) -- a 3rd star, ahead of the star-killer's target (idx 1)
+      let base = base_game(0.0)
+      let g0 = { base with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   stars: List.append(base.stars, Cons(s2, Nil)) }
+      let ship = { star_idx: 2, x: s2.x, y: s2.y, mode: ShipOrbiting(0.0),
+                   fire_cooldown: 5.0, idle_timer: 10.0, hunter: false }
+      let g1 = { g0 with ships: Cons(ship, Nil) }
+      let g2 = Perihelion.Combat.fire(g1, space(), cursor_east(), dt())
+      -- run enough steps for the shot to reach star 1 (200, 360), destroying it;
+      -- star 2 (200, 100) shifts down to index 1
+      let g3 = run_n_ticks(g2, 200)
+      assert (List.length(g3.stars) == 2)
+      match g3.ships do
+        Cons(sh, Nil) -> assert (sh.star_idx == 1)
+        _ -> assert false
+      end
     end
   end
 
