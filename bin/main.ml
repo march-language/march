@@ -902,6 +902,12 @@ let rec march_files_in dir =
   let entries = try Sys.readdir dir with Sys_error _ -> [||] in
   Array.sort compare entries;
   Array.fold_left (fun acc entry ->
+    (* Skip dotfiles/dotdirs and macOS AppleDouble junk. "._x.march" is a binary
+       resource-fork file macOS creates (invisible there, a real file on Linux)
+       that ends in ".march" but is NOT source — the lexer chokes on its leading
+       NUL. Also skips .git/.march/etc. Never a source module either way. *)
+    if String.length entry > 0 && entry.[0] = '.' then acc
+    else
     let path = Filename.concat dir entry in
     match Sys.is_directory path with
     | true -> acc @ march_files_in path

@@ -115,6 +115,12 @@ let collect_lib_files dir =
       let entries = try Sys.readdir d with Sys_error _ -> [||] in
       Array.sort compare entries;
       Array.fold_left (fun acc name ->
+          (* Skip dotfiles/dotdirs and macOS AppleDouble junk ("._x.march": a
+             binary resource-fork file that ends in ".march" but is not source —
+             invisible on macOS, a real NUL-leading file on Linux that the lexer
+             rejects). Also skips .git/.march/etc. Never a source module. *)
+          if String.length name > 0 && name.[0] = '.' then acc
+          else
           let p = Filename.concat d name in
           (* A dangling symlink makes [Sys.is_directory] (which stats through
              the link) raise [Sys_error]; skip any entry we can't stat rather
