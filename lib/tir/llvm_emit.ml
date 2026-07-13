@@ -614,7 +614,7 @@ let is_builtin_fn name =
                  (* Panic/todo/unreachable internal builtins *)
                  "panic_"; "todo_"; "unreachable_";
                  (* IO read builtins *)
-                 "io_read_line"; "read_line";
+                 "io_read_line"; "read_line"; "io_read_byte"; "read_byte";
                  (* Logger builtins *)
                  "logger_set_level"; "logger_get_level";
                  "logger_add_context"; "logger_clear_context";
@@ -685,6 +685,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "panic_" | "todo_" | "unreachable_" -> Some (Tir.TPtr Tir.TUnit)  (* polymorphic `a` → ptr *)
   | "println" | "print" | "print_stderr" -> Some Tir.TUnit
   | "io_read_line" | "read_line"         -> Some Tir.TString
+  | "io_read_byte" | "read_byte"         -> Some Tir.TInt
   (* Logger builtins *)
   | "logger_set_level"     -> Some Tir.TUnit
   | "logger_get_level"     -> Some Tir.TInt
@@ -975,6 +976,7 @@ let mangle_extern : string -> string = function
   | "print"         -> "march_print"
   | "print_stderr"  -> "march_print_stderr"
   | "io_read_line" | "read_line" -> "march_io_read_line"
+  | "io_read_byte" | "read_byte" -> "march_io_read_byte"
   | "int_to_string" -> "march_int_to_string"
   | "float_to_string" -> "march_float_to_string"
   | "bool_to_string"  -> "march_bool_to_string"
@@ -3377,7 +3379,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       || builtin_ret_ty f.Tir.v_name <> None
       || (match f.Tir.v_name with
           | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | "print" | "print_stderr" | "io_read_line" | "read_line"
+          | "io_read_byte" | "read_byte" -> true
           | _ -> false)
     in
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
@@ -3658,7 +3661,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       || builtin_ret_ty f.Tir.v_name <> None
       || (match f.Tir.v_name with
           | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | "print" | "print_stderr" | "io_read_line" | "read_line"
+          | "io_read_byte" | "read_byte" -> true
           | _ -> false)
     in
     if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
@@ -5907,6 +5911,7 @@ declare i32  @march_test_report()
 declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
+declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_html_auto_escape(ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
@@ -6477,7 +6482,8 @@ let emit_module ?(fast_math=false) ?(pmap_threshold=1024) ?(target=Native)
      Also skip functions that are members of a mutual-TCO group — those were
      already emitted (as wrappers) by emit_mutual_tco_group above. *)
   let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
-                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
+                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line";
+                           "io_read_byte"; "read_byte"] in
   let migrate_suffix = "_migrate_state" in
   let migrate_suffix_len = String.length migrate_suffix in
   List.iter (fun fn ->
