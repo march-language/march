@@ -1,0 +1,80 @@
+name: Regenerate Perihelion Assets
+
+# docs/perihelion.html serves the compiled Perihelion demo as a static
+# fullscreen page. deploy-pages.yml only runs Jekyll over the committed
+# site — it never invokes the March compiler — so docs/assets/perihelion/*.mjs
+# is a checked-in build artifact that goes stale whenever the March source or
+# the JS runtime shims change, unless regenerated.
+#
+# This workflow regenerates docs/assets/perihelion/ on every relevant source
+# change and commits the result, so the live page can never drift from
+# demo_app/perihelion/lib/*.march.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'demo_app/perihelion/lib/**'
+      - 'runtime/march_runtime.mjs'
+      - 'runtime/march_dom.mjs'
+      - 'runtime/march_canvas.mjs'
+      - 'runtime/march_audio.mjs'
+      - 'scripts/gen-perihelion-assets.sh'
+      - '.github/workflows/gen-perihelion-assets.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Avoid races / duplicate commits if several pushes land in quick succession.
+concurrency:
+  group: gen-perihelion-assets
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          # libblake3-dev is not packaged for Ubuntu 24.04; build from source (same as ci.yml).
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Install dependencies
+        run: opam install --deps-only --with-test -y .
+
+      - name: Regenerate Perihelion assets
+        run: |
+          eval $(opam env)
+          scripts/gen-perihelion-assets.sh
+
+      - name: Commit regenerated assets
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # No [skip ci]: the commit touches only docs/assets/perihelion/**, which is
+          # NOT in this workflow's trigger paths (so it won't self-retrigger) but IS in
+          # deploy-pages.yml's (docs/**), so the regenerated assets get published.
+          if git status --porcelain docs/assets/perihelion | grep -q .; then
+            git add docs/assets/perihelion
+            git commit -m "docs(perihelion): regenerate compiled assets from March source"
+            git push
+          else
+            echo "docs/assets/perihelion already up to date — nothing to commit."
+          fi

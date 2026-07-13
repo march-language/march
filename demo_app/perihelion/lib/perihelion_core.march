@@ -9,36 +9,70 @@
 mod Perihelion.Core do
 
   -- ── Tuning constants ─────────────────────────────────────────────────
-  fn view_w() : Float do 400.0 end
-  fn view_h() : Float do 640.0 end
+  -- view_w/view_h are NOT constants — the game is full-screen, so the world's
+  -- visible size is live on Game (view_w/view_h fields, refreshed from
+  -- Dom.window_size() every tick). These two are only the boot-time default
+  -- for new_game/callers with no real viewport yet.
+  fn default_view_w() : Float do 400.0 end
+  fn default_view_h() : Float do 640.0 end
   fn dt() : Float do 0.0166667 end
-  fn orbit_speed() : Float do 2.4 end
+  fn orbit_speed() : Float do 1.8 end
   fn fly_speed() : Float do 340.0 end
   fn assist_strength() : Float do 1600.0 end
   fn assist_range_mult() : Float do 2.4 end
   fn cam_ease() : Float do 3.0 end
   fn cam_anchor() : Float do 0.6 end
+  -- Horizontal dead zone: camera_x holds still until the focus point (ball
+  -- while flying, current star while orbiting) would render outside
+  -- [cam_dead_zone, 1 - cam_dead_zone] of the screen width, then eases just
+  -- enough to bring it back to that edge -- not all the way to center.
+  fn cam_dead_zone() : Float do 0.25 end
   fn kill_margin() : Float do 40.0 end
   fn overshoot_margin() : Float do 150.0 end
   fn fall_margin() : Float do 200.0 end
+  -- Ladder generation stays this many screen-heights ahead of the visible
+  -- top edge (world y = camera_y), so a newly-generated star is always
+  -- already off-screen before it scrolls into view -- no visual pop-in.
+  fn lookahead_screens() : Float do 1.5 end
   fn two_pi() : Float do 6.283185307179586 end
   fn mult_cap() : Int do 5 end
 
-  doc "Orbit direction for the star at index `i`: alternates +1.0 / -1.0."
-  fn orbit_dir(i : Int) : Float do
-    if i % 2 == 0 do 1.0 else 0.0 - 1.0 end
+  doc "Orbit direction, the same for every star: capturing a new star must never reverse the player's spin."
+  fn orbit_dir(_i : Int) : Float do
+    1.0
   end
 
   -- ── Types ────────────────────────────────────────────────────────────
-  type Star = { x : Float, y : Float, radius : Float, capture_radius : Float }
+  -- One orbit ring: a radius the ball can circle at, and the angular-speed
+  -- multiplier while on it. A star carries a non-empty list of these ordered
+  -- inner -> outer (index 0 = tightest, last = capture_radius = the boundary
+  -- that triggers capture). Single-orbit stars just have one entry.
+  type Orbit = { radius : Float, speed_mult : Float }
 
-  type BallMode = Orbiting(Int, Float) | Flying(Float, Float)
+  -- speed_mult scales this star's orbit angular speed (see step_orbit) --
+  -- some stars spin faster or slower than the base orbit_speed(). It is the
+  -- OUTER ring's speed; inner rings (if any) carry their own in `orbits`.
+  -- capture_radius stays the outermost ring's radius (the capture boundary),
+  -- so ship/asteroid/find_capture logic keyed on it is unaffected.
+  type Star = { x : Float, y : Float, radius : Float, capture_radius : Float, speed_mult : Float,
+                orbits : List(Orbit) }
+
+  -- Orbiting(star_idx, ring_idx, angle): ring_idx indexes into the star's
+  -- `orbits` (0 = innermost). W/S step it out/in (see step_orbit).
+  type BallMode = Orbiting(Int, Int, Float) | Flying(Float, Float)
 
   type Phase = Ready | Playing | Over
 
   type RunRecord = { score : Int, stars : Int, max_mult : Int }
 
   type Game = {
+    -- The one master seed for this run: everything random -- the gameplay
+    -- rng below, and (via Perihelion.Nebula/the shell's starfield hash) the
+    -- nebula layout and background starfield -- derives from it, so a given
+    -- seed reproduces the ENTIRE run. Set once at run start (fresh_run) and
+    -- never mutated during play; a new run (boot/restart/reset) draws a
+    -- fresh one.
+    seed : Int,
     phase : Phase,
     ball_x : Float,
     ball_y : Float,
@@ -48,6 +82,11 @@ mod Perihelion.Core do
     score : Int,
     best : Int,
     camera_y : Float,
+    -- Horizontal camera offset. Unlike camera_y (which always follows the
+    -- focus point), camera_x only pans when the focus drifts outside a
+    -- dead zone -- see step_camera -- so most of the time it stays put
+    -- (world x == screen x) rather than constantly re-centering.
+    camera_x : Float,
     rng : Random.Rng,
     asteroids : List(Asteroid),
     ships : List(Ship),
@@ -61,7 +100,18 @@ mod Perihelion.Core do
     loop_angle : Float,
     fire_cooldown : Float,
     spawn_timer : Float,
-    runs : List(RunRecord)
+    runs : List(RunRecord),
+    view_w : Float,
+    view_h : Float,
+    -- Transient one-frame signals, not persistent state -- Combat.collide /
+    -- on_capture set these fresh every call (never accumulate across
+    -- frames); the shell just reads them once per tick, same "read-once"
+    -- shape as taps/key_presses. fx_bursts: world-space points where an
+    -- asteroid died (shot or collision) THIS frame, for a particle burst.
+    -- capture_flash: the star just captured (forward progress only), for a
+    -- brief highlight pulse.
+    fx_bursts : List((Float, Float)),
+    capture_flash : Option((Float, Float))
   }
 
   -- ── Helpers ──────────────────────────────────────────────────────────
@@ -70,50 +120,95 @@ mod Perihelion.Core do
     List.nth_opt(game.stars, i)
   end
 
-  -- ── Update ───────────────────────────────────────────────────────────
-  doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps and key presses."
-  fn update(game : Game, taps : List((Int, Int)), keys : List(String), dt_s : Float) : Game do
-    let tapped = !List.is_empty(taps)
-    match game.phase do
-      Ready ->
-        if tapped do { game with phase: Playing } else game end
-      Over ->
-        if tapped do restart(game) else game end
-      Playing ->
-        step_playing(game, tapped, keys, dt_s)
+  doc "How many orbit rings star `s` has."
+  fn ring_count(s : Star) : Int do
+    List.length(s.orbits)
+  end
+
+  doc "Ring `i` of star `s` (0 = innermost). Falls back to a ring at the capture radius if `i` is somehow out of range."
+  fn ring_at(s : Star, i : Int) : Orbit do
+    match List.nth_opt(s.orbits, i) do
+      Some(o) -> o
+      None    -> { radius: s.capture_radius, speed_mult: s.speed_mult }
     end
   end
 
-  pfn step_playing(game : Game, tapped : Bool, keys : List(String), dt_s : Float) : Game do
+  doc "Index of the outermost ring (the capture boundary)."
+  fn outer_ring(s : Star) : Int do
+    ring_count(s) - 1
+  end
+
+  -- W steps outward (toward a wider ring / higher index), S steps inward,
+  -- clamped to [0, n-1]. Edge-triggered: one keypress = one step. Both W and
+  -- S pressed the same frame cancel out. Single-ring stars (n == 1) clamp to
+  -- 0, so W/S are silently no-ops there.
+  pfn adjust_ring(ring_idx : Int, keys : List(String), n : Int) : Int do
+    let out = List.any(keys, fn k -> k == "w" || k == "W")
+    let inn = List.any(keys, fn k -> k == "s" || k == "S")
+    let delta = (if out do 1 else 0 end) - (if inn do 1 else 0 end)
+    let target = ring_idx + delta
+    if target < 0 do 0 else if target > n - 1 do n - 1 else target end end
+  end
+
+  -- ── Update ───────────────────────────────────────────────────────────
+  doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
+  fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
+    -- fx_bursts/capture_flash are read-once signals: reset here so a frame
+    -- with no new event never re-serves a stale one; Combat.collide /
+    -- on_capture overwrite them later THIS SAME pipeline call if something
+    -- actually happens.
+    let g0 = { game with view_w: view_w, view_h: view_h, fx_bursts: Nil, capture_flash: None }
+    -- R hard-resets from ANY phase: abandon the current run and return to a
+    -- fresh "tap to start" board. Persisted best + run history are kept (a
+    -- reset is not a finished run, so it neither records nor updates them).
+    if List.any(keys, fn k -> k == "r" || k == "R") do
+      reset(g0)
+    else
+      let tapped = !List.is_empty(taps)
+      match g0.phase do
+        Ready ->
+          if tapped do { g0 with phase: Playing } else g0 end
+        Over ->
+          if tapped do restart(g0) else g0 end
+        Playing ->
+          step_playing(g0, tapped, keys, cursor, dt_s)
+      end
+    end
+  end
+
+  pfn step_playing(game : Game, tapped : Bool, keys : List(String), cursor : (Int, Int), dt_s : Float) : Game do
     let g1 = match game.mode do
-      Orbiting(idx, angle) -> step_orbit(game, idx, angle, tapped, dt_s)
-      Flying(vx, vy)       -> step_flight(game, vx, vy, dt_s)
+      Orbiting(idx, ring, angle) -> step_orbit(game, idx, ring, angle, tapped, keys, dt_s)
+      Flying(vx, vy)             -> step_flight(game, vx, vy, dt_s)
     end
     match g1.phase do
       Playing ->
         let g2 = Perihelion.Combat.step(g1, dt_s)
-        let g3 = Perihelion.Combat.fire(g2, keys, dt_s)
+        let g3 = Perihelion.Combat.fire(g2, keys, cursor, dt_s)
         let g4 = Perihelion.Combat.collide(g3)
         match g4.phase do
-          Playing -> step_camera(g4, dt_s)
+          Playing -> top_up(step_camera(g4, dt_s))
           _ -> g4
         end
       _ -> g1
     end
   end
 
-  pfn step_orbit(game : Game, idx : Int, angle : Float, tapped : Bool, dt_s : Float) : Game do
+  pfn step_orbit(game : Game, idx : Int, ring : Int, angle : Float, tapped : Bool, keys : List(String), dt_s : Float) : Game do
     match star_at(game, idx) do
       None -> game
       Some(s) ->
         if tapped do
           release(game, idx, angle)
         else
-          let a2 = angle + orbit_dir(idx) * orbit_speed() * dt_s
-          let r = s.capture_radius
+          -- W/S may hop to an adjacent ring (same angle, new radius/speed).
+          let ring2 = adjust_ring(ring, keys, ring_count(s))
+          let o = ring_at(s, ring2)
+          let a2 = angle + orbit_dir(idx) * orbit_speed() * o.speed_mult * dt_s
+          let r = o.radius
           { game with
-              mode: Orbiting(idx, a2),
-              loop_angle: game.loop_angle + orbit_speed() * dt_s,
+              mode: Orbiting(idx, ring2, a2),
+              loop_angle: game.loop_angle + orbit_speed() * o.speed_mult * dt_s,
               ball_x: s.x + Math.cos(a2) * r,
               ball_y: s.y + Math.sin(a2) * r }
         end
@@ -180,11 +275,18 @@ mod Perihelion.Core do
   end
 
   -- Any star's ring captures — provided the ball is APPROACHING it
-  -- (velocity . (star - ball) > 0). A tangent release is exactly
-  -- perpendicular to its own star's radial, so the origin star cannot
-  -- instantly recapture; incoming paths across ANY ring (older stars
-  -- included) capture as the player expects. Grace includes the ball's
-  -- own radius so a visual ring-touch counts.
+  -- (velocity . (star - ball) > 0), EXCEPT the star just released from
+  -- (index == current). A tangent release is perpendicular to its own
+  -- star's radial, so `approaching` is ~0 at the release instant — but that
+  -- guard only holds for that one frame: the capture-assist steering force
+  -- (assist_strength 1600 vs fly_speed 340) can curve the ball back into
+  -- the origin ring within a few frames, at which point it IS approaching
+  -- again and gets recaptured — the ball never escapes and a tap "does
+  -- nothing" (release fires, then instant re-grab). Excluding index==current
+  -- enforces the intended "can't recapture the star you just left" robustly.
+  -- Rescue captures of OLDER rings (index < current) and forward captures
+  -- (index > current) are unaffected. Grace includes the ball's own radius
+  -- so a visual ring-touch counts.
   pfn find_capture(game : Game, vx : Float, vy : Float, stars : List(Star), i : Int) : Option((Int, Star)) do
     match stars do
       Nil -> None
@@ -193,7 +295,7 @@ mod Perihelion.Core do
         let dy = s.y - game.ball_y
         let grace = s.capture_radius + Perihelion.Combat.ball_radius()
         let approaching = vx * dx + vy * dy > 0.0
-        if approaching && Math.sqrt(dx * dx + dy * dy) <= grace do
+        if i != game.current && approaching && Math.sqrt(dx * dx + dy * dy) <= grace do
           Some((i, s))
         else
           find_capture(game, vx, vy, rest, i + 1)
@@ -219,8 +321,11 @@ mod Perihelion.Core do
   -- score, multiplier resets.
   pfn on_capture(game : Game, captured : Star, idx : Int) : Game do
     let angle = Math.atan2(game.ball_y - captured.y, game.ball_x - captured.x)
+    -- Land on the outermost ring (the capture boundary just crossed);
+    -- capture_radius == that ring's radius, so the snap position is exact.
+    -- The player descends to tighter rings with S.
     let snapped = { game with
-        mode: Orbiting(idx, angle),
+        mode: Orbiting(idx, outer_ring(captured), angle),
         loop_angle: 0.0,
         ball_x: captured.x + Math.cos(angle) * captured.capture_radius,
         ball_y: captured.y + Math.sin(angle) * captured.capture_radius }
@@ -236,26 +341,33 @@ mod Perihelion.Core do
           score: game.score + new_mult,
           stars_chained: game.stars_chained + 1,
           multiplier: new_mult,
-          max_mult: max2(game.max_mult, new_mult) })
+          max_mult: max2(game.max_mult, new_mult),
+          capture_flash: Some((captured.x, captured.y)) })
     else
       { snapped with current: idx, multiplier: 1 }
     end
   end
 
-  -- Keep at least two stars above the current one; each appended star rolls
-  -- an enemy-ship spawn. (Skip-a-rung captures can consume lookahead faster
-  -- than one-per-capture generation replaces it.)
+  -- Keep the ladder generated lookahead_screens() screen-heights above the
+  -- visible top edge -- distance-based rather than a fixed star count, so a
+  -- tall full-screen viewport (which can see much further ahead than the
+  -- original 640px design) never scrolls into a star that pops into
+  -- existence right as it enters view. Each appended star rolls an enemy-ship
+  -- spawn. Called both defensively every frame (step_playing) and eagerly
+  -- right after a capture (skip-a-rung captures can consume lookahead faster
+  -- than the per-frame call alone would replace it).
   pfn top_up(game : Game) : Game do
-    if List.length(game.stars) - 1 - game.current >= 2 do
-      game
-    else
-      let fallback = { x: view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
-      let top = top_star(game.stars, fallback)
-      let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top)
+    let fallback = { x: game.view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0,
+                     orbits: Cons({ radius: 54.0, speed_mult: 1.0 }, Nil) }
+    let top = top_star(game.stars, fallback)
+    if top.y > game.camera_y - game.view_h * lookahead_screens() do
+      let (fresh, rng2) = Perihelion.Level.next_star(game.rng, top, game.view_w)
       let g2 = { game with
           stars: List.append(game.stars, Cons(fresh, Nil)),
           rng: rng2 }
       top_up(Perihelion.Combat.maybe_spawn_ship(g2, List.length(g2.stars) - 1))
+    else
+      game
     end
   end
 
@@ -281,12 +393,13 @@ mod Perihelion.Core do
   end
 
   pfn check_death(game : Game) : Game do
-    let below = game.ball_y > game.camera_y + view_h() + kill_margin()
-    let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > view_w() + kill_margin()
+    let below = game.ball_y > game.camera_y + game.view_h + kill_margin()
+    let off_side = game.ball_x < 0.0 - kill_margin() || game.ball_x > game.view_w + kill_margin()
     -- Overshoot: sailed well past the target star with no capture — without
     -- this, an upward miss never triggers ANY end state (no gravity, no top
     -- kill) and the run dangles forever off-screen.
-    let fallback = { x: view_w() / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0 }
+    let fallback = { x: game.view_w / 2.0, y: 520.0, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0,
+                     orbits: Cons({ radius: 54.0, speed_mult: 1.0 }, Nil) }
     let topmost = top_star(game.stars, fallback)
     let overshot = game.ball_y < topmost.y - overshoot_margin()
     -- Falling below the current star is equally unrecoverable (no gravity,
@@ -302,58 +415,103 @@ mod Perihelion.Core do
   -- Camera: anchored to the current star while orbiting; chases the BALL
   -- while flying so the player can watch the shot (and its miss/capture).
   pfn step_camera(game : Game, dt_s : Float) : Game do
-    let target = match game.mode do
-      Flying(_, _) -> game.ball_y - cam_anchor() * view_h()
-      Orbiting(_, _) ->
+    let focus_x = match game.mode do
+      Flying(vx, _) -> game.ball_x
+      Orbiting(_, _, _) ->
         match star_at(game, game.current) do
-          None -> game.camera_y
-          Some(s) -> s.y - cam_anchor() * view_h()
+          None -> game.camera_x + game.view_w / 2.0
+          Some(s) -> s.x
         end
     end
-    { game with camera_y: game.camera_y + (target - game.camera_y) * cam_ease() * dt_s }
+    let target_y = match game.mode do
+      Flying(_, _) -> game.ball_y - cam_anchor() * game.view_h
+      Orbiting(_, _, _) ->
+        match star_at(game, game.current) do
+          None -> game.camera_y
+          Some(s) -> s.y - cam_anchor() * game.view_h
+        end
+    end
+    -- Dead-zone pan: only move camera_x when the focus point would land
+    -- outside the [dead_zone, 1 - dead_zone] band of the screen, and then
+    -- only far enough to put it back at that band's edge.
+    let left_edge = game.view_w * cam_dead_zone()
+    let right_edge = game.view_w * (1.0 - cam_dead_zone())
+    let screen_x = focus_x - game.camera_x
+    let target_x =
+      if screen_x < left_edge do focus_x - left_edge
+      else if screen_x > right_edge do focus_x - right_edge
+      else game.camera_x end end
+    { game with
+        camera_y: game.camera_y + (target_y - game.camera_y) * cam_ease() * dt_s,
+        camera_x: game.camera_x + (target_x - game.camera_x) * cam_ease() * dt_s }
   end
 
-  pfn fresh_run(rng : Random.Rng, best : Int, runs : List(RunRecord)) : Game do
-    let (stars, rng2) = Perihelion.Level.initial_stars(rng)
+  -- `seed` is the ONE master seed for the whole run: it seeds the gameplay
+  -- rng below (star ladder, asteroid/ship rolls, ...) AND is stored on
+  -- Game.seed for the shell to mix into the nebula/starfield hashes -- so
+  -- the entire run (ladder, hazards, nebula, background) is reproducible
+  -- from `seed` alone, and a new seed gives an entirely different run.
+  pfn fresh_run(seed : Int, best : Int, runs : List(RunRecord), view_w : Float, view_h : Float) : Game do
+    let (stars, rng2) = Perihelion.Level.initial_stars(Random.seed(seed), view_w)
     let start_angle = Math.pi() / 2.0
     match stars do
       Nil ->
         -- unreachable: initial_stars always returns 3 stars
-        { phase: Ready, ball_x: 0.0, ball_y: 0.0, mode: Orbiting(0, start_angle),
+        { seed: seed, phase: Ready, ball_x: 0.0, ball_y: 0.0, mode: Orbiting(0, 0, start_angle),
           stars: Nil, current: 0, score: 0, best: best,
-          camera_y: 0.0, rng: rng2,
+          camera_y: 0.0, camera_x: 0.0, rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
           shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
-          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs }
+          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
+          view_w: view_w, view_h: view_h,
+          fx_bursts: Nil, capture_flash: None }
       Cons(s0, _) ->
-        { phase: Ready,
+        { seed: seed, phase: Ready,
           ball_x: s0.x + Math.cos(start_angle) * s0.capture_radius,
           ball_y: s0.y + Math.sin(start_angle) * s0.capture_radius,
-          mode: Orbiting(0, start_angle),
+          mode: Orbiting(0, 0, start_angle),
           stars: stars, current: 0, score: 0, best: best,
-          camera_y: s0.y - cam_anchor() * view_h(),
+          camera_y: s0.y - cam_anchor() * view_h,
+          camera_x: 0.0,
           rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
           shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
-          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs }
+          spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
+          view_w: view_w, view_h: view_h,
+          fx_bursts: Nil, capture_flash: None }
     end
   end
 
-  doc "A fresh game from an integer seed, phase Ready (tap to start)."
+  doc "A fresh game from an integer seed, phase Ready (tap to start), using the default viewport size (the shell overrides this with the real window size on boot)."
   fn new_game(seed : Int) : Game do
-    new_game_saved(seed, 0, Nil)
+    new_game_saved(seed, 0, Nil, default_view_w(), default_view_h())
   end
 
-  doc "A fresh game seeded with persisted best + run history (from decode_save)."
-  fn new_game_saved(seed : Int, best : Int, runs : List(RunRecord)) : Game do
-    fresh_run(Random.seed(seed), best, runs)
+  doc "A fresh game seeded with persisted best + run history (from decode_save) and an initial viewport size."
+  fn new_game_saved(seed : Int, best : Int, runs : List(RunRecord), view_w : Float, view_h : Float) : Game do
+    fresh_run(seed, best, runs, view_w, view_h)
+  end
+
+  -- Draw the NEXT run's seed from the current run's rng (not reused as-is:
+  -- the old seed already produced the run that just ended).
+  pfn next_seed(game : Game) : Int do
+    let (s, _) = Random.next_int(game.rng)
+    s
   end
 
   pfn restart(game : Game) : Game do
-    let g = fresh_run(game.rng, game.best, game.runs)
+    let g = fresh_run(next_seed(game), game.best, game.runs, game.view_w, game.view_h)
     { g with phase: Playing }
+  end
+
+  -- Hard reset (R key): a fresh board back in Ready ("tap to start"), with a
+  -- freshly-drawn seed (so each reset lays a different ladder/nebula) and
+  -- preserving persisted best + run history. Unlike restart it does NOT
+  -- jump straight to Playing -- a reset is a full stop, then you start again.
+  pfn reset(game : Game) : Game do
+    fresh_run(next_seed(game), game.best, game.runs, game.view_w, game.view_h)
   end
 
   -- ── Persistence codec ────────────────────────────────────────────────
@@ -408,16 +566,13 @@ mod Perihelion.Core do
         match string_to_int(best_s) do
           None -> zero
           Some(best) ->
-            if runs_s == "" do
-              let ok = (best, Nil)
-              ok
-            else
-              match decode_runs(String.split(runs_s, ";"), Nil) do
-                None -> zero
-                Some(rs) ->
-                  let ok = (best, rs)
-                  ok
-              end
+            match runs_s do
+              "" -> (best, Nil)
+              _ ->
+                match decode_runs(String.split(runs_s, ";"), Nil) do
+                  None -> zero
+                  Some(rs) -> (best, rs)
+                end
             end
         end
       _ -> zero

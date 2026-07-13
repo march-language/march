@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 109 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 110 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -711,6 +711,8 @@ Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll
 Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
 Dom.store_get("save")          -- Option(String) — localStorage read
 Dom.store_set("save", data)    -- localStorage write
+Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
+Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
@@ -767,6 +769,23 @@ Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
 ```
 
 `Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
+
+---
+
+## Audio (JS only)
+
+`audio.march` — procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files — no assets, no licensing. Auto-loaded; no import needed.
+
+```march
+Audio.create()                                 -- Ctx
+Audio.resume(actx)                             -- unlock output; call from a user-gesture handler
+Audio.beep(actx, 440.0, 0.1, "sine")            -- flat tone: "sine"/"square"/"sawtooth"/"triangle"
+Audio.sweep(actx, 200.0, 800.0, 0.2, "square")  -- frequency ramp (chirps, risers, fall-offs)
+Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impacts, explosions)
+Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
+```
+
+`Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
 
 ---
 

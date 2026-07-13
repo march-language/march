@@ -127,9 +127,31 @@ export function march_dom_taps(el) {
   if (buf === undefined) {
     buf = [];
     __tap_buffers.set(el, buf);
-    el.addEventListener("pointerdown", (e) => {
-      buf.push({ _0: Math.trunc(e.offsetX), _1: Math.trunc(e.offsetY) });
-    });
+    // Pointer Events unify mouse / trackpad / touch / pen into ONE event that
+    // fires exactly once per press. Listen to `pointerdown` alone: with a
+    // single event type there is nothing to de-duplicate, so none of the
+    // dedup schemes this code cycled through -- a shared time window, then a
+    // gesture-state machine -- can exist, and neither can their failure modes
+    // (a window too short/long to match a real press-hold; a `pressActive`
+    // flag left stuck true when a release event was missed, silently eating
+    // every tap until a multi-second timeout). Acting on press rather than
+    // release is also the most responsive choice for a tap-to-act game and
+    // the least-missed event in a gesture.
+    const push = (x, y) => buf.push({ _0: Math.trunc(x), _1: Math.trunc(y) });
+    if (window.PointerEvent) {
+      el.addEventListener("pointerdown", (e) => push(e.offsetX, e.offsetY));
+    } else {
+      // No Pointer Events (very old engines only): mouse and touch events do
+      // not both fire here the way they would alongside pointer events, so
+      // listening to each is safe without de-duplication.
+      el.addEventListener("mousedown", (e) => push(e.offsetX, e.offsetY));
+      el.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        const t = e.changedTouches[0];
+        const rect = el.getBoundingClientRect();
+        push(t.clientX - rect.left, t.clientY - rect.top);
+      }, { passive: false });
+    }
   }
   return list_of_array(buf.splice(0, buf.length));
 }
@@ -155,6 +177,28 @@ export function march_dom_store_get(key) {
 
 export function march_dom_store_set(key, val) {
   try { window.localStorage.setItem(key, val); } catch (e) { }
+}
+
+// ── Pointer / viewport polling ──────────────────────────────────────────────
+
+const __pointer_positions = new WeakMap();
+
+export function march_dom_pointer_pos(el) {
+  let pos = __pointer_positions.get(el);
+  if (pos === undefined) {
+    const rect = el.getBoundingClientRect();
+    pos = { x: Math.trunc(rect.width / 2), y: Math.trunc(rect.height / 2) };
+    __pointer_positions.set(el, pos);
+    el.addEventListener("mousemove", (e) => {
+      pos.x = Math.trunc(e.offsetX);
+      pos.y = Math.trunc(e.offsetY);
+    });
+  }
+  return { _0: pos.x, _1: pos.y };
+}
+
+export function march_dom_window_size() {
+  return { _0: Math.trunc(window.innerWidth), _1: Math.trunc(window.innerHeight) };
 }
 
 // ── Window ────────────────────────────────────────────────────────────────────
