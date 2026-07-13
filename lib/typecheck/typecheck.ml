@@ -1279,6 +1279,7 @@ let builtin_bindings : (string * scheme) list =
     ("string_length",   Mono (TArrow (t_string, t_int)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
+    ("read_byte",      Mono (TArrow (t_unit,   t_int)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
     (* List helpers: ∀a. ... *)
     ("head",   poly1 (fun a -> TArrow (t_list a, a)));
@@ -6196,7 +6197,7 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
 
 let pure_banned : StringSet.t = StringSet.of_list [
   "spawn"; "send"; "print"; "println"; "eprint"; "eprintln";
-  "read_line"; "exit"; "random_int"; "random_float"; "random_bool";
+  "read_line"; "read_byte"; "exit"; "random_int"; "random_float"; "random_bool";
   "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
   "vault_delete"; "vault_update"; "vault_keys"; "write_file";
   "read_file"; "append_file"; "delete_file";
