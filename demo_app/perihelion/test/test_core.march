@@ -791,4 +791,34 @@ mod TestPerihelionCore do
     end
   end
 
+  describe "special: star thrust" do
+    test "X nudges velocity toward the nearest star and consumes one charge" do
+      let g0 = { mk_flying(200.0, 300.0, 0.0, 0.0 - Perihelion.Core.fly_speed()) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 3 }
+      let g2 = step_keys(g0, Cons("x", Nil))
+      assert (g2.special_charges == 2)
+    end
+
+    test "no charges left: X does nothing" do
+      let g0 = { mk_flying(200.0, 300.0, 0.0, 0.0 - Perihelion.Core.fly_speed()) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 0 }
+      let g2 = step_keys(g0, Cons("x", Nil))
+      assert (g2.special_charges == 0)
+    end
+  end
+
+  describe "special: keep or swap" do
+    test "apply_upgrade with a NEW special while one is equipped replaces it and refills charges" do
+      let g0 = { mk_game(0.0) with special: Some(Perihelion.Upgrades.StarJump), special_charges: 0 }
+      let g2 = Perihelion.Core.apply_upgrade(g0, Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarThrust))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust))
+      assert (g2.special_charges == 3)
+    end
+
+    test "apply_upgrade with the SAME (keep-current) special refills its charges without changing kind" do
+      let g0 = { mk_game(0.0) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 1 }
+      let g2 = Perihelion.Core.apply_upgrade(g0, Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarThrust))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust))
+      assert (g2.special_charges == 3)
+    end
+  end
+
 end

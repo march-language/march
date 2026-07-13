@@ -216,6 +216,84 @@ mod Perihelion.Core do
     int_mod(offset + delta + 3, 3) -- +3 before mod to keep it non-negative for delta = -1
   end
 
+  -- ── Special (X) ──────────────────────────────────────────────────────
+  fn star_thrust_strength() : Float do 60.0 end
+
+  pfn dist2(ax : Float, ay : Float, bx : Float, by_ : Float) : Float do
+    let dx = ax - bx
+    let dy = ay - by_
+    dx * dx + dy * dy
+  end
+
+  pfn nearest_star_dir_go(game : Game, stars : List(Star), best : Star, best_d2 : Float) : Option((Float, Float)) do
+    match stars do
+      Nil ->
+        let dx = best.x - game.ball_x
+        let dy = best.y - game.ball_y
+        let d = Math.sqrt(best_d2)
+        if d > 0.0 do Some((dx / d, dy / d)) else None end
+      Cons(s, rest) ->
+        let d2 = dist2(game.ball_x, game.ball_y, s.x, s.y)
+        if d2 < best_d2 do nearest_star_dir_go(game, rest, s, d2) else nearest_star_dir_go(game, rest, best, best_d2) end
+    end
+  end
+
+  -- Direction (unit vector) from the ball toward the single nearest star in
+  -- the ladder, regardless of approach/assist-bubble membership -- unlike
+  -- nearest_assist_target, star thrust always has *a* nearest star to nudge
+  -- toward as long as any star exists.
+  pfn nearest_star_dir(game : Game) : Option((Float, Float)) do
+    match game.stars do
+      Nil -> None
+      Cons(s0, rest) -> nearest_star_dir_go(game, rest, s0, dist2(game.ball_x, game.ball_y, s0.x, s0.y))
+    end
+  end
+
+  fn star_jump_max_stars() : Int do 4 end
+
+  -- Draws 1..star_jump_max_stars() rungs ahead and lands there via
+  -- on_capture -- the same scoring seam a skilled forward capture uses (see
+  -- on_capture's doc comment). A free jump therefore scores/bumps the
+  -- multiplier/can trigger a milestone exactly like a normal capture; this is
+  -- the deliberate, simplest-correct starting point (not a bug -- see task brief).
+  pfn apply_star_jump(game : Game) : Game do
+    let (rng2, t) = Perihelion.Level.draw_pub(game.rng)
+    let jump = 1 + float_to_int(t * int_to_float(star_jump_max_stars()))
+    let target_idx = game.current + jump
+    match star_at(game, target_idx) do
+      None -> { game with rng: rng2 } -- not enough ladder generated yet; consume the roll, no-op the jump (rare, harmless)
+      Some(target) ->
+        on_capture({ game with rng: rng2, special_charges: game.special_charges - 1 }, target, target_idx)
+    end
+  end
+
+  -- X activates whichever special is equipped. TrajectoryPreview is passive
+  -- (drawn continuously by Task 10, not triggered) so its arm is a no-op here.
+  pfn apply_special(game : Game, keys : List(String)) : Game do
+    let pressed = List.any(keys, fn k -> k == "x" || k == "X")
+    if !pressed || game.special_charges <= 0 do
+      game
+    else
+      match game.special do
+        None -> game
+        Some(StarThrust) ->
+          match nearest_star_dir(game) do
+            None -> game
+            Some(pair) ->
+              let (dx, dy) = pair
+              match game.mode do
+                Flying(vx, vy) -> { game with mode: Flying(vx + dx * star_thrust_strength(), vy + dy * star_thrust_strength()), special_charges: game.special_charges - 1 }
+                Orbiting(_, _, _) -> game
+              end
+          end
+        Some(StarJump) ->
+          apply_star_jump(game)
+        Some(TrajectoryPreview) ->
+          game -- passive; X does nothing (Task 10 draws the preview line)
+      end
+    end
+  end
+
   -- ── Update ───────────────────────────────────────────────────────────
   doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
   fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
@@ -259,16 +337,17 @@ mod Perihelion.Core do
     let n = List.length(g0.owned_weapons)
     let g1a = { g0 with active_weapon_idx: adjust_weapon(g0.active_weapon_idx, keys, n) }
     let g1 = { g1a with starkiller_target_offset: adjust_starkiller_target(g1a.starkiller_target_offset, keys) }
-    match g1.phase do
+    let g1x = apply_special(g1, keys)
+    match g1x.phase do
       Playing ->
-        let g2 = Perihelion.Combat.step(g1, dt_s)
+        let g2 = Perihelion.Combat.step(g1x, dt_s)
         let g3 = Perihelion.Combat.fire(g2, keys, cursor, dt_s)
         let g4 = Perihelion.Combat.collide(g3)
         match g4.phase do
           Playing -> top_up(step_camera(g4, dt_s))
           _ -> g4
         end
-      _ -> g1
+      _ -> g1x
     end
   end
 
