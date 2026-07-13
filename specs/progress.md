@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-13, tuple-accumulator fix — stats_basic/dataframe_basic interp-identical)
+
+**FIXED — float-bearing tuple accumulators (resolve_case_field_ty TTuple arm):** Stats.covariance/correlation's fold over a (Float,Float,Float) tuple no longer emits RC ops on the raw double bits of TVar-typed tuple sub-vars. With it, examples/stats_basic AND examples/dataframe_basic are byte-identical to the interpreter end-to-end; their oracle entries removed. Corpus: 70 matched / 5 known-divergence (only the five bench sorts) / 0 un-triaged. The bench sorts' curried-comparator ABI mismatch is fully diagnosed at the IR level with two candidate fixes awaiting a language-level decision (monomorphism restriction — 15 lines, verified, but rejects the working t03_let_poly pattern — vs uniform apply ABI — day-scale, preserves let-polymorphism); see specs/todos.md.
+
 ## Current State (as of 2026-07-13, sort-RC family float half FIXED decode-neutrally)
 
 **FIXED — the float half of the sort-RC family, with zero decode changes.** perceus.ml stores each ECase branch var in var_ctx with its ctor-field-RESOLVED type (resolve_case_field_ty, post-mono) and the EAtom non-last-use dup consults it (refine_occurrence_ty) — the scrutinee-borrowed conservatism no longer emits inc_rc on raw float bits. Fixes List.sort_by-on-floats, Stats.median/percentile/mode-on-shared, DataFrame.summarize, and examples/dataframe_basic end-to-end (first time); g42/g43 clean; one snapshot deliberately regenerated (spurious inc on an unboxed field gone). Pinned by test_compiled_float_merge_sort_family (stdlib runner 816). Still open: the CURRIED-comparator closure underflow (Sort.mergesort_by, all five bench sorts + stats_basic; n=5 repro filed) — with a wedge warning for the next attempt recorded in todos.

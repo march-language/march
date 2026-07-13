@@ -348,6 +348,12 @@ let resolve_case_field_ty (env : env) (scrut_ty : Tir.ty) (br_tag : string)
               | Tir.TPtr t'        -> Tir.TPtr (apply t')
               | _ -> t in
             Option.map apply (List.nth_opt generic_fields idx)))
+  (* Tuple scrutinee: fields are positional — the branch tag is lower_match's
+     "$TupleN" and the field types are the tuple component types themselves.
+     Needed for float-bearing tuple accumulators (Stats.covariance's
+     fold over `(sx, sy, sxy)`), whose TVar-typed sub-vars otherwise get the
+     same conservative RC ops on raw double bits as ctor fields did. *)
+  | Tir.TTuple ts -> List.nth_opt ts idx
   | _ -> None
 
 (** Refine a TVar-typed OCCURRENCE against [var_ctx].  Pattern-matrix branch

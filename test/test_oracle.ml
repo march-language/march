@@ -201,13 +201,6 @@ let known_divergence =
        its per-section "N ms" timing lines, which make a byte compare
        meaningless — so it moved to nondeterministic_allowlist below,
        like the other timing-printing programs. *)
-    (* dataframe_basic still crashes compiled, but LATER and for a DIFFERENT
-       reason than the fixed group_by bug: its "Stats Integration" section
-       reaches DataFrame.summarize → Stats.median on a Float column, which
-       dies in the still-open sort-RC family (a bare Stats.median([floats])
-       reproduces, exit 139).  Its non-crashing sections additionally show
-       the open to_string-on-container `#<tag:N>` divergence. *)
-    "dataframe_basic", "Stats.median/sort-RC family crash in the summarize section (139), interp clean; plus to_string-on-container #<tag:N> (both specs/todos.md; the group_by bug formerly filed here was fixed 2026-07-13)";
 
     (* stats_basic's former "Monomorphization limit reached" ICE was FIXED
        2026-07-12 (typecheck.ml fn_arities shadowing — a user `fn f(m)`
@@ -217,7 +210,6 @@ let known_divergence =
        its output still diverges via the SEPARATE, still-open
        to_string-on-container bug (prints "#<tag:1>" for the data list),
        same reason as "hello"/"list_lib" above. *)
-    "stats_basic", "crashes (139) in Stats internals — the still-open sort-RC family (Stats.median on floats), surfaced once the 2026-07-13 to_string-through-Show fix removed its former #<tag:N> mismatch";
   ]
 
 let known_divergence_tbl =

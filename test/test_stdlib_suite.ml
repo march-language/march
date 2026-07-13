@@ -10712,6 +10712,41 @@ let test_compiled_task_await_heap_payload () =
       "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
+(* Regression (float-bearing TUPLE accumulator, fixed 2026-07-13):
+   Stats.covariance folds with a `(Float, Float, Float)` tuple accumulator;
+   the tuple destructure's pattern-matrix sub-vars are TVar-typed, and
+   [resolve_case_field_ty] only resolved TCon variant fields — so the
+   tuple's float fields got the conservative RC ops on raw double bits
+   (SIGSEGV, the last crasher in examples/stats_basic's Bivariate section).
+   Fixed by the TTuple arm in perceus.ml's resolve_case_field_ty (tuple
+   fields are positional in the scrutinee type itself). *)
+let test_compiled_float_tuple_accumulator () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_tupacc" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "tupacc.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod TupAccRegress do\n\
+    \  fn main() : Unit do\n\
+    \    let cov = Stats.covariance([1.0, 2.0, 3.0], [45.0, 52.0, 60.0])\n\
+    \    if cov == 7.5 do () else process_exit(1) end\n\
+    \    let corr = Stats.correlation([1.0, 2.0, 3.0], [45.0, 52.0, 60.0])\n\
+    \    if corr > 0.99 do () else process_exit(2) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "tupaccbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled covariance/correlation with float tuple accumulators exit 0"
+      0 run_rc
+
 (* Regression (sort-RC family, float half, fixed 2026-07-13): the two-list
    merge shape — an OUTER match whose scrutinee is reused inside the INNER
    match's arms, so perceus's scrutinee-borrowed conservatism keeps the
@@ -12768,6 +12803,8 @@ let stdlib_suites =
           test_compiled_to_string_containers;
         Alcotest.test_case "float merge/sort_by/median/mode: no RC op on raw float bits (compiled)" `Slow
           test_compiled_float_merge_sort_family;
+        Alcotest.test_case "float tuple accumulator covariance/correlation (compiled)" `Slow
+          test_compiled_float_tuple_accumulator;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
