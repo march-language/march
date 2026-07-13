@@ -190,7 +190,14 @@ mod Perihelion.Core do
         Playing ->
           step_playing(g0, tapped, keys, cursor, dt_s)
         Milestone ->
-          g0
+          if tapped do
+            match List.nth_opt(g0.milestone_choices, 0) do
+              None -> g0
+              Some(choice) -> top_up({ (apply_upgrade(g0, choice)) with phase: Playing, milestone_choices: Nil })
+            end
+          else
+            g0
+          end
       end
     end
   end
@@ -355,15 +362,53 @@ mod Perihelion.Core do
         else
           1
         end
-      top_up({ snapped with
+      let new_chained = game.stars_chained + 1
+      let captured_game = { snapped with
           current: idx,
           score: game.score + new_mult,
-          stars_chained: game.stars_chained + 1,
+          stars_chained: new_chained,
           multiplier: new_mult,
           max_mult: max2(game.max_mult, new_mult),
-          capture_flash: Some((captured.x, captured.y)) })
+          capture_flash: Some((captured.x, captured.y)) }
+      if Perihelion.Upgrades.is_milestone(new_chained) do
+        let (rng2, choices) = Perihelion.Upgrades.draw_choices(captured_game.rng, captured_game.owned_weapons, captured_game.special)
+        top_up({ captured_game with phase: Milestone, rng: rng2, milestone_choices: choices })
+      else
+        top_up(captured_game)
+      end
     else
       { snapped with current: idx, multiplier: 1 }
+    end
+  end
+
+  doc "Apply a single drawn/chosen upgrade to the game state. Shared by the milestone screen (Task 3) and auto-applying random drops (Task 9)."
+  fn apply_upgrade(game : Game, u : Perihelion.Upgrades.UpgradeKind) : Game do
+    match u do
+      OffenseWeapon(k) ->
+        if List.member(game.owned_weapons, k) do
+          game -- already owned (shouldn't happen via draw_choices, but drops aren't filtered -- see Task 9)
+        else
+          { game with owned_weapons: List.append(game.owned_weapons, Cons(k, Nil)) }
+        end
+      OffenseFireRate ->
+        { game with fire_rate_stacks: game.fire_rate_stacks + 1 }
+      DefenseBulletWard ->
+        { game with bullet_ward: true }
+      DefenseDeflector ->
+        { game with deflector_plating: true }
+      DefenseShield ->
+        { game with shield: game.shield + 1 } -- "reinforced shield" also grants one immediately; see Task 7 for the "future shield pickups grant 2" behavior
+      SpecialItem(k) ->
+        { game with special: Some(k), special_charges: special_starting_charges(k) }
+    end
+  end
+
+  doc "Starting charge count for a freshly-equipped special. TrajectoryPreview is passive (0 = unused, not a real limit)."
+  fn special_starting_charges(k : Perihelion.Upgrades.SpecialKind) : Int do
+    match k do
+      StarThrust -> 3
+      StarJump -> 1
+      TrajectoryPreview -> 0
     end
   end
 

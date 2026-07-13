@@ -106,6 +106,12 @@ mod TestPerihelionCore do
     g2
   end
 
+  -- Like mk_flying, but starts from a caller-supplied base game (e.g. one with
+  -- non-default fields like stars_chained already set) rather than a fresh mk_game(0.0).
+  pfn mk_flying_from(base : Game, bx : Float, by_ : Float, vx : Float, vy : Float) : Game do
+    { base with ball_x: bx, ball_y: by_, mode: Flying(vx, vy) }
+  end
+
 
   pfn run_until_capture(g : Game, fuel : Int) : Game do
     if fuel == 0 do
@@ -404,6 +410,16 @@ mod TestPerihelionCore do
       assert (!is_orbiting_star(g2.mode, 0))
       assert (!is_orbiting_star(g3.mode, 0))
     end
+
+    test "capturing the Nth star opens a milestone choice screen" do
+      -- mk_game orbits star 0; give it 9 stars_chained so the NEXT forward
+      -- capture (stars_chained -> 10) crosses the interval.
+      let g0 = { mk_game(0.0) with stars_chained: 9 }
+      let g = mk_flying_from(g0, 200.0, 420.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = run_until_capture(g, 10)
+      assert (is_milestone(g2.phase))
+      assert (List.length(g2.milestone_choices) == 3)
+    end
   end
 
   describe "death and restart" do
@@ -693,6 +709,23 @@ mod TestPerihelionCore do
       let g2 = run_until_capture(g, 20)
       assert (g2.current == 1)
       assert (List.length(g2.stars) >= g2.current + 3)
+    end
+  end
+
+  describe "milestone choice screen" do
+    test "gameplay does not advance while a milestone is open" do
+      let g0 = { mk_game(0.0) with phase: Milestone, milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Cons(Perihelion.Upgrades.DefenseDeflector, Cons(Perihelion.Upgrades.DefenseBulletWard, Nil))) }
+      let g2 = Perihelion.Core.update(g0, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      assert (is_milestone(g2.phase))
+      assert (g2.loop_angle == g0.loop_angle)
+    end
+
+    test "tapping applies the first choice and resumes Playing" do
+      let g0 = { mk_game(0.0) with phase: Milestone, milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Cons(Perihelion.Upgrades.DefenseDeflector, Cons(Perihelion.Upgrades.DefenseBulletWard, Nil))) }
+      let g2 = Perihelion.Core.update(g0, Cons((10, 10), Nil), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      assert (is_playing(g2.phase))
+      assert (g2.fire_rate_stacks == g0.fire_rate_stacks + 1)
+      assert (List.is_empty(g2.milestone_choices))
     end
   end
 
