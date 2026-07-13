@@ -50,7 +50,7 @@ mod Perihelion.Combat do
   -- if W/D retarget the reticle again while the shot is still in flight.
   type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float, homing : Bool, star_killer : Bool, target_x : Float, target_y : Float }
 
-  type Pickup = { x : Float, y : Float, ttl : Float }
+  type Pickup = { x : Float, y : Float, ttl : Float, kind : Perihelion.Upgrades.UpgradeKind }
 
   -- ── Tuning constants ─────────────────────────────────────────────────
   fn asteroid_interval() : Float do 4.0 end
@@ -750,7 +750,7 @@ mod Perihelion.Combat do
     roll_drops(g2, dead)
   end
 
-  pfn roll_drops(game : Game, dead : List(Ship)) : Game do
+  fn roll_drops(game : Game, dead : List(Ship)) : Game do
     match dead do
       Nil -> game
       Cons(sh, rest) ->
@@ -758,9 +758,10 @@ mod Perihelion.Combat do
         let (sx, sy) = pos
         let (rng2, roll) = draw(game.rng)
         let g2 = if roll < drop_chance() do
+          let (rng3, upgrade) = Perihelion.Upgrades.roll_one(rng2, game.owned_weapons, game.special)
           { game with
-              rng: rng2,
-              pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl() }, game.pickups) }
+              rng: rng3,
+              pickups: Cons({ x: sx, y: sy, ttl: pickup_ttl(), kind: upgrade }, game.pickups) }
         else
           { game with rng: rng2 }
         end
@@ -773,18 +774,29 @@ mod Perihelion.Combat do
   end
 
   pfn collide_ball_pickups(game : Game) : Game do
-    if game.shield > 0 do
-      game
-    else
-      let hit = List.any(game.pickups, fn p -> ball_on_pickup(game, p))
-      if hit do
-        let grant = if game.shield_reinforced do 2 else 1 end
-        { game with
-            shield: game.shield + grant,
-            pickups: List.filter(game.pickups, fn p -> !ball_on_pickup(game, p)) }
-      else
-        game
-      end
+    match List.find(game.pickups, fn p -> ball_on_pickup(game, p)) do
+      None -> game
+      Some(p) ->
+        -- note: removes ALL overlapping pickups this tick, matching prior
+        -- behavior of "first hit clears the lot"
+        let remaining = List.filter(game.pickups, fn q -> !ball_on_pickup(game, q))
+        match p.kind do
+          SpecialItem(_) ->
+            match game.special do
+              None -> { (Perihelion.Core.apply_upgrade(game, p.kind)) with pickups: remaining }
+              Some(_) -> { game with pickups: remaining, phase: Perihelion.Core.Milestone, milestone_choices: Cons(p.kind, Nil) }
+            end
+          DefenseShield ->
+            -- preserves the pre-Task-9 "reinforced shield grants 2 charges
+            -- per pickup" mechanic, which Core.apply_upgrade's DefenseShield
+            -- branch (shared with the milestone screen) doesn't implement --
+            -- it always grants exactly 1 and unconditionally sets the
+            -- reinforced flag, which is correct for a milestone *choice* but
+            -- would silently drop the doubling for a physical *pickup*.
+            let grant = if game.shield_reinforced do 2 else 1 end
+            { game with shield: game.shield + grant, pickups: remaining }
+          _ -> { (Perihelion.Core.apply_upgrade(game, p.kind)) with pickups: remaining }
+        end
     end
   end
 

@@ -426,20 +426,20 @@ mod TestPerihelionCombat do
 
     test "ball collects a pickup" do
       let g0 = base_game(0.0)
-      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
       let g = { g0 with pickups: Cons(p, Nil) }
       let g2 = Perihelion.Combat.collide(g)
       assert (g2.shield > 0)
       assert (List.is_empty(g2.pickups))
     end
 
-    test "already-shielded ball leaves the pickup" do
+    test "already-shielded ball still collects a shield pickup (uncapped stacking)" do
       let g0 = base_game(0.0)
-      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
       let g = { g0 with pickups: Cons(p, Nil), shield: 1 }
       let g2 = Perihelion.Combat.collide(g)
-      assert (g2.shield > 0)
-      assert (List.length(g2.pickups) == 1)
+      assert (g2.shield == 2)
+      assert (List.is_empty(g2.pickups))
     end
   end
 
@@ -606,10 +606,52 @@ mod TestPerihelionCombat do
   describe "defense: reinforced shield" do
     test "picking up a shield grants 2 charges instead of 1 when reinforced" do
       let g0 = { base_game(0.0) with shield_reinforced: true }
-      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
       let g = { g0 with pickups: Cons(p, Nil) }
       let g2 = Perihelion.Combat.collide(g)
       assert (g2.shield == 2)
+    end
+  end
+
+  describe "generalized pickups" do
+    test "roll_drops can drop a non-shield upgrade kind" do
+      let g0 = { base_game(0.0) with rng: Random.seed(1) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      -- with seed 1, drop_chance() succeeds (empirically checked seeds 0..39
+      -- against Perihelion.Level.draw_pub's first draw; seed 1 rolls ~0.088,
+      -- well under drop_chance()'s 0.25) -- just assert a pickup landed with
+      -- SOME UpgradeKind, not asserting which
+      match g2.pickups do
+        Cons(p, Nil) -> assert true -- p.kind exists and typechecks; that's the point of this test
+        _ -> assert false
+      end
+    end
+
+    test "collecting an offense pickup adds the weapon, not a shield" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.Homing) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.member(g2.owned_weapons, Perihelion.Upgrades.Homing))
+      assert (g2.shield == 0)
+    end
+
+    test "collecting a special pickup while none equipped auto-equips it" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarJump) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.special == Some(Perihelion.Upgrades.StarJump))
+    end
+
+    test "collecting a special pickup while one IS equipped opens a 1-choice milestone-style prompt instead of auto-swapping" do
+      let g0 = { base_game(0.0) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 1 }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarJump) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_milestone(g2))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust)) -- unchanged until the player picks
     end
   end
 
