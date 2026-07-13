@@ -10712,6 +10712,62 @@ let test_compiled_task_await_heap_payload () =
       "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
+(* Regression (sort-RC family, float half, fixed 2026-07-13): the two-list
+   merge shape — an OUTER match whose scrutinee is reused inside the INNER
+   match's arms, so perceus's scrutinee-borrowed conservatism keeps the
+   branch vars live — on List(Float) crashed compiled: the EAtom
+   non-last-use dup emitted `inc_rc` on the RAW DOUBLE BITS of the element
+   (the pattern-matrix [$fN] sub-var is TVar-typed, so [needs_rc] was
+   conservatively true).  Fixed decode-neutrally in perceus.ml:
+   [refine_occurrence_ty] consults var_ctx, where the ECase processing now
+   stores each branch var with its ctor-field-RESOLVED type
+   ([resolve_case_field_ty], post-mono).  Covers List.sort_by-on-floats,
+   Stats.median/percentile, Stats.mode on a SHARED list, and
+   DataFrame.summarize.  The bench-local mergesort_by CURRIED-comparator
+   underflow is a separate still-open bug (specs/todos.md). *)
+let test_compiled_float_merge_sort_family () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_sortrc" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "sortrc.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod SortRcRegress do\n\
+    \  fn go(l : List(Float), r : List(Float), acc : List(Float)) : List(Float) do\n\
+    \    match l do\n\
+    \    Nil -> acc\n\
+    \    Cons(x, xl) -> do\n\
+    \      match r do\n\
+    \      Nil -> acc\n\
+    \      Cons(y, yl) ->\n\
+    \        if x < y do go(xl, r, Cons(x, acc))\n\
+    \        else go(l, yl, Cons(y, acc)) end\n\
+    \      end\n\
+    \    end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let m = go([3.8], [4.5], Nil)\n\
+    \    if List.length(m) == 1 do () else process_exit(1) end\n\
+    \    let s = List.sort_by([4.5, 3.8, 4.9], fn (a, b) -> a < b)\n\
+    \    if List.nth(s, 0) == 3.8 do () else process_exit(2) end\n\
+    \    let temps = [18.5, 21.0, 19.8, 20.3, 20.3]\n\
+    \    if Stats.median(temps) == 20.3 do () else process_exit(3) end\n\
+    \    if Stats.mode(temps) == 20.3 do () else process_exit(4) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "sortrcbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled float merge/sort_by/median/mode-on-shared exit 0 (no RC op on raw float bits)"
+      0 run_rc
+
 (* Regression (DataFrame P0 crash half, fixed 2026-07-13): Stats.mean on a
    SHARED List(Float) — the caller keeps a second reference alive across the
    call — used to SIGSEGV compiled at march_incrc(0x3ff0...) (the raw IEEE-754
@@ -12710,6 +12766,8 @@ let stdlib_suites =
           test_compiled_ambiguous_ctor_nested_pattern;
         Alcotest.test_case "to_string on containers routes through Show; annotated None links (compiled)" `Slow
           test_compiled_to_string_containers;
+        Alcotest.test_case "float merge/sort_by/median/mode: no RC op on raw float bits (compiled)" `Slow
+          test_compiled_float_merge_sort_family;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow

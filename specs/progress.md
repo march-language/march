@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-13, sort-RC family float half FIXED decode-neutrally)
+
+**FIXED — the float half of the sort-RC family, with zero decode changes.** perceus.ml stores each ECase branch var in var_ctx with its ctor-field-RESOLVED type (resolve_case_field_ty, post-mono) and the EAtom non-last-use dup consults it (refine_occurrence_ty) — the scrutinee-borrowed conservatism no longer emits inc_rc on raw float bits. Fixes List.sort_by-on-floats, Stats.median/percentile/mode-on-shared, DataFrame.summarize, and examples/dataframe_basic end-to-end (first time); g42/g43 clean; one snapshot deliberately regenerated (spurious inc on an unboxed field gone). Pinned by test_compiled_float_merge_sort_family (stdlib runner 816). Still open: the CURRIED-comparator closure underflow (Sort.mergesort_by, all five bench sorts + stats_basic; n=5 repro filed) — with a wedge warning for the next attempt recorded in todos.
+
 ## Current State (as of 2026-07-13, compiled to_string routed through Show)
 
 **FIXED — `to_string` on non-primitives compiled (the `#<tag:N>` divergence class) + closed the stale bare-None P1.** lower.ml rewrites a direct `to_string(e)` call to `show(e)` when e's static type is a non-primitive TCon — the same interface dispatch println uses, whose output is oracle-pinned identical to the interpreter. `to_string([1,2,3])`/`Some(9)`/annotated `None` now match interp exactly; custom-ADT/tuple/unpinned-tvar arguments fail loudly at link exactly like println (pre-existing, separately-filed Show gaps — tuple Show and derived ADT Show remain open). The bare/annotated-None println link failure was verified already fixed by 895ebfee's typechecker work. New Slow pin test_compiled_to_string_containers (stdlib runner 816).

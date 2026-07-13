@@ -350,6 +350,29 @@ let resolve_case_field_ty (env : env) (scrut_ty : Tir.ty) (br_tag : string)
             Option.map apply (List.nth_opt generic_fields idx)))
   | _ -> None
 
+(** Refine a TVar-typed OCCURRENCE against [var_ctx].  Pattern-matrix branch
+    vars ([$fN]) are minted with [unknown_ty] by lower_match, so every RC
+    decision keyed on the occurrence's static type is conservatively wrong
+    for them ([needs_rc (TVar _)] = true) — the sort-RC family crash was the
+    EAtom non-last-use dup emitting [inc_rc] on the RAW DOUBLE BITS of a
+    List(Float) element whose [$fN] the scrutinee-borrowed conservatism kept
+    live.  The ECase processing below stores each branch var in [var_ctx]
+    with its ctor-field-RESOLVED type ([resolve_case_field_ty], which runs
+    POST-mono where scrutinee types are concrete); this helper lets any
+    occurrence site pick that resolution up by name.  Deliberately refines
+    ONLY the RC decision — the occurrence's own [v_ty] (and thus every
+    codegen decode decision) is untouched, which is exactly the constraint
+    the two reverted lower_match sub-var-typing attempts violated (adopting
+    span types there flipped emit_case's decode: g42's Ok(Int) payload read
+    its tagged bits raw, g43's RRB sums doubled). *)
+let refine_occurrence_ty (env : env) (v : Tir.var) : Tir.ty =
+  match v.Tir.v_ty with
+  | Tir.TVar _ ->
+    (match StringMap.find_opt v.Tir.v_name env.var_ctx with
+     | Some rv -> (match rv.Tir.v_ty with Tir.TVar _ -> v.Tir.v_ty | t -> t)
+     | None -> v.Tir.v_ty)
+  | t -> t
+
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
 let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
@@ -554,7 +577,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
   match e with
   | Tir.EAtom (Tir.AVar v) ->
     let lb = StringSet.add v.Tir.v_name live_after in
-    if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty
+    (* [refine_occurrence_ty]: a TVar-typed pattern-matrix branch var uses
+       its ctor-field-resolved type from var_ctx here — an inc on an unboxed
+       Float field dereferences the raw double bits (the sort-RC family). *)
+    if v.Tir.v_lin = Tir.Unr && needs_rc (refine_occurrence_ty env v)
        && StringSet.mem v.Tir.v_name live_after then
       (* Non-last use of Unr heap value: inc before use.
          Borrowed field vars are NOT exempt here: a borrowed field is kept in
@@ -1148,12 +1174,33 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          Descending with an updated [env] copy handles shadowing correctly
          (the caller's [env] for sibling branches is untouched, matching the
          old code's save/restore). *)
+      (* Store each TVar-typed branch var with its ctor-field-RESOLVED type
+         (falling back to the static type when resolution fails), so
+         [refine_occurrence_ty] and the var_ctx-keyed passes (cross-branch
+         decs) make RC decisions from the CONCRETE field type instead of the
+         conservative TVar default.  The scrutinee's own type is refined
+         first — a NESTED matrix case's scrutinee is itself an outer case's
+         [$fN] branch var, so chaining through var_ctx resolves e.g.
+         [case $f1 of Cons($f2, $f3)] where $f1 was resolved to List(Float)
+         by the enclosing branch. *)
+      let scrut_res_ty = match a with
+        | Tir.AVar sv -> refine_occurrence_ty env sv
+        | _ -> Tir.TVar "_"
+      in
       let env_for_br =
         { env with
           var_ctx =
-            List.fold_left (fun ctx (v : Tir.var) ->
-              StringMap.add v.Tir.v_name v ctx
-            ) env.var_ctx br.Tir.br_vars }
+            List.fold_left (fun (i, ctx) (v : Tir.var) ->
+              let stored =
+                match v.Tir.v_ty with
+                | Tir.TVar _ ->
+                  (match resolve_case_field_ty env scrut_res_ty br.Tir.br_tag i with
+                   | Some fty -> { v with Tir.v_ty = fty }
+                   | None -> v)
+                | _ -> v
+              in
+              (i + 1, StringMap.add v.Tir.v_name stored ctx)
+            ) (0, env.var_ctx) br.Tir.br_vars |> snd }
       in
       let (body', live_before_br) = insert_rc_expr env_for_br br.Tir.br_body la in
       (* Emit EDecRC for br_vars that are heap-typed but dead in this branch body.

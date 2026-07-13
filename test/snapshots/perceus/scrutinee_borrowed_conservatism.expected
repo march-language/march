@@ -18,8 +18,7 @@ dec_rc $jp_clo10;
 let t : List(Int) = inc_rc $f8;
 $f8 in
 dec_rc t;
-let h : Int = inc_rc $f7;
-$f7 in
+let h : Int = $f7 in
 case flag of
   True() -> h
   _ -> case xs of
