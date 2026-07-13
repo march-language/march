@@ -40,7 +40,15 @@ mod Perihelion.Combat do
     hunter : Bool
   }
 
-  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float, homing : Bool, star_killer : Bool }
+  -- target_x/target_y: the star-killer's target star position, LOCKED IN at
+  -- fire time (see `fire`'s StarKiller branch). Only meaningful when
+  -- star_killer is true -- every other shot carries 0.0/0.0 (unused),
+  -- following the same always-present-only-meaningful-when-flagged pattern
+  -- as homing/star_killer themselves. Locking the position at fire time
+  -- (rather than re-deriving it from the live reticle at collision time)
+  -- keeps a shot correctly homed on the star it was actually fired at even
+  -- if W/D retarget the reticle again while the shot is still in flight.
+  type Shot = { x : Float, y : Float, vx : Float, vy : Float, ttl : Float, homing : Bool, star_killer : Bool, target_x : Float, target_y : Float }
 
   type Pickup = { x : Float, y : Float, ttl : Float }
 
@@ -406,9 +414,9 @@ mod Perihelion.Combat do
     let dy = game.ball_y - sy
     let dist = Math.sqrt(dx * dx + dy * dy)
     if dist > 0.0 do
-      { x: sx, y: sy, vx: dx / dist * enemy_shot_speed(), vy: dy / dist * enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
+      { x: sx, y: sy, vx: dx / dist * enemy_shot_speed(), vy: dy / dist * enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
     else
-      { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
+      { x: sx, y: sy, vx: 0.0, vy: enemy_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
     end
   end
 
@@ -543,11 +551,11 @@ mod Perihelion.Combat do
   fn spread_angle_step() : Float do 0.5236 end -- 30 degrees in radians
 
   pfn make_shot(x : Float, y : Float, ax : Float, ay : Float) : Shot do
-    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false }
+    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
   end
 
   pfn make_homing_shot(x : Float, y : Float, ax : Float, ay : Float) : Shot do
-    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: true, star_killer: false }
+    { x: x, y: y, vx: ax * player_shot_speed(), vy: ay * player_shot_speed(), ttl: shot_ttl(), homing: true, star_killer: false, target_x: 0.0, target_y: 0.0 }
   end
 
   pfn rotate(ax : Float, ay : Float, angle : Float) : (Float, Float) do
@@ -566,9 +574,17 @@ mod Perihelion.Combat do
     Cons(make_shot(x, y, a4x, a4y), Nil)))))
   end
 
+  doc "Whether StarKiller is the active weapon AND its own (much longer) cooldown is still counting down. Used by `fire`'s outer guard: without this, holding space while StarKiller is equipped but on cooldown would re-run the ENTIRE fire body (aim + unconditional apply_recoil) every single tick, since fire_cooldown itself is deliberately left unchanged for StarKiller (see cooldown2 below) and so never blocks re-entry on its own."
+  pfn starkiller_on_cooldown(game : Game) : Bool do
+    match Perihelion.Core.active_weapon(game) do
+      StarKiller -> game.starkiller_cooldown > 0.0
+      _ -> false
+    end
+  end
+
   fn fire(game : Game, keys : List(String), cursor : (Int, Int), _dt_s : Float) : Game do
     let pressed = List.any(keys, fn k -> k == " ")
-    if !pressed || game.fire_cooldown > 0.0 do
+    if !pressed || game.fire_cooldown > 0.0 || starkiller_on_cooldown(game) do
       game
     else
       let (cx, cy) = cursor
@@ -588,22 +604,24 @@ mod Perihelion.Combat do
             Homing -> Cons(make_homing_shot(game.ball_x, game.ball_y, ax, ay), Nil)
             Spread -> spread_shots(game.ball_x, game.ball_y, ax, ay)
             StarKiller ->
-              if game.starkiller_cooldown > 0.0 do
-                Nil
-              else
-                match Perihelion.Core.star_at(game, starkiller_target_idx(game)) do
-                  None -> Nil
-                  Some(target) ->
-                    let tdx = target.x - game.ball_x
-                    let tdy = target.y - game.ball_y
-                    let tdist = Math.sqrt(tdx * tdx + tdy * tdy)
-                    if tdist <= 0.0 do Nil else
-                      Cons({ x: game.ball_x, y: game.ball_y,
-                             vx: (tdx / tdist) * player_shot_speed(),
-                             vy: (tdy / tdist) * player_shot_speed(),
-                             ttl: shot_ttl() * 3.0, homing: false, star_killer: true }, Nil)
-                    end
-                end
+              -- The outer guard already excluded starkiller_cooldown > 0.0,
+              -- so this always attempts to fire when reached. Lock the
+              -- target star's position into the shot NOW (target_x/target_y)
+              -- so a later W/D retarget can't desync this shot from what it
+              -- actually flies toward (see collide_shots_stars).
+              match Perihelion.Core.star_at(game, starkiller_target_idx(game)) do
+                None -> Nil
+                Some(target) ->
+                  let tdx = target.x - game.ball_x
+                  let tdy = target.y - game.ball_y
+                  let tdist = Math.sqrt(tdx * tdx + tdy * tdy)
+                  if tdist <= 0.0 do Nil else
+                    Cons({ x: game.ball_x, y: game.ball_y,
+                           vx: (tdx / tdist) * player_shot_speed(),
+                           vy: (tdy / tdist) * player_shot_speed(),
+                           ttl: shot_ttl() * 3.0, homing: false, star_killer: true,
+                           target_x: target.x, target_y: target.y }, Nil)
+                  end
               end
           end
           -- StarKiller shouldn't ALSO reset the normal fire_cooldown -- it
@@ -646,28 +664,50 @@ mod Perihelion.Combat do
       fn sh -> if sh.star_idx > tidx do { sh with star_idx: sh.star_idx - 1 } else sh end)
   end
 
-  -- Star-killer shots have no distinguishing target reference (unlike
-  -- homing), so this checks the current star-killer shot(s) against the
-  -- CURRENT reticle target: since the reticle only ever advances forward
-  -- (never past a still-alive star), a live star-killer shot is always aimed
-  -- at whatever starkiller_target_idx resolves to right now.
+  -- Star positions never change after spawn (only remove_star shifts LATER
+  -- stars' ladder indices down) -- so a shot's locked (target_x, target_y)
+  -- always identifies the same physical star, even if the ladder has
+  -- shifted or the live reticle (starkiller_target_offset) has since moved
+  -- on to a different star. This walks the current ladder to recover that
+  -- star's CURRENT index (needed to call remove_star), the same
+  -- recursive-scan-with-index shape as `arrived_star`. Tiny epsilon (via
+  -- `hits` with a near-zero radius) guards against float noise, matching
+  -- this codebase's `approx`-style position-comparison convention.
+  pfn find_star_by_pos(stars : List(Star), tx : Float, ty : Float, i : Int) : Option(Int) do
+    match stars do
+      Nil -> None
+      Cons(s, rest) ->
+        if hits(s.x, s.y, 0.001, tx, ty, 0.0) do
+          Some(i)
+        else
+          find_star_by_pos(rest, tx, ty, i + 1)
+        end
+    end
+  end
+
+  -- Checks the current star-killer shot against its OWN locked target
+  -- (s.target_x/target_y, set once at fire time in `fire`), never the live
+  -- reticle -- so a W/D retarget mid-flight can't desync the shot from the
+  -- star it's actually flying toward. If the locked target star can no
+  -- longer be found (already destroyed some other way), the shot just
+  -- expires harmlessly: no crash, no incorrect removal.
   pfn collide_shots_stars(game : Game) : Game do
     let sk_shots = List.filter(game.player_shots, fn s -> s.star_killer)
     match sk_shots do
       Nil -> game
       Cons(s, _) ->
-        let tidx = starkiller_target_idx(game)
-        match Perihelion.Core.star_at(game, tidx) do
-          None -> game
-          Some(target) ->
-            if hits(s.x, s.y, star_kill_radius(), target.x, target.y, 0.0) do
+        if hits(s.x, s.y, star_kill_radius(), s.target_x, s.target_y, 0.0) do
+          match find_star_by_pos(game.stars, s.target_x, s.target_y, 0) do
+            None ->
+              { game with player_shots: List.filter(game.player_shots, fn sh -> !sh.star_killer) }
+            Some(tidx) ->
               let g2 = Perihelion.Core.remove_star(game, tidx)
               { g2 with
                   ships: retarget_ships_past_removal(g2.ships, tidx),
                   player_shots: List.filter(game.player_shots, fn sh -> !sh.star_killer) }
-            else
-              game
-            end
+          end
+        else
+          game
         end
     end
   end

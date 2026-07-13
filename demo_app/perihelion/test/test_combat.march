@@ -217,7 +217,7 @@ mod TestPerihelionCombat do
     test "asteroids drift, arc toward a nearby star, and shots age" do
       let g0 = base_game(0.0)
       let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01, homing: false, star_killer: false }
+      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.step(g, dt())
       match g2.asteroids do
@@ -367,7 +367,7 @@ mod TestPerihelionCombat do
     test "player shot kills asteroid and scores multiplier" do
       let g0 = base_game(0.0)
       let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
+      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil), multiplier: 3 }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.is_empty(g2.asteroids))
@@ -378,7 +378,7 @@ mod TestPerihelionCombat do
     test "shot misses outside radii sum" do
       let g0 = base_game(0.0)
       let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
+      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
       let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.length(g2.asteroids) == 1)
@@ -394,7 +394,7 @@ mod TestPerihelionCombat do
                    mode: ShipOrbiting(0.0), fire_cooldown: 1.0, idle_timer: 10.0, hunter: false }
       let pos = Perihelion.Combat.ship_pos(ship)
       let (sx, sy) = pos
-      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false }
+      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
       let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: Random.seed(12345) }
       let g2 = Perihelion.Combat.collide(g)
       assert (List.is_empty(g2.ships))
@@ -471,6 +471,38 @@ mod TestPerihelionCombat do
       assert (g2.starkiller_cooldown > 0.0)
     end
 
+    test "holding space with StarKiller on cooldown does not reapply recoil every tick" do
+      -- Flying mode makes apply_recoil's effect observable (it's a no-op
+      -- while Orbiting) -- same setup as the "firing while flying" test above,
+      -- but with StarKiller equipped and space held across several more
+      -- fire() calls while starkiller_cooldown is still counting down.
+      let g0 = { base_game(0.0) with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   mode: Flying(0.0, 0.0 - 300.0) }
+      let g1 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (List.length(g1.player_shots) == 1)
+      assert (g1.starkiller_cooldown > 0.0)
+      match g1.mode do
+        Flying(vx1, vy1) ->
+          assert (vx1 < 0.0) -- recoil WAS applied on the actual fire
+          -- Before the fix, fire_cooldown stays 0.0 for StarKiller (its own
+          -- starkiller_cooldown gates it instead), so the outer guard never
+          -- blocked re-entry and every one of these calls re-ran apply_recoil.
+          let g2 = Perihelion.Combat.fire(g1, space(), cursor_east(), dt())
+          let g3 = Perihelion.Combat.fire(g2, space(), cursor_east(), dt())
+          let g4 = Perihelion.Combat.fire(g3, space(), cursor_east(), dt())
+          assert (List.length(g4.player_shots) == 1)
+          match g4.mode do
+            Flying(vx4, vy4) ->
+              assert (approx(vx4, vx1))
+              assert (approx(vy4, vy1))
+            _ -> assert false
+          end
+        _ -> assert false
+      end
+    end
+
     test "star-killer projectile reaching its target star destroys it and shifts the ladder" do
       let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)), active_weapon_idx: 1 }
       let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
@@ -496,6 +528,40 @@ mod TestPerihelionCombat do
       assert (List.length(g3.stars) == 2)
       match g3.ships do
         Cons(sh, Nil) -> assert (sh.star_idx == 1)
+        _ -> assert false
+      end
+    end
+
+    test "retargeting mid-flight doesn't desync a live star-killer shot from its locked target" do
+      let s2 = mk_star(200.0, 100.0) -- a 3rd star, one further out than the initial target
+      let base = base_game(0.0)
+      let g0 = { base with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   stars: List.append(base.stars, Cons(s2, Nil)) }
+      -- offset 0 -> targets + locks onto star 1 (200, 360)
+      let g1 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      match g1.player_shots do
+        Cons(shot, Nil) ->
+          assert (approx(shot.target_x, 200.0))
+          assert (approx(shot.target_y, 360.0))
+        _ -> assert false
+      end
+      -- Simulate W/D retargeting the reticle to star 2 (200, 100) WHILE the
+      -- shot is still in flight -- Core.step_playing runs
+      -- adjust_starkiller_target unconditionally every tick regardless of
+      -- the active weapon, so this can happen even with StarKiller merely
+      -- equipped (not yet fired again).
+      let g2 = { g1 with starkiller_target_offset: 1 }
+      -- run enough steps for the shot to reach its ORIGINAL target, star 1
+      let g3 = run_n_ticks(g2, 200)
+      match g3.stars do
+        Cons(s0, Cons(s1, Nil)) ->
+          -- star 1 (the shot's locked target) died; star 2 (the
+          -- retargeted-to star) survived untouched, proving the shot wasn't
+          -- diverted onto whatever the live reticle points at now.
+          assert (approx(s0.y, 520.0))
+          assert (approx(s1.y, 100.0))
         _ -> assert false
       end
     end
