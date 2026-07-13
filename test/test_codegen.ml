@@ -6341,6 +6341,83 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
+   A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
+   boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
+   unresolved unification variable) reaches Perceus as `Option(TVar)`.
+   `Repr.repr_of_ty` conservatively boxes that (niche_payload_ok(TVar)=false),
+   but codegen (`llvm_case.ml`'s `effective_repr` abstract-arg recovery) niche-
+   encodes it — the value shares storage with its payload.  Pre-fix,
+   `scrutinee_shares_payload_storage` trusted `repr_of_ty`'s Boxed verdict, so
+   `add_scrutinee_free_for` treated the value as a distinct boxed cell and
+   handed it to FBIP, which rewrote `Some(conn) -> Ok(conn)` into
+   `reuse maybe_conn as Ok(conn)`.  Because `conn` aliases `maybe_conn` (niche),
+   the reuse stored the payload into its own reused cell — a self-referential
+   object → `march: RC underflow (rc was 0)` (SIGABRT, exit 134) when the
+   value is later consumed.  Fix: `scrutinee_shares_payload_storage` mirrors
+   codegen's abstract-arg niche recovery.  See docs/value-representation.md §7.
+   Runs the binary because the symptom is a runtime abort, not an IR shape. *)
+let test_erased_option_niche_fbip_no_underflow_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_erased_option_niche"
+    "mod Main do\n\
+    \  needs IO.Spawn\n\
+    \  type Conn = PgConn(Int) | LiteConn(String)\n\
+    \  actor Pool do\n\
+    \    state { n : Int }\n\
+    \    init { n: 0 }\n\
+    \    on Checkout(reply_to) do\n\
+    \      let _ = actor_reply(reply_to, Some(PgConn(42)))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn describe(c) do\n\
+    \    match c do\n\
+    \    PgConn(fd)  -> \"pg:\" ++ int_to_string(fd)\n\
+    \    LiteConn(k) -> \"lite:\" ++ k\n\
+    \    end\n\
+    \  end\n\
+    \  fn checkout(pool) do\n\
+    \    let t = task_spawn(fn _ ->\n\
+    \      match actor_call(pool, Checkout(0), 5000) do\n\
+    \      Err(e)         -> Err(e)\n\
+    \      Ok(maybe_conn) ->\n\
+    \        match maybe_conn do\n\
+    \        None       -> Err(\"none\")\n\
+    \        Some(conn) -> Ok(conn)\n\
+    \        end\n\
+    \      end\n\
+    \    )\n\
+    \    task_await_unwrap(t)\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    match checkout(spawn(Pool)) do\n\
+    \    Ok(conn) -> println(describe(conn))\n\
+    \    Err(e)   -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  (* NB: no interpreter parity check here — the interpreter's actor_call /
+     task_spawn interaction does not deliver the reply for this shape ("err: no
+     reply"), an unrelated interpreter limitation.  The RC bug is purely a
+     COMPILED-backend defect, so we assert on the compiled binary alone:
+     pre-fix it aborted with `RC underflow` (SIGABRT, exit 134); post-fix it
+     prints pg:42 and exits 0. *)
+  let bin = Filename.concat tmp "erasedoptbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased-niche-Option checkout prints pg:42 with no RC underflow \
+       (not SIGABRT/exit 134)"
+      true
+      (ir_contains run_out "pg:42"
+       && ir_contains run_out "EXIT:0"
+       && not (ir_contains run_out "RC underflow"))
+
 (* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
    `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
    referenced a/b/c/d as undefined global functions (`call ptr @a()`), so clang
@@ -8387,6 +8464,10 @@ let codegen_suites =
             test_float_lit_match_arm_compiled;
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "erased_option_niche_fbip_codegen", [
+          Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
+            test_erased_option_niche_fbip_no_underflow_compiled;
         ] );
       ( "nested_tuple_let_codegen", [
           Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
