@@ -431,6 +431,36 @@ mod Perihelion.Core do
     end
   end
 
+  fn trajectory_preview_dt() : Float do 0.05 end
+  fn trajectory_preview_steps() : Int do 24 end
+
+  pfn predict_trajectory_go(game : Game, x : Float, y : Float, vx : Float, vy : Float, n : Int, acc : List((Float, Float))) : List((Float, Float)) do
+    if n == 0 do
+      List.reverse(acc)
+    else
+      let simmed = { game with ball_x: x, ball_y: y }
+      let (vx2, vy2) = assisted_velocity(simmed, vx, vy, trajectory_preview_dt())
+      let x2 = x + vx2 * trajectory_preview_dt()
+      let y2 = y + vy2 * trajectory_preview_dt()
+      predict_trajectory_go(game, x2, y2, vx2, vy2, n - 1, Cons((x2, y2), acc))
+    end
+  end
+
+  doc "Predicted flight path (a list of world-space points) if the player released right now from ring `ring` of star `idx` at `angle` -- reuses the exact release()/assisted_velocity() physics a real flight uses, simulated forward without touching the real Game. Nil if `idx` isn't a valid star (shouldn't happen while actually orbiting it)."
+  fn predict_trajectory(game : Game, idx : Int, ring : Int, angle : Float) : List((Float, Float)) do
+    match star_at(game, idx) do
+      None -> Nil
+      Some(s) ->
+        let o = ring_at(s, ring)
+        let start_x = s.x + Math.cos(angle) * o.radius
+        let start_y = s.y + Math.sin(angle) * o.radius
+        match (release(game, idx, angle)).mode do
+          Flying(vx0, vy0) -> predict_trajectory_go(game, start_x, start_y, vx0, vy0, trajectory_preview_steps(), Nil)
+          Orbiting(_, _, _) -> Nil -- unreachable: release() always returns Flying
+        end
+    end
+  end
+
   -- Any star's ring captures — provided the ball is APPROACHING it
   -- (velocity . (star - ball) > 0), EXCEPT the star just released from
   -- (index == current). A tangent release is perpendicular to its own
@@ -509,6 +539,18 @@ mod Perihelion.Core do
       end
     else
       { snapped with current: idx, multiplier: 1 }
+    end
+  end
+
+  doc "Like `update`, but for the Milestone phase specifically: resolves which choice (0/1/2) a tap landed on, already computed by the shell from screen geometry."
+  fn pick_milestone(game : Game, choice_idx : Option(Int)) : Game do
+    match choice_idx do
+      None -> game
+      Some(i) ->
+        match List.nth_opt(game.milestone_choices, i) do
+          None -> game
+          Some(choice) -> top_up({ (apply_upgrade(game, choice)) with phase: Playing, milestone_choices: Nil })
+        end
     end
   end
 

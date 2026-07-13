@@ -572,6 +572,41 @@ mod Perihelion do
     end
   end
 
+  pfn upgrade_label(u : Perihelion.Upgrades.UpgradeKind) : String do
+    match u do
+      OffenseWeapon(Homing) -> "Homing Missiles"
+      OffenseWeapon(Spread) -> "Spread Fire"
+      OffenseWeapon(StarKiller) -> "Star Killer"
+      OffenseWeapon(Base) -> "Base Weapon"
+      OffenseFireRate -> "Faster Fire"
+      DefenseBulletWard -> "Bullet Ward"
+      DefenseDeflector -> "Deflector Plating"
+      DefenseShield -> "Reinforced Shield"
+      SpecialItem(StarThrust) -> "Star Thrust"
+      SpecialItem(StarJump) -> "Star Jump"
+      SpecialItem(TrajectoryPreview) -> "Trajectory Preview"
+    end
+  end
+
+  pfn draw_milestone_card(ctx, u : Perihelion.Upgrades.UpgradeKind, cx : Float, view_h : Float) : Unit do
+    Canvas.set_stroke_style(ctx, "#ffffff")
+    Canvas.set_line_width(ctx, 2.0)
+    Canvas.stroke_rect(ctx, cx - 60.0, view_h / 2.0 - 60.0, 120.0, 120.0)
+    Canvas.set_text_align(ctx, "center")
+    Canvas.set_font(ctx, "14px sans-serif")
+    Canvas.fill_text(ctx, upgrade_label(u), cx, view_h / 2.0)
+  end
+
+  pfn draw_milestone_cards(ctx, choices : List(Perihelion.Upgrades.UpgradeKind), view_w : Float, view_h : Float, i : Int) : Unit do
+    match choices do
+      Nil -> ()
+      Cons(u, rest) ->
+        let col_w = view_w / 3.0
+        draw_milestone_card(ctx, u, col_w * (int_to_float(i) + 0.5), view_h)
+        draw_milestone_cards(ctx, rest, view_w, view_h, i + 1)
+    end
+  end
+
   pfn draw_hud(ctx, game : Game) : Unit do
     Canvas.set_fill_style(ctx, "#eeeeee")
     Canvas.set_font(ctx, "18px sans-serif")
@@ -586,6 +621,18 @@ mod Perihelion do
     else
       ()
     end
+    Canvas.set_text_align(ctx, "left")
+    Canvas.set_font(ctx, "13px sans-serif")
+    Canvas.fill_text(ctx, upgrade_label(Perihelion.Upgrades.OffenseWeapon(Perihelion.Core.active_weapon(game))), 14.0, game.view_h - 60.0)
+    match game.special do
+      None -> ()
+      Some(k) -> Canvas.fill_text(ctx, upgrade_label(Perihelion.Upgrades.SpecialItem(k)) ++ " x" ++ int_to_string(game.special_charges), 14.0, game.view_h - 40.0)
+    end
+    let defense_tags =
+      (if game.bullet_ward do "ward " else "" end) ++
+      (if game.deflector_plating do "deflect " else "" end) ++
+      (if game.shield > 0 do "shield x" ++ int_to_string(game.shield) else "" end)
+    Canvas.fill_text(ctx, defense_tags, 14.0, game.view_h - 20.0)
     Canvas.set_text_align(ctx, "center")
     match game.phase do
       Ready ->
@@ -598,7 +645,10 @@ mod Perihelion do
                          game.view_w / 2.0, game.view_h / 2.0)
         draw_runs(ctx, game.runs, game.view_w, game.view_h / 2.0 + 36.0, 0)
       Playing -> ()
-      Milestone -> ()
+      Milestone ->
+        Canvas.set_font(ctx, "20px sans-serif")
+        Canvas.fill_text(ctx, "Choose an upgrade", game.view_w / 2.0, game.view_h / 2.0 - 90.0)
+        draw_milestone_cards(ctx, game.milestone_choices, game.view_w, game.view_h, 0)
     end
   end
 
@@ -617,6 +667,19 @@ mod Perihelion do
       Orbiting(_, _, _)  -> None
     end
     draw_stars(ctx, game.stars, game.camera_y, game.view_h, fx.t, aim)
+    match Perihelion.Core.active_weapon(game) do
+      StarKiller -> draw_starkiller_reticle(ctx, game)
+      _ -> ()
+    end
+    match game.mode do
+      Orbiting(idx, ring, angle) ->
+        if game.special == Some(Perihelion.Upgrades.TrajectoryPreview) do
+          draw_trajectory_preview(ctx, Perihelion.Core.predict_trajectory(game, idx, ring, angle))
+        else
+          ()
+        end
+      Flying(_, _) -> () -- only meaningful while aiming, not mid-flight
+    end
     draw_flash(ctx, fx.flash)
     draw_asteroids(ctx, game.asteroids)
     draw_ships(ctx, game.ships)
@@ -629,6 +692,41 @@ mod Perihelion do
     draw_ball(ctx, game)
     Canvas.restore(ctx)
     draw_hud(ctx, game)
+  end
+
+  pfn draw_starkiller_reticle(ctx, game : Game) : Unit do
+    match Perihelion.Core.star_at(game, Perihelion.Combat.starkiller_target_idx(game)) do
+      None -> ()
+      Some(s) ->
+        Canvas.set_stroke_style(ctx, "#ff5555")
+        Canvas.set_line_width(ctx, 2.0)
+        Canvas.begin_path(ctx)
+        Canvas.arc(ctx, s.x, s.y, s.capture_radius + 12.0, 0.0, two_pi())
+        Canvas.stroke(ctx)
+    end
+  end
+
+  pfn draw_trajectory_preview(ctx, points : List((Float, Float))) : Unit do
+    Canvas.set_fill_style(ctx, "#888888")
+    draw_trajectory_dots(ctx, points, 0)
+  end
+
+  -- Every 3rd predicted point, as a small dot -- reads as a dotted line
+  -- without needing canvas dash-pattern support.
+  pfn draw_trajectory_dots(ctx, points : List((Float, Float)), i : Int) : Unit do
+    match points do
+      Nil -> ()
+      Cons(pt, rest) ->
+        let (x, y) = pt
+        if int_mod(i, 3) == 0 do
+          Canvas.begin_path(ctx)
+          Canvas.arc(ctx, x, y, 2.0, 0.0, two_pi())
+          Canvas.fill(ctx)
+        else
+          ()
+        end
+        draw_trajectory_dots(ctx, rest, i + 1)
+    end
   end
 
   pfn was_playing(g : Game) : Bool do
@@ -739,6 +837,19 @@ mod Perihelion do
     end
   end
 
+  -- Maps a tap's x-position to the milestone card it landed on: 3 equal-width
+  -- columns spanning the full viewport width.
+  pfn milestone_tap_choice(taps : List((Int, Int)), view_w : Float, _view_h : Float) : Option(Int) do
+    match taps do
+      Nil -> None
+      Cons(tap, _) ->
+        let (tx, _) = tap
+        let col_w = view_w / 3.0
+        let idx = float_to_int(int_to_float(tx) / col_w)
+        Some(if idx > 2 do 2 else idx end)
+    end
+  end
+
   pfn tick(ctx, el, game : Game, fx : Fx) : Unit do
     let taps = Dom.taps(el)
     let keys = Dom.key_presses()
@@ -747,7 +858,10 @@ mod Perihelion do
     let view_w = int_to_float(win_w)
     let view_h = int_to_float(win_h)
     resize_canvas(el, game, view_w, view_h)
-    let g2 = Perihelion.Core.update(game, taps, keys, cursor, view_w, view_h, Perihelion.Core.dt())
+    let g2 = match game.phase do
+      Milestone -> Perihelion.Core.pick_milestone(game, milestone_tap_choice(taps, view_w, view_h))
+      _ -> Perihelion.Core.update(game, taps, keys, cursor, view_w, view_h, Perihelion.Core.dt())
+    end
     let muted2 = toggle_mute(fx.muted, keys)
     play_sfx(fx.actx, muted2, game, g2)
     let fx1 = step_fx(fx, g2, Perihelion.Core.dt())
