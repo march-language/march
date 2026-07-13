@@ -217,7 +217,7 @@ let known_divergence =
        its output still diverges via the SEPARATE, still-open
        to_string-on-container bug (prints "#<tag:1>" for the data list),
        same reason as "hello"/"list_lib" above. *)
-    "stats_basic", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\"; its former mono-limit ICE was fixed 2026-07-12)";
+    "stats_basic", "crashes (139) in Stats internals — the still-open sort-RC family (Stats.median on floats), surfaced once the 2026-07-13 to_string-through-Show fix removed its former #<tag:N> mismatch";
   ]
 
 let known_divergence_tbl =

@@ -480,6 +480,28 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
 
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, _) ->
+    (* `to_string` on a NON-PRIMITIVE static type → route through the Show
+       interface dispatch, exactly like println's `show`.  The builtin only
+       has dedicated helpers for Int/Float/Bool/String/Atom/Unit; every other
+       value fell through to the generic runtime march_value_to_string, which
+       renders any unrecognized heap object as "#<tag:N>" — so compiled
+       to_string([1,2,3]) printed "#<tag:1>" while the interpreter printed
+       "[1, 2, 3]".  Rewriting the callee to `show` here lets the immediately
+       following resolve_iface_method + mono/llvm_emit machinery specialize it
+       (Show$List.show etc.) — the same path println has always used, whose
+       output is oracle-pinned identical to the interpreter's.  Primitives
+       keep the builtin (same output, no dispatch); unknown (TVar) and tuple
+       types stay on the builtin — tuples have no Show impl to dispatch to
+       (still an open, separately-filed gap). *)
+    let f_expr = match f_expr, args with
+      | Ast.EVar ({ txt = "to_string"; _ } as n), [arg]
+        when not (Hashtbl.mem !_current_module_fns "to_string") ->
+        (match Lower_state.ty_of_span env (Typecheck.span_of_expr arg) with
+         | Tir.TCon (("Atom" | "Unit" | "String"), []) -> f_expr
+         | Tir.TCon _ -> Ast.EVar { n with Ast.txt = "show" }
+         | _ -> f_expr)
+      | _ -> f_expr
+    in
     (* Check for default-arg dispatch: if f is a plain EVar that names a
        default-arg function (tracked via [_default_dispatch]), rewrite the
        call to the appropriate arity-mangled version (e.g. greet$1, greet$2). *)

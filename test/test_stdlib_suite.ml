@@ -10748,6 +10748,49 @@ let test_compiled_stats_mean_shared_float_list () =
       "compiled Stats.mean on a shared List(Float) exits 0 (no RC op on raw float bits)"
       0 run_rc
 
+(* Regression (to_string-on-container, fixed 2026-07-13): compiled
+   `to_string(x)` on a non-primitive bypassed the Show dispatch and fell
+   through to the generic runtime march_value_to_string, printing
+   "#<tag:N>" for containers ("9"/"nil" for niche Options) while the
+   interpreter printed "[1, 2, 3]"/"Some(9)"/"None".  lower.ml now rewrites
+   a direct `to_string(e)` call to `show(e)` when e's static type is a
+   non-primitive TCon, riding the same interface machinery println uses.
+   Also doubles as the closure pin for the formerly-open "bare/unpinned
+   None fails to LINK compiled" P1 — the annotated-None println below used
+   to die at link with `Undefined symbols: _show` and now prints `None`. *)
+let test_compiled_to_string_containers () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_tostring" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "tostring.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ToStringRegress do\n\
+    \  fn main() : Unit do\n\
+    \    if to_string([1, 2, 3]) == \"[1, 2, 3]\" do () else process_exit(1) end\n\
+    \    if to_string(Some(9)) == \"Some(9)\" do () else process_exit(2) end\n\
+    \    let n : Option(Int) = None\n\
+    \    if to_string(n) == \"None\" do () else process_exit(3) end\n\
+    \    println(n)\n\
+    \    if to_string(42) == \"42\" do () else process_exit(4) end\n\
+    \    if to_string(\"s\") == \"s\" do () else process_exit(5) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "tostringbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled to_string on List/Option/None-annotated matches the interpreter"
+      0 run_rc;
+    Alcotest.(check string)
+      "annotated bare None prints None via println (former _show link failure)"
+      "None" (String.trim out)
+
 (* Regression (DataFrame P0 wrong-answer half, fixed 2026-07-13): a bare
    constructor pattern whose name is AMBIGUOUS across types (DataFrame.Row is
    a 1-ctor boxed type and Csv.CsvRow — CsvEof | Row(...) — is niche-shaped;
@@ -12665,6 +12708,8 @@ let stdlib_suites =
           test_compiled_stats_mean_shared_float_list;
         Alcotest.test_case "ambiguous ctor `Row` nested pattern: payload read intact (compiled)" `Slow
           test_compiled_ambiguous_ctor_nested_pattern;
+        Alcotest.test_case "to_string on containers routes through Show; annotated None links (compiled)" `Slow
+          test_compiled_to_string_containers;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
