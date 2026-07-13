@@ -301,7 +301,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 |---|---|---|
 | `t01_literals` | T-Lit (Int/Bool/String) | |
 | `t02_lambda_app` | T-Abs, T-App, annotated `Int -> Int` param | |
-| `t03_let_poly` | **T-Let generalization** — a local `id = fn x -> x` used at both `Int` and `String` | proves let-polymorphism (§4.1 finding 1) |
+| `t03_let_poly` | **T-Let generalization via annotation** — a local `id : (a) -> a = fn x -> x` used at both `Int` and `String` (annotated since the 2026-07-13 monomorphism restriction; unannotated form = reject/t79) | proves annotated let-polymorphism (§4.1 finding 1) |
 | `t04_if` | T-If (Bool cond, matching branches) | |
 | `t05_adt_construct_match` | T-Con + T-Match — a 2-ctor ADT (`Hue = Rood \| Bloo`) constructed and matched exhaustively | |
 | `t06_payload_ctor_branch` | P-Con — a payload-carrying ctor (`Circle(Int)`) bound to a pattern var in a branch | |

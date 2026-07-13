@@ -188,11 +188,11 @@ let known_divergence =
        RUN_TIMEOUT rather than RUN_FAIL(crashed). Same underlying RC bug
        (garbage pointer reaching an RC op); the wedge escalation is filed in
        specs/todos.md. These entries stay until the RC bug is fixed. *)
-    "alphadev_sort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "heapsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "mergesort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "sort_nearly_sorted", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "timsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+    (* The five bench sorts (alphadev_sort/heapsort/mergesort/
+       sort_nearly_sorted/timsort) were the sort-RC family, FIXED across
+       2026-07-13: float-half perceus refinement (f2729935), tuple-acc arm
+       (d2d0a3a3), and the staged monomorphism restriction for unannotated
+       let-bound lambdas (this commit) — all five now MATCH. *)
 
     (* dataframe_bench's group_by/Stats.mean SIGSEGV was FIXED 2026-07-13
        (nested-fn tvar-family alignment + perceus ctor-field resolution +

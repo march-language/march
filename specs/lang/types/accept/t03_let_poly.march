@@ -1,6 +1,12 @@
 mod M do
   fn main() do
-    let id = fn x -> x
+    -- Let-polymorphism via the annotation escape hatch: an ANNOTATED
+    -- let-bound lambda generalizes and may be used at several types.
+    -- (An UNANNOTATED let-bound lambda is deliberately monomorphic —
+    -- the monomorphism restriction, 2026-07-13: its first use pins its
+    -- type. See reject/r__let_poly_unannotated and specs/todos.md's
+    -- uniform-apply-ABI follow-up, which will lift the restriction.)
+    let id : (a) -> a = fn x -> x
     println(int_to_string(id(5)))
     println(id("hello"))
   end

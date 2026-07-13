@@ -4966,9 +4966,36 @@ and infer_block env exprs =
       | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
     in
+    (* MONOMORPHISM RESTRICTION for unannotated let-bound lambdas: keep the
+       binding Mono so its USE SITES pin the lambda's own type variables (a
+       later `merge_s(xs, ys, cmp)` links them to Int through the shared ref
+       cells the type_map already recorded at the lambda's param spans).
+       Generalizing here left the lambda's recorded types at the quantified
+       var while each use instantiated a fresh COPY — so codegen emitted the
+       apply functions with the ERASED (tagged-ptr) calling convention while
+       specialized callers passed RAW scalars per their concrete fn type:
+       `cmp2(cmp, x, y)` called `$lam$apply(ptr, ptr)` as `(ptr, i64)`.  Odd
+       raw ints mis-untagged (every comparison true → silently wrong merges)
+       and even raw ints were dereferenced as heap pointers (the sort-RC
+       family's mergesort_by/curried-comparator crash class).  An ANNOTATED
+       binding (`let f : (a) -> a = fn x -> x`) still generalizes — the
+       annotation is checked with check_expr above and remains the
+       deliberately-polymorphic escape hatch.
+       STAGED DECISION (2026-07-13, user-approved): this restriction is a
+       SOUNDNESS GUARD, not the endgame — the proper fix is the uniform
+       apply-fn ABI (all closure applies take tagged args; call sites tag
+       scalars), filed in specs/todos.md, after which unannotated let-poly
+       lambdas can be re-generalized.  Until then, generalizing one lets a
+       specialized callee call the erased apply with raw scalars (the
+       bench-sort silent-wrong-merge / SIGBUS class). *)
+    let is_unannotated_lambda =
+      b.bind_ty = None
+      && (match b.bind_expr with Ast.ELam _ -> true | _ -> false)
+    in
     let bindings' = match b.bind_pat with
-      | Ast.PatVar _ -> List.map gen_binding bindings
-      | _            -> bindings
+      | Ast.PatVar _ when not is_unannotated_lambda ->
+        List.map gen_binding bindings
+      | _ -> bindings
     in
     (* Propagate linearity: if bind_lin is Linear/Affine (written as
        `linear let x = ...` or `affine let x = ...`), override the

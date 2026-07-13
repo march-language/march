@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-13, sort-RC family CLOSED — corpus divergence-free)
+
+**THE ENTIRE ORACLE CORPUS IS DIVERGENCE-FREE: 75 matched / 0 known-divergence / 0 un-triaged.** The last piece was the staged monomorphism restriction (user-approved "both, staged"): an UNANNOTATED let-bound lambda stays monomorphic so its first use pins its type and its compiled apply fns are emitted at the concrete calling convention — closing the erased-apply-vs-raw-caller ABI mismatch behind all five bench-sort crashes/wrong answers. Annotated lambdas still generalize (`let id : (a) -> a = fn x -> x`). Spec updated (core-march-types.md §4.1 finding 1, t03 annotated, new reject/t79; types harness 163). The five sort known_divergence entries removed. STAGE 2 FILED: the uniform apply-fn ABI, which will lift the restriction and re-generalize unannotated let-poly lambdas.
+
 ## Current State (as of 2026-07-13, tuple-accumulator fix — stats_basic/dataframe_basic interp-identical)
 
 **FIXED — float-bearing tuple accumulators (resolve_case_field_ty TTuple arm):** Stats.covariance/correlation's fold over a (Float,Float,Float) tuple no longer emits RC ops on the raw double bits of TVar-typed tuple sub-vars. With it, examples/stats_basic AND examples/dataframe_basic are byte-identical to the interpreter end-to-end; their oracle entries removed. Corpus: 70 matched / 5 known-divergence (only the five bench sorts) / 0 un-triaged. The bench sorts' curried-comparator ABI mismatch is fully diagnosed at the IR level with two candidate fixes awaiting a language-level decision (monomorphism restriction — 15 lines, verified, but rejects the working t03_let_poly pattern — vs uniform apply ABI — day-scale, preserves let-polymorphism); see specs/todos.md.

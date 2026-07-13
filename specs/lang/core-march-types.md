@@ -4642,7 +4642,7 @@ Run: `dune build bin/main.exe && MARCH_BIN=… specs/lang/types/check_types.sh`.
 |---|---|---|---|
 | `accept/t01_literals` | accept | T-Lit (Int/Bool/String) | typechecks |
 | `accept/t02_lambda_app` | accept | T-Abs, T-App, annotated `Int -> Int` param | typechecks |
-| `accept/t03_let_poly` | accept | **T-Let generalization** — a local `id = fn x -> x` used at both `Int` and `String` | typechecks (proves let-polymorphism) |
+| `accept/t03_let_poly` | accept | **T-Let generalization via annotation** — a local `id : (a) -> a = fn x -> x` used at both `Int` and `String` (annotated since the 2026-07-13 monomorphism restriction; the unannotated form is now reject/t79) | typechecks (proves annotated let-polymorphism) |
 | `accept/t04_if` | accept | T-If (Bool cond, matching branches) | typechecks |
 | `reject/t01_int_vs_string` | reject | unification mismatch | `expected \`Int\` but got \`String\`` |
 | `reject/t02_unbound_var` | reject | T-Var, `x ∉ Γ` | `I cannot find \`undefined_var\`` |
@@ -4704,10 +4704,18 @@ genuine, filed, open gaps against the current implementation (findings 15 and
 Type System"); the rest are faithful-but-surprising facts about the existing
 typechecker that this document exists to pin down, not defects:
 
-1. **No value restriction.** `generalize` runs whenever the `let` binds a simple
-   `PatVar`, regardless of whether the RHS is a syntactic value (`infer_block`
-   :4318–4324). March relies on its purity/level discipline rather than the
-   ML value restriction. (`t03_let_poly` is the witness.)
+1. **No value restriction, but a MONOMORPHISM RESTRICTION for unannotated
+   let-bound lambdas (2026-07-13).** `generalize` runs whenever the `let`
+   binds a simple `PatVar` — EXCEPT when the RHS is a syntactic lambda with
+   no type annotation, which stays monomorphic so its first use pins its
+   type (`reject/t79_let_poly_unannotated_mr` is the witness; an annotated
+   lambda still generalizes — `accept/t03_let_poly`, now annotated, is that
+   witness). Rationale: a generalized lambda's compiled apply functions
+   keep the erased (tagged) calling convention while callees with concrete
+   fn-typed params call them raw — silently wrong results/crashes (the
+   bench-sort family). STAGED: the uniform-apply-ABI follow-up
+   (specs/todos.md) will lift the restriction. March otherwise relies on
+   its purity/level discipline rather than the ML value restriction.
 2. **`+`/`==` are interface-constrained polymorphic**, resolved as ordinary
    variables — not monomorphic, not parser-overloaded (§2.1).
 3. **No partial application.** A call site must saturate the function (`reject/t03`

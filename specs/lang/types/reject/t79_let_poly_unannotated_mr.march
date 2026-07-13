@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- Monomorphism restriction (2026-07-13): an UNANNOTATED let-bound lambda
+-- stays monomorphic — its first use pins its type, so a second use at a
+-- different type is rejected. Rationale: generalizing it leaves the
+-- compiled closure's apply functions at the erased (tagged) calling
+-- convention while callees with concrete fn-typed params call them raw —
+-- silently wrong comparisons / SIGBUS (the bench-sort family). Annotate to
+-- opt back into polymorphism: `let id : (a) -> a = fn x -> x` (see
+-- accept/t03_let_poly). The uniform-apply-ABI follow-up in specs/todos.md
+-- will lift this restriction.
+mod M do
+  fn main() do
+    let id = fn x -> x
+    println(int_to_string(id(5)))
+    println(id("hello"))
+  end
+end

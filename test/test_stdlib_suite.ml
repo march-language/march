@@ -10712,6 +10712,44 @@ let test_compiled_task_await_heap_payload () =
       "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
+(* Regression (curried-comparator, fixed 2026-07-13 via the STAGED
+   monomorphism restriction): an unannotated let-bound curried lambda was
+   let-generalized, so its apply fns kept the erased (tagged-ptr) calling
+   convention while Sort.cmp2's specialized call passed RAW scalars — odd
+   ints mis-untagged (silently wrong merges), even ints deref'd as heap
+   pointers (all five bench-sort crashes).  The restriction keeps the
+   lambda monomorphic so its use pins the type and the apply fns are
+   emitted at the concrete convention.  The uniform-apply-ABI follow-up
+   (specs/todos.md) will lift the restriction; this pin must keep passing
+   after it does. *)
+let test_compiled_curried_comparator_mergesort () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_curried" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "curried.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod CurriedCmpRegress do\n\
+    \  fn main() : Unit do\n\
+    \    let cmp = fn x -> fn y -> x <= y\n\
+    \    let s = Sort.mergesort_by([5, 1, 4, 2, 3], cmp)\n\
+    \    if List.nth(s, 0) == 1 do () else process_exit(1) end\n\
+    \    if List.nth(s, 4) == 5 do () else process_exit(2) end\n\
+    \    if List.length(s) == 5 do () else process_exit(3) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "curriedbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled curried-comparator mergesort sorts correctly (exit 0)"
+      0 run_rc
+
 (* Regression (float-bearing TUPLE accumulator, fixed 2026-07-13):
    Stats.covariance folds with a `(Float, Float, Float)` tuple accumulator;
    the tuple destructure's pattern-matrix sub-vars are TVar-typed, and
@@ -12805,6 +12843,8 @@ let stdlib_suites =
           test_compiled_float_merge_sort_family;
         Alcotest.test_case "float tuple accumulator covariance/correlation (compiled)" `Slow
           test_compiled_float_tuple_accumulator;
+        Alcotest.test_case "curried-comparator mergesort (compiled, monomorphism restriction)" `Slow
+          test_compiled_curried_comparator_mergesort;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
