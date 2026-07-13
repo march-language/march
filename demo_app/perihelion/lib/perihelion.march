@@ -858,8 +858,19 @@ mod Perihelion do
     let view_w = int_to_float(win_w)
     let view_h = int_to_float(win_h)
     resize_canvas(el, game, view_w, view_h)
+    -- R hard-resets from ANY phase (see Core.update), but the Milestone
+    -- branch below normally routes through pick_milestone instead of
+    -- update -- which never looks at `keys` -- so without this check R
+    -- would silently stop working while the milestone overlay is up.
+    -- Reuse Core.wants_reset/update's own reset handling rather than
+    -- reimplementing it here.
     let g2 = match game.phase do
-      Milestone -> Perihelion.Core.pick_milestone(game, milestone_tap_choice(taps, view_w, view_h))
+      Milestone ->
+        if Perihelion.Core.wants_reset(keys) do
+          Perihelion.Core.update(game, taps, keys, cursor, view_w, view_h, Perihelion.Core.dt())
+        else
+          Perihelion.Core.pick_milestone(game, milestone_tap_choice(taps, view_w, view_h))
+        end
       _ -> Perihelion.Core.update(game, taps, keys, cursor, view_w, view_h, Perihelion.Core.dt())
     end
     let muted2 = toggle_mute(fx.muted, keys)

@@ -728,6 +728,36 @@ mod TestPerihelionCore do
       assert (g2.fire_rate_stacks == g0.fire_rate_stacks + 1)
       assert (List.is_empty(g2.milestone_choices))
     end
+
+    -- pick_milestone is what the shell's tick() actually calls every frame
+    -- the overlay is up (Task 10). capture_flash/fx_bursts are read-once
+    -- signals (set once by the triggering capture, meant to be visible for
+    -- exactly one frame); pick_milestone must clear them on every call --
+    -- both while still waiting for a tap and when a tap resolves a choice --
+    -- or the capture flash/sweep-sound would replay every single frame the
+    -- overlay is on screen.
+    test "pick_milestone clears capture_flash/fx_bursts while still waiting for a tap" do
+      let g0 = { mk_game(0.0) with phase: Milestone,
+                 milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Nil),
+                 capture_flash: Some((10.0, 20.0)),
+                 fx_bursts: Cons((10.0, 20.0), Nil) }
+      let g1 = Perihelion.Core.pick_milestone(g0, None)
+      assert (match g1.capture_flash do None -> true | _ -> false end)
+      assert (List.is_empty(g1.fx_bursts))
+      assert (is_milestone(g1.phase))
+    end
+
+    test "pick_milestone clears capture_flash/fx_bursts when a tap resolves a choice" do
+      let g0 = { mk_game(0.0) with phase: Milestone,
+                 milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Nil),
+                 capture_flash: Some((10.0, 20.0)),
+                 fx_bursts: Cons((10.0, 20.0), Nil) }
+      let g1 = Perihelion.Core.pick_milestone(g0, Some(0))
+      assert (match g1.capture_flash do None -> true | _ -> false end)
+      assert (List.is_empty(g1.fx_bursts))
+      assert (is_playing(g1.phase))
+      assert (g1.fire_rate_stacks == g0.fire_rate_stacks + 1)
+    end
   end
 
   describe "weapon rotation (Q/E)" do

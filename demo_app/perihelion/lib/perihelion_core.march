@@ -295,6 +295,11 @@ mod Perihelion.Core do
   end
 
   -- ── Update ───────────────────────────────────────────────────────────
+  doc "Whether `keys` contains the hard-reset key (r/R). Shared by `update` (which honors it from every phase it dispatches directly) and the shell's `tick` (which needs the same check to decide whether to route a Milestone-phase frame through `update`'s reset instead of `pick_milestone`)."
+  fn wants_reset(keys : List(String)) : Bool do
+    List.any(keys, fn k -> k == "r" || k == "R")
+  end
+
   doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
   fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
     -- fx_bursts/capture_flash are read-once signals: reset here so a frame
@@ -305,7 +310,7 @@ mod Perihelion.Core do
     -- R hard-resets from ANY phase: abandon the current run and return to a
     -- fresh "tap to start" board. Persisted best + run history are kept (a
     -- reset is not a finished run, so it neither records nor updates them).
-    if List.any(keys, fn k -> k == "r" || k == "R") do
+    if wants_reset(keys) do
       reset(g0)
     else
       let tapped = !List.is_empty(taps)
@@ -544,12 +549,18 @@ mod Perihelion.Core do
 
   doc "Like `update`, but for the Milestone phase specifically: resolves which choice (0/1/2) a tap landed on, already computed by the shell from screen geometry."
   fn pick_milestone(game : Game, choice_idx : Option(Int)) : Game do
+    -- Same read-once reset as `update`'s first line: this runs on EVERY
+    -- Milestone-phase tick (both while waiting and when resolving a tap), so
+    -- without it capture_flash/fx_bursts from the triggering capture would
+    -- stay `Some(...)`/non-empty for the whole time the overlay is up
+    -- instead of just the one frame it was set on.
+    let g0 = { game with fx_bursts: Nil, capture_flash: None }
     match choice_idx do
-      None -> game
+      None -> g0
       Some(i) ->
-        match List.nth_opt(game.milestone_choices, i) do
-          None -> game
-          Some(choice) -> top_up({ (apply_upgrade(game, choice)) with phase: Playing, milestone_choices: Nil })
+        match List.nth_opt(g0.milestone_choices, i) do
+          None -> g0
+          Some(choice) -> top_up({ (apply_upgrade(g0, choice)) with phase: Playing, milestone_choices: Nil })
         end
     end
   end
