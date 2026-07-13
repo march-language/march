@@ -611,6 +611,13 @@ void *march_io_read_line(void) {
     return march_string_lit(buf, (int64_t)len);
 }
 
+int64_t march_io_read_byte(void) {
+    unsigned char c;
+    ssize_t n = read(0, &c, 1);
+    if (n <= 0) return -1;  /* EOF (n==0) or error (n<0) both surface as -1 */
+    return (int64_t)c;
+}
+
 /* ── Integer math helpers ────────────────────────────────────────────────── */
 
 int64_t march_int_pow(int64_t base, int64_t exp) {
