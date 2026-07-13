@@ -167,6 +167,26 @@ mod Perihelion.Core do
     if target < 0 do 0 else if target > n - 1 do n - 1 else target end end
   end
 
+  doc "The player's currently-active weapon (index-clamped against owned_weapons, which only grows, never shrinks -- so no out-of-range risk in practice, but clamped defensively)."
+  fn active_weapon(game : Game) : Perihelion.Upgrades.WeaponKind do
+    let n = List.length(game.owned_weapons)
+    let idx = if game.active_weapon_idx >= n do 0 else game.active_weapon_idx end
+    match List.nth_opt(game.owned_weapons, idx) do
+      Some(w) -> w
+      None -> Perihelion.Upgrades.Base
+    end
+  end
+
+  -- Edge-triggered like adjust_ring: one keypress this frame = one step.
+  -- Q/E both pressed cancel out (net 0), same convention as W/S.
+  pfn adjust_weapon(idx : Int, keys : List(String), n : Int) : Int do
+    let next = List.any(keys, fn k -> k == "e" || k == "E")
+    let prev = List.any(keys, fn k -> k == "q" || k == "Q")
+    let delta = (if next do 1 else 0 end) - (if prev do 1 else 0 end)
+    let raw = int_mod(idx + delta, n)
+    if raw < 0 do raw + n else raw end
+  end
+
   -- ── Update ───────────────────────────────────────────────────────────
   doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
   fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
@@ -203,10 +223,12 @@ mod Perihelion.Core do
   end
 
   pfn step_playing(game : Game, tapped : Bool, keys : List(String), cursor : (Int, Int), dt_s : Float) : Game do
-    let g1 = match game.mode do
+    let g0 = match game.mode do
       Orbiting(idx, ring, angle) -> step_orbit(game, idx, ring, angle, tapped, keys, dt_s)
       Flying(vx, vy)             -> step_flight(game, vx, vy, dt_s)
     end
+    let n = List.length(g0.owned_weapons)
+    let g1 = { g0 with active_weapon_idx: adjust_weapon(g0.active_weapon_idx, keys, n) }
     match g1.phase do
       Playing ->
         let g2 = Perihelion.Combat.step(g1, dt_s)

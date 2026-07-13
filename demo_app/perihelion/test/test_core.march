@@ -729,4 +729,26 @@ mod TestPerihelionCore do
     end
   end
 
+  describe "weapon rotation (Q/E)" do
+    test "E cycles to the next owned weapon, wrapping around" do
+      let g0 = { mk_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Homing, Nil)) }
+      let g2 = step_keys(g0, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Homing)
+      let g3 = step_keys(g2, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g3) == Perihelion.Upgrades.Base)
+    end
+
+    test "Q cycles to the previous owned weapon, wrapping around" do
+      let g0 = { mk_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Homing, Nil)) }
+      let g2 = step_keys(g0, Cons("q", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Homing)
+    end
+
+    test "single owned weapon: Q/E are no-ops" do
+      let g0 = mk_game(0.0)
+      let g2 = step_keys(g0, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Base)
+    end
+  end
+
 end
