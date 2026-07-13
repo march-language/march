@@ -6065,8 +6065,8 @@ let test_actor_call_get () =
         on Inc() do
           { count: state.count + 1 }
         end
-        on Call(ref, msg) do
-          Actor.reply(ref, state.count)
+        on GetCount(reply_to) do
+          Actor.reply(reply_to, state.count)
           state
         end
       end
@@ -6075,7 +6075,7 @@ let test_actor_call_get () =
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
-        let result = Actor.call(pid, Inc(), 1000)
+        let result = Actor.call(pid, GetCount, 1000)
         match result do
         Ok(n) -> n
         Err(_) -> -1

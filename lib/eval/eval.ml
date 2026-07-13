@@ -299,6 +299,12 @@ let is_type_dispatched_iface = function
     Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
 let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(** Constructor name → its 0-based tag index within its declaring type.
+    Mirrors the COMPILED runtime's per-type ctor tag numbering; used by
+    [actor_call] to reproduce march_actor_call's POSITIONAL dispatch (the
+    sentinel's tag index selects the handler at that index). *)
+let ctor_index_tbl : (string, int) Hashtbl.t = Hashtbl.create 16
+
 (** Record field-set → type name mapping.
     Maps a canonical key (sorted, comma-joined field names) to the declaring type name.
     Populated when [eval_decl] processes [DType] nodes with [TDRecord].
@@ -6771,16 +6777,24 @@ let base_env : env =
               | _ -> eval_error "actor_cast: message must be a constructor, got %s"
                        (value_to_string msg)))
         | _ -> eval_error "actor_cast: expected (Pid, message)"))
-  (* actor_call: synchronous call — sends Call(ref, msg) and waits for a reply.
-     The target handler must call actor_reply(ref, result) to unblock the caller.
-     Returns Ok(result) or Err(reason). *)
+  (* actor_call: synchronous call, mirroring the COMPILED runtime's protocol
+     (march_actor_call, runtime/march_runtime.c) — the canonical form per
+     specs/lang/actors.md: the caller passes a ZERO-ARG SENTINEL message;
+     dispatch is POSITIONAL on the sentinel's constructor tag index (NOT its
+     name), and the handler at that index receives the caller reference as
+     its SINGLE argument, replying via Actor.reply(reply_to, result).
+     Until 2026-07-13 the interpreter instead wrapped the message as
+     Call(ref, msg) and required an `on Call(ref, msg)` handler — a protocol
+     no compiled program could satisfy (the P1 "handler-dispatch FORM
+     diverges" entry): the same source either deadlocked compiled or
+     returned Err interpreted.  Returns Ok(result) or Err(reason). *)
   ; ("actor_call", VBuiltin ("actor_call", function
         | [VPid pid; msg; VInt _timeout_ms] ->
           let ref_id = !next_call_ref in
           next_call_ref := ref_id + 1;
-          let call_msg = match msg with
-            | VCon (tag, args) -> VCon ("Call", [VInt ref_id; VCon (tag, args)])
-            | VAtom tag        -> VCon ("Call", [VInt ref_id; VAtom tag])
+          let tag = match msg with
+            | VCon (tag, _) -> tag
+            | VAtom tag     -> tag
             | _ -> eval_error "actor_call: message must be a constructor, got %s"
                      (value_to_string msg)
           in
@@ -6789,14 +6803,30 @@ let base_env : env =
            | Some inst when not inst.ai_alive ->
              VCon ("Err", [VString "actor not alive"])
            | Some inst ->
-             Queue.push call_msg inst.ai_mailbox;
-             !run_scheduler_hook ();
-             (match Hashtbl.find_opt pending_replies ref_id with
-              | Some result ->
-                Hashtbl.remove pending_replies ref_id;
-                VCon ("Ok", [result])
-              | None ->
-                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])))
+             (* Sentinel tag index → the actor's handler at that index (the
+                compiled runtime's routing).  A sentinel whose ctor is not
+                registered falls back to name-routing so a sentinel named
+                after the target handler still works. *)
+             let handlers = inst.ai_def.actor_handlers in
+             let target = match Hashtbl.find_opt ctor_index_tbl tag with
+               | Some i when i < List.length handlers ->
+                 Some (List.nth handlers i).ah_msg.txt
+               | _ ->
+                 if List.exists (fun (h : actor_handler) ->
+                     String.equal h.ah_msg.txt tag) handlers
+                 then Some tag else None
+             in
+             (match target with
+              | None -> VCon ("Err", [VString "no handler for call tag"])
+              | Some handler_name ->
+                Queue.push (VCon (handler_name, [VInt ref_id])) inst.ai_mailbox;
+                !run_scheduler_hook ();
+                (match Hashtbl.find_opt pending_replies ref_id with
+                 | Some result ->
+                   Hashtbl.remove pending_replies ref_id;
+                   VCon ("Ok", [result])
+                 | None ->
+                   VCon ("Err", [VString "no reply (timeout or unhandled Call)"]))))
         | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
   (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
   ; ("actor_reply", VBuiltin ("actor_reply", function
@@ -7808,6 +7838,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset ctor_index_tbl;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
@@ -8469,8 +8500,9 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* Populate ctor_type_tbl so dispatch can find the type from a constructor value. *)
     (match td with
      | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+       List.iteri (fun i (v : variant) ->
+           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt;
+           Hashtbl.replace ctor_index_tbl v.var_name.txt i
          ) variants
      | TDRecord fields ->
        (* Register record type by its field names for Json derive dispatch *)
@@ -8496,6 +8528,13 @@ let rec eval_decl (env : env) (d : decl) : env =
        module — the desugar pass turns A.B into ECon("A.B") which becomes the
        actor_name used in ESpawn. *)
     let env_ref = ref env in
+    (* Register each handler's implicit message constructor with its handler
+       INDEX — the compiled runtime numbers actor message tags by handler
+       declaration order, and march_actor_call routes POSITIONALLY on the
+       sentinel's tag; [actor_call] below mirrors that via this table. *)
+    List.iteri (fun i (h : actor_handler) ->
+        Hashtbl.replace ctor_index_tbl h.ah_msg.txt i
+      ) def.actor_handlers;
     Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
     let qual = current_doc_prefix () ^ name.txt in
     if qual <> name.txt then
@@ -8697,8 +8736,9 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* Treat like DType at runtime — register constructors/records for dispatch. *)
     (match td with
      | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+       List.iteri (fun i (v : variant) ->
+           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt;
+           Hashtbl.replace ctor_index_tbl v.var_name.txt i
          ) variants
      | TDRecord fields ->
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
@@ -9004,8 +9044,9 @@ let eval_module_env (m : module_) : env =
       (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
       (match td with
        | TDVariant variants ->
-         List.iter (fun (v : variant) ->
-             Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+         List.iteri (fun i (v : variant) ->
+             Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt;
+             Hashtbl.replace ctor_index_tbl v.var_name.txt i
            ) variants
        | TDRecord fields ->
          let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
