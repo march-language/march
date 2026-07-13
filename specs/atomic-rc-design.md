@@ -1,8 +1,57 @@
 # Atomic Reference Counting for March
 
 **Date:** 2026-03-21
-**Status:** Draft
-**Depends on:** Perceus RC (implemented), per-actor arenas (designed), LLVM codegen (implemented), HTTP server (implemented with manual borrow workaround)
+**Status:** Largely implemented, in a MODIFIED form (see "Implementation
+status" below, added 2026-07-13). The operational rules the shipped design
+obeys are stated in `specs/lang/core-march.md` §4.16 (RC-Mode-Actor-Sent /
+RC-Mode-Local / RC-Mode-Dynamic-Promotion) — read that section for current
+truth; this document remains the design rationale.
+**Depends on:** Perceus RC (implemented), per-actor arenas (designed), LLVM codegen (implemented), HTTP server (implemented — the manual borrow workaround this draft targeted is GONE, replaced by `march_rc_set_thread_concurrent`)
+
+## Implementation status (2026-07-13)
+
+What actually landed diverges from the phase plan below in one important
+way: there is **no `rc_mode` annotation and no `lib/tir/rc_mode.ml`
+escape-analysis pass** (Phases 2 and 4 as designed). Instead, TIR carries
+two separate constructor pairs — `EIncRC`/`EDecRC` (local) and
+`EAtomicIncRC`/`EAtomicDecRC` (atomic), `lib/tir/tir.ml` — and selection
+is a hybrid:
+
+- **Static (coarse):** `perceus.ml`'s `collect_actor_sent_vars` marks
+  variables that flow into `send(actor, msg)`'s message position;
+  `incrc_for`/`decrc_for` pick the atomic constructors for exactly those.
+  No transitive closure through captures/fields is computed — the static
+  side is deliberately shallow.
+- **Codegen dispatch (Phase 3 — done as designed):** `llvm_emit.ml` sends
+  the local constructors to `march_incrc_local`/`march_decrc_local` and
+  the atomic ones to `march_incrc`/`march_decrc`.
+- **Runtime (Phase 1 — done, plus more):** the `_local` entry points exist
+  (`runtime/march_runtime.c`) but additionally perform a **dynamic
+  promotion** this draft only sketched as Open Question 5: when executing
+  on a scheduler worker thread (`march_sched_in_scheduler()`) or an OS
+  thread flagged via `march_rc_set_thread_concurrent(1)`
+  (`march_tls_concurrent_rc`), the local op takes the atomic path. This
+  thread-granularity check — not the per-value static analysis — carries
+  the correctness obligation for values the shallow static scan misses
+  (message payload fields, closure captures). The local dec also aborts
+  loudly on RC underflow rather than wrapping.
+- **HTTP borrow workaround (Phase 5 — done, differently):** the manual
+  capture-tree `march_incrc` walk in `march_http.c` is gone; connection
+  threads and the evloop instead call `march_rc_set_thread_concurrent(1)`
+  once at thread start (`march_http.c`, `march_http_evloop.c`), which
+  makes every RC op on those threads atomic via the dynamic promotion.
+- **Boundary sites hardcoded atomic:** `llvm_case.ml`'s shared-path field
+  IncRC, `march_decrc_freed`, and the `EReuse` RC-uniqueness load (an
+  atomic monotonic load) never consult the mode.
+- **Not built:** per-value transitive escape analysis (Phase 4), the
+  `rc_mode` TIR field (Phase 2 as specified), inlined RC ops, immortal
+  objects. Phase 6's benchmarking exists only as the general bench suite.
+
+Witnesses: `test/test_codegen.ml`
+`test_actor_sent_rc_ops_atomic_locals_stay_local` pins the two dispatch
+spellings in emitted IR; `test/apps/actor_stress.march` notes the
+single-scheduler golden requirement that traces back to exactly this
+local-RC design.
 
 ## Problem
 

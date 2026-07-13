@@ -655,6 +655,53 @@ let test_actor_suffix_named_user_type_not_treated_as_actor () =
   Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the atomic RC load"
     true (ir_contains ir "load atomic i64")
 
+(** Atomic-vs-local RC mode selection (core-march.md §4.16, RC-Mode rules):
+    Perceus statically partitions RC ops into two TIR constructors —
+    [EAtomicIncRC]/[EAtomicDecRC] for variables that flow into `send(actor,
+    msg)`'s message position ([collect_actor_sent_vars] / [incrc_for] /
+    [decrc_for] in perceus.ml), [EIncRC]/[EDecRC] for everything else — and
+    llvm_emit dispatches them to DIFFERENT runtime entry points:
+    `march_incrc`/`march_decrc` (always-atomic fetch-add) vs
+    `march_incrc_local`/`march_decrc_local` (plain rc++/rc--, dynamically
+    promoted to the atomic path when executing on a scheduler thread or a
+    thread flagged by march_rc_set_thread_concurrent — march_runtime.c).
+    Pin both spellings in the emitted IR of a program whose message value
+    stays live across a send (the double-send makes the FIRST send's
+    still-live msg take an inc, and msg ∈ actor_sent makes that inc
+    atomic): losing the atomic side silently reintroduces the cross-thread
+    RC race; losing the local side silently pessimizes every
+    single-threaded RC op to a lock-prefixed RMW. *)
+let test_actor_sent_rc_ops_atomic_locals_stay_local () =
+  let ir = emit_actor_ir {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+    fn ilen(xs : IntList) : Int do
+      match xs do
+        INil -> 0
+        ICons(_, t) -> 1 + ilen(t)
+      end
+    end
+    actor Sink do
+      state { n : Int }
+      init  { n: 0 }
+      on Ingest(xs : IntList) do { n: state.n + ilen(xs) } end
+    end
+    fn main() : Unit do
+      let s = spawn(Sink)
+      let xs = ICons(1, ICons(2, INil))
+      let msg = Ingest(xs)
+      send(s, msg)
+      send(s, msg)
+      println(int_to_string(ilen(xs)))
+      run_until_idle()
+    end
+  end|} in
+  Alcotest.(check bool) "actor-sent value's RC ops dispatch to the ATOMIC runtime entry (march_incrc/march_decrc)"
+    true (ir_contains ir "call void @march_incrc(ptr"
+          || ir_contains ir "call void @march_decrc(ptr");
+  Alcotest.(check bool) "non-sent values' RC ops stay on the LOCAL entry (march_incrc_local/march_decrc_local)"
+    true (ir_contains ir "call void @march_incrc_local(ptr"
+          || ir_contains ir "call void @march_decrc_local(ptr")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -7965,6 +8012,8 @@ let codegen_suites =
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
             `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
+          Alcotest.test_case "RC mode selection: actor-sent value atomic, everything else local"
+            `Quick test_actor_sent_rc_ops_atomic_locals_stay_local;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;

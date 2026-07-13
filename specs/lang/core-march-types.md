@@ -4512,8 +4512,11 @@ borrow-inferred; `TTuple`/`TRecord`: RC no at the aggregate level, borrow-
 eligible yes — fields are reconciled individually). This divergence is a
 property of `Tir.ty` (the erased representation), not `Ast.ty`, so even
 this lives downstream of typing — see `core-march.md` §4.16 for the
-operational account and `specs/perceus-invariants.md` §1 for the full
-fix-history-backed truth table.
+operational account (which since 2026-07-13 also states E-Reuse, the
+FBIP reuse-preserves-semantics rule, and the RC-Mode atomic/local
+selection rules — both likewise typing-free) and
+`specs/perceus-invariants.md` §1 for the full fix-history-backed truth
+table.
 
 ### 2.14 Refinement types: erasure in `typecheck.ml`, checked by a separate pass (widening slice 12, 2026-07-11)
 

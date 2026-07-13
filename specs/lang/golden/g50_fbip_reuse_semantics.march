@@ -1,0 +1,79 @@
+mod Main do
+  -- Operational FBIP/reuse witness (core-march.md §4.16 — the
+  -- reuse-preserves-semantics rule, E-Reuse). The INTERPRETER performs NO
+  -- reuse at all (eval.ml allocates fresh cells for every constructor), so
+  -- this corpus's standard interp==compiled byte-identity check IS the
+  -- executable semantic-equivalence witness: if the compiled backend's
+  -- EReuse ever produced a value observationally different from a fresh
+  -- allocation, this golden would diverge.
+  --
+  -- Three shapes, each targeting one premise of the rule:
+  --
+  -- 1. UNIQUE in-place map (the reuse path fires): `bump` consumes its list
+  --    argument (RC == 1 per cell at each Cons destructure), so
+  --    perceus_fbip rewrites the freed Cons + fresh Cons into EReuse and
+  --    the compiled walk mutates cells in place. Output must equal the
+  --    interpreter's all-fresh build.
+  --
+  -- 2. SHARED original preserved (the runtime uniqueness premise): `keep`
+  --    holds a second reference to the SAME list while `bump` maps it, so
+  --    every cell has RC >= 2 at the destructure — the emitted rc==1 check
+  --    (llvm_emit.ml EReuse: atomic monotonic load + branch) must take the
+  --    fresh-allocation path, leaving `keep`'s cells untouched. Printing
+  --    `keep` AFTER the map is the discriminator: an unsound in-place write
+  --    on a shared cell corrupts it.
+  --
+  -- 3. CROSS-CTOR reuse (the arity-equality premise, P8): `flip` frees a
+  --    2-field `A` cell and allocates a 2-field `B` — perceus_fbip's
+  --    [same_arity] approves reuse across DIFFERENT constructors of equal
+  --    field count (the $fbip$-encoded freed-cell arity, not the ctor
+  --    name, is what must match), and the reuse branch overwrites tag +
+  --    every field (the full-overwrite premise, fail-loudly-checked at
+  --    emission since 2026-07-12 — llvm_emit.ml EReuse arg-count guard).
+  type Pair = A(Int, Int) | B(Int, Int)
+
+  fn bump(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> Cons(h + 1, bump(t))
+    end
+  end
+
+  fn flip(p : Pair) : Pair do
+    match p do
+      A(x, y) -> B(y, x)
+      B(x, y) -> A(y, x)
+    end
+  end
+
+  fn show_pair(p : Pair) : String do
+    match p do
+      A(x, y) -> "A(" ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ ")"
+      B(x, y) -> "B(" ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ ")"
+    end
+  end
+
+  fn sum(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(h, t) -> h + sum(t)
+    end
+  end
+
+  fn main() do
+    -- 1. unique: the list is consumed by bump — reuse path
+    let unique_mapped = bump([10, 20, 30, 40])
+    println("unique_sum=" ++ int_to_string(sum(unique_mapped)))
+
+    -- 2. shared: keep survives the map — fresh-alloc path, original intact
+    let keep = [1, 2, 3]
+    let shared_mapped = bump(keep)
+    println("shared_sum=" ++ int_to_string(sum(shared_mapped)))
+    println("keep_sum=" ++ int_to_string(sum(keep)))
+
+    -- 3. cross-ctor: A cell freed, equal-arity B allocated (and back)
+    let p = flip(A(7, 9))
+    println("flip1=" ++ show_pair(p))
+    println("flip2=" ++ show_pair(flip(p)))
+  end
+end

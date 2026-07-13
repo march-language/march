@@ -2927,15 +2927,133 @@ binary runs clean under `MARCH_SANITIZE=1` — exit 0, no ASan/UBSan report
 sweep exists over the corpus, a documented gap, not built in this
 docs-only slice).
 
-**What this section deliberately excludes.** FBIP/reuse (`lib/tir/
-perceus_fbip.ml`) needs an "reuse preserves semantics" theorem to state as a
-real rule, not just an arity-compatibility check — excluded pending that
-metatheory. Atomic RC mode-selection (`specs/atomic-rc-design.md`) is an
-undesigned draft — no code implements it today. Escape-analysis stack
+**FBIP reuse preserves semantics (E-Reuse) — added 2026-07-13.** This rule
+was originally excluded because the reuse check proved only *size*
+compatibility, not semantic equivalence. The compiler work that closes the
+gap has landed, and the equivalence claim now rests on four premises, each
+enforced at a different stage:
+
+```
+        Perceus emits `dec_rc v` as a match arm's scrutinee free, encoding the
+        freed constructor's EXACT field count n onto v's type behind the
+        `$fbip$` marker (add_scrutinee_free_for, lib/tir/perceus.ml)       (P-arity-src)
+
+        the dec sinks to an adjacent `alloc C(a₁…aₖ)` crossing only ELet
+        bindings whose RHS does not mention v, and RC ops on OTHER
+        variables (try_fbip_sink, lib/tir/perceus_fbip.ml)                 (P-sink)
+
+        k = n  (same_arity: marker-encoded arity only — a raw declared
+        type's parameter count is never accepted)   and   v ∉ {a₁…aₖ}
+        (args_alias_reuse: no self-reference)                              (P-compat)
+
+  (E-Reuse)  ───────────────────────────────────────────────────────────────
+        TIR rewrites to `reuse v as C(a₁…aₖ)`, and llvm_emit's EReuse arm
+        compiles it as:  rc ← load atomic monotonic v.rc;
+                         if rc == 1  → overwrite v's tag AND all k fields
+                                       in place (full overwrite, checked
+                                       fail-loudly at emission: arg count
+                                       must equal the resolved ctor's
+                                       declared field count)
+                         else        → march_decrc(v); fresh alloc
+```
+
+The conclusion — a reused cell is observationally identical to a fresh
+allocation — holds because (1) the RC==1 runtime branch guarantees no other
+live reference can observe the overwrite (a shared cell always takes the
+fresh path, so even an aliasing corner the static analysis missed degrades
+to the ordinary alloc semantics, never to corruption); (2) the full
+overwrite (tag + every field, under-write now a `failwith` at emission)
+leaves no stale byte of the old value visible through the new one; and
+(3) March has no pointer-identity observation — no `==`-on-address, no
+`Object.id` — so "same cell, new contents" and "new cell" are
+indistinguishable to every program.
+
+**Golden `g50_fbip_reuse_semantics`** witnesses the rule with a twist that
+makes the corpus's usual check unusually strong here: the interpreter
+performs NO reuse at all (`eval.ml` allocates fresh cells for every
+constructor), so interp==compiled byte-identity IS the executable
+semantic-equivalence check — if EReuse ever produced a value
+distinguishable from a fresh allocation, g50 would diverge. Its three
+shapes each target one premise: a unique in-place list map (reuse fires —
+the post-Perceus TIR shows `reuse xs as List.Cons(…)`, also pinned
+byte-for-byte by `test/snapshots/perceus/fbip_dead_binding_reuse.expected`),
+a shared original held across the map (RC==1 fails → fresh path, original
+prints unchanged), and a cross-constructor equal-arity flip
+(`A(x,y) → B(y,x)` — P-compat's arity check is deliberately
+constructor-name-blind).
+
+**A finding worth recording (2026-07-13):** before this slice, FBIP fired
+**nowhere** — a `--dump-tir` of the full stdlib+program showed zero `reuse`
+ops, and even `test/snapshots/perceus/fbip_dead_binding_reuse.expected`
+(the snapshot created to pin EReuse) had the starved dec+alloc shape pinned
+in as if correct. Cause: since join_points began lifting a match's panic
+default arm into a `$jp_clo` closure, every real arm carries a
+`dec_rc $jp_clo` between its let chain and its tail alloc, and the sink
+only traversed ELet nodes — it stopped at that ESeq every time. The fix
+(the "RC ops on OTHER variables" clause of P-sink above) restored reuse
+program-wide: `bench/tree_transform.march` went from 9.67s to 0.98s
+(~10×) with byte-identical output, and the full suite + 50-program golden
+corpus stayed green.
+
+**Atomic RC mode-selection — added 2026-07-13 (supersedes the
+`specs/atomic-rc-design.md` draft's "nothing implemented" status).** The
+draft's Phase-4 escape analysis (a planned `lib/tir/rc_mode.ml` — never built, no such file exists) <!-- doc-lint:ignore -->
+was skipped; what landed instead is a simpler hybrid — a static two-constructor
+partition plus a dynamic thread-context promotion — that has been live in
+the compiler and runtime since the actor/parallelism work:
+
+```
+        v flows into `send(actor, msg)`'s message position
+        (collect_actor_sent_vars — the transitive closure is NOT taken:
+        only the sent variable itself is marked)
+  (RC-Mode-Actor-Sent)  ────────────────────────────────────────────────
+        Perceus emits EAtomicIncRC/EAtomicDecRC for v
+        → llvm_emit dispatches to march_incrc/march_decrc
+          (always-atomic fetch-add on the RC header word)
+
+        every other RC-managed variable
+  (RC-Mode-Local)  ──────────────────────────────────────────────────────
+        Perceus emits EIncRC/EDecRC
+        → llvm_emit dispatches to march_incrc_local/march_decrc_local
+
+        an RC-Mode-Local op executes on a scheduler worker thread, OR on
+        an OS thread flagged via march_rc_set_thread_concurrent(1)
+  (RC-Mode-Dynamic-Promotion)  ────────────────────────────────────────
+        the _local entry point takes the atomic path at runtime
+        (march_incrc_local/march_decrc_local, runtime/march_runtime.c —
+        the check is march_sched_in_scheduler() || march_tls_concurrent_rc)
+```
+
+The dynamic promotion is the load-bearing safety rule: because a compiled
+`main` is itself a green thread dispatched by the scheduler, RC ops in
+ordinary compiled program code promote to atomic whenever actors/tasks
+are actually running, so a value that reaches another thread through a
+path the static send-position scan cannot see (a message *payload*'s
+field, a closure capture) is still raced-safely counted. The static
+partition is therefore a *performance* statement (single-threaded RC
+traffic stays a plain `rc++`, never a lock-prefixed RMW), while the
+dynamic check carries the *correctness* obligation. HTTP thread-pool
+workers and the evloop use the explicit flag (`march_rc_set_thread_concurrent(1)`
+in `runtime/march_http.c` / `march_http_evloop.c`), replacing the manual
+borrow-workaround the design draft proposed. Three boundary sites are
+hardcoded atomic regardless of mode: the shared-path field IncRC in
+`llvm_case.ml`, `march_decrc_freed`, and E-Reuse's RC load above (an
+atomic monotonic load, so the uniqueness read is data-race-free even if
+borrow inference's process-local proof is ever weakened). The local dec
+aborts loudly on RC underflow (`march: local RC underflow`) rather than
+wrapping. Witness: `test/test_codegen.ml`'s
+`test_actor_sent_rc_ops_atomic_locals_stay_local` pins both dispatch
+spellings (`march_incrc(`/`march_incrc_local(`) in the emitted IR of a
+program whose message stays live across a send.
+
+**What this section still deliberately excludes.** Escape-analysis stack
 promotion (`lib/tir/escape.ml`) is an orthogonal optimization with no
 correctness content of its own to formalize (its one correctness
 obligation — never stack-promote an erased-repr alloc — was already the L7
-finding fixed in slice 7, §4.12).
+finding fixed in slice 7, §4.12). P8 Layer 2 (sinking the reuse dec past
+arbitrary intervening non-RC code, not just RC ops on other variables)
+remains future work (`specs/optimizations.md` §P8) — E-Reuse as stated
+covers exactly what `try_fbip_sink` accepts today.
 
 ### 4.17 Argument and element evaluation order (widening slice 14, 2026-07-11)
 
@@ -3150,7 +3268,12 @@ strings-as-first-class-data addition (§4.18, widening slice 13),
 witnessing String-as-`Map`-key correctness (the exact read-then-update
 shape finding C1 fixed, now a positive claim) and the byte-vs-codepoint
 semantics of `reverse`/`to_uppercase` on a genuine multi-byte-codepoint
-string:
+string. `g50` is the FBIP/reuse addition (§4.16 E-Reuse, 2026-07-13),
+witnessing that compiled in-place reuse is observationally identical to
+the interpreter's always-fresh allocation — the corpus's byte-identity
+check doubling as the semantic-equivalence proof, across the unique
+(reuse fires), shared (runtime RC==1 check falls back to fresh), and
+cross-constructor equal-arity shapes:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -3194,8 +3317,8 @@ string:
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 49 / 49 matched, 0 divergences in the committed corpus** (the table
-above enumerates `g01`–`g39`; `g40`–`g49` are documented in their respective §4
+**Result: 50 / 50 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g50` are documented in their respective §4
 sections (or, for `g46`, `core-march-types.md` §2.14; for `g47`, §3).
 These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
@@ -3373,7 +3496,9 @@ re-litigated):
   mint/forge);
 - **the Perceus RC discipline** — §4.16 (operational: `needs_rc`/
   `borrow_eligible`, the dual-position dup/drop invariant, verified against a
-  TIR snapshot + `MARCH_SANITIZE`), `core-march-types.md` §2.13 (typing: adds
+  TIR snapshot + `MARCH_SANITIZE`; since 2026-07-13 also E-Reuse — FBIP
+  reuse-preserves-semantics, golden `g50` — and the RC-Mode atomic/local
+  selection rules), `core-march-types.md` §2.13 (typing: adds
   no rules — codegen-only over already-typed TIR);
 - **refinement types** — `core-march-types.md` §2.14 (`{T | pred}` erasure in
   `typecheck.ml`, checked by the separate `lib/refinecheck` pass; direct-call
