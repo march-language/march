@@ -1,0 +1,28 @@
+-- Perihelion.Upgrades — pure module defining every offense/defense/special
+-- upgrade, the milestone-pacing constant, and (once later tasks fill it in)
+-- the weighted draw pool used by both milestone choice screens and random
+-- drops. No Dom/Canvas deps.
+mod Perihelion.Upgrades do
+
+  -- Every stars_chained multiple of this triggers a milestone choice screen.
+  -- Kept as its own named constant per explicit request: easy to retune.
+  fn milestone_star_interval() : Int do 10 end
+
+  type WeaponKind = Base | Homing | Spread | StarKiller
+
+  type SpecialKind = StarThrust | StarJump | TrajectoryPreview
+
+  -- OffenseWeapon(k): unlocks weapon k into the player's Q/E rotation.
+  -- OffenseFireRate: one stack of the "faster fire" stat buff.
+  -- DefenseBulletWard/DefenseDeflector/DefenseShield: the three independent,
+  -- stacking defense systems (see design doc).
+  -- SpecialItem(k): equips (or offers keeping) special k.
+  type UpgradeKind =
+      OffenseWeapon(WeaponKind)
+    | OffenseFireRate
+    | DefenseBulletWard
+    | DefenseDeflector
+    | DefenseShield
+    | SpecialItem(SpecialKind)
+
+end

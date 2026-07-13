@@ -47,7 +47,18 @@ mod TestPerihelionCore do
       camera_x: 0.0,
       rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-      shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+      shield: 0, multiplier: 1, max_mult: 1,
+      owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+      active_weapon_idx: 0,
+      fire_rate_stacks: 0,
+      bullet_ward: false,
+      deflector_plating: false,
+      special: None,
+      special_charges: 0,
+      starkiller_target_offset: 0,
+      starkiller_cooldown: 0.0,
+      milestone_choices: Nil,
+      stars_chained: 0,
       loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil,
       view_w: 400.0, view_h: 640.0,
       fx_bursts: Nil, capture_flash: None }
@@ -70,6 +81,13 @@ mod TestPerihelionCore do
   pfn is_over(p : Phase) : Bool do
     match p do
       Over -> true
+      _ -> false
+    end
+  end
+
+  pfn is_milestone(p : Phase) : Bool do
+    match p do
+      Milestone -> true
       _ -> false
     end
   end

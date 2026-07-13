@@ -61,7 +61,7 @@ mod Perihelion.Core do
   -- `orbits` (0 = innermost). W/S step it out/in (see step_orbit).
   type BallMode = Orbiting(Int, Int, Float) | Flying(Float, Float)
 
-  type Phase = Ready | Playing | Over
+  type Phase = Ready | Playing | Over | Milestone
 
   type RunRecord = { score : Int, stars : Int, max_mult : Int }
 
@@ -93,9 +93,26 @@ mod Perihelion.Core do
     player_shots : List(Shot),
     enemy_shots : List(Shot),
     pickups : List(Pickup),
-    shield : Bool,
+    shield : Int,
     multiplier : Int,
     max_mult : Int,
+    owned_weapons : List(Perihelion.Upgrades.WeaponKind),
+    active_weapon_idx : Int,
+    fire_rate_stacks : Int,
+    bullet_ward : Bool,
+    deflector_plating : Bool,
+    special : Option(Perihelion.Upgrades.SpecialKind),
+    special_charges : Int,
+    -- Which of the 3 targetable stars ahead (current+1..current+3) the
+    -- star-killer weapon's reticle sits on: 0/1/2. Only meaningful while
+    -- StarKiller is the active weapon, but always tracked (see Task 6 for
+    -- why W/D update it unconditionally).
+    starkiller_target_offset : Int,
+    starkiller_cooldown : Float,
+    -- The 3 choices offered by the currently-open milestone screen; Nil
+    -- when phase isn't Milestone. Populated when a milestone triggers,
+    -- cleared (back to Nil) when the player picks one and play resumes.
+    milestone_choices : List(Perihelion.Upgrades.UpgradeKind),
     stars_chained : Int,
     loop_angle : Float,
     fire_cooldown : Float,
@@ -172,6 +189,8 @@ mod Perihelion.Core do
           if tapped do restart(g0) else g0 end
         Playing ->
           step_playing(g0, tapped, keys, cursor, dt_s)
+        Milestone ->
+          g0
       end
     end
   end
@@ -461,7 +480,18 @@ mod Perihelion.Core do
           stars: Nil, current: 0, score: 0, best: best,
           camera_y: 0.0, camera_x: 0.0, rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          shield: 0, multiplier: 1, max_mult: 1,
+          owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+          active_weapon_idx: 0,
+          fire_rate_stacks: 0,
+          bullet_ward: false,
+          deflector_plating: false,
+          special: None,
+          special_charges: 0,
+          starkiller_target_offset: 0,
+          starkiller_cooldown: 0.0,
+          milestone_choices: Nil,
+          stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
           spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
           view_w: view_w, view_h: view_h,
@@ -476,7 +506,18 @@ mod Perihelion.Core do
           camera_x: 0.0,
           rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          shield: 0, multiplier: 1, max_mult: 1,
+          owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+          active_weapon_idx: 0,
+          fire_rate_stacks: 0,
+          bullet_ward: false,
+          deflector_plating: false,
+          special: None,
+          special_charges: 0,
+          starkiller_target_offset: 0,
+          starkiller_cooldown: 0.0,
+          milestone_choices: Nil,
+          stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
           spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
           view_w: view_w, view_h: view_h,

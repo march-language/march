@@ -561,7 +561,7 @@ mod Perihelion do
     Canvas.begin_path(ctx)
     Canvas.arc(ctx, game.ball_x, game.ball_y, 6.0, 0.0, two_pi())
     Canvas.fill(ctx)
-    if game.shield do
+    if game.shield > 0 do
       Canvas.set_stroke_style(ctx, "#cccccc")
       Canvas.set_line_width(ctx, 2.0)
       Canvas.begin_path(ctx)
@@ -598,6 +598,7 @@ mod Perihelion do
                          game.view_w / 2.0, game.view_h / 2.0)
         draw_runs(ctx, game.runs, game.view_w, game.view_h / 2.0 + 36.0, 0)
       Playing -> ()
+      Milestone -> ()
     end
   end
 
@@ -660,6 +661,13 @@ mod Perihelion do
     end
   end
 
+  pfn is_milestone_phase(p : Phase) : Bool do
+    match p do
+      Milestone -> true
+      _ -> false
+    end
+  end
+
   pfn is_orbiting_mode(m : BallMode) : Bool do
     match m do
       Orbiting(_, _, _) -> true
@@ -718,7 +726,7 @@ mod Perihelion do
       else
         ()
       end
-      if !game.shield && g2.shield do
+      if game.shield == 0 && g2.shield > 0 do
         Audio.beep(actx, 700.0, 0.06, "sine")
       else
         ()

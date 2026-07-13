@@ -37,7 +37,18 @@ mod TestPerihelionCombat do
       camera_x: 0.0,
       rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-      shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+      shield: 0, multiplier: 1, max_mult: 1,
+      owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+      active_weapon_idx: 0,
+      fire_rate_stacks: 0,
+      bullet_ward: false,
+      deflector_plating: false,
+      special: None,
+      special_charges: 0,
+      starkiller_target_offset: 0,
+      starkiller_cooldown: 0.0,
+      milestone_choices: Nil,
+      stars_chained: 0,
       loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil,
       view_w: 400.0, view_h: 640.0,
       fx_bursts: Nil, capture_flash: None }
@@ -72,6 +83,13 @@ mod TestPerihelionCombat do
   pfn is_over(g : Game) : Bool do
     match g.phase do
       Over -> true
+      _ -> false
+    end
+  end
+
+  pfn is_milestone(g : Game) : Bool do
+    match g.phase do
+      Milestone -> true
       _ -> false
     end
   end
@@ -354,10 +372,10 @@ mod TestPerihelionCombat do
     test "shield absorbs the hit and despawns the hazard" do
       let g0 = base_game(0.0)
       let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
-      let g = { g0 with asteroids: Cons(ast, Nil), shield: true }
+      let g = { g0 with asteroids: Cons(ast, Nil), shield: 1 }
       let g2 = Perihelion.Combat.collide(g)
       assert (!is_over(g2))
-      assert (!g2.shield)
+      assert (g2.shield == 0)
       assert (List.is_empty(g2.asteroids))
     end
 
@@ -366,16 +384,16 @@ mod TestPerihelionCombat do
       let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
       let g = { g0 with pickups: Cons(p, Nil) }
       let g2 = Perihelion.Combat.collide(g)
-      assert (g2.shield)
+      assert (g2.shield > 0)
       assert (List.is_empty(g2.pickups))
     end
 
     test "already-shielded ball leaves the pickup" do
       let g0 = base_game(0.0)
       let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
-      let g = { g0 with pickups: Cons(p, Nil), shield: true }
+      let g = { g0 with pickups: Cons(p, Nil), shield: 1 }
       let g2 = Perihelion.Combat.collide(g)
-      assert (g2.shield)
+      assert (g2.shield > 0)
       assert (List.length(g2.pickups) == 1)
     end
   end
