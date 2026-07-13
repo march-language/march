@@ -773,7 +773,7 @@ static void sched_loop(march_scheduler *sched) {
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
     tl_sched = sched;
-    sched->running = 1;
+    atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
     /* When the previous task cooperatively yielded (PROC_RUNNABLE after running),
      * try to steal work from another scheduler before re-running the yielded
@@ -969,7 +969,7 @@ static void sched_loop(march_scheduler *sched) {
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }
 
-    sched->running = 0;
+    atomic_store_explicit(&sched->running, 0, memory_order_release);
     tl_sched = NULL;
 }
 
@@ -1336,7 +1336,8 @@ static void *preempt_daemon(void *arg) {
 
         /* Signal every active scheduler thread. */
         for (int i = 0; i < g_num_scheds; i++) {
-            if (g_scheds[i].running && g_scheds[i].thread) {
+            if (atomic_load_explicit(&g_scheds[i].running, memory_order_acquire)
+                    && g_scheds[i].thread) {
                 pthread_kill(g_scheds[i].thread, SIGUSR1);
             }
         }

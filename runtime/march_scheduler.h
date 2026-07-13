@@ -201,7 +201,13 @@ typedef struct march_scheduler {
     march_deque     local_queue;  /* Work-stealing deque of RUNNABLE processes   */
     march_proc     *current;      /* Currently running process (NULL = in sched) */
     ucontext_t      sched_ctx;    /* Scheduler context; processes yield here     */
-    int             running;      /* Non-zero while scheduler loop is active     */
+    _Atomic int     running;      /* Non-zero while scheduler loop is active.
+                                   * Atomic: written by the owning scheduler
+                                   * thread, read concurrently by the preemption
+                                   * daemon (preempt_daemon) to decide whom to
+                                   * SIGUSR1 — a plain int there is a data race
+                                   * (TSan: sched_loop write vs preempt_daemon
+                                   * read). */
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
 #ifdef MARCH_ASAN_BUILD
