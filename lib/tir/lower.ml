@@ -498,7 +498,12 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         when not (Hashtbl.mem !_current_module_fns "to_string") ->
         (match Lower_state.ty_of_span env (Typecheck.span_of_expr arg) with
          | Tir.TCon (("Atom" | "Unit" | "String"), []) -> f_expr
-         | Tir.TCon _ -> Ast.EVar { n with Ast.txt = "show" }
+         (* Tuples and records also route through show since mono can now
+            synthesize their structural renderers (show$derived$…) — before
+            that they had no Show impl to dispatch to and stayed on the
+            builtin's "#<tag:N>" fallback. *)
+         | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ ->
+           Ast.EVar { n with Ast.txt = "show" }
          | _ -> f_expr)
       | _ -> f_expr
     in

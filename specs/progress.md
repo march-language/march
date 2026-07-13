@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-13, derived structural Show — tuple/ADT println/to_string compiled)
+
+**FIXED — the tuple/custom-ADT Show link gaps.** mono now synthesizes derived structural renderers (synth_derived_show) on demand when `show` dispatch fails: tuples, records, plain ADTs (recursive ones via a memoized placeholder), with nested strings QUOTED and Lists rendered structurally — the compiled analogue of eval's value_to_string fallback, interp-identical on the probe corpus. println((1,2)) and println(Circle(1.5)) link and render; to_string on tuples/records routes through show. Field reads go through lower's exact untyped-br_var + typed-rebind shape (the ELet copy is the tagged-scalar coercion point — concretely-typed br_vars would copy tagged bits verbatim). Corners filed: string escaping, record field order (TIR-sorted vs source), exotic types. Suite 820, goldens 50/50, types 163, oracle 75/0/0.
+
 ## Current State (as of 2026-07-13, sort-RC family CLOSED — corpus divergence-free)
 
 **THE ENTIRE ORACLE CORPUS IS DIVERGENCE-FREE: 75 matched / 0 known-divergence / 0 un-triaged.** The last piece was the staged monomorphism restriction (user-approved "both, staged"): an UNANNOTATED let-bound lambda stays monomorphic so its first use pins its type and its compiled apply fns are emitted at the concrete calling convention — closing the erased-apply-vs-raw-caller ABI mismatch behind all five bench-sort crashes/wrong answers. Annotated lambdas still generalize (`let id : (a) -> a = fn x -> x`). Spec updated (core-march-types.md §4.1 finding 1, t03 annotated, new reject/t79; types harness 163). The five sort known_divergence entries removed. STAGE 2 FILED: the uniform apply-fn ABI, which will lift the restriction and re-generalize unannotated let-poly lambdas.

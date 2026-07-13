@@ -10712,6 +10712,51 @@ let test_compiled_task_await_heap_payload () =
       "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
+(* Regression (derived structural Show, added 2026-07-13): println/to_string
+   on tuples and plain ADTs (no user Show impl) used to FAIL AT LINK with
+   "Undefined symbols: _show" — mono left the bare interface method
+   unresolved because tuples have no nameable impl type and plain ADTs have
+   no registered impl.  mono's [synth_derived_show] now synthesizes the
+   structural renderer (the compiled analogue of eval's [value_to_string]
+   fallback): tuples "(a, b)", ADTs "Ctor(f, …)", records "{ k: v }",
+   nested strings QUOTED, recursive ADTs via a memoized placeholder.
+   Filed corners (specs/todos.md): string fields are quoted but NOT
+   escaped, and record field order is the TIR's canonical (sorted) order
+   rather than the interpreter's source order. *)
+let test_compiled_derived_structural_show () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_dshow" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "dshow.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod DerivedShowRegress do\n\
+    \  type Shape = Circle(Float) | Rect(Float, Float) | Pt\n\
+    \  type Tree = Leaf(Int) | Node(Tree, Tree)\n\
+    \  fn main() : Unit do\n\
+    \    if to_string((1, 2)) == \"(1, 2)\" do () else process_exit(1) end\n\
+    \    if to_string(Circle(1.5)) == \"Circle(1.5)\" do () else process_exit(2) end\n\
+    \    if to_string(Pt) == \"Pt\" do () else process_exit(3) end\n\
+    \    if to_string(Node(Leaf(1), Leaf(2))) == \"Node(Leaf(1), Leaf(2))\" do () else process_exit(4) end\n\
+    \    if to_string((1, \"a\", true)) == \"(1, \\\"a\\\", true)\" do () else process_exit(5) end\n\
+    \    if to_string([(1, 2), (3, 4)]) == \"[(1, 2), (3, 4)]\" do () else process_exit(6) end\n\
+    \    println((9, Pt))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "dshowbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled derived structural show: tuples/ADTs/trees render like the interpreter"
+      0 run_rc;
+    Alcotest.(check string)
+      "println of a tuple links and renders" "(9, Pt)" (String.trim out)
+
 (* Regression (curried-comparator, fixed 2026-07-13 via the STAGED
    monomorphism restriction): an unannotated let-bound curried lambda was
    let-generalized, so its apply fns kept the erased (tagged-ptr) calling
@@ -12845,6 +12890,8 @@ let stdlib_suites =
           test_compiled_float_tuple_accumulator;
         Alcotest.test_case "curried-comparator mergesort (compiled, monomorphism restriction)" `Slow
           test_compiled_curried_comparator_mergesort;
+        Alcotest.test_case "derived structural show: tuples/ADTs/trees (compiled)" `Slow
+          test_compiled_derived_structural_show;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow

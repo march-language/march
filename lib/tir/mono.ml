@@ -130,6 +130,300 @@ let mangle_name (base : string) (tys : Tir.ty list) : string =
   | [] -> base
   | _  -> Tir_names.specialize_mangle base (String.concat "$" (List.map mangle_ty tys))
 
+(* ── Derived Show synthesis (structural renderer) ───────────────── *)
+
+(** Type definitions of the module being monomorphized — set by
+    [monomorphize] at entry (single-threaded module-global, the same
+    pattern as lower's [_fn_param_types]).  [synth_derived_show] uses it
+    to look up ADT constructor lists. *)
+let _mono_type_defs : Tir.type_def list ref = ref []
+
+(** Synthesize a STRUCTURAL renderer for [ty] and enqueue it for emission,
+    returning its function name — or [None] when [ty] has no renderable
+    structure (TVar, unknown TCon).
+
+    This is the compiled analogue of the interpreter's [value_to_string]
+    FALLBACK (eval.ml): the renderer used when `show(x)` reaches a type
+    with no user/prelude Show impl — tuples, records, and plain ADTs.
+    Before this, such calls survived mono as bare `show` and died at link
+    ("Undefined symbols: _show") for println((1,2)) / println(Circle(1.5)).
+
+    Output contract — must match [value_to_string] byte-for-byte, because
+    the differential oracle compares stdout:
+      Int/Float/Bool  → the plain to_string builtins (already parity-pinned)
+      String          → QUOTED: "\"" ++ s ++ "\"" (the interpreter fallback
+                        quotes nested strings, unlike Show$String's identity;
+                        NOTE String.escaped is NOT mirrored — a string field
+                        containing quotes/backslashes/control chars will
+                        diverge; filed corner in specs/todos.md)
+      Unit            → "()"
+      closures (TFn)  → "<fn>"
+      tuple           → "(" e0 ", " e1 … ")"
+      record          → "{ k: v, … }" (declaration field order)
+      List            → "[]" / "[" e0 ", " e1 … "]" (structural — element
+                        strings QUOTED, matching the interp fallback, which
+                        deliberately differs from prelude Show$List's
+                        unquoted elements)
+      other ADT       → "Ctor" / "Ctor(" f0 ", " f1 … ")"
+      anything else   → the generic runtime `to_string` builtin
+                        (march_value_to_string), a graceful degrade
+    Recursion through fields goes through this same synthesizer (memoized
+    via [fn_table]; a placeholder is registered before the body is built so
+    recursive ADTs — trees — terminate). *)
+let rec synth_derived_show fn_table done_set
+    (worklist : (string * Tir.fn_def * ty_subst) Queue.t)
+    (ty : Tir.ty) : string option =
+  let str_t = Tir.TString in
+  let fname = "show$derived$" ^ mangle_ty ty in
+  if Hashtbl.mem fn_table fname then Some fname
+  else begin
+    let param = { Tir.v_name = "x"; v_ty = ty; v_lin = Tir.Unr } in
+    (* Placeholder first: a recursive field type (Tree in Tree) memo-hits
+       this entry and uses the name; the real body replaces it below. *)
+    let placeholder = { Tir.fn_name = fname; fn_params = [param];
+                        fn_ret_ty = str_t; fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitString ""));
+                        fn_kind = Tir.FnNormal } in
+    Hashtbl.replace fn_table fname placeholder;
+    let ctr = ref 0 in
+    let fresh p = incr ctr; Printf.sprintf "$ds%s%d" p !ctr in
+    let mkv n t = { Tir.v_name = n; Tir.v_ty = t; Tir.v_lin = Tir.Unr } in
+    let slit s = Tir.ALit (March_ast.Ast.LitString s) in
+    let fn_var n ps r = mkv n (Tir.TFn (ps, r)) in
+    let app1 n pty a = Tir.EApp (fn_var n [pty] str_t, [a]) in
+    (* ANF: bind each String-typed part to a var, fold left with ++ *)
+    let concat_all (parts : Tir.expr list) : Tir.expr =
+      match parts with
+      | [] -> Tir.EAtom (slit "")
+      | [e] -> e
+      | first :: rest ->
+        let rec go acc_var = function
+          | [] -> Tir.EAtom (Tir.AVar acc_var)
+          | e :: tl ->
+            let ev = mkv (fresh "p") str_t in
+            let cv = mkv (fresh "c") str_t in
+            Tir.ELet (ev, e,
+              Tir.ELet (cv,
+                Tir.EApp (fn_var "++" [str_t; str_t] str_t,
+                          [Tir.AVar acc_var; Tir.AVar ev]),
+                go cv tl))
+        in
+        let fv = mkv (fresh "p") str_t in
+        Tir.ELet (fv, first, go fv rest)
+    in
+    let render_field (a : Tir.atom) (fty : Tir.ty) : Tir.expr =
+      (* Constructor/tuple fields extracted by the boxed decode live in
+         generic ptr slots holding TAGGED scalars, and the builtin call
+         emission passes the slot's natural type verbatim (an ELet rebind
+         copies without coercing, too).  The one guaranteed coercion point
+         is the OPERATOR path — arithmetic emission conditionally untags
+         ptr-slot args (the same reason `<(x, y)` on list elements works) —
+         so scalars are normalized via `+ 0` / `+. 0.0` (Bool via a case)
+         before the to_string builtin sees them. *)
+      match fty with
+      | Tir.TInt ->
+        let cv = mkv (fresh "v") Tir.TInt in
+        Tir.ELet (cv,
+          Tir.EApp (fn_var "+" [Tir.TInt; Tir.TInt] Tir.TInt,
+                    [a; Tir.ALit (March_ast.Ast.LitInt 0)]),
+          app1 "int_to_string" Tir.TInt (Tir.AVar cv))
+      | Tir.TFloat ->
+        let cv = mkv (fresh "v") Tir.TFloat in
+        Tir.ELet (cv,
+          Tir.EApp (fn_var "+." [Tir.TFloat; Tir.TFloat] Tir.TFloat,
+                    [a; Tir.ALit (March_ast.Ast.LitFloat 0.0)]),
+          app1 "float_to_string" Tir.TFloat (Tir.AVar cv))
+      | Tir.TBool ->
+        Tir.ECase (a,
+          [{ Tir.br_tag = Tir_names.bool_lit_tag true; br_vars = [];
+             br_body = Tir.EAtom (slit "true") }],
+          Some (Tir.EAtom (slit "false")))
+      | Tir.TUnit   -> Tir.EAtom (slit "()")
+      | Tir.TString ->
+        concat_all [Tir.EAtom (slit "\""); Tir.EAtom a; Tir.EAtom (slit "\"")]
+      | Tir.TFn _   -> Tir.EAtom (slit "<fn>")
+      | Tir.TCon ("Atom", []) -> app1 "atom_to_string" (Tir.TCon ("Atom", [])) a
+      | (Tir.TTuple _ | Tir.TRecord _ | Tir.TCon _) as t ->
+        (match synth_derived_show fn_table done_set worklist t with
+         | Some n -> Tir.EApp (fn_var n [t] str_t, [a])
+         | None   -> app1 "to_string" t a)
+      | t -> app1 "to_string" t a
+    in
+    let comma_sep (rendered : Tir.expr list) : Tir.expr list =
+      List.concat (List.mapi (fun i r ->
+          if i = 0 then [r] else [Tir.EAtom (slit ", "); r]) rendered)
+    in
+    (* Branch fields must go through lower's exact rebinding shape:
+       UNTYPED ([TVar "_"]) branch vars, each immediately re-bound with a
+       TYPED let (`let f : Int = $dsf`).  The ELet copy is where the
+       ptr-slot→typed-slot coercion (conditional untag / float bitcast)
+       happens — and it only fires on a TYPE CHANGE, so concretely-typed
+       branch vars would copy the TAGGED bits verbatim (ints printed as
+       2n+1).  [bind_fields tys k] returns (raw_br_vars, body) where [k]
+       receives the typed copies. *)
+    let bind_fields (tys : Tir.ty list) (k : Tir.var list -> Tir.expr)
+      : Tir.var list * Tir.expr =
+      let raws  = List.map (fun _ -> mkv (fresh "f") (Tir.TVar "_")) tys in
+      let typed = List.map (fun t -> mkv (fresh "b") t) tys in
+      let body =
+        List.fold_right2 (fun (r : Tir.var) (t : Tir.var) acc ->
+            Tir.ELet (t, Tir.EAtom (Tir.AVar r), acc))
+          raws typed (k typed)
+      in
+      (raws, body)
+    in
+    let xatom = Tir.AVar param in
+    let body_opt : Tir.expr option =
+      match ty with
+      | Tir.TTuple ts ->
+        let raws, inner = bind_fields ts (fun typed ->
+            concat_all
+              (Tir.EAtom (slit "(")
+               :: comma_sep (List.map (fun (fv : Tir.var) ->
+                      render_field (Tir.AVar fv) fv.Tir.v_ty) typed)
+               @ [Tir.EAtom (slit ")")])) in
+        Some (Tir.ECase (xatom,
+          [{ Tir.br_tag = Tir_names.tuple_tag (List.length ts);
+             br_vars = raws; br_body = inner }], None))
+      | Tir.TRecord fs ->
+        let parts = List.map (fun (k, ft) ->
+            let fv = mkv (fresh "r") ft in
+            Tir.ELet (fv, Tir.EField (xatom, k),
+              concat_all [Tir.EAtom (slit (k ^ ": "));
+                          render_field (Tir.AVar fv) ft])) fs in
+        Some (concat_all
+                (Tir.EAtom (slit "{ ") :: comma_sep parts
+                 @ [Tir.EAtom (slit " }")]))
+      | Tir.TCon ("List", [elt]) ->
+        (* "[]" / "[" e0 (", " ei)* "]" — a recursive tail helper carries
+           the accumulated string. *)
+        let tail_name = fname ^ "$tail" in
+        let l = mkv "l" ty and acc = mkv "acc" str_t in
+        let raws_t, cons_body_t = bind_fields [elt; ty] (fun typed ->
+            let h = List.nth typed 0 and tl = List.nth typed 1 in
+            let s = mkv (fresh "s") str_t in
+            Tir.ELet (s,
+              concat_all [Tir.EAtom (Tir.AVar acc);
+                          Tir.EAtom (slit ", ");
+                          render_field (Tir.AVar h) elt],
+              Tir.EApp (fn_var tail_name [ty; str_t] str_t,
+                        [Tir.AVar tl; Tir.AVar s]))) in
+        let tail_fn = {
+          Tir.fn_name = tail_name; fn_params = [l; acc]; fn_ret_ty = str_t;
+          fn_body = Tir.ECase (Tir.AVar l,
+            [ { Tir.br_tag = "Nil"; br_vars = [];
+                br_body = concat_all [Tir.EAtom (Tir.AVar acc);
+                                      Tir.EAtom (slit "]")] };
+              { Tir.br_tag = "Cons"; br_vars = raws_t;
+                br_body = cons_body_t } ], None);
+          fn_kind = Tir.FnNormal } in
+        Hashtbl.replace fn_table tail_name tail_fn;
+        if not (Hashtbl.mem done_set tail_name) then
+          Queue.add (tail_name, tail_fn, []) worklist;
+        let raws_0, cons_body_0 = bind_fields [elt; ty] (fun typed ->
+            let h0 = List.nth typed 0 and t0 = List.nth typed 1 in
+            let s = mkv (fresh "s") str_t in
+            Tir.ELet (s,
+              concat_all [Tir.EAtom (slit "[");
+                          render_field (Tir.AVar h0) elt],
+              Tir.EApp (fn_var tail_name [ty; str_t] str_t,
+                        [Tir.AVar t0; Tir.AVar s]))) in
+        Some (Tir.ECase (xatom,
+          [ { Tir.br_tag = "Nil"; br_vars = [];
+              br_body = Tir.EAtom (slit "[]") };
+            { Tir.br_tag = "Cons"; br_vars = raws_0;
+              br_body = cons_body_0 } ], None))
+      | Tir.TCon (tname, targs) ->
+        (* ADT: per-ctor branches, field types = the typedef's generic field
+           types with the TCon's args substituted by free-tvar declaration
+           order (the same convention as Llvm_toplevel.build_ctor_info and
+           perceus's resolve_case_field_ty). *)
+        let last_seg s = match String.rindex_opt s '.' with
+          | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+          | None -> s in
+        (* EXACT name first; fall back to last-segment candidates only when
+           no exact match exists, and among those prefer one whose free-tvar
+           count matches |targs| — several types can share a short name
+           (the stdlib ordered_map/sorted_set `Tree`s vs a user `Tree`), and
+           a wrong pick either miscounts params (silently returning None) or
+           renders the wrong constructors. *)
+        let exact = List.find_map (function
+            | Tir.TDVariant (n, ctors) when String.equal n tname -> Some ctors
+            | _ -> None) !_mono_type_defs in
+        let variant = match exact with
+          | Some _ -> exact
+          | None ->
+            let cands = List.filter_map (function
+                | Tir.TDVariant (n, ctors)
+                  when String.equal (last_seg n) (last_seg tname) -> Some ctors
+                | _ -> None) !_mono_type_defs in
+            let tvar_count ctors =
+              let seen = Hashtbl.create 4 in
+              let rec c = function
+                | Tir.TVar n -> if not (Hashtbl.mem seen n) then Hashtbl.add seen n ()
+                | Tir.TCon (_, a) -> List.iter c a
+                | Tir.TFn (ps, r) -> List.iter c ps; c r
+                | Tir.TTuple ts -> List.iter c ts
+                | Tir.TPtr t -> c t
+                | _ -> () in
+              List.iter (fun (_, ftys) -> List.iter c ftys) ctors;
+              Hashtbl.length seen in
+            (match List.find_opt
+                     (fun ctors -> tvar_count ctors = List.length targs) cands with
+             | Some _ as r -> r
+             | None -> (match cands with c :: _ -> Some c | [] -> None))
+        in
+        (match variant with
+         | None -> None
+         | Some ctors ->
+           let seen = Hashtbl.create 4 in
+           let params_order = ref [] in
+           let rec collect = function
+             | Tir.TVar n ->
+               if not (Hashtbl.mem seen n) then begin
+                 Hashtbl.add seen n (); params_order := n :: !params_order
+               end
+             | Tir.TCon (_, args) -> List.iter collect args
+             | Tir.TFn (ps, r)    -> List.iter collect ps; collect r
+             | Tir.TTuple ts      -> List.iter collect ts
+             | Tir.TPtr t         -> collect t
+             | _ -> () in
+           List.iter (fun (_, ftys) -> List.iter collect ftys) ctors;
+           let param_names = List.rev !params_order in
+           if List.length param_names <> List.length targs then None
+           else begin
+             let s = List.combine param_names targs in
+             let branches = List.map (fun (cname, gftys) ->
+                 let ftys = List.map (subst_ty s) gftys in
+                 let disp = last_seg cname in
+                 match ftys with
+                 | [] -> { Tir.br_tag = cname; br_vars = [];
+                           br_body = Tir.EAtom (slit disp) }
+                 | _ ->
+                   let raws, body = bind_fields ftys (fun typed ->
+                       concat_all
+                         (Tir.EAtom (slit (disp ^ "("))
+                          :: comma_sep (List.map (fun (fv : Tir.var) ->
+                                 render_field (Tir.AVar fv) fv.Tir.v_ty) typed)
+                          @ [Tir.EAtom (slit ")")])) in
+                   { Tir.br_tag = cname; br_vars = raws; br_body = body })
+                 ctors in
+             Some (Tir.ECase (xatom, branches, None))
+           end)
+      | _ -> None
+    in
+    match body_opt with
+    | None ->
+      Hashtbl.remove fn_table fname;
+      None
+    | Some body ->
+      let fn = { Tir.fn_name = fname; fn_params = [param]; fn_ret_ty = str_t;
+                 fn_body = body; fn_kind = Tir.FnNormal } in
+      Hashtbl.replace fn_table fname fn;
+      if not (Hashtbl.mem done_set fname) then
+        Queue.add (fname, fn, []) worklist;
+      Some fname
+  end
+
 (* ── Type matching (poly → concrete → subst) ────────────────────── *)
 
 (** [match_ty poly conc acc] extends substitution [acc] by matching
@@ -387,6 +681,19 @@ let rec rewrite_calls
        | None -> None
        | Some tname -> resolve_impl_by_type impls tname)
   in
+  (* When `show` dispatch fails (no user/prelude impl for the concrete
+     first-arg type — tuples, records, plain ADTs), synthesize the
+     structural renderer instead of leaving a bare `show` for the linker
+     to reject — see [synth_derived_show]. *)
+  let try_synth_show (name : string) (args : Tir.atom list) : string option =
+    let base = match String.rindex_opt name '.' with
+      | Some i -> String.sub name (i + 1) (String.length name - i - 1)
+      | None -> name in
+    if not (String.equal base "show") then None
+    else match args with
+      | [a] -> synth_derived_show fn_table done_set worklist (atom_ty a)
+      | _ -> None
+  in
   match expr with
   | Tir.EApp (f_var, args) ->
     (* Ensure functions passed as arguments are discovered *)
@@ -473,10 +780,20 @@ let rec rewrite_calls
                   | _ -> None)
              in
              (match type_name_or_single with
-              | None -> expr   (* Still cannot resolve — leave for linker *)
+              | None ->
+                (* Unnameable concrete type (tuple/record) — synthesize the
+                   structural show when this is a show call. *)
+                (match try_synth_show orig_name args with
+                 | Some n -> Tir.EApp ({ f_var with Tir.v_name = n }, args)
+                 | None -> expr   (* Still cannot resolve — leave for linker *))
               | Some tname ->
                 (match resolve_impl_by_type impls tname with
-                 | None -> expr   (* No impl for this concrete type *)
+                 | None ->
+                   (* Named type with no registered impl (plain ADT) —
+                      synthesize the structural show when applicable. *)
+                   (match try_synth_show orig_name args with
+                    | Some n -> Tir.EApp ({ f_var with Tir.v_name = n }, args)
+                    | None -> expr)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl (specialized under this
                       call's concrete arg types — see enqueue_specialized_impl
@@ -856,6 +1173,7 @@ let refine_field_types (body : Tir.expr) : Tir.expr =
     [iface_methods] is the dispatch table saved by [Lower.get_iface_methods ()].
     When absent (empty table), interface dispatch post-mono is skipped. *)
 let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.tir_module =
+  _mono_type_defs := m.Tir.tm_types;
   (* Build lookup table for original fn_defs *)
   let fn_table : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 32 in
   List.iter (fun fn -> Hashtbl.replace fn_table fn.Tir.fn_name fn) m.Tir.tm_fns;
