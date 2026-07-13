@@ -2887,6 +2887,17 @@ let base_env : env =
           (try VString (input_line stdin)
            with End_of_file -> VString "")
         | _ -> eval_error "io_read_line: expected unit"))
+  ; ("read_byte", VBuiltin ("read_byte", function
+        | [VUnit] | [] ->
+          (try VInt (Char.code (input_char stdin))
+           with End_of_file -> VInt (-1))
+        | _ -> eval_error "read_byte: expected unit"))
+    (* io_read_byte: alias for read_byte, avoids name conflict inside IO module *)
+  ; ("io_read_byte", VBuiltin ("io_read_byte", function
+        | [VUnit] | [] ->
+          (try VInt (Char.code (input_char stdin))
+           with End_of_file -> VInt (-1))
+        | _ -> eval_error "io_read_byte: expected unit"))
     (* print_stderr: write string to stderr without newline *)
   ; ("print_stderr", VBuiltin ("print_stderr", function
         | [VString s] -> Printf.eprintf "%s%!" s; VUnit
