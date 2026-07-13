@@ -43,6 +43,7 @@ mod TestPerihelionCombat do
       fire_rate_stacks: 0,
       bullet_ward: false,
       deflector_plating: false,
+      shield_reinforced: false,
       special: None,
       special_charges: 0,
       starkiller_target_offset: 0,
@@ -564,6 +565,51 @@ mod TestPerihelionCombat do
           assert (approx(s1.y, 100.0))
         _ -> assert false
       end
+    end
+  end
+
+  describe "defense: bullet ward" do
+    test "absorbs one enemy shot hit, then is consumed" do
+      let g0 = { base_game(0.0) with bullet_ward: true }
+      let es = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, ttl: 5.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with enemy_shots: Cons(es, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+      assert (!g2.bullet_ward)
+      assert (List.is_empty(g2.enemy_shots))
+    end
+
+    test "without bullet ward, the same hit ends the run (no shield either)" do
+      let g0 = base_game(0.0)
+      let es = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, ttl: 5.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with enemy_shots: Cons(es, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_over(g2))
+    end
+  end
+
+  describe "defense: deflector plating" do
+    test "a lucky roll deflects an asteroid hit instead of ending the run" do
+      -- Random.seed(2) (the brief's suggested seed) rolls >= 0.5 (not deflected)
+      -- with this Rng; empirically checked 0..10 and seed(0) is the first that
+      -- rolls < 0.5 on the very first draw() -- pinned here per this file's
+      -- established RNG-seed-pinning convention (see the shield-drop-chance
+      -- tests above).
+      let g0 = { base_game(0.0) with deflector_plating: true, rng: Random.seed(0) }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: Perihelion.Combat.AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+    end
+  end
+
+  describe "defense: reinforced shield" do
+    test "picking up a shield grants 2 charges instead of 1 when reinforced" do
+      let g0 = { base_game(0.0) with shield_reinforced: true }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0 }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield == 2)
     end
   end
 

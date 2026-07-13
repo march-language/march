@@ -53,6 +53,7 @@ mod TestPerihelionCore do
       fire_rate_stacks: 0,
       bullet_ward: false,
       deflector_plating: false,
+      shield_reinforced: false,
       special: None,
       special_charges: 0,
       starkiller_target_offset: 0,

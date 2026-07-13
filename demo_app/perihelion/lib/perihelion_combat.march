@@ -778,8 +778,9 @@ mod Perihelion.Combat do
     else
       let hit = List.any(game.pickups, fn p -> ball_on_pickup(game, p))
       if hit do
+        let grant = if game.shield_reinforced do 2 else 1 end
         { game with
-            shield: game.shield + 1,
+            shield: game.shield + grant,
             pickups: List.filter(game.pickups, fn p -> !ball_on_pickup(game, p)) }
       else
         game
@@ -801,25 +802,49 @@ mod Perihelion.Combat do
     shot_hits_at(s, game.ball_x, game.ball_y, ball_radius())
   end
 
+  pfn deflector_roll(game : Game) : (Random.Rng, Bool) do
+    let (rng2, t) = draw(game.rng)
+    (rng2, t < 0.5)
+  end
+
   pfn collide_ball_hazards(game : Game) : Game do
-    let ast_hit = List.any(game.asteroids, fn a -> ball_hits_asteroid(game, a))
     let shot_hit = List.any(game.enemy_shots, fn s -> ball_hits_shot(game, s))
-    let ship_hit = List.any(game.ships, fn sh -> ball_hits_ship(game, sh))
-    if !(ast_hit || shot_hit || ship_hit) do
-      game
+    if shot_hit && game.bullet_ward do
+      { game with
+          bullet_ward: false,
+          enemy_shots: List.filter(game.enemy_shots, fn s -> !ball_hits_shot(game, s)) }
     else
-      if game.shield > 0 do
-        -- consume shield; despawn every hazard overlapping this tick
-        let dead_ast = List.filter(game.asteroids, fn a -> ball_hits_asteroid(game, a))
-        { game with
-            shield: game.shield - 1,
-            asteroids: List.filter(game.asteroids, fn a -> !ball_hits_asteroid(game, a)),
-            enemy_shots: List.filter(game.enemy_shots, fn s -> !ball_hits_shot(game, s)),
-            ships: List.filter(game.ships, fn sh -> !ball_hits_ship(game, sh)),
-            fx_bursts: List.append(game.fx_bursts, burst_points(dead_ast)) }
+      let ast_hit = List.any(game.asteroids, fn a -> ball_hits_asteroid(game, a))
+      let ship_hit = List.any(game.ships, fn sh -> ball_hits_ship(game, sh))
+      if !(ast_hit || shot_hit || ship_hit) do
+        game
       else
-        Perihelion.Core.end_run(game)
+        if ast_hit && !shot_hit && !ship_hit && game.deflector_plating do
+          let (rng2, deflected) = deflector_roll(game)
+          if deflected do
+            { game with rng: rng2 }
+          else
+            collide_ball_hazards_shield_or_die({ game with rng: rng2 })
+          end
+        else
+          collide_ball_hazards_shield_or_die(game)
+        end
       end
+    end
+  end
+
+  pfn collide_ball_hazards_shield_or_die(game : Game) : Game do
+    if game.shield > 0 do
+      -- consume shield; despawn every hazard overlapping this tick
+      let dead_ast = List.filter(game.asteroids, fn a -> ball_hits_asteroid(game, a))
+      { game with
+          shield: game.shield - 1,
+          asteroids: List.filter(game.asteroids, fn a -> !ball_hits_asteroid(game, a)),
+          enemy_shots: List.filter(game.enemy_shots, fn s -> !ball_hits_shot(game, s)),
+          ships: List.filter(game.ships, fn sh -> !ball_hits_ship(game, sh)),
+          fx_bursts: List.append(game.fx_bursts, burst_points(dead_ast)) }
+    else
+      Perihelion.Core.end_run(game)
     end
   end
 

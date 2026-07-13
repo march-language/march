@@ -101,6 +101,10 @@ mod Perihelion.Core do
     fire_rate_stacks : Int,
     bullet_ward : Bool,
     deflector_plating : Bool,
+    -- Once true (via DefenseShield's Upgrades pickup), every FUTURE shield
+    -- pickup (Combat.collide_ball_pickups) grants 2 charges instead of 1.
+    -- Distinct from DefenseShield's own immediate +1-charge grant.
+    shield_reinforced : Bool,
     special : Option(Perihelion.Upgrades.SpecialKind),
     special_charges : Int,
     -- Which of the 3 targetable stars ahead (current+1..current+3) the
@@ -445,7 +449,7 @@ mod Perihelion.Core do
       DefenseDeflector ->
         { game with deflector_plating: true }
       DefenseShield ->
-        { game with shield: game.shield + 1 } -- "reinforced shield" also grants one immediately; see Task 7 for the "future shield pickups grant 2" behavior
+        { game with shield: game.shield + 1, shield_reinforced: true }
       SpecialItem(k) ->
         { game with special: Some(k), special_charges: special_starting_charges(k) }
     end
@@ -579,6 +583,7 @@ mod Perihelion.Core do
           fire_rate_stacks: 0,
           bullet_ward: false,
           deflector_plating: false,
+          shield_reinforced: false,
           special: None,
           special_charges: 0,
           starkiller_target_offset: 0,
@@ -605,6 +610,7 @@ mod Perihelion.Core do
           fire_rate_stacks: 0,
           bullet_ward: false,
           deflector_plating: false,
+          shield_reinforced: false,
           special: None,
           special_charges: 0,
           starkiller_target_offset: 0,
