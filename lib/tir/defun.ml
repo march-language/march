@@ -21,7 +21,7 @@ let builtin_names : StringSet.t =
       "int_to_string"; "float_to_string"; "bool_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
-      "read_line"; "io_read_line"; "not";
+      "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
