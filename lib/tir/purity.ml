@@ -13,7 +13,7 @@ let impure_builtins = [
   (* Console IO *)
   "print"; "println"; "march_print"; "march_println";
   "print_int"; "print_float"; "print_char";
-  "read_line"; "io_read_line"; "process_read_line";
+  "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "process_read_line";
   (* File IO *)
   "file_read_line"; "file_open"; "file_close";
   "file_read"; "file_write"; "file_write_line";
