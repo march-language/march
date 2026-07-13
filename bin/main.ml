@@ -258,7 +258,7 @@ let stdlib_file_list = [
 (** Stdlib modules only loaded for --target js builds.
     These have externs with no native C symbols, so including them in native/JIT
     builds would cause dlopen(RTLD_NOW) to fail at link time. *)
-let js_only_stdlib_file_list = ["dom.march"; "canvas.march"]
+let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]
 
 (** Read all stdlib source files and compute a hash of their contents.
     Returns (stdlib_dir, source_hash, file_paths). *)

@@ -31,5 +31,6 @@ echo "Copying runtimes..."
 cp "$ROOT/runtime/march_runtime.mjs" "$DEMO/"
 cp "$ROOT/runtime/march_dom.mjs" "$DEMO/"
 cp "$ROOT/runtime/march_canvas.mjs" "$DEMO/"
+cp "$ROOT/runtime/march_audio.mjs" "$DEMO/"
 
 echo "Done! Open demo_app/perihelion/index.html in a browser."
