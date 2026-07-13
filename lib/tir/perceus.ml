@@ -244,6 +244,112 @@ let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
   | Repr.Newtype _ | Repr.Niche _ -> true
   | Repr.Boxed -> false
 
+(** Tag-based fallback for the check above when the scrutinee's static type
+    is an unresolved [TVar] — the pattern-matrix sub-vars [lower_match] mints
+    with [unknown_ty].  [Repr.repr_of_ty] classifies a TVar as [Boxed], so a
+    NESTED newtype destructure (e.g. `Cons(Row(pairs), _)` — the inner `Row`
+    match's scrutinee is a TVar-typed [$f] var) slipped past the guard and
+    got a scrutinee free: but a Newtype/Niche value IS its payload, so that
+    `dec_rc` decrements the payload object itself — an unbalanced dec, early
+    free, and a use-after-free read (the DataFrame `from_rows_widen`
+    "Groups: 0" bug: the freed cell's tag read back as `Nil`, so every
+    `List.length`/`List.zip` over the still-live pairs list returned empty).
+
+    Mirrors [Llvm_case]'s [newtype_recovery_payload] DECODE-side rule so the
+    two passes agree about the same value: resolve the branch's constructor
+    tag to the variant typedef(s) owning it (bare last-segment name matching,
+    same as the decode side) and report shared storage iff EVERY owner
+    classifies [Newtype] or [Niche] — any ambiguity (a boxed type sharing the
+    ctor name, or no owner found) keeps the conservative Boxed answer, which
+    matches the decode side keeping the Boxed strategy. *)
+let tag_owner_shares_payload_storage (env : env) (ctor_tag : string) : bool =
+  let bare s = match String.rindex_opt s '.' with
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+    | None -> s in
+  let tag = bare ctor_tag in
+  let owner_reprs = List.filter_map (function
+    | Tir.TDVariant (tname, variants)
+      when List.exists (fun (c, _) -> String.equal (bare c) tag) variants ->
+      Some (Repr.repr_of_ty env.type_defs (Tir.TCon (bare tname, [])))
+    | _ -> None) env.type_defs in
+  owner_reprs <> []
+  && List.for_all (function
+      | Repr.Newtype _ | Repr.Niche _ -> true
+      | Repr.Boxed -> false) owner_reprs
+
+(** Resolve the CONCRETE type of constructor [br_tag]'s field [idx] given the
+    scrutinee's static type, mirroring [Llvm_data.resolve_ctor_fields]: find
+    the scrutinee TCon's [TDVariant], collect its type-parameter names as the
+    free TVars of the ctor field types in declaration order (the same
+    ordering [Llvm_toplevel.build_ctor_info] uses for [type_params]), and
+    substitute the scrutinee's type arguments.
+
+    Used by the dead-branch-var EDecRC pass below when a pattern-matrix
+    field var's own static type is an unresolved TVar ([lower_match] types a
+    sub-var from its sub-pattern's span, but a WILDCARD sub-pattern has no
+    type_map record, leaving [TVar "_"]).  [needs_rc (TVar _)] is
+    conservatively TRUE, so without this resolution a dead `Cons(_, t)` head
+    on a shared List(Float) got a dec_rc on the RAW DOUBLE BITS of the
+    element — march_decrc dereferencing 0x3ff0... (the float 1.0) — the
+    Stats.mean / DataFrame group_by compiled SIGSEGV.  llvm_case's
+    shared-path field IncRC already does this same resolution
+    ([resolve_ctor_fields]) and skips non-pointer fields, so suppressing the
+    matching dec here keeps the two sides balanced in both directions.
+    Returns [None] (→ caller falls back to the conservative static type)
+    when the type or ctor cannot be resolved. *)
+let resolve_case_field_ty (env : env) (scrut_ty : Tir.ty) (br_tag : string)
+    (idx : int) : Tir.ty option =
+  match scrut_ty with
+  | Tir.TCon (type_name, ty_args) ->
+    let bare s = match String.rindex_opt s '.' with
+      | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+      | None -> s in
+    (* Exact-name lookup first, then progressively strip the scrutinee type
+       name's module prefixes (same convention as Llvm_data.get_record_fields). *)
+    let rec find_ctors name =
+      match Repr.find_variant env.type_defs name with
+      | Some ctors -> Some ctors
+      | None ->
+        (match String.index_opt name '.' with
+         | Some i -> find_ctors (String.sub name (i + 1) (String.length name - i - 1))
+         | None -> None) in
+    (match find_ctors type_name with
+     | None -> None
+     | Some ctors ->
+       let ctor_bare = bare br_tag in
+       (match List.find_opt (fun (c, _) -> String.equal (bare c) ctor_bare) ctors with
+        | None -> None
+        | Some (_, generic_fields) ->
+          (* Type-parameter names: free TVars of ALL ctor field types in
+             declaration order — must mirror Llvm_toplevel.build_ctor_info. *)
+          let seen = Hashtbl.create 4 in
+          let params = ref [] in
+          let rec collect = function
+            | Tir.TVar n ->
+              if not (Hashtbl.mem seen n) then begin
+                Hashtbl.add seen n (); params := n :: !params
+              end
+            | Tir.TCon (_, args) -> List.iter collect args
+            | Tir.TFn (ps, r)    -> List.iter collect ps; collect r
+            | Tir.TTuple ts      -> List.iter collect ts
+            | Tir.TPtr t         -> collect t
+            | _ -> () in
+          List.iter (fun (_, ftys) -> List.iter collect ftys) ctors;
+          let param_names = List.rev !params in
+          if List.length param_names <> List.length ty_args then None
+          else
+            let subst = List.combine param_names ty_args in
+            let rec apply t = match t with
+              | Tir.TVar n ->
+                (match List.assoc_opt n subst with Some t' -> t' | None -> t)
+              | Tir.TCon (n, args) -> Tir.TCon (n, List.map apply args)
+              | Tir.TFn (ps, r)    -> Tir.TFn (List.map apply ps, apply r)
+              | Tir.TTuple ts      -> Tir.TTuple (List.map apply ts)
+              | Tir.TPtr t'        -> Tir.TPtr (apply t')
+              | _ -> t in
+            Option.map apply (List.nth_opt generic_fields idx)))
+  | _ -> None
+
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
 let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
@@ -938,7 +1044,15 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
                         branch variable (S(x)≡x, Some(x)≡x); the variable's own
                         RC lifecycle frees the shared object, so emitting a
                         separate scrutinee free here would double-free it. *)
-                     && not (scrutinee_shares_payload_storage env v.Tir.v_ty) ->
+                     && not (scrutinee_shares_payload_storage env v.Tir.v_ty)
+                     (* TVar-typed scrutinee (pattern-matrix sub-var): the check
+                        above can't classify it, so resolve by this branch's
+                        ctor tag instead — see [tag_owner_shares_payload_storage]
+                        (the from_rows_widen `Cons(Row(_),_)` UAF). *)
+                     && not (match v.Tir.v_ty with
+                             | Tir.TVar _ ->
+                               tag_owner_shares_payload_storage env ctor_tag
+                             | _ -> false) ->
         (* Use the concrete ctor type so FBIP can recognise the tag.
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
@@ -1052,15 +1166,30 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          When scrutinee_borrowed = true, all br_vars are re-added to [la]
          above, so they appear in [live_before_br] and the check below
          correctly suppresses EDecRC for borrowed fields. *)
-      let body'' = List.fold_right (fun (v : Tir.var) body_acc ->
-        if needs_rc v.Tir.v_ty
+      let body'' = List.fold_right (fun (i, (v : Tir.var)) body_acc ->
+        (* When the field var's static type is an unresolved TVar (wildcard
+           sub-pattern — no type_map record), resolve the ctor field's
+           concrete type from the scrutinee's type instead of conservatively
+           treating it as heap ([needs_rc (TVar _)] = true): a dec_rc on an
+           UNBOXED field (Float stored as raw double bits) dereferences the
+           value as a pointer — see [resolve_case_field_ty]. *)
+        let field_needs_rc = match v.Tir.v_ty with
+          | Tir.TVar _ ->
+            (match a with
+             | Tir.AVar sv ->
+               (match resolve_case_field_ty env sv.Tir.v_ty br.Tir.br_tag i with
+                | Some fty -> needs_rc fty
+                | None -> needs_rc v.Tir.v_ty)
+             | _ -> needs_rc v.Tir.v_ty)
+          | _ -> needs_rc v.Tir.v_ty in
+        if field_needs_rc
            && not (StringSet.mem v.Tir.v_name live_before_br)
            && not (StringSet.mem v.Tir.v_name env.closure_fvs)
            && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars) then
           Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         else
           body_acc
-      ) br.Tir.br_vars body'
+      ) (List.mapi (fun i v -> (i, v)) br.Tir.br_vars) body'
       in
       (br, body'', live_before_br, bound)
     ) branches in

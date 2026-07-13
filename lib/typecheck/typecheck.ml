@@ -1028,6 +1028,36 @@ let qualified_error_msg (name : string) (env : env) : string =
         in
         Printf.sprintf "Module `%s` does not export `%s`.%s" mod_name member hint
 
+(** Bare constructor names observed to be AMBIGUOUS (owned by more than one
+    type) at a use site during checking — the same condition that emits the
+    "Constructor `X` is defined by multiple types" hint.  Consumed by
+    [Lower_match]: a bare constructor PATTERN whose name is in this table
+    gets its TIR branch tag qualified to "Type.Ctor" (from the typechecker's
+    resolved pattern type), so codegen's [qualified_br_key] resolves it to
+    the exact ctor_info entry the ENCODE side used, instead of an erased
+    (TVar-scrutinee) match falling into the bare-name recovery paths, which
+    pick an arbitrary owner — e.g. `Cons(Row(pairs), _)` in
+    stdlib/dataframe.march decoded via Csv.CsvRow's NICHE shape (identity)
+    while the value was encoded as DataFrame.Row's BOX: the box pointer
+    became "pairs", its tag read as Nil, and every List op on it returned
+    empty (the group_by "Groups: 0" wrong answer).
+
+    Global and monotone across [check_module] calls (a multi-compile process
+    may accumulate names that are unambiguous in a later program — harmless:
+    qualifying an unambiguous ctor still resolves to its unique entry). *)
+let ambiguous_bare_ctors : (string, unit) Hashtbl.t = Hashtbl.create 32
+
+(** The OWNING TYPE the pattern-checker resolved each constructor PATTERN to,
+    keyed by the pattern ctor name's span.  [infer_pattern]'s PatCon arm is
+    the single resolution point (expected-type precedence, then lookup_ctor's
+    current-module preference, then qualified resolution) — this table lets
+    [Lower_match] qualify an ambiguous bare branch tag with the SAME winner
+    the typechecker chose, rather than re-resolving (or worse, letting
+    codegen's bare-name recovery pick an arbitrary owner).  Same global /
+    monotone caveat as [ambiguous_bare_ctors]; identical source spans always
+    re-record the identical resolution. *)
+let resolved_pattern_ctor_types : (Ast.span, string) Hashtbl.t = Hashtbl.create 64
+
 (** All parent types of ctors in [env] that share [name] (multiple types may
     define the same variant). Returns list of type names (deduplicated).
     O(log n) — just a single map lookup on the ctor_info list. *)
@@ -3084,9 +3114,11 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
+       Hashtbl.replace resolved_pattern_ctor_types name.span ci.ci_type;
        (* Emit a hint when the bare constructor name is ambiguous across types. *)
        let all_types = all_ctors_named name.txt env in
-       (if List.length all_types > 1 && not (String.contains name.txt '.') then
+       (if List.length all_types > 1 && not (String.contains name.txt '.') then begin
+         Hashtbl.replace ambiguous_bare_ctors name.txt ();
          Err.hint env.errors ~span:name.span
            (Printf.sprintf
               "Constructor `%s` is defined by multiple types (%s). \
@@ -3094,7 +3126,8 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
               name.txt
               (String.concat ", " all_types)
               (List.hd all_types)
-              name.txt));
+              name.txt)
+       end);
        let arg_tys, result_ty = instantiate_ctor env ci in
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
@@ -4320,7 +4353,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
             Qualified names (containing '.') are already disambiguated — skip. *)
          (if not (String.contains name.txt '.') then begin
            let all_types = all_ctors_named name.txt env in
-           if List.length all_types > 1 then
+           if List.length all_types > 1 then begin
+             Hashtbl.replace ambiguous_bare_ctors name.txt ();
              Err.hint env.errors ~span:name.span
                (Printf.sprintf
                   "Constructor `%s` is defined by multiple types (%s). \
@@ -4329,6 +4363,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   (String.concat ", " all_types)
                   (List.hd all_types)
                   name.txt)
+           end
          end);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
@@ -9261,6 +9296,19 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   warn_unused_imports final_env;
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  (* Record every bare constructor name owned by MORE THAN ONE type into
+     [ambiguous_bare_ctors] for Lower_match's branch-tag qualification.
+     Derived from the final ctor registry (not from the use-site ambiguity
+     hint, which the expected-type-directed PatCon path legitimately skips —
+     a pattern checked against a known scrutinee type never consults
+     [all_ctors_named], yet its TIR branch tag still needs qualification for
+     codegen's erased-scrutinee decode paths). *)
+  StrMap.iter (fun name cis ->
+      let distinct = List.sort_uniq compare
+          (List.map (fun ci -> ci.ci_type) cis) in
+      if List.length distinct > 1 then
+        Hashtbl.replace ambiguous_bare_ctors name ()
+    ) final_env.ctors;
   (errors, type_map, final_env)
 
 let check_module ?errors (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =

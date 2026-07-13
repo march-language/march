@@ -142,6 +142,11 @@ let nondeterministic_allowlist =
     "supervision_monitor";
     (* IOList template outputs variable content *)
     "iolist_template";
+    (* Prints per-section "N ms" wall-clock timings; its former
+       group_by/Stats.mean compiled SIGSEGV was FIXED 2026-07-13 (see
+       specs/todos.md Done) and the payload output is now byte-identical to
+       the interpreter — only the timing lines differ across runs. *)
+    "dataframe_bench";
     (* HTTP client requiring a WASM-only fetch shim; compiled link fails
        cleanly (unsupported outside the browser target), not comparable *)
     "http_test";
@@ -189,22 +194,20 @@ let known_divergence =
     "sort_nearly_sorted", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
     "timsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
 
-    (* DataFrame groupby+agg: a DISTINCT compiled-only RC-misclassification
-       crash (EXC_BAD_ACCESS in march_incrc, called from Stats.mean via
-       DataFrame.eval_agg/apply_group_by) — same bug CLASS as the sort
-       family (a corrupted/tagged-immediate value dereferenced as a heap
-       pointer) but a different call site; newly filed by this sweep.
-       specs/todos.md P0: "DataFrame.group_by + Stats.mean: compiled-only
-       RC-misclassification SIGSEGV". *)
-    "dataframe_bench", "DataFrame group_by/Stats.mean RC-misclassification SIGSEGV (specs/todos.md, filed by this sweep)";
-    (* Same DataFrame RC-misclassification family as dataframe_bench: the
-       COMPILED binary crashes (exit 139) in the DataFrame internals while the
-       interpreter runs clean.  Surfaced 2026-07-10 once the InterpFail gate
-       drove the fix of its stale API-drift (it now interprets, giving ground
-       truth) AND is_divergence began treating the 128+signo crash exit as a
-       divergence — before both, its compiled crash was invisible. Not a new
-       bug; the same open DataFrame RC issue as dataframe_bench. *)
-    "dataframe_basic", "DataFrame RC-misclassification family: compiled crash (139), interp clean (same bug as dataframe_bench; specs/todos.md)";
+    (* dataframe_bench's group_by/Stats.mean SIGSEGV was FIXED 2026-07-13
+       (nested-fn tvar-family alignment + perceus ctor-field resolution +
+       ambiguous-ctor branch-tag qualification — see specs/todos.md Done);
+       it now runs to completion byte-identical to the interpreter modulo
+       its per-section "N ms" timing lines, which make a byte compare
+       meaningless — so it moved to nondeterministic_allowlist below,
+       like the other timing-printing programs. *)
+    (* dataframe_basic still crashes compiled, but LATER and for a DIFFERENT
+       reason than the fixed group_by bug: its "Stats Integration" section
+       reaches DataFrame.summarize → Stats.median on a Float column, which
+       dies in the still-open sort-RC family (a bare Stats.median([floats])
+       reproduces, exit 139).  Its non-crashing sections additionally show
+       the open to_string-on-container `#<tag:N>` divergence. *)
+    "dataframe_basic", "Stats.median/sort-RC family crash in the summarize section (139), interp clean; plus to_string-on-container #<tag:N> (both specs/todos.md; the group_by bug formerly filed here was fixed 2026-07-13)";
 
     (* stats_basic's former "Monomorphization limit reached" ICE was FIXED
        2026-07-12 (typecheck.ml fn_arities shadowing — a user `fn f(m)`

@@ -262,9 +262,42 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- ELetFn as block statement → bind function name in rest of block --- *)
   | Ast.EBlock (Ast.ELetFn (name, params, ret_ty_ann, fn_body, _) :: rest, sp) ->
     let fn_name = name.Ast.txt in
+    (* For a POLYMORPHIC param annotation (one containing type variables,
+       e.g. `lst : List(a)`), prefer the typechecker's inferred type from
+       the param's span — same rationale as Lower_decls.lower_fn_def's
+       [ty_from_tc_or_ann]: the annotation lowers to the NAME family
+       [TVar "a"], while the BODY's typed expressions (pattern-bound branch
+       vars etc., via ty_of_span) use the typechecker's NUMBERED family
+       [TVar "_<id>"].  Mono's local-subst for nested fns is derived by
+       matching PARAM types against call-site args, so with the annotation
+       family on params the body's numbered TVars are never substituted —
+       leftover [TVar "_<id>"] vars then classify [needs_rc] = true
+       conservatively, emitting RC ops on unboxed payloads (the
+       Stats.mean-on-a-shared-List(Float) compiled SIGSEGV: march_incrc on
+       raw double bits of the cons head).  A CONCRETE (tvar-free)
+       annotation stays authoritative — ty_of_span "may return a stale or
+       spurious type for a parameter use-site" (see lower_to_atom_k's
+       _fn_param_types preference above), and a concrete annotation has no
+       family-mismatch problem to fix. *)
+    let rec ann_has_tvar (t : Ast.ty) : bool = match t with
+      | Ast.TyVar _ -> true
+      | Ast.TyCon (_, args) -> List.exists ann_has_tvar args
+      | Ast.TyArrow (a, b) -> ann_has_tvar a || ann_has_tvar b
+      | Ast.TyTuple ts -> List.exists ann_has_tvar ts
+      | Ast.TyRecord fs -> List.exists (fun (_, t) -> ann_has_tvar t) fs
+      | Ast.TyLinear (_, t) -> ann_has_tvar t
+      | Ast.TyRefine (t, _, _) -> ann_has_tvar t
+      | _ -> false
+    in
     let params' = List.map (fun (p : Ast.param) ->
-        { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span env p.param_name.span);
+        let v_ty = match p.param_ty with
+          | Some t when not (ann_has_tvar t) -> lower_ty t
+          | ann ->
+            (match ty_of_span env p.param_name.span, ann with
+             | Tir.TVar "_", Some t -> lower_ty t
+             | ty, _ -> ty)
+        in
+        { Tir.v_name = p.param_name.txt; v_ty;
           v_lin = lower_linearity p.param_lin }
       ) params in
     (* Install fn_name → self_ty so that both recursive self-calls inside the
@@ -713,10 +746,30 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
      enabling recursion.  Defun lifts it and computes free-variable captures. *)
   | Ast.ELetFn (name, params, ret_ty_ann, body, _) ->
     let fn_name = name.Ast.txt in
+    (* For a POLYMORPHIC param annotation, prefer the typechecker's inferred
+       type from the param's span — see the EBlock/ELetFn case above for the
+       full rationale (annotation TVars "a" vs body span TVars "_<id>" are
+       different families; mono's local subst only covers the params'
+       family).  Concrete annotations stay authoritative. *)
+    let rec ann_has_tvar (t : Ast.ty) : bool = match t with
+      | Ast.TyVar _ -> true
+      | Ast.TyCon (_, args) -> List.exists ann_has_tvar args
+      | Ast.TyArrow (a, b) -> ann_has_tvar a || ann_has_tvar b
+      | Ast.TyTuple ts -> List.exists ann_has_tvar ts
+      | Ast.TyRecord fs -> List.exists (fun (_, t) -> ann_has_tvar t) fs
+      | Ast.TyLinear (_, t) -> ann_has_tvar t
+      | Ast.TyRefine (t, _, _) -> ann_has_tvar t
+      | _ -> false
+    in
     let params' = List.map (fun (p : Ast.param) ->
-        { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t
-                  | None -> ty_of_span env p.param_name.span);
+        let v_ty = match p.param_ty with
+          | Some t when not (ann_has_tvar t) -> lower_ty t
+          | ann ->
+            (match ty_of_span env p.param_name.span, ann with
+             | Tir.TVar "_", Some t -> lower_ty t
+             | ty, _ -> ty)
+        in
+        { Tir.v_name = p.param_name.txt; v_ty;
           v_lin = lower_linearity p.param_lin }
       ) params in
     let ret_ty_pre = match ret_ty_ann with Some t -> lower_ty t | None -> unknown_ty in

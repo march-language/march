@@ -10712,6 +10712,85 @@ let test_compiled_task_await_heap_payload () =
       "compiled Task.await with heap payloads (String >15B, List) exits 0 (no OOM)"
       0 run_rc
 
+(* Regression (DataFrame P0 crash half, fixed 2026-07-13): Stats.mean on a
+   SHARED List(Float) — the caller keeps a second reference alive across the
+   call — used to SIGSEGV compiled at march_incrc(0x3ff0...) (the raw IEEE-754
+   bits of the first element incremented as a pointer).  Root cause was the
+   nested-fn tvar-family mismatch (annotation family "a" on ELetFn params vs
+   the typechecker's numbered family in the body, so mono never substituted
+   body types) leaving Perceus to emit RC ops on unboxed Float fields; fixed
+   by span-preferring polymorphic nested-fn param types (lower.ml) plus
+   ctor-field type resolution for the dead-branch-var dec (perceus.ml). *)
+let test_compiled_stats_mean_shared_float_list () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_mean_shared" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "mean_shared.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod MeanSharedRegress do\n\
+    \  fn main() : Unit do\n\
+    \    let xs = [1.0, 2.0, 3.0, 4.0]\n\
+    \    let m = Stats.mean(xs)\n\
+    \    if m == 2.5 do () else process_exit(1) end\n\
+    \    if List.length(xs) == 4 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "meansharedbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Stats.mean on a shared List(Float) exits 0 (no RC op on raw float bits)"
+      0 run_rc
+
+(* Regression (DataFrame P0 wrong-answer half, fixed 2026-07-13): a bare
+   constructor pattern whose name is AMBIGUOUS across types (DataFrame.Row is
+   a 1-ctor boxed type and Csv.CsvRow — CsvEof | Row(...) — is niche-shaped;
+   both own bare `Row`) matched through an ERASED scrutinee (the TVar-typed
+   head sub-var of `Cons(Row(pairs), _)`).  Codegen's bare-name niche
+   recovery committed to CsvRow's identity decode while the value had been
+   ENCODED as DataFrame.Row's box, so `pairs` became the box pointer itself
+   and every List op on it read the box tag (0 = Nil) as an empty list — the
+   silent group_by "Groups: 0".  Fixed by qualifying ambiguous bare branch
+   tags to "Type.Ctor" from the typechecker's own pattern resolution
+   (typecheck.ml resolved_pattern_ctor_types + lower_match.ml), which
+   codegen's qualified_br_key resolves exactly like the encode key. *)
+let test_compiled_ambiguous_ctor_nested_pattern () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_ambig_ctor" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "ambig_ctor.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod AmbigCtorRegress do\n\
+    \  fn consume(rows : List(Row)) : Int do\n\
+    \    match rows do\n\
+    \      Nil -> 0 - 1\n\
+    \      Cons(Row(pairs), _) -> List.length(pairs)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let r = DataFrame.Row([(\"a\", Value.Str(\"x\")), (\"b\", Value.Str(\"y\"))])\n\
+    \    if consume([r]) == 2 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "ambigctorbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, _) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled ambiguous-ctor nested pattern (DataFrame.Row vs Csv.CsvRow `Row`) reads its payload"
+      0 run_rc
+
 (* Regression: a generic helper that projects a record field carrying a
    polymorphic element and feeds it to another generic function under-specialised
    that callee, producing a representation mismatch that crashed when COMPILED.
@@ -12582,6 +12661,10 @@ let stdlib_suites =
           test_compiled_default_method_sibling_call;
         Alcotest.test_case "Task.await heap payload (String >15B, List): no OOM (compiled)" `Slow
           test_compiled_task_await_heap_payload;
+        Alcotest.test_case "Stats.mean on shared List(Float): no RC op on raw float bits (compiled)" `Slow
+          test_compiled_stats_mean_shared_float_list;
+        Alcotest.test_case "ambiguous ctor `Row` nested pattern: payload read intact (compiled)" `Slow
+          test_compiled_ambiguous_ctor_nested_pattern;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow

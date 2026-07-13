@@ -291,6 +291,39 @@ and compile_matrix_impl
                   the arm would be silently dropped instead of compiled"
                  (string_of_pat_span (span_of_pat fp)))
              | Some (tag, subs) ->
+               (* AMBIGUOUS bare constructor pattern → qualify the branch tag
+                  to "Type.Ctor" from the typechecker's resolved pattern type,
+                  matching the EAlloc key format on the encode side.  When the
+                  scrutinee reaching codegen is ERASED (a TVar-typed pattern-
+                  matrix sub-var, e.g. the head of `Cons(Row(pairs), _)`), a
+                  bare tag is resolved by codegen's bare-name recovery scans,
+                  which pick an arbitrary owner of the ctor name — for `Row`
+                  (owned by both Csv.CsvRow, niche-shaped, and DataFrame.Row,
+                  boxed) the decode committed to CsvRow's NICHE identity while
+                  the encode had BOXED a DataFrame.Row: the box pointer itself
+                  became the payload and read as an empty list (the group_by
+                  "Groups: 0" wrong answer).  A qualified tag instead hits the
+                  exact ctor_info entry via llvm_case's [qualified_br_key].
+                  Scoped to names the typechecker flagged ambiguous, so
+                  unambiguous programs keep byte-identical TIR. *)
+               let tag =
+                 if String.length tag > 0 && tag.[0] >= 'A' && tag.[0] <= 'Z'
+                    && not (String.contains tag '.')
+                    && Hashtbl.mem March_typecheck.Typecheck.ambiguous_bare_ctors tag then
+                   (match fp with
+                    | Ast.PatCon (n, _) ->
+                      (match Hashtbl.find_opt
+                               March_typecheck.Typecheck.resolved_pattern_ctor_types
+                               n.Ast.span with
+                       | Some owner_ty ->
+                         let last_seg s = match String.rindex_opt s '.' with
+                           | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+                           | None -> s in
+                         last_seg owner_ty ^ "." ^ tag
+                       | None -> tag)
+                    | _ -> tag)
+                 else tag
+               in
                let arity = List.length subs in
                let row_entry = (subs @ rest_pats, body) in
                (match List.assoc_opt tag !tag_groups with
