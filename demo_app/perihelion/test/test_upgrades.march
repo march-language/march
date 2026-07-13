@@ -66,6 +66,44 @@ mod TestPerihelionUpgrades do
       end
       assert (List.any(choices, is_keep_current))
     end
+
+    test "equipped special never appears more than once in the 3 choices" do
+      fn count_special(choices : List(Perihelion.Upgrades.UpgradeKind), target : Perihelion.Upgrades.SpecialKind) : Int do
+        match choices do
+          Nil -> 0
+          Cons(u, rest) ->
+            let inc = match u do
+              SpecialItem(sk) -> if sk == target do 1 else 0 end
+              _ -> 0
+            end
+            inc + count_special(rest, target)
+        end
+      end
+      fn check_seed_with_special(seed : Int, special : Perihelion.Upgrades.SpecialKind) : Bool do
+        let (_, choices) = Perihelion.Upgrades.draw_choices(Random.seed(seed), Cons(Perihelion.Upgrades.Base, Nil), Some(special))
+        count_special(choices, special) == 1
+      end
+      fn check_seeds(n : Int) : Bool do
+        if n == 0 do
+          true
+        else
+          if !check_seed_with_special(n, Perihelion.Upgrades.StarThrust) do
+            false
+          else
+            if !check_seed_with_special(n, Perihelion.Upgrades.StarJump) do
+              false
+            else
+              if !check_seed_with_special(n, Perihelion.Upgrades.TrajectoryPreview) do
+                false
+              else
+                check_seeds(n - 1)
+              end
+            end
+          end
+        end
+      end
+      assert (check_seeds(50))
+    end
   end
 
 end

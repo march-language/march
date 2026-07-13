@@ -12,6 +12,17 @@ mod Perihelion.Upgrades do
 
   type SpecialKind = StarThrust | StarJump | TrajectoryPreview
 
+  impl Eq(SpecialKind) do
+    fn eq(a : SpecialKind, b : SpecialKind) : Bool do
+      match (a, b) do
+        (StarThrust, StarThrust) -> true
+        (StarJump, StarJump) -> true
+        (TrajectoryPreview, TrajectoryPreview) -> true
+        _ -> false
+      end
+    end
+  end
+
   -- OffenseWeapon(k): unlocks weapon k into the player's Q/E rotation.
   -- OffenseFireRate: one stack of the "faster fire" stat buff.
   -- DefenseBulletWard/DefenseDeflector/DefenseShield: the three independent,
@@ -90,7 +101,12 @@ mod Perihelion.Upgrades do
       None ->
         draw_n(rng, milestone_pool(owned_weapons), 3, Nil)
       Some(k) ->
-        let (rng2, two) = draw_n(rng, milestone_pool(owned_weapons), 2, Nil)
+        let pool = List.filter(milestone_pool(owned_weapons), fn u ->
+          match u do
+            SpecialItem(sk) -> sk != k
+            _ -> true
+          end)
+        let (rng2, two) = draw_n(rng, pool, 2, Nil)
         (rng2, Cons(SpecialItem(k), two))
     end
   end
