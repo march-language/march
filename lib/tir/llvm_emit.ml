@@ -374,22 +374,17 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       (* We'll generate the wrapper function at the end.  For now, declare it.
          When the AVar's type is erased (TVar "_"), fall back to the param-count
          registered in top_fn_nparams at function-definition time. *)
-      let (ps_tirs, nparams) = match v.Tir.v_ty with
-        | Tir.TFn (ps, _) -> (ps, List.length ps)
+      let ps_tirs = match v.Tir.v_ty with
+        | Tir.TFn (ps, _) -> ps
         | _ ->
           let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
-          (List.init n (fun _ -> Tir.TVar "_"), n)
+          List.init n (fun _ -> Tir.TVar "_")
       in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ret_tir in
-      (* Use concrete param types so the wrapper signature matches ECallPtr's
-         call-site type annotation (which uses llvm_ty for each param). *)
-      let param_tys = List.map llvm_ty ps_tirs in
-      let all_params = "ptr" :: param_tys in  (* clo + original params *)
-      let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-      let all_arg_decls = "%_clo" :: arg_names in
-      let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
-      let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+      (* Wrapper params/args come from the shared sig builder so the
+         convention matches ECallPtr's call-site view — see clo_wrap_sig. *)
+      let (decl_str, call_args) = Llvm_calls.clo_wrap_sig ps_tirs in
       Buffer.add_string ctx.extra_fns
         (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
     end;
@@ -502,15 +497,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        let wrap_name = fn_name ^ "$clo_wrap" in
        if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
          Hashtbl.add ctx.emitted_wraps wrap_name ();
-         let nparams     = List.length ps in
          let ret_tir     = fn_ret_tir v.Tir.v_ty in
          let target_ret  = llvm_ret_ty ret_tir in
-         let param_tys   = List.map llvm_ty ps in
-         let all_params  = "ptr" :: param_tys in
-         let arg_names   = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-         let all_decls   = "%_clo" :: arg_names in
-         let decl_str    = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_decls) in
-         let call_args   = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+         (* Shared sig builder — see Llvm_calls.clo_wrap_sig. *)
+         let (decl_str, call_args) = Llvm_calls.clo_wrap_sig ps in
          Buffer.add_string ctx.extra_fns
            (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
        end;

@@ -127,6 +127,24 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
        silently bind to an arbitrary one of these impls."
       bare_name (String.concat ", " candidates))
 
+(** Build the wrapper signature pieces for a `$clo_wrap` from the TARGET's
+    TIR param types: [decl_str] is the wrapper's own param list (the ignored
+    closure cell `%_clo` followed by the target's params at their concrete
+    LLVM types), [call_args] the forwarded argument list.  All three
+    clo_wrap producer sites (llvm_emit's top-fns and no-var-slot first-class
+    paths, llvm_repl's closure-slot fn wrapper) go through this ONE helper
+    so the wrapper's ARG convention is defined in a single place — the
+    uniform-apply-ABI flip (specs/plans/2026-07-13-uniform-apply-abi.md
+    stage 3) changes it here once. *)
+let clo_wrap_sig (ps_tirs : Tir.ty list) : string * string =
+  let param_tys = List.map Llvm_ctx.llvm_ty ps_tirs in
+  let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_tys in
+  let decl_str = String.concat ", "
+      ("ptr %_clo" :: List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+  let call_args = String.concat ", "
+      (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+  (decl_str, call_args)
+
 (** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
     result in the generic ptr ABI shared by all closure dispatch (see
     [is_apply_fn]).  A closure struct's fn-pointer is type-erased, so a thin
