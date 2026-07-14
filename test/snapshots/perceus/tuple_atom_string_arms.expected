@@ -57,10 +57,8 @@ dec_rc $jp_clo10;
   _ -> call_ptr $jp_clo8()
   _ -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$3($jp3$apply$3) in
 dec_rc $jp_clo4;
-let y : Int = inc_rc $f2;
-$f2 in
-let x : Int = inc_rc $f1;
-$f1 in
+let y : Int = $f2 in
+let x : Int = $f1 in
 "point"
   _ -> panic("non-exhaustive pattern match")
 
