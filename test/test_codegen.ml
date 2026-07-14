@@ -1062,6 +1062,48 @@ let test_llvm_no_call_to_double_underscore () =
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
 
+(* --- name-resolution: cross-module qualified-alias hijack (RC-underflow root
+   cause) --------------------------------------------------------------------
+
+   A bulk `import Bastion` in ONE module registers the DOTTED short name
+   `Logger.debug` -> `Bastion.Logger.debug` in the program-global [_use_aliases]
+   table (register_aliases strips only the import prefix "Bastion.").  That
+   global table is consulted while lowering EVERY module.  It must NOT hijack a
+   module-qualified `Logger.debug` reference written in an UNRELATED module —
+   one that never imported Bastion, and that the typechecker bound to the stdlib
+   `Logger.debug/1`.  Pre-fix, lowering rewrote it to the arity-2
+   `Bastion.Logger.debug`, emitting a call with an uninitialised second argument
+   -> RC underflow / SIGSEGV at runtime.  The fix restricts the global
+   [_use_aliases] fallback to UNQUALIFIED (dot-free) names; the importing module
+   itself still resolves its own qualified alias via [current_module_aliases]. *)
+let test_qualified_alias_no_cross_module_hijack () =
+  let open March_tir.Lower in
+  Hashtbl.reset _fn_param_types;
+  _use_aliases := Hashtbl.create 8;
+  (* Simulate another module's `import Bastion`: a DOTTED global alias plus an
+     ordinary UNQUALIFIED one. *)
+  Hashtbl.replace !_use_aliases "Logger.debug" "Bastion.Logger.debug";
+  Hashtbl.replace !_use_aliases "helper" "Some.Mod.helper";
+  with_current_module_fns [] (fun () ->
+    (* A module that did NOT import Bastion — empty current_module_aliases. *)
+    let non_importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+    Alcotest.(check string)
+      "qualified `Logger.debug` NOT hijacked by another module's global import"
+      "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
+    (* The importing module itself still resolves its own qualified alias. *)
+    let importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+    Hashtbl.replace importer.current_module_aliases
+      "Logger.debug" "Bastion.Logger.debug";
+    Alcotest.(check string)
+      "importing module still resolves its own qualified alias"
+      "Bastion.Logger.debug" (resolve_use_alias importer "Logger.debug");
+    (* Unqualified names still resolve through the global table (unchanged). *)
+    Alcotest.(check string)
+      "unqualified global alias still applies"
+      "Some.Mod.helper" (resolve_use_alias non_importer "helper"))
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -8562,6 +8604,10 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "name_resolution", [
+          Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
+            test_qualified_alias_no_cross_module_hijack;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;

@@ -291,7 +291,22 @@ let resolve_use_alias (env : env) (name : string) : string =
   else match Hashtbl.find_opt env.current_module_aliases name with
   | Some qualified -> qualified
   | None ->
-  match Hashtbl.find_opt !_use_aliases name with
+  (* The GLOBAL [_use_aliases] table is populated program-wide by EVERY module's
+     bulk imports (e.g. a `import Bastion` in one module registers the dotted
+     short name `Logger.debug` -> `Bastion.Logger.debug`).  Consulting it for a
+     MODULE-QUALIFIED (dotted) reference lets one module's import hijack an
+     unrelated module's qualified call: a `Logger.debug(msg)` written in a
+     module that never imported Bastion (and which the typechecker bound to the
+     stdlib `Logger.debug/1`) would be rewritten at lowering to the arity-2
+     `Bastion.Logger.debug`, emitting a call with an uninitialised second
+     argument (RC underflow at runtime).  The importing module itself always
+     also registers the alias into its OWN [current_module_aliases] (checked
+     above), so restricting the global fallback to UNQUALIFIED (dot-free) names
+     keeps intra-module resolution intact while matching the typechecker's
+     per-module import scoping.  Dotted names fall through to the explicit
+     module-alias prefix rewrite below. *)
+  match (if String.contains name '.' then None
+         else Hashtbl.find_opt !_use_aliases name) with
   | Some qualified ->
     (* GLOBAL-fallback resolution: the current module did not import this name
        itself.  If several distinct qualified candidates exist program-wide,
