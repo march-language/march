@@ -47,7 +47,19 @@ mod TestPerihelionCore do
       camera_x: 0.0,
       rng: Random.seed(7),
       asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-      shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+      shield: 0, multiplier: 1, max_mult: 1,
+      owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+      active_weapon_idx: 0,
+      fire_rate_stacks: 0,
+      bullet_ward: false,
+      deflector_plating: false,
+      shield_reinforced: false,
+      special: None,
+      special_charges: 0,
+      starkiller_target_offset: 0,
+      starkiller_cooldown: 0.0,
+      milestone_choices: Nil,
+      stars_chained: 0,
       loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil,
       view_w: 400.0, view_h: 640.0,
       fx_bursts: Nil, capture_flash: None }
@@ -74,6 +86,13 @@ mod TestPerihelionCore do
     end
   end
 
+  pfn is_milestone(p : Phase) : Bool do
+    match p do
+      Milestone -> true
+      _ -> false
+    end
+  end
+
   pfn is_orbiting_star(m : BallMode, want : Int) : Bool do
     match m do
       Orbiting(i, _, _) -> i == want
@@ -86,6 +105,12 @@ mod TestPerihelionCore do
     let g = mk_game(0.0)
     let g2 = { g with mode: Flying(vx, vy), ball_x: x, ball_y: y }
     g2
+  end
+
+  -- Like mk_flying, but starts from a caller-supplied base game (e.g. one with
+  -- non-default fields like stars_chained already set) rather than a fresh mk_game(0.0).
+  pfn mk_flying_from(base : Game, bx : Float, by_ : Float, vx : Float, vy : Float) : Game do
+    { base with ball_x: bx, ball_y: by_, mode: Flying(vx, vy) }
   end
 
 
@@ -386,6 +411,16 @@ mod TestPerihelionCore do
       assert (!is_orbiting_star(g2.mode, 0))
       assert (!is_orbiting_star(g3.mode, 0))
     end
+
+    test "capturing the Nth star opens a milestone choice screen" do
+      -- mk_game orbits star 0; give it 9 stars_chained so the NEXT forward
+      -- capture (stars_chained -> 10) crosses the interval.
+      let g0 = { mk_game(0.0) with stars_chained: 9 }
+      let g = mk_flying_from(g0, 200.0, 420.0, 0.0, 0.0 - Perihelion.Core.fly_speed())
+      let g2 = run_until_capture(g, 10)
+      assert (is_milestone(g2.phase))
+      assert (List.length(g2.milestone_choices) == 3)
+    end
   end
 
   describe "death and restart" do
@@ -675,6 +710,144 @@ mod TestPerihelionCore do
       let g2 = run_until_capture(g, 20)
       assert (g2.current == 1)
       assert (List.length(g2.stars) >= g2.current + 3)
+    end
+  end
+
+  describe "milestone choice screen" do
+    test "gameplay does not advance while a milestone is open" do
+      let g0 = { mk_game(0.0) with phase: Milestone, milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Cons(Perihelion.Upgrades.DefenseDeflector, Cons(Perihelion.Upgrades.DefenseBulletWard, Nil))) }
+      let g2 = Perihelion.Core.update(g0, no_taps(), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      assert (is_milestone(g2.phase))
+      assert (g2.loop_angle == g0.loop_angle)
+    end
+
+    test "tapping applies the first choice and resumes Playing" do
+      let g0 = { mk_game(0.0) with phase: Milestone, milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Cons(Perihelion.Upgrades.DefenseDeflector, Cons(Perihelion.Upgrades.DefenseBulletWard, Nil))) }
+      let g2 = Perihelion.Core.update(g0, Cons((10, 10), Nil), no_keys(), (999, 999), 400.0, 640.0, Perihelion.Core.dt())
+      assert (is_playing(g2.phase))
+      assert (g2.fire_rate_stacks == g0.fire_rate_stacks + 1)
+      assert (List.is_empty(g2.milestone_choices))
+    end
+
+    -- pick_milestone is what the shell's tick() actually calls every frame
+    -- the overlay is up (Task 10). capture_flash/fx_bursts are read-once
+    -- signals (set once by the triggering capture, meant to be visible for
+    -- exactly one frame); pick_milestone must clear them on every call --
+    -- both while still waiting for a tap and when a tap resolves a choice --
+    -- or the capture flash/sweep-sound would replay every single frame the
+    -- overlay is on screen.
+    test "pick_milestone clears capture_flash/fx_bursts while still waiting for a tap" do
+      let g0 = { mk_game(0.0) with phase: Milestone,
+                 milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Nil),
+                 capture_flash: Some((10.0, 20.0)),
+                 fx_bursts: Cons((10.0, 20.0), Nil) }
+      let g1 = Perihelion.Core.pick_milestone(g0, None)
+      assert (match g1.capture_flash do None -> true | _ -> false end)
+      assert (List.is_empty(g1.fx_bursts))
+      assert (is_milestone(g1.phase))
+    end
+
+    test "pick_milestone clears capture_flash/fx_bursts when a tap resolves a choice" do
+      let g0 = { mk_game(0.0) with phase: Milestone,
+                 milestone_choices: Cons(Perihelion.Upgrades.OffenseFireRate, Nil),
+                 capture_flash: Some((10.0, 20.0)),
+                 fx_bursts: Cons((10.0, 20.0), Nil) }
+      let g1 = Perihelion.Core.pick_milestone(g0, Some(0))
+      assert (match g1.capture_flash do None -> true | _ -> false end)
+      assert (List.is_empty(g1.fx_bursts))
+      assert (is_playing(g1.phase))
+      assert (g1.fire_rate_stacks == g0.fire_rate_stacks + 1)
+    end
+  end
+
+  describe "weapon rotation (Q/E)" do
+    test "E cycles to the next owned weapon, wrapping around" do
+      let g0 = { mk_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Homing, Nil)) }
+      let g2 = step_keys(g0, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Homing)
+      let g3 = step_keys(g2, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g3) == Perihelion.Upgrades.Base)
+    end
+
+    test "Q cycles to the previous owned weapon, wrapping around" do
+      let g0 = { mk_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Homing, Nil)) }
+      let g2 = step_keys(g0, Cons("q", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Homing)
+    end
+
+    test "single owned weapon: Q/E are no-ops" do
+      let g0 = mk_game(0.0)
+      let g2 = step_keys(g0, Cons("e", Nil))
+      assert (Perihelion.Core.active_weapon(g2) == Perihelion.Upgrades.Base)
+    end
+  end
+
+  describe "star killer targeting (W/D)" do
+    test "D advances the target offset, wrapping 0/1/2" do
+      let g0 = mk_game(0.0)
+      let g2 = step_keys(g0, Cons("d", Nil))
+      assert (g2.starkiller_target_offset == 1)
+      let g3 = step_keys(g2, Cons("d", Nil))
+      assert (g3.starkiller_target_offset == 2)
+      let g4 = step_keys(g3, Cons("d", Nil))
+      assert (g4.starkiller_target_offset == 0)
+    end
+
+    test "W also decrements the target offset (in addition to its existing ring-out effect)" do
+      let g0 = { mk_game(0.0) with starkiller_target_offset: 2 }
+      let g2 = step_keys(g0, Cons("w", Nil))
+      assert (g2.starkiller_target_offset == 1)
+    end
+  end
+
+  describe "remove_star" do
+    test "removing a future star shrinks the ladder and shifts later stars down" do
+      let g0 = mk_game(0.0) -- stars: [s0 (idx 0), s1 (idx 1)]
+      let g2 = { g0 with stars: List.append(g0.stars, Cons(mk_star(200.0, 200.0), Nil)) } -- add s2 (idx 2)
+      let g3 = Perihelion.Core.remove_star(g2, 1)
+      assert (List.length(g3.stars) == 2)
+      -- old s2 (at 200,200) is now index 1
+      match List.nth_opt(g3.stars, 1) do
+        Some(s) -> assert (approx(s.y, 200.0))
+        None -> assert false
+      end
+    end
+
+    test "removing the player's immediate next star does not change `current`" do
+      let g0 = mk_game(0.0) -- current = 0
+      let g2 = Perihelion.Core.remove_star(g0, 1)
+      assert (g2.current == 0)
+      assert (List.length(g2.stars) == 1)
+    end
+  end
+
+  describe "special: star thrust" do
+    test "X nudges velocity toward the nearest star and consumes one charge" do
+      let g0 = { mk_flying(200.0, 300.0, 0.0, 0.0 - Perihelion.Core.fly_speed()) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 3 }
+      let g2 = step_keys(g0, Cons("x", Nil))
+      assert (g2.special_charges == 2)
+    end
+
+    test "no charges left: X does nothing" do
+      let g0 = { mk_flying(200.0, 300.0, 0.0, 0.0 - Perihelion.Core.fly_speed()) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 0 }
+      let g2 = step_keys(g0, Cons("x", Nil))
+      assert (g2.special_charges == 0)
+    end
+  end
+
+  describe "special: keep or swap" do
+    test "apply_upgrade with a NEW special while one is equipped replaces it and refills charges" do
+      let g0 = { mk_game(0.0) with special: Some(Perihelion.Upgrades.StarJump), special_charges: 0 }
+      let g2 = Perihelion.Core.apply_upgrade(g0, Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarThrust))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust))
+      assert (g2.special_charges == 3)
+    end
+
+    test "apply_upgrade with the SAME (keep-current) special refills its charges without changing kind" do
+      let g0 = { mk_game(0.0) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 1 }
+      let g2 = Perihelion.Core.apply_upgrade(g0, Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarThrust))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust))
+      assert (g2.special_charges == 3)
     end
   end
 

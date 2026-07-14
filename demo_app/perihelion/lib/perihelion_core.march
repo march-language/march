@@ -61,7 +61,7 @@ mod Perihelion.Core do
   -- `orbits` (0 = innermost). W/S step it out/in (see step_orbit).
   type BallMode = Orbiting(Int, Int, Float) | Flying(Float, Float)
 
-  type Phase = Ready | Playing | Over
+  type Phase = Ready | Playing | Over | Milestone
 
   type RunRecord = { score : Int, stars : Int, max_mult : Int }
 
@@ -93,9 +93,30 @@ mod Perihelion.Core do
     player_shots : List(Shot),
     enemy_shots : List(Shot),
     pickups : List(Pickup),
-    shield : Bool,
+    shield : Int,
     multiplier : Int,
     max_mult : Int,
+    owned_weapons : List(Perihelion.Upgrades.WeaponKind),
+    active_weapon_idx : Int,
+    fire_rate_stacks : Int,
+    bullet_ward : Bool,
+    deflector_plating : Bool,
+    -- Once true (via DefenseShield's Upgrades pickup), every FUTURE shield
+    -- pickup (Combat.collide_ball_pickups) grants 2 charges instead of 1.
+    -- Distinct from DefenseShield's own immediate +1-charge grant.
+    shield_reinforced : Bool,
+    special : Option(Perihelion.Upgrades.SpecialKind),
+    special_charges : Int,
+    -- Which of the 3 targetable stars ahead (current+1..current+3) the
+    -- star-killer weapon's reticle sits on: 0/1/2. Only meaningful while
+    -- StarKiller is the active weapon, but always tracked (see Task 6 for
+    -- why W/D update it unconditionally).
+    starkiller_target_offset : Int,
+    starkiller_cooldown : Float,
+    -- The 3 choices offered by the currently-open milestone screen; Nil
+    -- when phase isn't Milestone. Populated when a milestone triggers,
+    -- cleared (back to Nil) when the player picks one and play resumes.
+    milestone_choices : List(Perihelion.Upgrades.UpgradeKind),
     stars_chained : Int,
     loop_angle : Float,
     fire_cooldown : Float,
@@ -118,6 +139,17 @@ mod Perihelion.Core do
   doc "The star at index `i` of the ladder, if it exists."
   fn star_at(game : Game, i : Int) : Option(Star) do
     List.nth_opt(game.stars, i)
+  end
+
+  -- No List.filter_indexed in stdlib -- List.take/List.drop compose to the
+  -- same "everything except index i" result.
+  pfn remove_at(xs : List(Star), idx : Int) : List(Star) do
+    List.append(List.take(xs, idx), List.drop(xs, idx + 1))
+  end
+
+  doc "Remove the star at ladder index `idx` (star-killer's effect). Anything orbiting/targeting it is the CALLER's responsibility to clean up (Combat does this for ships, since Core doesn't know about Ship)."
+  fn remove_star(game : Game, idx : Int) : Game do
+    { game with stars: remove_at(game.stars, idx) }
   end
 
   doc "How many orbit rings star `s` has."
@@ -150,7 +182,124 @@ mod Perihelion.Core do
     if target < 0 do 0 else if target > n - 1 do n - 1 else target end end
   end
 
+  doc "The player's currently-active weapon (index-clamped against owned_weapons, which only grows, never shrinks -- so no out-of-range risk in practice, but clamped defensively)."
+  fn active_weapon(game : Game) : Perihelion.Upgrades.WeaponKind do
+    let n = List.length(game.owned_weapons)
+    let idx = if game.active_weapon_idx >= n do 0 else game.active_weapon_idx end
+    match List.nth_opt(game.owned_weapons, idx) do
+      Some(w) -> w
+      None -> Perihelion.Upgrades.Base
+    end
+  end
+
+  -- Edge-triggered like adjust_ring: one keypress this frame = one step.
+  -- Q/E both pressed cancel out (net 0), same convention as W/S.
+  pfn adjust_weapon(idx : Int, keys : List(String), n : Int) : Int do
+    let next = List.any(keys, fn k -> k == "e" || k == "E")
+    let prev = List.any(keys, fn k -> k == "q" || k == "Q")
+    let delta = (if next do 1 else 0 end) - (if prev do 1 else 0 end)
+    let raw = int_mod(idx + delta, n)
+    if raw < 0 do raw + n else raw end
+  end
+
+  -- D advances the star-killer reticle (targets a farther star), W pulls it
+  -- back in -- edge-triggered, same convention as adjust_ring/adjust_weapon.
+  -- W does double duty here: it ALSO steps the orbit ring outward (see
+  -- adjust_ring/step_orbit) -- the two effects are orthogonal (ring-stepping
+  -- only matters while orbiting normally; retargeting only matters/is drawn
+  -- when StarKiller is the active weapon), so both firing unconditionally is
+  -- intentional, not a bug.
+  pfn adjust_starkiller_target(offset : Int, keys : List(String)) : Int do
+    let dn = List.any(keys, fn k -> k == "d" || k == "D")
+    let up = List.any(keys, fn k -> k == "w" || k == "W")
+    let delta = (if dn do 1 else 0 end) - (if up do 1 else 0 end)
+    int_mod(offset + delta + 3, 3) -- +3 before mod to keep it non-negative for delta = -1
+  end
+
+  -- ── Special (X) ──────────────────────────────────────────────────────
+  fn star_thrust_strength() : Float do 60.0 end
+
+  pfn dist2(ax : Float, ay : Float, bx : Float, by_ : Float) : Float do
+    let dx = ax - bx
+    let dy = ay - by_
+    dx * dx + dy * dy
+  end
+
+  pfn nearest_star_dir_go(game : Game, stars : List(Star), best : Star, best_d2 : Float) : Option((Float, Float)) do
+    match stars do
+      Nil ->
+        let dx = best.x - game.ball_x
+        let dy = best.y - game.ball_y
+        let d = Math.sqrt(best_d2)
+        if d > 0.0 do Some((dx / d, dy / d)) else None end
+      Cons(s, rest) ->
+        let d2 = dist2(game.ball_x, game.ball_y, s.x, s.y)
+        if d2 < best_d2 do nearest_star_dir_go(game, rest, s, d2) else nearest_star_dir_go(game, rest, best, best_d2) end
+    end
+  end
+
+  -- Direction (unit vector) from the ball toward the single nearest star in
+  -- the ladder, regardless of approach/assist-bubble membership -- unlike
+  -- nearest_assist_target, star thrust always has *a* nearest star to nudge
+  -- toward as long as any star exists.
+  pfn nearest_star_dir(game : Game) : Option((Float, Float)) do
+    match game.stars do
+      Nil -> None
+      Cons(s0, rest) -> nearest_star_dir_go(game, rest, s0, dist2(game.ball_x, game.ball_y, s0.x, s0.y))
+    end
+  end
+
+  fn star_jump_max_stars() : Int do 4 end
+
+  -- Draws 1..star_jump_max_stars() rungs ahead and lands there via
+  -- on_capture -- the same scoring seam a skilled forward capture uses (see
+  -- on_capture's doc comment). A free jump therefore scores/bumps the
+  -- multiplier/can trigger a milestone exactly like a normal capture; this is
+  -- the deliberate, simplest-correct starting point (not a bug -- see task brief).
+  pfn apply_star_jump(game : Game) : Game do
+    let (rng2, t) = Perihelion.Level.draw_pub(game.rng)
+    let jump = 1 + float_to_int(t * int_to_float(star_jump_max_stars()))
+    let target_idx = game.current + jump
+    match star_at(game, target_idx) do
+      None -> { game with rng: rng2 } -- not enough ladder generated yet; consume the roll, no-op the jump (rare, harmless)
+      Some(target) ->
+        on_capture({ game with rng: rng2, special_charges: game.special_charges - 1 }, target, target_idx)
+    end
+  end
+
+  -- X activates whichever special is equipped. TrajectoryPreview is passive
+  -- (drawn continuously by Task 10, not triggered) so its arm is a no-op here.
+  pfn apply_special(game : Game, keys : List(String)) : Game do
+    let pressed = List.any(keys, fn k -> k == "x" || k == "X")
+    if !pressed || game.special_charges <= 0 do
+      game
+    else
+      match game.special do
+        None -> game
+        Some(StarThrust) ->
+          match nearest_star_dir(game) do
+            None -> game
+            Some(pair) ->
+              let (dx, dy) = pair
+              match game.mode do
+                Flying(vx, vy) -> { game with mode: Flying(vx + dx * star_thrust_strength(), vy + dy * star_thrust_strength()), special_charges: game.special_charges - 1 }
+                Orbiting(_, _, _) -> game
+              end
+          end
+        Some(StarJump) ->
+          apply_star_jump(game)
+        Some(TrajectoryPreview) ->
+          game -- passive; X does nothing (Task 10 draws the preview line)
+      end
+    end
+  end
+
   -- ── Update ───────────────────────────────────────────────────────────
+  doc "Whether `keys` contains the hard-reset key (r/R). Shared by `update` (which honors it from every phase it dispatches directly) and the shell's `tick` (which needs the same check to decide whether to route a Milestone-phase frame through `update`'s reset instead of `pick_milestone`)."
+  fn wants_reset(keys : List(String)) : Bool do
+    List.any(keys, fn k -> k == "r" || k == "R")
+  end
+
   doc "The only state transition: advance `game` by `dt_s` seconds, consuming this frame's taps, key presses, live cursor position, and viewport size."
   fn update(game : Game, taps : List((Int, Int)), keys : List(String), cursor : (Int, Int), view_w : Float, view_h : Float, dt_s : Float) : Game do
     -- fx_bursts/capture_flash are read-once signals: reset here so a frame
@@ -161,7 +310,7 @@ mod Perihelion.Core do
     -- R hard-resets from ANY phase: abandon the current run and return to a
     -- fresh "tap to start" board. Persisted best + run history are kept (a
     -- reset is not a finished run, so it neither records nor updates them).
-    if List.any(keys, fn k -> k == "r" || k == "R") do
+    if wants_reset(keys) do
       reset(g0)
     else
       let tapped = !List.is_empty(taps)
@@ -172,25 +321,38 @@ mod Perihelion.Core do
           if tapped do restart(g0) else g0 end
         Playing ->
           step_playing(g0, tapped, keys, cursor, dt_s)
+        Milestone ->
+          if tapped do
+            match List.nth_opt(g0.milestone_choices, 0) do
+              None -> g0
+              Some(choice) -> top_up({ (apply_upgrade(g0, choice)) with phase: Playing, milestone_choices: Nil })
+            end
+          else
+            g0
+          end
       end
     end
   end
 
   pfn step_playing(game : Game, tapped : Bool, keys : List(String), cursor : (Int, Int), dt_s : Float) : Game do
-    let g1 = match game.mode do
+    let g0 = match game.mode do
       Orbiting(idx, ring, angle) -> step_orbit(game, idx, ring, angle, tapped, keys, dt_s)
       Flying(vx, vy)             -> step_flight(game, vx, vy, dt_s)
     end
-    match g1.phase do
+    let n = List.length(g0.owned_weapons)
+    let g1a = { g0 with active_weapon_idx: adjust_weapon(g0.active_weapon_idx, keys, n) }
+    let g1 = { g1a with starkiller_target_offset: adjust_starkiller_target(g1a.starkiller_target_offset, keys) }
+    let g1x = apply_special(g1, keys)
+    match g1x.phase do
       Playing ->
-        let g2 = Perihelion.Combat.step(g1, dt_s)
+        let g2 = Perihelion.Combat.step(g1x, dt_s)
         let g3 = Perihelion.Combat.fire(g2, keys, cursor, dt_s)
         let g4 = Perihelion.Combat.collide(g3)
         match g4.phase do
           Playing -> top_up(step_camera(g4, dt_s))
           _ -> g4
         end
-      _ -> g1
+      _ -> g1x
     end
   end
 
@@ -274,6 +436,36 @@ mod Perihelion.Core do
     end
   end
 
+  fn trajectory_preview_dt() : Float do 0.05 end
+  fn trajectory_preview_steps() : Int do 24 end
+
+  pfn predict_trajectory_go(game : Game, x : Float, y : Float, vx : Float, vy : Float, n : Int, acc : List((Float, Float))) : List((Float, Float)) do
+    if n == 0 do
+      List.reverse(acc)
+    else
+      let simmed = { game with ball_x: x, ball_y: y }
+      let (vx2, vy2) = assisted_velocity(simmed, vx, vy, trajectory_preview_dt())
+      let x2 = x + vx2 * trajectory_preview_dt()
+      let y2 = y + vy2 * trajectory_preview_dt()
+      predict_trajectory_go(game, x2, y2, vx2, vy2, n - 1, Cons((x2, y2), acc))
+    end
+  end
+
+  doc "Predicted flight path (a list of world-space points) if the player released right now from ring `ring` of star `idx` at `angle` -- reuses the exact release()/assisted_velocity() physics a real flight uses, simulated forward without touching the real Game. Nil if `idx` isn't a valid star (shouldn't happen while actually orbiting it)."
+  fn predict_trajectory(game : Game, idx : Int, ring : Int, angle : Float) : List((Float, Float)) do
+    match star_at(game, idx) do
+      None -> Nil
+      Some(s) ->
+        let o = ring_at(s, ring)
+        let start_x = s.x + Math.cos(angle) * o.radius
+        let start_y = s.y + Math.sin(angle) * o.radius
+        match (release(game, idx, angle)).mode do
+          Flying(vx0, vy0) -> predict_trajectory_go(game, start_x, start_y, vx0, vy0, trajectory_preview_steps(), Nil)
+          Orbiting(_, _, _) -> Nil -- unreachable: release() always returns Flying
+        end
+    end
+  end
+
   -- Any star's ring captures — provided the ball is APPROACHING it
   -- (velocity . (star - ball) > 0), EXCEPT the star just released from
   -- (index == current). A tangent release is perpendicular to its own
@@ -336,15 +528,71 @@ mod Perihelion.Core do
         else
           1
         end
-      top_up({ snapped with
+      let new_chained = game.stars_chained + 1
+      let captured_game = { snapped with
           current: idx,
           score: game.score + new_mult,
-          stars_chained: game.stars_chained + 1,
+          stars_chained: new_chained,
           multiplier: new_mult,
           max_mult: max2(game.max_mult, new_mult),
-          capture_flash: Some((captured.x, captured.y)) })
+          capture_flash: Some((captured.x, captured.y)) }
+      if Perihelion.Upgrades.is_milestone(new_chained) do
+        let (rng2, choices) = Perihelion.Upgrades.draw_choices(captured_game.rng, captured_game.owned_weapons, captured_game.special)
+        top_up({ captured_game with phase: Milestone, rng: rng2, milestone_choices: choices })
+      else
+        top_up(captured_game)
+      end
     else
       { snapped with current: idx, multiplier: 1 }
+    end
+  end
+
+  doc "Like `update`, but for the Milestone phase specifically: resolves which choice (0/1/2) a tap landed on, already computed by the shell from screen geometry."
+  fn pick_milestone(game : Game, choice_idx : Option(Int)) : Game do
+    -- Same read-once reset as `update`'s first line: this runs on EVERY
+    -- Milestone-phase tick (both while waiting and when resolving a tap), so
+    -- without it capture_flash/fx_bursts from the triggering capture would
+    -- stay `Some(...)`/non-empty for the whole time the overlay is up
+    -- instead of just the one frame it was set on.
+    let g0 = { game with fx_bursts: Nil, capture_flash: None }
+    match choice_idx do
+      None -> g0
+      Some(i) ->
+        match List.nth_opt(g0.milestone_choices, i) do
+          None -> g0
+          Some(choice) -> top_up({ (apply_upgrade(g0, choice)) with phase: Playing, milestone_choices: Nil })
+        end
+    end
+  end
+
+  doc "Apply a single drawn/chosen upgrade to the game state. Shared by the milestone screen (Task 3) and auto-applying random drops (Task 9)."
+  fn apply_upgrade(game : Game, u : Perihelion.Upgrades.UpgradeKind) : Game do
+    match u do
+      OffenseWeapon(k) ->
+        if List.member(game.owned_weapons, k) do
+          game -- already owned (shouldn't happen via draw_choices, but drops aren't filtered -- see Task 9)
+        else
+          { game with owned_weapons: List.append(game.owned_weapons, Cons(k, Nil)) }
+        end
+      OffenseFireRate ->
+        { game with fire_rate_stacks: game.fire_rate_stacks + 1 }
+      DefenseBulletWard ->
+        { game with bullet_ward: true }
+      DefenseDeflector ->
+        { game with deflector_plating: true }
+      DefenseShield ->
+        { game with shield: game.shield + 1, shield_reinforced: true }
+      SpecialItem(k) ->
+        { game with special: Some(k), special_charges: special_starting_charges(k) }
+    end
+  end
+
+  doc "Starting charge count for a freshly-equipped special. TrajectoryPreview is passive (0 = unused, not a real limit)."
+  fn special_starting_charges(k : Perihelion.Upgrades.SpecialKind) : Int do
+    match k do
+      StarThrust -> 3
+      StarJump -> 1
+      TrajectoryPreview -> 0
     end
   end
 
@@ -461,7 +709,19 @@ mod Perihelion.Core do
           stars: Nil, current: 0, score: 0, best: best,
           camera_y: 0.0, camera_x: 0.0, rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          shield: 0, multiplier: 1, max_mult: 1,
+          owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+          active_weapon_idx: 0,
+          fire_rate_stacks: 0,
+          bullet_ward: false,
+          deflector_plating: false,
+          shield_reinforced: false,
+          special: None,
+          special_charges: 0,
+          starkiller_target_offset: 0,
+          starkiller_cooldown: 0.0,
+          milestone_choices: Nil,
+          stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
           spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
           view_w: view_w, view_h: view_h,
@@ -476,7 +736,19 @@ mod Perihelion.Core do
           camera_x: 0.0,
           rng: rng2,
           asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
-          shield: false, multiplier: 1, max_mult: 1, stars_chained: 0,
+          shield: 0, multiplier: 1, max_mult: 1,
+          owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+          active_weapon_idx: 0,
+          fire_rate_stacks: 0,
+          bullet_ward: false,
+          deflector_plating: false,
+          shield_reinforced: false,
+          special: None,
+          special_charges: 0,
+          starkiller_target_offset: 0,
+          starkiller_cooldown: 0.0,
+          milestone_choices: Nil,
+          stars_chained: 0,
           loop_angle: 0.0, fire_cooldown: 0.0,
           spawn_timer: Perihelion.Combat.asteroid_interval(), runs: runs,
           view_w: view_w, view_h: view_h,

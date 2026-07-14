@@ -327,6 +327,7 @@ let literal_tag_js br_tag =
 let js_runtime_module_path = function
   | "dom"    -> Some "./march_dom.mjs"
   | "canvas" -> Some "./march_canvas.mjs"
+  | "audio"  -> Some "./march_audio.mjs"
   | _        -> None
 
 (** True when the library name is a JS module specifier (not a C lib name).
@@ -467,6 +468,18 @@ let compute_async_fns (ctx : ctx) (fns : Tir.fn_def list) : unit =
       end
     ) fns
   done
+
+(* True when an expression is pure RC bookkeeping (inc/dec-ref, free) with no
+   real returned value — a no-op on the JS backend, where RC is free (GC'd).
+   Used to detect Perceus's self-tail-call ESeq(call, decrc...) shape (see
+   perceus.ml's "EXCEPTION: self-recursive tail calls" comment): when the
+   trailing side of an ESeq chain reduces to only this, the expression BEFORE
+   it is the chain's actual tail value, not a fire-and-forget statement. *)
+let rec is_rc_noop_only = function
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EFree _ -> true
+  | Tir.ESeq (a, b) -> is_rc_noop_only a && is_rc_noop_only b
+  | _ -> false
 
 (* ── Forward declarations ────────────────────────────────────────── *)
 
@@ -791,6 +804,21 @@ and emit_stmts_impl ctx expr =
       Hashtbl.replace ctx.local_fns fn.Tir.fn_name ()) fns;
     List.iter (emit_fn_decl ctx) fns;
     emit_stmts ctx body
+
+  | Tir.ESeq (e1, e2) when is_rc_noop_only e2 && not (is_rc_noop_only e1) ->
+    (* Perceus keeps a self-tail-call in the ESeq(call, post_dec_vars...)
+       shape specifically so llvm_emit.ml's has_self_tail_call can recognize
+       and TCO-rewrite it (see perceus.ml's "EXCEPTION: self-recursive tail
+       calls" comment) — the trailing EDecRC's are meant to become dead code
+       once TCO emits the loop back-edge. The JS backend has no such TCO
+       rewrite, so without this case the generic ESeq handling below would
+       emit e1 (the call) as a bare statement — discarding its return value —
+       then emit_stmts on e2 (all RC no-ops in JS) would produce nothing,
+       leaving the function to fall off the end and implicitly return
+       undefined. Since e2 is pure RC bookkeeping (free in JS), e1 IS this
+       chain's real tail value; recurse via emit_stmts so it gets proper
+       return/switch-tail treatment instead of being flattened away. *)
+    emit_stmts ctx e1
 
   | Tir.ESeq (e1, e2) ->
     (match e1 with

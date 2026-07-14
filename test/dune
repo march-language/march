@@ -2141,6 +2141,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_match_stmt_fallthrough.expected js_match_stmt_fallthrough.out)))
 
+; js_self_tail_call_rc_drop — a self-recursive tail call whose Cons-branch
+; drops a heap-allocated (RC'd) binding it never read must still return its
+; own value, not `undefined`. Perceus keeps self-tail-calls in the shape
+; ESeq(call, EDecRC(dead_var)...) so llvm_emit.ml's TCO pass can recognize
+; and rewrite them; the JS backend has no such rewrite and was emitting the
+; call as a bare (unreturned) statement, discarding its result.
+(rule
+ (targets js_self_tail_call_rc_drop.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_self_tail_call_rc_drop.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_self_tail_call_rc_drop.mjs native/js_self_tail_call_rc_drop.march)))
+
+(rule
+ (targets js_self_tail_call_rc_drop.out)
+ (deps js_self_tail_call_rc_drop.mjs march_runtime.mjs)
+ (action (with-stdout-to js_self_tail_call_rc_drop.out (run node js_self_tail_call_rc_drop.mjs))))
+
+(rule (alias runtest) (action (diff native/js_self_tail_call_rc_drop.expected js_self_tail_call_rc_drop.out)))
+
 ; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
 ; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
 ; const. Pins native/JS parity with the interpreter (values in the fixture).
