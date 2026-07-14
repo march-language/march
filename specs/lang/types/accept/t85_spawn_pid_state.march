@@ -1,0 +1,21 @@
+-- Finding 18 (spawn half, FIXED 2026-07-13): `spawn(Actor)` types as
+-- Pid[state], not Pid[<fresh var>].  Two pids of the SAME actor unify, so
+-- they can share a homogeneous list; the program runs and prints its pin.
+mod SpawnPidState do
+  actor Counter do
+    state { value : Int }
+    init { value: 0 }
+    on Bump(n : Int) do
+      { state with value: state.value + n }
+    end
+  end
+
+  fn main() : Unit do
+    let a = spawn(Counter)
+    let b = spawn(Counter)
+    let pids = [a, b]
+    println("pids: " ++ int_to_string(length(pids)))
+    kill(a)
+    kill(b)
+  end
+end

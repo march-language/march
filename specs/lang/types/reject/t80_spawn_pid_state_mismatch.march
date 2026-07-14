@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: expected
+-- Finding 18 (spawn half, FIXED 2026-07-13): spawn's Pid now carries the
+-- actor's STATE type, so pids of actors with different state shapes no
+-- longer unify into one homogeneous list (previously both were
+-- Pid[<fresh var>] and this typechecked).
+mod SpawnPidMismatch do
+  actor IntBox do
+    state { value : Int }
+    init { value: 0 }
+    on Put(n : Int) do
+      { state with value: n }
+    end
+  end
+
+  actor StrBox do
+    state { text : String }
+    init { text: "" }
+    on Say(s : String) do
+      { state with text: s }
+    end
+  end
+
+  fn main() : Unit do
+    let a = spawn(IntBox)
+    let b = spawn(StrBox)
+    let pids = [a, b]
+    println(int_to_string(length(pids)))
+  end
+end

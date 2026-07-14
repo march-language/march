@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t84 accept, t01–t79 reject)
+# Typing corpus index (t01–t85 accept, t01–t80 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 163/163 — 84 accept, 79
+Exit 0 iff every program behaves as declared (currently 165/165 — 85 accept, 80
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -383,6 +383,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t82_affine_let` | **(T-LinMark) `affine let` positive — finding L1 FIX witness (2026-07-11, §2.9.1)** — `affine let c = C(1)` dropped unused, (T-AffDrop) applies; this production did not exist at ALL before the fix (not even droppable — it simply never parsed) | `--check` exit 0 |
 | `t83_always_linear_no_false_collision` | **finding L4 FIX witness, no-false-positive control (2026-07-11, §2.9.5)** — a `type MyToken = T(Int)` whose bare name does NOT collide with any `always_linear type` typechecks with no spurious error; confirms the new collision check (`reject/t76`) is a targeted collision detector, not a blanket restriction | `--check` exit 0 |
 | `t84_linear_return_type_consumed` | **finding L8 FIX witness (2026-07-12, §2.9.1)** — accept twin of `reject/t78`: the auto-promoted binding of a `linear`-return-typed call typechecks fine when consumed exactly once, and a plain (non-linear-returning) function's result can still be dropped with no spurious promotion | `--check` exit 0 |
+| `t85_spawn_pid_state` | **finding 18 spawn-half FIX witness (2026-07-13, §2.6.3)** — `spawn(Counter)` now types as `Pid[state]` (the ESpawn arm resolves the actor's value binding, which DActor sets to `Pid[state_ty]`, instead of minting `Pid[fresh]`); two pids of the SAME actor unify into one homogeneous list. Reject twin: `t80` | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -467,8 +468,10 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t76_always_linear_name_collision` | **finding L4 FIX witness (2026-07-11, §2.9.5)** — a plain `type Handle = H(Int)` sharing stdlib's `always_linear type Handle` (`stdlib/handle.march`) bare name is now a hard, actionable error at THIS type's own declaration site, instead of silently inheriting linear semantics and surfacing later as a confusing `was never used`/non-exhaustive-match error. Accept twin: `t83` (non-colliding control) | `has the same name as \`always_linear type Handle\`` |
 | `t77_linear_field_param_double_access` | **(T-LinField), fn-PARAM sentinel path — finding L3 FIX witness (2026-07-11, §2.9.3)** — reject twin of `t63`, but the record is fn-PARAM-bound instead of let-bound. Before the fix, the param never got a `p#data` sentinel and this degraded to a WARNING (the exact gap that made the pre-slice unit test `test_linear_field_double_access_error` vacuous); now the param gets a sentinel too and the second access trips `record_use` identically to the let-bound case | `is used more than once here` |
 | `t78_linear_return_type_drop` | **finding L8 FIX witness (2026-07-12, §2.9.1)** — a `fn mk() : linear Res` called via a plain `let h = mk()` (no keyword, no annotation) now correctly rejects when dropped, same as `linear let h = mk()`/`let h : linear Res = mk()`. Before the fix, `infer_block`'s ELet `auto_lin` computation only checked for a `TCon` matching `always_linear_types` and silently fell through to Unrestricted for a `TLin`-wrapped RHS type — the return-position `linear` qualifier was decorative | `The linear value \`h\` was never used.` |
+| `t79_let_poly_unannotated_mr` | **monomorphism restriction (2026-07-13, §4.1 finding 1, STAGED)** — an UNANNOTATED let-bound lambda stays monomorphic (its first use pins the type), so a second use at a different type rejects; the annotated form still generalizes (`accept/t03`). Filed to be lifted by the stage-2 uniform apply-fn ABI | `expected \`Int\` but got \`String\`` |
+| `t80_spawn_pid_state_mismatch` | **finding 18 spawn-half FIX witness (2026-07-13, §2.6.3)** — reject twin of `accept/t85`: `spawn`'s `Pid` now carries the actor's STATE type, so pids of actors with different state shapes no longer unify into one list (previously both were `Pid[fresh]` and this typechecked) | `expected \`{ value : Int }\` but got \`{ text : String }\`` |
 
-**Result: 163 / 163 (84 accept, 79 reject).**
+**Result: 165 / 165 (85 accept, 80 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

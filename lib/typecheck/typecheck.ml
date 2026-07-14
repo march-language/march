@@ -1758,8 +1758,13 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
     (* Phase 3: Epoch-based capability builtins *)
-    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
-    ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    (* Cap's parameter is the actor's MESSAGE plane, deliberately DECOUPLED
+       from the Pid's parameter (which since 2026-07-13 carries the actor's
+       STATE record — finding 18 spawn half) and from send_checked's message
+       argument: there is no message-acceptance check yet (finding 19, open),
+       so tying `Cap(a)` to the msg would wrongly force msg = state. *)
+    ("get_cap",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [b])]))));
+    ("send_checked", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TArrow (b, t_atom))));
     ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
     ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
@@ -4671,7 +4676,30 @@ let rec infer_expr env (e : Ast.expr) : ty =
             A computed actor expression (from an `if`, `match`, or function \
             call) isn't supported: March resolves which actor to spawn at \
             compile time from its name.");
-      TCon ("Pid", [fresh_var env.level])
+      (* Finding 18 (spawn half): [DActor] binds the actor NAME to
+         `Pid[state_ty]` in the VALUE env, but a bare `Counter` occurrence
+         never reaches it — the nullary-constructor registration shadows it
+         in ECon inference.  `spawn`'s argument is syntactically a plain
+         actor name (enforced just above), so resolve the state type from
+         that value binding directly here.  Fresh-var fallback preserves the
+         old behavior when the name is not a declared actor (the error
+         surfaces in lowering/eval).  The annotation half of finding 18
+         (`Pid(T)` unwritable — stdlib GlobalPid's 0-arity `Pid` record
+         shadows the built-in arity-1 `Pid`) is unchanged and still filed. *)
+      let actor_name = match actor with
+        | Ast.ECon (n, [], _) -> Some n.txt
+        | Ast.EVar n -> Some n.txt
+        | _ -> None
+      in
+      (match actor_name with
+       | Some n ->
+         (match lookup_var n env with
+          | Some sch ->
+            (match instantiate env.level env sch with
+             | TCon ("Pid", _) as pid_ty -> pid_ty
+             | _ -> TCon ("Pid", [fresh_var env.level]))
+          | None -> TCon ("Pid", [fresh_var env.level]))
+       | None -> TCon ("Pid", [fresh_var env.level]))
 
     (* ── REPL result reference ─────────────────────────────────────── *)
     | Ast.EResultRef _ ->

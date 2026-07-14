@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-13, spawn types as Pid[state] — finding 18 spawn half)
+
+**FIXED (spawn half of finding 18):** `spawn(Actor)` now types as `Pid[state]` — the ESpawn arm resolves the actor's value binding (DActor's `Pid[state_ty]`, previously shadowed into unreachability by the nullary-ctor registration) instead of minting `Pid[fresh]`. Same-actor pids unify (accept/t85); different-state pids no longer unify into one list (reject/t80). Types corpus 165/165 (the missing reject/t79 monomorphism-restriction INDEX row was also backfilled). Still open: the `Pid(T)`-annotation half (GlobalPid 0-arity `Pid` shadows the built-in arity-1 `Pid`). With this, task #139's actor-plane list is done except the annotation half + the separately-filed supervision/get_actor_field compiled crash.
+
 ## Current State (as of 2026-07-13, epoch-Cap / dead-send plane backend-identical)
 
 **FIXED — the compiled capability plane (§4.10.6), all four gaps.** march_get_cap was a stub whose boxed None the niche Option(Cap) decode misread as Some (garbage cap, OOB epoch reads); it now builds the real {actor, pid_index, epoch} cap and returns NULL (niche None) for dead actors. march_send_checked returned void where March expects an Atom (the garbage-atom finding); it now returns interned :ok/:error (new march_atom_i64, bit-forced like llvm_ctx's atom_hash) and checks liveness. march_send's dead paths return NULL so a dead send is None on both backends. revoke_cap/is_cap_valid gained compiled plumbing (march_revoke_cap_v/march_is_cap_valid_v + llvm_builtins + defun). Witness byte-identical both backends; pinned by test_compiled_epoch_cap_plane (adversarial-regressions, suite 821). NEW FINDING filed: test/native/node_discovery is a FLAKY golden — green-thread stack overflow in Msgpack.list_append (pre-existing, only observable now that full dune builds complete). Remaining on the actor plane: supervision/get_actor_field compiled crash, Pid[state] spawn typing.

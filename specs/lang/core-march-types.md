@@ -5037,7 +5037,20 @@ typechecker that this document exists to pin down, not defects:
     currently, incorrectly, `--check`s clean) — once fixed, a
     `reject/derive_unknown_type`-style program should be added here.
 
-18. **[OPEN — filed, not fixed] `spawn(Actor)` does NOT yield `Pid[state]`; the
+18. **[PARTIALLY FIXED 2026-07-13 — spawn half done, annotation half open]**
+    `spawn(Actor)` now yields `Pid[state]`: the `ESpawn` arm resolves the
+    actor name's VALUE binding (which `DActor` sets to `Pid[state_ty]` and the
+    nullary-ctor registration shadows for bare occurrences) and returns it,
+    minting `Pid[fresh]` only as the not-a-declared-actor fallback. Witnesses:
+    `accept/t85_spawn_pid_state` (same-actor pids unify into a homogeneous
+    list) and `reject/t80_spawn_pid_state_mismatch` (different-state pids no
+    longer unify — the live probe below now REJECTS ``expected `{ value :
+    Int }` but got `{ text : String }```). STILL OPEN: the `Pid(T)`-annotation
+    half (stdlib `GlobalPid`'s 0-arity `Pid` record shadows the built-in
+    arity-1 `Pid`, so the annotation is unwritable), and a bare `Counter`
+    occurrence still types as the nullary ctor. Original finding below.
+
+    **[ORIGINAL FINDING]** `spawn(Actor)` does NOT yield `Pid[state]`; the
     `Pid` parameter is an unconstrained fresh variable, and the state type never
     reaches an observable `Pid`.** Found while building §2.6 (actors widening,
     Task 1). The `ESpawn` arm returns `TCon ("Pid", [fresh_var env.level])`
