@@ -895,13 +895,35 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
       else if StrMap.mem qname env.vars then env
       else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
     | ExType arity ->
-      if StrMap.mem qname env.types then env
-      else { env with types = StrMap.add qname arity env.types }
+      (* Register the qualified name AND the BARE type name.  March uses a single
+         global type namespace (see [surface_ty]'s [canon_name]): a type's bare
+         name is its canonical identity, and a sibling module resolves a peer
+         type UNQUALIFIED (`scope : UniqueScope`, no `use`/`import`).  When the
+         defining module is PREBOUND FROM SOURCE, [prebind_mod_members] (:8931)
+         seeds the bare name; when it is loaded from the compiled Module_registry
+         instead (e.g. a dependency in the `--compile`/`--test` unit), only the
+         qualified key was seeded — so expanding a registry-loaded RECORD whose
+         field references a bare sibling type failed with a bogus "I cannot find
+         `UniqueScope`" pointing at the definer's field span.  Seed the bare name
+         too, first-wins (don't clobber a name a source module already bound),
+         mirroring the source-prebind path. *)
+      let env = if StrMap.mem qname env.types then env
+                else { env with types = StrMap.add qname arity env.types } in
+      if StrMap.mem entry.ex_name env.types then env
+      else { env with types = StrMap.add entry.ex_name arity env.types }
     | ExRecord (arity, field_decls) ->
+      let param_names = List.init arity (fun i -> Printf.sprintf "$t%d" i) in
       let env1 = if StrMap.mem qname env.types then env
                  else { env with types = StrMap.add qname arity env.types } in
-      let param_names = List.init arity (fun i -> Printf.sprintf "$t%d" i) in
-      { env1 with records = StrMap.add qname (param_names, field_decls) env1.records }
+      (* Bare type name too — see the [ExType] arm's rationale. *)
+      let env1 = if StrMap.mem entry.ex_name env1.types then env1
+                 else { env1 with types = StrMap.add entry.ex_name arity env1.types } in
+      (* Register the record's fields under BOTH the qualified and bare keys so a
+         bare cross-module reference (or a peer module's bare field type) expands
+         structurally instead of staying an opaque TCon. *)
+      let env1 = { env1 with records = StrMap.add qname (param_names, field_decls) env1.records } in
+      if StrMap.mem entry.ex_name env1.records then env1
+      else { env1 with records = StrMap.add entry.ex_name (param_names, field_decls) env1.records }
     | ExCtor (parent_type, _ctor_arity) ->
       begin
         (* Find the parent type's param names from the module's type exports *)
@@ -2660,17 +2682,28 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
                    | ExRecord (arity, fields) when entry.ex_name = member ->
                      let params = List.init arity
                        (fun i -> Printf.sprintf "$t%d" i) in
-                     Some (params, fields)
+                     (* Thread an env enriched with the DEFINING module's exports
+                        so the record's field types — stored as UNRESOLVED surface
+                        types that name sibling types by their BARE name (`scope :
+                        UniqueScope`) — resolve against those siblings' bare names.
+                        Without this the fields would be expanded in the referrer's
+                        env, which has only the qualified sibling names, failing
+                        with a bogus "I cannot find `UniqueScope`" pointing at the
+                        definer's field span.  [load_module_into_env] seeds both
+                        the qualified and bare forms (first-wins), so this cannot
+                        clobber a name the referrer already bound. *)
+                     let fenv = load_module_into_env mod_name exports env in
+                     Some (params, fields, fenv)
                    | _ -> None)
               ) None exports.me_entries)
        in
        (match registry_record with
-        | Some (params, field_decls)
+        | Some (params, field_decls, fenv)
           when List.length params = List.length args'
                && not (name_is_variant env name.txt) ->
           let saved = !tvars in
           List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
-          let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
+          let flds = List.map (fun (fn, fty) -> (fn, surface_ty fenv ~tvars fty)) field_decls in
           tvars := saved;
           TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
         | _ ->

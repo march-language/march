@@ -1141,6 +1141,60 @@ let test_entry_bulk_import_resolves_partial_qualified () =
   Alcotest.(check bool) "no unresolved bare @Sub.greet call" false
     (Test_helpers.contains "@Sub.greet(" ir)
 
+(* A record type loaded from the COMPILED module registry (a dependency in the
+   `--compile`/`--test` unit, not prebound from source) stores its field types as
+   UNRESOLVED surface types that name sibling types by their BARE name (e.g.
+   `mod Conduit`'s `type UniqueConstraint = { scope : UniqueScope }` — both types
+   in one module, `UniqueScope` referenced unqualified).  When a referring module
+   annotates against `Conduit.UniqueConstraint`, [surface_ty] must expand that
+   record's fields; before the fix it expanded them in the REFERRER's env, which
+   held only the QUALIFIED sibling name (`Conduit.UniqueScope`) — [load_module_
+   into_env]/registry loading never seeded the bare `UniqueScope`.  Result: a
+   bogus "I cannot find `UniqueScope`" pointing at the definer's field span,
+   reproduced ~16x (once per test file importing the dep) under `forge test`
+   while `forge check` (which prebinds the dep FROM SOURCE, seeding bare names)
+   stayed clean.  Fix: registry type/record loading seeds the bare name too, and
+   registry-record field expansion threads the defining module's env.  This test
+   drives the exact registry path: register a module with a bare-named sibling
+   type referenced by a record field, then resolve the qualified record in a
+   separate module — pre-fix errors, post-fix clean. *)
+let test_registry_record_field_bare_sibling_type_resolves () =
+  let open March_modules.Module_registry in
+  reset ();
+  let dummy = March_ast.Ast.dummy_span in
+  let bare_ty n = March_ast.Ast.TyCon ({ March_ast.Ast.txt = n; span = dummy }, []) in
+  register "Widgets" {
+    me_name = "Widgets";
+    me_entries = [
+      (* A variant sibling type, referenced BARE by the record field below. *)
+      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true };
+      (* The record whose stored field type names `Scope` by its bare name —
+         exactly how the compiler serialises a same-module sibling reference. *)
+      { ex_name = "Constraint";
+        ex_kind = ExRecord (0, [("scope", bare_ty "Scope")]);
+        ex_public = true };
+    ];
+  };
+  (* A DIFFERENT module references the qualified record type; expanding it must
+     resolve the bare `Scope` field type. *)
+  let src = {|mod Client do
+    fn describe(c : Widgets.Constraint) : Int do 0 end
+  end|} in
+  let m = Test_helpers.parse_and_desugar src in
+  let (errors, _tm) = March_typecheck.Typecheck.check_module m in
+  reset ();
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      errors.March_errors.Errors.diagnostics in
+  let mentions_scope =
+    List.exists (fun s -> Test_helpers.contains "Scope" s
+                          && Test_helpers.contains "cannot find" s) msgs in
+  Alcotest.(check bool)
+    "no 'cannot find Scope' when expanding a registry record's bare-named field"
+    false mentions_scope;
+  Alcotest.(check bool)
+    "referrer typechecks cleanly against the registry record type"
+    false (March_errors.Errors.has_errors errors)
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -8647,6 +8701,8 @@ let codegen_suites =
             test_qualified_alias_no_cross_module_hijack;
           Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
             test_entry_bulk_import_resolves_partial_qualified;
+          Alcotest.test_case "registry record's bare-named sibling field type resolves" `Quick
+            test_registry_record_field_bare_sibling_type_resolves;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
