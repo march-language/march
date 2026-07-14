@@ -139,6 +139,27 @@ consumers, perceus, inline — scoped separately).
   untag per scalar arg per call); measured in stage 6 with a named
   fallback.
 
+## Stage-1 baseline (recorded 2026-07-13 at head bd470045, arm64 macOS, --opt 2)
+
+All six benches compile and run clean; correctness checksums (second-run
+wall-clock in parens, noise-dominated at these sizes — see note):
+
+| bench | checksum (stdout) | run2 real |
+|---|---|---|
+| list_ops | 333333666666 | 0.10s |
+| alphadev_sort | (exit 0) | 0.02s |
+| heapsort | (exit 0) | 0.05s |
+| insertion_sort | (exit 0) | 0.07s |
+| introsort | (exit 0) | 0.04s |
+| mergesort | 1423 | 0.02s |
+
+**Measurement note for stage 6:** these benches print checksums only (no
+self-timing) and finish in 0.02–0.10s, so single-run wall-clock cannot
+resolve a few-percent dispatch regression. Stage 6 must either loop the
+binary (>=20 runs, compare medians) or temporarily scale the workload
+(list_ops element count) before comparing against these numbers. The
+checksums above double as correctness pins across the flip.
+
 Survey provenance: full surface map with file:line pointers produced
 2026-07-13 (session worktree hopeful-kapitsa); key anchors re-verified at
 head `1a547481`.
