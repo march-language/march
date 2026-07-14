@@ -194,6 +194,20 @@ end|} in
 (* Idempotence property: format is a fixpoint                         *)
 (* ------------------------------------------------------------------ *)
 
+let test_small_float_literal () =
+  (* string_of_float renders small-magnitude floats in scientific notation
+     (e.g. "9.537e-07"), but the March lexer's float literal only accepts
+     digit+ '.' digit+ — no exponent form. The formatter must expand
+     scientific notation back to plain decimal so a second --fmt pass
+     doesn't fail to parse. *)
+  let src = {|mod Test do
+fn f(x : Float) : Float do
+  if x < 0.0000009537 do 1.0 else 2.0 end
+end
+end|} in
+  check_parses "small float literal" src;
+  check_idempotent "small float literal" src
+
 let test_format_fixpoint () =
   (* A source written in already-formatted style should be unchanged *)
   let src = {|mod Demo do
@@ -303,6 +317,7 @@ let () =
       test_case "use decl"        `Quick test_use_decl;
       test_case "doc comment"     `Quick test_doc_comment;
       test_case "type alias"      `Quick test_type_alias;
+      test_case "small float literal" `Quick test_small_float_literal;
       test_case "format fixpoint" `Quick test_format_fixpoint;
       test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
     ];
