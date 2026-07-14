@@ -970,7 +970,9 @@ int32_t march_test_report(void) {
  *   offset  0: int64_t  rc         — reference count
  *   offset  8: int32_t  tag        — 0 for closures
  *   offset 12: int32_t  pad
- *   offset 16: void    *apply_fn   — int64_t apply(void *clo, int64_t arg)
+ *   offset 16: void    *apply_fn   — uniform apply-fn ABI: all args are
+ *              ptr-slot encoded (scalars tagged (n<<1)|1, floats raw bits,
+ *              heap ptrs raw); returns the tagged ptr-ABI result
  *   offset 24+: captured environment fields
  *
  * Result(a, String) layout (24 bytes):
@@ -1000,7 +1002,10 @@ void *__try_call(void *thunk) {
     int     panicked  = 0;
 
     if (setjmp(march_test_jmp_buf) == 0) {
-        ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
+        /* Uniform apply-fn ABI: scalar args arrive TAGGED (n<<1)|1, so
+         * the dummy Bool true is 3 — the apply prologue's conditional
+         * untag (odd -> ashr) recovers 1. A raw 1 would decode as 0. */
+        ok_result = apply(thunk, 3);
     } else {
         panicked = 1;
     }
@@ -1083,7 +1088,10 @@ void *__try_call_val(void *thunk) {
     int     panicked  = 0;
 
     if (setjmp(march_test_jmp_buf) == 0) {
-        ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
+        /* Uniform apply-fn ABI: scalar args arrive TAGGED (n<<1)|1, so
+         * the dummy Bool true is 3 — the apply prologue's conditional
+         * untag (odd -> ashr) recovers 1. A raw 1 would decode as 0. */
+        ok_result = apply(thunk, 3);
     } else {
         panicked = 1;
     }
@@ -1669,10 +1677,10 @@ static void do_actor_death(void *actor) {
                 void **clo_fields = (void **)((char *)clo + 16);
                 clo_fn_t fn_ptr = (clo_fn_t)(*(clo_fields));
                 if (fn_ptr) {
-                    /* Allocate a Unit argument */
-                    void *unit_arg = march_alloc(16);
-                    fn_ptr(clo, unit_arg);
-                    march_decrc(unit_arg);
+                    /* Uniform apply-fn ABI: Unit passes as the tagged scalar
+                     * (0<<1)|1 = 1 (the apply prologue conditional-untags it
+                     * back to 0); no heap cell needed. */
+                    fn_ptr(clo, (void *)(intptr_t)1);
                 }
             }
             free(node);
@@ -1851,7 +1859,11 @@ static void march_thunk_trampoline(void *arg) {
     }
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
-    void *result = apply(clo, (int64_t)0);
+    /* Uniform apply-fn ABI: pass the ignored dummy arg as a TAGGED
+     * scalar ((0<<1)|1 = 1) rather than raw 0 — raw 0 reads as a NULL
+     * "even heap-ptr view" under the conditional untag; harmless for
+     * an ignored param but normalized for convention hygiene. */
+    void *result = apply(clo, (int64_t)1);
     if (task) {
         /* Tag the result for the uniform March value convention: scalars (Int,
          * Bool, Unit) are returned as raw i64 by the apply function, but the

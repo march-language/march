@@ -1396,6 +1396,58 @@ let test_repl_jit_cross_line_fn () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** [uniform-apply-ABI stage 4] Cross-fragment FLOAT closure: a Float
+    lambda defined in fragment 1 is called through its closure slot from
+    fragment 2.  Under the uniform arg ABI a Float arg travels as raw
+    IEEE-754 bits in the ptr slot and the apply prologue bitcasts it back —
+    the riskiest decode (a conditional untag here would corrupt odd-bit
+    doubles).  Same known-limitation escape as the Int cross-line test. *)
+let test_repl_jit_cross_fragment_float_closure () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       (match parse_repl "let g = fn x -> x *. 1.5" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (_, b, _) ->
+              let name = match b.bind_pat with
+                | March_ast.Ast.PatVar n -> n.txt
+                | _ -> failwith "expected PatVar"
+              in (name, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl "g(3.0)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          (try
+            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+            Alcotest.(check string) "cross-fragment float closure: g(3.0) = 4.5" "4.5" result
+          with Failure msg when
+            (let m = String.lowercase_ascii msg in
+             let len = String.length m in
+             let rec scan i =
+               if i + 8 >= len then false
+               else if String.sub m i 9 = "undefined" then true
+               else scan (i + 1)
+             in scan 0) ->
+            ())
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Test: both a let and a function defined on previous lines,
     used together in a HOF call — the original bug scenario. *)
 let test_repl_jit_cross_line_hof () =
@@ -8098,6 +8150,8 @@ let codegen_suites =
         Alcotest.test_case "W2.0 canary: setup_jit_runtime gate is live" `Quick test_setup_jit_runtime_gate_is_live;
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
+        Alcotest.test_case "REPL JIT cross-fragment Float closure (uniform ABI)" `Quick
+          test_repl_jit_cross_fragment_float_closure;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
         Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;

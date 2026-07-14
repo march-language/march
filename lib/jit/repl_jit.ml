@@ -771,10 +771,17 @@ let precompile_stdlib ctx
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
+  (* "abi2" = the uniform apply-fn arg ABI (specs/plans/
+     2026-07-13-uniform-apply-abi.md).  The cache key is otherwise a
+     SOURCE-content hash, so an emitted-code convention change with
+     unchanged stdlib sources would dlopen a stale old-convention .so into
+     a new-convention REPL (cross-time ABI skew) — bump this tag on any
+     future closure-ABI change. *)
+  let abi_tag = "abi2" in
   let so_path    = Filename.concat cache_dir
-    ("stdlib_prelude_O1_" ^ short_hash ^ ".so") in
+    ("stdlib_prelude_O1_" ^ abi_tag ^ "_" ^ short_hash ^ ".so") in
   let names_path = Filename.concat cache_dir
-    ("stdlib_prelude_O1_" ^ short_hash ^ ".names") in
+    ("stdlib_prelude_O1_" ^ abi_tag ^ "_" ^ short_hash ^ ".names") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
   if Sys.file_exists so_path && Sys.file_exists names_path then begin
     (try
