@@ -1890,12 +1890,17 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
     wa->task = task;
-    march_proc *p = march_sched_spawn(march_thunk_trampoline, wa);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16: proc handle */
-        task[3] = (int64_t)0;              /* field 1 at offset 24: result (tagged, init 0) */
-        task[4] = (int64_t)0;              /* field 2 at offset 32: done flag (init 0) */
-    }
+    /* Publish the proc LAST.  Once march_sched_spawn returns, a work-stealing
+     * scheduler on another OS thread may already be running march_thunk_trampoline
+     * for this proc — which writes task[2] (proc handle), task[3] (result) and
+     * task[4] (done flag).  Any store to the task object here, AFTER the spawn,
+     * therefore races the trampoline with no synchronization between them and
+     * can clobber a completed result/done flag back to zero (confirmed by
+     * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
+     * nothing to write: march_alloc() zero-initialises the whole object (so
+     * result/done start at 0) and the trampoline records task[2] itself as its
+     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+    (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
 
@@ -1951,12 +1956,10 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->clo  = clo_ptr;
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
-    march_proc *p = march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;
-        task[3] = (int64_t)0;   /* tagged result, init 0 */
-        task[4] = (int64_t)0;   /* done flag, init 0 */
-    }
+    /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
+     * the task object after the spawn races the trampoline.  march_alloc zeroed
+     * the object and the trampoline records task[2] itself. */
+    (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
 

@@ -1321,9 +1321,26 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DTransitions _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.
-           The qualified fn_defs are already in [fns] from DMod processing above. *)
+           The qualified fn_defs are already in [fns] from DMod processing above.
+
+           Each alias is registered into BOTH the program-global [_use_aliases]
+           table AND this (entry) module's own [env.current_module_aliases] —
+           mirroring the nested-module DUse handler (register_aliases above).
+           The per-module table is what [resolve_use_alias] consults for
+           MODULE-QUALIFIED (dotted) references: after the global fallback was
+           restricted to unqualified names (to stop one module's bulk import
+           hijacking another's qualified call), a bulk `import Foo` at the entry
+           file's top level followed by the partial-qualified `Sub.fn(...)` form
+           must still resolve to `Foo.Sub.fn` via THIS module's own table, or it
+           would emit an undefined `_Sub.fn` symbol. *)
         let prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "." in
         let all_fn_names = List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns in
+        let register short fn_name =
+          note_alias_candidate short fn_name;
+          Hashtbl.replace !_use_aliases short fn_name;
+          if not (Hashtbl.mem env.current_module_aliases short) then
+            Hashtbl.replace env.current_module_aliases short fn_name
+        in
         (match ud.use_sel with
          | Ast.UseSingle -> ()
          | Ast.UseAll ->
@@ -1334,17 +1351,14 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
-                 note_alias_candidate short fn_name;
-                 Hashtbl.replace !_use_aliases short fn_name
+                 register short fn_name
                end
              ) all_fn_names
          | Ast.UseNames names ->
            List.iter (fun (n : Ast.name) ->
                let qualified = prefix ^ n.txt in
-               if List.mem qualified all_fn_names then begin
-                 note_alias_candidate n.txt qualified;
-                 Hashtbl.replace !_use_aliases n.txt qualified
-               end
+               if List.mem qualified all_fn_names then
+                 register n.txt qualified
              ) names
          | Ast.UseExcept excluded ->
            let excl_set = List.map (fun (n : Ast.name) -> n.txt) excluded in
@@ -1354,10 +1368,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
-                 if not (List.mem short excl_set) then begin
-                   note_alias_candidate short fn_name;
-                   Hashtbl.replace !_use_aliases short fn_name
-                 end
+                 if not (List.mem short excl_set) then
+                   register short fn_name
                end
              ) all_fn_names)
       | Ast.DAlias (ad, _) ->

@@ -242,7 +242,27 @@ let empty_env : env = {
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
   match Repr.repr_of_ty env.type_defs ty with
   | Repr.Newtype _ | Repr.Niche _ -> true
-  | Repr.Boxed -> false
+  | Repr.Boxed ->
+    (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
+       abstract-arg path.  [repr_of_ty] conservatively returns [Boxed] for a
+       niche-shaped type applied to abstract (TVar) arguments — e.g.
+       [TCon("Option", [TVar "_35129"])], produced when a value crosses a
+       fully-polymorphic boundary such as [actor_call]'s reply — because
+       [niche_payload_ok(TVar)] is false.  But codegen recovers [Niche] for
+       exactly this shape (the ctor layout is fixed by the type NAME), so the
+       runtime value shares storage with its payload (Some(x) ≡ x).  Perceus
+       must agree, or [add_scrutinee_free_for] would treat the value as a
+       distinct boxed cell and hand it to FBIP for whole-cell reuse — writing
+       the payload (which aliases the scrutinee) into its own reused cell: a
+       self-referential object → RC underflow / use-after-free.  See
+       docs/value-representation.md §7 (erased Option payloads stay NICHE at
+       every commitment site). *)
+    (match ty with
+     | Tir.TCon (name, args)
+       when args <> []
+            && List.exists (function Tir.TVar _ -> true | _ -> false) args
+            && Repr.is_niche_shaped env.type_defs name -> true
+     | _ -> false)
 
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)

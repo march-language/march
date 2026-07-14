@@ -1062,6 +1062,85 @@ let test_llvm_no_call_to_double_underscore () =
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
 
+(* --- name-resolution: cross-module qualified-alias hijack (RC-underflow root
+   cause) --------------------------------------------------------------------
+
+   A bulk `import Bastion` in ONE module registers the DOTTED short name
+   `Logger.debug` -> `Bastion.Logger.debug` in the program-global [_use_aliases]
+   table (register_aliases strips only the import prefix "Bastion.").  That
+   global table is consulted while lowering EVERY module.  It must NOT hijack a
+   module-qualified `Logger.debug` reference written in an UNRELATED module —
+   one that never imported Bastion, and that the typechecker bound to the stdlib
+   `Logger.debug/1`.  Pre-fix, lowering rewrote it to the arity-2
+   `Bastion.Logger.debug`, emitting a call with an uninitialised second argument
+   -> RC underflow / SIGSEGV at runtime.  The fix restricts the global
+   [_use_aliases] fallback to UNQUALIFIED (dot-free) names; the importing module
+   itself still resolves its own qualified alias via [current_module_aliases]. *)
+let test_qualified_alias_no_cross_module_hijack () =
+  let open March_tir.Lower in
+  Hashtbl.reset _fn_param_types;
+  _use_aliases := Hashtbl.create 8;
+  _module_aliases := Hashtbl.create 8;  (* isolate: resolve_use_alias's prefix fallback reads it *)
+  (* Simulate another module's `import Bastion`: a DOTTED global alias plus an
+     ordinary UNQUALIFIED one. *)
+  Hashtbl.replace !_use_aliases "Logger.debug" "Bastion.Logger.debug";
+  Hashtbl.replace !_use_aliases "helper" "Some.Mod.helper";
+  with_current_module_fns [] (fun () ->
+    (* A module that did NOT import Bastion — empty current_module_aliases. *)
+    let non_importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+    Alcotest.(check string)
+      "qualified `Logger.debug` NOT hijacked by another module's global import"
+      "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
+    (* The importing module itself still resolves its own qualified alias. *)
+    let importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+    Hashtbl.replace importer.current_module_aliases
+      "Logger.debug" "Bastion.Logger.debug";
+    Alcotest.(check string)
+      "importing module still resolves its own qualified alias"
+      "Bastion.Logger.debug" (resolve_use_alias importer "Logger.debug");
+    (* Unqualified names still resolve through the global table (unchanged). *)
+    Alcotest.(check string)
+      "unqualified global alias still applies"
+      "Some.Mod.helper" (resolve_use_alias non_importer "helper"))
+
+(* Companion to the hijack guard: the entry file's OWN top-level bulk import
+   must still resolve the partial-qualified call form.  `import Foo` (UseAll,
+   where Foo has a sub-module Foo.Sub) registers the DOTTED short name
+   `Sub.greet` -> `Foo.Sub.greet`.  After the global `_use_aliases` fallback was
+   restricted to unqualified names, the entry file's own `Sub.greet(...)` call
+   must resolve via the entry module's `current_module_aliases` — the top-level
+   DUse arms now register there too (mirroring the nested-import path).  Without
+   that, lowering emits an undefined `@Sub.greet` call (the same failure
+   direction as the hijack bug, but for a legitimate import).  This exercises the
+   full lower pipeline: pre-fix the emitted IR calls bare `@Sub.greet`, post-fix
+   it calls the qualified `@Foo.Sub.greet`. *)
+let test_entry_bulk_import_resolves_partial_qualified () =
+  let src = {|mod Main do
+    mod Foo do
+      mod Sub do
+        fn greet(n : Int) : Int do n + 1 end
+      end
+    end
+    import Foo
+    fn run(x : Int) : Int do Sub.greet(x) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  (* The qualified target must be CALLED; the bare `@Sub.greet(` (undefined /
+     unresolved) must NOT appear. Note `@Foo.Sub.greet` does not contain the
+     substring `@Sub.greet`, so the negative check is a clean discriminator. *)
+  Alcotest.(check bool) "partial-qualified call resolves to Foo.Sub.greet" true
+    (Test_helpers.contains "@Foo.Sub.greet" ir);
+  Alcotest.(check bool) "no unresolved bare @Sub.greet call" false
+    (Test_helpers.contains "@Sub.greet(" ir)
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -6341,6 +6420,83 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
+   A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
+   boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
+   unresolved unification variable) reaches Perceus as `Option(TVar)`.
+   `Repr.repr_of_ty` conservatively boxes that (niche_payload_ok(TVar)=false),
+   but codegen (`llvm_case.ml`'s `effective_repr` abstract-arg recovery) niche-
+   encodes it — the value shares storage with its payload.  Pre-fix,
+   `scrutinee_shares_payload_storage` trusted `repr_of_ty`'s Boxed verdict, so
+   `add_scrutinee_free_for` treated the value as a distinct boxed cell and
+   handed it to FBIP, which rewrote `Some(conn) -> Ok(conn)` into
+   `reuse maybe_conn as Ok(conn)`.  Because `conn` aliases `maybe_conn` (niche),
+   the reuse stored the payload into its own reused cell — a self-referential
+   object → `march: RC underflow (rc was 0)` (SIGABRT, exit 134) when the
+   value is later consumed.  Fix: `scrutinee_shares_payload_storage` mirrors
+   codegen's abstract-arg niche recovery.  See docs/value-representation.md §7.
+   Runs the binary because the symptom is a runtime abort, not an IR shape. *)
+let test_erased_option_niche_fbip_no_underflow_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_erased_option_niche"
+    "mod Main do\n\
+    \  needs IO.Spawn\n\
+    \  type Conn = PgConn(Int) | LiteConn(String)\n\
+    \  actor Pool do\n\
+    \    state { n : Int }\n\
+    \    init { n: 0 }\n\
+    \    on Checkout(reply_to) do\n\
+    \      let _ = actor_reply(reply_to, Some(PgConn(42)))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn describe(c) do\n\
+    \    match c do\n\
+    \    PgConn(fd)  -> \"pg:\" ++ int_to_string(fd)\n\
+    \    LiteConn(k) -> \"lite:\" ++ k\n\
+    \    end\n\
+    \  end\n\
+    \  fn checkout(pool) do\n\
+    \    let t = task_spawn(fn _ ->\n\
+    \      match actor_call(pool, Checkout(0), 5000) do\n\
+    \      Err(e)         -> Err(e)\n\
+    \      Ok(maybe_conn) ->\n\
+    \        match maybe_conn do\n\
+    \        None       -> Err(\"none\")\n\
+    \        Some(conn) -> Ok(conn)\n\
+    \        end\n\
+    \      end\n\
+    \    )\n\
+    \    task_await_unwrap(t)\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    match checkout(spawn(Pool)) do\n\
+    \    Ok(conn) -> println(describe(conn))\n\
+    \    Err(e)   -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  (* NB: no interpreter parity check here — the interpreter's actor_call /
+     task_spawn interaction does not deliver the reply for this shape ("err: no
+     reply"), an unrelated interpreter limitation.  The RC bug is purely a
+     COMPILED-backend defect, so we assert on the compiled binary alone:
+     pre-fix it aborted with `RC underflow` (SIGABRT, exit 134); post-fix it
+     prints pg:42 and exits 0. *)
+  let bin = Filename.concat tmp "erasedoptbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased-niche-Option checkout prints pg:42 with no RC underflow \
+       (not SIGABRT/exit 134)"
+      true
+      (ir_contains run_out "pg:42"
+       && ir_contains run_out "EXIT:0"
+       && not (ir_contains run_out "RC underflow"))
+
 (* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
    `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
    referenced a/b/c/d as undefined global functions (`call ptr @a()`), so clang
@@ -8388,6 +8544,10 @@ let codegen_suites =
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
         ] );
+      ( "erased_option_niche_fbip_codegen", [
+          Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
+            test_erased_option_niche_fbip_no_underflow_compiled;
+        ] );
       ( "nested_tuple_let_codegen", [
           Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
             test_nested_tuple_let_destructure_compiled;
@@ -8481,6 +8641,12 @@ let codegen_suites =
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "name_resolution", [
+          Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
+            test_qualified_alias_no_cross_module_hijack;
+          Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
+            test_entry_bulk_import_resolves_partial_qualified;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;

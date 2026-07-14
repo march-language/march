@@ -743,6 +743,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
 
+; ── Regression: burst-of-task_spawn must not race the Task object ──
+; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
+; AFTER march_sched_spawn published the proc, so a work-stealing scheduler
+; thread could run the thunk trampoline (which writes the result and
+; release-stores the done flag) before the spawner returned — the spawner then
+; clobbered the completed result/done flag back to zero (TSan-confirmed race
+; at march_runtime.c:1833 vs the post-spawn store; symptom: task_await hangs or
+; returns a zeroed result).  This program spawns a burst of tasks up front,
+; then awaits them all and checks the exact sum, repeated over many rounds so
+; the non-deterministic race is likely to fire.  Compile natively, run, diff.
+; To also catch it under a race detector: compile with MARCH_SANITIZE=thread
+; and run ~100x — expect no ThreadSanitizer report.
+(rule
+ (targets native_task_burst_await native_task_burst_await.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_burst_await.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_burst_await
+        native/task_burst_await.march)
+   (with-stdout-to native_task_burst_await.out
+        (system "./native_task_burst_await")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_burst_await.expected native_task_burst_await.out)))
+
 ; ── Regression: bare sibling call 2 levels deep in a stdlib file must
 ; qualify with the file's OWN top-level mod name, not just the immediate
 ; enclosing submodule (desugar's qualify_module_refs; see
