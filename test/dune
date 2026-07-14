@@ -120,6 +120,40 @@
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
 
+; ── Boxed-Float runtime API unit test (float-boxing design, stage 1) ──────
+; march_alloc_float / march_unbox_float / march_poly_eq / march_poly_compare
+; live in march_runtime.c (the god-object), so this harness links the same
+; core runtime set the native goldens do, plus -lz for march_compress.c.
+(rule
+ (targets test_float_box_runner)
+ (deps    test_float_box.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_float_box.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_float_box_runner))
+ (action  (run ./test_float_box_runner)))
+
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
 ; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the

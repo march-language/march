@@ -86,7 +86,7 @@ reopens the three-site encode/decode/eq repr-audit problem; keep it Boxed.
 
 ## Staged plan (each gated; do not start N+1 with N red)
 
-**Stage 1 — runtime box API + tag-dispatch arms (additive, non-breaking).**
+**Stage 1 — runtime box API + tag-dispatch arms (additive, non-breaking). [LANDED]**
 `MARCH_FLOAT_TAG`, `march_alloc_float`/`march_unbox_float`
 (`march_runtime.{c,h}`); `march_poly_eq` gains a float-box arm; new
 `march_poly_compare(ptr,ptr)` dispatching odd→int / float-box→
@@ -94,7 +94,10 @@ reopens the three-site encode/decode/eq repr-audit problem; keep it Boxed.
 float-box arm (also fixes the `#<tag:N>`-for-float cousin of the container
 divergence); `copy_value` treats the float box like the string arm (opaque
 payload, no raw-bits sniff). Gate: builds, existing suite unchanged (nothing
-emits the tag yet).
+emits the tag yet). Landed — pinned by `test/test_float_box.c` (a C harness;
+the box fns live in the `march_runtime.c` god-object, so it links the core
+runtime set + `-lz`), which proves the negative-float ordering
+`-9.0 < -1.25` that a hardened `IS_HEAP_PTR` cannot fix.
 
 **Stage 2 — the atomic compiler flip (one commit).** `coerce` double↔ptr
 arms box/unbox (splitting the `("i64","double")` arm from the static REPL-slot

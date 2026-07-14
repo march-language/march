@@ -418,6 +418,24 @@ int64_t march_compare_float(double x, double y) {
     return (x > y) - (x < y);
 }
 
+/* ── Boxed Float (float-boxing design, stage 1 — additive) ─────────────── */
+
+/* Heap-box a Float for storage in a type-erased (ptr) slot: a 24-byte cell
+ * tagged MARCH_FLOAT_TAG, discriminable from tagged ints (odd) and ADT/record
+ * cells (tag >= 0). Perceus treats it as an ordinary heap value. Nothing emits
+ * this yet — the codegen flip that populates erased slots with boxes is
+ * stage 2 (specs/plans/2026-07-13-float-boxing-design.md). */
+void *march_alloc_float(double v) {
+    march_float_box *b = (march_float_box *)march_alloc(sizeof(march_float_box));
+    b->tag = MARCH_FLOAT_TAG;
+    b->val = v;
+    return b;
+}
+
+double march_unbox_float(void *p) {
+    return ((march_float_box *)p)->val;
+}
+
 int64_t march_compare_string(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;
@@ -480,10 +498,37 @@ int64_t march_string_eq(void *a, void *b) {
 int64_t march_poly_eq(void *a, void *b) {
     if (a == b) return 1;
     if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
-    if (((march_hdr *)a)->tag == MARCH_STRING_TAG &&
-        ((march_hdr *)b)->tag == MARCH_STRING_TAG)
+    int32_t ta = ((march_hdr *)a)->tag, tb = ((march_hdr *)b)->tag;
+    if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
         return march_string_eq(a, b);
+    /* Boxed floats compare by VALUE, not box identity — two distinct boxes of
+     * 3.5 are equal (float-boxing design). Also fixes the historical hazard
+     * where two distinct raw-float-bit patterns got dereferenced here. */
+    if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
+        return march_unbox_float(a) == march_unbox_float(b) ? 1 : 0;
     return 0;
+}
+
+/* Ordered generic compare for erased-slot operands (-1/0/1). See the header
+ * doc. Nothing calls this yet — the fallback_cmp codegen wiring is stage 2. */
+int64_t march_poly_compare(void *a, void *b) {
+    if (a == b) return 0;
+    /* Tagged immediates (odd low bit) → untag and integer-compare. A raw heap
+     * ptr on one side and a tagged int on the other cannot be ordered
+     * meaningfully; the tagged-vs-tagged case is the real one. */
+    int a_imm = ((uintptr_t)a & 1u) != 0;
+    int b_imm = ((uintptr_t)b & 1u) != 0;
+    if (a_imm && b_imm) {
+        int64_t ia = (intptr_t)a >> 1, ib = (intptr_t)b >> 1;
+        return march_compare_int(ia, ib);
+    }
+    if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
+    int32_t ta = ((march_hdr *)a)->tag, tb = ((march_hdr *)b)->tag;
+    if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
+        return march_compare_float(march_unbox_float(a), march_unbox_float(b));
+    if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
+        return march_compare_string(a, b);
+    return 0;  /* structural order needs static type info unavailable here */
 }
 
 int64_t march_string_byte_length(void *s) {
@@ -3803,6 +3848,10 @@ void *march_value_to_string(void *v) {
      * the interpreter — instead of misreading the layout (len-as-tag) and
      * printing "#<tag:len>".  Result is +1: alias the borrowed input. */
     if (tag == MARCH_STRING_TAG) { march_incrc(v); return v; }
+    /* Boxed float in an erased slot: render the value, not "#<tag:-3>"
+     * (float-boxing design; also closes a cousin of the to_string-on-erased
+     * divergence). */
+    if (tag == MARCH_FLOAT_TAG) return march_float_to_string(march_unbox_float(v));
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);
