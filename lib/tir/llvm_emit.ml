@@ -2523,6 +2523,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
          | None -> ()
        end;
+       (* Actor.call tag-base registration. F19 (build_ctor_info) gives actor
+          _Msg ctors GLOBALLY-unique tags (base 0x0100_0000 + declaration
+          index) so cross-actor sends can't misroute — but march_actor_call
+          stamps the augmented call message with the SENTINEL's per-type
+          0-based tag (= handler index). Register this actor's first-msg-ctor
+          global tag so the runtime can translate index → global tag; without
+          it every compiled Actor.call falls to the dispatch default arm and
+          is dropped (the caller blocks forever / times out). Emitted at the
+          alloc (like the shape stamp above) so supervisor respawns, which
+          re-run the March-level spawn closure, re-register the fresh record. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then begin
+         let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
+         let msg_ty_name = actor_base ^ Tir_names.actor_msg_suffix in
+         let first_ctor = List.find_map (function
+           | Tir.TDVariant (n, (c, _) :: _) when n = msg_ty_name -> Some c
+           | _ -> None) ctx.type_defs
+         in
+         match first_ctor with
+         | Some c ->
+           (match Hashtbl.find_opt ctx.ctor_info (msg_ty_name ^ "." ^ c) with
+            | Some e ->
+              emit ctx (Printf.sprintf
+                "call void @march_actor_set_call_base(ptr %s, i64 %d)"
+                ptr e.ce_tag)
+            | None -> ())
+         | None -> ()
+       end;
        ("ptr", ptr))
 
   | Tir.EAlloc (_, args) ->

@@ -776,6 +776,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
   ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
+  ("march_actor_set_call_base", "declare void @march_actor_set_call_base(ptr %actor, i64 %base)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare ptr  @march_alloc(i64 %sz)");
   ("march_incrc", "declare void @march_incrc(ptr %p)");
@@ -879,6 +880,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_register_name";
   PDeclare "march_reload_server_start";
   PDeclare "march_actor_set_dispatch_id";
+  PDeclare "march_actor_set_call_base";
   PDeclare "getenv";
   PDeclare "march_alloc";
   PDeclare "march_incrc";

@@ -1501,6 +1501,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_counter.expected native_actor_counter.out)))
 
+; ── Regression: Actor.call must (a) tag-translate the sentinel's ctor index
+; onto the actor's F19 global msg-tag base (else every compiled call is
+; dropped by the dispatch default arm and blocks forever) and (b) enforce
+; timeout_ms — a never-replying handler returns Err(timeout), not a hang.
+(rule
+ (targets native_actor_call_timeout native_actor_call_timeout.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_call_timeout.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_call_timeout
+        native/actor_call_timeout.march)
+   (with-stdout-to native_actor_call_timeout.out
+        (system "./native_actor_call_timeout")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_call_timeout.expected native_actor_call_timeout.out)))
+
 ; ── Regression: pid_of_int must return a real actor pointer, not a raw
 ; int-to-ptr cast (compiled march_pid_of_int used to reinterpret a small
 ; pid_index integer as a heap address, corrupting/hanging on any use).
