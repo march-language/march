@@ -85,6 +85,46 @@ resolved per-module is no longer re-bound by another module's global import.
   ```
   The Logger RC underflow is gone; the worker progresses to completion.
 
+### Follow-up fix: entry-file top-level bulk imports (`lib/tir/lower.ml`)
+Restricting the global `_use_aliases` fallback to unqualified names exposed a
+latent gap: the three TOP-LEVEL `DUse` arms (`lower.ml` ~1338/1346/1359 — the
+entry file's own imports) wrote ONLY the global table, never the entry module's
+`current_module_aliases` (unlike the nested-import path at ~1258, which writes
+both). Post-fix, an entry file that does `import Foo` (UseAll, `Foo` has a
+sub-module `Foo.Sub`) and then calls the partial-qualified `Sub.fn(...)` — the
+normal post-bulk-import form, which the typechecker binds per-module to
+`Foo.Sub.fn` — would lowering-diverge: the dotted `Sub.fn` skips the now
+dot-free-only global fallback, misses `current_module_aliases`, and emits an
+undefined `_Sub.fn` symbol (same failure direction as the original bug, for a
+legitimate import). Reproduced live (`/tmp/entryimp`): `Undefined symbols:
+"_Sub.greet"`.
+
+Fix: mirror the nested handler — the top-level `DUse` arms now register each
+alias into BOTH `!_use_aliases` and `env.current_module_aliases` (via a shared
+`register` helper, first-wins). The entry file then resolves the partial form
+per-module like both typecheck and the nested path, without reopening the
+global-hijack hole. Verified leak-free: an entry file that `import Bastion`
+followed by a *separate* module's bare `Logger.debug` does NOT hijack that other
+module (it still binds stdlib `Logger.debug/1`). Regression test:
+`test/test_codegen.ml` name_resolution → "entry-file bulk import resolves
+partial-qualified call" (asserts the emitted IR calls `@Foo.Sub.greet`, not a
+bare unresolved `@Sub.greet(`). Fails pre-this-fix, passes post-fix. Suites
+re-verified: `run_codegen` 406/406, `run_eval` 232/232; forgepm worker still
+reaches `WORKER-REPRO: running`/`exit`.
+
+## Follow-up (out of scope — sibling bug of the same family)
+
+`_module_aliases` (`lib/tir/lower_state.ml` ~332-339, the dotted-prefix rewrite
+fallback in `resolve_use_alias`) is the **same cross-module-global-hijack class**
+as the bug fixed here. An `alias X.Y as Short` in one module registers
+`Short -> X.Y` process-wide (`lower.ml` ~1284/1384); a colliding `Short.member`
+reference in an unrelated module would be rewritten by that global entry even
+though the typechecker scopes `alias` per-module. Not triggered by forgepm today
+(no such colliding `alias`), so left out of scope for this commit — but it should
+get the same per-module-scoping treatment (register the alias into the declaring
+module's own table and stop consulting the global `_module_aliases` across
+modules) in a follow-up.
+
 ---
 
 ## 1. Where it aborts (ground truth from the compiled forgepm worker)

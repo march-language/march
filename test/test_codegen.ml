@@ -1080,6 +1080,7 @@ let test_qualified_alias_no_cross_module_hijack () =
   let open March_tir.Lower in
   Hashtbl.reset _fn_param_types;
   _use_aliases := Hashtbl.create 8;
+  _module_aliases := Hashtbl.create 8;  (* isolate: resolve_use_alias's prefix fallback reads it *)
   (* Simulate another module's `import Bastion`: a DOTTED global alias plus an
      ordinary UNQUALIFIED one. *)
   Hashtbl.replace !_use_aliases "Logger.debug" "Bastion.Logger.debug";
@@ -1103,6 +1104,42 @@ let test_qualified_alias_no_cross_module_hijack () =
     Alcotest.(check string)
       "unqualified global alias still applies"
       "Some.Mod.helper" (resolve_use_alias non_importer "helper"))
+
+(* Companion to the hijack guard: the entry file's OWN top-level bulk import
+   must still resolve the partial-qualified call form.  `import Foo` (UseAll,
+   where Foo has a sub-module Foo.Sub) registers the DOTTED short name
+   `Sub.greet` -> `Foo.Sub.greet`.  After the global `_use_aliases` fallback was
+   restricted to unqualified names, the entry file's own `Sub.greet(...)` call
+   must resolve via the entry module's `current_module_aliases` — the top-level
+   DUse arms now register there too (mirroring the nested-import path).  Without
+   that, lowering emits an undefined `@Sub.greet` call (the same failure
+   direction as the hijack bug, but for a legitimate import).  This exercises the
+   full lower pipeline: pre-fix the emitted IR calls bare `@Sub.greet`, post-fix
+   it calls the qualified `@Foo.Sub.greet`. *)
+let test_entry_bulk_import_resolves_partial_qualified () =
+  let src = {|mod Main do
+    mod Foo do
+      mod Sub do
+        fn greet(n : Int) : Int do n + 1 end
+      end
+    end
+    import Foo
+    fn run(x : Int) : Int do Sub.greet(x) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  (* The qualified target must be CALLED; the bare `@Sub.greet(` (undefined /
+     unresolved) must NOT appear. Note `@Foo.Sub.greet` does not contain the
+     substring `@Sub.greet`, so the negative check is a clean discriminator. *)
+  Alcotest.(check bool) "partial-qualified call resolves to Foo.Sub.greet" true
+    (Test_helpers.contains "@Foo.Sub.greet" ir);
+  Alcotest.(check bool) "no unresolved bare @Sub.greet call" false
+    (Test_helpers.contains "@Sub.greet(" ir)
 
 (* --- multiline tests --- *)
 
@@ -8608,6 +8645,8 @@ let codegen_suites =
       ( "name_resolution", [
           Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
             test_qualified_alias_no_cross_module_hijack;
+          Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
+            test_entry_bulk_import_resolves_partial_qualified;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
