@@ -1132,6 +1132,43 @@ let test_llvm_no_call_to_double_underscore () =
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
 
+(** [uniform-apply-ABI stage 1 — baseline pin, specs/plans/2026-07-13-
+    uniform-apply-abi.md] Apply-fn calling conventions are currently MIXED:
+    a monomorphic lambda's apply takes its scalar param as raw `i64` while
+    an annotated-polymorphic (erased) lambda's apply takes `ptr`; indirect
+    ECallPtr sites emit the CALL-SITE's view of the convention. This test
+    pins all four shapes so the stage-3 atomic flip (all apply args -> ptr)
+    shows up as a deliberate edit to these assertions, not an accident.
+    The probe also contains the live mismatch the flip fixes: call_it$Int
+    calls the erased (ptr, ptr) apply at (ptr, i64) — benign here only
+    because `id` never decodes its argument. *)
+let test_apply_abi_baseline_pin () =
+  let ir = emit_actor_ir {|mod AbiPin do
+    fn use_cb(f : (Int) -> Int, n : Int) : Int do
+      f(n)
+    end
+    fn call_it(f : (a) -> a, v : a) : a do
+      f(v)
+    end
+    fn main() : Unit do
+      let bump = fn x -> x + 1
+      let id : (a) -> a = fn x -> x
+      println(int_to_string(use_cb(bump, 3)))
+      println(int_to_string(call_it(id, 5)))
+      println(call_it(id, "s"))
+    end
+  end|} in
+  (* Producer side: one concrete apply (i64 param), one erased apply (ptr). *)
+  Alcotest.(check bool) "concrete apply define takes raw i64 param" true
+    (ir_contains ir "%$clo.arg, i64 %x.arg");
+  Alcotest.(check bool) "erased apply define takes ptr param" true
+    (ir_contains ir "%$clo.arg, ptr nonnull dereferenceable(16) %x.arg");
+  (* Consumer side: indirect calls emitted at the call-site's convention. *)
+  Alcotest.(check bool) "indirect call at concrete (ptr, i64) convention" true
+    (ir_contains ir "call ptr (ptr, i64) %");
+  Alcotest.(check bool) "indirect call at erased (ptr, ptr) convention" true
+    (ir_contains ir "call ptr (ptr, ptr) %")
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -8282,6 +8319,8 @@ let codegen_suites =
         (* Regression: 831e315 + perceus caused @__ undefined symbol in &&/|| *)
         Alcotest.test_case "no @__ call for && / || (831e315)" `Quick
           test_llvm_no_call_to_double_underscore;
+        Alcotest.test_case "apply-ABI baseline pin (uniform-ABI stage 1)" `Quick
+          test_apply_abi_baseline_pin;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
