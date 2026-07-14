@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t85 accept, t01–t80 reject)
+# Typing corpus index (t01–t86 accept, t01–t81 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 165/165 — 85 accept, 80
+Exit 0 iff every program behaves as declared (currently 167/167 — 86 accept, 81
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -384,6 +384,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t83_always_linear_no_false_collision` | **finding L4 FIX witness, no-false-positive control (2026-07-11, §2.9.5)** — a `type MyToken = T(Int)` whose bare name does NOT collide with any `always_linear type` typechecks with no spurious error; confirms the new collision check (`reject/t76`) is a targeted collision detector, not a blanket restriction | `--check` exit 0 |
 | `t84_linear_return_type_consumed` | **finding L8 FIX witness (2026-07-12, §2.9.1)** — accept twin of `reject/t78`: the auto-promoted binding of a `linear`-return-typed call typechecks fine when consumed exactly once, and a plain (non-linear-returning) function's result can still be dropped with no spurious promotion | `--check` exit 0 |
 | `t85_spawn_pid_state` | **finding 18 spawn-half FIX witness (2026-07-13, §2.6.3)** — `spawn(Counter)` now types as `Pid[state]` (the ESpawn arm resolves the actor's value binding, which DActor sets to `Pid[state_ty]`, instead of minting `Pid[fresh]`); two pids of the SAME actor unify into one homogeneous list. Reject twin: `t80` | `--check` exit 0 |
+| `t86_impl_coherence_ok` | **impl-coherence accept side (§4.4.3, 2026-07-13)** — what the overlap check must NOT reject: a single user override of a builtin (`impl Show(Int)`, builtins not tracked), distinct interfaces for one type (`derive Eq, Ord, Hash`), and blanket impls with distinct head constructors (`Speak(Box(a))` vs `Speak(Bag(a))`). Reject twin: `t81` | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
 
@@ -470,8 +471,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t78_linear_return_type_drop` | **finding L8 FIX witness (2026-07-12, §2.9.1)** — a `fn mk() : linear Res` called via a plain `let h = mk()` (no keyword, no annotation) now correctly rejects when dropped, same as `linear let h = mk()`/`let h : linear Res = mk()`. Before the fix, `infer_block`'s ELet `auto_lin` computation only checked for a `TCon` matching `always_linear_types` and silently fell through to Unrestricted for a `TLin`-wrapped RHS type — the return-position `linear` qualifier was decorative | `The linear value \`h\` was never used.` |
 | `t79_let_poly_unannotated_mr` | **monomorphism restriction (2026-07-13, §4.1 finding 1, STAGED)** — an UNANNOTATED let-bound lambda stays monomorphic (its first use pins the type), so a second use at a different type rejects; the annotated form still generalizes (`accept/t03`). Filed to be lifted by the stage-2 uniform apply-fn ABI | `expected \`Int\` but got \`String\`` |
 | `t80_spawn_pid_state_mismatch` | **finding 18 spawn-half FIX witness (2026-07-13, §2.6.3)** — reject twin of `accept/t85`: `spawn`'s `Pid` now carries the actor's STATE type, so pids of actors with different state shapes no longer unify into one list (previously both were `Pid[fresh]` and this typechecked) | `expected \`{ value : Int }\` but got \`{ text : String }\`` |
+| `t81_impl_coherence_overlap` | **impl coherence (§4.4.3, FIXED 2026-07-13)** — two `impl Speak(Dog)` for the same `(interface, type)` both typechecked silently, then the backends disagreed at runtime on which body ran (interp last-wins, compiled first-wins). `(T-Impl)` now tracks each user impl in a per-unit registry and rejects a second OVERLAPPING one (`types_overlap` — exact dup, generic-vs-specific, or derive-vs-manual). Accept twin: `t86` | `Overlapping implementation` |
 
-**Result: 165 / 165 (85 accept, 80 reject).**
+**Result: 167 / 167 (86 accept, 81 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

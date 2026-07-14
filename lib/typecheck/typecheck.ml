@@ -1058,6 +1058,18 @@ let ambiguous_bare_ctors : (string, unit) Hashtbl.t = Hashtbl.create 32
     re-record the identical resolution. *)
 let resolved_pattern_ctor_types : (Ast.span, string) Hashtbl.t = Hashtbl.create 64
 
+(** Per-compilation-unit impl-coherence registry: each USER-declared
+    `impl Iface(Ty)` (including `derive`-generated ones) records
+    (iface_name, resolved impl type, the iface-name span). RESET at the
+    start of every [check_module_core] — unlike the global-monotone tables
+    above — so overlapping impls are a hard error WITHIN one unit, while a
+    file re-checked as both a dependency and an entry (forge's per-file
+    model) never spuriously conflicts across units. Builtin impls
+    (`builtin_impls`, seeded into `env.impls`) are deliberately NOT recorded
+    here, so a user impl may still OVERRIDE a primitive builtin (e.g. a test
+    that writes `impl Show(Int)`), matching existing programs. *)
+let impl_coherence_registry : (string * ty * Ast.span) list ref = ref []
+
 (** All parent types of ctors in [env] that share [name] (multiple types may
     define the same variant). Returns list of type names (deduplicated).
     O(log n) — just a single map lookup on the ctor_info list. *)
@@ -5610,6 +5622,30 @@ let rec impl_matches_ty impl_ty target_ty =
   | TError, _ | _, TError -> true
   | a, b -> a = b
 
+(** [types_overlap t1 t2] — do two impl-head types OVERLAP, i.e. is there a
+    concrete type matching BOTH? Unlike [impl_matches_ty] (asymmetric: an
+    impl pattern vs a target), this is SYMMETRIC — a type variable on EITHER
+    side is a wildcard, so `C(a)` overlaps `C(Int)` (the blanket covers the
+    specific) while `C(List(a))` overlaps `C(List(Int))` but not `C(Int)`
+    (the head constructor disambiguates). Used by the impl-coherence check to
+    reject two implementations of one interface whose heads could dispatch on
+    the same value. *)
+let rec types_overlap t1 t2 =
+  match repr t1, repr t2 with
+  | TVar _, _ | _, TVar _ -> true   (* either side is a wildcard pattern *)
+  | TCon (n1, as1), TCon (n2, as2)
+    when n1 = n2 && List.length as1 = List.length as2 ->
+    List.for_all2 types_overlap as1 as2
+  | TArrow (a1, b1), TArrow (a2, b2) ->
+    types_overlap a1 a2 && types_overlap b1 b2
+  | TTuple ts1, TTuple ts2 when List.length ts1 = List.length ts2 ->
+    List.for_all2 types_overlap ts1 ts2
+  | TRecord f1, TRecord f2 when List.map fst f1 = List.map fst f2 ->
+    List.for_all2 (fun (_, x) (_, y) -> types_overlap x y) f1 f2
+  | TLin (_, x), TLin (_, y) -> types_overlap x y
+  | TError, _ | _, TError -> true
+  | a, b -> a = b
+
 (** Pre-register an interface implementation's SHAPE (pass 1) so that
     CInterface constraints from modules checked earlier in the unit can be
     discharged against impls declared in modules checked later.  Conversion
@@ -8067,6 +8103,39 @@ let rec check_decl env (d : Ast.decl) : env =
        can reference the same type variables as the impl type itself. *)
     let tvars = ref [] in
     let inst_ty = surface_ty env ~tvars idef.impl_ty in
+    (* Impl coherence (§4.4.3): reject a SECOND user impl of the same
+       interface whose head type OVERLAPS an already-declared one — exact
+       duplicate, generic-vs-specific, or derive-vs-manual. Without this both
+       impls typecheck silently and the backends disagree on which body runs
+       (interpreter last-registered-wins, compiled first-registered-wins). An
+       entry with the identical iface span is the SAME source impl re-visited
+       (idempotent); builtin impls are not tracked, so overriding a primitive
+       (`impl Show(Int)`) is still allowed. *)
+    let inst_ty_r = repr inst_ty in
+    let already_here =
+      List.exists (fun (i, _, sp) ->
+          i = idef.impl_iface.txt && sp = idef.impl_iface.span)
+        !impl_coherence_registry in
+    if not already_here then begin
+      match List.find_opt (fun (i, t, _) ->
+          i = idef.impl_iface.txt && types_overlap (repr t) inst_ty_r)
+          !impl_coherence_registry with
+      | Some (_, prior_ty, _) ->
+        Err.error env.errors ~span:idef.impl_iface.span
+          (Printf.sprintf
+             "Overlapping implementation: `impl %s(%s)` conflicts with an \
+              existing `impl %s(%s)`.\n\
+              A type can implement an interface at most once — remove or \
+              merge the duplicate (a `derive %s` counts as an implementation \
+              too)."
+             idef.impl_iface.txt (pp_ty inst_ty_r)
+             idef.impl_iface.txt (pp_ty (repr prior_ty))
+             idef.impl_iface.txt)
+      | None ->
+        impl_coherence_registry :=
+          (idef.impl_iface.txt, inst_ty, idef.impl_iface.span)
+          :: !impl_coherence_registry
+    end;
     (* Register this implementation so CInterface constraints can be discharged. *)
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
@@ -9068,6 +9137,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     | Some (se : env) -> se.type_map
     | None -> Hashtbl.create 256
   in
+  (* Fresh impl-coherence scope for this compilation unit (see the registry's
+     doc comment for why this is per-unit rather than global-monotone). *)
+  impl_coherence_registry := [];
   (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
      declarations so that cross-module forward references are pre-bound in
      pass 1. This mirrors the eval.ml global module_registry approach.

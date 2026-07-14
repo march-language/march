@@ -1,0 +1,31 @@
+mod M do
+  -- Impl coherence accept side (§4.4.3): what the overlap check must NOT
+  -- reject. (1) One impl per (interface, type) — including a single user
+  -- override of a builtin (`impl Show(Int)` shadows the primitive builtin,
+  -- which is NOT tracked in the coherence registry). (2) Distinct
+  -- interfaces for the SAME type (derive Eq, Ord, Hash — three impls, no
+  -- overlap). (3) Blanket impls with DISTINCT head constructors don't
+  -- overlap each other.
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  impl Speak(Int) do
+    fn speak(self) do int_to_string(self) end
+  end
+
+  type Point = { x : Int, y : Int }
+  derive Eq, Ord, Hash for Point
+
+  type Box(a) = Box(a)
+  type Bag(a) = Bag(a)
+  impl Speak(Box(a)) do
+    fn speak(self) do "box" end
+  end
+  impl Speak(Bag(a)) do
+    fn speak(self) do "bag" end
+  end
+
+  fn main() do
+    println(speak(42))
+  end
+end

@@ -1323,18 +1323,21 @@ item 1.
    uniqueness check.** `env.impls : ty list StrMap.t` is keyed only by
    interface name; the value is a **list** of impl head types, and
    registration is always `inst_ty :: existing_list` (typecheck.ml:7081–7084).
-   There is no "is this type already present" lookup anywhere in this step —
    `env.impls` is built to be *searched* (via `impl_matches_ty`, a structural,
    non-unifying, wildcard-tolerant shape match — its own named rule,
-   `(T-ImplMatch)`, detailed just below) rather than *inserted into with a
-   conflict check*. **Overlapping impls of the same interface for the same
-   type are NOT rejected at typecheck** — a second `impl Speak(Dog)` typechecks
-   exactly like the first, with no duplicate/coherence diagnostic of any kind;
-   `core-march.md` §4.4.3 documents this fully as an open, filed divergence
-   (the interpreter and compiled backend disagree at RUNTIME on which
-   overlapping impl's method body actually runs — last-registered vs.
-   first-registered, respectively), cross-referenced here rather than
-   restated.
+   `(T-ImplMatch)`, detailed just below). **A coherence check now also runs
+   here (FIXED 2026-07-13):** step 1 additionally registers each user impl in
+   a per-compilation-unit `impl_coherence_registry` and rejects a second impl
+   of the same interface whose head OVERLAPS an existing one (a new symmetric
+   `types_overlap` — TVar on either side is a wildcard, catching exact
+   duplicate, generic-vs-specific, and derive-vs-manual). So a second `impl
+   Speak(Dog)` is now `Overlapping implementation`-rejected rather than
+   silently accepted. Builtin primitive impls are not tracked, so a single
+   user override (`impl Show(Int)`) is still allowed. This closes the RUNTIME
+   selection-split divergence `core-march.md` §4.4.3 formerly documented (the
+   interpreter and compiled backend disagreed on which overlapping impl ran —
+   last-registered vs. first-registered); that program is now rejected before
+   either backend runs.
 
 **`(T-ImplMatch)` — the impl-head-matching judgment (typecheck.ml:4964–4984).**
 Both the `when`-clause check and the superclass check above (and, at the use

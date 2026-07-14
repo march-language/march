@@ -1356,7 +1356,20 @@ widened), but the specific `Eq`/`neq` collision its comment narrates cannot
 occur today, because the typechecker's own extra-method rejection forecloses
 it first.
 
-### 4.4.3 Known divergence: impl coherence — overlapping impls, and the interp/compiled selection split
+### 4.4.3 Impl coherence — overlapping impls (was: a known interp/compiled divergence)
+
+> **Status: FIXED 2026-07-13.** `(T-Impl)` now rejects a second user impl of
+> the same interface whose head type OVERLAPS an existing one — a new
+> per-compilation-unit `impl_coherence_registry` + symmetric `types_overlap`
+> predicate in `lib/typecheck/typecheck.ml`'s DImpl arm (catches exact
+> duplicate, generic-vs-specific, and derive-vs-manual overlap). The
+> selection-split divergence described below can therefore no longer arise
+> from surface programs: the overlapping program is rejected at typecheck
+> time (`Overlapping implementation: …`) before either backend runs. Builtin
+> primitive impls are not tracked, so a single user override (`impl
+> Show(Int)`) is still accepted. Pinned by `specs/lang/types/reject/t81` +
+> `accept/t86`. The historical account below is retained as the record of
+> what the fix closed.
 
 §4.4.2 ended by noting that overlap for a user interface is "just shadowing,
 not a designed coherence policy," and `core-march-types.md` §2.3's

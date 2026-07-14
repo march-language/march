@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: Overlapping implementation
+-- Impl coherence (§4.4.3, FIXED 2026-07-13): a type can implement an
+-- interface at most once. Two `impl Speak(Dog)` blocks used to BOTH
+-- typecheck silently, then the backends disagreed at runtime on which body
+-- ran (interpreter last-registered-wins, compiled first-registered-wins).
+-- (T-Impl) now registers each impl in a per-unit coherence registry and
+-- rejects a second overlapping one. A `derive` counts as an impl too.
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  type Dog = Dog(String)
+  impl Speak(Dog) do
+    fn speak(self) do match self do Dog(n) -> n end end
+  end
+  impl Speak(Dog) do
+    fn speak(self) do match self do Dog(_) -> "woof" end end
+  end
+  fn main() do () end
+end
