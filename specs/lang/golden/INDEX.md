@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g50)
+# Golden corpus index (g01–g51)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (50/50 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (51/51 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -119,6 +119,7 @@ fail-loudly full-overwrite guard in `llvm_emit.ml`'s `EReuse` arm).
 | `g48_argument_evaluation_order` | a call's arguments and a tuple's elements evaluate strictly left-to-right, each with its side effects completing before the next begins — `trace(label, v)` (prints then returns) at both a 3-arg call and a 3-element tuple, byte-identical both backends. Extends the idiom golden `g17` already used for `ERecord` field order to the two element-list forms it didn't cover | E-Elts-LTR (§4.17): verified against this toolchain's actual `List.map` (interp) and `lower.ml`'s CPS-nested ANF lowering (compiled, a structural invariant, not just empirical) |
 | `g49_string_map_key_and_unicode` | strings as first-class data: (1) a `Map(String, Int)` built via the read-then-update idiom, read back via `keys`+`get_or` — the exact shape finding C1 used to crash (§4.16, FIXED 2026-07-11), now a positive byte-identical claim, stress-verified 0/15 crashes + `MARCH_SANITIZE=1` clean; (2) `"café"`'s `byte_size`(5)/`codepoint_count`(4) diverge since `é` is a 2-byte UTF-8 sequence, and `reverse`/`to_uppercase` operate on BYTES not codepoints/graphemes (reverse can produce invalid UTF-8; to_uppercase leaves `é` untouched) — all byte-identical both backends | §4.18: String-as-Map-key hashing/equality/refcount correctness; byte-vs-codepoint semantics of `reverse`/`to_uppercase` |
 | `g50_fbip_reuse_semantics` | FBIP reuse preserves semantics — the interpreter performs NO reuse (every ctor allocates fresh), so this golden's interp==compiled byte-identity IS the executable semantic-equivalence witness. Three shapes, one per premise: (1) unique in-place list map (`bump` consumes its argument — post-Perceus TIR shows `reuse xs as List.Cons(…)`); (2) shared original preserved (`keep` holds a second reference during the map, so the runtime RC==1 check takes the fresh-alloc path and `keep` prints unchanged after); (3) cross-ctor equal-arity flip (`A(x,y) -> B(y,x)` — `same_arity` approves reuse across DIFFERENT constructors of equal field count, tag+every-field overwritten) | E-Reuse (§4.16): static `$fbip$` arity equality + no-self-alias + runtime RC==1 uniqueness branch + fail-loudly full-overwrite (`llvm_emit.ml` EReuse) |
+| `g51_hash_cross_backend` | cross-backend `hash()` equality (§4.4 δ-Hash, FIXED 2026-07-13): the polymorphic `hash()` builtin ran OCaml `Hashtbl.hash` interpreted vs a splitmix64/FNV-1a family compiled — zero shared bits by design. The interpreter now reimplements the compiled runtime's algorithms (`march_hash_int`/`float`/`string`) bit-for-bit, both masked to 62 bits so the result is representable in the interpreter's 63-bit native-int Value. Byte-identical for the four primitive forms (Int incl. negative/large, Float incl. negative, String incl. empty/long, Bool) and a `{x:1,y:2}` record whose derived-Hash combine stays within 63-bit signed range | δ-Hash (§4.4): `march_hash_*` (`runtime/march_runtime.c`) == `march_hash_int64`/`march_hash_string64` (`lib/eval/eval.ml`), both masked `MARCH_HASH_MASK` |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 

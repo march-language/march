@@ -1,0 +1,32 @@
+mod Main do
+  -- Cross-backend hash() equality (§4.4 δ-Hash, FIXED 2026-07-13). The
+  -- polymorphic hash() builtin used to run OCaml's Hashtbl.hash interpreted
+  -- vs a splitmix64/FNV-1a family compiled — the two shared ZERO bits by
+  -- design, so hash(x) diverged for every x. The interpreter now
+  -- reimplements the compiled runtime's algorithms (march_hash_int/float/
+  -- string) bit-for-bit, both masked to 62 bits so the result is
+  -- representable in the interpreter's 63-bit native-int Value. This
+  -- golden's interp==compiled byte-identity IS the equality witness for the
+  -- four primitive hash forms.
+  --
+  -- A record's derived Hash (combine of per-field hash() calls) is portable
+  -- too when the combine stays within 63-bit signed range (the general
+  -- interpreter-int-width limit, orthogonal to the hash algorithm) — the
+  -- {x:1,y:2} case below fits and is byte-identical.
+  type Point = { x : Int, y : Int }
+  derive Hash for Point
+
+  fn main() : Unit do
+    println(int_to_string(hash(1)))
+    println(int_to_string(hash(0 - 5)))
+    println(int_to_string(hash(1000000)))
+    println(int_to_string(hash(2.5)))
+    println(int_to_string(hash(0.0 -. 2.5)))
+    println(int_to_string(hash("abc")))
+    println(int_to_string(hash("")))
+    println(int_to_string(hash("a longer key string for FNV-1a")))
+    println(int_to_string(hash(true)))
+    println(int_to_string(hash(false)))
+    println(int_to_string(hash({ x: 1, y: 2 })))
+  end
+end

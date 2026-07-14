@@ -3102,6 +3102,35 @@ let mpst_close me =
 (** Call the Show impl for [v] if one is registered, else fall back to
     value_to_string.  Used by to_string and println builtins so they
     respect user-defined impl Show even when the prelude is not loaded. *)
+(* ── Portable hash primitives ─────────────────────────────────────────────
+   Bit-for-bit reimplementations of the compiled runtime's hash functions
+   (march_hash_int / march_hash_string, runtime/march_runtime.c) so the
+   polymorphic `hash()` builtin agrees across backends. Both mask to 62 bits
+   (non-negative, <= 2^62-1 = OCaml max_int) so the result fits the
+   interpreter's 63-bit native-int Value exactly. See runtime/march_runtime.c
+   MARCH_HASH_MASK for the invariant. *)
+let march_hash_mask = 0x3FFFFFFFFFFFFFFFL
+
+(* splitmix64 finalizer, matching march_hash_int. *)
+let march_hash_int64 (x : int64) : int64 =
+  let open Int64 in
+  let v = logxor x (shift_right_logical x 30) in
+  let v = mul v 0xbf58476d1ce4e5b9L in
+  let v = logxor v (shift_right_logical v 27) in
+  let v = mul v 0x94d049bb133111ebL in
+  let v = logxor v (shift_right_logical v 31) in
+  logand v march_hash_mask
+
+(* FNV-1a 64-bit over the UTF-8 bytes, matching march_hash_string. *)
+let march_hash_string64 (s : string) : int64 =
+  let open Int64 in
+  let h = ref 0xcbf29ce484222325L in       (* 14695981039346656037 *)
+  String.iter (fun c ->
+      h := logxor !h (of_int (Char.code c));
+      h := mul !h 0x100000001b3L            (* 1099511628211 *)
+    ) s;
+  logand !h march_hash_mask
+
 let show_dispatch (v : value) : string =
   match v with
   | VInt n    -> string_of_int n
@@ -3712,10 +3741,16 @@ let base_env : env =
         | [v] -> VString (show_dispatch v)
         | _ -> eval_error "show: expected one argument"))
   ; ("hash", VBuiltin ("hash", function
-        | [VInt n]    -> VInt (Hashtbl.hash n)
-        | [VFloat f]  -> VInt (Hashtbl.hash f)
-        | [VString s] -> VInt (Hashtbl.hash s)
-        | [VBool b]   -> VInt (Hashtbl.hash b)
+        (* Cross-backend hash() equality: reimplement the compiled runtime's
+           algorithms (march_hash_int/float/string, runtime/march_runtime.c)
+           bit-for-bit in Int64, with the same 62-bit mask so the result is
+           representable in the interpreter's 63-bit native-int Value. Was
+           OCaml's Hashtbl.hash, which shared zero bits with the compiled
+           hash by design. *)
+        | [VInt n]    -> VInt (Int64.to_int (march_hash_int64 (Int64.of_int n)))
+        | [VFloat f]  -> VInt (Int64.to_int (march_hash_int64 (Int64.bits_of_float f)))
+        | [VString s] -> VInt (Int64.to_int (march_hash_string64 s))
+        | [VBool b]   -> VInt (if b then 1 else 0)
         | [v] ->
           (match type_name_of_value v with
            | Some tname ->
