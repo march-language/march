@@ -124,6 +124,35 @@ list_ops regresses beyond noise: implement the dual-entry `$direct`
 scheme for known_call as a follow-up (touches `tir_names.is_apply_fn`
 consumers, perceus, inline — scoped separately).
 
+## Execution status (2026-07-13)
+
+- **Stages 1–4 LANDED** (6ac6eaf7 pin, 3c8826a0 consolidation, fcfd78ba
+  atomic flip, 4ab998ea C runtime + prelude cache key).  All gates green;
+  the generalized-INT closure class is fixed end-to-end (the annotated
+  escape hatch and the JIT cross-fragment paths run the uniform ABI, and
+  the unannotated curried Int comparator sorts correctly when generalized).
+- **Stage 5 BLOCKED — the monomorphism restriction STAYS for now.**  The
+  stage-5 float gate caught a deeper, PRE-EXISTING bug: a generalized
+  (erased) FLOAT closure is broken compiled regardless of the ABI.  Two
+  mechanisms, both verified in the emitted apply body of
+  `let cmp = fn x -> fn y -> x <= y` over floats: (1) Perceus emits
+  `march_incrc_local` on the captured comparand — the erased slot holds
+  raw IEEE-754 bits, `IS_HEAP_PTR` accepts typical doubles, and the RC
+  write lands at `*(3.5)` → SIGSEGV; (2) the generic `<=` on TVar operands
+  emits conditional-untag + INTEGER compare — coincidentally correct for
+  positive floats (IEEE bit ordering), wrong for negatives.  Crucially the
+  ANNOTATED form was ALREADY broken pre-flip: at 3c8826a0 the same program
+  SILENTLY MIS-SORTS (prints 4.5 for the head where the interpreter prints
+  0.5); post-flip it crashes loudly instead.  Lifting the MR would turn
+  today's WORKING unannotated float comparators (monomorphized) into
+  crashes — so it stays until floats are boxed at generalization/erasure
+  boundaries (or the generic Ord/RC paths get runtime type witnesses), a
+  repr design change filed in specs/todos.md.
+- **Stage 6 DONE for the landed flip:** list_ops median 0.10s over 10 runs
+  — identical to the pre-flip baseline (no measurable dispatch cost); all
+  six bench checksums unchanged.  The dual-entry `$direct` fallback is not
+  needed.
+
 ## Risk register
 
 - Cross-time ABI skew (JIT fragments / prelude cache / hot-reload `.so`)
