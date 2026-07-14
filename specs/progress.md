@@ -250,7 +250,7 @@ march/
 │   ├── test_march.ml         # 1200+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, stdlib: Enum/Crypto/UUID/Duration/Base64/URI/IO/System, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
-│   ├── test_fmt.ml           # 23 tests (formatter round-trip)
+│   ├── test_fmt.ml           # 24 tests (formatter round-trip)
 │   ├── test_properties.ml    # 36 QCheck2 property tests
 │   ├── test_supervision.ml   # 15 tests (actor supervision policies)
 │   └── test_oracle.ml        # oracle tests (requires MARCH_BIN env var)
