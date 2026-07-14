@@ -250,7 +250,7 @@ march/
 │   ├── test_march.ml         # 1200+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, stdlib: Enum/Crypto/UUID/Duration/Base64/URI/IO/System, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
-│   ├── test_fmt.ml           # 23 tests (formatter round-trip)
+│   ├── test_fmt.ml           # 24 tests (formatter round-trip)
 │   ├── test_properties.ml    # 36 QCheck2 property tests
 │   ├── test_supervision.ml   # 15 tests (actor supervision policies)
 │   └── test_oracle.ml        # oracle tests (requires MARCH_BIN env var)
@@ -831,6 +831,52 @@ Resolves the 2026-07-09 Starfling P1 ("`Random` unusable on `--target js`").
 Full suite green: **451 compiler / 231 eval / 396 codegen / 807 stdlib** (the
 pre-existing full-suite baseline failures unchanged); all 11 js goldens (9
 positive + 2 negative) pass.
+
+## Current State (as of 2026-07-13, `march --fmt` multi-line lambda body corruption fixed)
+
+`march --fmt` (`lib/format/format.ml`) previously collapsed any lambda whose
+body needed multi-line rendering (multi-statement `let`-chain body) to a
+literal `...` placeholder — invalid syntax that failed to re-parse. Root
+cause: the block (multi-line) renderer's statement-emission fallback always
+routed through the single-line `expr_inline` pretty-printer for `ELam`/`EApp`/
+`ECon` nodes, and `expr_inline`'s `EBlock` case (used for a lambda's body)
+literally returns the string `"..."` for any block with more than one
+statement — a stub meant only for terse `EMatch`/`ELetFn`/etc. summaries used
+in *other* diagnostic contexts, never meant to reach formatter output. This
+hit any lambda with a multi-statement body: bound directly (`let f = fn x ->
+...`), passed as a trailing call argument (`List.map(xs, fn x -> ...)`, the
+dominant real-world shape — ~167 occurrences across `stdlib/`), inside a pipe
+stage (`xs |> List.map(fn x -> ...)`), or nested through wrapper
+constructors in tail position (`GenTree(w, Thunk(fn _ -> ...))`, as seen in
+`stdlib/gen.march`).
+
+Fix: `is_multiline` now recognizes `ELam` (via its body) and `EApp`/`ECon`
+whose argument list ends — possibly through a chain of wrapper calls/
+constructors in tail position — in such a lambda (`trailing_multiline`,
+`lib/format/format.ml`). The block renderer gained matching emission: a new
+`emit_stmt` case for standalone multi-line lambdas, and
+`emit_call_multiline` for the "trailing block" call shape, which walks the
+same wrapper chain and closes all opened parens together on one line
+(`GenTree(w, Thunk(fn _ ->` ... body ... `))`), matching existing idiomatic
+stdlib style. `emit_pipe_chain` was updated to use the same renderer per
+pipe stage instead of always calling `expr_inline`.
+
+Verified via targeted repros (let-bound, call-arg, pipe-stage, nested-ctor
+lambdas) plus a full `--fmt` sweep of every `stdlib/*.march` file — zero
+remaining `-> ...` artifacts and no new parse failures (post-fix corpus
+compared against a corruption-free baseline; a prior sweep had been
+self-contaminated by testing with the old buggy binary in place). 4 new
+regression tests in `test/test_fmt.exe` (idempotence + no-ellipsis-
+placeholder checks). Two **pre-existing, unrelated** `--fmt` round-trip bugs
+were discovered incidentally and are tracked separately (not fixed here):
+float literals reformatted into scientific notation the parser rejects
+(`0.0000009537` → `9.537e-07` → parse error), and record literals that fail
+to re-parse after formatting.
+
+**Test counts:** 450 compiler / 231 eval / 396 codegen / 779 stdlib (all `-q`,
+all exit 0) — no suite composition change, `test/test_fmt.exe` is a separate
+formatter-only suite (28 cases, 1 pre-existing unrelated failure —
+`record literal`).
 
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
@@ -4397,3 +4443,13 @@ their existing build steps, no manual patching.
 **Also ported from an unmerged sibling branch** (`claude/doom-like-browser-game-82db28`, needed because this branch was cut from `main` before that branch's fixes landed there): the one-line `js_emit.ml` JS-module mapping for `extern "audio"` (`"audio" -> Some "./march_audio.mjs"`), without which the JS build failed on every `Audio.*` call; and the self-recursive-tail-call JS-emit fix (`is_rc_noop_only` / the `ESeq` case recognizing Perceus's `ESeq(call, decrc...)` self-tail-call shape) plus its golden regression test (`test/native/js_self_tail_call_rc_drop.march`), which the same sibling branch had already found and fixed via a real Perihelion crash.
 
 **Tests:** interpreter-run unit suites across 5 files, `demo_app/perihelion/test/{test_core,test_combat,test_level,test_nebula,test_upgrades}.march` — 207/177/141/145/144 = 814 tests, all green (baseline 776 before this feature; +38 new). Full compiler quick suite (`scripts/run-tests.sh -q`) green (776 tests). Shell/UI-layer work (milestone overlay, HUD, reticle, trajectory preview) has no dedicated unit tests by design (matches this project's established pattern for draw code) — verified instead via live browser walkthrough (pixel-level canvas inspection for the trajectory dots, since the actual dots are only 2px), which is how both the Star Killer recoil bug's *absence* of a regression and the Option-equality bug were confirmed fixed/found.
+
+## Current State (as of 2026-07-10, `int_mod_euclid` native codegen negative-divisor fix)
+
+**`int_mod_euclid` native codegen was silently wrong for a negative divisor, now fixed.** Its runtime helper had lowered to genuinely-*unsigned* `%` (`march_checked_umod`), which matches the interpreter's Euclidean remainder only for a positive divisor; a negative divisor diverged (`int_mod_euclid(-7, -3)` → `-7` compiled vs. `2` interpreted). Replaced with signed Euclidean semantics (`r = a % b; if r < 0 then r + abs b else r`) and renamed the symbol `march_checked_umod` → `march_checked_emod` (the mod-side pair of `march_checked_ediv`; the "u"-for-unsigned prefix was misleading once the body became signed). New parity test `test_compiled_int_mod_euclid_parity` pins all four sign quadrants (`[1, 2, 2, 1]`).
+
+## Current State (as of 2026-07-13, `march --fmt` non-idempotent on small-magnitude float literals)
+
+**`march --fmt` could produce output that failed to re-parse on a second `--fmt` pass, for any Float literal small/large enough that OCaml's `string_of_float` renders it in scientific notation** (e.g. source `0.0000009537` formats to `9.537e-07`). The March lexer's float rule (`lib/lexer/lexer.mll`) is `digit+ '.' digit+` only — it has never accepted an exponent form — but `lib/format/format.ml`'s `fmt_lit` assumed scientific-notation output was valid March and left it as-is (stale comment: "scientific notation: leave as-is"). Fixed by adding `expand_scientific` to `format.ml`, which shifts the decimal point to render the same digits back in plain decimal form instead of growing the lexer/parser to accept exponents. Regression test `test_small_float_literal` added to `test/test_fmt.ml` (idempotence + re-parses).
+
+**Test counts:** `test_fmt.exe` gains 1 test (now 25 total; 1 pre-existing, unrelated failure — the formatter emits record-literal shorthand `{ x = x, y = y }` the parser rejects, confirmed present before this fix too, out of scope here). Standard six runners unaffected (779 quick-suite tests green, no regressions).
