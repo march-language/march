@@ -1,0 +1,16 @@
+mod P26EcondTwoCharRelop do
+  -- Token-filter arm-boundary lookahead (§7): a scrutinee-less `match do
+  -- cond -> body ... end` boolean chain whose arm condition uses a TWO-CHAR
+  -- relational operator (`>=`, `<=`) must parse — the `->`-scan that
+  -- distinguishes arm boundaries from block continuations previously got
+  -- stuck on the `>=`/`<=` operator before reaching the next arm's `->`.
+  -- (Fixed; regression witness.)
+  fn grade(s : Int) : String do
+    match do
+      s >= 90 -> "A"
+      s <= 59 -> "F"
+      _ -> "C"
+    end
+  end
+  fn main() do println(grade(85)) end
+end

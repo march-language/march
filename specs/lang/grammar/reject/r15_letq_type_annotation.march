@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: cannot have a type annotation
+-- A `let?` binding takes NO type annotation (the bound type is inferred from
+-- the Result's Ok payload). The dedicated diagnostic — the `LET QUESTION
+-- simple_pattern COLON error` production (parser.mly, 2026-07-13) — points at
+-- the annotation, rather than the generic missing-`=` recovery it used to hit.
+mod R15LetqTypeAnnotation do
+  fn f() : Result(Int, String) do Ok(1) end
+  fn bad() : Result(Int, String) do
+    let? x : Int = f()
+    Ok(x)
+  end
+end

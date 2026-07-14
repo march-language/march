@@ -15,12 +15,12 @@ reject/t67–t70}` and golden `g42`. This chapter is the tutorial companion.
 > **Implementation note — §4–§8 below read as a design/plan.** That material
 > was written as the *implementation spec*. `let?` shipped exactly as its
 > design describes: an `ELetQ` AST node typechecked natively (`typecheck.ml`
-> `infer_expr`) and evaluated natively (`eval.ml`) — with ONE deviation: the
-> dedicated "`let?` cannot have a type annotation" parser production shown in
-> §5.2 was never implemented. `let? x : T = e` is still correctly rejected,
-> but by the generic missing-`=` recovery (`` I was expecting `=` in the let?
-> binding here: ``), not a bespoke message. See `reject/t70` and the slice-8
-> finding in `specs/todos.md`.
+> `infer_expr`) and evaluated natively (`eval.ml`). The dedicated "`let?`
+> cannot have a type annotation" parser production shown in §5.2 is now
+> implemented (`LET QUESTION simple_pattern COLON error` in `parser.mly`,
+> 2026-07-13): `let? x : T = e` reports "`` `let?` bindings cannot have a
+> type annotation — the type is inferred from the `Result`. ``", pinned by
+> `reject/t70`.
 
 **Depends on:** the `Result` type, the `QUESTION` token, `EMatch`, and as-pattern / tuple-pattern support (all present).
 

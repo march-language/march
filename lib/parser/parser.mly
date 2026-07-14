@@ -1009,6 +1009,18 @@ block_expr:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  (* Dedicated diagnostic for `let? x : T = e` — a type annotation on a
+     `let?` binding is not allowed (the bound type is inferred from the
+     Result's Ok payload). This shifts the COLON so the message points AT
+     the annotation, rather than falling through to the generic
+     missing-`=` recovery below (which reported "expecting `=`"). See
+     let-propagation.md §5.2. *)
+  | LET; QUESTION; _p = simple_pattern; COLON; error
+    { error_raise
+        "`let?` bindings cannot have a type annotation — the type is \
+         inferred from the `Result`."
+        (Some "let? name = result_expr")
+        $startpos($4) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"

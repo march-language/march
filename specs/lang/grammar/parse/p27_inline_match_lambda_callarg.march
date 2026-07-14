@@ -1,0 +1,12 @@
+mod P27InlineMatchLambdaCallarg do
+  -- Token-filter arm-boundary lookahead (§7): an inline `match` used as a
+  -- lambda body that is itself a call ARGUMENT must parse — the arm-boundary
+  -- scan previously confused the newline/paren-delimited match arms nested
+  -- inside `fn (kv) -> match ... do ... end` inside a call arg (this is the
+  -- shape that made stdlib GlobalRegistry unparseable). Fixed; regression.
+  fn main() do
+    let kept = [(1, 10), (2, 20)]
+    let names = List.map(kept, fn (kv) -> match kv do (n, _e) -> n end)
+    println(int_to_string(List.length(names)))
+  end
+end
