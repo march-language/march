@@ -127,23 +127,46 @@ let fail_if_unresolved_iface_method ctx (bare_name : string) : unit =
        silently bind to an arbitrary one of these impls."
       bare_name (String.concat ", " candidates))
 
-(** Build the wrapper signature pieces for a `$clo_wrap` from the TARGET's
-    TIR param types: [decl_str] is the wrapper's own param list (the ignored
-    closure cell `%_clo` followed by the target's params at their concrete
-    LLVM types), [call_args] the forwarded argument list.  All three
-    clo_wrap producer sites (llvm_emit's top-fns and no-var-slot first-class
-    paths, llvm_repl's closure-slot fn wrapper) go through this ONE helper
-    so the wrapper's ARG convention is defined in a single place — the
-    uniform-apply-ABI flip (specs/plans/2026-07-13-uniform-apply-abi.md
-    stage 3) changes it here once. *)
-let clo_wrap_sig (ps_tirs : Tir.ty list) : string * string =
+(** Build the wrapper pieces for a `$clo_wrap` from the TARGET's TIR param
+    types, under the UNIFORM apply-fn ABI (specs/plans/
+    2026-07-13-uniform-apply-abi.md, stage 3): the wrapper's own params are
+    ALL plain `ptr` slots (the ignored closure cell `%_clo` followed by one
+    `ptr %aN` per target param — i64-family scalars arrive tagged (n<<1)|1,
+    Floats as raw IEEE-754 bits, heap ptrs raw), [decode_str] is the body
+    prologue that decodes each slot to the target's concrete LLVM type
+    (conditional untag / raw-bits bitcast / passthrough), and [call_args]
+    forwards the decoded values at the target's own convention.  All three
+    clo_wrap producer sites (llvm_emit's top-fns and no-var-slot
+    first-class paths, llvm_repl's closure-slot fn wrapper) go through this
+    ONE helper so the wrapper ARG convention is defined in a single place. *)
+let clo_wrap_sig (ps_tirs : Tir.ty list) : string * string * string =
   let param_tys = List.map Llvm_ctx.llvm_ty ps_tirs in
-  let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_tys in
   let decl_str = String.concat ", "
-      ("ptr %_clo" :: List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+      ("ptr %_clo" :: List.mapi (fun i _ -> Printf.sprintf "ptr %%a%d" i) param_tys) in
+  let decode_buf = Buffer.create 128 in
   let call_args = String.concat ", "
-      (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-  (decl_str, call_args)
+      (List.mapi (fun i t ->
+           match t with
+           | "ptr" -> Printf.sprintf "ptr %%a%d" i
+           | "double" ->
+             (* Float slot: raw IEEE-754 bits in the ptr — bitcast back. *)
+             Buffer.add_string decode_buf (Printf.sprintf
+               "  %%a%d.i = ptrtoint ptr %%a%d to i64\n  \
+                %%a%d.v = bitcast i64 %%a%d.i to double\n" i i i i);
+             Printf.sprintf "double %%a%d.v" i
+           | scalar ->
+             (* i64-family slot: conditional untag (odd -> ashr, even
+                preserved verbatim — the erased-i64 convention). *)
+             Buffer.add_string decode_buf (Printf.sprintf
+               "  %%a%d.i = ptrtoint ptr %%a%d to i64\n  \
+                %%a%d.b = and i64 %%a%d.i, 1\n  \
+                %%a%d.o = icmp ne i64 %%a%d.b, 0\n  \
+                %%a%d.s = ashr i64 %%a%d.i, 1\n  \
+                %%a%d.v = select i1 %%a%d.o, i64 %%a%d.s, i64 %%a%d.i\n"
+               i i i i i i i i i i i i);
+             Printf.sprintf "%s %%a%d.v" scalar i)
+          param_tys) in
+  (decl_str, Buffer.contents decode_buf, call_args)
 
 (** Emit a `$clo_wrap` trampoline that forwards to [fn_name] and returns the
     result in the generic ptr ABI shared by all closure dispatch (see
@@ -154,25 +177,25 @@ let clo_wrap_sig (ps_tirs : Tir.ty list) : string * string =
     passed to List.filter, read back tagged and inverted).  Scalars are tagged
     `(n<<1)|1` and floats bitcast into the ptr slot; the consumer untags via the
     usual ptr->scalar coerce.  void wrappers carry no value (ret ptr null). *)
-let clo_wrap_define wrap_name decl_str target_ret fn_name call_args =
+let clo_wrap_define ?(decode = "") wrap_name decl_str target_ret fn_name call_args =
   if target_ret = "void" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
-      wrap_name decl_str fn_name call_args
+      "define ptr @%s(%s) {\nentry:\n%s  call void @%s(%s)\n  ret ptr null\n}\n\n"
+      wrap_name decl_str decode fn_name call_args
   else if target_ret = "ptr" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
-      wrap_name decl_str fn_name call_args
+      "define ptr @%s(%s) {\nentry:\n%s  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
+      wrap_name decl_str decode fn_name call_args
   else if target_ret = "double" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  \
+      "define ptr @%s(%s) {\nentry:\n%s  %%r = call double @%s(%s)\n  \
        %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  \
        ret ptr %%rp\n}\n\n"
-      wrap_name decl_str fn_name call_args
+      wrap_name decl_str decode fn_name call_args
   else
     (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  \
+      "define ptr @%s(%s) {\nentry:\n%s  %%r = call %s @%s(%s)\n  \
        %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
        %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
-      wrap_name decl_str target_ret fn_name call_args
+      wrap_name decl_str decode target_ret fn_name call_args

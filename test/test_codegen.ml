@@ -1132,16 +1132,17 @@ let test_llvm_no_call_to_double_underscore () =
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
 
-(** [uniform-apply-ABI stage 1 — baseline pin, specs/plans/2026-07-13-
-    uniform-apply-abi.md] Apply-fn calling conventions are currently MIXED:
-    a monomorphic lambda's apply takes its scalar param as raw `i64` while
-    an annotated-polymorphic (erased) lambda's apply takes `ptr`; indirect
-    ECallPtr sites emit the CALL-SITE's view of the convention. This test
-    pins all four shapes so the stage-3 atomic flip (all apply args -> ptr)
-    shows up as a deliberate edit to these assertions, not an accident.
-    The probe also contains the live mismatch the flip fixes: call_it$Int
-    calls the erased (ptr, ptr) apply at (ptr, i64) — benign here only
-    because `id` never decodes its argument. *)
+(** [uniform-apply-ABI — convention pin, specs/plans/2026-07-13-
+    uniform-apply-abi.md] Stage 3 flipped every apply fn to the UNIFORM arg
+    convention: all args are plain `ptr` slots (i64-family scalars tagged
+    (n<<1)|1, Floats raw IEEE-754 bits, heap ptrs raw) and every indirect
+    ECallPtr site encodes to match, so the calling convention no longer
+    depends on the call-site's view of the closure's TFn type.  This test
+    pins the uniform shapes AND the absence of the old mixed ones (a
+    reappearing `i64` apply param or `(ptr, i64)` indirect call = the
+    curried-comparator SIGBUS class reopening).  Historical: before the
+    flip this same probe emitted BOTH conventions, including a live
+    (ptr, i64)-calls-(ptr, ptr) mismatch at call_it$Int. *)
 let test_apply_abi_baseline_pin () =
   let ir = emit_actor_ir {|mod AbiPin do
     fn use_cb(f : (Int) -> Int, n : Int) : Int do
@@ -1158,16 +1159,19 @@ let test_apply_abi_baseline_pin () =
       println(call_it(id, "s"))
     end
   end|} in
-  (* Producer side: one concrete apply (i64 param), one erased apply (ptr). *)
-  Alcotest.(check bool) "concrete apply define takes raw i64 param" true
+  (* Producer side: EVERY apply takes bare ptr params (no attributes — a
+     tagged-scalar slot is not a dereferenceable pointer). *)
+  Alcotest.(check bool) "apply defines take bare ptr params" true
+    (ir_contains ir "%$clo.arg, ptr %x.arg");
+  Alcotest.(check bool) "no apply define takes a raw i64 param" false
     (ir_contains ir "%$clo.arg, i64 %x.arg");
-  Alcotest.(check bool) "erased apply define takes ptr param" true
-    (ir_contains ir "%$clo.arg, ptr nonnull dereferenceable(16) %x.arg");
-  (* Consumer side: indirect calls emitted at the call-site's convention. *)
-  Alcotest.(check bool) "indirect call at concrete (ptr, i64) convention" true
-    (ir_contains ir "call ptr (ptr, i64) %");
-  Alcotest.(check bool) "indirect call at erased (ptr, ptr) convention" true
-    (ir_contains ir "call ptr (ptr, ptr) %")
+  Alcotest.(check bool) "no apply define carries param attributes" false
+    (ir_contains ir "%$clo.arg, ptr nonnull");
+  (* Consumer side: every indirect dispatch is (ptr, ptr...). *)
+  Alcotest.(check bool) "indirect calls at uniform (ptr, ptr) convention" true
+    (ir_contains ir "call ptr (ptr, ptr) %");
+  Alcotest.(check bool) "no indirect call at raw (ptr, i64) convention" false
+    (ir_contains ir "call ptr (ptr, i64) %")
 
 (* --- multiline tests --- *)
 

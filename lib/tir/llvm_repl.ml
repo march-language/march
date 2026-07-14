@@ -316,7 +316,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
   let target_ret = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
   (* Shared sig builder — see Llvm_calls.clo_wrap_sig. *)
-  let (decl_str, call_args) =
+  let (decl_str, decode, call_args) =
     Llvm_calls.clo_wrap_sig (List.map (fun v -> v.Tir.v_ty) fn.Tir.fn_params) in
   (* Same check-then-add emitted_wraps guard as the other two clo_wrap_define
      call sites: the fn is registered in ctx.top_fns BEFORE emit_fn above, so
@@ -327,7 +327,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
   if not (Hashtbl.mem ctx.Llvm_ctx.emitted_wraps wrap_name) then begin
     Hashtbl.add ctx.Llvm_ctx.emitted_wraps wrap_name ();
     Buffer.add_string ctx.Llvm_ctx.extra_fns
-      (Llvm_calls.clo_wrap_define wrap_name decl_str target_ret fn_llvm_name call_args)
+      (Llvm_calls.clo_wrap_define ~decode wrap_name decl_str target_ret fn_llvm_name call_args)
   end;
   (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in

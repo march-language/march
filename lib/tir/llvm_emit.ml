@@ -384,9 +384,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       let target_ret = llvm_ret_ty ret_tir in
       (* Wrapper params/args come from the shared sig builder so the
          convention matches ECallPtr's call-site view — see clo_wrap_sig. *)
-      let (decl_str, call_args) = Llvm_calls.clo_wrap_sig ps_tirs in
+      let (decl_str, decode, call_args) = Llvm_calls.clo_wrap_sig ps_tirs in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+        (clo_wrap_define ~decode wrap_name decl_str target_ret fn_name call_args)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in
@@ -500,9 +500,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          let ret_tir     = fn_ret_tir v.Tir.v_ty in
          let target_ret  = llvm_ret_ty ret_tir in
          (* Shared sig builder — see Llvm_calls.clo_wrap_sig. *)
-         let (decl_str, call_args) = Llvm_calls.clo_wrap_sig ps in
+         let (decl_str, decode, call_args) = Llvm_calls.clo_wrap_sig ps in
          Buffer.add_string ctx.extra_fns
-           (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+           (clo_wrap_define ~decode wrap_name decl_str target_ret fn_name call_args)
        end;
        let hp  = fresh ctx "cwrap" in
        emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -1753,8 +1753,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, args) ->
     (* Emit each arg once, collecting both type and value strings. *)
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
-    let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
-    let args_str  = String.concat ", " arg_strs in
     (* Resolve unqualified cross-module references: lower.ml may emit a
        function reference without its module prefix (e.g. "base64_encode"
        for "Crypto.base64_encode").  Look up the qualified name first.
@@ -1766,6 +1764,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | Some q -> q
         | None -> f.Tir.v_name
     in
+    (* Uniform apply-fn ABI (stage 3): direct calls to an apply fn — the
+       known_call ECallPtr→EApp(apply, clo :: args) rewrite — must encode
+       args the same way the indirect dispatch does: everything in plain
+       `ptr` slots (scalars tagged, floats raw bits, heap ptrs raw),
+       symmetric to the existing is_apply_fn RETURN special case below. *)
+    let arg_strs  =
+      if is_apply_fn resolved_name then
+        List.map (fun (ty, v) -> "ptr " ^ coerce ctx ty v "ptr") arg_pairs
+      else
+        List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
+    let args_str  = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
       | None -> mangle_extern resolved_name in
@@ -2173,33 +2182,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let base = llvm_ret_ty ret_tir in
       if base = "void" then "void" else "ptr"
     in
-    let orig_param_llvm_tys = match fn_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TFn (ps, _) when List.length ps = nargs -> List.map llvm_ty ps
-         | Tir.TFn _ as ty ->
-           (* Uncurry the param type chain for curried calls, collecting
-              all parameter types across nested TFn wrappers. *)
-           let rec collect_params n t acc =
-             if n = 0 then List.rev acc
-             else match t with
-               | Tir.TFn (ps, ret) ->
-                 let take = min n (List.length ps) in
-                 let taken = List.filteri (fun i _ -> i < take) ps in
-                 collect_params (n - take) ret (List.rev_append (List.map llvm_ty taken) acc)
-               | _ -> List.rev acc @ List.init n (fun _ -> "ptr")
-           in
-           collect_params nargs ty []
-         | _ -> List.map (fun _ -> "ptr") args)
-      | _ -> List.map (fun _ -> "ptr") args
-    in
+    (* Uniform apply-fn ABI (stage 3): every apply fn takes ALL its args as
+       plain `ptr` slots (scalars tagged, floats raw bits, heap ptrs raw),
+       so the indirect dispatch no longer derives arg slot types from the
+       CALL-SITE's view of the closure's TFn type — the exact
+       generalize-vs-instantiate disagreement behind the curried-comparator
+       SIGBUS class.  `coerce → "ptr"` does the encode: i64-family tags
+       (n<<1)|1, double bitcasts its bits, ptr passes through. *)
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
-        (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
-    let orig_arg_strs = List.map2 (fun pty a ->
+        (String.concat ", " ("ptr" :: List.map (fun _ -> "ptr") args)) in
+    let orig_arg_strs = List.map (fun a ->
         let (actual_ty, v) = emit_atom ctx a in
-        let v' = coerce ctx actual_ty v pty in
-        pty ^ " " ^ v'
-      ) orig_param_llvm_tys args in
+        let v' = coerce ctx actual_ty v "ptr" in
+        "ptr " ^ v'
+      ) args in
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call %s %s(%s)"

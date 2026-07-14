@@ -172,10 +172,27 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     && not (Llvm_builtins.is_builtin_fn fn.Tir.fn_name)
   in
 
-  let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
-      let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
-    ) fn.Tir.fn_params) in
+  (* Uniform apply-fn ABI (specs/plans/2026-07-13-uniform-apply-abi.md,
+     stage 3): every apply fn takes ALL its args as plain `ptr` slots —
+     i64-family scalars tagged (n<<1)|1, Floats as raw IEEE-754 bits, heap
+     ptrs raw — regardless of whether the lambda's TIR params are concrete
+     or erased, so the calling convention no longer depends on
+     generalize-vs-monomorphic inference.  Bare `ptr` (no nonnull/
+     dereferenceable): a tagged-scalar slot is not a dereferenceable
+     pointer.  The prologue below decodes each arg into the fn's existing
+     concretely-typed alloca, so the body (and TCO back-edges, which store
+     into the same slots) stays raw. *)
+  let is_apply = Tir_names.is_apply_fn fn.Tir.fn_name in
+  let params_str =
+    if is_apply then
+      String.concat ", " (List.map (fun (v : Tir.var) ->
+          "ptr %" ^ Llvm_ctx.llvm_name v.Tir.v_name ^ ".arg"
+        ) fn.Tir.fn_params)
+    else
+      String.concat ", " (List.map (fun (v : Tir.var) ->
+          let vn = Llvm_ctx.llvm_name v.Tir.v_name in
+          Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+        ) fn.Tir.fn_params) in
 
   (* In --compile-so mode, give every non-exported function hidden ELF
      visibility so intra-.so PLT calls resolve to the .so's own definitions
@@ -219,12 +236,22 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   Buffer.add_string ctx.Llvm_ctx.buf
     (Printf.sprintf "\ndefine %s%s @%s(%s) {\nentry:\n" vis_prefix ret_ty fn_llvm_name params_str);
 
-  (* Alloca + store for each parameter; collect slot info for TCO. *)
+  (* Alloca + store for each parameter; collect slot info for TCO.
+     For apply fns under the uniform ABI, the incoming `ptr` slot is decoded
+     into the concretely-typed alloca here (conditional untag for i64-family,
+     raw-bits bitcast for double, verbatim for ptr) — the single per-call
+     decode point; everything downstream reads the alloca raw. *)
   let param_slots = List.map (fun (v : Tir.var) ->
     let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
-    let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+    let vn = Llvm_ctx.llvm_name v.Tir.v_name in
+    let slot = Llvm_ctx.alloca_name ctx vn in
     Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
-    Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (Llvm_ctx.llvm_name v.Tir.v_name) slot);
+    let stored_v =
+      if is_apply && ty <> "ptr"
+      then Llvm_ctx.coerce ctx "ptr" ("%" ^ vn ^ ".arg") ty
+      else "%" ^ vn ^ ".arg"
+    in
+    Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" ty stored_v slot);
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
