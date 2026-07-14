@@ -142,13 +142,46 @@ let flush_comments_before ctx node_line =
 (* Literals                                                            *)
 (* ------------------------------------------------------------------ *)
 
+(* The March lexer's float literal only matches [digit+ '.' digit+] — it has
+   no exponent form. OCaml's [string_of_float] switches to scientific
+   notation (e.g. "9.537e-07") for small/large magnitudes, which the lexer
+   then can't re-parse. Expand any scientific-notation output back into plain
+   decimal digits by shifting the decimal point, so `--fmt` output is always
+   re-parseable (idempotent). *)
+let expand_scientific s =
+  match String.index_opt s 'e' with
+  | None -> s
+  | Some ei ->
+    let mantissa = String.sub s 0 ei in
+    let exp = int_of_string (String.sub s (ei + 1) (String.length s - ei - 1)) in
+    let neg, mantissa =
+      if mantissa.[0] = '-' then true, String.sub mantissa 1 (String.length mantissa - 1)
+      else false, mantissa
+    in
+    let int_part, frac_part =
+      match String.index_opt mantissa '.' with
+      | Some di -> String.sub mantissa 0 di, String.sub mantissa (di + 1) (String.length mantissa - di - 1)
+      | None -> mantissa, ""
+    in
+    let digits = int_part ^ frac_part in
+    let point_pos = String.length int_part + exp in
+    let body =
+      if point_pos <= 0 then
+        "0." ^ String.make (-point_pos) '0' ^ digits
+      else if point_pos >= String.length digits then
+        digits ^ String.make (point_pos - String.length digits) '0' ^ ".0"
+      else
+        String.sub digits 0 point_pos ^ "." ^ String.sub digits point_pos (String.length digits - point_pos)
+    in
+    if neg then "-" ^ body else body
+
 let fmt_lit = function
   | LitInt n    -> string_of_int n
   | LitFloat f  ->
     let s = string_of_float f in
+    let s = if String.contains s 'e' then expand_scientific s else s in
     (* March requires digit+ '.' digit+ — ensure at least one digit after decimal *)
-    if String.contains s 'e' then s  (* scientific notation: leave as-is *)
-    else if not (String.contains s '.') then s ^ ".0"
+    if not (String.contains s '.') then s ^ ".0"
     else begin
       (* If the string ends with '.', append '0' *)
       if s.[String.length s - 1] = '.' then s ^ "0"
@@ -391,10 +424,10 @@ let rec expr_inline = function
   | ETuple (es, _)              ->
     Printf.sprintf "(%s)" (String.concat ", " (List.map expr_inline es))
   | ERecord (flds, _)           ->
-    let f (n, e) = Printf.sprintf "%s = %s" n.txt (expr_inline e) in
+    let f (n, e) = Printf.sprintf "%s: %s" n.txt (expr_inline e) in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | ERecordUpdate (e, flds, _)  ->
-    let f (n, v) = Printf.sprintf "%s = %s" n.txt (expr_inline v) in
+    let f (n, v) = Printf.sprintf "%s: %s" n.txt (expr_inline v) in
     Printf.sprintf "{ %s with %s }" (expr_inline e)
       (String.concat ", " (List.map f flds))
   | EField (e, n, _)            -> Printf.sprintf "%s.%s" (expr_inline e) n.txt
