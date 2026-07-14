@@ -423,10 +423,10 @@ let rec expr_inline = function
   | ETuple (es, _)              ->
     Printf.sprintf "(%s)" (String.concat ", " (List.map expr_inline es))
   | ERecord (flds, _)           ->
-    let f (n, e) = Printf.sprintf "%s = %s" n.txt (expr_inline e) in
+    let f (n, e) = Printf.sprintf "%s: %s" n.txt (expr_inline e) in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | ERecordUpdate (e, flds, _)  ->
-    let f (n, v) = Printf.sprintf "%s = %s" n.txt (expr_inline v) in
+    let f (n, v) = Printf.sprintf "%s: %s" n.txt (expr_inline v) in
     Printf.sprintf "{ %s with %s }" (expr_inline e)
       (String.concat ", " (List.map f flds))
   | EField (e, n, _)            -> Printf.sprintf "%s.%s" (expr_inline e) n.txt
