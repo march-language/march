@@ -1212,6 +1212,15 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* Global tag of this actor's FIRST message constructor (the F19
+     * memory-safety fix gives actor _Msg ctors globally-unique tags,
+     * base 0x0100_0000 — see lib/tir/llvm_toplevel.ml build_ctor_info).
+     * march_actor_call adds the caller's sentinel ctor INDEX to this base
+     * to address the handler positionally; 0 = unregistered (fall back to
+     * the sentinel's raw tag). Stamped at actor-record alloc via
+     * march_actor_set_call_base, so supervisor respawns (which re-run the
+     * March-level spawn closure) re-stamp it on the fresh record. */
+    int64_t                     call_tag_base;
     /* Set on a CHILD when it is spawned by a supervisor; NULL for every
      * other actor, including a supervisor's own meta. */
     void                        *supervisor;
@@ -1748,6 +1757,14 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
     meta->dispatch_name_id = name_id;
 }
 
+void march_actor_set_call_base(void *actor, int64_t base) {
+    /* Emitted by codegen right after the actor record's alloc (same timing
+     * as march_actor_set_dispatch_id): before march_spawn, so
+     * find_or_create_meta creates the entry the spawn will reuse. */
+    march_actor_meta *meta = find_or_create_meta(actor);
+    meta->call_tag_base = base;
+}
+
 #define MARCH_MIGRATE_SNAPSHOT 2048
 
 void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
@@ -2078,15 +2095,15 @@ void *march_send(void *actor, void *msg) {
  *      proc pointer (the "reply channel").  The actor handler receives this as
  *      its first parameter (e.g., `on GetCount(reply_to)`).
  *   3. Send the augmented message to the actor's green thread.
- *   4. Block via march_sched_recv() until the actor calls march_actor_reply.
+ *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
+ *      march_sched_recv(); a positive timeout_ms does a deadline-bounded
+ *      yield-poll and returns Err("actor_call: timeout") past the deadline.
  *   5. Return Ok(reply_value).
  *
  * RC contract: we consume one reference to inner_msg (via march_decrc after
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
 void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
-    (void)timeout_ms;  /* timeout not yet enforced; accepted for API compat */
-
     int64_t *a = (int64_t *)actor;
     if (!a[3]) {
         march_decrc(inner_msg);
@@ -2108,8 +2125,25 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     /* Read the tag from inner_msg so we can reproduce it on the augmented msg.
      * inner_msg is assumed to be a zero-arg constructor (16 bytes: header only).
      * We decrc it now — the caller owned one reference. */
-    int32_t msg_tag = ((march_hdr *)inner_msg)->tag;
-    march_decrc(inner_msg);
+    int32_t msg_tag;
+    if (IS_HEAP_PTR(inner_msg)) {
+        msg_tag = ((march_hdr *)inner_msg)->tag;
+        march_decrc(inner_msg);
+    } else {
+        /* Enum-shaped sentinel types (several nullary ctors) compile to
+         * immediates: odd tagged ints carrying the ctor index. Decode
+         * instead of dereferencing (which would fault). */
+        int64_t raw = (int64_t)(intptr_t)inner_msg;
+        msg_tag = (raw & 1) ? (int32_t)(raw >> 1) : 0;
+    }
+
+    /* Positional dispatch: the sentinel's per-type tag IS the handler
+     * index. The actor's dispatch switch matches GLOBAL msg tags (F19:
+     * base 0x0100_0000 + declaration index, unique across actors), so
+     * translate index → global tag via the base stamped at alloc time.
+     * Without this every call message falls to the dispatch default arm
+     * and is silently dropped — the caller blocks forever (or times out). */
+    if (meta->call_tag_base) msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
 
     /* Build the augmented call message: same tag, field 0 = caller proc ptr.
      * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
@@ -2119,11 +2153,39 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 
     march_sched_send(meta->green_thread, call_msg);
 
-    /* Block until the actor calls actor_reply. */
-    void *result = march_sched_recv();
-    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+    if (timeout_ms <= 0) {
+        /* Preserve wait-forever semantics for callers that opt out. */
+        void *result = march_sched_recv();
+        if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+        return mk_ok(result);
+    }
 
-    return mk_ok(result);
+    /* Timed wait: poll the mailbox with cooperative yields until the
+     * deadline.  A parked-with-deadline mechanism needs timer support the
+     * scheduler doesn't have; replies are normally immediate, so the yield
+     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+     *
+     * Known limitation: on timeout, a late reply still lands in the
+     * caller's mailbox. Safe for per-call task green threads (the thread
+     * exits and sends to dead procs are dropped); a long-lived green thread
+     * mixing Actor.call and raw receive could observe a stale reply after
+     * a timeout. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
+                          + timeout_ms;
+    for (;;) {
+        void *msg = NULL;
+        if (march_sched_try_recv2(&msg)) {
+            if (msg == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
+            return mk_ok(msg);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            return mk_err_cstr("actor_call: timeout");
+        march_sched_yield();
+    }
 }
 
 /*

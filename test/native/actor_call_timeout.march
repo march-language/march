@@ -1,0 +1,21 @@
+mod ActorCallTimeout do
+  type CallGet = CallGet
+
+  actor Silent do
+    state { value : Int }
+    init { value: 0 }
+    -- tag 0: receives the call but never replies.
+    on GetValue(_ref) do
+      state
+    end
+  end
+
+  fn main() : Unit do
+    let c = spawn(Silent)
+    match Actor.call(c, CallGet, 300) do
+    Ok(_)  -> println("fail:expected_timeout")
+    Err(_) -> println("timeout_ok")
+    end
+    kill(c)
+  end
+end

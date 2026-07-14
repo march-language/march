@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t84 accept, t01–t78 reject)
+# Typing corpus index (t01–t84 accept, t01–t79 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 162/162 — 84 accept, 78
+Exit 0 iff every program behaves as declared (currently 163/163 — 84 accept, 79
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -468,7 +468,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t77_linear_field_param_double_access` | **(T-LinField), fn-PARAM sentinel path — finding L3 FIX witness (2026-07-11, §2.9.3)** — reject twin of `t63`, but the record is fn-PARAM-bound instead of let-bound. Before the fix, the param never got a `p#data` sentinel and this degraded to a WARNING (the exact gap that made the pre-slice unit test `test_linear_field_double_access_error` vacuous); now the param gets a sentinel too and the second access trips `record_use` identically to the let-bound case | `is used more than once here` |
 | `t78_linear_return_type_drop` | **finding L8 FIX witness (2026-07-12, §2.9.1)** — a `fn mk() : linear Res` called via a plain `let h = mk()` (no keyword, no annotation) now correctly rejects when dropped, same as `linear let h = mk()`/`let h : linear Res = mk()`. Before the fix, `infer_block`'s ELet `auto_lin` computation only checked for a `TCon` matching `always_linear_types` and silently fell through to Unrestricted for a `TLin`-wrapped RHS type — the return-position `linear` qualifier was decorative | `The linear value \`h\` was never used.` |
 
-**Result: 162 / 162 (84 accept, 78 reject).**
+**Result: 163 / 163 (84 accept, 79 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

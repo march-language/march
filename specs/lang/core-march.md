@@ -2430,9 +2430,10 @@ with NO `get_actor_field`/`pid_of_int` — **diverges** (interp fires the child
 `init`s, compiled runs none). A directly-spawned actor's printing `init` *does*
 run byte-identically on both backends (that path is not supervisor-mediated), so
 the divergence is specifically the supervisor-child-spawn plane, not `init`
-bodies in general. Both the `get_actor_field`/`pid_of_int` compiled crash and
-the `Actor.call` timeout gap encountered nearby are filed as open findings in
-`specs/todos.md`. Consequently the supervision restart semantics are documented
+bodies in general. The `get_actor_field`/`pid_of_int` compiled crash is filed as an open finding
+in `specs/todos.md` (the `Actor.call` timeout gap encountered nearby was fixed
+2026-07-13 — the compiled runtime now enforces `timeout_ms`, see
+`specs/lang/actors.md`). Consequently the supervision restart semantics are documented
 here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
 added** — the same class of "the observation surface diverges/crashes compiled,
 so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
