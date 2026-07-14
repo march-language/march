@@ -1,0 +1,76 @@
+-- types (7) --
+closure $Clo_$jp11$0(Ptr(Unit), Int)
+closure $Clo_$jp6$1(Ptr(Unit))
+closure $Clo_$jp1$2(Ptr(Unit))
+closure $Clo_$jp1$3(Ptr(Unit))
+closure $Clo_$jp6$4(Ptr(Unit))
+closure $Clo_$jp1$5(Ptr(Unit))
+closure $Clo_$jp1$6(Ptr(Unit))
+-- fns (9) --
+## $jp1$apply$2
+fn $jp1$apply$2($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp1$apply$3
+fn $jp1$apply$3($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp1$apply$5
+fn $jp1$apply$5($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp1$apply$6
+fn $jp1$apply$6($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp11$apply$0
+fn $jp11$apply$0($clo : Ptr(Unit)) : '_ =
+  let x : Int = inc_rc $clo;
+$clo.$fv1 in
+let $jp_clo7 : () -> '_ = alloc $Clo_$jp6$1($jp6$apply$1) in
+dec_rc $jp_clo7;
+let n : Int = x in
+let $guard5 : Bool = <(n, 0) in
+case $guard5 of
+  true() -> "neg"
+  _ -> let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$3($jp1$apply$3) in
+dec_rc $jp_clo2;
+"zero"
+
+## $jp6$apply$1
+fn $jp6$apply$1($clo : Ptr(Unit)) : '_ =
+  let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$2($jp1$apply$2) in
+dec_rc $jp_clo2;
+"zero"
+
+## $jp6$apply$4
+fn $jp6$apply$4($clo : Ptr(Unit)) : '_ =
+  let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$5($jp1$apply$5) in
+dec_rc $jp_clo2;
+"zero"
+
+## classify
+fn classify(x : Int) : String =
+  let $jp_clo12 : () -> '_ = alloc $Clo_$jp11$0($jp11$apply$0, x) in
+dec_rc $jp_clo12;
+let n : Int = x in
+let $guard10 : Bool = >(n, 0) in
+case $guard10 of
+  true() -> "pos"
+  _ -> let $jp_clo7 : () -> '_ = alloc $Clo_$jp6$4($jp6$apply$4) in
+dec_rc $jp_clo7;
+let n$sh1 : Int = x in
+let $guard5 : Bool = <(n$sh1, 0) in
+case $guard5 of
+  true() -> "neg"
+  _ -> let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$6($jp1$apply$6) in
+dec_rc $jp_clo2;
+"zero"
+
+## main
+fn main() : () =
+  let $t15 : String = classify(5) in
+let $rc_1 : () = println($t15) in
+dec_rc $t15;
+$rc_1
+

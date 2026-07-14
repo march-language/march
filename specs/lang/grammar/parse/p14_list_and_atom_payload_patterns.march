@@ -1,0 +1,25 @@
+mod P14ListAndAtomPayloadPatterns do
+  fn describe(tagged) do
+    match tagged do
+      :ok(n) -> n * 10
+      :error(_msg) -> -1
+      _ -> 0
+    end
+  end
+
+  fn sum_first_two(xs) do
+    match xs do
+      [a, b] -> a + b
+      [a, b, c] -> a + b + c
+      _ -> 0
+    end
+  end
+
+  fn main() do
+    println(describe(:ok(7)))
+    println(describe(:error("bad")))
+    println(sum_first_two([1, 2]))
+    println(sum_first_two([1, 2, 3]))
+    println(sum_first_two([]))
+  end
+end

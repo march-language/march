@@ -1,0 +1,145 @@
+-- Unit tests for ForgeRegistry's pure logic (multipart framing, response
+-- classification, endpoint URL building, manifest parsing) — no network,
+-- no tar shell-out. Run with: dune exec march -- test forge/tasks/test_registry.march
+mod TestForgeRegistry do
+
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetConnect.TLS
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Random
+
+  import ForgeRegistry
+  import Test
+
+describe "ForgeRegistry.publish_url / retire_url" do
+
+  test "publish_url builds the exact releases path" do
+    Test.assert_eq_str(ForgeRegistry.publish_url("https://forgepm.org", "bastion"),
+      "https://forgepm.org/api/v1/packages/bastion/releases", "publish url")
+  end
+
+  test "publish_url normalizes a trailing slash on the registry" do
+    Test.assert_eq_str(ForgeRegistry.publish_url("https://forgepm.org/", "bastion"),
+      "https://forgepm.org/api/v1/packages/bastion/releases", "no double slash")
+  end
+
+  test "retire_url appends the version" do
+    Test.assert_eq_str(ForgeRegistry.retire_url("https://forgepm.org", "bastion", "0.1.3"),
+      "https://forgepm.org/api/v1/packages/bastion/releases/0.1.3", "retire url")
+  end
+
+end
+
+describe "ForgeRegistry.multipart" do
+
+  test "frames tarball + checksum with a fixed boundary, byte-exact" do
+    let body = ForgeRegistry.multipart("BOUND123", "fake-tarball-bytes", "pkg-0.1.0.tar.gz", "abc123")
+    Test.assert_true(String.contains(body, "--BOUND123\r\n"), "opening boundary")
+    Test.assert_true(String.contains(body, "Content-Disposition: form-data; name=\"tarball\"; filename=\"pkg-0.1.0.tar.gz\"\r\n"), "tarball part header")
+    Test.assert_true(String.contains(body, "Content-Type: application/octet-stream\r\n"), "tarball content type")
+    Test.assert_true(String.contains(body, "\r\n\r\nfake-tarball-bytes\r\n"), "tarball bytes appear verbatim")
+    Test.assert_true(String.contains(body, "Content-Disposition: form-data; name=\"checksum\"\r\n\r\nabc123\r\n"), "checksum part")
+    Test.assert_true(String.ends_with(body, "--BOUND123--\r\n"), "closing boundary")
+  end
+
+  test "tarball bytes containing the boundary substring survive verbatim (binary-safety)" do
+    let tricky = "before--BOUND123--after"
+    let body = ForgeRegistry.multipart("BOUND123", tricky, "f.tar.gz", "cs")
+    Test.assert_true(String.contains(body, "\r\n\r\n" ++ tricky ++ "\r\n"), "boundary-looking bytes not re-escaped or truncated")
+  end
+
+end
+
+describe "ForgeRegistry.finalize / classify" do
+
+  test "finalize parses status and body from a raw HTTP response" do
+    let raw = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{\"name\":\"bastion\"}"
+    match ForgeRegistry.finalize(raw) do
+    (status, body) -> do
+      Test.assert_eq_int(status, 201, "status")
+      Test.assert_eq_str(body, "{\"name\":\"bastion\"}", "body")
+    end
+    end
+  end
+
+  test "classify maps a 2xx to Published with name/version/checksum from the JSON body" do
+    let body = "{\"name\":\"bastion\",\"version\":\"0.1.3\",\"checksum\":\"a3f8\"}"
+    match ForgeRegistry.classify(201, body) do
+    Published(nm, vsn, cs) -> do
+      Test.assert_eq_str(nm, "bastion", "name")
+      Test.assert_eq_str(vsn, "0.1.3", "version")
+      Test.assert_eq_str(cs, "a3f8", "checksum")
+    end
+    Rejected(_, _, _) -> Test.fail("expected Published")
+    end
+  end
+
+  test "classify maps 2fa_required to a friendly, actionable message" do
+    let body = "{\"error\":\"2fa_required\",\"message\":\"\"}"
+    match ForgeRegistry.classify(403, body) do
+    Published(_, _, _) -> Test.fail("expected Rejected")
+    Rejected(code, msg, http) -> do
+      Test.assert_eq_str(code, "2fa_required", "code")
+      Test.assert_eq_str(msg, "enable 2FA in your account settings before publishing", "friendly message")
+      Test.assert_eq_int(http, 403, "http status")
+    end
+    end
+  end
+
+  test "classify maps version_exists to a friendly message naming the fix" do
+    let body = "{\"error\":\"version_exists\",\"message\":\"\"}"
+    match ForgeRegistry.classify(409, body) do
+    Published(_, _, _) -> Test.fail("expected Rejected")
+    Rejected(code, msg, _) -> do
+      Test.assert_eq_str(code, "version_exists", "code")
+      Test.assert_true(String.contains(msg, "bump the version"), "message names the fix")
+    end
+    end
+  end
+
+  test "classify falls back to the server's raw message for an unmapped error code" do
+    let body = "{\"error\":\"some_new_code\",\"message\":\"server explains itself here\"}"
+    match ForgeRegistry.classify(422, body) do
+    Published(_, _, _) -> Test.fail("expected Rejected")
+    Rejected(code, msg, _) -> do
+      Test.assert_eq_str(code, "some_new_code", "unmapped code passed through")
+      Test.assert_eq_str(msg, "server explains itself here", "raw server message used")
+    end
+    end
+  end
+
+end
+
+describe "ForgeRegistry.read_name_version" do
+
+  test "reads name and version from a valid forge.toml" do
+    let toml = "[package]\nname = \"bastion\"\nversion = \"0.2.0\"\n"
+    match ForgeRegistry.read_name_version(toml) do
+    Ok((name, version)) -> do
+      Test.assert_eq_str(name, "bastion", "name")
+      Test.assert_eq_str(version, "0.2.0", "version")
+    end
+    Err(e) -> Test.fail("expected Ok, got Err(" ++ e ++ ")")
+    end
+  end
+
+  test "returns Err when [package] is missing" do
+    let toml = "[deps]\n"
+    match ForgeRegistry.read_name_version(toml) do
+    Ok(_) -> Test.fail("expected Err")
+    Err(e) -> Test.assert_true(String.contains(e, "[package]"), "error names the missing table")
+    end
+  end
+
+  test "returns Err on malformed TOML" do
+    match ForgeRegistry.read_name_version("this is not [ valid toml") do
+    Ok(_) -> Test.fail("expected Err")
+    Err(_) -> Test.assert_true(true, "malformed TOML rejected")
+    end
+  end
+
+end
+
+end

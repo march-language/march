@@ -49,6 +49,7 @@ let test_serialize_fn_def_deterministic () =
                  { v_name = "y"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let b1 = March_cas.Serialize.serialize_fn_def fd in
   let b2 = March_cas.Serialize.serialize_fn_def fd in
@@ -60,6 +61,7 @@ let test_serialize_fn_def_body_changes_output () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let changed = { base with fn_body = EAtom (ALit (March_ast.Ast.LitInt 0)) } in
   let b1 = March_cas.Serialize.serialize_fn_def base in
@@ -79,6 +81,7 @@ let test_serialize_sig_excludes_body () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TBool;
     fn_body   = EAtom (ALit (March_ast.Ast.LitBool true));
+    fn_kind   = FnNormal;
   } in
   let fd2 = { fd1 with fn_body = EAtom (ALit (March_ast.Ast.LitBool false)) } in
   let s1 = March_cas.Serialize.serialize_fn_sig fd1 in
@@ -91,6 +94,7 @@ let test_serialize_sig_differs_on_param_type_change () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TBool;
     fn_body   = EAtom (ALit (March_ast.Ast.LitBool true));
+    fn_kind   = FnNormal;
   } in
   let fd2 = { fd1 with fn_params = [{ v_name = "x"; v_ty = TFloat; v_lin = Unr }] } in
   let s1 = March_cas.Serialize.serialize_fn_sig fd1 in
@@ -121,6 +125,22 @@ let test_blake3_known_vector () =
   let expected = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262" in
   Alcotest.(check string) "empty input hash matches known vector" expected h
 
+(* Phase5C-C.2: cross-implementation agreement between this OCaml BLAKE3
+   (lib/cas/blake3_stubs.c, via libblake3) and the C-runtime helper
+   (runtime/march_blake3.c, also via libblake3) that march_reload.c
+   (Phase5C-C.3) will use to recompute cap_root server-side. Both sides
+   assert the *same* fixture hashes to the *same* literal — see
+   test/test_blake3_agreement.c for the C-side half of this check. A
+   mismatch here (this test, or the C test) means the two implementations
+   have diverged and cap_root tamper checks would silently break. *)
+let test_blake3_cross_impl_agreement_fixture () =
+  let h = March_cas.Blake3.hash_string "march-hcr-blake3-agreement-fixture" in
+  let expected = "24b435176d98631a620c35d049975df9e07dd4d761d89593f1e6b55fe3767717" in
+  Alcotest.(check string)
+    "OCaml Blake3.hash_string(fixture) matches the literal also asserted by \
+     test_blake3_agreement.c's runtime march_blake3_hex(fixture)"
+    expected h
+
 let test_hash_fn_def () =
   let fd : fn_def = {
     fn_name   = "add";
@@ -128,6 +148,7 @@ let test_hash_fn_def () =
                  { v_name = "y"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let hashed = March_cas.Hash.hash_fn_def fd in
   Alcotest.(check int) "sig_hash is 64 hex chars"  64 (String.length hashed.March_cas.Hash.sig_hash);
@@ -139,6 +160,7 @@ let test_impl_hash_changes_with_body () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let fd2 = { fd1 with fn_body = EAtom (ALit (March_ast.Ast.LitInt 42)) } in
   let h1 = March_cas.Hash.hash_fn_def fd1 in
@@ -152,6 +174,7 @@ let test_sig_hash_stable_across_body_change () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let fd2 = { fd1 with fn_body = EAtom (ALit (March_ast.Ast.LitInt 42)) } in
   let h1 = March_cas.Hash.hash_fn_def fd1 in
@@ -180,6 +203,7 @@ let test_cas_store_and_lookup_def () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let hashed = March_cas.Hash.hash_fn_def fd in
   let hd : March_cas.Cas.hashed_def = {
@@ -299,6 +323,7 @@ let test_cas_gc_removes_unreferenced () =
     fn_params = [];
     fn_ret_ty = TUnit;
     fn_body   = EAtom (ALit (March_ast.Ast.LitAtom "unit"));
+    fn_kind   = FnNormal;
   } in
   let hashed = March_cas.Hash.hash_fn_def fd in
   let hd : March_cas.Cas.hashed_def = {
@@ -324,6 +349,7 @@ let test_scc_single_non_recursive () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let sccs = March_cas.Scc.compute_sccs [fd] in
   Alcotest.(check int) "one SCC for one fn" 1 (List.length sccs);
@@ -339,6 +365,7 @@ let test_scc_self_recursive_is_single () =
     fn_ret_ty = TInt;
     fn_body   = EApp ({ v_name = "f"; v_ty = TFn ([TInt], TInt); v_lin = Unr },
                       [AVar { v_name = "x"; v_ty = TInt; v_lin = Unr }]);
+    fn_kind   = FnNormal;
   } in
   let sccs = March_cas.Scc.compute_sccs [fd] in
   Alcotest.(check int) "one SCC for self-recursive fn" 1 (List.length sccs);
@@ -356,6 +383,7 @@ let test_scc_mutual_recursion_is_group () =
     fn_ret_ty = TBool;
     fn_body   = EApp ({ v_name = "odd"; v_ty = TFn ([TInt], TBool); v_lin = Unr },
                       [AVar { v_name = "n"; v_ty = TInt; v_lin = Unr }]);
+    fn_kind   = FnNormal;
   } in
   let odd_fd : fn_def = {
     fn_name   = "odd";
@@ -363,6 +391,7 @@ let test_scc_mutual_recursion_is_group () =
     fn_ret_ty = TBool;
     fn_body   = EApp ({ v_name = "even"; v_ty = TFn ([TInt], TBool); v_lin = Unr },
                       [AVar { v_name = "n"; v_ty = TInt; v_lin = Unr }]);
+    fn_kind   = FnNormal;
   } in
   let sccs = March_cas.Scc.compute_sccs [even_fd; odd_fd] in
   Alcotest.(check int) "one SCC group for mutual recursion" 1 (List.length sccs);
@@ -379,6 +408,7 @@ let test_scc_topological_order () =
     fn_params = [{ v_name = "x"; v_ty = TInt; v_lin = Unr }];
     fn_ret_ty = TInt;
     fn_body   = EAtom (AVar { v_name = "x"; v_ty = TInt; v_lin = Unr });
+    fn_kind   = FnNormal;
   } in
   let g_fd : fn_def = {
     fn_name   = "g";
@@ -386,6 +416,7 @@ let test_scc_topological_order () =
     fn_ret_ty = TInt;
     fn_body   = EApp ({ v_name = "f"; v_ty = TFn ([TInt], TInt); v_lin = Unr },
                       [AVar { v_name = "x"; v_ty = TInt; v_lin = Unr }]);
+    fn_kind   = FnNormal;
   } in
   let sccs = March_cas.Scc.compute_sccs [g_fd; f_fd] in
   (* f must appear before g in topological order *)
@@ -449,6 +480,7 @@ let test_impl_hash_changes_when_dependency_hash_changes () =
     fn_params = [];
     fn_ret_ty = TInt;
     fn_body   = EAtom (ADefRef did_v1);
+    fn_kind   = FnNormal;
   } in
   let g2 = { g1 with fn_body = EAtom (ADefRef did_v2) } in
   let h1 = March_cas.Hash.hash_fn_def g1 in
@@ -462,7 +494,7 @@ let test_impl_hash_changes_when_dependency_hash_changes () =
 
 (* Helpers *)
 let make_fn name body : fn_def =
-  { fn_name = name; fn_params = []; fn_ret_ty = TInt; fn_body = body }
+  { fn_name = name; fn_params = []; fn_ret_ty = TInt; fn_body = body; fn_kind = FnNormal }
 
 let int_atom n = EAtom (ALit (March_ast.Ast.LitInt n))
 
@@ -660,7 +692,8 @@ let test_impl_hash_unaffected_by_unrelated_def_via_pipeline () =
 let fn_using ty name : fn_def =
   (* a fn whose signature mentions [ty] *)
   { fn_name = name; fn_params = [{ v_name = "u"; v_ty = ty; v_lin = Unr }];
-    fn_ret_ty = TInt; fn_body = EAtom (ALit (March_ast.Ast.LitInt 0)) }
+    fn_ret_ty = TInt; fn_body = EAtom (ALit (March_ast.Ast.LitInt 0));
+    fn_kind = FnNormal }
 
 let test_impl_hash_tracks_referenced_type_layout () =
   (* f takes a User. Changing User's record layout must move f's impl_hash
@@ -732,6 +765,7 @@ let () =
       Alcotest.test_case "different inputs → different hashes" `Quick test_blake3_different_inputs_different_hashes;
       Alcotest.test_case "output is 64 hex chars"             `Quick test_blake3_output_is_64_hex_chars;
       Alcotest.test_case "known empty-input vector"           `Quick test_blake3_known_vector;
+      Alcotest.test_case "cross-impl agreement w/ runtime march_blake3_hex" `Quick test_blake3_cross_impl_agreement_fixture;
       Alcotest.test_case "hash_fn_def produces hashes"        `Quick test_hash_fn_def;
       Alcotest.test_case "impl_hash changes with body"        `Quick test_impl_hash_changes_with_body;
       Alcotest.test_case "sig_hash stable across body change" `Quick test_sig_hash_stable_across_body_change;

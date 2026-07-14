@@ -1,0 +1,22 @@
+mod M do
+  -- (T-ImplMatch) generic/parameterised impl head: `impl Describe(Box(a))`
+  -- covers every instantiation of `Box`, because `impl_matches_ty` treats the
+  -- impl's own free type variable `a` as a wildcard (typecheck.ml:4970).
+  -- Used here at both `Box(Int)` and `Box(String)`.
+  interface Describe(a) do
+    fn describe : a -> String
+  end
+
+  type Box(a) = Box(a)
+
+  impl Describe(Box(a)) do
+    fn describe(_self) do
+      "a box"
+    end
+  end
+
+  fn main() do
+    println(describe(Box(1)))
+    println(describe(Box("hi")))
+  end
+end

@@ -1,0 +1,16 @@
+-- types (0) --
+-- fns (2) --
+## main
+fn main() : () =
+  let $t4 : Int = sum_to(5, 0) in
+println($t4)
+
+## sum_to
+fn sum_to(n : Int, acc : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> acc
+  _ -> let $t2 : Int = -(n, 1) in
+let $t3 : Int = +(acc, n) in
+sum_to($t2, $t3)
+

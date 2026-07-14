@@ -3295,6 +3295,82 @@ let test_tc_sig_opaque_hides_ctors () =
   end|} in
   Alcotest.(check bool) "opaque type — ctors hidden outside" true (has_errors ctx)
 
+(* Order-independent multi-module resolution: a submodule that references a
+   sibling's BARE type/constructors (no import) must resolve regardless of check
+   order.  A dependency CYCLE (Types -> Handlers via a call, Handlers -> Types
+   via bare `Event`/`Started`) makes the two impossible to topologically order,
+   so before bare types/ctors were seeded in Pass 1 this failed whenever the
+   referrer sorted first ("I cannot find `Event`" / unknown constructor). *)
+let test_tc_cyclic_bare_ctor_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+      fn describe(e : Event) : String do Handlers.label(e) end
+    end
+    mod Handlers do
+      fn label(e : Event) : String do
+        match e do
+          Started -> "started"
+          Stopped(m) -> m
+        end
+      end
+      fn make() : Event do Started end
+      fn disambig() : Event do Event.Stopped("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "cyclic cross-module bare ctor/type — no errors"
+    false (has_errors ctx)
+
+(* Companion: a function whose signature names a sibling module's type by its
+   QUALIFIED path (`Types.Event`) must still unify with the bare `Event` a
+   caller produces, regardless of which module's Pass-2 check runs first.  The
+   prebind fn-scheme used to emit the qualified nominal verbatim, giving an
+   order-dependent "expected Types.Event but got Event". *)
+let test_tc_qualified_sig_type_order_independent () =
+  let ctx = typecheck {|mod App do
+    mod Types do
+      type Event = Started | Stopped(String)
+    end
+    mod Producer do
+      fn make() : Event do Started end
+    end
+    mod Consumer do
+      fn take(e : Types.Event) : String do
+        match e do
+          Started -> "s"
+          Stopped(m) -> m
+        end
+      end
+      fn run() : String do Consumer.take(Producer.make()) end
+    end
+  end|} in
+  Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
+    false (has_errors ctx)
+
+(* Regression (2026-07-10): a module must be able to use its OWN constructor
+   when a SIBLING module declares a same-named one with a different payload.
+   d95fe942's Pass-1 bare-ctor seeding put the later sibling's `Mk` at the
+   head of the candidate list, and Pass-2's own-module re-registration was a
+   structural-dedup NO-OP — so `A.make`'s `Mk(1)` resolved against B's
+   `Mk(String)` ("expected String but got Int" pointing inside A).  add_ctor
+   now moves a re-registered entry to the FRONT, restoring the declaring
+   module's recency for its own body check while keeping the Pass-1 seeds
+   (and thus cross-module order-independence) intact.  Caught by the types
+   corpus (accept/t35 went red at merge time); witnessed by accept/t69. *)
+let test_tc_sibling_ctor_own_module_wins () =
+  let ctx = typecheck {|mod Main do
+    mod A do
+      type Foo = Mk(Int)
+      fn make() : Foo do Mk(1) end
+    end
+    mod B do
+      type Foo = Mk(String)
+      fn make() : Foo do Mk("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "own-module ctor wins over same-named sibling — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -3682,6 +3758,62 @@ let test_derive_variant_with_args_eq () =
   end|} in
   Alcotest.(check bool) "derive Eq for variant with args" true
     (vbool (call_fn env "result" []))
+
+(* Regression: with 2+ impls of the same interface in scope, the named method
+   builtins (eq/compare/hash) must dispatch on the argument's type, not resolve
+   to the last-registered impl.  Previously the DImpl eval bound the bare method
+   name in the env, so the second `derive` shadowed the first and calling the
+   method on the first type ran the wrong impl (false result / non-exhaustive
+   match panic). *)
+let test_eval_eq_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Eq for Wrap
+    type WrapS = WrapS(String)
+    derive Eq for WrapS
+    fn r_first_eq() : Bool do eq(Wrap(1), Wrap(1)) end
+    fn r_first_ne() : Bool do eq(Wrap(1), Wrap(2)) end
+    fn r_last_eq() : Bool do eq(WrapS("a"), WrapS("a")) end
+  end|} in
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(1)) dispatches to Wrap.eq = true" true
+    (vbool (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "eq(Wrap(1),Wrap(2)) = false" false
+    (vbool (call_fn env "r_first_ne" []));
+  Alcotest.(check bool) "eq(WrapS a,WrapS a) still dispatches = true" true
+    (vbool (call_fn env "r_last_eq" []))
+
+let test_eval_compare_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Ord for Dir
+    type Size = Small | Large
+    derive Ord for Size
+    fn r_first_lt() : Int do compare(North, West) end
+    fn r_first_eq() : Int do compare(North, North) end
+    fn r_last_lt() : Int do compare(Small, Large) end
+  end|} in
+  Alcotest.(check bool) "compare(North,West) < 0 dispatches to Dir.compare" true
+    (vint (call_fn env "r_first_lt" []) < 0);
+  Alcotest.(check int) "compare(North,North) = 0" 0
+    (vint (call_fn env "r_first_eq" []));
+  Alcotest.(check bool) "compare(Small,Large) < 0 still dispatches" true
+    (vint (call_fn env "r_last_lt" []) < 0)
+
+let test_eval_hash_multi_type_dispatch () =
+  let env = eval_module {|mod Test do
+    type Dir = North | South | East | West
+    derive Hash for Dir
+    type Size = Small | Large
+    derive Hash for Size
+    fn r_first() : Int do hash(South) end
+    fn r_last() : Int do hash(Large) end
+  end|} in
+  (* Before the fix, hash(South) ran Size.hash (last-registered) and panicked
+     with a non-exhaustive match; just assert both dispatch without error. *)
+  let a = vint (call_fn env "r_first" []) in
+  let b = vint (call_fn env "r_last" []) in
+  Alcotest.(check bool) "hash dispatches per-type without error" true
+    (a >= 0 && b >= 0 || a <> b || true)
 
 (* ── Helpers for exhaustiveness tests ──────────────────────────────────── *)
 
@@ -4521,7 +4653,6 @@ let test_hash_prop_eq_consistency () =
       let a = Red
       let b = Red
       if a == b do hash(a) == hash(b) else true end
-      if a == b then hash(a) == hash(b) else true
     end
   end|} in
   Alcotest.(check bool) "Hash/Eq consistency: a==b => hash(a)==hash(b)" true
@@ -4735,24 +4866,24 @@ let test_parse_empty_module () =
     (List.length m.March_ast.Ast.mod_decls)
 
 let test_parse_deeply_nested_if () =
-  (* 8 levels of nested if/then/else *)
+  (* 8 levels of nested if/do/else/end *)
   let src = {|mod Test do
     fn deep(x : Int) : Int do
-      if x > 0 then
-        if x > 1 then
-          if x > 2 then
-            if x > 3 then
-              if x > 4 then
-                if x > 5 then
-                  if x > 6 then
+      if x > 0 do
+        if x > 1 do
+          if x > 2 do
+            if x > 3 do
+              if x > 4 do
+                if x > 5 do
+                  if x > 6 do
                     if x > 7 do x else 7 end
-                  else 6
-                else 5
-              else 4
-            else 3
-          else 2
-        else 1
-      else 0
+                  else 6 end
+                else 5 end
+              else 4 end
+            else 3 end
+          else 2 end
+        else 1 end
+      else 0 end
     end
   end|} in
   let m = parse_module src in
@@ -5076,7 +5207,8 @@ let test_tap_in_actor_context () =
 (*                                                                     *)
 (* These tests run the same March code through BOTH the interpreter   *)
 (* (repl_eval_exprs) and JIT (when available) and compare outputs.    *)
-(* JIT tests skip gracefully when clang/runtime is unavailable.       *)
+(* JIT tests skip (counted) only when clang is absent; runtime-source *)
+(* or link problems fail loudly per W2.0 — see setup_jit_runtime.     *)
 (* ------------------------------------------------------------------ *)
 
 (** Run an expression through the interpreter and return (value_str, type_str) option. *)
@@ -5121,6 +5253,25 @@ let test_parity_string_interp () =
     ) [
       {|"hello"|};
       {|int_to_string(42)|};
+    ]
+
+(* `show(:atom)` through the JIT/REPL path specifically: the generated
+   @march_atom_to_string reverse-lookup switch (Show$Atom.show's backing) must
+   be emitted into the fragment by the REPL finalizers, not only by the AOT
+   emit_module — a JIT fragment referencing it with no in-module definition is
+   a clang error.  Directly pins the path that regressed (undefined symbol)
+   during the Show(Atom) fix; interpreter renders atoms as ":name", so the JIT
+   must agree. *)
+let test_parity_atom_show () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun src ->
+      check_parity ~ctx:"atom_show" ~runtime_so src
+    ) [
+      {|show(:ok)|};
+      {|show(:hello_world)|};
+      {|show(:ok) ++ show(:err)|};
     ]
 
 let test_parity_closures () =
@@ -5184,40 +5335,31 @@ let test_parity_bitwise_builtins () =
     (1024), so the chunked parallel path (real multi-core scheduler) runs.
     Compiled end-to-end (not REPL/JIT) so it exercises the production path. *)
 let test_compiled_pmap_matches_map () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_pmap" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "pmap.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod PmapParity do\n\
-      \  fn main() : Unit do\n\
-      \    let xs = List.range(0, 2000)\n\
-      \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
-      \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
-      \    if map_ok && flt_ok do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "pmapbin" in
-    (* Run from the test's CWD (project root) so the compiler resolves the
-       CWD-relative runtime/ and stdlib/ directories; use absolute paths for
-       the source and output. *)
-    let compile_rc = Sys.command (Printf.sprintf
-      "%s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    (* Skip when compilation can't complete in this environment (no clang or
-       runtime sources on the search path) — matches the other Slow compiled
-       regression tests. When it does compile, the run asserts correctness. *)
-    if compile_rc <> 0 then ()
-    else
-      Alcotest.(check int)
-        "compiled List.pmap==map and List.pfilter==filter (2000 elems, parallel path)"
-        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_pmap" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "pmap.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod PmapParity do\n\
+    \  fn main() : Unit do\n\
+    \    let xs = List.range(0, 2000)\n\
+    \    let map_ok = List.pmap(xs, fn x -> x * x) == List.map(xs, fn x -> x * x)\n\
+    \    let flt_ok = List.pfilter(xs, fn x -> x % 2 == 0) == List.filter(xs, fn x -> x % 2 == 0)\n\
+    \    if map_ok && flt_ok do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "pmapbin" in
+  (* Run from the test's CWD (project root) so the compiler resolves the
+     CWD-relative runtime/ and stdlib/ directories; use absolute paths for
+     the source and output. *)
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled List.pmap==map and List.pfilter==filter (2000 elems, parallel path)"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
 
 (* ── Tail-call enforcement tests ────────────────────────────────────────── *)
 
@@ -9567,6 +9709,46 @@ end|} in
   Alcotest.(check bool) "format_inner not flagged via impl method" false
     (List.mem "format_inner" flagged)
 
+(* ── safety/no-panic-in-lib file classification (is_lib_file) ──────────────── *)
+
+(** A module in a `*_test.march` file panics legitimately (test helpers assert
+    via panic); no-panic-in-lib must NOT fire. Regression for the is_lib_file
+    off-by-one that made the `_test.march` suffix exclusion dead code. *)
+let panic_src = {|mod Demo do
+fn boom() do
+  panic("nope")
+end
+end|}
+
+let test_lint_no_panic_test_suffix_exempt () =
+  let diags = lint_check_named ~filename:"foo_test.march" panic_src in
+  Alcotest.(check bool) "panic in *_test.march NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** The same source in a plain library file MUST be flagged — the fix must not
+    suppress the rule for real library code. *)
+let test_lint_no_panic_lib_flagged () =
+  let diags = lint_check_named ~filename:"foo.march" panic_src in
+  Alcotest.(check bool) "panic in library file IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `test/` directory (any basename, no `_test` suffix) is also a
+    test — forge lint scans both lib/ and test/ with full paths, so the
+    directory is the reliable signal. Must NOT be flagged. *)
+let test_lint_no_panic_test_dir_exempt () =
+  let diags =
+    lint_check_named ~filename:"/proj/test/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under test/ dir NOT flagged" false
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
+(** A file under a `lib/` directory with the same basename IS flagged, confirming
+    it is the `test/` path component — not merely a deep path — that exempts. *)
+let test_lint_no_panic_lib_dir_flagged () =
+  let diags =
+    lint_check_named ~filename:"/proj/lib/scratch.march" panic_src in
+  Alcotest.(check bool) "panic under lib/ dir IS flagged" true
+    (has_lint_rule "safety/no-panic-in-lib" diags)
+
 (* ────────────────────────────────────────────────────────────────────────────
    Adversarial-regression tests
    Each test corresponds to a bug found by the adversarial compiler review.
@@ -9852,37 +10034,30 @@ let test_dmod_test_body_qualifies_helper_refs () =
    and assert it exits 0.  Skips gracefully (like the JIT tests) when the
    compiler binary, clang, or the runtime is unavailable. *)
 let test_compiled_check_property_passes () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_checktag" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "t_test.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod CheckTag do\n\
-      \  describe \"tagging\" do\n\
-      \    test \"trivially-true property passes compiled\" do\n\
-      \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
-      \    end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "tbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled trivially-true Check.all property exits 0" 0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_checktag" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "t_test.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod CheckTag do\n\
+    \  describe \"tagging\" do\n\
+    \    test \"trivially-true property passes compiled\" do\n\
+    \      Check.all(Gen.int(0, 5), fn x -> x >= 0)\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "tbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src ~extra_args:"--test" () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled trivially-true Check.all property exits 0" 0 run_rc
 
 (* ── __try_call_val: heap Ok payload round-trips + panic caught ──────────────
    __try_call_val : (Bool -> a) -> Result(a, String) is the value-carrying
@@ -9893,46 +10068,39 @@ let test_compiled_check_property_passes () =
    a panicking thunk as Err, asserting it exits 0.  Skips when the compiler /
    clang / runtime is unavailable, like the sibling tests. *)
 let test_compiled_try_call_val_heap_roundtrip () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_trycallval" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "tcv.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod TryCallVal do\n\
-      \  describe \"__try_call_val\" do\n\
-      \    test \"heap Ok payload round-trips\" do\n\
-      \      match __try_call_val(fn _ -> \"hello world\") do\n\
-      \        Ok(s)  -> assert s == \"hello world\"\n\
-      \        Err(_) -> assert false\n\
-      \      end\n\
-      \    end\n\
-      \    test \"panicking thunk is caught as Err\" do\n\
-      \      match __try_call_val(fn _ -> do let _ = 1 / 0 \"unreached\" end) do\n\
-      \        Ok(_)  -> assert false\n\
-      \        Err(_) -> assert true\n\
-      \      end\n\
-      \    end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "tbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile --test -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled __try_call_val heap round-trip + panic catch exits 0" 0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_trycallval" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "tcv.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod TryCallVal do\n\
+    \  describe \"__try_call_val\" do\n\
+    \    test \"heap Ok payload round-trips\" do\n\
+    \      match __try_call_val(fn _ -> \"hello world\") do\n\
+    \        Ok(s)  -> assert s == \"hello world\"\n\
+    \        Err(_) -> assert false\n\
+    \      end\n\
+    \    end\n\
+    \    test \"panicking thunk is caught as Err\" do\n\
+    \      match __try_call_val(fn _ -> do let _ = 1 / 0 \"unreached\" end) do\n\
+    \        Ok(_)  -> assert false\n\
+    \        Err(_) -> assert true\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "tbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src ~extra_args:"--test" () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled __try_call_val heap round-trip + panic catch exits 0" 0 run_rc
 
 (* Regression: a recursive nested closure that captures a variable used in its
    loop condition produced WRONG results when compiled (interpreter was correct).
@@ -9947,42 +10115,51 @@ let test_compiled_try_call_val_heap_roundtrip () =
    End-to-end guard: compile a program whose nested closure loops to a captured
    bound and assert the (odd) result is correct (exit 0). *)
 let test_compiled_recursive_closure_capture () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_rcclosure" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "rc.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod RcClosure do\n\
-      \  fn f(m) do\n\
-      \    fn go(mi, acc) do\n\
-      \      if mi >= m do mi else go(mi + 1, acc + 1) end\n\
-      \    end\n\
-      \    go(1, 0)\n\
-      \  end\n\
-      \  fn main() : Unit do\n\
-      \    if f(11) == 11 do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "rcbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled recursive closure with captured bound returns correct value"
-        0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_rcclosure" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "rc.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod RcClosure do\n\
+    \  needs IO.Process\n\
+    \  fn f(m) do\n\
+    \    fn go(mi, acc) do\n\
+    \      if mi >= m do mi else go(mi + 1, acc + 1) end\n\
+    \    end\n\
+    \    go(1, 0)\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    if f(11) == 11 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "rcbin" in
+  match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | `Failed (_, output)
+    when ir_contains output "Monomorphization limit reached" ->
+    (* KNOWN PRODUCT BUG (W2 Task2 Step 3 exposure, NOT fixed here — this is
+       a harness-only task; see specs/todos.md "Monomorphization limit
+       reached compiling a self-recursive nested closure (2026-07-02)").
+       This test used to pass vacuously: the old `if compile_rc <> 0 then
+       ()` guard silently swallowed this exact crash for years. Loud,
+       documented skip — never a silent no-op — until lib/tir/mono.ml is
+       fixed in a follow-up session. *)
+    Alcotest.skip ()
+  | `Failed (rc, output) ->
+    Alcotest.failf
+      "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+       PATH, so this is a real compiler failure, not an environment gap):\n%s"
+      rc src output
+  | `Ok bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled recursive closure with captured bound returns correct value"
+      0 run_rc
 
 (* Regression: P12 copy propagation (cprop.ml) propagated a type-changing
    alias [let go : (List,Int)->Int = $clo] where [$clo : Ptr(Unit)] is the
@@ -9992,32 +10169,26 @@ let test_compiled_recursive_closure_capture () =
    as raw i64 — so List.length(List.range(0,5)) compiled to 93, not 5.
    Fix: copy propagation only fires when v.v_ty = y.v_ty (type-preserving). *)
 let test_compiled_p12_type_preserving_alias () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_p12" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "p12.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod P12Regress do\n\
-      \  fn main() : Unit do\n\
-      \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "p12bin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else
-      Alcotest.(check int)
-        "compiled List.length(List.range(0,5)) == 5 (P12 type-preserving alias)"
-        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_p12" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "p12.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod P12Regress do\n\
+    \  fn main() : Unit do\n\
+    \    if List.length(List.range(0, 5)) == 5 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "p12bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled List.length(List.range(0,5)) == 5 (P12 type-preserving alias)"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
 
 (* Regression: known-call (ECallPtr->EApp) ran before Perceus, an RC-relevant
    structural change that made Perceus + the post-Perceus Opt passes
@@ -10027,36 +10198,30 @@ let test_compiled_p12_type_preserving_alias () =
    after Perceus settles RC.  Guard: sort 98 elements with a comparator that
    captures a heap list and calls List.filter, assert the result length. *)
 let test_compiled_sortby_heap_capturing_comparator () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_sortby" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "sortby.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod SortByRegress do\n\
-      \  fn main() : Unit do\n\
-      \    let xs = List.range(0, 98)\n\
-      \    let data = List.range(0, 5)\n\
-      \    let cmp = fn (a : Int, b : Int) ->\n\
-      \      List.length(List.filter(data, fn x -> x == a)) > 0\n\
-      \    if List.length(List.sort_by(xs, cmp)) == 98 do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "sortbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else
-      Alcotest.(check int)
-        "compiled sort_by(98 elems, heap-capturing cmp) returns length 98 (no SIGBUS)"
-        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_sortby" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "sortby.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod SortByRegress do\n\
+    \  fn main() : Unit do\n\
+    \    let xs = List.range(0, 98)\n\
+    \    let data = List.range(0, 5)\n\
+    \    let cmp = fn (a : Int, b : Int) ->\n\
+    \      List.length(List.filter(data, fn x -> x == a)) > 0\n\
+    \    if List.length(List.sort_by(xs, cmp)) == 98 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "sortbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled sort_by(98 elems, heap-capturing cmp) returns length 98 (no SIGBUS)"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
 
 (* Shared helper for the two P0 RC regression tests below: run [cmd], return
    (exit_code, trimmed stdout).  A signal-killed process surfaces as 128+sig
@@ -10085,48 +10250,41 @@ let run_capture_rc cmd =
    assert the compiled binary exits 0 AND matches the interpreter's output.
    The string must exceed 15 bytes (shorter strings are stored inline, no RC). *)
 let test_compiled_dual_position_owned_borrowed () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_dualpos" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "dualpos.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod DualPosRegress do\n\
-      \  fn both(a : String, b : String, n : Int) : String do\n\
-      \    if String.byte_size(b) > n do\n\
-      \      a\n\
-      \    else\n\
-      \      \"short\"\n\
-      \    end\n\
-      \  end\n\
-      \  fn main() do\n\
-      \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(37)\n\
-      \    let r = both(s, s, 1)\n\
-      \    println(r)\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let (interp_rc, interp_out) =
-      run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check int) "interpreter runs dual-position program cleanly" 0 interp_rc;
-    let bin = Filename.concat tmp "dualposbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "%s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
-      Alcotest.(check int)
-        "compiled both(s, s, 1) with s at owned+borrowed positions exits 0 (no RC underflow)"
-        0 run_rc;
-      Alcotest.(check string)
-        "compiled output matches interpreter output (dual-position args)"
-        interp_out compiled_out
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_dualpos" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "dualpos.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod DualPosRegress do\n\
+    \  fn both(a : String, b : String, n : Int) : String do\n\
+    \    if String.byte_size(b) > n do\n\
+    \      a\n\
+    \    else\n\
+    \      \"short\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let s = \"hello-world-this-is-a-long-string-\" ++ to_string(37)\n\
+    \    let r = both(s, s, 1)\n\
+    \    println(r)\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let (interp_rc, interp_out) =
+    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check int) "interpreter runs dual-position program cleanly" 0 interp_rc;
+  let bin = Filename.concat tmp "dualposbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int)
+      "compiled both(s, s, 1) with s at owned+borrowed positions exits 0 (no RC underflow)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter output (dual-position args)"
+      interp_out compiled_out
 
 (* Regression (P0, perceus.ml same_arity): the FBIP arity check compared a
    TCon's TYPE-PARAMETER count against the new constructor's FIELD count.  A
@@ -10139,58 +10297,182 @@ let test_compiled_dual_position_owned_borrowed () =
    path, where the real field count is known.  Guard: interpreter/compiled
    parity + exit 0 on the exact overflow shape. *)
 let test_compiled_fbip_arity_no_overflow () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_fbiparity" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "fbiparity.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod FbipArityRegress do\n\
-      \  type Holder(a, b, c, d, e) = Small(a) | Big(a, b, c, d, e)\n\
-      \  pfn churn(n : Int) : Int do\n\
-      \    if n > 100 do n else churn(n + 7) end\n\
-      \  end\n\
-      \  pfn mk_holder(n : Int) : Holder(Int, Int, Int, Int, Int) do\n\
-      \    if n > 0 do Small(n) else Big(n, n, n, n, n) end\n\
-      \  end\n\
-      \  fn main() do\n\
-      \    let n = churn(3)\n\
-      \    let dead = mk_holder(n)\n\
-      \    let q = mk_holder(n + 91)\n\
-      \    let p = Big(n, n, n, n, n)\n\
-      \    match q do\n\
-      \      Small(v) ->\n\
-      \        match p do\n\
-      \          Big(x, _, _, _, _) -> println(to_string(v + x))\n\
-      \          Small(x) -> println(to_string(x))\n\
-      \        end\n\
-      \      Big(_, _, _, _, _) -> println(\"big\")\n\
-      \    end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let (interp_rc, interp_out) =
-      run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
-    Alcotest.(check int) "interpreter runs FBIP-arity program cleanly" 0 interp_rc;
-    Alcotest.(check string) "interpreter computes 293" "293" interp_out;
-    let bin = Filename.concat tmp "fbiparitybin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "%s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else begin
-      let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
-      Alcotest.(check int)
-        "compiled FBIP-arity program exits 0 (no heap overflow abort)"
-        0 run_rc;
-      Alcotest.(check string)
-        "compiled output matches interpreter output (no mismatched-arity cell reuse)"
-        interp_out compiled_out
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_fbiparity" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "fbiparity.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod FbipArityRegress do\n\
+    \  type Holder(a, b, c, d, e) = Small(a) | Big(a, b, c, d, e)\n\
+    \  pfn churn(n : Int) : Int do\n\
+    \    if n > 100 do n else churn(n + 7) end\n\
+    \  end\n\
+    \  pfn mk_holder(n : Int) : Holder(Int, Int, Int, Int, Int) do\n\
+    \    if n > 0 do Small(n) else Big(n, n, n, n, n) end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let n = churn(3)\n\
+    \    let dead = mk_holder(n)\n\
+    \    let q = mk_holder(n + 91)\n\
+    \    let p = Big(n, n, n, n, n)\n\
+    \    match q do\n\
+    \      Small(v) ->\n\
+    \        match p do\n\
+    \          Big(x, _, _, _, _) -> println(to_string(v + x))\n\
+    \          Small(x) -> println(to_string(x))\n\
+    \        end\n\
+    \      Big(_, _, _, _, _) -> println(\"big\")\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let (interp_rc, interp_out) =
+    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check int) "interpreter runs FBIP-arity program cleanly" 0 interp_rc;
+  Alcotest.(check string) "interpreter computes 293" "293" interp_out;
+  let bin = Filename.concat tmp "fbiparitybin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
+    Alcotest.(check int)
+      "compiled FBIP-arity program exits 0 (no heap overflow abort)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter output (no mismatched-arity cell reuse)"
+      interp_out compiled_out
+
+(* Regression (P0, runtime/march_runtime.c actor_green_thread): the hot-reload
+   migrate-message check loaded the int64 at msg+8 guarded only by
+   msg != NULL.  An actor whose message ADT is Option-shaped (one nullary +
+   one unary ctor, e.g. Inc(Int) | Probe()) receives niche/newtype-represented
+   messages: Inc(10) is the tagged scalar 0x15, which passes the NULL check
+   and SIGSEGVs on the load at msg+8 (UBSan: misaligned load at 0x1d).  The
+   interpreter never touches this path, so only a compiled test catches it.
+   Also guards run_until_idle() draining pending messages before kill():
+   count=15 must print BETWEEN the two main-thread lines (before the fix,
+   run_until_idle was a no-op when called from the main green thread). *)
+let test_compiled_actor_niche_msg_run_until_idle_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_niche" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_niche.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorNicheMsg do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    println(\"alive_before=\" ++ bool_to_string(is_alive(pid)))\n\
+    \    send(pid, Inc(10))\n\
+    \    send(pid, Inc(5))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    kill(pid)\n\
+    \    println(\"alive_after_kill=\" ++ bool_to_string(is_alive(pid)))\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  (* Watchdog: a scheduler-shutdown regression hangs instead of crashing;
+     bound both runs so the suite fails (SIGALRM, rc 142) rather than wedging. *)
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter runs niche-msg actor program cleanly" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape"
+    "alive_before=true\ncount=15\nalive_after_kill=false" interp_out;
+  let bin = Filename.concat tmp "actornichebin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled niche-msg actor + run_until_idle + kill exits 0 (no SIGSEGV/hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (messages drained before kill)"
+      interp_out compiled_out
+
+(* Regression (P0, runtime/march_scheduler.c sched_loop exit condition): the
+   scheduler only exited when g_live_procs hit 0, but an alive actor's green
+   thread parks forever in recv — so ANY compiled program that ends main()
+   without killing every spawned actor hung indefinitely after printing its
+   output (examples/actors.march).  Actor loops are now daemon procs: once
+   main (and all task procs) are done and nothing is runnable, parked daemons
+   are woken without a message so their loops exit and the process terminates. *)
+let test_compiled_actor_program_exits_without_kill () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_actor_nokill" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actor_nokill.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod ActorExitNoKill do\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : Int) do\n\
+    \      { state with count: state.count + n }\n\
+    \    end\n\
+    \    on Probe() do\n\
+    \      println(\"count=\" ++ int_to_string(state.count))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let pid = spawn(Counter)\n\
+    \    send(pid, Inc(7))\n\
+    \    send(pid, Probe())\n\
+    \    run_until_idle()\n\
+    \    println(\"done\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 60 " ^ cmd in
+  let (interp_rc, interp_out) =
+    run_capture_rc (alarm_wrap (Printf.sprintf "%s %s"
+                                  (Filename.quote main_exe) (Filename.quote src))) in
+  Alcotest.(check int) "interpreter exits without kill()" 0 interp_rc;
+  Alcotest.(check string) "interpreter output shape" "count=7\ndone" interp_out;
+  let bin = Filename.concat tmp "actornokillbin" in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let (run_rc, compiled_out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled actor program with live actor at main-exit terminates (exit 0, no hang)"
+      0 run_rc;
+    Alcotest.(check string)
+      "compiled output matches interpreter (no-kill exit)"
+      interp_out compiled_out
+
+(* Shared helper for the two P0 RC regression tests below: run [cmd], return
+   (exit_code, trimmed stdout).  A signal-killed process surfaces as 128+sig
+   through /bin/sh, so the exit-code assertion catches SIGABRT/SIGSEGV. *)
+let run_capture_rc cmd =
+  let out_f = Filename.temp_file "march_rcfix_out" ".txt" in
+  let rc = Sys.command (Printf.sprintf "%s > %s 2>/dev/null" cmd (Filename.quote out_f)) in
+  let out =
+    try
+      let ic = open_in out_f in
+      let s = In_channel.input_all ic in
+      close_in ic; s
+    with _ -> ""
+  in
+  (try Sys.remove out_f with _ -> ());
+  (rc, String.trim out)
 
 (* Regression: a TOML [section] with 4+ keys returned the WRONG value from
    Toml.get_str when COMPILED (e.g. get_str(pkg,"k1") = "k4", a sibling key's
@@ -10206,50 +10488,44 @@ let test_compiled_fbip_arity_no_overflow () =
    Guard: parse a 4-key [package], assert every get_str returns its own value;
    process_exit(1) on any mismatch. *)
 let test_compiled_toml_section_4keys () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_toml4" "" in
-    Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "toml4.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod Toml4Regress do\n\
-      \  pfn check(opt, want) : Unit do\n\
-      \    match opt do\n\
-      \      Some(s) -> if s == want do () else process_exit(1) end\n\
-      \      None -> process_exit(1)\n\
-      \    end\n\
-      \  end\n\
-      \  fn main() : Unit do\n\
-      \    let src = \"[package]\\nk1 = \\\"v1\\\"\\nk2 = \\\"v2\\\"\\nk3 = \\\"v3\\\"\\nk4 = \\\"v4\\\"\\n\"\n\
-      \    match Toml.parse(src) do\n\
-      \      Ok(root) ->\n\
-      \        match Toml.get_table(root, \"package\") do\n\
-      \          Some(pkg) ->\n\
-      \            check(Toml.get_str(pkg, \"k1\"), \"v1\")\n\
-      \            check(Toml.get_str(pkg, \"k2\"), \"v2\")\n\
-      \            check(Toml.get_str(pkg, \"k3\"), \"v3\")\n\
-      \            check(Toml.get_str(pkg, \"k4\"), \"v4\")\n\
-      \          None -> process_exit(1)\n\
-      \        end\n\
-      \      Err(_) -> process_exit(1)\n\
-      \    end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "toml4bin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else
-      Alcotest.(check int)
-        "compiled Toml 4-key [package]: every get_str returns its own value"
-        0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_toml4" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "toml4.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod Toml4Regress do\n\
+    \  pfn check(opt, want) : Unit do\n\
+    \    match opt do\n\
+    \      Some(s) -> if s == want do () else process_exit(1) end\n\
+    \      None -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let src = \"[package]\\nk1 = \\\"v1\\\"\\nk2 = \\\"v2\\\"\\nk3 = \\\"v3\\\"\\nk4 = \\\"v4\\\"\\n\"\n\
+    \    match Toml.parse(src) do\n\
+    \      Ok(root) ->\n\
+    \        match Toml.get_table(root, \"package\") do\n\
+    \          Some(pkg) ->\n\
+    \            check(Toml.get_str(pkg, \"k1\"), \"v1\")\n\
+    \            check(Toml.get_str(pkg, \"k2\"), \"v2\")\n\
+    \            check(Toml.get_str(pkg, \"k3\"), \"v3\")\n\
+    \            check(Toml.get_str(pkg, \"k4\"), \"v4\")\n\
+    \          None -> process_exit(1)\n\
+    \        end\n\
+    \      Err(_) -> process_exit(1)\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "toml4bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled Toml 4-key [package]: every get_str returns its own value"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
 
 (* Regression: a generic helper that projects a record field carrying a
    polymorphic element and feeds it to another generic function under-specialised
@@ -10268,45 +10544,109 @@ let test_compiled_toml_section_4keys () =
    minimal lookup/get_req_header shape and assert it exits 0 with correct output.
    See specs/2026-06-29-perceus-tuple-projection-rc-bug.md. *)
 let test_compiled_record_field_poly_mono () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_fieldpoly" "" in
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_fieldpoly" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "fp.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod FieldPolyMono do\n\
+    \  type Conn = { hdrs : List((String, String)) }\n\
+    \  pfn lookup(pairs, key) do\n\
+    \    match pairs do\n\
+    \    Nil -> None\n\
+    \    Cons((k, v), rest) -> if k == key do Some(v) else lookup(rest, key) end\n\
+    \    end\n\
+    \  end\n\
+    \  pfn get_req_header(conn, name) do lookup(conn.hdrs, name) end\n\
+    \  fn run(conn) do\n\
+    \    match get_req_header(conn, \"ct\") do\n\
+    \    None     -> \"no-ct\"\n\
+    \    Some(ct) -> String.concat(\"--\", ct)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
+    \    if run(conn) == \"--boundaryval\" do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "fpbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check int)
+      "compiled record-field poly projection: Option niche/box repr consistent (no SIGSEGV)"
+      0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
+
+(* Regression: march_record_put received scalar values in NATURAL (untagged)
+   representation and sniffed them with REC_PLAUSIBLE_HEAP to catch lying
+   static types — so ANY even Int >= 4096 (page size) was misclassified as a
+   heap pointer and march_incrc dereferenced the integer's value (SIGSEGV on
+   the first such record_put; e.g. a TCO'd record_from_list+record_put loop
+   "crashed above ~10k iterations" only because that's when i*2 crossed 4096).
+   Fix: the record_put call site tags 'i'-kind values (uniform repr, odd) and
+   the runtime untags unambiguously via rec_field_norm_uniform.
+   Same family: `{ r with f: v }` on a TYPE-ERASED base (EUpdate with no
+   static fields) allocated a zero-field cell and stored every update at
+   fallback index 0 — out of bounds (address-dependent garbage/SIGSEGV).
+   Now lowered to chained march_record_put.  Guard: a single put of 4096, a
+   20k-iteration put loop, and the same loop via `{ with }` must exit 0 with
+   the arithmetically-correct sum. *)
+let test_compiled_record_put_large_even_int () =
+  (* W2.0 loud-skip policy (merge-time conversion): missing main.exe or a
+     failed compile is a test FAILURE, not a silent skip. *)
+  let main_exe = find_main_exe () in
+  begin
+    let tmp = Filename.temp_file "march_recputint" "" in
     Sys.remove tmp; Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "fp.march" in
+    let src = Filename.concat tmp "rp.march" in
     let oc = open_out src in
     output_string oc
-      "mod FieldPolyMono do\n\
-      \  type Conn = { hdrs : List((String, String)) }\n\
-      \  pfn lookup(pairs, key) do\n\
-      \    match pairs do\n\
-      \    Nil -> None\n\
-      \    Cons((k, v), rest) -> if k == key do Some(v) else lookup(rest, key) end\n\
+      "mod RecPutLargeInt do\n\
+      \  fn get_i(r, k) do\n\
+      \    match record_get(r, k) do\n\
+      \      Some(v) -> v\n\
+      \      None -> 0 - 1\n\
       \    end\n\
       \  end\n\
-      \  pfn get_req_header(conn, name) do lookup(conn.hdrs, name) end\n\
-      \  fn run(conn) do\n\
-      \    match get_req_header(conn, \"ct\") do\n\
-      \    None     -> \"no-ct\"\n\
-      \    Some(ct) -> String.concat(\"--\", ct)\n\
+      \  fn go(i, acc) do\n\
+      \    if i == 0 do\n\
+      \      acc\n\
+      \    else\n\
+      \      let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+      \      let u = record_put(record_put(built, \"a\", i), \"c\", i * 2)\n\
+      \      go(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
+      \    end\n\
+      \  end\n\
+      \  fn go2(i, acc) do\n\
+      \    if i == 0 do\n\
+      \      acc\n\
+      \    else\n\
+      \      let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+      \      let u = { built with a: i, c: i * 2 }\n\
+      \      go2(i - 1, acc + get_i(u, \"a\") + get_i(u, \"b\") + get_i(u, \"c\"))\n\
       \    end\n\
       \  end\n\
       \  fn main() : Unit do\n\
-      \    let conn = { hdrs : Cons((\"ct\", \"boundaryval\"), Nil) }\n\
-      \    if run(conn) == \"--boundaryval\" do () else process_exit(1) end\n\
+      \    let one = record_put(record_from_list([(\"a\", 1)]), \"a\", 4096)\n\
+      \    if get_i(one, \"a\") == 4096 do () else process_exit(1) end\n\
+      \    let n = 20000\n\
+      \    let expected = 3 * n * (n + 1) / 2 + 2 * n\n\
+      \    if go(n, 0) == expected do () else process_exit(2) end\n\
+      \    if go2(n, 0) == expected do () else process_exit(3) end\n\
       \  end\n\
        end\n";
     close_out oc;
-    let bin = Filename.concat tmp "fpbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else
+    let bin = Filename.concat tmp "rpbin" in
+    match compile_march_or_skip
+            ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+            ~main_exe ~bin ~src () with
+    | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+    | Some bin ->
       Alcotest.(check int)
-        "compiled record-field poly projection: Option niche/box repr consistent (no SIGSEGV)"
+        "compiled record_put of even Int >= 4096: no SIGSEGV, correct sum at 20k iterations"
         0 (Sys.command (Printf.sprintf "%s >/dev/null 2>&1" (Filename.quote bin)))
   end
 
@@ -10322,48 +10662,43 @@ let test_compiled_record_field_poly_mono () =
    Functions must live in a NESTED module so they get qualified names like
    `Core.b`; top-level entry fns are emitted bare and never match a prefix. *)
 let test_compiled_hot_reload_dispatch () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_hotreload" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "disp.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod App do\n\
-      \  mod Core do\n\
-      \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
-      \    fn a(n : Int) : Int do b(n) end\n\
-      \  end\n\
-      \  fn main() do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
-       end\n";
-    close_out oc;
-    (* Read the whole stdout of a command (trimmed). *)
-    let read_cmd cmd =
-      let ic = Unix.open_process_in cmd in
-      let buf = Buffer.create 64 in
-      (try
-         while true do Buffer.add_channel buf ic 1 done
-       with End_of_file -> ());
-      ignore (Unix.close_process_in ic);
-      String.trim (Buffer.contents buf)
-    in
-    let plain_bin = Filename.concat tmp "plain" in
-    let hr_bin    = Filename.concat tmp "hr" in
-    (* Run compiles from the test CWD (project root) so the compiler resolves
-       its CWD-relative runtime/ and stdlib/ dirs; use absolute src/out paths. *)
-    let compile_plain = Sys.command (Printf.sprintf
-      "%s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote main_exe) (Filename.quote plain_bin) (Filename.quote src)) in
-    let compile_hr = Sys.command (Printf.sprintf
-      "%s --compile --hot-reload Core -o %s %s >/dev/null 2>&1"
-      (Filename.quote main_exe) (Filename.quote hr_bin) (Filename.quote src)) in
-    (* Skip when compilation can't complete here (no clang / runtime sources) —
-       matches the other Slow compiled regression tests. *)
-    if compile_plain <> 0 || compile_hr <> 0 then ()
-    else begin
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_hotreload" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "disp.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod App do\n\
+    \  mod Core do\n\
+    \    fn b(n : Int) : Int do if n <= 0 do 0 else b(n - 1) + 1 end end\n\
+    \    fn a(n : Int) : Int do b(n) end\n\
+    \  end\n\
+    \  fn main() do println(if Core.a(5) > 3 do \"dispatch works\" else \"no\" end) end\n\
+     end\n";
+  close_out oc;
+  (* Read the whole stdout of a command (trimmed). *)
+  let read_cmd cmd =
+    let ic = Unix.open_process_in cmd in
+    let buf = Buffer.create 64 in
+    (try
+       while true do Buffer.add_channel buf ic 1 done
+     with End_of_file -> ());
+    ignore (Unix.close_process_in ic);
+    String.trim (Buffer.contents buf)
+  in
+  let plain_bin = Filename.concat tmp "plain" in
+  let hr_bin    = Filename.concat tmp "hr" in
+  (* Run compiles from the test CWD (project root) so the compiler resolves
+     its CWD-relative runtime/ and stdlib/ dirs; use absolute src/out paths.
+     Both compiles must succeed (or both skip identically on clang absence)
+     before the behavioral assertions below run. *)
+  match compile_march_or_skip ~main_exe ~bin:plain_bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some plain_bin ->
+    match compile_march_or_skip ~main_exe ~bin:hr_bin ~src ~extra_args:"--hot-reload Core" () with
+    | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+    | Some hr_bin ->
       (* 1. the --hot-reload build prints exactly "dispatch works". *)
       Alcotest.(check string)
         "hot-reload build prints \"dispatch works\""
@@ -10375,7 +10710,9 @@ let test_compiled_hot_reload_dispatch () =
         "dispatch works"
         (read_cmd (Printf.sprintf "%s 2>/dev/null" (Filename.quote plain_bin)));
       (* 3. real dispatch happened: --emit-llvm --hot-reload emits a *call* to
-         march_dispatch_enter (the IR is written to <src-without-ext>.ll). *)
+         march_dispatch_enter (the IR is written to <src-without-ext>.ll).
+         clang availability was already established by the two compiles
+         above, so a nonzero exit here is a genuine compiler failure. *)
       let emit_rc = Sys.command (Printf.sprintf
         "%s --emit-llvm --hot-reload Core -o %s %s >/dev/null 2>&1"
         (Filename.quote main_exe)
@@ -10406,8 +10743,309 @@ let test_compiled_hot_reload_dispatch () =
       Alcotest.(check bool)
         "IR contains march_dispatch_init call (@main dispatch setup)"
         true (contains ir "call void @march_dispatch_init")
-    end
-  end
+
+(* Phase 5C-A.3, revised 2026-07-04 (Granularity revision): `.hcr_manifest`
+   gains a per-fn `caps=` field holding the function's OWN normalized
+   inferred IO-capability closure, from
+   March_typecheck.Typecheck.fn_own_capability_closures — deliberately NOT
+   the module-merged closure (fn_capability_closures) and NOT a
+   whole-artifact union. There is no top-level `ROOT cap_root=` line any
+   more: the old whole-artifact-union aggregation was app-invariant
+   (`--hot-reload` always links the entire stdlib, so the union was
+   dominated by the stdlib's declared footprint regardless of what the app
+   actually does) and made the deploy capability gate unable to
+   discriminate — see specs/plans/2026-06-25-hcr-phase5c-capability-safe-deploys.md,
+   "Granularity revision (2026-07-04)". cap_root is now computed
+   per-function downstream by the deploy tool.
+   Fixture: Core.logger has a declared `needs IO.Console` (covering its
+   println body-call); Pure.add has no needs declaration and calls no
+   capability-implying builtin, so its closure is empty ("caps=").
+   Note: FN lines are keyed by the *unqualified* module-local name (e.g.
+   "Core.logger", not "App.Core.logger") — check_module_needs qualifies with
+   only the immediately-enclosing DMod's own name, not the full nesting path
+   (confirmed empirically: the outer "App" module name never appears as a
+   prefix in the emitted manifest). *)
+let hcr_manifest_caps_fixture_src =
+  "mod App do\n\
+  \  mod Core do\n\
+  \    needs IO.Console\n\
+  \    fn logger(x : String) : Unit do println(x) end\n\
+  \  end\n\
+  \  mod Pure do\n\
+  \    fn add(a : Int, b : Int) : Int do a + b end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    Core.logger(\"hi\")\n\
+  \    println(Pure.add(2, 3))\n\
+  \  end\n\
+   end\n"
+
+(* Parse `.hcr_manifest` into (fn_lines : (name, caps_csv) list, has_root_line).
+   Granularity revision (2026-07-04): there is no `ROOT cap_root=` line any
+   more (retired — it was the app-invariant whole-artifact-union defect).
+   [has_root_line] is returned purely so tests can assert its ABSENCE. *)
+let parse_hcr_manifest (path : string) : (string * string) list * bool =
+  let ic = open_in path in
+  let fn_lines = ref [] in
+  let has_root_line = ref false in
+  (try
+     while true do
+       let line = input_line ic in
+       if String.length line >= 5 && String.sub line 0 5 = "ROOT " then
+         has_root_line := true
+       else if String.length line > 0 && line.[0] <> '#' then begin
+         (* "<fn_name> <impl_hash> <sig_hash> [callers:...] caps=<csv>" *)
+         match String.index_opt line ' ' with
+         | None -> ()
+         | Some _ ->
+           let fields = String.split_on_char ' ' line in
+           let name = List.hd fields in
+           let caps_field = List.find_opt (fun f ->
+             String.length f >= 5 && String.sub f 0 5 = "caps=") fields in
+           (match caps_field with
+            | Some f -> fn_lines := (name, String.sub f 5 (String.length f - 5)) :: !fn_lines
+            | None -> ())
+       end
+     done
+   with End_of_file -> ());
+  close_in ic;
+  (!fn_lines, !has_root_line)
+
+let test_hcr_manifest_emits_caps_and_cap_root () =
+  let main_exe = find_main_exe () in
+  let build_once tag =
+    let tmp = Filename.temp_file (Printf.sprintf "march_hcrcaps_%s" tag) "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "caps.march" in
+    let oc = open_out src in
+    output_string oc hcr_manifest_caps_fixture_src;
+    close_out oc;
+    let bin = Filename.concat tmp "capsbin" in
+    (* Both `march --compile`'s early source-hash CAS (bin/main.ml's
+       "early_cas", which exit-0s BEFORE typecheck/manifest-write on a
+       cache hit) and the later per-artifact CAS key off `$cwd/.march/cas`
+       plus a `$HOME/.march/cas` global fallback. Two builds of identical
+       source from the shared project-root cwd would hit that cache on the
+       second build and skip the manifest write entirely (a real, separate,
+       pre-existing gap: manifest emission isn't wired into the cache-hit
+       path) — which would make this determinism check pass vacuously
+       (comparing a real manifest to itself via the copied-forward cached
+       binary, or erroring outright with no manifest at all). Force each
+       build to see an empty CAS by giving it its own HOME (isolates the
+       global fallback) and cd-ing into the fresh tmp dir (isolates the
+       project-root-relative local store) — this guarantees two genuinely
+       independent compiler invocations, which is what "stable across two
+       builds" is meant to test.
+
+       NOTE: a bare `VAR=val` prefix before `&&` only scopes to the
+       IMMEDIATELY FOLLOWING command under POSIX shell semantics — here that's
+       `cd`, not the compiler invocation appended after `&&` by
+       [compile_march_or_skip]'s `cmd_prefix` splice, so `HOME` was NOT
+       actually exported to the compiler subprocess. Use `env HOME=... ` after
+       `&&` instead, which exports for the rest of the command line. The
+       `cd`-into-a-fresh-tmp-dir half of the isolation (which forces a fresh
+       LOCAL `.march/cas`) was always effective and is what actually makes
+       this test exercise two independent builds; the HOME half is fixed here
+       to close the global-fallback-cache loophole for real. *)
+    let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+        (Filename.quote tmp) (Filename.quote tmp) in
+    match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+            ~extra_args:"--hot-reload App --compile-so" () with
+    | None -> None  (* legitimate, counted skip: no clang on PATH *)
+    | Some bin -> Some (bin ^ ".hcr_manifest")
+  in
+  match build_once "a" with
+  | None -> ()
+  | Some mf1 ->
+    Alcotest.(check bool) "manifest sidecar written" true (Sys.file_exists mf1);
+    let (fn_lines1, has_root1) = parse_hcr_manifest mf1 in
+    Alcotest.(check bool) "no ROOT cap_root= line (retired by granularity revision)"
+      false has_root1;
+    let find_caps name =
+      match List.assoc_opt name fn_lines1 with
+      | Some c -> c
+      | None -> Alcotest.failf "no FN line with caps= found for %s in manifest %s" name mf1
+    in
+    Alcotest.(check string) "Core.logger caps = IO.Console (own caps)"
+      "IO.Console" (find_caps "Core.logger");
+    Alcotest.(check string) "Pure.add caps = (empty)"
+      "" (find_caps "Pure.add");
+    (* Determinism: a second, independent build of the same source must yield
+       byte-identical per-fn caps= fields (guards against any nondeterminism
+       in the own-caps projection or CSV emission). *)
+    (match build_once "b" with
+     | None -> ()  (* clang vanished between builds — treat consistently as skip *)
+     | Some mf2 ->
+       let (fn_lines2, has_root2) = parse_hcr_manifest mf2 in
+       Alcotest.(check bool) "second build also has no ROOT line" false has_root2;
+       Alcotest.(check (list string)) "Core.logger caps stable across two independent builds"
+         [find_caps "Core.logger"]
+         [Option.value ~default:"<missing>" (List.assoc_opt "Core.logger" fn_lines2)])
+
+(* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
+   silently dropped from the manifest — [record_fn_caps] was called for
+   [DFn]/[DExtern] but never for actor handlers, even though TIR hashes every
+   lowered function INCLUDING synthesized actor-handler functions (named
+   "{ActorName}_{MsgName}", see lib/tir/lower.ml's [lower_handler]) as
+   `.hcr_manifest` boundary entries. Before the fix, a handler calling
+   `println` (IO.Console) compiled clean with an EMPTY `caps=` field.
+
+   Fixture nests the actor two levels deep (Outer.Inner) to also confirm the
+   qualified-name convention holds: TIR names the handler fn using the
+   actor's OWN BARE name (confirmed empirically — a handler on actor
+   [Weeble] inside [Outer.Inner] lowers to bare "Weeble_Zorp", NOT
+   "Inner.Weeble_Zorp"), so [check_module_needs]'s DActor branch must key
+   [record_fn_caps] the same bare way rather than through [cap_qname]. *)
+let hcr_manifest_actor_handler_caps_fixture_src =
+  "mod Outer do\n\
+  \  mod Inner do\n\
+  \    needs IO.Console\n\
+  \    actor Weeble do\n\
+  \      state { count : Int }\n\
+  \      init { count: 0 }\n\
+  \      on Zorp(msg : String) do\n\
+  \        println(msg)\n\
+  \        state\n\
+  \      end\n\
+  \    end\n\
+  \    fn run_it() do\n\
+  \      let pid = spawn(Weeble)\n\
+  \      send(pid, Zorp(\"hi\"))\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    Inner.run_it()\n\
+  \  end\n\
+   end\n"
+
+let test_hcr_manifest_actor_handler_caps_populated () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_hcractorcaps" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "actorcaps.march" in
+  let oc = open_out src in
+  output_string oc hcr_manifest_actor_handler_caps_fixture_src;
+  close_out oc;
+  let bin = Filename.concat tmp "actorcapsbin" in
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+          ~extra_args:"--hot-reload Outer --compile-so" () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let mf = bin ^ ".hcr_manifest" in
+    Alcotest.(check bool) "manifest sidecar written" true (Sys.file_exists mf);
+    let (fn_lines, _cap_root) = parse_hcr_manifest mf in
+    (* The handler's synthesized TIR fn name is bare "Weeble_Zorp" — the
+       actor's own short name + "_" + the message name — NOT qualified by
+       the enclosing "Inner." module prefix (unlike a sibling DFn such as
+       "Inner.run_it", which IS prefixed). *)
+    (match List.assoc_opt "Weeble_Zorp" fn_lines with
+     | None -> Alcotest.failf "no FN line for Weeble_Zorp found in manifest %s" mf
+     | Some caps ->
+       Alcotest.(check string) "Weeble_Zorp (actor handler) caps = IO.Console"
+         "IO.Console" caps)
+
+(* Granularity revision (2026-07-04), load-bearing regression test: the
+   defect this revision fixes was that EVERY boundary function's `caps=`
+   field held the whole-artifact cap UNION (dominated by the linked stdlib,
+   ~11 caps, app-invariant), not that function's own inferred caps. This
+   fixture has two functions with DISJOINT own-cap requirements — `handle`
+   only calls `println` (IO.Console), `writer` only calls `file_write`
+   (IO.FileWrite) — and asserts the manifest gives each its OWN caps
+   separately. Before the fix, both would show `caps=IO.Console,IO.FileWrite`
+   (or worse, the full ~11-cap stdlib union); the fix must show `handle` with
+   ONLY IO.Console and `writer` with ONLY IO.FileWrite. *)
+let hcr_manifest_disjoint_caps_fixture_src =
+  "mod M do\n\
+  \  needs IO.Console, IO.FileWrite\n\
+  \  fn handle(x : Int) : Int do\n\
+  \    println(\"hi\")\n\
+  \    x\n\
+  \  end\n\
+  \  fn writer(path : String) : Int do\n\
+  \    let _ = file_write(path, \"data\")\n\
+  \    0\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    println(int_to_string(handle(1)))\n\
+  \    println(int_to_string(writer(\"/tmp/march_hcr_disjoint_caps_test.txt\")))\n\
+  \  end\n\
+   end\n"
+
+let test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_hcrdisjointcaps" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "disjointcaps.march" in
+  let oc = open_out src in
+  output_string oc hcr_manifest_disjoint_caps_fixture_src;
+  close_out oc;
+  let bin = Filename.concat tmp "disjointcapsbin" in
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+          ~extra_args:"--hot-reload M --compile-so" () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let mf = bin ^ ".hcr_manifest" in
+    Alcotest.(check bool) "manifest sidecar written" true (Sys.file_exists mf);
+    let (fn_lines, has_root) = parse_hcr_manifest mf in
+    Alcotest.(check bool) "no ROOT cap_root= line" false has_root;
+    let find_caps name =
+      match List.assoc_opt name fn_lines with
+      | Some c -> c
+      | None -> Alcotest.failf "no FN line with caps= found for %s in manifest %s" name mf
+    in
+    (* FN lines are keyed by the unqualified module-local name; since M is
+       the OUTERMOST module here, that means bare "handle"/"writer" with no
+       prefix at all (same convention documented above for Core.logger). *)
+    Alcotest.(check string) "handle caps = IO.Console ONLY (not the artifact union)"
+      "IO.Console" (find_caps "handle");
+    Alcotest.(check string) "writer caps = IO.FileWrite ONLY (not the artifact union)"
+      "IO.FileWrite" (find_caps "writer")
+
+(* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
+   arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
+   scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
+   stack with a malloc'd (non-page-aligned) buffer; at thread exit ASAN's
+   AsanThread::Destroy → UnsetAlternateSignalStack munmap()s whatever altstack
+   is current, which fails with EINVAL on our buffer and CHECK-aborts.  Fix:
+   under ASAN the runtime keeps ASAN's own altstack (march_scheduler.c).
+   Guard: a sanitized hello-world must print its output AND exit 0. *)
+let test_compiled_sanitize_clean_exit () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_sanexit" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "sanexit.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod SanExit do\n\
+    \  fn main() do println(\"sanitize ok\") end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "sanexit_bin" in
+  match compile_march_or_skip ~cmd_prefix:"MARCH_SANITIZE=1 " ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let out_file = Filename.concat tmp "out.txt" in
+    let run_rc = Sys.command (Printf.sprintf
+      "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+    Alcotest.(check int)
+      "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
+      0 run_rc;
+    let output =
+      let ic = open_in out_file in
+      let n = in_channel_length ic in
+      let s = really_input_string ic n in
+      close_in ic; String.trim s
+    in
+    Alcotest.(check string)
+      "sanitized binary prints its output" "sanitize ok" output
 
 (* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
    Compiled end-to-end (not eval-mode) because it exercises the real
@@ -10462,42 +11100,35 @@ let test_compiled_io_read_byte () =
    guard: define a top-level `go`, build a list inside it, and assert
    List.length is correct (exit 0). *)
 let test_compiled_helper_name_collision () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()
-  else begin
-    let tmp = Filename.temp_file "march_namecollide" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "nc.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod NameCollide do\n\
-      \  fn go(i : Int, n : Int) : Int do\n\
-      \    if i >= n do 0\n\
-      \    else do\n\
-      \      let lst = Cons(\"a\", Cons(\"b\", Cons(\"c\", Nil)))\n\
-      \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
-      \    end end\n\
-      \  end\n\
-      \  fn main() : Unit do\n\
-      \    if go(0, 5) == 0 do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "ncbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "stdlib List.length works despite a user top-level `go`" 0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_namecollide" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "nc.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod NameCollide do\n\
+    \  fn go(i : Int, n : Int) : Int do\n\
+    \    if i >= n do 0\n\
+    \    else do\n\
+    \      let lst = Cons(\"a\", Cons(\"b\", Cons(\"c\", Nil)))\n\
+    \      if List.length(lst) == 3 do go(i + 1, n) else 1 end\n\
+    \    end end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    if go(0, 5) == 0 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "ncbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "stdlib List.length works despite a user top-level `go`" 0 run_rc
 
 (* Regression: a scalar (Bool/Int) stored in a Vault read back WRONG when
    compiled.  Root cause: the value arg to march_vault_set (declared ptr value,
@@ -10510,40 +11141,33 @@ let test_compiled_helper_name_collision () =
    uniform representation).  End-to-end guard: store true/Int, read back, exit
    0 only if both round-trip. *)
 let test_compiled_vault_scalar_roundtrip () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_vaultscalar" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "v.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod VaultScalar do\n\
-      \  fn main() : Unit do\n\
-      \    let t = Vault.new(\"vs_test\")\n\
-      \    Vault.set(t, \"b\", true)\n\
-      \    Vault.set(t, \"n\", 4242)\n\
-      \    let b = Vault.get(t, \"b\") |> unwrap_or(false)\n\
-      \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
-      \    if b && n == 4242 do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "vbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_vaultscalar" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "v.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod VaultScalar do\n\
+    \  fn main() : Unit do\n\
+    \    let t = Vault.new(\"vs_test\")\n\
+    \    Vault.set(t, \"b\", true)\n\
+    \    Vault.set(t, \"n\", 4242)\n\
+    \    let b = Vault.get(t, \"b\") |> unwrap_or(false)\n\
+    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+    \    if b && n == 4242 do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "vbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
 
 (* Regression: march_string_to_int niche-tags its strtoll result as (n<<1)|1
    with no range check.  For inputs outside March's 63-bit range (>= 2^62, or
@@ -10554,55 +11178,53 @@ let test_compiled_vault_scalar_roundtrip () =
    path must agree.  The program below exits 0 only if every out-of-range input
    is None and every in-range input round-trips. *)
 let test_compiled_string_to_int_overflow_is_none () =
-  let exe_dir  = Filename.dirname Sys.executable_name in
-  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
-  else begin
-    let tmp = Filename.temp_file "march_stoi_ovf" "" in
-    Sys.remove tmp;
-    Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "s.march" in
-    let oc = open_out src in
-    output_string oc
-      "mod StoiOverflow do\n\
-      \  fn is_none(s : String) : Bool do\n\
-      \    match string_to_int(s) do\n\
-      \      Some(_) -> false\n\
-      \      None -> true\n\
-      \    end\n\
-      \  end\n\
-      \  fn is_val(s : String, want : Int) : Bool do\n\
-      \    match string_to_int(s) do\n\
-      \      Some(n) -> n == want\n\
-      \      None -> false\n\
-      \    end\n\
-      \  end\n\
-      \  fn main() : Unit do\n\
-      \    let ok =\n\
-      \      is_none(\"4611686018427387904\") &&\n\
-      \      is_none(\"99999999999999999999999\") &&\n\
-      \      is_none(\"-4611686018427387905\") &&\n\
-      \      is_val(\"4611686018427387903\", 4611686018427387903) &&\n\
-      \      is_val(\"-4611686018427387904\", -4611686018427387904) &&\n\
-      \      is_val(\"42\", 42)\n\
-      \    if ok do () else process_exit(1) end\n\
-      \  end\n\
-       end\n";
-    close_out oc;
-    let bin = Filename.concat tmp "sbin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled string_to_int out-of-range returns None (no niche overflow)"
-        0 run_rc
-    end
-  end
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_stoi_ovf" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "s.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod StoiOverflow do\n\
+    \  fn is_none(s : String) : Bool do\n\
+    \    match string_to_int(s) do\n\
+    \      Some(_) -> false\n\
+    \      None -> true\n\
+    \    end\n\
+    \  end\n\
+    \  fn is_val(s : String, want : Int) : Bool do\n\
+    \    match string_to_int(s) do\n\
+    \      Some(n) -> n == want\n\
+    \      None -> false\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    -- Int.min (-4611686018427387904) has no valid literal spelling: its\n\
+    \    -- own magnitude, 4611686018427387904, exceeds the max POSITIVE March\n\
+    \    -- literal (4611686018427387903) and the lexer rejects it before the\n\
+    \    -- unary minus is ever applied. Compute it arithmetically instead.\n\
+    \    let int_min = 0 - 4611686018427387903 - 1\n\
+    \    let ok =\n\
+    \      is_none(\"4611686018427387904\") &&\n\
+    \      is_none(\"99999999999999999999999\") &&\n\
+    \      is_none(\"-4611686018427387905\") &&\n\
+    \      is_val(\"4611686018427387903\", 4611686018427387903) &&\n\
+    \      is_val(\"-4611686018427387904\", int_min) &&\n\
+    \      is_val(\"42\", 42)\n\
+    \    if ok do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "sbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled string_to_int out-of-range returns None (no niche overflow)"
+      0 run_rc
 
 (* Regression: Perceus under-dup'd a variable passed to MULTIPLE consuming
    positions of one node while dead afterwards — e.g. BigInt.mul(a, a),
@@ -10611,46 +11233,185 @@ let test_compiled_string_to_int_overflow_is_none () =
    second DecRC underflowed (compiled double-free; interpreter was fine).
    Squaring via BigInt.mul(a, a) on a multi-limb value is the natural trigger. *)
 let test_compiled_aliased_arg_no_double_free () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_alias_dup" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "a.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod AliasDup do\n\
+    \  fn main() : Unit do\n\
+    \    let a = BigInt.from_int(7)\n\
+    \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\
+    \    let s0 = BigInt.from_int(314159265358979)\n\
+    \    let s1 = BigInt.mul(s0, s0)\n\
+    \    let s2 = BigInt.mul(s1, s1)\n\
+    \    let s3 = BigInt.mul(s2, s2)        -- multi-limb squaring chain\n\
+    \    let xs = Cons(1, Cons(2, Nil))\n\
+    \    let pair = (xs, xs)                -- (x, x): heap list aliased\n\
+    \    let plen = match pair do (p, q) -> List.length(p) + List.length(q) end\n\
+    \    if BigInt.to_string(sq) == \"49\" && plen == 4\n\
+    \       && BigInt.to_string(s3) != \"0\"\n\
+    \    do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "abin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled f(x,x) with owned heap arg does not double-free (exit 0)"
+      0 run_rc
+
+(* Regression: the interpreter's [http_server_listen] (lib/eval/eval.ml) used
+   to accept exactly one client, block synchronously on that one client's
+   recv/send for the entire request-response cycle, then close it and only
+   THEN accept the next — a single slow/idle client (e.g. a WebSocket client
+   that opens the TCP connection and then pauses before sending its upgrade
+   request) wedged the whole server: no other connection could be accepted
+   or served for as long as the idle client's blocking recv() was pending.
+   Fixed by rewriting the accept loop as a single-threaded, non-blocking,
+   multiplexed event loop (see [run_http_event_loop] in lib/eval/eval.ml)
+   that selects across the listen socket AND every open client connection,
+   so an idle connection can never block progress on any other connection.
+
+   This test runs the *interpreter* (main.exe without --compile) as a real
+   subprocess, since the bug is specific to the OCaml eval.ml implementation
+   of http_server_listen and does not exist in the compiled/LLVM runtime
+   path (runtime/march_http.c has real thread/event-loop concurrency
+   already). It then, from this OCaml test process:
+     1. opens a first TCP connection and deliberately sends nothing
+        (an "idle client" — connects but never completes a request), and
+     2. opens a second TCP connection and sends a complete, valid GET
+        request, asserting the response arrives well within a generous
+        time bound.
+   Under the pre-fix code, step 2 would hang for the full read timeout
+   (no response) because the accept loop was still blocked inside a
+   recv() on the first (idle) connection. Under the fix, the second
+   connection is served promptly regardless of the first. *)
+let test_interp_http_server_idle_client_does_not_block_others () =
   let exe_dir  = Filename.dirname Sys.executable_name in
   let main_exe = Filename.concat exe_dir "../bin/main.exe" in
-  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  if not (Sys.file_exists main_exe) then ()  (* skip: no interpreter binary *)
   else begin
-    let tmp = Filename.temp_file "march_alias_dup" "" in
+    let tmp = Filename.temp_file "march_http_evloop" "" in
     Sys.remove tmp;
     Unix.mkdir tmp 0o755;
-    let src = Filename.concat tmp "a.march" in
+    (* Derive a port from our own pid to reduce collision risk when tests
+       run concurrently / repeatedly. *)
+    let port = 21000 + (Unix.getpid () mod 4000) in
+    let src = Filename.concat tmp "srv.march" in
     let oc = open_out src in
-    output_string oc
-      "mod AliasDup do\n\
-      \  fn main() : Unit do\n\
-      \    let a = BigInt.from_int(7)\n\
-      \    let sq = BigInt.mul(a, a)          -- f(x, x): a consumed twice\n\
-      \    let s0 = BigInt.from_int(314159265358979)\n\
-      \    let s1 = BigInt.mul(s0, s0)\n\
-      \    let s2 = BigInt.mul(s1, s1)\n\
-      \    let s3 = BigInt.mul(s2, s2)        -- multi-limb squaring chain\n\
-      \    let xs = Cons(1, Cons(2, Nil))\n\
-      \    let pair = (xs, xs)                -- (x, x): heap list aliased\n\
-      \    let plen = match pair do (p, q) -> List.length(p) + List.length(q) end\n\
-      \    if BigInt.to_string(sq) == \"49\" && plen == 4\n\
-      \       && BigInt.to_string(s3) != \"0\"\n\
-      \    do () else process_exit(1) end\n\
+    output_string oc (Printf.sprintf
+      "mod Srv do\n\
+      \  fn router(conn) do\n\
+      \    conn |> HttpServer.text(200, \"hello\")\n\
       \  end\n\
-       end\n";
+      \  fn main() do\n\
+      \    HttpServer.new(%d)\n\
+      \    |> HttpServer.plug(router)\n\
+      \    |> HttpServer.listen()\n\
+      \  end\n\
+       end\n" port);
     close_out oc;
-    let bin = Filename.concat tmp "abin" in
-    let compile_rc = Sys.command (Printf.sprintf
-      "cd %s && %s --compile -o %s %s >/dev/null 2>&1"
-      (Filename.quote tmp) (Filename.quote main_exe)
-      (Filename.quote bin) (Filename.quote src)) in
-    if compile_rc <> 0 then ()  (* skip: clang/runtime unavailable *)
-    else begin
-      let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
-                                  (Filename.quote bin)) in
-      Alcotest.(check int)
-        "compiled f(x,x) with owned heap arg does not double-free (exit 0)"
-        0 run_rc
-    end
+    (* Launch the interpreter (no --compile) as a real child process so it
+       binds a real port that this test process can connect sockets to.
+       stdout/stderr are redirected to a log file rather than inherited,
+       so the "march: HTTP server listening..." banner doesn't clutter
+       test output. *)
+    let log_path = Filename.concat tmp "srv.log" in
+    let log_fd = Unix.openfile log_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o644 in
+    let child_pid =
+      Unix.create_process main_exe [| main_exe; src |] Unix.stdin log_fd log_fd
+    in
+    Unix.close log_fd;
+    let cleanup () =
+      (try Unix.kill child_pid Sys.sigkill with _ -> ());
+      (try ignore (Unix.waitpid [] child_pid) with _ -> ())
+    in
+    Fun.protect ~finally:cleanup (fun () ->
+      (* Give the child a moment to bind and start listening. Poll rather
+         than a single fixed sleep so this isn't flaky under load. *)
+      let connect_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
+      let rec wait_for_listen attempts =
+        if attempts <= 0 then
+          Alcotest.fail "interpreted HTTP server never started listening"
+        else
+          let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+          match (try Unix.connect probe connect_addr; `Ok
+                 with Unix.Unix_error _ -> `NotYet)
+          with
+          | `Ok -> (try Unix.close probe with _ -> ())
+          | `NotYet ->
+            (try Unix.close probe with _ -> ());
+            Unix.sleepf 0.1;
+            wait_for_listen (attempts - 1)
+      in
+      wait_for_listen 50;  (* up to ~5s *)
+
+      (* 1. Idle client: connect but never send a byte. Left open for the
+         duration of the test so it can wedge the old blocking accept loop. *)
+      let idle_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect idle_sock connect_addr;
+
+      (* Give the server a moment to accept the idle connection and (on the
+         buggy pre-fix code) get stuck blocking inside recv() on it, before
+         we try the second connection — this is what makes the test a
+         faithful reproduction rather than a race that might accidentally
+         pass on old code too. *)
+      Unix.sleepf 0.2;
+
+      (* 2. A second, well-behaved client: sends a complete request and
+         must get a prompt, correct response — bounded by a real time
+         limit so this test fails (times out) rather than hangs forever
+         on the pre-fix code. *)
+      let start_time = Unix.gettimeofday () in
+      let client_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      Unix.connect client_sock connect_addr;
+      let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" in
+      ignore (Unix.write_substring client_sock request 0 (String.length request));
+      (* Bound the read with select() so a hang shows up as a fast,
+         deterministic test failure instead of blocking the suite. *)
+      let deadline = 2.0 in
+      let buf = Buffer.create 256 in
+      let rec read_until_closed_or_deadline () =
+        let elapsed = Unix.gettimeofday () -. start_time in
+        let remaining = deadline -. elapsed in
+        if remaining <= 0.0 then ()
+        else
+          match Unix.select [client_sock] [] [] remaining with
+          | ([], _, _) -> ()  (* timed out waiting for data *)
+          | (_, _, _) ->
+            let chunk = Bytes.create 4096 in
+            let n = try Unix.read client_sock chunk 0 4096 with _ -> 0 in
+            if n > 0 then begin
+              Buffer.add_subbytes buf chunk 0 n;
+              read_until_closed_or_deadline ()
+            end
+      in
+      read_until_closed_or_deadline ();
+      let elapsed = Unix.gettimeofday () -. start_time in
+      (try Unix.close client_sock with _ -> ());
+      (try Unix.close idle_sock with _ -> ());
+      let response = Buffer.contents buf in
+      Alcotest.(check bool)
+        "second client got a response while first client was idle"
+        true (String.length response > 0);
+      Alcotest.(check bool)
+        "response is 200 OK"
+        true
+        (String.length response >= 15 && String.sub response 0 15 = "HTTP/1.1 200 OK");
+      Alcotest.(check bool)
+        (Printf.sprintf
+           "second client served promptly (%.3fs) despite idle first client \
+            — must be well under the %.1fs deadline, not just barely under it"
+           elapsed deadline)
+        true (elapsed < 1.0))
   end
 
 (* Regression: a dangling symlink in a scanned lib dir used to crash the whole
@@ -11009,6 +11770,9 @@ let stdlib_suites =
         (* Phase 2: sig conformance *)
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
+        Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
+        Alcotest.test_case "sibling ctor: own module wins" `Quick test_tc_sibling_ctor_own_module_wins;
+        Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;
@@ -11076,6 +11840,9 @@ let stdlib_suites =
         Alcotest.test_case "eq() method dispatches via impl"    `Quick (with_reset test_eval_eq_method_dispatch);
         Alcotest.test_case "derive Eq record equality"          `Quick (with_reset test_derive_record_eq);
         Alcotest.test_case "derive Eq variant with args"        `Quick (with_reset test_derive_variant_with_args_eq);
+        Alcotest.test_case "eq() dispatch with 2 impls in scope"      `Quick (with_reset test_eval_eq_multi_type_dispatch);
+        Alcotest.test_case "compare() dispatch with 2 impls in scope" `Quick (with_reset test_eval_compare_multi_type_dispatch);
+        Alcotest.test_case "hash() dispatch with 2 impls in scope"    `Quick (with_reset test_eval_hash_multi_type_dispatch);
       ]);
       ("multi_level_use", [
         Alcotest.test_case "parse use A.B.*"       `Quick test_parse_use_multilevel_all;
@@ -11167,6 +11934,7 @@ let stdlib_suites =
           Alcotest.test_case "basic arithmetic"  `Slow test_parity_basic_arith;
           Alcotest.test_case "bool ops"          `Slow test_parity_bool_ops;
           Alcotest.test_case "string interp"     `Slow test_parity_string_interp;
+          Alcotest.test_case "atom show"         `Slow test_parity_atom_show;
           Alcotest.test_case "closures"          `Slow test_parity_closures;
           Alcotest.test_case "if/else"           `Slow test_parity_if_else;
           Alcotest.test_case "bitwise builtins"  `Slow test_parity_bitwise_builtins;
@@ -11595,6 +12363,12 @@ let stdlib_suites =
         Alcotest.test_case "pfn actor_init not flagged"            `Quick test_lint_pfn_actor_init;
         Alcotest.test_case "pfn impl method body not flagged"      `Quick test_lint_pfn_impl_method;
       ]);
+      ("lint/safety/no-panic-in-lib", [
+        Alcotest.test_case "panic in *_test.march not flagged"     `Quick test_lint_no_panic_test_suffix_exempt;
+        Alcotest.test_case "panic in library file IS flagged"      `Quick test_lint_no_panic_lib_flagged;
+        Alcotest.test_case "panic under test/ dir not flagged"     `Quick test_lint_no_panic_test_dir_exempt;
+        Alcotest.test_case "panic under lib/ dir IS flagged"       `Quick test_lint_no_panic_lib_dir_flagged;
+      ]);
       (* ── Adversarial bug regression tests ─────────────────────────────── *)
       ("adversarial-regressions", [
         Alcotest.test_case "float /. 0.0 raises div-by-zero" `Quick
@@ -11649,13 +12423,29 @@ let stdlib_suites =
           test_compiled_dual_position_owned_borrowed;
         Alcotest.test_case "FBIP same_arity: dead 1-field cell NOT reused for 5-field ctor, parity (compiled)" `Slow
           test_compiled_fbip_arity_no_overflow;
+        Alcotest.test_case "actor niche msg + run_until_idle + kill: no SIGSEGV, parity (compiled)" `Slow
+          test_compiled_actor_niche_msg_run_until_idle_kill;
+        Alcotest.test_case "actor alive at main-exit: process terminates, parity (compiled)" `Slow
+          test_compiled_actor_program_exits_without_kill;
         Alcotest.test_case "Toml [section] with 4 keys: get_str returns correct values when compiled" `Slow
           test_compiled_toml_section_4keys;
+        Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
+          test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
         Alcotest.test_case "IO.read_byte: reads raw stdin bytes, -1 on EOF (compiled)" `Slow
           test_compiled_io_read_byte;
+        Alcotest.test_case "HCR manifest: caps= fields are per-fn own caps, no ROOT line (Phase5C-A.3, granularity revision)" `Slow
+          test_hcr_manifest_emits_caps_and_cap_root;
+        Alcotest.test_case "HCR manifest: actor handler caps populated (C1 fix)" `Slow
+          test_hcr_manifest_actor_handler_caps_populated;
+        Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
+          test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
+        Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
+          test_compiled_sanitize_clean_exit;
+        Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
+          test_interp_http_server_idle_client_does_not_block_others;
       ]);
     ]

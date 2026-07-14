@@ -222,7 +222,8 @@ let gen_map_fold
                            Tir.AVar acc'; Tir.AVar xg]))) };
     ], None)
   in
-  { Tir.fn_name; fn_params = [xs; xf; acc; xg]; fn_ret_ty = acc_ty; fn_body = body }
+  { Tir.fn_name; fn_params = [xs; xf; acc; xg]; fn_ret_ty = acc_ty; fn_body = body;
+    fn_kind = Tir.FnFused }
 
 (** Generate a filter+fold fused function.
     Equivalent to: fold_left(combine, acc, filter(pred, xs))
@@ -257,19 +258,20 @@ let gen_filter_fold
         br_body =
           Tir.ELet (ph, Tir.EApp (xp, [Tir.AVar h]),
           Tir.ECase (Tir.AVar ph, [
-            { Tir.br_tag = "True";  br_vars = [];
+            { Tir.br_tag = Tir_names.synthetic_true_tag;  br_vars = [];
               br_body =
                 Tir.ELet (acc', Tir.EApp (xg, [Tir.AVar acc; Tir.AVar h]),
                 Tir.EApp (self, [Tir.AVar t; Tir.AVar xp;
                                  Tir.AVar acc'; Tir.AVar xg])) };
-            { Tir.br_tag = "False"; br_vars = [];
+            { Tir.br_tag = Tir_names.synthetic_false_tag; br_vars = [];
               br_body =
                 Tir.EApp (self, [Tir.AVar t; Tir.AVar xp;
                                  Tir.AVar acc; Tir.AVar xg]) };
           ], None)) };
     ], None)
   in
-  { Tir.fn_name; fn_params = [xs; xp; acc; xg]; fn_ret_ty = acc_ty; fn_body = body }
+  { Tir.fn_name; fn_params = [xs; xp; acc; xg]; fn_ret_ty = acc_ty; fn_body = body;
+    fn_kind = Tir.FnFused }
 
 (** Generate a map+filter+fold fused function.
     Equivalent to: fold_left(combine, acc, filter(pred, map(transform, xs)))
@@ -308,12 +310,12 @@ let gen_map_filter_fold
           Tir.ELet (fh, Tir.EApp (xf, [Tir.AVar h]),
           Tir.ELet (ph, Tir.EApp (xp, [Tir.AVar fh]),
           Tir.ECase (Tir.AVar ph, [
-            { Tir.br_tag = "True";  br_vars = [];
+            { Tir.br_tag = Tir_names.synthetic_true_tag;  br_vars = [];
               br_body =
                 Tir.ELet (acc', Tir.EApp (xg, [Tir.AVar acc; Tir.AVar fh]),
                 Tir.EApp (self, [Tir.AVar t; Tir.AVar xf; Tir.AVar xp;
                                  Tir.AVar acc'; Tir.AVar xg])) };
-            { Tir.br_tag = "False"; br_vars = [];
+            { Tir.br_tag = Tir_names.synthetic_false_tag; br_vars = [];
               br_body =
                 Tir.EApp (self, [Tir.AVar t; Tir.AVar xf; Tir.AVar xp;
                                  Tir.AVar acc; Tir.AVar xg]) };
@@ -323,7 +325,8 @@ let gen_map_filter_fold
   { Tir.fn_name;
     fn_params  = [xs; xf; xp; acc; xg];
     fn_ret_ty  = acc_ty;
-    fn_body    = body }
+    fn_body    = body;
+    fn_kind    = Tir.FnFused }
 
 (* ── Fusion attempt helpers ──────────────────────────────────────────── *)
 

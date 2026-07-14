@@ -1,0 +1,27 @@
+-- types (0) --
+-- fns (2) --
+## bump_head
+fn bump_head(xs : List(Int)) : List(Int) =
+  case xs of
+  Cons($f2, $f3) -> let $jp_clo5 : () -> '_ = letrec [$jp4] in
+$jp4 in
+let t : List(Int) = $f3 in
+let h : Int = $f2 in
+let $t1 : Int = +(h, 1) in
+alloc List.Cons($t1, t)
+  Nil() -> alloc List.Nil(Int)()
+  _ -> panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t10 : List(Int) = let $t9 : List(Int) = let $t8 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(1, $t8) in
+bump_head($t9) in
+case $t10 of
+  Cons($f11, $f12) -> let $jp_clo14 : () -> '_ = letrec [$jp13] in
+$jp13 in
+let h : Int = $f11 in
+println(h)
+  Nil() -> println(0)
+  _ -> panic("non-exhaustive pattern match")
+

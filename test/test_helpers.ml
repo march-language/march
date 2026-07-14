@@ -16,6 +16,18 @@ let typecheck src =
 
 let has_errors ctx = March_errors.Errors.has_errors ctx
 
+(** True iff DESUGARING [src] produces any error diagnostic. Mirrors the CLI
+    (bin/main.ml threads a shared [errors] ctx through [desugar_module] and
+    exits 1 if it has errors) — needed because the plain [typecheck] helper
+    above discards desugar-phase errors (its [parse_and_desugar] calls
+    [desugar_module] with no [~errors] arg). Used for the derive-unknown-type
+    regression (finding 17), whose error is emitted at desugar time. *)
+let desugar_has_errors src =
+  let ast = parse_module src in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors ast);
+  March_errors.Errors.has_errors errors
+
 (* ── Desugaring tests ───────────────────────────────────────────────────── *)
 
 let typecheck_full src =
@@ -288,7 +300,8 @@ let perceus_dead_let v =
       March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 0)))
   in
   let fn = { March_tir.Tir.fn_name = "f"; fn_params = [];
-             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn];
             tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let m' = March_tir.Perceus.perceus m in
@@ -519,6 +532,80 @@ let mk_inp buf cur = { March_repl.Input.empty with
   March_repl.Input.buffer = buf;
   March_repl.Input.cursor = cur }
 
+(* ── Loud-skip accounting (W2 Task 2 / W2.0) ─────────────────────────────
+   Policy: a skip is legitimate ONLY when the environment genuinely lacks a
+   tool — no `clang` on PATH, or no LLVM verifier (`opt`/`llvm-as`) for the
+   IR validity gate (test_ir_verify.ml). Any in-repo failure — clang present
+   but the link fails, or the runtime sources this project ships with are
+   missing — is a test FAILURE, not a skip. Legitimate skips are still
+   counted (not just silently swallowed) and the total is printed once at
+   process exit, so a whole run of skipped tool-gated tests is visible in
+   the summary rather than indistinguishable from "all passed". *)
+let jit_skip_count = ref 0
+let jit_skip_reasons = ref []
+let jit_skip_teardown_registered = ref false
+
+let record_jit_skip reason =
+  incr jit_skip_count;
+  jit_skip_reasons := reason :: !jit_skip_reasons;
+  if not !jit_skip_teardown_registered then begin
+    jit_skip_teardown_registered := true;
+    at_exit (fun () ->
+      if !jit_skip_count > 0 then begin
+        (* The ledger carries every tool-absence skip class (clang-gated JIT
+           tests AND the IR gate's LLVM-verifier-absence skips), so the
+           header stays generic — each reason line names its missing tool. *)
+        Printf.printf
+          "\n[tool-skip ledger] %d test(s) SKIPPED (required external tool not found):\n"
+          !jit_skip_count;
+        List.iter (fun r -> Printf.printf "  - %s\n" r) (List.rev !jit_skip_reasons);
+        flush stdout
+      end)
+  end
+
+(** True iff a `clang` binary is reachable on PATH. Distinguishes "tool
+    genuinely absent" (legitimate skip) from "clang is present but the link
+    failed" (must fail loudly — see setup_jit_runtime). *)
+let clang_available () =
+  Sys.command "command -v clang >/dev/null 2>&1" = 0
+
+(** True iff a `zig` binary is reachable on PATH.  The Linux cross-compile path
+    drives `zig cc`; without zig, cross tests are a legitimate tool-absence skip
+    (same policy as [clang_available]). *)
+let zig_available () =
+  Sys.command "command -v zig >/dev/null 2>&1" = 0
+
+(** Directory of the cross-compile target sysroot for [arch] ("amd64"|"arm64"),
+    populated by scripts/fetch-cross-sysroot.sh, or None if absent.  Mirrors the
+    compiler's own resolution (env override → ~/.cache/march cache).  A cross
+    link test without a sysroot is a legitimate skip, not a failure. *)
+let cross_sysroot_dir arch =
+  let well_formed d =
+    Sys.file_exists (Filename.concat d "lib/libssl.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libcrypto.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libz.so.1")
+  in
+  let candidates =
+    let upper = String.uppercase_ascii arch in
+    (match Sys.getenv_opt ("MARCH_CROSS_SYSROOT_" ^ upper) with
+     | Some d -> [d] | None -> [])
+    @ (match Sys.getenv_opt "MARCH_CROSS_SYSROOT" with
+       | Some d -> [d] | None -> [])
+    @ (let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+       [Filename.concat home
+          (Printf.sprintf ".cache/march/cross-sysroot/linux-%s" arch)])
+  in
+  List.find_opt well_formed candidates
+
+(** Read the whole contents of a file (best-effort; "" if unreadable). *)
+let read_file_contents path =
+  try
+    let ic = open_in path in
+    let n = in_channel_length ic in
+    let s = really_input_string ic n in
+    close_in ic; s
+  with Sys_error _ -> ""
+
 let setup_jit_runtime () =
   let home = Sys.getenv "HOME" in
   let dot_cache = Filename.concat home ".cache" in
@@ -532,7 +619,15 @@ let setup_jit_runtime () =
     Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
   ] in
   match List.find_opt Sys.file_exists candidates with
-  | None -> None
+  | None ->
+    (* The runtime/ sources are checked into this repo and always present
+       relative to the project root — this is not "tool absence", it means
+       the test binary was invoked from somewhere that can't find them.
+       Fail loudly rather than silently no-op every JIT test. *)
+    Alcotest.failf
+      "setup_jit_runtime: could not find runtime/march_runtime.c (searched: %s) — \
+       run tests from the project root or a normal _build layout"
+      (String.concat ", " candidates)
   | Some runtime_c ->
     let runtime_dir = Filename.dirname runtime_c in
     let opt_path f =
@@ -542,10 +637,23 @@ let setup_jit_runtime () =
     (* On Linux, dlopen requires all symbols resolved at load time (unlike
        macOS which allows lazy/two-level resolution). Include all core C
        files that march_runtime.c depends on. Determined by attempting a
-       link and collecting the resulting "undefined symbol" errors. *)
+       link and collecting the resulting "undefined symbol" errors.
+       march_dispatch.c/march_reload.c/march_remote_registry.c/
+       march_monitor_registry.c were added later (Hot Code Reload phases 2-10)
+       and march_runtime.c's actor_green_thread / march_kill now reference
+       their symbols unconditionally — omitting them used to make EVERY test
+       in this file silently skip (setup_jit_runtime returned None) rather
+       than fail, since the link error was swallowed into the `None` branch.
+       That vacuous-green class is now impossible: any link failure while
+       clang IS present is an Alcotest.fail with the captured stderr (see
+       below). Deliberately NOT adding march_http.c/march_tls.c/
+       march_compress.c: those pull in libssl/libz and aren't referenced by
+       the symbols these tests need. *)
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "base64.c"; "march_ffi.c";
+      "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
+      "march_monitor_registry.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in
     let h_inputs =
@@ -566,7 +674,11 @@ let setup_jit_runtime () =
     let so_path =
       Filename.concat cache_dir ("libmarch_rt_test_" ^ key ^ ".so") in
     if Sys.file_exists so_path then Some so_path
-    else begin
+    else if not (clang_available ()) then begin
+      record_jit_skip
+        (Printf.sprintf "no clang on PATH (building %s)" (Filename.basename so_path));
+      None
+    end else begin
       let extra_srcs =
         String.concat "" (List.map (fun p -> " " ^ p) extra_src_list) in
       (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
@@ -582,18 +694,363 @@ let setup_jit_runtime () =
          filesystem, so a concurrent test process can never dlopen a
          half-written .so. *)
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
+      let stderr_file = Printf.sprintf "%s.%d.stderr" so_path (Unix.getpid ()) in
       let rc = Sys.command (Printf.sprintf
-        "clang -shared -O2 -fPIC %s%s%s -o %s 2>/dev/null"
-        runtime_c extra_srcs pthread_flag tmp) in
+        "clang -shared -O2 -fPIC %s%s%s -o %s 2>%s"
+        runtime_c extra_srcs pthread_flag tmp (Filename.quote stderr_file)) in
       if rc <> 0 then begin
+        let stderr_output = read_file_contents stderr_file in
         (try Sys.remove tmp with Sys_error _ -> ());
-        None
+        (try Sys.remove stderr_file with Sys_error _ -> ());
+        (* clang IS on PATH (checked above) — this is a genuine in-repo link
+           failure (e.g. a missing runtime source, an undefined symbol from
+           a recently-added .c file not yet listed above). Never silently
+           skip: fail loudly with the linker's own stderr. *)
+        Alcotest.failf
+          "setup_jit_runtime: clang link failed (rc=%d) building %s from %s:\n%s"
+          rc so_path runtime_c stderr_output
       end else begin
+        (try Sys.remove stderr_file with Sys_error _ -> ());
         (try Sys.rename tmp so_path
          with Sys_error _ -> (try Sys.remove tmp with Sys_error _ -> ()));
-        if Sys.file_exists so_path then Some so_path else None
+        if Sys.file_exists so_path then Some so_path
+        else
+          Alcotest.failf
+            "setup_jit_runtime: clang reported success (rc=0) but %s does not exist \
+             after rename from %s" so_path tmp
       end
     end
+
+(* ── Compiled-regression test infra: main.exe + --compile skip policy ────
+   Same policy as setup_jit_runtime above: `march --compile` shells out to
+   clang for the final link, so a `compile_rc <> 0` conflates two very
+   different situations — (a) clang genuinely absent from PATH (legitimate,
+   countable skip) and (b) clang present but the March compiler produced a
+   bad program / crashed / hit a real bug (a test FAILURE, never a silent
+   `()`). This consolidates the ~20 near-identical
+   `exe_dir`/`main_exe`/`if not (Sys.file_exists main_exe) then ()` and
+   `if compile_rc <> 0 then ()` copies that used to live independently in
+   test_codegen.ml and test_stdlib_suite.ml. *)
+
+(** Locate the compiler binary built alongside this test executable
+    (`<build>/bin/main.exe`, relative to `<build>/test/<this test>.exe`).
+    `main.exe` is produced by the SAME `dune build` that produces the test
+    binaries — it is never legitimately absent, so a missing exe here means
+    the test was invoked from a broken/partial build, not "tool absence".
+    Fails loudly rather than silently skipping every compiled-regression
+    test in the file. *)
+let find_main_exe () =
+  let exe_dir = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if Sys.file_exists main_exe then main_exe
+  else
+    Alcotest.failf
+      "find_main_exe: %s does not exist — compiled-regression tests require \
+       `dune build ... test/run_codegen.exe test/run_stdlib.exe` (which also \
+       builds bin/main.exe) to have completed" main_exe
+
+(** The March project root: the parent of the `_build` directory this test
+    executable lives under, verified by the `dune-project` file sitting at
+    that root. The compiled-regression tests `cd` here before invoking the
+    compiler so its CWD-relative fallback candidates are live: `stdlib/`
+    and `runtime/` resolve from the source tree even when the
+    `_build/default/` copies are absent (a targeted `dune build
+    test/run_codegen.exe bin/main.exe` populates neither — only a full
+    `dune build` does), and the `.march/cas` tree a `--compile` run drops
+    under its CWD lands at the repo root instead of inside `_build/`.
+
+    Walking the exe's own ancestors (rather than applying a fixed number
+    of [Filename.dirname]s) is deliberate: a previous fixed-count version
+    landed on `_build` itself — one dirname short — which silently
+    disabled everything above (stdlib resolution then depended entirely on
+    the exe-relative `_build/default/stdlib` copy, and CAS trees piled up
+    inside `_build/`). The walk is correct at any depth, including dune's
+    `_build/.sandbox/<hash>/...` trees. Fails loudly if the exe is not
+    under a `_build` with a `dune-project` beside it (same
+    never-silently-wrong policy as [find_main_exe]). *)
+let march_project_root () =
+  let exe =
+    if Filename.is_relative Sys.executable_name
+    then Filename.concat (Sys.getcwd ()) Sys.executable_name
+    else Sys.executable_name
+  in
+  let rec parent_of_build dir =
+    let parent = Filename.dirname dir in
+    if Filename.basename dir = "_build" then parent
+    else if parent = dir then
+      Alcotest.failf
+        "march_project_root: test exe %s is not under a _build directory" exe
+    else parent_of_build parent
+  in
+  let root = parent_of_build (Filename.dirname exe) in
+  if Sys.file_exists (Filename.concat root "dune-project") then root
+  else
+    Alcotest.failf
+      "march_project_root: derived %s (parent of the exe's _build ancestor) \
+       but it contains no dune-project" root
+
+(** Run a shell command, returning (exit_code, combined_stdout_stderr).
+    Used to capture the March compiler's own diagnostic output so a real
+    compile failure can be reported with the actual error, not swallowed. *)
+let run_capture cmd =
+  let tmp = Filename.temp_file "march_test_capture" ".txt" in
+  let rc = Sys.command (Printf.sprintf "( %s ) >%s 2>&1" cmd (Filename.quote tmp)) in
+  let output = read_file_contents tmp in
+  (try Sys.remove tmp with Sys_error _ -> ());
+  (rc, output)
+
+(** Like [compile_march] but never calls [Alcotest.fail]/[Alcotest.skip]
+    itself — returns the raw outcome so a caller can inspect a real
+    compiler failure's captured output before deciding how to report it
+    (e.g. to recognize one specific, already-tracked product bug and
+    convert it to a documented [Alcotest.skip] rather than a plain fail —
+    see test_compiled_recursive_closure_capture). Most callers should use
+    [compile_march] or [compile_march_or_skip] instead, which apply the
+    default loud-failure policy automatically. *)
+let compile_march_raw ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  let cmd = Printf.sprintf "%s%s --compile%s -o %s %s"
+    cmd_prefix (Filename.quote main_exe)
+    (if extra_args = "" then "" else " " ^ extra_args)
+    (Filename.quote bin) (Filename.quote src) in
+  let (rc, output) = run_capture cmd in
+  if rc = 0 then `Ok bin
+  else if not (clang_available ()) then begin
+    record_jit_skip (Printf.sprintf "no clang on PATH (compiling %s)" src);
+    `Skipped
+  end else
+    `Failed (rc, output)
+
+(** Compile [src] with `main_exe --compile [extra_args] -o bin src`
+    (optionally prefixed with extra env/cd via [cmd_prefix]; [extra_args]
+    lets callers pass e.g. "--test"). Returns `Ok bin_path` on success.
+    On failure: if clang is genuinely absent from PATH, records a counted
+    skip and returns `Error `Skipped` (legitimate — see setup_jit_runtime's
+    doc comment for the policy this mirrors); otherwise clang IS present
+    and the March compiler itself failed, which is never a silent skip —
+    fails the test immediately with the compiler's captured stderr. *)
+let compile_march ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  match compile_march_raw ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
+  | `Ok bin -> `Ok bin
+  | `Skipped -> `Skipped
+  | `Failed (rc, output) ->
+    Alcotest.failf
+      "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
+       PATH, so this is a real compiler failure, not an environment gap):\n%s"
+      rc src output
+
+(** Like [compile_march], but calls [Alcotest.fail] directly instead of
+    returning a variant — for the common case where the caller has no
+    further use for a "skipped" outcome distinct from "compiled". Returns
+    `None` only on a legitimate clang-absent skip; always `Some bin` or a
+    failed test otherwise (never a silent no-op). *)
+let compile_march_or_skip ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~src () =
+  match compile_march ~cmd_prefix ~extra_args ~main_exe ~bin ~src () with
+  | `Ok bin -> Some bin
+  | `Skipped -> None
+
+(* ── LLVM IR validity gate infra (W2 Task 3 / W2.1) ──────────────────────
+   Policy mirrors setup_jit_runtime / compile_march above: a skip is
+   legitimate ONLY when no LLVM verifier tool is reachable on this machine
+   (genuine environment gap, counted via record_jit_skip so it shows up in
+   the same at_exit summary as the clang-absence skips — one unified
+   "skipped because tooling missing" ledger for the whole suite). Once a
+   tool IS found, any invalid-IR result is real signal, never swallowed.
+   Note this is a SEPARATE tool-absence class from clang: `--emit-llvm`
+   never shells out to clang (it writes textual IR and exits — see
+   bin/main.ml's `--emit-llvm only: write IR and exit` branch), so emitting
+   IR never needs a skip check; only the VERIFY step (running an external
+   `opt`/`llvm-as`) can legitimately be skipped for tool-absence. *)
+
+(** Locate an LLVM module verifier. Tries, in order:
+    1. `opt` on PATH (accepts modern `-passes=verify` pass-manager syntax).
+    2. `opt` at the Homebrew LLVM keg prefix (`brew --prefix llvm`), which is
+       not linked onto PATH by default because Homebrew's LLVM would shadow
+       Xcode's `clang`. Apple's Xcode Command Line Tools ship `clang` but
+       deliberately do NOT ship `opt`/`llvm-as` (no `xcrun -f opt`), so on a
+       stock macOS toolchain PATH alone finds nothing — the brew keg is the
+       realistic place a verifier lives on a dev machine even when `opt` is
+       not exported.
+    3. `llvm-as` (assembler) at either location as a fallback: it can't run
+       the module-verifier pass, but IR that fails to parse as valid LLVM
+       assembly is caught by its parser — this project treats "fails to
+       parse" and "parses but fails to verify" as the same detectable class
+       of ill-typed IR (both surface as a non-zero exit + a locatable
+       line:col error) — see the RED test below, which exercises the
+       parse-level failure mode `opt` also rejects.
+    Memoized: the probe shells out (`command -v`, `brew --prefix`), so it
+    only needs to run once per test process. *)
+let llvm_verifier_tool : [ `Opt of string | `LlvmAs of string | `None ] option ref = ref None
+
+let find_llvm_verifier_tool () =
+  match !llvm_verifier_tool with
+  | Some t -> t
+  | None ->
+    let on_path name =
+      if Sys.command (Printf.sprintf "command -v %s >/dev/null 2>&1" name) = 0
+      then Some name else None
+    in
+    let brew_llvm_bin =
+      let tmp = Filename.temp_file "march_brew_prefix" ".txt" in
+      let rc = Sys.command (Printf.sprintf "brew --prefix llvm >%s 2>/dev/null" (Filename.quote tmp)) in
+      let out = if rc = 0 then String.trim (read_file_contents tmp) else "" in
+      (try Sys.remove tmp with Sys_error _ -> ());
+      if out = "" then None else Some (Filename.concat out "bin")
+    in
+    let at_brew name =
+      match brew_llvm_bin with
+      | None -> None
+      | Some dir ->
+        let p = Filename.concat dir name in
+        if Sys.file_exists p then Some p else None
+    in
+    let result =
+      match on_path "opt" with
+      | Some p -> `Opt p
+      | None ->
+        match at_brew "opt" with
+        | Some p -> `Opt p
+        | None ->
+          match on_path "llvm-as" with
+          | Some p -> `LlvmAs p
+          | None ->
+            match at_brew "llvm-as" with
+            | Some p -> `LlvmAs p
+            | None -> `None
+    in
+    llvm_verifier_tool := Some result;
+    result
+
+(** Run the discovered verifier tool against a single `.ll` file.
+    Returns `Ok on valid IR, `Invalid error_output on a verifier/parser
+    rejection, `NoTool if no verifier is reachable (caller should convert
+    this to a legitimate, counted skip — never a silent pass). *)
+let verify_llvm_ir_file (path : string) : [ `Ok | `Invalid of string | `NoTool ] =
+  match find_llvm_verifier_tool () with
+  | `None -> `NoTool
+  | `Opt opt_path ->
+    let cmd = Printf.sprintf "%s -passes=verify -disable-output %s"
+      (Filename.quote opt_path) (Filename.quote path) in
+    let (rc, output) = run_capture cmd in
+    if rc = 0 then `Ok else `Invalid output
+  | `LlvmAs llvm_as_path ->
+    let cmd = Printf.sprintf "%s -o %s %s"
+      (Filename.quote llvm_as_path) (Filename.quote Filename.null) (Filename.quote path) in
+    let (rc, output) = run_capture cmd in
+    if rc = 0 then `Ok else `Invalid output
+
+(** Human-readable name of the tool actually in use (for report/skip messages). *)
+let llvm_verifier_tool_name () =
+  match find_llvm_verifier_tool () with
+  | `Opt p -> Printf.sprintf "opt -passes=verify (%s)" p
+  | `LlvmAs p -> Printf.sprintf "llvm-as (%s, parse-only fallback)" p
+  | `None -> "none"
+
+(** Recursively delete a temp directory tree we created. Needed because
+    running the compiler with a temp dir as CWD leaves more than the compile
+    outputs behind: even `--emit-llvm` creates a `.march/cas/vc/<xx>/<hash>`
+    verdict-cache tree under its CWD, so a bare `Unix.rmdir` after removing
+    the known files silently fails (ENOTEMPTY) and leaks one directory per
+    compile.
+
+    SELF-CONFINING: a recursive-delete primitive must defend itself rather
+    than rely on call-site discipline ("" was only accidentally safe via
+    ENOENT; "/" lstats as a directory and would have been walked). The
+    function REFUSES — [Alcotest.failf], deleting nothing — unless the
+    realpath-resolved target is a strict descendant of the realpath-resolved
+    system temp root ([Filename.get_temp_dir_name ()], the same root
+    [Filename.temp_file] creates under). "" and "/" are rejected outright
+    before any stat. Resolving BOTH sides through [Unix.realpath] also
+    neutralizes the macOS `/tmp` → `/private/tmp` and `/var` → `/private/var`
+    symlink mismatches between $TMPDIR's spelling and the filesystem's.
+    A path that does not exist is a no-op (nothing to delete; keeps cleanup
+    idempotent) — only an EXISTING path outside the temp root fails loudly.
+
+    Within the confined tree: structure-safe (lstat-based; symlinks are
+    removed as links, never followed) and best-effort (per-entry errors
+    ignored). The unconfined worker is deliberately local to this function
+    so no caller can reach it without the guard. *)
+let rm_rf_temp_dir path =
+  if path = "" || path = "/" then
+    Alcotest.failf
+      "rm_rf_temp_dir: refusing to delete %S (empty path or filesystem root)"
+      path;
+  let temp_root =
+    let raw = Filename.get_temp_dir_name () in
+    try Unix.realpath raw with Unix.Unix_error _ -> raw
+  in
+  match (try Some (Unix.realpath path) with Unix.Unix_error _ -> None) with
+  | None -> ()  (* target does not exist: nothing to delete *)
+  | Some real ->
+    let root_slash =
+      let n = String.length temp_root in
+      if n > 0 && temp_root.[n - 1] = '/' then temp_root else temp_root ^ "/"
+    in
+    let is_strict_descendant =
+      String.length real > String.length root_slash
+      && String.sub real 0 (String.length root_slash) = root_slash
+    in
+    if not is_strict_descendant then
+      Alcotest.failf
+        "rm_rf_temp_dir: refusing to delete %s (outside temp root %s)"
+        real temp_root
+    else begin
+      let rec go p =
+        match (try Some (Unix.lstat p) with Unix.Unix_error _ -> None) with
+        | None -> ()
+        | Some st ->
+          if st.Unix.st_kind = Unix.S_DIR then begin
+            (try
+               Sys.readdir p
+               |> Array.iter (fun f -> go (Filename.concat p f))
+             with Sys_error _ -> ());
+            (try Unix.rmdir p with Unix.Unix_error _ -> ())
+          end else
+            (try Sys.remove p with Sys_error _ -> ())
+      in
+      go real
+    end
+
+(** Emit LLVM IR for [src] to a fresh temp `.ll` file via `main_exe
+    --emit-llvm`, bypassing the CAS artifact cache entirely (unlike plain
+    `--compile`, `--emit-llvm` always regenerates and writes `<file>.ll`
+    rather than possibly short-circuiting on a cache hit with no `.ll`
+    write) so the gate always inspects freshly emitted text, never a stale
+    or absent file. Returns the `.ll` path on success. Never a legitimate
+    skip: `--emit-llvm` shells out to nothing (no clang, no linker — see
+    bin/main.ml's `--emit-llvm only: write IR and exit` branch), and
+    `main_exe` itself is the same never-legitimately-absent binary
+    `find_main_exe` already asserts on, so any failure here is a real
+    compiler bug and must fail loudly with the captured output. *)
+let emit_llvm_ir_to_file ~main_exe ~src () : [ `Ok of string | `Failed of int * string ] =
+  let tmp_dir = Filename.temp_file "march_ir_verify" "" in
+  Sys.remove tmp_dir;
+  Unix.mkdir tmp_dir 0o755;
+  let base = Filename.remove_extension (Filename.basename src) in
+  let march_copy = Filename.concat tmp_dir (base ^ ".march") in
+  (* Copy rather than compile in place: native/*.march fixtures may sit next
+     to sibling .expected/.c files, and we must not clobber any real .ll a
+     concurrent dune action for the SAME fixture might be producing. *)
+  let ic = open_in src in
+  let contents = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  let oc = open_out march_copy in
+  output_string oc contents;
+  close_out oc;
+  let ll_path = Filename.concat tmp_dir (base ^ ".ll") in
+  let cmd = Printf.sprintf "cd %s && %s --emit-llvm %s </dev/null"
+    (Filename.quote tmp_dir) (Filename.quote main_exe) (Filename.quote (Filename.basename march_copy)) in
+  let (rc, output) = run_capture cmd in
+  if rc = 0 && Sys.file_exists ll_path then `Ok ll_path
+  else begin
+    (* Failure: the caller gets no path back, so nothing in tmp_dir is
+       reachable afterwards — clean it up here (source copy, any partial
+       .ll, the .march/ verdict-cache tree the compiler drops in its CWD),
+       or a failing corpus would leak one temp dir per failing fixture. On
+       success the caller owns ll_path and cleans the dir up after
+       verifying (see run_fixture in test_ir_verify.ml). *)
+    rm_rf_temp_dir tmp_dir;
+    `Failed (rc, output)
+  end
 
 (** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
 let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
@@ -658,7 +1115,8 @@ let _blit b = March_tir.Tir.ALit (March_ast.Ast.LitBool b)
 
 let mk_fn name body =
   { March_tir.Tir.fn_name = name; fn_params = [];
-    fn_ret_ty = March_tir.Tir.TInt; fn_body = body }
+    fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+    fn_kind = March_tir.Tir.FnNormal }
 let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
 let avar name ty = March_tir.Tir.AVar (mk_var name ty)
 let flit f = March_tir.Tir.ALit (March_ast.Ast.LitFloat f)
@@ -1456,6 +1914,13 @@ let gen_nested_modules depth width =
 let lint_check src =
   let config = March_lint.Lint.default_config () in
   March_lint.Lint.check_file ~config ~filename:"test.march" ~src
+
+(** Like [lint_check] but lets the caller control the file path, so rules that
+    depend on the filename (e.g. [safety/no-panic-in-lib]'s lib-vs-test
+    classification) can be exercised. *)
+let lint_check_named ~filename src =
+  let config = March_lint.Lint.default_config () in
+  March_lint.Lint.check_file ~config ~filename ~src
 
 let has_lint_rule rule diags =
   List.exists (fun d -> d.March_lint.Lint.rule = rule) diags

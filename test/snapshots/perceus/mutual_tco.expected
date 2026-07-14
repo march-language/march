@@ -1,0 +1,23 @@
+-- types (0) --
+-- fns (3) --
+## is_even
+fn is_even(n : Int) : Bool =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> true
+  _ -> let $t2 : Int = -(n, 1) in
+is_odd($t2)
+
+## is_odd
+fn is_odd(n : Int) : Bool =
+  let $t3 : Bool = ==(n, 0) in
+case $t3 of
+  True() -> false
+  _ -> let $t4 : Int = -(n, 1) in
+is_even($t4)
+
+## main
+fn main() : () =
+  let $t5 : Bool = is_even(10) in
+println($t5)
+

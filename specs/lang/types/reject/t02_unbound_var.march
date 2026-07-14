@@ -1,0 +1,4 @@
+-- EXPECT-ERROR: I cannot find `undefined_var`
+mod M do
+  fn main() do println(int_to_string(undefined_var)) end
+end

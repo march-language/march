@@ -1,0 +1,18 @@
+-- Data parallelism adds no new typing rules (widening slice 9, §2.11). The
+-- parallel combinators are ordinary polymorphic stdlib functions: `List.pmap`
+-- infers the SAME type as `List.map` (so `sq == m` typechecks at List(Int)),
+-- and RRB `Parallel.preduce`/`psum` type like folds over `RRB.Vec(Int)`. The
+-- associativity of `merge` is a SEMANTIC obligation (§4.14), not a typing one.
+-- Typechecks by the existing application/HOF rules (§2.1). Operationally
+-- witnessed by golden g43.
+mod Main do
+  fn main() do
+    let xs = List.range(1, 10)
+    let sq = List.pmap(xs, fn x -> x * x)
+    let m  = List.map(xs, fn x -> x * x)
+    let v  = RRB.from_list(sq)
+    let t  = Parallel.preduce(v, 0, fn x -> x, fn (p, q) -> p + q)
+    println(int_to_string(t + Parallel.psum(v)))
+    println(bool_to_string(sq == m))
+  end
+end

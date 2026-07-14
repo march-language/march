@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: does not satisfy its return type constraint on all code paths
+-- Refinement types (widening slice 12, §2.14). A function declared with a
+-- refined RETURN type has its OWN BODY checked -- once, at the function's
+-- definition site, independent of any caller -- to prove every path produces
+-- a value satisfying the predicate. `bad`'s `n < 0` branch returns `n` itself
+-- (negative by the guard), directly violating `_ >= 0`; Z3 returns a concrete
+-- counterexample (`n = -1`) that `--check` surfaces in the diagnostic. Accept
+-- companion: accept/t76 (an exhaustive guard that DOES satisfy every branch).
+mod M do
+  fn bad(n : Int) : {Int | _ >= 0} do
+    if n < 0 do n else 0 end
+  end
+  fn main() do
+    println(int_to_string(bad(-3)))
+  end
+end

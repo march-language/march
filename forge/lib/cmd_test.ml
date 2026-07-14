@@ -75,8 +75,12 @@ let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ?(skip_properties=f
   end
 
 (** Interpreter fallback: invoke `march test` directly.
-    Used when MARCH_TEST_INTERPRETER=1. *)
-let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ~lib_path_env files =
+    Used when MARCH_TEST_INTERPRETER=1. [ffi_flags] carries the [[ffi]] C
+    sources / link flags (same shape as [Cmd_build.ffi_flags_full]) so tests
+    that call into native FFI shims (e.g. depot's sqlite shim) can resolve
+    march runtime symbols under the interpreter — without them, the shim is
+    never dlopened and any extern call into it fails at runtime. *)
+let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_properties=false) ?(ffi_flags="") ~lib_path_env files =
   let verbose_flag  = if verbose  then " --verbose"  else "" in
   let coverage_flag = if coverage then " --coverage" else "" in
   let filter_flag   = if filter = "" then ""
@@ -85,8 +89,8 @@ let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="
                       else Printf.sprintf " --seed=%s" (Filename.quote seed) in
   let skip_flag     = if skip_properties then " --skip-properties" else "" in
   let files_str = String.concat " " (List.map Filename.quote files) in
-  let cmd = Printf.sprintf "%smarch test%s%s%s%s%s %s"
-      lib_path_env verbose_flag coverage_flag filter_flag seed_flag skip_flag files_str in
+  let cmd = Printf.sprintf "%smarch test%s%s%s%s%s%s %s"
+      lib_path_env verbose_flag coverage_flag filter_flag seed_flag skip_flag ffi_flags files_str in
   let rc = Sys.command cmd in
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "test run failed (exit %d)" rc)
@@ -134,7 +138,13 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
     let (lib_path_env, output, all_lib_paths) = project_env proj in
     if use_interp then
-      invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~lib_path_env test_files
+      (* Link the same FFI shims as the compiled path below (and `forge build`)
+         so interpreter-mode tests that call into [[ffi]] code don't fail with
+         "runtime not loaded" — see invoke_march_interp's doc comment. *)
+      match Cmd_build.ffi_flags_full proj with
+      | Error msg -> Error msg
+      | Ok ffi_flags ->
+        invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~ffi_flags ~lib_path_env test_files
     else begin
       (* Compiled path: we need a single entry point.  When multiple test files
          are present, use the first one as entry — MARCH_LIB_PATH includes the

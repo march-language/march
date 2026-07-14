@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: I got stuck here
+mod R03ChainedComparisonNonassoc do
+  fn main() do
+    println(1 < 2 < 3)
+  end
+end

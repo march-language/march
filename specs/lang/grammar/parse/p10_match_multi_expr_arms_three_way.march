@@ -1,0 +1,23 @@
+mod P10MatchMultiExprArmsThreeWay do
+  type Shape = Circle(Int) | Square(Int) | Triangle(Int, Int)
+
+  fn area(s) do
+    match s do
+      Circle(r) ->
+        let doubled = r * 2
+        let squared = doubled * doubled
+        squared
+      Square(side) ->
+        let a = side * side
+        a
+      Triangle(base, height) ->
+        base * height
+    end
+  end
+
+  fn main() do
+    println(area(Circle(3)))
+    println(area(Square(4)))
+    println(area(Triangle(5, 6)))
+  end
+end

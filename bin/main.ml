@@ -121,8 +121,15 @@ let load_stdlib_file path =
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-       let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
+       (* prelude.march's own members are unwrapped into global scope below
+          (matching TIR's entry-module unwrapping), so its bare intra-module
+          calls must NOT be qualified with "Prelude." — is_entry:true (the
+          default) keeps them bare, consistent with every other file. Every
+          other stdlib file keeps its own top-level mod name as part of every
+          member's qualified name (Module.member), so is_entry:false here. *)
+       let m = March_desugar.Desugar.desugar_module
+                 ~is_entry:(basename = "prelude.march") m in
        if basename = "prelude.march" then
          (* Unwrap the outer mod so prelude functions are in global scope *)
          (match m.March_ast.Ast.mod_decls with
@@ -210,6 +217,7 @@ let stdlib_file_list = [
   "presence.march";
   "env.march";
   "config.march";
+  "cli.march";
   "test.march";
   "tuple.march";
   "char.march";
@@ -250,7 +258,7 @@ let stdlib_file_list = [
 (** Stdlib modules only loaded for --target js builds.
     These have externs with no native C symbols, so including them in native/JIT
     builds would cause dlopen(RTLD_NOW) to fail at link time. *)
-let js_only_stdlib_file_list = ["dom.march"]
+let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]
 
 (** Read all stdlib source files and compute a hash of their contents.
     Returns (stdlib_dir, source_hash, file_paths). *)
@@ -320,6 +328,148 @@ let load_stdlib ?(for_js=false) () =
         Sys.rename tmp cache_path
       with _ -> ());
       decls
+
+(** Typecheck [stdlib_decls] once and cache the resulting environment, so a
+    combined check/compile can seed pass 1 from it (via
+    [Typecheck.check_module_core]'s [?seed_env]) instead of re-typechecking
+    the whole stdlib from scratch every invocation — stdlib typecheck alone
+    measured ~68% of `forge check`'s wall time on a small (10-file) real
+    project, and a large fixed cost even on bigger ones.
+
+    Deliberately NOT the same cache/mechanism as [lib/repl/repl.ml]'s
+    `stdlib_tcenv_*.bin`: that one is built by folding [check_decl] over each
+    stdlib decl one at a time with no forward-reference prebinding pass, and
+    is KNOWN to tolerate real typecheck errors in some stdlib modules (see
+    its own comment on `load_decls_into_env` — http_server_listen/ws_recv
+    fail under that path and the resulting partial env is used anyway). This
+    cache is instead built via the exact same [check_module_core] pass 1/1b/2
+    machinery `march --check`/`--compile` already trust for stdlib, just
+    applied to stdlib alone first — so a cache hit here is behaviorally
+    identical to what today's from-scratch combined check would have done
+    for stdlib's own portion, not a reduced approximation of it. *)
+let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
+  let content_hash = Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+  let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+  let cache_dir = Filename.concat home ".cache/march" in
+  let short_hash = String.sub content_hash 0 16 in
+  let js_suffix = if for_js then "_js" else "" in
+  let cache_path = Filename.concat cache_dir
+    (Printf.sprintf "stdlib_tcenv_cli%s_%s.bin" js_suffix short_hash) in
+  let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+    Hashtbl.create 4096 in
+  let load_from_cache () =
+    try
+      if Sys.file_exists cache_path then begin
+        let ic = open_in_bin cache_path in
+        let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
+        let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
+          Marshal.from_channel ic in
+        close_in ic;
+        List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
+        Some { cached_env with
+               March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+               type_map }
+      end else None
+    with _ -> None
+  in
+  match load_from_cache () with
+  | Some env -> env
+  | None ->
+    let dummy_span = March_ast.Ast.{
+      file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0
+    } in
+    let synthetic = {
+      March_ast.Ast.mod_name = { March_ast.Ast.txt = "StdlibBaseline"; span = dummy_span };
+      March_ast.Ast.mod_decls = stdlib_decls;
+    } in
+    let errors = March_errors.Errors.create () in
+    let (_errs, _tm, final_env) =
+      March_typecheck.Typecheck.check_module_core ~errors synthetic in
+    (try
+      (try Unix.mkdir cache_dir 0o755
+       with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+      let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
+      let oc = open_out_bin tmp in
+      Marshal.to_channel oc final_env [];
+      let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+        final_env.March_typecheck.Typecheck.type_map [] in
+      Marshal.to_channel oc tm_list [];
+      close_out oc;
+      Sys.rename tmp cache_path
+    with _ -> ());
+    { final_env with
+      March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+      type_map = final_env.March_typecheck.Typecheck.type_map }
+
+(* clang cflags/libs to make libblake3 linkable into the runtime. These come
+   from March_cas.Blake3_flags, generated by lib/cas/discover.ml's dune
+   configurator probe — the SAME probe the OCaml FFI stubs in lib/cas use
+   (pkg-config tier, static-archive-on-macOS preference, toolchain-based
+   macOS detection, bare -lblake3 fallback). Sharing one generated module
+   makes it impossible for this link path and the lib/cas link path to
+   silently diverge. Used to compile+link runtime/march_blake3.c (see
+   march_blake3.h) so march_reload.c can recompute cap_root with the same
+   BLAKE3 algorithm the compiler uses (March_cas.Blake3, Phase5C-A). Only
+   needed on the paths that link march_reload.c (i.e. not --compile-so
+   patches). *)
+let blake3_link_flags () =
+  let flags = March_cas.Blake3_flags.cflags @ March_cas.Blake3_flags.libs in
+  match flags with
+  | [] -> ""
+  | _ -> " " ^ String.concat " " flags
+
+(* ── Cross-compile target sysroot (OpenSSL/TLS + zlib/gzip) ─────────────────
+   A cross Linux main binary CANNOT defer undefined symbols the way a .so can,
+   so the cross-linker needs TARGET copies of libssl/libcrypto/libz (+ headers)
+   at link time — not just at runtime.  These live in a per-arch cache populated
+   by scripts/fetch-cross-sysroot.sh, extracted from Debian bookworm packages so
+   the soname/ABI matches the deploy image (debian:bookworm-slim).  See
+   specs/2026-07-04-cross-compile-linux-hot-deploy-design.md §5. *)
+
+(** The cache/override directory that holds a target sysroot for [arch]
+    ("amd64" | "arm64").  Resolution order:
+      1. MARCH_CROSS_SYSROOT_<ARCH>  (arch-specific override)
+      2. MARCH_CROSS_SYSROOT         (single dir — used as-is for the built arch)
+      3. ~/.cache/march/cross-sysroot/linux-<arch>  (fetch-script cache)
+    Returns the first directory that both exists and contains lib/libssl.so.3
+    (a well-formed sysroot), else None. *)
+let cross_sysroot_dir (arch : string) : string option =
+  let well_formed d =
+    Sys.file_exists (Filename.concat d "lib/libssl.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libcrypto.so.3")
+    && Sys.file_exists (Filename.concat d "lib/libz.so.1")
+    && Sys.file_exists (Filename.concat d "include/openssl/ssl.h")
+  in
+  let candidates =
+    let upper = String.uppercase_ascii arch in
+    (match Sys.getenv_opt ("MARCH_CROSS_SYSROOT_" ^ upper) with
+     | Some d -> [d] | None -> [])
+    @ (match Sys.getenv_opt "MARCH_CROSS_SYSROOT" with
+       | Some d -> [d] | None -> [])
+    @ (let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+       [Filename.concat home
+          (Printf.sprintf ".cache/march/cross-sysroot/linux-%s" arch)])
+  in
+  List.find_opt well_formed candidates
+
+(** Short digest of a sysroot's three .so files (by content), folded into the CAS
+    key so re-fetching a different OpenSSL/zlib version invalidates cached cross
+    binaries.  Empty string if the sysroot is missing (the build errors out
+    before caching anyway). *)
+let cross_sysroot_digest (dir : string) : string =
+  let buf = Buffer.create 64 in
+  List.iter (fun so ->
+      let p = Filename.concat dir ("lib/" ^ so) in
+      (try Buffer.add_string buf (Digest.to_hex (Digest.file p))
+       with _ -> ()))
+    ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"];
+  String.sub (Digest.to_hex (Digest.string (Buffer.contents buf))) 0 12
+
+(** arch string ("amd64"/"arm64") for a LinuxGnu target, for sysroot lookup. *)
+let linux_arch_str = function
+  | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) -> Some "amd64"
+  | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ })  -> Some "arm64"
+  | _ -> None
 
 (** Pre-compile the C runtime to a shared library.
     Cached at ~/.cache/march/libmarch_runtime_<hash>.so, where <hash> covers
@@ -402,6 +552,8 @@ let ensure_runtime_so () =
       ^ (opt_file ffi_c)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
+      ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)
+      ^ (opt_file (Filename.concat runtime_dir "march_cap_lattice.c")) (* cap subsumption/normalize for ACTIVATE4 admission *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
     in
@@ -469,13 +621,17 @@ let ensure_runtime_so () =
     let so_san_flag =
       if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined" else ""
     in
+    (* BLAKE3 flags: needed when march_blake3.c is included (links alongside
+       march_reload.c so the reload server can recompute cap_root). *)
+    let blake3_c = Filename.concat runtime_dir "march_blake3.c" in
+    let blake3_flags = if Sys.file_exists blake3_c then blake3_link_flags () else "" in
     (* Content key: digests of every C input (the .c files named in the
        command plus every header in runtime/) and the full flag string.
        Identical inputs across worktrees share one artifact; any divergence
        gets its own filename instead of overwriting a shared one. *)
     let flags_sig = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags in
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
     let c_inputs =
@@ -535,6 +691,85 @@ let ffi_cas_tag () : string list =
     List.iter (Buffer.add_string buf) (List.rev !ffi_link_flags);
     ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
   end
+
+(* Interpreter FFI (Phase 4 / Gap 1): provide the runtime .so so extern calls
+   can be resolved dynamically, and — if ffi_c_files are present (from
+   --ffi-c or forge.toml [ffi]) — compile them into a temp .so and tell the
+   interpreter to dlopen it. An explicit --ffi-so path takes precedence.
+   Shared by every interpreter entry point (plain `march file.march` and
+   `march test`) so FFI shims resolve the same way in both. *)
+let setup_interpreter_ffi () =
+  March_eval.Eval.ffi_runtime_so := (fun () -> Some (ensure_runtime_so ()));
+  match !March_eval.Eval.ffi_shim_so with
+  | Some _ -> ()  (* already set explicitly via --ffi-so *)
+  | None when !ffi_c_files = [] -> ()  (* no shim sources *)
+  | None ->
+    (* Build a content-addressed temp path for the shim .so *)
+    let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+    let cache_dir = Filename.concat home ".cache/march" in
+    (try Unix.mkdir cache_dir 0o755
+     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let key_buf = Buffer.create 256 in
+    List.iter (fun f ->
+      Buffer.add_string key_buf f;
+      (try Buffer.add_string key_buf (Digest.to_hex (Digest.file f)) with _ -> ()))
+      (List.rev !ffi_c_files);
+    List.iter (Buffer.add_string key_buf) (List.rev !ffi_link_flags);
+    let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
+    let so_path = Filename.concat cache_dir ("march_ffi_shim_" ^ key ^ ".so") in
+    if not (Sys.file_exists so_path) then begin
+      (* Find the runtime dir for the -I flag (march_ffi.h lives there) *)
+      let runtime_dir_opt =
+        let candidates = [
+          "runtime/march_runtime.c";
+          Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
+          Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+        ] in
+        match List.find_opt Sys.file_exists candidates with
+        | Some p -> Some (Filename.dirname p)
+        | None -> None
+      in
+      let inc_flag = match runtime_dir_opt with
+        | Some d -> Printf.sprintf " -I%s" (Filename.quote d)
+        | None -> ""
+      in
+      let src_files = String.concat " "
+        (List.rev_map Filename.quote !ffi_c_files) in
+      (* Link flags from forge.toml [ffi] link (e.g. -lsqlite3) — the shim's
+         own C code needs these resolved same as a native `forge build`;
+         without them, symbols the shim calls into a system library for
+         (not march runtime symbols, which resolve at dlopen time via
+         RTLD_GLOBAL) are undefined and the whole shim fails to dlopen. *)
+      let link_flags = String.concat " " (List.rev !ffi_link_flags) in
+      let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
+      (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
+         that are not available at .so link time — they'll be resolved at dlopen
+         time via RTLD_GLOBAL. Pass -undefined dynamic_lookup on Darwin. *)
+      let platform_flags =
+        match Sys.getenv_opt "MARCH_FFI_SHIM_LDFLAGS" with
+        | Some f -> " " ^ f   (* explicit override *)
+        | None ->
+          (* Detect macOS via the existence of /System/Library/CoreServices *)
+          if Sys.file_exists "/System/Library/CoreServices"
+          then " -undefined dynamic_lookup"
+          else ""
+      in
+      let cmd = Printf.sprintf
+        "cc -shared -O2 -fPIC%s%s %s -o %s %s 2>&1"
+        platform_flags inc_flag src_files tmp link_flags in
+      let rc = Sys.command cmd in
+      if rc <> 0 then
+        Printf.eprintf "march: warning: failed to compile FFI shim sources \
+                        to .so (exit %d) — interpreter will not find shim symbols\n" rc
+      else begin
+        (try Sys.rename tmp so_path
+         with Sys_error _ ->
+           (try Sys.remove tmp with Sys_error _ -> ()))
+      end
+    end;
+    if Sys.file_exists so_path then
+      March_eval.Eval.ffi_shim_so := Some so_path
+
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
@@ -555,6 +790,19 @@ let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
+(* CAS cache-key fragments for the remaining toggles that alter the emitted
+   binary: MARCH_SANITIZE adds -fsanitize to the clang link, MARCH_HTTP_EVLOOP
+   adds -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
+   --debug/--debug-tui add -g. Any toggle missing here lets a cached artifact
+   silently shadow the requested codegen. (MARCH_DEBUG_RUNTIME is deliberately
+   absent: it only affects the interpreter/JIT runtime .so, which is keyed by
+   its own flags_sig content key.) *)
+let codegen_cas_tags () =
+  (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
+     then ["evloop"] else [])
+  @ (if !fast_math then ["fast-math"] else [])
+  @ (if !debug_mode || !debug_tui_mode then ["dbg"] else [])
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
@@ -571,8 +819,21 @@ let parse_target s =
   | "wasm32-wasi" | "wasm32" -> March_tir.Llvm_emit.Wasm32Wasi
   | "wasm32-unknown-unknown" | "wasm-browser" | "browser" -> March_tir.Llvm_emit.Wasm32Unknown
   | "js" | "javascript" -> March_tir.Llvm_emit.Js
+  (* glibc floor 2.36 matches the deploy image (debian:bookworm-slim ships glibc
+     2.36) and, crucially, is the minimum that TLS builds need: the target
+     libcrypto.so.3 references GLIBC_2.34 symbols (pthread_getspecific@2.34,
+     dlsym/dlclose@2.34 — that's where libdl merged into libc) plus stat@2.33,
+     which a lower floor's libc doesn't provide, so `ld.lld
+     --no-allow-shlib-undefined` rejects the link.  Bumping from 2.31→2.36 trades
+     pre-bookworm portability (which the hot-deploy target does not need) for a
+     TLS-capable cross link.  See specs/…cross-compile-linux-hot-deploy-design.md
+     §5 (P3). *)
+  | "linux/amd64" | "linux/x86_64" | "linux-x86_64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; glibc_min = "2.36" })
+  | "linux/arm64" | "linux/aarch64" | "linux-arm64" ->
+    March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; glibc_min = "2.36" })
   | other ->
-    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
+    Printf.eprintf "march: unknown target '%s'\n  Valid targets: native, linux/amd64, linux/arm64, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown, js\n" other;
     exit 1
 
 (* ------------------------------------------------------------------ *)
@@ -632,18 +893,26 @@ let fmt_file filename =
   in
   formatted <> src, formatted
 
-(** Collect all .march files under a directory recursively. *)
+(** Collect all .march files under a directory recursively.
+    Tolerant of unreadable entries: a permission-denied subdirectory (whose
+    [Sys.readdir] raises) or an entry we cannot [Sys.is_directory]-stat (e.g. a
+    dangling symlink) is skipped rather than aborting the whole walk — mirrors
+    [March_resolver.Resolver.collect_lib_files]. *)
 let rec march_files_in dir =
-  let entries = Sys.readdir dir in
+  let entries = try Sys.readdir dir with Sys_error _ -> [||] in
   Array.sort compare entries;
   Array.fold_left (fun acc entry ->
-    let path = Filename.concat dir entry in
-    if Sys.is_directory path then
-      acc @ march_files_in path
-    else if Filename.check_suffix path ".march" then
-      acc @ [path]
+    (* Skip dotfiles/dotdirs and macOS AppleDouble junk. "._x.march" is a binary
+       resource-fork file macOS creates (invisible there, a real file on Linux)
+       that ends in ".march" but is NOT source — the lexer chokes on its leading
+       NUL. Also skips .git/.march/etc. Never a source module either way. *)
+    if String.length entry > 0 && entry.[0] = '.' then acc
     else
-      acc
+    let path = Filename.concat dir entry in
+    match Sys.is_directory path with
+    | true -> acc @ march_files_in path
+    | false -> if Filename.check_suffix path ".march" then acc @ [path] else acc
+    | exception (Sys_error _ | Unix.Unix_error _) -> acc
   ) [] entries
 
 (** Run the test subcommand and exit.
@@ -654,19 +923,29 @@ let run_test_cmd args =
   let filter   = ref "" in
   let coverage = ref false in
   let targets  = ref [] in
-  List.iter (fun a ->
-    if a = "--verbose" || a = "-v" then verbose := true
-    else if a = "--coverage" then coverage := true
-    else if String.length a > 9 && String.sub a 0 9 = "--filter=" then
-      filter := String.sub a 9 (String.length a - 9)
-    else if String.length a > 7 && String.sub a 0 7 = "--seed=" then
-      Unix.putenv "MARCH_PROP_SEED" (String.sub a 7 (String.length a - 7))
-    else if a = "--skip-properties" then
-      Unix.putenv "MARCH_SKIP_PROPERTIES" "1"
-    else
-      targets := a :: !targets
-  ) args;
+  let rec parse_args = function
+    | [] -> ()
+    | a :: rest when a = "--verbose" || a = "-v" -> verbose := true; parse_args rest
+    | a :: rest when a = "--coverage" -> coverage := true; parse_args rest
+    | a :: rest when String.length a > 9 && String.sub a 0 9 = "--filter=" ->
+      filter := String.sub a 9 (String.length a - 9); parse_args rest
+    | a :: rest when String.length a > 7 && String.sub a 0 7 = "--seed=" ->
+      Unix.putenv "MARCH_PROP_SEED" (String.sub a 7 (String.length a - 7)); parse_args rest
+    | a :: rest when a = "--skip-properties" ->
+      Unix.putenv "MARCH_SKIP_PROPERTIES" "1"; parse_args rest
+    (* --ffi-c/--ffi-link/--ffi-so take their value as the next token, matching
+       the Arg.String convention used by the generic (non-test) CLI path. *)
+    | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_args rest
+    | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_args rest
+    | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_args rest
+    | a :: rest -> targets := a :: !targets; parse_args rest
+  in
+  parse_args args;
   let targets = List.rev !targets in
+  (* Same FFI wiring the plain interpreter path uses (setup_interpreter_ffi),
+     so tests that call into forge.toml [ffi] shims (e.g. depot's sqlite
+     shim) can resolve march runtime symbols under `march test`. *)
+  setup_interpreter_ffi ();
   (* If no explicit files given, auto-discover test/test_*.march and test/*_test.march *)
   let files =
     if targets <> [] then targets
@@ -674,7 +953,11 @@ let run_test_cmd args =
       let test_dir = "test" in
       if not (Sys.file_exists test_dir) then []
       else
-        let entries = List.sort compare (Array.to_list (Sys.readdir test_dir)) in
+        (* Skip an unreadable test/ (permission-denied) the same way we skip a
+           missing one, rather than crashing on the [Sys.readdir]. *)
+        let entries =
+          List.sort compare
+            (Array.to_list (try Sys.readdir test_dir with Sys_error _ -> [||])) in
         List.filter_map (fun name ->
           if (String.length name > 6 && String.sub name 0 5 = "test_"
               && Filename.check_suffix name ".march")
@@ -763,6 +1046,9 @@ let run_test_cmd args =
     March_refinecheck.No_alloc.check_module errors desugared;
     (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
     March_refinecheck.Cap_infer.check_module errors desugared;
+    (* Solving scope ends here: reap the shared z3 child now rather than
+       holding an idle solver process for the rest of the run. *)
+    March_refine.Refine.shutdown ();
     let diags = March_errors.Errors.sorted errors in
     (* Fatal when the diagnostic points into any file loaded as user code:
        the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
@@ -823,7 +1109,11 @@ let run_test_cmd args =
     end;
     (* Run doctests extracted from fn_doc fields *)
     let parse_expr src =
-      let lexbuf = Lexing.from_string src in
+      (* Wrap in `do ... end` so a doctest chaining a `let` line into a
+         following statement (see March_doctest.Doctest.extract) parses as
+         a block body; a single bare expression degenerates to itself. *)
+      let wrapped = "do\n" ^ src ^ "\nend" in
+      let lexbuf = Lexing.from_string wrapped in
       let expr =
         try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
         with
@@ -985,31 +1275,18 @@ let make_newstate_decl (new_fields : March_forge.Schema_diff.field list) : March
    Convention (from TIR/llvm_emit): user writes `fn {actor_lower}_migrate_state`
    as a top-level DFn; TIR picks it up by suffix and exports @__migrate_<Actor>.
    We match any DFn whose name ends with "_migrate_state" and whose last
-   dotted component before the suffix equals lowercase(actor). *)
+   dotted component before the suffix equals lowercase(actor) — see
+   [March_tir.Tir_names.is_migrate_fn_for]. *)
 let find_migrate_fn (actor : string) (decls : March_ast.Ast.decl list)
     : March_ast.Ast.fn_def option =
   let module A = March_ast.Ast in
-  let actor_lower = String.lowercase_ascii actor in
-  let suffix = "_migrate_state" in
-  let suf_len = String.length suffix in
-  let matches fn_name =
-    let n = String.length fn_name in
-    if n < suf_len then false
-    else if String.sub fn_name (n - suf_len) suf_len <> suffix then false
-    else begin
-      let prefix = String.sub fn_name 0 (n - suf_len) in
-      let last_part = match String.rindex_opt prefix '.' with
-        | None   -> prefix
-        | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1)
-      in
-      last_part = actor_lower
-    end
-  in
   let rec walk = function
     | [] -> None
     | d :: rest ->
       let found = match d with
-        | A.DFn (fd, _) when matches fd.A.fn_name.A.txt -> Some fd
+        | A.DFn (fd, _) when
+            March_tir.Tir_names.is_migrate_fn_for ~actor fd.A.fn_name.A.txt ->
+          Some fd
         | A.DMod (_, _, inner, _) -> walk inner
         | _ -> None
       in
@@ -1079,7 +1356,27 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
 (* File compiler                                                       *)
 (* ------------------------------------------------------------------ *)
 
+(* Exit code for "the compile pipeline (Lower -> Perceus/Opt -> Llvm_emit)
+   raised an uncaught OCaml exception on a program that already typechecked
+   cleanly" — i.e. an internal compiler bug, not a diagnosed user error.
+   Distinct from the exit codes already in use elsewhere in this file:
+     0 = success, 1 = diagnosed error (parse/typecheck/user), 2 = usage/CLI
+   error.  3 is otherwise unused; picked here and documented so callers
+   (notably the differential oracle, test/test_properties.ml) can treat it
+   as an unambiguous "compiler crashed" signal instead of sniffing stderr
+   text. See specs/2026-07-04-differential-oracle-design.md §4.1: a survey
+   of lib/tir/*.ml's ~33 failwith/assert-false sites (Oracle Task 2) found
+   NONE are a deliberate "typechecked but not lowerable yet" marker — every
+   site is an internal-invariant check (the typechecker/desugarer should
+   have prevented reaching that state) or closed-set exhaustiveness (e.g.
+   operator-name tables). There is no genuine "unsupported construct"
+   category to signal separately; anything that reaches here is a bug. *)
+let internal_compiler_error_exit_code = 3
+
 let compile filename =
+  (* Enable backtraces so an internal-error report (below) is actionable
+     even without OCAMLRUNPARAM=b. *)
+  Printexc.record_backtrace true;
   let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
     try read_file filename
@@ -1151,17 +1448,34 @@ let compile filename =
         let target_parsed = parse_target !target_str in
         let target_label  = match target_parsed with
           | March_tir.Llvm_emit.Native          -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
           | March_tir.Llvm_emit.Js              -> "js"
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        (* Cross target OpenSSL/zlib .so live outside the repo, so fold a digest of
+           them into the key (mirrors the inner CAS check below) — otherwise this
+           source-level early cache would serve a stale cross binary after a
+           sysroot re-fetch changed the linked libs. *)
+        let cross_sysroot_tag =
+          match linux_arch_str target_parsed with
+          | None -> []
+          | Some arch ->
+            (match cross_sysroot_dir arch with
+             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
+             | None -> [])
+        in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag ()
+          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
         let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
@@ -1182,6 +1496,14 @@ let compile filename =
         Some (store, ch)
       end
     end
+  in
+  (* Per-stage timing: stamp records wall time since just before parsing.
+     Enabled by --timings; output goes to stderr so it doesn't mix with
+     the compiled binary's stdout. *)
+  let t_compile_start = Unix.gettimeofday () in
+  let stamp label =
+    if !do_timings then
+      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
   in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
@@ -1210,6 +1532,7 @@ let compile filename =
        | None -> ()
        | Some h -> Printf.eprintf "hint: %s\n" h)
     ) parse_errs;
+  stamp "parse";
   (* Apply .march.spans sidecar remapping if present *)
   let module_ast =
     match March_ast.Span_remap.load_sidecar filename with
@@ -1225,6 +1548,7 @@ let compile filename =
         d.span.March_ast.Ast.start_col d.message
     ) (March_errors.Errors.sorted desugar_errors);
   let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
+  stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
@@ -1239,6 +1563,7 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "resolve-imports";
   (* Inject stdlib declarations before user declarations.
      If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
      to the external version: strip the stdlib copy so the external one is
@@ -1265,22 +1590,25 @@ let compile filename =
       | _ -> true
     ) stdlib_decls
   in
+  (* [desugared] is also what gets LOWERED further down (TIR needs stdlib's
+     own function bodies too, not just their types, to emit a working
+     binary) — so unlike [run_check_cmd] (--check only, no lowering), stdlib
+     decls must stay physically present here regardless of the seed-env
+     typecheck optimization below. An earlier version of this change also
+     skipped this prepend when unshadowed, which silently dropped stdlib
+     from what gets lowered and broke every compiled program exercising real
+     stdlib internals (confirmed via the full test suite: 24 codegen + 6
+     stdlib failures, all "type-incorrect TIR reached codegen" ICEs from
+     stdlib functions the user's code called into never being lowered). *)
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  stamp "stdlib-load";
   (* source_cas_state = early_cas — the CAS lookup already ran before parse.
      On a cache hit we already exited; if we reach this point it's a miss.
      We still pass the (store, ch) pair forward so the post-clang store fires. *)
   let source_cas_state = early_cas in
-  (* Per-stage timing: stamp records wall time since process start.
-     Enabled by --timings; output goes to stderr so it doesn't mix with
-     the compiled binary's stdout. *)
-  let t_compile_start = Unix.gettimeofday () in
-  let stamp label =
-    if !do_timings then
-      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
-  in
   (* Typecheck + capability enforcement (applies to both eval and compile paths).
      Capability enforcement is embedded in check_module via check_module_needs:
        - transitive needs propagation across module imports
@@ -1295,6 +1623,10 @@ let compile filename =
   March_refinecheck.No_alloc.check_module errors desugared;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
   March_refinecheck.Cap_infer.check_module errors desugared;
+  (* Solving scope ends here: reap the shared z3 child now rather than holding
+     an idle solver for the rest of the run (eval servers live indefinitely).
+     --check-migration below lazily respawns; its child is reaped by at_exit. *)
+  March_refine.Refine.shutdown ();
   stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors.
      "User" means any file loaded as user code: the entry file AND modules
@@ -1412,6 +1744,7 @@ let compile filename =
       exit 0
   end
   else if compile_mode then begin
+   try
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in
     let snap_tir label tir =
@@ -1747,6 +2080,10 @@ let compile filename =
         (* CAS: check for a cached binary before running clang *)
         let target_label = match target with
           | March_tir.Llvm_emit.Native -> "native"
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.X86_64; glibc_min } ->
+            "linux-x86_64-gnu-" ^ glibc_min
+          | March_tir.Llvm_emit.LinuxGnu { arch = March_tir.Llvm_emit.Arm64; glibc_min } ->
+            "linux-arm64-gnu-" ^ glibc_min
           | March_tir.Llvm_emit.Wasm64Wasi -> "wasm64-wasi"
           | March_tir.Llvm_emit.Wasm32Wasi -> "wasm32-wasi"
           | March_tir.Llvm_emit.Wasm32Unknown -> "wasm32-unknown-unknown"
@@ -1822,13 +2159,31 @@ let compile filename =
           ) pre_fns
         in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        (* Cross-toolchain identity: the target OpenSSL/zlib .so live OUTSIDE the
+           repo (~/.cache/march/cross-sysroot), so runtime_identity (which digests
+           only runtime/*.c/*.h) does NOT cover them.  Fold a digest of the three
+           sysroot .so files into cas_flags so re-fetching a different
+           OpenSSL/zlib version invalidates cached cross binaries.  The glibc
+           floor is already in target_label. *)
+        let cross_sysroot_tag =
+          match linux_arch_str target with
+          | None -> []
+          | Some arch ->
+            (match cross_sysroot_dir arch with
+             | Some d -> ["xsysroot:" ^ cross_sysroot_digest d]
+             | None -> [])
+        in
         let cas_flags =
           (if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt")
           :: Printf.sprintf "pmt%d" !pmap_threshold
-          :: (hr_cas_tag () @ ffi_cas_tag ()
+          :: (hr_cas_tag () @ ffi_cas_tag () @ codegen_cas_tags ()
               @ (if !compile_so then ["compile-so"] else [])
+              @ cross_sysroot_tag
               @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:target_label ~flags:cas_flags in
+        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
+           Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
+             target_label (String.concat "," cas_flags) ch);
         let cached_ok =
           match March_cas.Cas.lookup_artifact store ch with
           | Some cached_bin ->
@@ -1959,6 +2314,8 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_blake3.c")    else "")  (* BLAKE3 for server-side cap_root recompute *)
+              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_cap_lattice.c") else "")  (* cap subsumption/normalize for ACTIVATE4 admission *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
@@ -2024,28 +2381,44 @@ let compile filename =
             let math_flag = if Sys.unix then " -lm" else "" in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag =
-              if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined"
-              else ""
+              match Sys.getenv_opt "MARCH_SANITIZE" with
+              | Some "thread" -> " -fsanitize=thread -g"
+              | Some _ -> " -fsanitize=address,undefined"
+              | None -> ""
             in
+            (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
+               guarded by not !compile_so above, same as march_reload.c). *)
+            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
+            let blake3_flags2 = if not !compile_so && Sys.file_exists blake3_c2 then blake3_link_flags () else "" in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
                path so their `#include "march_ffi.h"` resolves with no config. *)
             let ffi_inc = if !ffi_c_files = [] then ""
                           else Printf.sprintf " -I%s" (Filename.quote runtime_dir) in
+            (* Target-derived C compiler + linker decisions (cross-compilation).
+               [xtarget] is re-parsed locally so nothing here depends on the
+               build host: a cross Linux .so/binary needs Linux linker flags even
+               when built on macOS, and vice versa. *)
+            let xtarget = parse_target !target_str in
+            let link_is_linux =
+              March_tir.Llvm_emit.target_is_linux xtarget
+              || (match xtarget with
+                  | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
+                  | _ -> false) in
             let rdynamic_flag =
               (* Export all symbols so dlopen'd patch .so can resolve back to server.
                  Pass via -Wl, so the flag goes straight to the linker, not the clang driver.
                  Linux (GNU ld): --export-dynamic. macOS (ld64): -export_dynamic. *)
               if !hot_reload_prefix <> None && not !compile_so then
-                if Sys.file_exists "/proc/version" then " -Wl,--export-dynamic"
+                if link_is_linux then " -Wl,--export-dynamic"
                 else " -Wl,-export_dynamic"
               else "" in
             let so_flag =
               if !compile_so then
                 (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
                    macOS: clang uses -undefined dynamic_lookup for the same effect. *)
-                let undef = if Sys.file_exists "/proc/version"
+                let undef = if link_is_linux
                             then " -Wl,--allow-shlib-undefined"
                             else " -undefined dynamic_lookup" in
                 " -shared -fPIC" ^ undef
@@ -2053,7 +2426,7 @@ let compile filename =
             let reload_ldl =
               (* -ldl is needed on Linux for dlopen; macOS has it in libc. *)
               if !hot_reload_prefix <> None && not !compile_so
-                 && Sys.file_exists "/proc/version" then " -ldl" else "" in
+                 && link_is_linux then " -ldl" else "" in
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
@@ -2062,9 +2435,84 @@ let compile filename =
                   Printf.eprintf "march: --signing-pubkey: invalid base64 or not 32 bytes\n";
                   ""
               else "" in
+            (* Target-derived C compiler + arch flags (cross-compilation). *)
+            let cc_driver =
+              match March_tir.Llvm_emit.zig_target xtarget with
+              | Some zt -> Printf.sprintf "zig cc -target %s" zt
+              | None    -> "clang"
+            in
+            let arch_cflags =
+              match xtarget with
+              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> ""   (* NEON by default; SSE flags are x86-only *)
+              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
+              | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
+            in
+            (* Cross Linux link (P3): link TLS (OpenSSL 3) + gzip (zlib) against a
+               TARGET sysroot instead of the host's homebrew libs.  march_tls.c
+               and march_compress.c cross-compile cleanly given the target
+               headers, so KEEP them; but drop march_blake3.c (needs a target
+               libblake3 we don't vendor) and march_reload.c (the HCR reload
+               server — hot-reload-over-cross is out of scope; its symbols are the
+               only thing that pulled in blake3).  Host-discovered link flags are
+               replaced wholesale so no -L/opt/homebrew/lib leaks into the cross
+               link.  See specs/2026-07-04-cross-compile-linux-hot-deploy-design.md
+               §5 (P3). *)
+            let is_cross = March_tir.Llvm_emit.target_is_linux xtarget in
+            let cross_sysroot =
+              if not is_cross then None
+              else match linux_arch_str xtarget with
+                | None -> None
+                | Some arch ->
+                  (match cross_sysroot_dir arch with
+                   | Some d -> Some d
+                   | None ->
+                     Printf.eprintf
+                       "march: cross-compile target sysroot for linux/%s not found.\n\
+                       \  TLS (OpenSSL) + gzip (zlib) cross-linking needs target \
+                        libssl/libcrypto/libz + headers.\n\
+                       \  Populate the cache with:\n\
+                       \      scripts/fetch-cross-sysroot.sh %s\n\
+                       \  or point MARCH_CROSS_SYSROOT_%s (or MARCH_CROSS_SYSROOT) \
+                        at a prepared sysroot\n\
+                       \  (a dir with lib/{libssl.so.3,libcrypto.so.3,libz.so.1} + \
+                        include/openssl + include/zlib.h).\n"
+                       arch arch (String.uppercase_ascii arch);
+                     exit 1)
+            in
+            (* Direct positional .so paths (NOT -l:/-L): lld can't find the target
+               .sos via -l:libssl.so.3, but a direct path links and records the
+               correct DT_NEEDED soname.  zstd/brotli stay off for cross (zlib is
+               the only mandatory codec; gzip/deflate is pure zlib). *)
+            let openssl_flags2 = match cross_sysroot with
+              | None -> openssl_flags2
+              | Some sr ->
+                Printf.sprintf " -I%s/include %s/lib/libssl.so.3 %s/lib/libcrypto.so.3"
+                  sr sr sr
+            in
+            let compress_flags2 = match cross_sysroot with
+              | None -> compress_flags2
+              | Some sr ->
+                Printf.sprintf " -I%s/include %s/lib/libz.so.1" sr sr
+            in
+            (* blake3 stays host-discovered for native; zeroed for cross (its .c
+               is dropped below — no target libblake3). *)
+            let blake3_flags2 = if is_cross then "" else blake3_flags2 in
+            let extra_c_files =
+              if not is_cross then extra_c_files
+              else
+                (* Keep march_tls.c + march_compress.c (they link against the
+                   target sysroot); drop the blake3/reload HCR pair. *)
+                let dropped = ["march_blake3.c"; "march_reload.c"] in
+                extra_c_files
+                |> String.split_on_char ' '
+                |> List.filter (fun p ->
+                     p = "" || not (List.mem (Filename.basename p) dropped))
+                |> String.concat " " in
             let cmd = Printf.sprintf
-              "clang%s%s%s%s%s -msse4.2 -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s %s -o %s%s%s"
-              opt_flag dbg_flag san_flag rdynamic_flag so_flag evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+            (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+               Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -2082,12 +2530,39 @@ let compile filename =
            without having to dlopen the artifact.  Format:
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
-             <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>]
+             <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
-           of a sig-changed function are also being updated. *)
+           of a sig-changed function are also being updated.
+           caps: (Phase5C-A.3, revised 2026-07-04 for granularity) the
+           function's OWN normalized, sorted inferred IO-capability closure
+           from March_typecheck.Typecheck.fn_own_capability_closures — always
+           present, empty when the function needs no capabilities.  This is
+           deliberately the per-function OWN projection, not the module-merged
+           closure: the whole-artifact union is dominated by the linked
+           stdlib and is app-invariant, which made the deploy capability gate
+           unable to discriminate between artifacts.  There is no
+           artifact-wide ROOT cap_root line any more; cap_root is computed
+           per-function downstream by the deploy tool from that function's
+           own caps= field. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
+          (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
+             fn_own_capability_closures returns each function's own caps
+             (body/sig/extern), WITHOUT the module-wide `needs` merge that
+             fn_capability_closures performs — that merge is what made the
+             whole-artifact union app-invariant (Granularity revision,
+             2026-07-04).  Caps are already normalized by Cap_lattice.normalize;
+             sort here only for deterministic CSV output (List.sort does not
+             mutate the underlying set). *)
+          let fn_caps_tbl : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+          List.iter (fun (name, caps) -> Hashtbl.replace fn_caps_tbl name caps)
+            (March_typecheck.Typecheck.fn_own_capability_closures typecheck_env);
+          let caps_for name =
+            match Hashtbl.find_opt fn_caps_tbl name with
+            | Some caps -> List.sort_uniq String.compare caps
+            | None -> []
+          in
           (* Build a reverse caller index: callee_name → sorted list of
              boundary caller names.  Walk the pre-opt TIR so that calls which
              the optimizer inlined away are still captured. *)
@@ -2159,7 +2634,8 @@ let compile filename =
                  | Some (_ :: _ as cs) -> " callers:" ^ String.concat "," cs
                  | _ -> ""
                in
-               Printf.fprintf oc "%s %s %s%s\n" name impl_h sig_h callers_field
+               let caps_field = "caps=" ^ String.concat "," (caps_for name) in
+               Printf.fprintf oc "%s %s %s%s %s\n" name impl_h sig_h callers_field caps_field
              ) hr_impl_hashes;
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
@@ -2288,6 +2764,31 @@ let compile filename =
         Printf.eprintf "wrote %s\n" ll_file
       end
     end
+   with
+   | March_errors.Errors.ParseError _ as exn -> raise exn
+   | March_tir.Js_emit.Js_emit_error _ as exn -> raise exn
+   | exn ->
+     (* Every diagnosed failure in this pipeline (parse errors, typecheck
+        errors, user-file capability-policy violations, clang/link failures)
+        already prints its own message and calls `exit` directly — `exit`
+        terminates the process without raising, so it never reaches this
+        handler.  Anything that DOES land here is an OCaml exception that
+        escaped the compile pipeline (Lower -> Mono -> Perceus -> Opt ->
+        Llvm_emit) uncaught: per the Oracle Task 2 survey, every failwith/
+        assert-false site in lib/tir is an internal-invariant check, so this
+        is always a compiler bug, never a "this construct isn't supported"
+        signal.  Render it like a diagnostic instead of letting OCaml print
+        a raw "Fatal error: exception ..." with no span and no guidance, and
+        exit with a distinct, documented code so tooling (the differential
+        oracle) can tell "the compiler crashed" apart from a clean, graceful
+        nonzero exit. *)
+     let bt = Printexc.get_backtrace () in
+     Printf.eprintf "march: internal compiler error: %s\n" (Printexc.to_string exn);
+     if bt <> "" then Printf.eprintf "%s" bt;
+     Printf.eprintf
+       "This is a compiler bug, not a problem with your program. Please file \
+        an issue with a minimal reproduction.\n%!";
+     exit internal_compiler_error_exit_code
   end
   else begin
     (* Set up the on-demand module loader so qualified access like Map.get()
@@ -2364,76 +2865,7 @@ let compile filename =
       end
     in
     March_eval.Eval.clear_march_stack ();
-    (* Interpreter FFI (Phase 4): provide the runtime .so so extern calls can be
-       resolved dynamically.  Lazy — only built if the program actually calls an
-       extern at runtime. *)
-    March_eval.Eval.ffi_runtime_so := (fun () -> Some (ensure_runtime_so ()));
-    (* Gap 1: if ffi_c_files are present (from --ffi-c or forge.toml [ffi]),
-       compile them into a temp .so and tell the interpreter to dlopen it.
-       An explicit --ffi-so path (set above) takes precedence.
-       Hash = sum of source paths and their content for cache invalidation. *)
-    (match !March_eval.Eval.ffi_shim_so with
-     | Some _ -> ()  (* already set explicitly via --ffi-so *)
-     | None when !ffi_c_files = [] -> ()  (* no shim sources *)
-     | None ->
-       (* Build a content-addressed temp path for the shim .so *)
-       let home = (try Sys.getenv "HOME" with Not_found -> ".") in
-       let cache_dir = Filename.concat home ".cache/march" in
-       (try Unix.mkdir cache_dir 0o755
-        with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-       let key_buf = Buffer.create 256 in
-       List.iter (fun f ->
-         Buffer.add_string key_buf f;
-         (try Buffer.add_string key_buf (Digest.to_hex (Digest.file f)) with _ -> ()))
-         (List.rev !ffi_c_files);
-       let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
-       let so_path = Filename.concat cache_dir ("march_ffi_shim_" ^ key ^ ".so") in
-       if not (Sys.file_exists so_path) then begin
-         (* Find the runtime dir for the -I flag (march_ffi.h lives there) *)
-         let runtime_dir_opt =
-           let candidates = [
-             "runtime/march_runtime.c";
-             Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-             Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-           ] in
-           match List.find_opt Sys.file_exists candidates with
-           | Some p -> Some (Filename.dirname p)
-           | None -> None
-         in
-         let inc_flag = match runtime_dir_opt with
-           | Some d -> Printf.sprintf " -I%s" (Filename.quote d)
-           | None -> ""
-         in
-         let src_files = String.concat " "
-           (List.rev_map Filename.quote !ffi_c_files) in
-         let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
-         (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
-            that are not available at .so link time — they'll be resolved at dlopen
-            time via RTLD_GLOBAL.  Pass -undefined dynamic_lookup on Darwin. *)
-         let platform_flags =
-           match Sys.getenv_opt "MARCH_FFI_SHIM_LDFLAGS" with
-           | Some f -> " " ^ f   (* explicit override *)
-           | None ->
-             (* Detect macOS via the existence of /System/Library/CoreServices *)
-             if Sys.file_exists "/System/Library/CoreServices"
-             then " -undefined dynamic_lookup"
-             else ""
-         in
-         let cmd = Printf.sprintf
-           "cc -shared -O2 -fPIC%s%s %s -o %s 2>&1"
-           platform_flags inc_flag src_files tmp in
-         let rc = Sys.command cmd in
-         if rc <> 0 then
-           Printf.eprintf "march: warning: failed to compile FFI shim sources \
-                           to .so (exit %d) — interpreter will not find shim symbols\n" rc
-         else begin
-           (try Sys.rename tmp so_path
-            with Sys_error _ ->
-              (try Sys.remove tmp with Sys_error _ -> ()))
-         end
-       end;
-       if Sys.file_exists so_path then
-         March_eval.Eval.ffi_shim_so := Some so_path);
+    setup_interpreter_ffi ();
     (try March_eval.Eval.run_module desugared
      with
      | March_eval.Eval.Eval_error msg ->
@@ -2498,26 +2930,90 @@ let run_check_cmd files =
     let desugared = March_desugar.Desugar.desugar_module module_ast in
     let (_resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     import_user_files := user_files @ !import_user_files;
-    let desugared =
-      { desugared with
-        March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
-    in
-    (* Wrap each user file in a DMod so its names are accessible as Module.name,
-       mirroring what load_stdlib_file does for stdlib modules. *)
+    (* [extra_decls] (this file's auto-discovered/imported modules) must stay
+       FLAT top-level siblings of this file's own DMod, not merged into its
+       body — nesting them one level in (a) gives them the wrong qualified
+       name (Module.name becomes EntryFile.Module.name — the exact hazard
+       [resolve_imports]'s own doc comment warns against) and (b) hides
+       cross-file duplicates from the dedup pass below: when checking
+       multiple files together, each file's OWN [resolve_imports] call
+       independently auto-discovers the whole search path (its dedup tables
+       are scoped to that one call), so two files that both see the same
+       shared dependency each produce their own copy of it — only visible
+       to dedup if both copies land as top-level siblings here. *)
     [March_ast.Ast.DMod (desugared.March_ast.Ast.mod_name,
                          March_ast.Ast.Public,
                          desugared.March_ast.Ast.mod_decls,
                          March_ast.Ast.dummy_span)]
+    @ extra_decls
   ) files in
-  (* Build a synthetic combined module and type-check it *)
+  (* [resolve_imports] auto-discovers the WHOLE library search path on every
+     call, with its dedup tables scoped to that single call — so calling it
+     once per [files] entry (above) independently re-embeds every shared
+     transitive import once per file that (directly or auto-discovered-ly)
+     pulls it in.  For N files sharing common dependencies this blows up the
+     combined module to N copies of the shared decls (confirmed: verified
+     against a live project, error-message repeat count scaled exactly
+     linearly with file count, and total time compounded far worse than
+     linearly on top of that — 5 files took 24x longer than 1).  Every
+     top-level decl this loop produces is a whole-module DMod, and a given
+     module name always maps to exactly one file (one-mod-per-file
+     convention), so any two DMods sharing a name ARE the same module —
+     keep only the first occurrence. *)
+  let seen_mod_names : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let all_decls = List.filter (function
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, _, _) ->
+      if Hashtbl.mem seen_mod_names mn then false
+      else begin Hashtbl.add seen_mod_names mn (); true end
+    | _ -> true
+  ) all_decls in
+  (* If a checked file's own module name shadows a stdlib module (e.g. a
+     project's own `mod Crypto do` — the exact scenario [compile]'s
+     [extern_mod_names] below already guards against for the single-file
+     --check/--compile path), strip the stdlib copy so the project's
+     definition is the sole one.  Without this, both DMods named "Crypto"
+     end up in the combined module and corrupt unrelated typecheck state:
+     confirmed live — an unrelated user file shadowing stdlib Crypto made a
+     completely different module's own constructor (`PgTarget`, from a
+     third file) become unresolvable, with no diagnostic pointing at the
+     real cause. *)
+  let stdlib_decls_unshadowed_count = List.length stdlib_decls in
+  let stdlib_decls = List.filter (function
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, _, _) ->
+      not (Hashtbl.mem seen_mod_names mn)
+    | _ -> true
+  ) stdlib_decls in
+  let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
+  (* Build a synthetic module of just the user's own decls and type-check it,
+     seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
+     instead of re-typechecking stdlib combined with user code from scratch —
+     UNLESS a user file shadows a stdlib module name, in which case the
+     cached (full, unshadowed) stdlib env would be wrong for this project;
+     that's rare enough to just fall back to the slower from-scratch
+     combined check rather than parameterize the cache key on the shadow set. *)
   let dummy_span = March_ast.Ast.{
     file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0
   } in
-  let combined = {
-    March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
-    March_ast.Ast.mod_decls = stdlib_decls @ all_decls;
-  } in
-  let (errors, _type_map) = March_typecheck.Typecheck.check_module combined in
+  let errors =
+    if no_shadowing then begin
+      let seed_env = get_stdlib_tc_env
+        ~for_js:(parse_target !target_str = March_tir.Llvm_emit.Js) stdlib_decls in
+      let user_only = {
+        March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
+        March_ast.Ast.mod_decls = all_decls;
+      } in
+      let (errs, _tm, _env) =
+        March_typecheck.Typecheck.check_module_core ~seed_env user_only in
+      errs
+    end else begin
+      let combined = {
+        March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
+        March_ast.Ast.mod_decls = stdlib_decls @ all_decls;
+      } in
+      let (errs, _type_map) = March_typecheck.Typecheck.check_module combined in
+      errs
+    end
+  in
   let diags = March_errors.Errors.sorted errors in
   let lib_files =
     List.sort_uniq String.compare (files @ !import_user_files) in
@@ -2526,17 +3022,21 @@ let run_check_cmd files =
     d.span.March_ast.Ast.file = "" ||
     d.span.March_ast.Ast.file = "<unknown>"
   in
-  let user_errors = List.filter (fun d ->
-    is_user_file d &&
-    d.March_errors.Errors.severity = March_errors.Errors.Error
+  let user_diags severity = List.filter (fun d ->
+    is_user_file d && d.March_errors.Errors.severity = severity
   ) diags in
-  List.iter (fun (d : March_errors.Errors.diagnostic) ->
-    Printf.eprintf "%s:%d:%d: error: %s\n"
+  let user_errors   = user_diags March_errors.Errors.Error in
+  let user_warnings = user_diags March_errors.Errors.Warning in
+  let print_diag label (d : March_errors.Errors.diagnostic) =
+    Printf.eprintf "%s:%d:%d: %s: %s\n"
       d.span.March_ast.Ast.file
       d.span.March_ast.Ast.start_line
       d.span.March_ast.Ast.start_col
+      label
       d.message
-  ) user_errors;
+  in
+  List.iter (print_diag "warning") user_warnings;
+  List.iter (print_diag "error") user_errors;
   if user_errors <> [] then exit 1
   else exit 0
 

@@ -1,0 +1,17 @@
+mod Main do
+  -- Widening slice 2, Task 4 -- the SELECTOR form: `use List.{append}`
+  -- parses to `DUse { use_sel = UseNames [append] }` (`parser.mly`'s
+  -- `use_selector` -> `LBRACE; names; RBRACE`, ~parser.mly:671). Typecheck's
+  -- `UseNames` arm (~typecheck.ml:7320-7337) looks up ONLY "List.append" in
+  -- `env.vars` and binds exactly that one name bare -- a sibling public name
+  -- this selector does NOT list (e.g. `List.filter_map`) stays unreachable
+  -- bare. If the requested name were absent OR private, this arm is the one
+  -- that raises "Module `%s` does not export `%s`." -- see
+  -- `reject/t27_use_selector_private_name` for that path exercised against a
+  -- real private `pfn`.
+  use List.{append}
+
+  fn main() do
+    println(int_to_string(length(append([1, 2], [3]))))
+  end
+end

@@ -1,3 +1,6 @@
+-- HISTORICAL (frozen): predates the removal of the `if..then..else` expression
+-- form (W4.4, 2026-07); line 11 no longer parses. To re-run, rewrite it as
+-- `if k == key do Some(v) else lookup(rest, key) end`. Content otherwise verbatim.
 mod T do
 
 type Conn = { hdrs : List((String, String)) }

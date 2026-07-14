@@ -1,0 +1,15 @@
+mod P19AppOnStartSupervisorSpec do
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on Tick() do { count: state.count + 1 } end
+  end
+
+  app HookApp do
+    on_start do
+      42
+    end
+
+    Supervisor.spec(:one_for_one, [worker(Counter)])
+  end
+end

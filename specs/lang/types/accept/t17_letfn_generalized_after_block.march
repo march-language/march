@@ -1,0 +1,16 @@
+mod M do
+  fn use_twice() do
+    fn id_rec(x) do
+      x
+    end
+    let a = id_rec(1)
+    let b = id_rec("s")
+    (a, b)
+  end
+
+  fn main() do
+    let (a, b) = use_twice()
+    println(int_to_string(a))
+    println(b)
+  end
+end

@@ -1,0 +1,38 @@
+mod Main do
+  -- Operational parallelism witness (core-march.md §4.14): the data-parallel
+  -- combinators produce EXACTLY the same result as their sequential
+  -- counterparts -- same values, same order -- and that result is byte-identical
+  -- interpreted and compiled. The interpreter runs the task thunks eagerly and
+  -- sequentially; the compiled backend runs them on the real multi-core
+  -- work-stealing scheduler. Determinism of the RESULT holds regardless because
+  -- (i) `pmap` gathers partials in spawn order via per-handle await, not
+  -- completion order, so output order == input order; (ii) `preduce`/`psum`/
+  -- `pcount`/`pany`/`pall` use associative merges with correct identities, so
+  -- the differing chunk boundaries (worker count differs interp vs compiled)
+  -- cancel out.
+  --
+  -- This is the FIRST compiled conformance witness for the RRB `Parallel`
+  -- module (widening slice 9). `test_compiled_pmap_matches_map` in the suite
+  -- covers only the list-based `List.pmap`/`pfilter`; the RRB `Parallel.*`
+  -- reductions had interpreter unit tests only.
+  --
+  -- NOT included on purpose: `Parallel.psum_float`. IEEE-754 `+.` is not
+  -- associative, so differing chunk counts can reorder the additions and change
+  -- the last bit -- it is not backend-portable and must not be golden-compared
+  -- (finding P1, specs/todos.md).
+  fn main() do
+    let xs = List.range(1, 200)
+    -- List.pmap is order-preserving: identical to List.map element-for-element.
+    let a = List.pmap(xs, fn x -> x * x)
+    let b = List.map(xs, fn x -> x * x)
+    println("pmap_eq_map=" ++ bool_to_string(a == b))
+    -- RRB Parallel reductions over the same data (all associative + identity).
+    let v = RRB.from_list(xs)
+    println("psum=" ++ int_to_string(Parallel.psum(v)))                        -- 19900
+    println("pcount_gt100=" ++ int_to_string(Parallel.pcount(v, fn x -> x > 100)))  -- 99
+    println("pany_eq150=" ++ bool_to_string(Parallel.pany(v, fn x -> x == 150)))
+    println("pall_pos=" ++ bool_to_string(Parallel.pall(v, fn x -> x > 0)))
+    println("preduce_sum=" ++ int_to_string(Parallel.preduce(v, 0, fn x -> x, fn (p, q) -> p + q)))  -- 19900
+    println("done")
+  end
+end

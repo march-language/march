@@ -56,13 +56,36 @@ dune runtest --force       # re-run even if inputs are cached (avoids silent no-
 
 To unstick a stale daemon: `dune shutdown` (dune 3.x).
 
-13 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
-parity tests (~5s), 5 compiled adversarial regression tests (~5s), and 2 pbkdf2
-key-derivation tests (~3s). Run the full suite before merging to main.
+**Shared dune cache.** Dune's build cache is enabled user-globally
+(`~/.config/dune/config`), so identical compilation actions are reused across
+all worktrees and sessions instead of recompiled — a fresh worktree's build is
+mostly cache hits. If you suspect the cache during compiler debugging, bypass
+it with `DUNE_CACHE=disabled dune build ...`. Bound its growth occasionally
+with `dune cache trim --size 20GB`.
+
+24 tests in `run_stdlib` are marked `Slow` and skipped by `-q`: 6 JIT/interpreter
+parity tests (~5s), 15 compiled adversarial regression tests (~20s), 2 pbkdf2
+key-derivation tests (~3s), and 1 vault concurrency test. Run the full suite
+before merging to main.
 
 After implementing or completing a feature, update `specs/todos.md` (move item to Done) and `specs/progress.md` (add to feature list) to keep them current.
 
-After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`.
+After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`) — interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
+
+### TIR golden-snapshot tests
+
+`test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small
+hand-picked corpus (`test/snapshots/src/*.march`) at two pipeline stages —
+post-lower (`test/snapshots/lower/*.expected`) and post-Perceus/RC-insertion
+(`test/snapshots/perceus/*.expected`) — so a lowering/monomorphization/
+defunctionalization/Perceus refactor that changes the emitted IR shape shows up
+as a readable diff instead of only surfacing later as a runtime regression.
+Regenerate deliberately after an intentional TIR-shape change with
+`UPDATE_SNAPSHOTS=1 ./_build/default/test/run_snapshots.exe -e`, then review
+`git diff test/snapshots/` before committing — the diff IS the code review
+artifact. See the workflow/design comment at the top of `test/test_snapshots.ml`
+for the full detail (printer choice, prelude-noise filtering, fresh-name-counter
+determinism).
 
 ## Multi-file compilation (MARCH_LIB_PATH)
 
@@ -113,11 +136,14 @@ lib/parser/parser.mly       menhir parser
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
 lib/typecheck/typecheck.ml  bidirectional HM type inference
 lib/eval/eval.ml            tree-walking interpreter (1180+ tests)
-lib/tir/                    typed IR: lower, mono, defun, perceus, borrow, fusion, llvm_emit
+lib/tir/                    typed IR: lower (+lower_state/types/match/decls/actor/tests), mono, defun,
+                             perceus (+perceus_liveness/elide/fbip/scrut), borrow, fusion,
+                             llvm_emit (+llvm_ctx/builtins/eq/data/case/calls/tco/toplevel/repl),
+                             tir_names (cross-pass name contracts), rc_types (needs_rc/borrow_eligible)
 lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
 lib/search/search.ml        Hoogle-style type/name search engine
-stdlib/                     107 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     110 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)
@@ -127,11 +153,11 @@ specs/                      design specs, progress tracking, feature plans
 
 ## Surface syntax notes
 
-See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of all March syntax.
+See [specs/lang/surface-syntax.md](specs/lang/surface-syntax.md) for a complete quick-reference of all March syntax.
 
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
-- Conditionals: `if cond do ... end` — use `do...end`, `else` is optional, NO `then` keyword
+- Conditionals: `if cond do ... else ... end` — `else` is MANDATORY (omitting it: "March `if` expressions always need an `else` branch"); `then` is rejected ("I don't recognize `then` here — March uses do/end blocks instead.")
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - Result propagation: `let? p = e` binds the `Ok` payload and returns `Err(e)` immediately; RHS must be `Result`; cannot be the last expr in a block
 - No `;` — use newlines to separate block expressions

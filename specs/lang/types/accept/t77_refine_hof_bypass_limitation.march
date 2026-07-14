@@ -1,0 +1,20 @@
+-- Refinement types (widening slice 12, §2.14). The documented "direct calls
+-- only" limitation (specs/lang/refinement-types.md's own Limitations
+-- section): lib/refinecheck's precondition pass recognizes a NAMED direct
+-- call to a function whose parameter is refined -- it does NOT trace a
+-- refined function passed as a first-class value through a higher-order
+-- call. `apply(take_n, -3)` calls `take_n` indirectly (through the `f`
+-- parameter), so refine_check never associates the argument `-3` with
+-- `take_n`'s `{Int | _ >= 0}` precondition -- `--check` accepts even though
+-- the same literal at a DIRECT `take_n(-3)` call is rejected (reject/t71).
+-- This is an honest scope boundary, not unsoundness: no runtime check is
+-- promised either (core-march-types.md §2.14 states the erasure explicitly),
+-- so nothing here is unsafe -- just unverified. NOT a bug; do not "fix" by
+-- making this reject without reading §2.14's scope note first.
+mod M do
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn apply(f : Int -> Int, x : Int) : Int do f(x) end
+  fn main() do
+    println(int_to_string(apply(take_n, -3)))
+  end
+end

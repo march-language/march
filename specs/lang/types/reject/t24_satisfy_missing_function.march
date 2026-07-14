@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: satisfy Named for Person: no function `name` found in scope.
+mod M do
+  -- `satisfy Iface for Type` requires an EXISTING same-named top-level `fn`
+  -- for every one of the interface's methods (desugar.ml's `expand_satisfy`).
+  -- Here `interface Named(a)` declares `name`, but no top-level `fn name` is
+  -- ever defined -- rejected. This is all-or-nothing per (interface, type):
+  -- if even one method has no matching function, `expand_satisfy` returns
+  -- `[]` for the whole pair (no partial impl is ever emitted), which is why
+  -- this doesn't ALSO trigger `(T-Impl)`'s "missing method" check downstream.
+  interface Named(a) do
+    fn name : a -> String
+  end
+
+  type Person = Person(String)
+
+  satisfy Named for Person
+
+  fn main() do
+    println("unreachable")
+  end
+end

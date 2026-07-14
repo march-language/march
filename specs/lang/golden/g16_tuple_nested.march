@@ -1,0 +1,8 @@
+mod Main do
+  fn main() do
+    let nested = ((1, 2), (3, 4))
+    match nested do
+      ((a, b), (c, d)) -> println(int_to_string(a + b + c + d))
+    end
+  end
+end

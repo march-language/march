@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: Parse error in declaration
+mod R09PubFnKeywordRejected do
+  pub fn add(a, b) do
+    a + b
+  end
+
+  fn main() do
+    println(add(1, 2))
+  end
+end

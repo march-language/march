@@ -1,0 +1,12 @@
+mod P24TwoLineCallJuxtaposition do
+  -- §7.3 — a newline between a call's closing `)` and a following `(` is the
+  -- user's signal of intent: two separate statements, not a curried call. The
+  -- guard is newline-sensitive, so `f(1)⏎(g(2))` must keep parsing as two
+  -- statements even though `f(1)(g(2))` on one line would be rejected.
+  fn g(n) do n end
+  fn f(n) do n end
+  fn main() do
+    let a = f(1)
+    (g(2))
+  end
+end

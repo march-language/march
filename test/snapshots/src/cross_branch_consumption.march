@@ -1,0 +1,15 @@
+-- Cross-branch consumption: a heap value bound before an ECase is CONSUMED
+-- (owning use) on one arm and merely goes dead (needs a dec) on another.
+-- Pins the per-branch EDecRC / no-dec-if-consumed asymmetry.
+mod CrossBranchConsumption do
+  fn pick(flag : Bool, s : String) : String do
+    match flag do
+      true -> s
+      false -> "discarded"
+    end
+  end
+
+  fn main() do
+    println(pick(true, "value"))
+  end
+end

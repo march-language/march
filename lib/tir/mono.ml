@@ -122,11 +122,13 @@ let rec mangle_ty : Tir.ty -> string = function
   | Tir.TVar name     -> "V_" ^ name
 
 (** [mangle_name base tys] appends a "$"-separated mangled suffix to [base].
-    Returns [base] unchanged if [tys] is empty (already monomorphic). *)
+    Returns [base] unchanged if [tys] is empty (already monomorphic).
+    The "$"-glue itself is [Tir_names.specialize_mangle] (Wave 3 Chunk 2
+    Task 1) — [mangle_ty] (mono-specific type-to-string) stays here. *)
 let mangle_name (base : string) (tys : Tir.ty list) : string =
   match tys with
   | [] -> base
-  | _  -> base ^ "$" ^ String.concat "$" (List.map mangle_ty tys)
+  | _  -> Tir_names.specialize_mangle base (String.concat "$" (List.map mangle_ty tys))
 
 (* ── Type matching (poly → concrete → subst) ────────────────────── *)
 
@@ -185,6 +187,12 @@ let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
   | _ -> acc
 
 (* ── Worklist monomorphization ──────────────────────────────────── *)
+
+(** Set of function names bound by a lexically-enclosing nested [fn]
+    (an [ELetRec] binding).  Such names shadow same-named top-level
+    functions and must NOT be resolved against the module-level
+    [fn_table] — see the shadowing guard in [rewrite_calls]. *)
+module SSet = Set.Make (String)
 
 (** Derive the type substitution for calling [fn_def] with arguments
     of types [arg_tys]. Matches each parameter's type against the
@@ -281,6 +289,7 @@ let rec rewrite_calls
     (worklist         : (string * Tir.fn_def * ty_subst) Queue.t)
     (iface_methods    : (string, (string * string) list) Hashtbl.t)
     (record_to_typename : (string, string) Hashtbl.t)
+    (shadowed         : SSet.t)
     (expr             : Tir.expr)
   : Tir.expr =
   (* Concrete type of the first call argument (for interface dispatch). *)
@@ -295,6 +304,55 @@ let rec rewrite_calls
        | March_ast.Ast.LitString _ -> Tir.TString
        | March_ast.Ast.LitAtom _   -> Tir.TUnit)
     | _ -> Tir.TUnit
+  in
+  (* Enqueue a resolved interface impl (e.g. "Show$List.show") for emission,
+     specializing it under the substitution derived from THIS call site's
+     concrete argument types — exactly like the ordinary generic-fn
+     specialization a few lines below (build_subst + mangle_name).
+
+     CRITICAL (Wave 2 Task 1 — println-of-list miscompile): an impl body can
+     itself be generic — e.g. `impl Show(List(a)) when Show(a)` has an
+     element-level `show(x : a)` inside it.  The three call sites below used
+     to enqueue such impls with an EMPTY substitution, so the impl was
+     emitted once, still generic, and its nested `show(x)` call stayed an
+     unresolved bare reference all the way to llvm_emit — which then mis-bound
+     it via the `unqualified_fns` dot-suffix fallback to an arbitrary
+     same-named impl (the actual bug: Int → SIGSEGV, String → non-exhaustive
+     panic, Option → SIGSEGV/SIGBUS, depending on which impl DCE kept first).
+
+     Returns the name the CALLER should use as the callee (either the
+     original [mangled_name] when no further specialization was needed —
+     the impl was already monomorphic, e.g. Show$Int.show — or a further
+     doubly-mangled name, e.g. "Show$List.show$List_Int", when it was).
+
+     Name convention: the SAME [mangle_name] scheme used for ordinary
+     generic fns (glued via [Tir_names.specialize_mangle], Wave 3 Chunk 2
+     Task 1 — see that helper's doc for why this never trips
+     [Tir_names.is_iface_mangled]): the impl name gets an extra
+     "$"-separated suffix built from its OWN concrete parameter types
+     after substitution, e.g. "Show$List.show" + [List(Int)] ->
+     "Show$List.show$List_Int".  Recursion (List(List(Int)) etc.) terminates
+     via the existing worklist [done_set] dedup: once a given specialized
+     name has been enqueued/emitted, subsequent calls just reuse it. *)
+  let enqueue_specialized_impl
+      (mangled_name : string) (args : Tir.atom list) : string =
+    match Hashtbl.find_opt fn_table mangled_name with
+    | None -> mangled_name  (* not in fn_table (e.g. a builtin-backed impl) *)
+    | Some orig_impl ->
+      let arg_tys = List.map atom_ty args in
+      let subst = build_subst orig_impl arg_tys in
+      if subst = [] then begin
+        if not (Hashtbl.mem done_set mangled_name) then
+          Queue.add (mangled_name, orig_impl, []) worklist;
+        mangled_name
+      end else begin
+        let param_tys_concrete =
+          List.map (fun v -> subst_ty subst v.Tir.v_ty) orig_impl.Tir.fn_params in
+        let specialized_name = mangle_name mangled_name param_tys_concrete in
+        if not (Hashtbl.mem done_set specialized_name) then
+          Queue.add (specialized_name, orig_impl, subst) worklist;
+        specialized_name
+      end
   in
   (* If [name] is an interface method, resolve it to the impl for the concrete
      first-argument type.  Returns the mangled impl function name, or None.
@@ -338,6 +396,16 @@ let rec rewrite_calls
        types from the type_map, so f_var.v_ty is already monomorphic there —
        but the fn_def it refers to may still be the generic version. *)
     let orig_name = f_var.Tir.v_name in
+    (* A call to a name bound by a lexically-enclosing nested [fn] (ELetRec)
+       must NOT be resolved against the module-level [fn_table]: the nested
+       binding shadows any same-named top-level function.  Leave it untouched
+       for [Defun] to lift as a local closure/apply — exactly what happens when
+       no top-level fn shares the name.  Without this guard a user top-level
+       `go` captures every stdlib nested `go` helper (List.length/rev/map …):
+       the call's callee is silently rebound to the wrong body, so e.g.
+       `List.length(xs)` runs the user's `go` and returns garbage. *)
+    if SSet.mem orig_name shadowed then expr
+    else
     (match Hashtbl.find_opt fn_table orig_name with
      | None ->
        (* Not in fn_table (builtin or external).  Before giving up, check if
@@ -410,12 +478,11 @@ let rec rewrite_calls
                 (match resolve_impl_by_type impls tname with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
-                   (* Resolved!  Enqueue the impl so DCE keeps it alive. *)
-                   (match Hashtbl.find_opt fn_table mangled_name with
-                    | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-                      Queue.add (mangled_name, orig_impl, []) worklist
-                    | _ -> ());
-                   let f_var' = { f_var with Tir.v_name = mangled_name } in
+                   (* Resolved!  Enqueue the impl (specialized under this
+                      call's concrete arg types — see enqueue_specialized_impl
+                      above for why this must NOT be an empty substitution). *)
+                   let final_name = enqueue_specialized_impl mangled_name args in
+                   let f_var' = { f_var with Tir.v_name = final_name } in
                    Tir.EApp (f_var', args)))))
      | Some orig_fn
        when (* Interface-method-name collision: the callee name is a user
@@ -435,11 +502,11 @@ let rec rewrite_calls
              | _ -> false) ->
        (match iface_impl_name orig_name args with
         | Some mangled_name ->
-          (match Hashtbl.find_opt fn_table mangled_name with
-           | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-             Queue.add (mangled_name, orig_impl, []) worklist
-           | _ -> ());
-          Tir.EApp ({ f_var with Tir.v_name = mangled_name }, args)
+          (* Specialize under this call's concrete arg types — see
+             enqueue_specialized_impl for why an empty substitution is wrong
+             (Wave 2 Task 1: println-of-list miscompile). *)
+          let final_name = enqueue_specialized_impl mangled_name args in
+          Tir.EApp ({ f_var with Tir.v_name = final_name }, args)
         | None -> expr)
      | Some orig_fn
        when not (List.exists (fun v ->
@@ -492,6 +559,10 @@ let rec rewrite_calls
     (match fn_atom with
      | Tir.AVar v ->
        let orig_name = v.Tir.v_name in
+       (* Same lexical-shadowing guard as the EApp case above: a call to a
+          nested-fn-bound name is a local closure call, not a top-level fn. *)
+       if SSet.mem orig_name shadowed then expr
+       else
        (match Hashtbl.find_opt fn_table orig_name with
         | None ->
           (* Not a user function.  Try to resolve as an interface method call
@@ -544,15 +615,17 @@ let rec rewrite_calls
                    (match resolve_impl_by_type impls tname with
                     | None -> expr
                     | Some mangled_name ->
-                      (match Hashtbl.find_opt fn_table mangled_name with
-                       | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
-                         Queue.add (mangled_name, orig_impl, []) worklist
-                       | _ -> ());
+                      (* Specialize under this call's concrete arg types —
+                         see enqueue_specialized_impl for why an empty
+                         substitution is wrong (Wave 2 Task 1: println-of-list
+                         miscompile — this is the ECallPtr twin of the EApp
+                         site above). *)
+                      let final_name = enqueue_specialized_impl mangled_name args in
                       (* Rewrite ECallPtr to use the resolved impl name.
                          Switch to EApp so that the call goes through the direct
                          call path in llvm_emit rather than the closure-dispatch
                          path, which would try to load a fn_ptr from a struct. *)
-                      let f_var' = { v with Tir.v_name = mangled_name } in
+                      let f_var' = { v with Tir.v_name = final_name } in
                       Tir.EApp (f_var', args)))))
         | Some orig_fn ->
           (* If callee is polymorphic, try to build a substitution from args *)
@@ -630,13 +703,17 @@ let rec rewrite_calls
             acc s)
         [] per_fn_substs
     in
+    (* These locally-bound fn names shadow any same-named top-level fn within
+       the inner bodies, the ELetRec body, and the continuation. *)
+    let inner_shadowed =
+      List.fold_left (fun s fn -> SSet.add fn.Tir.fn_name s) shadowed fns in
     let updated_fns = List.map (fun fn ->
         let local_subst = match List.assoc_opt fn.Tir.fn_name per_fn_substs with
           | Some s -> s | None -> [] in
         let fn' = if local_subst = [] then fn else subst_fn_def local_subst fn in
         { fn' with Tir.fn_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-              fn'.Tir.fn_body }
+              inner_shadowed fn'.Tir.fn_body }
       ) fns in
     (* Apply the merged subst to binding_body (e.g. EAtom(AVar fn_var)) so
        the closure-variable type inside the ELetRec stays consistent with the
@@ -648,34 +725,55 @@ let rec rewrite_calls
     let _ = e1 in  (* e1 deconstructed into fns/binding_body above *)
     Tir.ELet (v',
       Tir.ELetRec (updated_fns,
-        rewrite_calls fn_table done_set worklist iface_methods record_to_typename binding_body'),
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename cont)
+        rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+          inner_shadowed binding_body'),
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+        inner_shadowed cont)
   | Tir.ELet (v, e1, e2) ->
+    (* [v] is bound in [e2]; if it names a local fn/closure it shadows a
+       same-named top-level fn for callee resolution there.  A block-level
+       nested `fn go(...) do ... end` followed by `go(xs, 0)` lowers to
+       `ELet("go", ELetRec([go], AVar go), go(xs, 0))` — the resolving call
+       lives in the continuation [e2], NOT inside the ELetRec body — so the
+       ELetRec-name shadowing above is not enough for a monomorphic nested
+       helper (e.g. List.sum_int's `go`). *)
     Tir.ELet (v,
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e1,
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e2)
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename shadowed e1,
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+        (SSet.add v.Tir.v_name shadowed) e2)
   | Tir.ELetRec (fns, body) ->
+    (* The locally-bound fn names shadow same-named top-level fns within the
+       inner bodies and the ELetRec body (see the shadowing guard above). *)
+    let inner_shadowed =
+      List.fold_left (fun s fn -> SSet.add fn.Tir.fn_name s) shadowed fns in
     let fns' = List.map (fun fn ->
         { fn with Tir.fn_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-              fn.Tir.fn_body }
+              inner_shadowed fn.Tir.fn_body }
       ) fns in
     Tir.ELetRec (fns',
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename body)
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+        inner_shadowed body)
   | Tir.ECase (a, brs, def) ->
     let brs' = List.map (fun br ->
+        (* Constructor-arg pattern vars are bound in [br_body] and likewise
+           shadow same-named top-level fns for callee resolution. *)
+        let br_shadowed =
+          List.fold_left (fun s (bv : Tir.var) -> SSet.add bv.Tir.v_name s)
+            shadowed br.Tir.br_vars in
         { br with Tir.br_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-              br.Tir.br_body }
+              br_shadowed br.Tir.br_body }
       ) brs in
     Tir.ECase (a, brs',
       Option.map
-        (rewrite_calls fn_table done_set worklist iface_methods record_to_typename)
+        (rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+           shadowed)
         def)
   | Tir.ESeq (e1, e2) ->
     Tir.ESeq (
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e1,
-      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e2)
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename shadowed e1,
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename shadowed e2)
   | other -> other
 
 (** Resolve record-field-projection result types from a now-concrete record.
@@ -811,12 +909,7 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
     (* Hot-reload migration entry points: always include even when the body
        has a TVar (e.g. from an empty list literal []). The LLVM emitter
        exports them as @__migrate_<Actor> aliases for dlsym at deploy time. *)
-    let is_migrate_fn =
-      let n = fn.Tir.fn_name in
-      let suf = "_migrate_state" in
-      let ln = String.length n and ls = String.length suf in
-      ln >= ls && String.sub n (ln - ls) ls = suf
-    in
+    let is_migrate_fn = Tir_names.is_migrate_fn_name fn.Tir.fn_name in
     (* Only seed monomorphic exports; polymorphic ones are specialised on demand *)
     if is_mono || is_main || is_migrate_fn then
       Queue.add (fn.Tir.fn_name, fn, []) worklist
@@ -852,7 +945,7 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         let refined_body = refine_field_types fn'.Tir.fn_body in
         (* Rewrite calls in the body, enqueuing new specializations *)
         let body' = rewrite_calls fn_table done_set worklist
-                      iface_methods record_to_typename refined_body in
+                      iface_methods record_to_typename SSet.empty refined_body in
         result := { fn' with Tir.fn_body = body' } :: !result
       end
     end

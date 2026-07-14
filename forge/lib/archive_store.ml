@@ -275,47 +275,72 @@ let rec walk_dirs acc d =
 (** Lib paths to add to MARCH_LIB_PATH for tasks running from an archive root.
     Includes lib/ AND all of its descendant directories (so tasks can import
     modules that live in lib/ subfolders, e.g. march_doc's lib/march_doc/
-    submodules), plus forge/ at the root level (for CAS-extracted archives).
-    The recursive lib/ expansion mirrors cmd_build's collect_lib_dirs. *)
+    submodules), plus forge/ at the root level (for CAS-extracted archives),
+    plus .forge/generated and config/ when present.
+    Mirrors cmd_build's lib_path_env / collect_lib_dirs. *)
 let lib_paths_for_root archive_root =
-  let lib_dir   = Filename.concat archive_root "lib" in
-  let forge_dir = Filename.concat archive_root "forge" in
+  let lib_dir    = Filename.concat archive_root "lib" in
+  let forge_dir  = Filename.concat archive_root "forge" in
+  let gen_dir    = Filename.concat archive_root ".forge/generated" in
+  let config_dir = Filename.concat archive_root "config" in
   let lib_dirs = List.rev (walk_dirs [] lib_dir) in
-  lib_dirs @ List.filter Sys.file_exists [forge_dir]
+  lib_dirs @ List.filter Sys.file_exists [forge_dir; gen_dir; config_dir]
 
-(** Collect lib paths from an archive's [deps] entries.
-    Mirrors cmd_build's dep_to_lib_paths so archive tasks can import dep modules
-    (e.g. Router, Static from bastion) just like a normal forge build. *)
+(** Collect lib paths from an archive's [deps] entries, transitively.
+    Mirrors cmd_build's dep_to_lib_paths for each dep, then recurses into the
+    dep's own forge.toml: the archive's modules were written against the
+    archive project's full dep closure (a dep's modules may import modules from
+    ITS deps), so a task run from the archive needs the closure on the path
+    too. Cycles are broken with a visited set keyed on canonical dep roots. *)
 let dep_lib_paths_for_archive archive_root =
-  let toml_path = Filename.concat archive_root "forge.toml" in
-  if not (Sys.file_exists toml_path) then []
-  else
-    let ic = open_in toml_path in
-    let n = in_channel_length ic in
-    let buf = Bytes.create n in
-    really_input ic buf 0 n;
-    close_in ic;
-    let doc = Toml.parse (Bytes.to_string buf) in
-    let inline_deps = Project.parse_deps_section (Toml.get_section doc "deps") in
-    let section_deps = Project.parse_section_deps "deps" doc in
-    let deps = inline_deps @ section_deps in
-    List.concat_map (fun (dep_name, dep) ->
-        match dep with
-        | Project.PathDep rel_path ->
-          let abs_path = if Filename.is_relative rel_path
-            then Filename.concat archive_root rel_path
-            else rel_path
-          in
-          let lib_dir = Filename.concat abs_path "lib" in
-          if Sys.file_exists lib_dir then List.rev (walk_dirs [] lib_dir)
-          else if Sys.file_exists abs_path then List.rev (walk_dirs [] abs_path)
-          else []
-        | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-          (match Project.git_dep_lib_path dep_name with
-           | Some p -> List.rev (walk_dirs [] p)
-           | None   -> [])
-        | _ -> []
-      ) deps
+  let canon p = try Unix.realpath p with Unix.Unix_error _ -> p in
+  let visited = Hashtbl.create 8 in
+  let rec deps_of root =
+    let toml_path = Filename.concat root "forge.toml" in
+    if not (Sys.file_exists toml_path) then []
+    else
+      let ic = open_in toml_path in
+      let n = in_channel_length ic in
+      let buf = Bytes.create n in
+      really_input ic buf 0 n;
+      close_in ic;
+      let doc = Toml.parse (Bytes.to_string buf) in
+      let inline_deps = Project.parse_deps_section (Toml.get_section doc "deps") in
+      let section_deps = Project.parse_section_deps "deps" doc in
+      let deps = inline_deps @ section_deps in
+      List.concat_map (fun (dep_name, dep) ->
+          match dep with
+          | Project.PathDep rel_path ->
+            let abs_path = if Filename.is_relative rel_path
+              then Filename.concat root rel_path
+              else rel_path
+            in
+            visit ~dep_root:abs_path ~lib_dir:(Filename.concat abs_path "lib")
+          | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+            (match Project.git_dep_lib_path dep_name with
+             | Some p ->
+               (* p is either <dep_root>/lib or <dep_root> itself *)
+               let dep_root =
+                 if Filename.basename p = "lib" then Filename.dirname p else p in
+               visit ~dep_root ~lib_dir:p
+             | None -> [])
+          | _ -> []
+        ) deps
+  and visit ~dep_root ~lib_dir =
+    let key = canon dep_root in
+    if Hashtbl.mem visited key then []
+    else begin
+      Hashtbl.add visited key ();
+      let own =
+        if Sys.file_exists lib_dir then List.rev (walk_dirs [] lib_dir)
+        else if Sys.file_exists dep_root then List.rev (walk_dirs [] dep_root)
+        else []
+      in
+      own @ deps_of dep_root
+    end
+  in
+  Hashtbl.add visited (canon archive_root) ();
+  deps_of archive_root
 
 (** Given a command like "bastion.new", return (task_file, lib_paths) or None.
     Checks project-local deps first, then global archives. *)
@@ -325,6 +350,40 @@ let find_task command =
   | None -> None
   | Some dot ->
     let ns = String.sub command 0 dot in
+    (* 0. Check the current project's own forge.toml when the namespace is
+       the project's own package name (e.g. "forgepm.seed" run from inside
+       forgepm) — a project's own [archive.task.*] entries were previously
+       only found via deps/<ns>/forge.toml or the global registry, neither
+       of which a project satisfies for itself, so `forge <own-name>.<task>`
+       always failed with "unknown command" even for a correctly-declared
+       task. *)
+    let self_result =
+      match Project.find_forge_toml () with
+      | None -> None
+      | Some project_root ->
+        let self_name =
+          try (Project.load_from project_root).Project.name
+          with Sys_error _ | Failure _ | Toml.Parse_error _ -> ""
+        in
+        if self_name <> "" && self_name = ns then begin
+          let self_toml = Filename.concat project_root "forge.toml" in
+          let tasks = read_tasks_from_toml self_toml in
+          match List.find_opt (fun (cmd, _, _) -> cmd = command) tasks with
+          | None -> None
+          | Some (_, rel_module, _) ->
+            let full_path = Filename.concat project_root rel_module in
+            if Sys.file_exists full_path then
+              (* Deps first, own lib last — same order as cmd_build's
+                 lib_path_env (and cases 1/2 below). *)
+              let lib_paths = dep_lib_paths_for_archive project_root
+                              @ lib_paths_for_root project_root in
+              Some (full_path, lib_paths)
+            else None
+        end else None
+    in
+    (match self_result with
+     | Some _ -> self_result
+     | None ->
     (* 1. Check project-local deps *)
     let local_result =
       match Project.find_forge_toml () with
@@ -339,8 +398,10 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat dep_dir rel_module in
             if Sys.file_exists full_path then
-              let lib_paths = lib_paths_for_root dep_dir
-                              @ dep_lib_paths_for_archive dep_dir in
+              (* Deps first, own lib last — same order as cmd_build's
+                 lib_path_env. *)
+              let lib_paths = dep_lib_paths_for_archive dep_dir
+                              @ lib_paths_for_root dep_dir in
               Some (full_path, lib_paths)
             else None
         end else None
@@ -364,10 +425,10 @@ let find_task command =
           | Some (_, rel_module, _) ->
             let full_path = Filename.concat archive_root rel_module in
             if Sys.file_exists full_path then
-              let lib_paths = lib_paths_for_root archive_root
-                              @ dep_lib_paths_for_archive archive_root in
+              let lib_paths = dep_lib_paths_for_archive archive_root
+                              @ lib_paths_for_root archive_root in
               Some (full_path, lib_paths)
-            else None))
+            else None)))
 
 (** Return all (command, module_path, doc) triples for an archive directory. *)
 let list_archive_tasks archive_root =
@@ -407,6 +468,10 @@ let run_task task_file lib_paths args =
     | None -> ""
     | Some p -> Printf.sprintf "MARCH_STDLIB=%s " (Filename.quote p)
   in
-  let cmd = Printf.sprintf "%s%sFORGE_TASK_ARGS=%s march %s"
-      lib_path_env stdlib_env (Filename.quote args_env) (Filename.quote task_file) in
+  (* Same pinned-toolchain resolution as cmd_build: put the resolved toolchain
+     first on PATH so the bare `march` below uses the pinned version. *)
+  let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
+  let cmd = Printf.sprintf "%s%s%sFORGE_TASK_ARGS=%s march %s"
+      toolchain_pfx lib_path_env stdlib_env
+      (Filename.quote args_env) (Filename.quote task_file) in
   Sys.command cmd

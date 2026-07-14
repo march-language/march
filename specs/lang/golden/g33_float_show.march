@@ -1,0 +1,13 @@
+mod Main do
+  fn main() do
+    -- Whole-number Floats must render identically interpreted and compiled.
+    -- The reference (eval.ml string_of_float) emits a bare trailing dot: 1.0 -> "1."
+    println(float_to_string(1.0))
+    println(float_to_string(42.0))
+    println(float_to_string(100.0))
+    println(float_to_string(0.0))
+    println(float_to_string(-3.0))
+    -- A fractional value anchors the non-whole format alongside it.
+    println(float_to_string(1.5))
+  end
+end

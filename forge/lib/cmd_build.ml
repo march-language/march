@@ -169,15 +169,44 @@ let dep_to_lib_paths ~root (dep_name, dep) =
     if Sys.file_exists d then collect_lib_dirs d
     else if Sys.file_exists abs_path then collect_lib_dirs abs_path
     else []
-  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+  | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _
+  | Project.RegistryDep _ ->
+    (* Git and registry deps both install under ~/.march/cas/deps/<name>; use
+       that dep's lib/ (or its root as a fallback). *)
     (match Project.git_dep_lib_path dep_name with
      | Some p -> collect_lib_dirs p
      | None  -> [])
-  | _ -> []
+
+(** Walk a project's dependency graph transitively: for every direct dep,
+    also pull in ITS OWN prod [deps] (recursively), so e.g. a project
+    depending on `bastion`, which itself depends on `depot`, gets `depot`
+    on its MARCH_LIB_PATH too.  Each entry carries the root it should be
+    resolved relative to (a PathDep is relative to the DECLARING project's
+    root, not the top-level one).  Dedup is by dep name, nearest-wins (a
+    project's own direct dep shadows the same name pulled in transitively),
+    and a [visited] set guards against dependency cycles. *)
+let rec collect_transitive_deps visited (root, deps) =
+  List.concat_map (fun (dep_name, dep) ->
+      if Hashtbl.mem visited dep_name then []
+      else begin
+        Hashtbl.add visited dep_name ();
+        let here = [(root, dep_name, dep)] in
+        let nested =
+          match Project.dep_root_dir ~project_root:root (dep_name, dep) with
+          | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
+            (match Project.load_from_dir dep_dir with
+             | Ok dep_proj -> collect_transitive_deps visited (dep_dir, dep_proj.Project.deps)
+             | Error _ -> [])
+          | _ -> []
+        in
+        here @ nested
+      end
+    ) deps
 
 (** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
     of the [march] compiler.  Contains the project's own lib/, any dep lib
-    roots (scoped by environment), and config/ when present.
+    roots (scoped by environment) — walked transitively — and config/ when
+    present.
 
     [release=true]  → only prod [deps] are on the path (ships to users).
     [release=false] → [deps] + [dev-deps] + [dev-only-deps] are included. *)
@@ -189,6 +218,8 @@ let lib_path_env ?(release=false) proj =
     if release then proj.Project.deps
     else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
   in
+  let visited = Hashtbl.create 16 in
+  let transitive_deps = collect_transitive_deps visited (proj.Project.root, scoped_deps) in
   (* A dependency's lib/ may group modules into subfolders exactly like the
      primary package (e.g. lib/api, lib/wire).  The module resolver searches
      each lib path flatly, so expand every dep lib root into the root plus all
@@ -196,7 +227,8 @@ let lib_path_env ?(release=false) proj =
      the primary package below.  Without this, a reorganised dependency's
      internal cross-module imports fail with "Module not found" in consumers. *)
   let dep_lib_paths = List.concat_map
-    (dep_to_lib_paths ~root:proj.Project.root) scoped_deps in
+    (fun (root, dep_name, dep) -> dep_to_lib_paths ~root (dep_name, dep))
+    transitive_deps in
   let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ collect_lib_dirs lib_dir
@@ -294,26 +326,61 @@ let print_build_summary ~t0 ~errors ~warnings =
   else
     Printf.printf "  %s \xe2\x80\x94 %s\n%!" (String.concat ", " parts) time_str
 
-(** Typecheck [file] via [march --check].
-    Returns [(ok, n_errors, n_warnings)]; the compiler's stderr is re-emitted
-    to forge's own stderr. *)
-let check_file ~lib_path_env file =
-  let cmd =
-    Printf.sprintf "%smarch --check %s"
-      lib_path_env (Filename.quote file)
-  in
-  let (rc, content) = run_capturing_stderr cmd in
-  let (e, w) = count_diagnostics content in
-  (rc = 0, e, w)
+(** Digest [files]' sorted paths + contents + [lib_path_env], so any edit to
+    a checked file or a change to MARCH_LIB_PATH invalidates the cache below.
 
-(** Typecheck every .march file in [files] individually.
-    Returns [(n_failed, total_errors, total_warnings)]. *)
-let check_all ~lib_path_env files =
-  List.fold_left (fun (failed, te, tw) f ->
-    let (ok, e, w) = check_file ~lib_path_env f in
-    if ok then (failed, te + e, tw + w)
-    else (failed + 1, te + e, tw + w)
-  ) (0, 0, 0) files
+    Known limitation: this does NOT hash the *contents* of directories on
+    MARCH_LIB_PATH, only the env-var string itself.  Editing a local
+    `path = "../foo"` dependency's source in place, without touching
+    forge.toml/forge.lock (and thus without changing MARCH_LIB_PATH), will
+    not invalidate this cache.  Delete `.forge/check-cache/` if that bites. *)
+let check_all_cache_key ~lib_path_env files =
+  let buf = Buffer.create 4096 in
+  List.iter (fun f ->
+      Buffer.add_string buf f;
+      (try
+         let ic = open_in_bin f in
+         let n = in_channel_length ic in
+         let b = Bytes.create n in
+         really_input ic b 0 n;
+         close_in ic;
+         Buffer.add_bytes buf b
+       with Sys_error _ -> ())
+    ) (List.sort String.compare files);
+  Buffer.add_string buf lib_path_env;
+  Digest.to_hex (Digest.string (Buffer.contents buf))
+
+(** Typecheck every file in [files] together in a single [march check]
+    subprocess, so the stdlib and any shared imports are parsed and
+    typechecked once instead of once per file (previously: one subprocess
+    per file, each re-parsing the whole stdlib).  On a fully-clean repeat
+    call (no errors, no warnings, nothing changed) short-circuits via
+    [cache_dir] instead of invoking [march] at all, so a repeated no-op
+    `forge build`/`forge check` doesn't regress relative to the old
+    per-file behavior (which benefited from the compiler's own CAS cache).
+    Returns [(n_failed, total_errors, total_warnings)]; n_failed is 0 or 1
+    since all files are checked as one combined module. *)
+let check_all ~lib_path_env ~cache_dir files =
+  if files = [] then (0, 0, 0)
+  else begin
+    let key = check_all_cache_key ~lib_path_env files in
+    let marker = Filename.concat cache_dir (key ^ ".clean") in
+    if Sys.file_exists marker then (0, 0, 0)
+    else begin
+      let quoted = String.concat " " (List.map Filename.quote files) in
+      let cmd = Printf.sprintf "%smarch check %s" lib_path_env quoted in
+      let (rc, content) = run_capturing_stderr cmd in
+      let (e, w) = count_diagnostics content in
+      if rc = 0 && e = 0 && w = 0 then begin
+        (try Project.mkdir_p cache_dir with Sys_error _ -> ());
+        (try
+           let oc = open_out marker in
+           close_out oc
+         with Sys_error _ -> ())
+      end;
+      ((if rc = 0 then 0 else 1), e, w)
+    end
+  end
 
 (** FFI shim flags from forge.toml [[ffi]]: --ffi-c per source (resolved to an
     absolute path under [root]) and --ffi-link per linker flag. *)
@@ -329,10 +396,17 @@ let ffi_flags_of ~root (proj : Project.project) =
     a --ffi-link to its staticlib archive.  Shared by [forge build] and
     [forge test] so both link the same native shims.  Returns [Error] if the
     Rust build fails or its archive is missing. *)
-let ffi_flags_full (proj : Project.project) : (string, string) result =
+let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, string) result =
   let rust_link_flags_result =
     match proj.Project.ffi_rust with
     | None -> Ok ""
+    | Some _ when target_is_cross ->
+      (* P1: the Rust crate is built for the host via `cargo build` (no --target),
+         so it cannot link into a cross Linux binary. Fail loudly rather than
+         silently producing a broken artifact. Cross Rust FFI (cargo-zigbuild)
+         is a follow-up. *)
+      Error "this project uses [ffi.rust]; cross-compilation of Rust bindings is \
+             not yet supported. Build on Linux, or use `forge deploy hot --so`."
     | Some frc ->
       let crate_dir =
         if Filename.is_relative frc.Project.frc_path then
@@ -518,8 +592,24 @@ let ensure_js_deps ~root (proj : Project.project) =
 
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
   let t0 = Unix.gettimeofday () in
+  (* Normalize cross-target aliases to the compiler's canonical form and derive
+     a per-target output subdir so a Linux build never clobbers the host binary. *)
+  let target = Option.map (fun t ->
+    match t with
+    | "linux/x86_64" | "linux-x86_64" -> "linux/amd64"
+    | "linux/aarch64" | "linux-arm64" -> "linux/arm64"
+    | other -> other) target in
+  let target_subdir = match target with
+    | Some "linux/amd64" -> "linux-amd64"
+    | Some "linux/arm64" -> "linux-arm64"
+    | _ -> "" in
   match Project.load () with
   | Error msg -> Error msg
+  | Ok _ when target_subdir <> ""
+              && Sys.command "command -v zig >/dev/null 2>&1" <> 0 ->
+    Error (Printf.sprintf
+      "cross target %s requires `zig` (used as the C cross-compiler).\n  Install: brew install zig"
+      (Option.value ~default:"" target))
   | Ok proj ->
     (* --frozen: a lockfile out of date with forge.toml is an error, not a
        silent re-resolve (CI reproducibility). *)
@@ -560,8 +650,10 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
      | None   -> ());
     let mode = if release then "release" else "debug" in
     let build_dir =
-      Filename.concat proj.Project.root
-        (Filename.concat ".march" (Filename.concat "build" mode))
+      let base = Filename.concat proj.Project.root
+        (Filename.concat ".march" "build") in
+      let base = if target_subdir = "" then base else Filename.concat base target_subdir in
+      Filename.concat base mode
     in
     Project.mkdir_p build_dir;
     let lib_dir = Filename.concat proj.Project.root "lib" in
@@ -590,7 +682,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
       in
       match proj.Project.project_type with
       | Project.Lib ->
-        let (failed, errors, warnings) = check_all ~lib_path_env files in
+        let cache_dir = Filename.concat proj.Project.root (Filename.concat ".forge" "check-cache") in
+        let (failed, errors, warnings) = check_all ~lib_path_env ~cache_dir files in
         print_build_summary ~t0 ~errors ~warnings;
         if failed > 0 then
           Error "typecheck failed"
@@ -610,7 +703,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
             abs_f <> abs_entry
           ) files
         in
-        let (orphan_failed, te, tw) = check_all ~lib_path_env orphan_files in
+        let cache_dir = Filename.concat proj.Project.root (Filename.concat ".forge" "check-cache") in
+        let (orphan_failed, te, tw) = check_all ~lib_path_env ~cache_dir orphan_files in
         if orphan_failed > 0 then begin
           print_build_summary ~t0 ~errors:te ~warnings:tw;
           Error "typecheck failed"
@@ -623,7 +717,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           let output = Filename.concat build_dir (proj.Project.name ^ output_ext) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
-          match ffi_flags_full proj with
+          match ffi_flags_full ~target_is_cross:(target_subdir <> "") proj with
           | Error msg -> Error msg
           | Ok ffi_flags ->
           (* Install npm packages declared in [js_deps] before JS compilation. *)

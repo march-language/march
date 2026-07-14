@@ -59,6 +59,11 @@ type value =
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
   | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
+  | VResource of int64
+      (** Opaque FFI `resource` handle (e.g. a native DB/Stmt handle from an
+          extern call). Holds the raw marshaled march_value bits; never
+          introspected by the interpreter, only round-tripped through
+          ffi_marshal_iv/ffi_unmarshal_iv back into subsequent extern calls. *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -256,6 +261,38 @@ let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
     Reset per module eval via [reset_scheduler_state]. *)
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
+(** Interface methods that are dispatched by the argument's type through a
+    type-directed builtin ([show], [eq], [compare], [hash]) rather than by name.
+
+    For these, the DImpl eval must NOT bind the bare method name in the outer
+    env: doing so lets the last-registered impl shadow the builtin, so a second
+    `derive` of the same interface breaks dispatch for the first type (wrong
+    result, or a non-exhaustive-match panic when the wrong impl's clauses run).
+    Instead they are registered only in [impl_tbl], keyed by (iface, type), and
+    the builtin resolves the correct impl from the value's type at call time.
+    A plain (non-self-referential) closure is used so recursive calls in the
+    body (e.g. [eq] on nested fields) also route through builtin dispatch. *)
+let is_type_dispatched_method iface meth =
+  match iface, meth with
+  | "Show", "show" | "Eq", "eq" | "Ord", "compare" | "Hash", "hash" -> true
+  | _ -> false
+
+(** Whether [iface] is a built-in interface whose value-level dispatch reads
+    [impl_tbl] under the shared (iface, type) key (see [is_type_dispatched_method]).
+
+    Such an interface has exactly ONE dispatch method (Eq→eq, Ord→compare,
+    Show→show, Hash→hash), but a user may declare it with the built-in name and
+    give it EXTRA methods — e.g. [Eq]'s default [neq], or [Ord]'s [lt]/[gt]/
+    [le]/[ge].  Those extra methods must NOT be written into [impl_tbl], or they
+    clobber the dispatch method under the same key: the builtin then invokes the
+    wrong method and [neq → eq → neq] recurses forever (stack overflow).
+    Non-dispatched interfaces (Json, Drop, user interfaces) are unaffected —
+    nothing reads their (iface, type) entry by value, so they keep their
+    existing per-method registration. *)
+let is_type_dispatched_iface = function
+  | "Show" | "Eq" | "Ord" | "Hash" -> true
+  | _ -> false
+
 (** Constructor → type name mapping.
     Maps each data constructor name (e.g. "Red") to its declaring type (e.g. "Color").
     Populated when [eval_decl] processes [DType] nodes.
@@ -272,6 +309,22 @@ let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
     Populated when [eval_decl] processes [DType] nodes.
     Used by ffi_marshal_field/unmarshal to look up record fields and ctor args. *)
 let ffi_type_decl_tbl : (string, March_ast.Ast.type_def) Hashtbl.t = Hashtbl.create 16
+
+(** Names of `resource`-declared FFI types (e.g. `resource Db`), populated
+    alongside [ffi_type_decl_tbl] when [eval_decl] processes [DType] nodes.
+
+    The parser desugars `resource Foo` to [DType (Public, "Foo", [], TDVariant [], _)]
+    (see lib/parser/parser.mly, resource_decl) — an empty-constructor variant.
+    Every *other* grammar production for a type declaration requires
+    [separated_nonempty_list(PIPE, variant)], i.e. at least one constructor,
+    so [TDVariant []] is a structurally reliable signal that a [DType] came
+    from a `resource` declaration and not a genuine user type. We use that
+    signal here (rather than adding a new AST decl constructor, which would
+    force exhaustiveness updates across ~90 unrelated match sites in
+    typecheck/lower/borrow/format for no behavioral gain) to mark the name as
+    opaque: the FFI marshal layer must treat it as a raw handle ([VResource])
+    instead of trying to interpret it as a zero-case variant discriminant. *)
+let ffi_resource_tbl : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 (** Protocol → sorted role list mapping.
     Populated when [eval_decl] processes [DProtocol] nodes.
@@ -427,15 +480,24 @@ let http_fetch_hook
   : (string -> string -> string -> string -> (string, string) result) option ref
   = ref None
 
+(* Flushed on every call, not just at exit: a long-running program (e.g. an
+   HTTP server started via `forge run`, interpreted rather than compiled)
+   writes print/println output through here on every request. Without an
+   explicit flush, OCaml's stdout channel buffers silently until the process
+   exits — logs redirected to a file or pipe (`forge run > server.log 2>&1`)
+   never appear until the process is killed, even though the same program
+   looks fine interactively (a terminal's own line-buffering can mask the
+   channel-level buffering underneath). Mirrors capture_ewriteln below, which
+   already flushes on every call for the same reason. *)
 let capture_write (s : string) : unit =
   match !test_capture_buf with
   | Some buf -> Buffer.add_string buf s
-  | None -> print_string s
+  | None -> print_string s; flush stdout
 
 let capture_writeln (s : string) : unit =
   match !test_capture_buf with
   | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
-  | None -> print_endline s
+  | None -> print_endline s; flush stdout
 
 (* Logger output goes to stderr normally; redirect to capture buf during tests. *)
 let capture_ewriteln (s : string) : unit =
@@ -742,21 +804,25 @@ let vault_shard_for (k : string) (shards : vault_shard array) : vault_shard =
 
 (** Try to match [v] against [pat].
     Returns [Some bindings] on success, [None] on failure.
-    Bindings are accumulated in reverse order (callers reverse or prepend). *)
+    Bindings are accumulated in reverse order (callers reverse or prepend).
+
+    This is the operational semantics of Core March's pattern-matching
+    relation `match(Pat…)` — see `specs/lang/core-march.md` §4.3. Each arm
+    below is annotated with the spec rule it implements. *)
 let rec match_pattern (v : value) (pat : pattern) : (string * value) list option =
   match pat, v with
-  | PatWild _, _ -> Some []
+  | PatWild _, _ -> Some []  (* match(PatWild) — §4.3 *)
 
-  | PatVar n, _ -> Some [(n.txt, v)]
+  | PatVar n, _ -> Some [(n.txt, v)]  (* match(PatVar) — §4.3 *)
 
-  | PatLit (LitInt i, _),    VInt j    when i = j   -> Some []
-  | PatLit (LitFloat f, _),  VFloat g  when f = g   -> Some []
-  | PatLit (LitString s, _), VString t when s = t   -> Some []
-  | PatLit (LitBool b, _),   VBool c   when b = c   -> Some []
-  | PatLit (LitAtom a, _),   VAtom b   when a = b   -> Some []
-  | PatLit _,                _                       -> None
+  | PatLit (LitInt i, _),    VInt j    when i = j   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitFloat f, _),  VFloat g  when f = g   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitString s, _), VString t when s = t   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitBool b, _),   VBool c   when b = c   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit (LitAtom a, _),   VAtom b   when a = b   -> Some []  (* match(PatLit) — §4.3 *)
+  | PatLit _,                _                       -> None    (* match(PatLit) — §4.3 *)
 
-  | PatCon (n, pats), VCon (tag, args) ->
+  | PatCon (n, pats), VCon (tag, args) ->  (* match(PatCon) — §4.3 *)
     (* Strip any type qualifier from the pattern name before comparing so that
        both Result.Ok(x) and Ok(x) match VCon("Ok", …) at runtime. *)
     let bare_pat = match String.rindex_opt n.txt '.' with
@@ -767,22 +833,22 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
     else if List.length pats <> List.length args then None
     else match_list pats args
 
-  | PatCon _, _ -> None
+  | PatCon _, _ -> None  (* match(PatCon) — §4.3 *)
 
-  | PatAtom (a, pats, _), VAtom b when a = b && pats = [] -> Some []
-  | PatAtom (a, pats, _), VCon (tag, args) when a = tag ->
+  | PatAtom (a, pats, _), VAtom b when a = b && pats = [] -> Some []  (* match(PatAtom) nullary — §4.3 *)
+  | PatAtom (a, pats, _), VCon (tag, args) when a = tag ->             (* match(PatAtom) payload — §4.3 *)
     if List.length pats <> List.length args then None
     else match_list pats args
-  | PatAtom _, _ -> None
+  | PatAtom _, _ -> None  (* match(PatAtom) — §4.3 *)
 
-  | PatTuple ([], _), VUnit -> Some []
-  | PatTuple (pats, _), VTuple vs ->
+  | PatTuple ([], _), VUnit -> Some []  (* match(PatTuple) k=0 alias to VUnit — §4.3 *)
+  | PatTuple (pats, _), VTuple vs ->    (* match(PatTuple) — §4.3 *)
     if List.length pats <> List.length vs then None
     else match_list pats vs
 
-  | PatTuple _, _ -> None
+  | PatTuple _, _ -> None  (* match(PatTuple) — §4.3 *)
 
-  | PatRecord (fields, _), VRecord record_fields ->
+  | PatRecord (fields, _), VRecord record_fields ->  (* match(PatRecord) — §4.3, unreachable from surface syntax per §4.3.1 *)
     let bindings = List.fold_left (fun acc (fname, fpat) ->
         match acc with
         | None -> None
@@ -796,9 +862,9 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
       ) (Some []) fields in
     bindings
 
-  | PatRecord _, _ -> None
+  | PatRecord _, _ -> None  (* match(PatRecord) — §4.3 *)
 
-  | PatAs (inner, alias, _), _ ->
+  | PatAs (inner, alias, _), _ ->  (* match(PatAs) — §4.3, unreachable from surface syntax per §4.3.1 *)
     (match match_pattern v inner with
      | None -> None
      | Some bs -> Some ((alias.txt, v) :: bs))
@@ -976,6 +1042,7 @@ let rec value_to_string v =
      | None   -> Printf.sprintf "Vault(#%d)" id)
   | VRingBuf r ->
     Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
+  | VResource _ -> "#<resource>"
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -1242,6 +1309,22 @@ let list_index pred lst =
    int_enc=`Tagged: Int/Bool as tagged word via make_int (Option/Result payloads). *)
 let rec ffi_marshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (v : value) : int64 =
   match ty, v with
+  (* Opaque FFI `resource` handle: pass the raw marshaled bits straight
+     through, regardless of the expected type — a VResource is only ever
+     produced by ffi_unmarshal_iv's own resource case below, so it's always
+     already the correct representation for re-entering an extern call.
+     Bump the refcount first: the OCaml [value] keeps its own live reference
+     to [mv] independent of this call, but dynamic_ffi_call's post-call
+     cleanup unconditionally drops every heap-classified argument it
+     marshaled (mirroring the fact that e.g. VString's str_new allocates a
+     fresh, call-scoped march_value). A resource is the one case where the
+     marshaled march_value is NOT a fresh call-scoped allocation but the same
+     long-lived handle the March-level variable still holds, so without this
+     dup the cleanup drop would prematurely free it (and run its native
+     destructor) after its first use as an argument — e.g. passing the same
+     `Db` handle into two successive `sqlite_prepare` calls would close the
+     connection after the first. *)
+  | _, VResource mv -> Ffi_marshal.dup mv; mv
   | TyCon ({txt = "Int"|"Char"; _}, []), VInt n ->
     let n64 = Int64.of_int n in
     if int_enc = `Tagged then Ffi_marshal.make_int n64 else n64
@@ -1326,6 +1409,11 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
     if Ffi_marshal.variant_tag mv = 0
     then VCon ("Ok",  [ffi_unmarshal_payload a_ty (Ffi_marshal.variant_field mv 0)])
     else VCon ("Err", [ffi_unmarshal_payload e_ty (Ffi_marshal.variant_field mv 0)])
+  | TyCon ({txt = tname; _}, _) when Hashtbl.mem ffi_resource_tbl tname ->
+    (* `resource Foo` — an opaque FFI handle (see ffi_resource_tbl comment).
+       Never consult ffi_type_decl_tbl's variant path for these: the raw bits
+       are not a variant discriminant, just wrap them as-is. *)
+    VResource mv
   | TyCon ({txt = tname; _}, _) ->
     (match Hashtbl.find_opt ffi_type_decl_tbl tname with
      | Some (TDRecord fdecls) ->
@@ -1338,7 +1426,7 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
      | Some (TDVariant vars) ->
        let tag = Ffi_marshal.variant_tag mv in
        let var = (try List.nth vars tag
-                  with Failure _ ->
+                  with Failure _ | Invalid_argument _ ->
                     eval_error "FFI unmarshal: variant tag %d out of range for %s" tag tname) in
        let args = List.mapi (fun i arg_ty ->
          ffi_unmarshal_field arg_ty (Ffi_marshal.variant_field mv i))
@@ -2576,6 +2664,306 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
   | _ -> ()                  (* swallow other connection errors *)
 
 (* ------------------------------------------------------------------ *)
+(* Non-blocking, single-threaded, multiplexed HTTP connection handling *)
+(* ------------------------------------------------------------------ *)
+(* [handle_http_connection] above is fully blocking: it assumes every recv/
+   send completes immediately. That's fine for the fork-per-accept-loop
+   variant (http_server_spawn_n) where each forked child only ever serves
+   one client at a time by design, but it is fatal for [http_server_listen]'s
+   main accept loop — a single slow/idle client (e.g. a WebSocket client that
+   opens the TCP connection and then pauses before sending the upgrade
+   request) blocks that one OS thread inside a blocking recv(), and since
+   there is only one thread, NO other client can be accepted or served until
+   that recv() returns.
+
+   The fix follows the same cooperative, single-threaded pattern the
+   interpreter already uses for actor mailboxes (see [BlockedOnReceive] /
+   [run_scheduler] above): instead of blocking, each connection is a small
+   state machine that is driven forward only when [Unix.select] reports its
+   socket ready. No connection can ever stall another. *)
+
+(** What a connection is currently waiting to do. *)
+type http_conn_phase =
+  | HCReadingRequest    (* accumulating bytes until headers (+ body) complete *)
+  | HCWriting           (* response bytes queued; draining via non-blocking send *)
+
+type http_conn_state = {
+  hc_sock            : Unix.file_descr;
+  mutable hc_phase    : http_conn_phase;
+  hc_in_buf           : Buffer.t;   (* raw bytes read so far (request line+headers+body) *)
+  mutable hc_out_buf  : string;     (* full response bytes still to be written *)
+  mutable hc_out_off  : int;        (* bytes of hc_out_buf already written *)
+}
+
+let http_conn_new sock =
+  { hc_sock = sock;
+    hc_phase = HCReadingRequest;
+    hc_in_buf = Buffer.create 512;
+    hc_out_buf = "";
+    hc_out_off = 0;
+  }
+
+(** Look for "\r\n\r\n" (or bare "\n\n") marking the end of the header block
+    in the bytes accumulated so far. Returns the byte offset just past the
+    blank line, or None if not yet seen. *)
+let http_find_header_end (raw : string) : int option =
+  let n = String.length raw in
+  let rec go i =
+    if i + 3 >= n then None
+    else if raw.[i] = '\r' && raw.[i+1] = '\n' && raw.[i+2] = '\r' && raw.[i+3] = '\n'
+    then Some (i + 4)
+    else go (i + 1)
+  in
+  (* Also allow a bare "\n\n" for leniency, matching how http_recv_line
+     tolerates missing CR. *)
+  let rec go_lf i =
+    if i + 1 >= n then None
+    else if raw.[i] = '\n' && raw.[i+1] = '\n' then Some (i + 2)
+    else go_lf (i + 1)
+  in
+  match go 0 with
+  | Some _ as r -> r
+  | None -> go_lf 0
+
+(** Parse the accumulated header block (everything up to but not including
+    the blank-line terminator) into (method, full_path, headers_raw). *)
+let http_parse_request_head (head_block : string) : string * string * (string * string) list =
+  let lines = String.split_on_char '\n' head_block in
+  let lines = List.map (fun l ->
+      if String.length l > 0 && l.[String.length l - 1] = '\r'
+      then String.sub l 0 (String.length l - 1) else l)
+      lines
+  in
+  match lines with
+  | [] -> ("GET", "/", [])
+  | req_line :: header_lines ->
+    let (meth, full_path) =
+      match String.split_on_char ' ' req_line with
+      | m :: fp :: _ -> (m, fp)
+      | _ -> ("GET", "/")
+    in
+    let headers_raw = List.filter_map parse_header_line header_lines in
+    (meth, full_path, headers_raw)
+
+(** Given the bytes read so far, determine whether a complete HTTP request
+    (headers + body, per Content-Length) is present. Returns
+    Some (meth, full_path, headers_raw, body) once complete. *)
+let http_try_parse_request (raw : string) :
+  (string * string * (string * string) list * string) option =
+  match http_find_header_end raw with
+  | None -> None
+  | Some header_end ->
+    let head_block = String.sub raw 0 header_end in
+    let (meth, full_path, headers_raw) = http_parse_request_head head_block in
+    let content_length =
+      match List.find_opt
+              (fun (n, _) -> String.lowercase_ascii n = "content-length")
+              headers_raw
+      with
+      | Some (_, s) -> (match int_of_string_opt (String.trim s) with
+          | Some n when n >= 0 -> n
+          | _ -> 0)
+      | None -> 0
+    in
+    let available_body = String.length raw - header_end in
+    if available_body < content_length then None  (* body not fully arrived yet *)
+    else Some (meth, full_path, headers_raw, String.sub raw header_end content_length)
+
+(** Run the pipeline for a fully-received request and produce the response
+    bytes to write (or detect a WebSocket upgrade, returning [None] since
+    there is no ordinary HTTP response to queue in that case). This part is
+    pure in-memory computation (no blocking I/O) except for the WS handshake
+    write and handoff, which — like the prior blocking implementation —
+    intentionally takes over the socket for the lifetime of the WS
+    connection (matching the documented, unchanged semantics of
+    WebSocketUpgrade / handler_fn: once upgraded, this one connection is
+    WS-owned and blocking, exactly as before this fix). *)
+let http_run_pipeline_and_respond
+    (sock : Unix.file_descr) (pipeline_fn : value)
+    (meth : string) (full_path : string)
+    (headers_raw : (string * string) list) (body : string) : string option =
+  let conn_val = build_conn_value
+      ~fd:(Obj.magic sock : int)
+      ~method_str:meth ~full_path ~headers_raw ~body () in
+  let result_conn = !apply_hook pipeline_fn [conn_val] in
+  match result_conn with
+  | VCon ("Conn", [_fd; _meth; _path; _pi; _qs;
+                   _rh; _rb; _status; _rhs; _rbody;
+                   _halted; _assigns;
+                   VCon ("WebSocketUpgrade", [handler_fn])]) ->
+    let ws_key_opt =
+      List.find_opt
+        (fun (n, _) -> String.lowercase_ascii n = "sec-websocket-key")
+        headers_raw
+    in
+    (match ws_key_opt with
+     | None ->
+       Some "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+     | Some (_, key) ->
+       let accept = ws_accept_key (String.trim key) in
+       let handshake =
+         "HTTP/1.1 101 Switching Protocols\r\n" ^
+         "Upgrade: websocket\r\n" ^
+         "Connection: Upgrade\r\n" ^
+         "Sec-WebSocket-Accept: " ^ accept ^ "\r\n\r\n"
+       in
+       (* The handshake + subsequent WS frames are written/read with the
+          same blocking helpers the old implementation used: this one
+          connection becomes WS-owned for its lifetime, same as before. *)
+       tcp_send_all sock handshake;
+       let fd_int = (Obj.magic sock : int) in
+       let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
+       (try ignore (!apply_hook handler_fn [ws_sock]) with _ -> ());
+       None)
+  | _ ->
+    let (status, resp_headers, resp_body) = extract_conn_response result_conn in
+    let effective_status = if status = 0 then 200 else status in
+    let reason     = http_reason_phrase effective_status in
+    let header_str = march_headers_to_string resp_headers in
+    let response   =
+      Printf.sprintf "HTTP/1.1 %d %s\r\n%sContent-Length: %d\r\n\r\n%s"
+        effective_status reason
+        header_str
+        (String.length resp_body)
+        resp_body
+    in
+    Some response
+
+(** Non-blocking multiplexed HTTP accept/serve loop.
+    Tracks every open connection (not just the listening socket) and
+    [Unix.select]s across all of them each iteration, so a connection that
+    is idle/slow/partially-written never blocks progress on any other
+    connection. Each connection is driven forward only when [select]
+    reports it ready for the operation it is currently waiting on. *)
+let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : unit =
+  let open Unix in
+  set_nonblock server_sock;
+  (* fd -> connection state, for all currently-open client connections. *)
+  let conns : (Unix.file_descr, http_conn_state) Hashtbl.t = Hashtbl.create 64 in
+  let close_conn (c : http_conn_state) =
+    Hashtbl.remove conns c.hc_sock;
+    (try close c.hc_sock with _ -> ())
+  in
+  (* Try to make forward progress reading a request on [c]. Called only
+     after select reports the socket readable. *)
+  let advance_read (c : http_conn_state) =
+    let chunk = Bytes.create 65536 in
+    match (try `Read (Unix.read c.hc_sock chunk 0 (Bytes.length chunk))
+           with
+           | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+           | Unix_error (EINTR, _, _) -> `WouldBlock
+           | Unix_error _ -> `Closed
+           | _ -> `Closed)
+    with
+    | `WouldBlock -> ()
+    | `Closed -> close_conn c
+    | `Read 0 -> close_conn c   (* peer closed before completing a request *)
+    | `Read n ->
+      Buffer.add_subbytes c.hc_in_buf chunk 0 n;
+      (match http_try_parse_request (Buffer.contents c.hc_in_buf) with
+       | None -> ()  (* need more bytes; keep waiting on this socket *)
+       | Some (meth, full_path, headers_raw, body) ->
+         (* Run the (in-memory, non-blocking) pipeline now. This may take
+            over the socket for a WebSocket upgrade — matching the prior
+            blocking implementation's semantics exactly — in which case
+            there is no HTTP response to queue and the connection is
+            simply closed out from the event loop's perspective. *)
+         (match
+            (try http_run_pipeline_and_respond c.hc_sock pipeline_fn
+                   meth full_path headers_raw body
+             with
+             | Eval_error msg ->
+               Printf.eprintf "[http handler error] %s\n%!" msg;
+               Some "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+             | Unix.Unix_error _ -> None
+             | _ -> None)
+          with
+          | None -> close_conn c
+          | Some response ->
+            c.hc_out_buf <- response;
+            c.hc_out_off <- 0;
+            c.hc_phase <- HCWriting))
+  in
+  (* Try to make forward progress writing the queued response on [c].
+     Called only after select reports the socket writable. *)
+  let advance_write (c : http_conn_state) =
+    let remaining = String.length c.hc_out_buf - c.hc_out_off in
+    if remaining <= 0 then close_conn c
+    else
+      match
+        (try `Wrote (Unix.write_substring c.hc_sock c.hc_out_buf c.hc_out_off remaining)
+         with
+         | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+         | Unix_error (EINTR, _, _) -> `WouldBlock
+         | Unix_error _ -> `Closed
+         | _ -> `Closed)
+      with
+      | `WouldBlock -> ()
+      | `Closed -> close_conn c
+      | `Wrote n ->
+        c.hc_out_off <- c.hc_out_off + n;
+        if c.hc_out_off >= String.length c.hc_out_buf then close_conn c
+  in
+  (try
+     while not !shutdown_requested do
+       let read_fds =
+         server_sock ::
+         Hashtbl.fold (fun _ c acc ->
+             if c.hc_phase = HCReadingRequest then c.hc_sock :: acc else acc)
+           conns []
+       in
+       let write_fds =
+         Hashtbl.fold (fun _ c acc ->
+             if c.hc_phase = HCWriting then c.hc_sock :: acc else acc)
+           conns []
+       in
+       let (readable, writable, _) =
+         try select read_fds write_fds [] 1.0
+         with Unix_error (EINTR, _, _) -> ([], [], [])
+            | _ -> ([], [], [])
+       in
+       if not !shutdown_requested then begin
+         (* New connections first. *)
+         if List.mem server_sock readable then begin
+           (* Drain every pending connection in the backlog, not just one —
+              under load, select only guarantees at least one is ready. *)
+           let continue_accepting = ref true in
+           while !continue_accepting do
+             match
+               (try `Accepted (accept server_sock)
+                with
+                | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> `WouldBlock
+                | Unix_error (EINTR, _, _) -> `WouldBlock
+                | Unix_error _ -> `WouldBlock
+                | _ -> `WouldBlock)
+             with
+             | `WouldBlock -> continue_accepting := false
+             | `Accepted (client_sock, _addr) ->
+               (try set_nonblock client_sock with _ -> ());
+               Hashtbl.replace conns client_sock (http_conn_new client_sock)
+           done
+         end;
+         (* Drive every connection ready for its current phase. Snapshot
+            first since advance_read/advance_write may remove entries. *)
+         List.iter (fun fd ->
+             match Hashtbl.find_opt conns fd with
+             | Some c when c.hc_phase = HCReadingRequest -> advance_read c
+             | _ -> ())
+           readable;
+         List.iter (fun fd ->
+             match Hashtbl.find_opt conns fd with
+             | Some c when c.hc_phase = HCWriting -> advance_write c
+             | _ -> ())
+           writable
+       end
+     done;
+     Printf.eprintf "march: Shutting down...\n%!"
+   with exn ->
+     Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns;
+     raise exn);
+  Hashtbl.iter (fun _ c -> try close c.hc_sock with _ -> ()) conns
+
+(* ------------------------------------------------------------------ *)
 (* Session-typed channel runtime                                       *)
 (* ------------------------------------------------------------------ *)
 
@@ -2733,11 +3121,15 @@ let show_dispatch (v : value) : string =
 (* ------------------------------------------------------------------ *)
 
 let base_env : env =
+  (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
+     surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
+     here, dispatched via E-App-Prim (§4.2) — there is no separate arithmetic
+     evaluation path. *)
   [ (* Integer arithmetic *)
-    ("+",  arith_num ( + ) ( +. ) "+")
-  ; ("-",  arith_num ( - ) ( -. ) "-")
-  ; ("*",  arith_num ( * ) ( *. ) "*")
-  ; ("/",  VBuiltin ("/", function
+    ("+",  arith_num ( + ) ( +. ) "+")   (* δ-Add-I / δ-Add-F — §4.4 *)
+  ; ("-",  arith_num ( - ) ( -. ) "-")   (* δ-Sub-I / δ-Sub-F — §4.4 *)
+  ; ("*",  arith_num ( * ) ( *. ) "*")   (* δ-Mul-I / δ-Mul-F — §4.4 *)
+  ; ("/",  VBuiltin ("/", function       (* δ-Div-I / δ-Div-F / δ-Div-0 / δ-Div-0F — §4.4 *)
         | [VInt a;   VInt b]   when b <> 0   -> VInt (a / b)
         | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
         | [VInt _;   VInt 0]                 -> eval_error "division by zero"
@@ -2746,7 +3138,7 @@ let base_env : env =
            explicitly.  Same guard applies to the /. operator below. *)
         | [VFloat _; VFloat 0.0]             -> eval_error "division by zero"
         | _ -> eval_error "builtin /: expected two numbers"))
-  ; ("%",  VBuiltin ("%", function
+  ; ("%",  VBuiltin ("%", function       (* δ-Mod-I / δ-Mod-0 — §4.4 *)
         | [VInt a; VInt b] when b <> 0 -> VInt (a mod b)
         | [VInt _; VInt 0]             -> eval_error "modulo by zero"
         | _ -> eval_error "builtin %%: expected two integers"))
@@ -2776,14 +3168,14 @@ let base_env : env =
           eval_error "/.: arguments must be Float, not Int — use `/` for Int or `int_to_float` to convert"
         | _ -> eval_error "/.: expected two Floats, got %s"
             (String.concat " and " (List.map value_to_string args))))
-    (* Comparisons *)
+    (* Comparisons — δ-Eq-* / δ-Neq-* / δ-Lt-* / δ-Le-* / δ-Gt-* / δ-Ge-* — §4.4 *)
   ; ("==", cmp_op ( = )  ( = )  ( = )  ( = )  "==")
   ; ("!=", cmp_op ( <> ) ( <> ) ( <> ) ( <> ) "!=")
   ; ("<",  cmp_op ( < )  ( < )  ( < )  ( < )  "<")
   ; ("<=", cmp_op ( <= ) ( <= ) ( <= ) ( <= ) "<=")
   ; (">",  cmp_op ( > )  ( > )  ( > )  ( > )  ">")
   ; (">=", cmp_op ( >= ) ( >= ) ( >= ) ( >= ) ">=")
-    (* Boolean *)
+    (* Boolean — δ-rules — §4.4 *)
   ; ("&&", VBuiltin ("&&", function
         | [VBool a; VBool b] -> VBool (a && b)
         | _ -> eval_error "builtin &&: expected two bools"))
@@ -5059,11 +5451,16 @@ let base_env : env =
         | _ -> eval_error "http_fetch_available()"))
 
   (* ── HTTP server (interpreter mode: pure-OCaml implementation) ──── *)
-  (* Uses select with a 1-second timeout so the loop can check
-     [shutdown_requested] between iterations.  This lets Ctrl+C (SIGINT)
-     — which sets [shutdown_requested] via the handler installed in
-     [run_module] — exit the server cleanly instead of blocking forever
-     on [accept].  Mirrors the C runtime's g_http_shutdown pattern. *)
+  (* Single-threaded, non-blocking, multiplexed event loop — see
+     [run_http_event_loop] above.  select()s across the listen socket AND
+     every open client connection each iteration (1s timeout so the loop
+     can check [shutdown_requested] between iterations, letting Ctrl+C /
+     SIGTERM exit cleanly).  No connection's recv/send can ever block
+     progress on any other connection: a slow/idle client (e.g. a
+     WebSocket client that connects but delays sending its upgrade
+     request) simply sits in HCReadingRequest without being served, while
+     every other connection continues to make progress.  Mirrors the C
+     runtime's g_http_shutdown pattern for shutdown handling. *)
   ; ("http_server_listen", VBuiltin ("http_server_listen", function
       | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
         let open Unix in
@@ -5072,28 +5469,7 @@ let base_env : env =
         bind server_sock (ADDR_INET (inet_addr_any, port));
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
-        (try
-           while not !shutdown_requested do
-             (* select with 1s timeout — returns early on EINTR (signal) *)
-             let readable =
-               try
-                 let (r, _, _) = select [server_sock] [] [] 1.0 in r
-               with Unix_error (EINTR, _, _) -> []
-                  | _ -> []
-             in
-             if readable <> [] && not !shutdown_requested then
-               (match
-                 (try Some (accept server_sock)
-                  with Unix_error (EINTR, _, _) -> None
-                     | _ -> None)
-               with
-               | None -> ()
-               | Some (client_sock, _addr) ->
-                 (try handle_http_connection client_sock pipeline_fn
-                  with _ -> ());
-                 (try close client_sock with _ -> ()))
-           done;
-           Printf.eprintf "march: Shutting down...\n%!"
+        (try run_http_event_loop server_sock pipeline_fn
          with
          (* EINTR from accept/select that slipped past inner handlers —
             treat as a clean shutdown rather than re-raising as a fatal error *)
@@ -6843,12 +7219,16 @@ let span_of_expr (e : expr) : span =
   | EResultRef _ -> dummy_span
 
 (** Evaluate a block: return the value of the last expression.
-    [ELet] bindings extend the environment for subsequent expressions. *)
+    [ELet] bindings extend the environment for subsequent expressions.
+
+    This is the operational semantics of Core March's block rules — see
+    `specs/lang/core-march.md` §4.2 (E-Blk-Last, E-Blk-Let, E-LetFn,
+    E-Blk-Seq). Each arm below is annotated with the spec rule it implements. *)
 let rec eval_block (env : env) (es : expr list) : value =
   match es with
   | []      -> VUnit
-  | [e]     -> eval_expr env e
-  | ELet (b, _) :: rest ->
+  | [e]     -> eval_expr env e  (* E-Blk-Last — core-march.md §4.2 *)
+  | ELet (b, _) :: rest ->      (* E-Blk-Let — core-march.md §4.2 *)
     let v = eval_expr env b.bind_expr in
     let bindings = match match_pattern v b.bind_pat with
       | Some bs -> bs
@@ -6859,6 +7239,10 @@ let rec eval_block (env : env) (es : expr list) : value =
     eval_block (bindings @ env) rest
   (* Local named recursive function: fn go(params) do body end *)
   | ELetFn (name, params, _, body, _) :: rest ->
+    (* E-LetFn — core-march.md §4.2 — env_ref recursive knot: the closure's
+       body reads !env_ref at call time (deferred), and env_ref is
+       back-patched to env' (which contains name -> rec_v) below, so the
+       closure's own name resolves to itself once called. *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
     (* Use the env_ref trick so the function can call itself recursively. *)
     let env_ref = ref env in
@@ -6868,7 +7252,7 @@ let rec eval_block (env : env) (es : expr list) : value =
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     eval_block env' rest
-  | e :: rest ->
+  | e :: rest ->  (* E-Blk-Seq — core-march.md §4.2 *)
     let _ = eval_expr env e in
     eval_block env rest
 
@@ -6925,22 +7309,28 @@ and apply (fn_val : value) (args : value list) : value =
   | `Ok v    -> v
   | `Err exn -> raise exn
 
-(** Main expression evaluator (inner, no tracing). *)
+(** Main expression evaluator (inner, no tracing).
+
+    This is the operational semantics of Core March — see
+    `specs/lang/core-march.md` §4. Each core-construct arm below is annotated
+    with the spec rule it implements. *)
 and eval_expr_inner (env : env) (e : expr) : value =
   match e with
-  | ELit (LitInt n, _)    -> VInt n
-  | ELit (LitFloat f, _)  -> VFloat f
-  | ELit (LitString s, _) -> VString s
-  | ELit (LitBool b, _)   -> VBool b
-  | ELit (LitAtom a, _)   -> VAtom a
+  | ELit (LitInt n, _)    -> VInt n     (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitFloat f, _)  -> VFloat f   (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitString s, _) -> VString s  (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitBool b, _)   -> VBool b    (* E-Lit — core-march.md §4.2 *)
+  | ELit (LitAtom a, _)   -> VAtom a    (* E-Lit — core-march.md §4.2 *)
 
-  | EVar n -> lookup n.txt env
+  | EVar n -> lookup n.txt env  (* E-Var — core-march.md §4.2 *)
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
   | EApp (f, args, sp) ->
+    (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
+       happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)
     check_reductions ();
     let fn_name = match f with
       | EVar n -> n.txt
@@ -6960,7 +7350,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
      | exception e -> march_stack_pop (); raise e)
 
-  | ECon (name, args, _) ->
+  | ECon (name, args, _) ->  (* E-Con — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     (* Strip any type qualifier from the constructor tag so that
        Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
@@ -6970,47 +7360,64 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     VCon (tag, arg_vals)
 
-  | ELam (params, body, _) ->
+  | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
     VClosure (env, param_names, body)
 
   | EBlock (es, _) -> eval_block env es
+    (* E-Blk-Last / E-Blk-Let / E-LetFn / E-Blk-Seq — core-march.md §4.2, see eval_block below *)
 
   | ELet (b, _) ->
     (* Standalone let (outside a block) — evaluate and ignore bindings.
-       This shouldn't appear after desugaring except inside EBlock. *)
+       This shouldn't appear after desugaring except inside EBlock.
+       (Not itself one of the block rules below — those apply to ELet
+       encountered *inside* an EBlock's statement list; see E-Blk-Let.) *)
     eval_expr env b.bind_expr
 
-  | EMatch (scrut, branches, sp) ->
+  | EMatch (scrut, branches, sp) ->  (* E-Match — core-march.md §4.2, branch selection §4.3 *)
     check_reductions ();
     let v = eval_expr env scrut in
     eval_match env sp v branches
 
-  | ETuple ([], _) -> VUnit
-  | ETuple (es, _) ->
+  | ETuple ([], _) -> VUnit           (* E-Tuple (k=0 alias to VUnit) — core-march.md §4.2 *)
+  | ETuple (es, _) ->                 (* E-Tuple — core-march.md §4.2 *)
     VTuple (List.map (eval_expr env) es)
 
-  | ERecord (fields, _) ->
+  | ERecord (fields, _) ->  (* E-Record — core-march.md §4.2 *)
     VRecord (List.map (fun (n, ex) -> (n.txt, eval_expr env ex)) fields)
 
-  | ERecordUpdate (base, updates, _) ->
+  | ERecordUpdate (base, updates, _) ->  (* E-Update — core-march.md §4.2 *)
     let base_val = eval_expr env base in
     (match base_val with
      | VRecord fields ->
        let updated = List.map (fun (n, ex) -> (n.txt, eval_expr env ex)) updates in
+       (* A functional update is only defined for fields that already exist
+          on the base record's actual (runtime) shape — matches the compiled
+          backend's march_record_update_dyn contract (runtime/march_extras.c),
+          which panics rather than silently fabricating a new field.  Most
+          call sites have a statically-known record type, so the typechecker
+          (typecheck.ml's ERecordUpdate case, expand_record on a concrete
+          TRecord) already rejects an unknown field name before this arm ever
+          runs; this eval_error only fires for an update through an
+          erased/generic base (record_from_list/record_put results, whose
+          type is a bare TVar), which is exactly the case the typechecker
+          cannot validate ahead of time. *)
+       List.iter (fun (k, _) ->
+           if not (List.mem_assoc k fields) then
+             eval_error "record update: no field '%s' in record" k
+         ) updated;
        (* Merge: updated fields override existing ones *)
        let new_fields = List.map (fun (k, v) ->
            match List.assoc_opt k updated with
            | Some v' -> (k, v')
            | None    -> (k, v)
          ) fields in
-       (* Add any fields in updated that weren't in the original *)
-       let extra = List.filter (fun (k, _) ->
-           not (List.mem_assoc k fields)) updated in
-       VRecord (new_fields @ extra)
+       VRecord new_fields
      | _ -> eval_error "record update on non-record value")
 
   | EField (ex, field, _) ->
+    (* E-Field — core-march.md §4.2 (the record-field case below; module-path
+       resolution here is a fidelity note in the spec prose, not a separate rule) *)
     (* First try to resolve as a module path (handles A.B.c chained access) *)
     let rec module_path_str = function
       | ECon (n, [], _) -> Some n.txt
@@ -7058,11 +7465,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with
-     | VBool true  ->
+     | VBool true  ->  (* E-If-T — core-march.md §4.2 *)
        (if !March_coverage.Coverage.coverage_enabled then
          March_coverage.Coverage.record_branch sp true);
        eval_expr env then_
-     | VBool false ->
+     | VBool false ->  (* E-If-F — core-march.md §4.2 *)
        (if !March_coverage.Coverage.coverage_enabled then
          March_coverage.Coverage.record_branch sp false);
        eval_expr env else_
@@ -7071,10 +7478,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | ECond (arms, _) ->
     let rec go = function
       | [] -> eval_error "non-exhaustive `match do` — no arm matched"
+        (* E-Cond-Fail — core-march.md §4.2 *)
       | (cond_e, body_e) :: rest ->
         (match eval_expr env cond_e with
-         | VBool true  -> eval_expr env body_e
-         | VBool false -> go rest
+         | VBool true  -> eval_expr env body_e  (* E-Cond-Sel — core-march.md §4.2 *)
+         | VBool false -> go rest                (* E-Cond-Sel — core-march.md §4.2 *)
          | _           -> eval_error "`match do` condition must be Bool")
     in
     go arms
@@ -7116,8 +7524,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EAnnot (ex, _, _) -> eval_expr env ex
 
-  | EAtom (a, [], _) -> VAtom a
-  | EAtom (a, args, _) ->
+  | EAtom (a, [], _) -> VAtom a  (* E-Atom-0 — core-march.md §4.2 *)
+  | EAtom (a, args, _) ->        (* E-Atom-N — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     VCon (a, arg_vals)
 
@@ -7287,31 +7695,37 @@ and eval_expr_inner (env : env) (e : expr) : value =
             "assert: expected Bool, got %s (at %s)" (value_to_string v) loc))))
 
 (** Evaluate a match expression: try each branch until one matches.
-    [match_span] is the span of the [EMatch] node, used for coverage arm tracking. *)
+    [match_span] is the span of the [EMatch] node, used for coverage arm tracking.
+
+    This is the operational semantics of Core March's branch selection —
+    see `specs/lang/core-march.md` §4.3. Branch selection: first-match-wins,
+    guard, Match_failure — §4.3. *)
 and eval_match (env : env) (match_span : span) (v : value) (branches : branch list) : value =
   let rec go arm_idx = function
     | [] ->
+      (* exhaustiveness / no-match: raises Match_failure — §4.3 *)
       raise (Match_failure
                (Printf.sprintf "Non-exhaustive pattern match: no branch matched the value %s.\nAdd a catch-all `_ -> ...` arm, or handle this case explicitly."
                   (value_to_string v)))
     | br :: rest ->
       (match match_pattern v br.branch_pat with
-       | None -> go (arm_idx + 1) rest
+       | None -> go (arm_idx + 1) rest  (* pattern failed to match: try next branch — §4.3 *)
        | Some bindings ->
-         let env' = bindings @ env in
+         let env' = bindings @ env in  (* pattern-extended environment — §4.3 *)
          (* Check guard if present *)
          let guard_ok = match br.branch_guard with
-           | None   -> true
+           | None   -> true  (* no guard: branch selected outright — §4.3 *)
            | Some g ->
              (match eval_expr env' g with
-              | VBool b -> b
+              | VBool b -> b  (* guard evaluated in pattern-extended env — §4.3 *)
               | _       -> eval_error "guard must evaluate to a boolean")
          in
          if guard_ok then begin
+           (* first-match-wins: this is the selected branch — §4.3 *)
            (if !March_coverage.Coverage.coverage_enabled then
              March_coverage.Coverage.record_arm match_span arm_idx);
            eval_expr env' br.branch_body
-         end else go (arm_idx + 1) rest)
+         end else go (arm_idx + 1) rest)  (* false guard: try next branch, does not fail the whole match — §4.3 *)
   in
   go 0 branches
 
@@ -7434,7 +7848,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear vault_registry;
   Hashtbl.clear vault_name_registry;
   vault_next_id := 0;
-  Hashtbl.clear ffi_type_decl_tbl
+  Hashtbl.clear ffi_type_decl_tbl;
+  Hashtbl.clear ffi_resource_tbl
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -7657,6 +8072,11 @@ let task_builtins : env =
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
+  (* mint_cap — the gated proof-cap mint. Gating is a compile-time check; at
+     runtime it is a no-op alias of cap_narrow (caps are opaque unit sentinels). *)
+  ; ("mint_cap", VBuiltin ("mint_cap", function
+    | [_cap] -> VUnit
+    | _ -> eval_error "mint_cap: expected 1 argument"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
@@ -8070,8 +8490,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
     (* Also register in ffi_type_decl_tbl so the FFI marshal layer can look up
-       field/ctor types for record and variant arguments. *)
+       field/ctor types for record and variant arguments. A `resource Foo`
+       declaration desugars to TDVariant [] (see resource_decl in parser.mly);
+       mark such names in ffi_resource_tbl so the marshal layer treats them as
+       opaque handles instead of zero-case variants. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8214,18 +8638,18 @@ let rec eval_decl (env : env) (d : decl) : env =
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
     List.fold_left (fun env (mname, fn_def) ->
-        (* For Show.show: create a non-self-referential closure so that
-           recursive `show(x)` calls inside the body go through the builtin
-           dispatch (impl_tbl), not back to this impl's function. *)
-        let is_show_method =
-          idef.impl_iface.txt = "Show" && mname.txt = "show"
+        (* Type-dispatched methods (show/eq/compare/hash) use a
+           non-self-referential closure so recursive calls inside the body go
+           through the builtin dispatch (impl_tbl), not back to this impl. *)
+        let is_dispatched =
+          is_type_dispatched_method idef.impl_iface.txt mname.txt
         in
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
             let v = eval_expr env fc_body in
             (mname.txt, v) :: env
-          | _ when is_show_method ->
-            (* Plain closure: `show` in body → builtin dispatch, not self. *)
+          | _ when is_dispatched ->
+            (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
             let clo = VClosure (env, params, clause.fc_body) in
@@ -8240,7 +8664,12 @@ let rec eval_decl (env : env) (d : decl) : env =
         if type_name <> "" then begin
           match List.assoc_opt mname.txt new_env with
           | Some fn_val ->
-            Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* For a type-dispatched interface, only its single dispatch method
+               may claim the shared (iface, type) key; extra methods (e.g. Eq's
+               default `neq`) must not clobber it, or builtin dispatch invokes
+               the wrong method and recurses forever (neq → eq → neq). *)
+            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
             Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
@@ -8248,9 +8677,10 @@ let rec eval_decl (env : env) (d : decl) : env =
         (* For Json derive: to_json only registers in impl_tbl (so the
            builtin dispatcher can route by value type); from_json binds in
            env (since we can't dispatch on the target type from a JsonValue).
-           Same for Show.show: the builtin `show` dispatches through impl_tbl,
-           so binding `show` in the global env would shadow the builtin. *)
-        if (is_json_iface && mname.txt = "to_json") || is_show_method then env
+           For type-dispatched methods (show/eq/compare/hash) the builtin
+           dispatches through impl_tbl, so binding the bare name in the env
+           would shadow the builtin and break dispatch when 2+ impls exist. *)
+        if (is_json_iface && mname.txt = "to_json") || is_dispatched then env
         else new_env
       ) env idef.impl_methods
 
@@ -8286,7 +8716,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        let key = String.concat "," (List.sort String.compare field_names) in
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
+    (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl.
+       always_linear types can't currently arise from `resource` declarations
+       (resource_decl only produces DType), but handle it the same way as the
+       other two registration sites for defense in depth. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8528,14 +8963,14 @@ let eval_module_env (m : module_) : env =
         && String.sub idef.impl_iface.txt 0 4 = "Json"
       in
       let env' = List.fold_left (fun acc_env (mname, fn_def) ->
-          let is_show_method =
-            idef.impl_iface.txt = "Show" && mname.txt = "show"
+          let is_dispatched =
+            is_type_dispatched_method idef.impl_iface.txt mname.txt
           in
           let new_acc = match fn_def.fn_clauses with
             | [{ fc_params = []; fc_body; _ }] ->
               let v = eval_expr acc_env fc_body in
               (mname.txt, v) :: acc_env
-            | _ when is_show_method ->
+            | _ when is_dispatched ->
               let clause = List.hd fn_def.fn_clauses in
               let params = clause_params clause in
               let clo = VClosure (acc_env, params, clause.fc_body) in
@@ -8550,15 +8985,22 @@ let eval_module_env (m : module_) : env =
           if type_name <> "" then begin
             match List.assoc_opt mname.txt new_acc with
             | Some fn_val ->
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+              (* For a type-dispatched interface, only its single dispatch method
+                 may claim the shared (iface, type) key; extra methods (e.g. Eq's
+                 default `neq`) must not clobber it, or builtin dispatch invokes
+                 the wrong method and recurses forever (neq → eq → neq). *)
+              if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
+                Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
               let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
               Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()
           end;
           (* For Json derive: to_json only registers in impl_tbl;
              from_json binds in env (can't dispatch on target type).
-             Show.show: plain closure above, don't rebind show globally. *)
-          if is_json_iface || is_show_method then acc_env
+             Type-dispatched methods (show/eq/compare/hash): plain closure
+             above, don't rebind the bare name globally — it would shadow the
+             builtin and break dispatch when 2+ impls of the iface exist. *)
+          if is_json_iface || is_dispatched then acc_env
           else new_acc
         ) env idef.impl_methods in
       env_ref := env';
@@ -8581,7 +9023,9 @@ let eval_module_env (m : module_) : env =
          let key = String.concat "," (List.sort String.compare field_names) in
          Hashtbl.replace record_type_tbl key name.txt
        | _ -> ());
+      (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl. *)
       (match td with
+       | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
        | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
        | _ -> ());
       make_recursive_env rest env

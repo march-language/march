@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: Chan.recv: channel is at
+mod Main do
+  -- Session-types widening, Task 3 -- recv-at-wrong-state.
+  -- `Chan.recv` (typecheck.ml:3509) requires SRecv(T,S). `cc` (the Client
+  -- endpoint of `Echo`) is at Send(Int, Recv(Int, End)) immediately after
+  -- Chan.new -- calling Chan.recv on it BEFORE the matching send is a
+  -- state mismatch (the channel is at Send, not Recv).
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let (n, cc2) = Chan.recv(cc)
+    println(int_to_string(n))
+    Chan.close(cc2)
+    Chan.close(sc)
+  end
+end

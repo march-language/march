@@ -1,0 +1,18 @@
+-- The distributed CRDT / identity surface adds no new typing rules (widening
+-- slice 10, §2.12): CRDT states, VectorClock, GlobalPid and the RemoteCall
+-- verdicts are ordinary ADTs typed by the §2.1 constructor/match rules. Cross-
+-- node type-safety rests on content-addressed sig_hash/impl_hash admission at
+-- RUNTIME (RemoteCall.verify), not on the type system. This program typechecks;
+-- convergence is operationally witnessed by golden g44. (Typecheck-only:
+-- VectorClock.compare crashes COMPILED on disjoint clocks, finding C1.)
+mod Main do
+  fn main() do
+    let a = CRDT.GCounter.increment(CRDT.GCounter.new(), "n1")
+    let b = CRDT.GCounter.increment(CRDT.GCounter.new(), "n2")
+    let m = CRDT.GCounter.merge(a, b)
+    println(int_to_string(CRDT.GCounter.value(m)))
+    let v1 = VectorClock.increment(VectorClock.new(), "n1")
+    let v2 = VectorClock.increment(VectorClock.new(), "n2")
+    println(bool_to_string(VectorClock.happens_before(v1, v2)))
+  end
+end

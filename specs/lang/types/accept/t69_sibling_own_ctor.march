@@ -1,0 +1,31 @@
+mod Main do
+  -- Sibling-ctor shadowing regression witness (FIXED 2026-07-10). Two
+  -- sibling modules each declare `type Foo` with a SAME-NAMED constructor
+  -- `Mk` carrying different payloads -- and each module uses its OWN `Mk`
+  -- in its own body. Post-d95fe942 (order-independent resolution) and
+  -- pre-fix, A's `Mk(1)` resolved against B's `Mk(String)` and rejected
+  -- "expected `String` but got `Int`" pointing INSIDE A: Pass-1 prebind
+  -- seeded B's bare `Mk` ahead of A's, and Pass-2's own-module
+  -- re-registration was a structural-dedup no-op. add_ctor now moves a
+  -- re-registered entry to the front (declaring-module recency), so this
+  -- program -- the ORIGINAL shape of accept/t35 before its 2026-07-10
+  -- reconciliation -- typechecks again. The no-per-module-TYPE-identity
+  -- design point (§2.5) still holds: `take_a` annotated `A.Foo` accepts a
+  -- `B.Foo` value (the two Foos are the same nominal TCon).
+  --
+  -- Value-witnessed: prints `7`.
+  mod A do
+    type Foo = Mk(Int)
+    fn make() : Foo do Mk(1) end
+  end
+  mod B do
+    type Foo = Mk(String)
+    fn make() : Foo do Mk("x") end
+  end
+
+  fn take_a(_x : A.Foo) : Int do 7 end
+
+  fn main() do
+    println(int_to_string(take_a(B.make())))
+  end
+end

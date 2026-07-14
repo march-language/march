@@ -1,0 +1,13 @@
+mod M do
+  -- A generic `when Ord(a)` bound, SATISFIED at the call site (Int implements
+  -- Ord), still typechecks — the re-check at call sites (finding 15) accepts a
+  -- discharged constraint and only rejects an unsatisfied one.
+  fn max(a, b) when Ord(a) do if a > b do a else b end end
+  -- Likewise `when Eq(a)` satisfied at Int and String.
+  fn same(a, b) when Eq(a) do a == b end
+  fn main() do
+    println(int_to_string(max(1, 2)))
+    if same(1, 1) do println("eq") else println("neq") end
+    if same("x", "y") do println("eq") else println("neq") end
+  end
+end

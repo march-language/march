@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: `Hue` does not implement interface `Eq`.
+mod M do
+  type Hue = Rood | Bloo
+  -- `a` is an UNANNOTATED generic parameter, so the `when Eq(a)` bound rides
+  -- on the parameter's own type variable and must be re-checked at each call
+  -- site (finding 15).  `Hue` has no `impl Eq`, so `same(Rood, Rood)` is
+  -- rejected — exactly as a direct `Rood == Rood` is.
+  fn same(a, b) when Eq(a) do a == b end
+  fn main() do
+    if same(Rood, Rood) do println("y") else println("n") end
+  end
+end

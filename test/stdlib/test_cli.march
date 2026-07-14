@@ -1,0 +1,231 @@
+-- Tests for the Cli stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_cli.march
+
+mod TestCli do
+
+pfn sample_specs() do
+  [
+    Cli.flag_with("verbose", Some("v"), BoolFlag, None, false, "Verbose output"),
+    Cli.flag_with("port", Some("p"), ValueFlag, Some("4000"), false, "Port"),
+    Cli.flag_with("name", None, ValueFlag, None, true, "Required name")
+  ]
+end
+
+describe "Cli spec constructors" do
+
+  test "flag builds a BoolFlag spec with no short form" do
+    let spec = Cli.flag("verbose", "Enable verbose output")
+    assert (spec.long == "verbose")
+    assert (spec.arity == BoolFlag)
+    assert (spec.required == false)
+    match spec.short do
+    None -> assert true
+    Some(_) -> assert false
+    end
+  end
+
+  test "value_flag builds a ValueFlag spec" do
+    let spec = Cli.value_flag("output", "Output file path")
+    assert (spec.long == "output")
+    assert (spec.arity == ValueFlag)
+    assert (spec.required == false)
+  end
+
+  test "flag_with builds a fully custom spec" do
+    let spec = Cli.flag_with("port", Some("p"), ValueFlag, Some("4000"), true, "Port to listen on")
+    assert (spec.long == "port")
+    match spec.short do
+    Some(s) -> assert (s == "p")
+    None -> assert false
+    end
+    assert (spec.required == true)
+    match spec.default do
+    Some(d) -> assert (d == "4000")
+    None -> assert false
+    end
+  end
+
+end
+
+describe "Cli.parse" do
+
+  test "parses long value flag and positional args" do
+    match Cli.parse(sample_specs(), ["--name", "alice", "--port", "8080", "serve"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "8080")
+      assert (Cli.get_string_or(parsed, "name", "") == "alice")
+      assert (List.length(Cli.positional(parsed)) == 1)
+      assert (List.nth(Cli.positional(parsed), 0) == "serve")
+    end
+  end
+
+  test "parses short flags and boolean flags" do
+    match Cli.parse(sample_specs(), ["-p", "9090", "-v", "--name", "bob"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "9090")
+      assert (Cli.get_bool(parsed, "verbose") == true)
+    end
+  end
+
+  test "unset value flag falls back to its spec default" do
+    match Cli.parse(sample_specs(), ["--name", "carol"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "4000") == "4000")
+      assert (Cli.get_bool(parsed, "verbose") == false)
+    end
+  end
+
+  test "unknown flag is an error" do
+    match Cli.parse(sample_specs(), ["--name", "dave", "--bogus"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      UnknownFlag(f) -> assert (f == "bogus")
+      _ -> assert false
+      end
+    end
+  end
+
+  test "value flag with no following value is an error" do
+    match Cli.parse(sample_specs(), ["--name", "eve", "--port"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingValue(f) -> assert (f == "port")
+      _ -> assert false
+      end
+    end
+  end
+
+  test "missing required flag is an error" do
+    match Cli.parse(sample_specs(), ["--port", "8080"]) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingRequired(f) -> assert (f == "name")
+      _ -> assert false
+      end
+    end
+  end
+
+  test "negative number token is treated as positional, not an unknown flag" do
+    match Cli.parse([], ["-5"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (List.length(Cli.positional(parsed)) == 1)
+      assert (List.nth(Cli.positional(parsed), 0) == "-5")
+    end
+  end
+
+  test "a flag passed twice keeps the first occurrence (accumulate-then-reverse)" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "1", "--port", "2"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "port", "?") == "1")
+    end
+  end
+
+  test "empty argv against a spec with a required flag is an error" do
+    match Cli.parse(sample_specs(), []) do
+    Ok(_) -> assert false
+    Err(e) ->
+      match e do
+      MissingRequired(f) -> assert (f == "name")
+      _ -> assert false
+      end
+    end
+  end
+
+end
+
+describe "Cli typed accessors and error messages" do
+
+  test "get_int parses a valid integer value" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "8080"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      match Cli.get_int(parsed, "port") do
+      Some(n) -> assert (n == 8080)
+      None -> assert false
+      end
+    end
+  end
+
+  test "get_int returns None for a non-integer value" do
+    match Cli.parse([Cli.value_flag("port", "")], ["--port", "not-a-number"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      match Cli.get_int(parsed, "port") do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+  end
+
+  test "error_message renders each CliError case readably" do
+    assert (Cli.error_message(UnknownFlag("bogus")) == "unknown flag: --bogus")
+    assert (Cli.error_message(MissingValue("port")) == "flag --port requires a value")
+    assert (Cli.error_message(MissingRequired("name")) == "missing required flag: --name")
+  end
+
+end
+
+describe "Cli end-to-end composition" do
+
+  test "the same spec list drives parse and help_text, and accessors compose on one parsed result" do
+    let specs = sample_specs()
+    match Cli.parse(specs, ["--name", "alice", "-v", "serve", "now"]) do
+    Err(_) -> assert false
+    Ok(parsed) ->
+      assert (Cli.get_string_or(parsed, "name", "") == "alice")
+      assert (Cli.get_bool(parsed, "verbose") == true)
+      assert (Cli.get_string_or(parsed, "port", "4000") == "4000")
+      match Cli.get_int(parsed, "port") do
+      Some(_) -> assert false
+      None -> assert true
+      end
+      assert (List.length(Cli.positional(parsed)) == 2)
+      assert (List.nth(Cli.positional(parsed), 0) == "serve")
+      assert (List.nth(Cli.positional(parsed), 1) == "now")
+    end
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "Usage: myapp [OPTIONS]"))
+    assert (String.contains(text, "--verbose, -v"))
+    assert (String.contains(text, "Verbose output"))
+    assert (String.contains(text, "--port, -p"))
+    assert (String.contains(text, "(default: 4000)"))
+    assert (String.contains(text, "--name"))
+    assert (String.contains(text, "(required)"))
+  end
+
+end
+
+describe "Cli.help_text" do
+
+  test "renders program name, usage line, and one line per flag" do
+    let specs = [
+      Cli.flag_with("verbose", Some("v"), BoolFlag, None, false, "Enable verbose output"),
+      Cli.flag_with("port", None, ValueFlag, Some("4000"), false, "Port to listen on")
+    ]
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "Usage: myapp [OPTIONS]"))
+    assert (String.contains(text, "--verbose, -v"))
+    assert (String.contains(text, "Enable verbose output"))
+    assert (String.contains(text, "--port"))
+    assert (String.contains(text, "Port to listen on"))
+    assert (String.contains(text, "(default: 4000)"))
+  end
+
+  test "marks required flags" do
+    let specs = [Cli.flag_with("name", None, ValueFlag, None, true, "Your name")]
+    let text = Cli.help_text("myapp", specs)
+    assert (String.contains(text, "--name"))
+    assert (String.contains(text, "(required)"))
+  end
+
+end
+
+end

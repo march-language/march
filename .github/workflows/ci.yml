@@ -65,6 +65,16 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      - name: Static-semantics conformance corpus (slow lane, not part of runtest)
+        run: |
+          eval $(opam env)
+          dune build @types-check
+
+      - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
+        run: |
+          eval $(opam env)
+          dune build @grammar-check
+
       - name: Check doc notebooks (.scrollmd) compile
         run: |
           eval $(opam env)
@@ -74,3 +84,55 @@ jobs:
         run: |
           eval $(opam env)
           dune fmt 2>&1 || true
+
+  # Cross-compilation gate (P1): cross-compile the deterministic examples+golden
+  # corpus to Linux via `zig cc` and assert byte-identical output to the native
+  # build (native-referenced).  Targets linux/amd64 so the cross binaries run
+  # NATIVELY on the x86_64 runner (no QEMU) — QEMU user-mode emulation produces
+  # spurious segfaults that the oracle would count as failures.  arm64 coverage
+  # needs a native arm64 runner (ubuntu-24.04-arm) — a follow-up.  This still
+  # exercises the whole LinuxGnu / zig-cc / arch-flag / external-lib-stripping
+  # path end to end.
+  cross-linux-oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies (blake3 for the native reference build)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Install zig (the C cross-compiler)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install dependencies
+        run: opam install --deps-only --with-test -y .
+
+      - name: Build compiler + oracle
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe test/test_oracle.exe
+
+      - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
+        run: |
+          eval $(opam env)
+          MARCH_ORACLE_CROSS=amd64 \
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+          MARCH_ROOT="$PWD" \
+          ./_build/default/test/test_oracle.exe

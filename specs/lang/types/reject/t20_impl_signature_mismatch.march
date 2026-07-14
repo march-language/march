@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: `speak` in `impl Speak` must match the interface signature
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+
+  type Dog = Dog(String)
+
+  impl Speak(Dog) do
+    fn speak(self) do
+      match self do
+        Dog(_) -> 42
+      end
+    end
+  end
+
+  fn main() do
+    println(speak(Dog("Rex")))
+  end
+end

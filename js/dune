@@ -23,3 +23,22 @@
   js_of_ocaml)
  (js_of_ocaml (flags (:standard)))
  (modes js))
+
+; March browser live-compile entry point — runs the real --target js compile
+; pipeline (lib/driver/js_pipeline.ml) against user-edited source, in the
+; browser. Build/copy the same way as march_browser above, with
+; march_browser_compile.bc.js -> docs/assets/march_compile.js.
+(executable
+ (name march_browser_compile)
+ (libraries
+  march_ast
+  march_errors
+  march_lexer
+  march_parser
+  march_desugar
+  march_typecheck
+  march_tir
+  march_driver
+  js_of_ocaml)
+ (js_of_ocaml (flags (:standard)))
+ (modes js))

@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+mod Main do
+  -- Widening actors slice, Task 3 -- MESSAGE PAYLOAD TYPING (the reject path).
+  -- A message payload of the WRONG type is rejected by ordinary constructor
+  -- typing. The `ESend` arm (`typecheck.ml:4177`) types the message via
+  -- `let msg_ty = infer_expr env msg` (`:4179`), so `Inc("not an int")` runs
+  -- the normal `ECon` arm for the `Inc` constructor: the handler declared
+  -- `on Inc(x : Int)`, so `Inc`'s payload type is `Int`, and the argument
+  -- `"not an int" : String` fails to unify -> ordinary type-mismatch.
+  --
+  -- This proves message-payload SHAPE is statically checked (unlike the
+  -- message-ACCEPTANCE non-guarantee documented as finding 19: which actor a
+  -- Pid belongs to is NOT checked, only the payload's own type is).
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc(x : Int) do
+      { count: state.count + x }
+    end
+  end
+
+  fn main() do
+    let counter = spawn(Counter)
+    send(counter, Inc("not an int"))
+    println(bool_to_string(is_alive(counter)))
+  end
+end

@@ -257,6 +257,55 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
 
 (* ── CSRF token injection in ~H ──────────────────────────────────────────── *)
 
+(* B16 note: ~H used to auto-inject a `CSRF.tag_string(conn)` call after
+   every mutating `<form method="post|put|patch|delete">` opening tag,
+   UNCONDITIONALLY assuming a free `conn` variable in scope (the Bastion
+   convention). That broke every non-Bastion ~H user with a baffling
+   unbound-`conn` error, so the injection was removed entirely — which in
+   turn silently dropped CSRF protection from every Bastion app (every POST
+   started 403ing). The resolution keeps both behaviours: injection now
+   fires ONLY when a `conn` binding is lexically in scope at the ~H sigil
+   (function/lambda parameter, `let`/`let?` binding earlier in the block, or
+   a match-branch pattern). Templates without `conn` render verbatim and
+   never see an unbound-`conn` error; templates following the Bastion
+   convention keep automatic CSRF protection. An explicit
+   `${CSRF.tag_string(conn)}` interpolation still works either way. *)
+
+(** Is a `conn` binding lexically in scope at the expression currently being
+    desugared?  Maintained imperatively (like [expr_err_ctx]) because
+    [desugar_expr] doesn't thread an environment.  Scope owners save/restore
+    via [with_conn_scope]. *)
+let csrf_conn_in_scope : bool ref = ref false
+
+(** Run [f] with [csrf_conn_in_scope] additionally enabled when [flag] holds,
+    restoring the previous value afterwards (exception-safe). *)
+let with_conn_scope (flag : bool) (f : unit -> 'a) : 'a =
+  let saved = !csrf_conn_in_scope in
+  csrf_conn_in_scope := saved || flag;
+  Fun.protect ~finally:(fun () -> csrf_conn_in_scope := saved) f
+
+(** Does pattern [p] bind a variable named [conn]? *)
+let rec pat_binds_conn (p : pattern) : bool =
+  match p with
+  | PatWild _ | PatLit _ -> false
+  | PatVar n -> n.txt = "conn"
+  | PatCon (_, ps) -> List.exists pat_binds_conn ps
+  | PatAtom (_, ps, _) -> List.exists pat_binds_conn ps
+  | PatTuple (ps, _) -> List.exists pat_binds_conn ps
+  | PatRecord (fields, _) -> List.exists (fun (_, fp) -> pat_binds_conn fp) fields
+  | PatAs (inner, n, _) -> n.txt = "conn" || pat_binds_conn inner
+
+(** Does a function parameter bind [conn]? *)
+let fn_param_binds_conn : fn_param -> bool = function
+  | FPNamed p | FPDefault (p, _) -> p.param_name.txt = "conn"
+  | FPPat pat -> pat_binds_conn pat
+
+let params_bind_conn (ps : fn_param list) : bool =
+  List.exists fn_param_binds_conn ps
+
+let lam_params_bind_conn (ps : param list) : bool =
+  List.exists (fun (p : param) -> p.param_name.txt = "conn") ps
+
 (** Check whether [s] contains a [<form] opening tag whose [method] attribute
     specifies a mutating HTTP method (post, put, patch, delete).
 
@@ -324,8 +373,9 @@ let csrf_form_close_pos (s : string) : int option =
     The injected call returns [String] (not IOList), so it is valid as an
     element in the [List(String)] passed to [IOList.from_strings].
 
-    Assumes a [conn] variable is in scope — the standard Bastion convention
-    for request-handler functions that use ~H templates. *)
+    Only called when [csrf_conn_in_scope] holds — the caller guarantees a
+    [conn] variable is lexically in scope (the standard Bastion convention
+    for request-handler functions that use ~H templates). *)
 let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
   let v s = EVar { txt = s; span = sp } in
   let csrf_call = EApp (v "CSRF.tag_string", [v "conn"], sp) in
@@ -356,7 +406,8 @@ let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
 
     Form tags with mutating methods ([<form method="post/put/patch/delete">])
     have a [CSRF.tag_string(conn)] call injected immediately after the opening
-    tag, providing automatic CSRF protection in ~H templates.
+    tag — but only when a [conn] binding is lexically in scope (see the B16
+    note above [csrf_conn_in_scope]).
 
     The result is:
       IOList.from_strings(["static1", Html.escape(to_string(e1)), "static2", ...])
@@ -366,8 +417,11 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   let parts = decompose_concat content in
   (* First pass: replace <island> tags with IslandView calls *)
   let parts = process_island_tags parts sp in
-  (* Second pass: inject CSRF tokens after mutating <form> opening tags *)
-  let parts = inject_csrf_tokens parts sp in
+  (* Second pass: inject CSRF tokens after mutating <form> opening tags —
+     but ONLY when a `conn` binding is lexically in scope (B16: standalone
+     templates must never see an injected unbound `conn`). *)
+  let parts =
+    if !csrf_conn_in_scope then inject_csrf_tokens parts sp else parts in
   (* Third pass: escape dynamic interpolations.
      Use html_auto_escape(x) instead of Html.escape(to_string(x)) so that:
      - Html.Safe values are inserted verbatim (no double-escaping)
@@ -410,6 +464,32 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
 
 (* ---- Pipe desugaring ---- *)
 
+(** Diagnostic sink for expression-level desugar errors.
+
+    [desugar_expr] is public API called without an error context by the
+    REPL and other tools, so [desugar_module ~errors] communicates its
+    context via this ref for the duration of the module pass.  When a
+    caller-supplied context is installed, errors are reported through the
+    standard [Errors] diagnostic machinery (positioned span, rendered by
+    the drivers that check [has_errors]).  When no context was supplied,
+    we raise the same positioned [ParseError] exception the parse path
+    uses — loud failure, never silently-wrong desugared code. *)
+let expr_err_ctx : Err.ctx option ref = ref None
+
+let desugar_expr_error ~(sp : span) ?hint msg : unit =
+  match !expr_err_ctx with
+  | Some ctx ->
+    Err.report ctx
+      { severity = Err.Error; span = sp; message = msg; labels = [];
+        notes = (match hint with Some h -> [h] | None -> []);
+        code = None; fix = None }
+  | None ->
+    let pos = { Lexing.pos_fname = sp.file;
+                pos_lnum = sp.start_line;
+                pos_bol  = 0;
+                pos_cnum = sp.start_col } in
+    raise (March_errors.Errors.ParseError (msg, hint, pos))
+
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
 let rec desugar_expr (e : expr) : expr =
@@ -434,14 +514,13 @@ let rec desugar_expr (e : expr) : expr =
          | EAtom (a, args, epsp) -> PatAtom (a, List.map expr_to_pat args, epsp)
          | ETuple (es, epsp) -> PatTuple (List.map expr_to_pat es, epsp)
          | _ ->
-           let file = sp.file in
-           let line = sp.start_line in
-           let col  = sp.start_col in
-           failwith (Printf.sprintf
-             "%s:%d:%d: error: pipe-to-match: expression cannot be used as a pattern here.\n\
-              Only constructors, variables, literals, and tuples are allowed as match arms \
-              in a `|>` pipe expression."
-             file line col)
+           desugar_expr_error ~sp
+             ~hint:"Only constructors, variables, literals, and tuples are \
+                    allowed as match arms in a `|>` pipe expression."
+             "pipe-to-match: expression cannot be used as a pattern here.";
+           (* Error recovery (context path): a wildcard keeps the branch
+              well-formed; compilation aborts on the reported error. *)
+           PatWild sp
        in
        let branches = List.map (fun (cond_e, body) ->
            { branch_pat = expr_to_pat cond_e
@@ -449,8 +528,19 @@ let rec desugar_expr (e : expr) : expr =
            ; branch_body = body }) arms in
        EMatch (l', branches, cond_sp)
      | EMatch (_, branches, match_sp) ->
-       (* x |> match scrutinee do ... end where scrutinee may be a hole;
-          but more importantly: x |> match do ... end with pattern branches *)
+       (* B6: `x |> (match scrut do ... end)` used to silently DISCARD
+          `scrut` and match on `x` instead — verified silent wrong code.
+          The supported scrutinee-less form (`x |> (match do ... end)`)
+          parses as ECond and is handled above; an explicit scrutinee
+          here is always a mistake, so report it. *)
+       desugar_expr_error ~sp:match_sp
+         ~hint:"The piped value becomes the scrutinee. Use \
+                `x |> (match do pat -> ... end)` (no scrutinee), or write \
+                `match x do ... end` directly."
+         "piping into a match discards its scrutinee; write `match x do ... end` instead";
+       (* Error recovery (context path): keep the historical shape so
+          downstream passes see a well-formed tree; compilation aborts on
+          the reported error. *)
        EMatch (l', branches, match_sp)
      | _ -> EApp (r', [l'], sp))
 
@@ -476,18 +566,37 @@ let rec desugar_expr (e : expr) : expr =
     ECon (name, List.map desugar_expr args, sp)
 
   | ELam (ps, body, sp) ->
-    ELam (ps, desugar_expr body, sp)
+    let body' =
+      with_conn_scope (lam_params_bind_conn ps) (fun () -> desugar_expr body) in
+    ELam (ps, body', sp)
 
   | EBlock (es, sp) ->
-    EBlock (List.map desugar_expr es, sp)
+    (* `let conn = ...` brings `conn` into scope for the REST of the block —
+       walk statements in order, enabling the CSRF conn gate once a binding
+       of `conn` has been seen. Restore on exit (block-scoped). *)
+    with_conn_scope false (fun () ->
+      (* Explicit recursion: statement order matters for the scope scan
+         (List.map's application order is unspecified). *)
+      let rec go acc = function
+        | [] -> List.rev acc
+        | stmt :: rest ->
+          let stmt' = desugar_expr stmt in
+          (match stmt' with
+           | ELet (b, _) when pat_binds_conn b.bind_pat ->
+             csrf_conn_in_scope := true
+           | _ -> ());
+          go (stmt' :: acc) rest
+      in
+      EBlock (go [] es, sp))
 
   | ELet (b, sp) ->
     ELet ({ b with bind_expr = desugar_expr b.bind_expr }, sp)
 
   | EMatch (scrut, branches, sp) ->
     let branches' = List.map (fun br ->
-        { br with branch_guard = Option.map desugar_expr br.branch_guard
-                ; branch_body  = desugar_expr br.branch_body }) branches in
+        with_conn_scope (pat_binds_conn br.branch_pat) (fun () ->
+          { br with branch_guard = Option.map desugar_expr br.branch_guard
+                  ; branch_body  = desugar_expr br.branch_body })) branches in
     EMatch (desugar_expr scrut, branches', sp)
 
   | ETuple (es, sp) ->
@@ -542,10 +651,17 @@ let rec desugar_expr (e : expr) : expr =
     ESpawn (desugar_expr actor, sp)
 
   | ELetFn (name, params, ret_ty, body, sp) ->
-    ELetFn (name, params, ret_ty, desugar_expr body, sp)
+    let body' =
+      with_conn_scope (lam_params_bind_conn params)
+        (fun () -> desugar_expr body) in
+    ELetFn (name, params, ret_ty, body', sp)
 
   | ELetQ (p, result, cont, sp) ->
-    ELetQ (p, desugar_expr result, desugar_expr cont, sp)
+    (* `let? conn = ...` binds `conn` for the continuation only. *)
+    let result' = desugar_expr result in
+    let cont' =
+      with_conn_scope (pat_binds_conn p) (fun () -> desugar_expr cont) in
+    ELetQ (p, result', cont', sp)
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
@@ -586,8 +702,10 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
   | [only] when clause_is_trivial only ->
     (* Fast path: single clause, all named params, no guard — nothing to do
        except recursively desugar the body. *)
-    let only' = { only with fc_body = desugar_expr only.fc_body
-                           ; fc_guard = Option.map desugar_expr only.fc_guard }
+    let only' =
+      with_conn_scope (params_bind_conn only.fc_params) (fun () ->
+        { only with fc_body = desugar_expr only.fc_body
+                  ; fc_guard = Option.map desugar_expr only.fc_guard })
     in
     { def with fn_clauses = [only'] }
 
@@ -617,9 +735,11 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
        argument to be supplied — nested default-arg dispatch was never wired
        up). *)
     let strip = function FPDefault (p, _) -> FPNamed p | other -> other in
-    let only' = { only with fc_params = List.map strip only.fc_params
-                           ; fc_body = desugar_expr only.fc_body
-                           ; fc_guard = Option.map desugar_expr only.fc_guard }
+    let only' =
+      with_conn_scope (params_bind_conn only.fc_params) (fun () ->
+        { only with fc_params = List.map strip only.fc_params
+                  ; fc_body = desugar_expr only.fc_body
+                  ; fc_guard = Option.map desugar_expr only.fc_guard })
     in
     { def with fn_clauses = [only'] }
 
@@ -643,10 +763,11 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
         | [p] -> p
         | ps  -> PatTuple (ps, clause.fc_span)
       in
-      { branch_pat   = pat
-      ; branch_guard = Option.map desugar_expr clause.fc_guard
-      ; branch_body  = desugar_expr clause.fc_body
-      }
+      with_conn_scope (params_bind_conn clause.fc_params) (fun () ->
+        { branch_pat   = pat
+        ; branch_guard = Option.map desugar_expr clause.fc_guard
+        ; branch_body  = desugar_expr clause.fc_body
+        })
     in
 
     let branches = List.map clause_to_branch clauses in
@@ -837,6 +958,147 @@ let mk_fn_def name params body : fn_def =
       fc_body   = body;
       fc_span   = dummy_span;
     }] }
+
+(* ── Derive-expansion span uniquification ──────────────────────────────
+
+   Every AST node minted by [derive_impl] used to carry the SAME [dummy_span].
+   The typechecker records inferred types keyed by span ([env.type_map],
+   [Hashtbl.replace] — last write wins) and TIR lowering reads them back
+   ([Lower_state.ty_of_span]), so a shared span made every derived node
+   collide on ONE table entry: lowering saw arbitrary garbage types for
+   derived params and body exprs (e.g. [Ord$Wrap.compare(a : (Wrap) -> Int)]),
+   and the LLVM backend then picked the wrong representation strategy for the
+   receiver match — SIGSEGV / non-exhaustive panic on Newtype-repr variant
+   types (P1 in specs/todos.md).  Rewriting every span inside the generated
+   decls to a fresh structurally-unique key gives each node its own type_map
+   entry, so derived methods typecheck+lower exactly like hand-written impls.
+   The file stays "<none>" so span-based synthetic-code filters (coverage's
+   file check, the LSP's [= dummy_span] checks compare the whole record and
+   never map "<none>" spans onto a document) keep treating derived code as
+   synthetic. *)
+
+let _synthetic_span_counter = ref 0
+
+let fresh_synthetic_span () : span =
+  incr _synthetic_span_counter;
+  { file = "<none>"; start_line = !_synthetic_span_counter; start_col = 0;
+    end_line = !_synthetic_span_counter; end_col = 0 }
+
+let respan_name (n : name) : name = { n with span = fresh_synthetic_span () }
+
+let rec respan_pat (p : pattern) : pattern =
+  match p with
+  | PatWild _            -> PatWild (fresh_synthetic_span ())
+  | PatVar n             -> PatVar (respan_name n)
+  | PatCon (n, subs)     -> PatCon (respan_name n, List.map respan_pat subs)
+  | PatAtom (s, subs, _) -> PatAtom (s, List.map respan_pat subs, fresh_synthetic_span ())
+  | PatTuple (subs, _)   -> PatTuple (List.map respan_pat subs, fresh_synthetic_span ())
+  | PatLit (l, _)        -> PatLit (l, fresh_synthetic_span ())
+  | PatRecord (fs, _)    ->
+    PatRecord (List.map (fun (n, p) -> (respan_name n, respan_pat p)) fs,
+               fresh_synthetic_span ())
+  | PatAs (p, n, _)      -> PatAs (respan_pat p, respan_name n, fresh_synthetic_span ())
+
+let rec respan_ty (t : ty) : ty =
+  match t with
+  | TyCon (n, args)      -> TyCon (respan_name n, List.map respan_ty args)
+  | TyVar n              -> TyVar (respan_name n)
+  | TyArrow (a, b)       -> TyArrow (respan_ty a, respan_ty b)
+  | TyTuple ts           -> TyTuple (List.map respan_ty ts)
+  | TyRecord fs          -> TyRecord (List.map (fun (n, t) -> (respan_name n, respan_ty t)) fs)
+  | TyLinear (l, t)      -> TyLinear (l, respan_ty t)
+  | TyNat _ as t         -> t
+  | TyNatOp (op, a, b)   -> TyNatOp (op, respan_ty a, respan_ty b)
+  | TyChan (a, b)        -> TyChan (respan_name a, respan_name b)
+  | TyRefine (t, n, e)   -> TyRefine (respan_ty t, Option.map respan_name n, respan_expr e)
+
+and respan_expr (e : expr) : expr =
+  match e with
+  | ELit (l, _)          -> ELit (l, fresh_synthetic_span ())
+  | EVar n               -> EVar (respan_name n)
+  | EApp (f, args, _)    -> EApp (respan_expr f, List.map respan_expr args, fresh_synthetic_span ())
+  | ECon (n, args, _)    -> ECon (respan_name n, List.map respan_expr args, fresh_synthetic_span ())
+  | ELam (ps, body, _)   -> ELam (List.map respan_param ps, respan_expr body, fresh_synthetic_span ())
+  | EBlock (es, _)       -> EBlock (List.map respan_expr es, fresh_synthetic_span ())
+  | ELet (b, _)          -> ELet (respan_binding b, fresh_synthetic_span ())
+  | EMatch (s, brs, _)   -> EMatch (respan_expr s, List.map respan_branch brs, fresh_synthetic_span ())
+  | ETuple (es, _)       -> ETuple (List.map respan_expr es, fresh_synthetic_span ())
+  | ERecord (fs, _)      ->
+    ERecord (List.map (fun (n, e) -> (respan_name n, respan_expr e)) fs, fresh_synthetic_span ())
+  | ERecordUpdate (e, fs, _) ->
+    ERecordUpdate (respan_expr e,
+                   List.map (fun (n, e) -> (respan_name n, respan_expr e)) fs,
+                   fresh_synthetic_span ())
+  | EField (e, n, _)     -> EField (respan_expr e, respan_name n, fresh_synthetic_span ())
+  | EIf (c, t, f, _)     -> EIf (respan_expr c, respan_expr t, respan_expr f, fresh_synthetic_span ())
+  | ECond (arms, _)      ->
+    ECond (List.map (fun (c, b) -> (respan_expr c, respan_expr b)) arms, fresh_synthetic_span ())
+  | EPipe (a, b, _)      -> EPipe (respan_expr a, respan_expr b, fresh_synthetic_span ())
+  | EAnnot (e, t, _)     -> EAnnot (respan_expr e, respan_ty t, fresh_synthetic_span ())
+  | EHole (n, _)         -> EHole (Option.map respan_name n, fresh_synthetic_span ())
+  | EAtom (s, args, _)   -> EAtom (s, List.map respan_expr args, fresh_synthetic_span ())
+  | ESend (a, b, _)      -> ESend (respan_expr a, respan_expr b, fresh_synthetic_span ())
+  | ESpawn (e, _)        -> ESpawn (respan_expr e, fresh_synthetic_span ())
+  | EResultRef _ as e    -> e
+  | EDbg (e, _)          -> EDbg (Option.map respan_expr e, fresh_synthetic_span ())
+  | ELetFn (n, ps, rt, body, _) ->
+    ELetFn (respan_name n, List.map respan_param ps, Option.map respan_ty rt,
+            respan_expr body, fresh_synthetic_span ())
+  | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
+  | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
+  | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
+
+and respan_param (p : param) : param =
+  { param_name = respan_name p.param_name;
+    param_ty   = Option.map respan_ty p.param_ty;
+    param_lin  = p.param_lin }
+
+and respan_binding (b : binding) : binding =
+  { bind_pat  = respan_pat b.bind_pat;
+    bind_ty   = Option.map respan_ty b.bind_ty;
+    bind_lin  = b.bind_lin;
+    bind_expr = respan_expr b.bind_expr }
+
+and respan_branch (br : branch) : branch =
+  { branch_pat   = respan_pat br.branch_pat;
+    branch_guard = Option.map respan_expr br.branch_guard;
+    branch_body  = respan_expr br.branch_body }
+
+let respan_fn_param : fn_param -> fn_param = function
+  | FPPat p          -> FPPat (respan_pat p)
+  | FPNamed p        -> FPNamed (respan_param p)
+  | FPDefault (p, e) -> FPDefault (respan_param p, respan_expr e)
+
+let respan_fn_def (fd : fn_def) : fn_def =
+  { fd with
+    fn_name    = respan_name fd.fn_name;
+    fn_ret_ty  = Option.map respan_ty fd.fn_ret_ty;
+    fn_bounds  = List.map (fun (n, t) -> (respan_name n, respan_ty t)) fd.fn_bounds;
+    fn_clauses = List.map (fun c ->
+        { fc_params = List.map respan_fn_param c.fc_params;
+          fc_guard  = Option.map respan_expr c.fc_guard;
+          fc_body   = respan_expr c.fc_body;
+          fc_span   = fresh_synthetic_span () }) fd.fn_clauses }
+
+(** Uniquify every span inside a derive-generated decl (the decl's own
+    top-level span — the derive site — is kept: it is a real user span used
+    for error attribution).  [derive_impl] only emits [DImpl] and [DFn]
+    (Json); any other decl kind passes through unchanged, which merely keeps
+    today's shared-dummy-span behavior for it. *)
+let respan_derived_decl (d : decl) : decl =
+  match d with
+  | DImpl (idef, sp) ->
+    DImpl ({ impl_iface       = respan_name idef.impl_iface;
+             impl_ty          = respan_ty idef.impl_ty;
+             impl_constraints = List.map (fun (n, tys) ->
+                 (respan_name n, List.map respan_ty tys)) idef.impl_constraints;
+             impl_assoc_types = List.map (fun (n, t) ->
+                 (respan_name n, respan_ty t)) idef.impl_assoc_types;
+             impl_methods     = List.map (fun (n, fd) ->
+                 (respan_name n, respan_fn_def fd)) idef.impl_methods },
+           sp)
+  | DFn (fd, sp) -> DFn (respan_fn_def fd, sp)
+  | d -> d
 
 (** Build derived declarations for one interface on [type_name].
     Returns a list of [decl] — usually one [DImpl], but [Json] produces
@@ -1385,7 +1647,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     []
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
-    Emits an error for unknown interfaces; silently skips if the type is not found. *)
+    Emits an error for unknown interfaces and for unknown target types. *)
 let expand_derive
     (errors : Err.ctx)
     (type_defs : (string * (name list * type_def)) list)
@@ -1394,10 +1656,16 @@ let expand_derive
     (sp : span)
   : decl list =
   match List.assoc_opt type_name.txt type_defs with
-  | None -> []   (* type not found — silently skip *)
+  | None ->
+    Err.error errors ~span:type_name.span
+      (Printf.sprintf
+         "Unknown type `%s` in `derive` — is it declared in this module?"
+         type_name.txt);
+    []
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
         derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
+        |> List.map respan_derived_decl
       ) ifaces
 
 (** Collect top-level function definitions for satisfy expansion. *)
@@ -1811,8 +2079,24 @@ let qualify_level (prefix : string) (own_names : string list) (decls : decl list
     For each [DMod], rewrites [EVar "name"] → [EVar "Mod.name"] in function
     bodies when [name] is a function declared directly in that module.
     The prefix accumulates as the walk descends into nested modules so that
-    "MyNet" inside the top-level module gets prefix "MyNet." matching TIR. *)
-let qualify_module_refs (decls : decl list) : decl list =
+    "MyNet" inside the top-level module gets prefix "MyNet." matching TIR.
+
+    [entry_prefix] seeds the accumulation for [decls] itself: "" for the
+    entry file (TIR unwraps its own top-level mod, so its own name must NOT
+    be part of the prefix — see [Typecheck.cap_qual_prefix]'s doc comment
+    for the matching convention on the typecheck side), or
+    ["ModName."] for a non-entry file loaded by its own top-level module
+    name (e.g. a stdlib/auto-discovered dependency file, whose [mod_decls]
+    is already the UNWRAPPED body of its own [mod ModName do ... end] —
+    the parser splits a file's sole top-level mod into [mod_name]/[mod_decls]
+    fields on [module_], so [decls] here never contains a [DMod] node for
+    the file's own name). Without this, a bare intra-module call two levels
+    deep inside such a file (e.g. stdlib's [CRDT.PNCounter] calling its own
+    sibling [map_inc] bare) got qualified as only "PNCounter.map_inc"
+    instead of "CRDT.PNCounter.map_inc" — mismatching the fully-qualified
+    name TIR lowering assigns the actual definition, which undefined-symbols
+    at link time (the reference and the definition never converged). *)
+let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
   let rec walk prefix decls =
     List.map (function
       | DMod (name, vis, inner, sp) ->
@@ -1825,13 +2109,32 @@ let qualify_module_refs (decls : decl list) : decl list =
       | d -> d
     ) decls
   in
-  walk "" decls
+  walk entry_prefix decls
 
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
-    [DDeriving] nodes are expanded into [DImpl] blocks here. *)
-let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
+    [DDeriving] nodes are expanded into [DImpl] blocks here.
+
+    [is_entry] (default [true], matching every pre-existing caller's actual
+    usage) controls whether [m.mod_name] itself is included when qualifying
+    bare intra-module calls (see [qualify_module_refs]'s doc comment): the
+    program's entry file must NOT have its own top-level mod name folded in
+    (TIR unwraps it — its members are emitted bare), but a non-entry file
+    loaded by name (a stdlib module or an auto-discovered dependency, via
+    [Resolver]) must, since TIR keeps ITS OWN top-level mod name as part of
+    every member's fully-qualified emitted name. *)
+let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
+  (* Only route expression-level errors into the context when the CALLER
+     supplied one (and therefore inspects it): reporting into a defaulted
+     throwaway context would silently swallow the diagnostic and return
+     wrong desugared code. Context-less callers get the loud positioned
+     ParseError from [desugar_expr_error] instead. *)
+  let caller_ctx = errors in
+  let errors = match errors with Some c -> c | None -> Err.create () in
+  let saved_ctx = !expr_err_ctx in
+  expr_err_ctx := caller_ctx;
+  Fun.protect ~finally:(fun () -> expr_err_ctx := saved_ctx) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in
@@ -1853,5 +2156,6 @@ let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
     ) expanded in
-  let decls = qualify_module_refs decls in
+  let entry_prefix = if is_entry then "" else m.mod_name.txt ^ "." in
+  let decls = qualify_module_refs ~entry_prefix decls in
   { m with mod_decls = decls }

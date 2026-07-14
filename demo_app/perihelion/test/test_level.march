@@ -1,0 +1,71 @@
+-- Tests for Perihelion.Level — deterministic, bounded star generation.
+-- Run from repo root:
+--   MARCH_STDLIB=$PWD/_build/default/stdlib \
+--   MARCH_LIB_PATH=$PWD/demo_app/perihelion/lib \
+--   ./_build/default/bin/main.exe test demo_app/perihelion/test/test_level.march
+mod TestPerihelionLevel do
+
+  pfn star_eq(a : Star, b : Star) : Bool do
+    a.x == b.x && a.y == b.y && a.radius == b.radius && a.capture_radius == b.capture_radius
+    && a.speed_mult == b.speed_mult
+  end
+
+  pfn base_star() : Star do
+    { x: 200.0, y: 520.0, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0,
+      orbits: Cons({ radius: 54.0, speed_mult: 1.0 }, Nil) }
+  end
+
+  -- Generate a chain of n stars, asserting bounds on each link.
+  pfn check_chain(rng : Random.Rng, prev : Star, n : Int) : Bool do
+    if n == 0 do
+      true
+    else
+      let (s, rng2) = Perihelion.Level.next_star(rng, prev, 400.0)
+      let gap = prev.y - s.y
+      let in_bounds =
+        gap >= Perihelion.Level.gap_min() && gap <= Perihelion.Level.gap_max()
+        && s.x >= Perihelion.Level.margin()
+        && s.x <= 400.0 - Perihelion.Level.margin()
+        && s.radius >= Perihelion.Level.radius_min()
+        && s.radius <= Perihelion.Level.radius_max()
+        && s.capture_radius >= s.radius * Perihelion.Level.capture_mult_min()
+        && s.capture_radius <= s.radius * Perihelion.Level.capture_mult_max()
+        && s.speed_mult >= Perihelion.Level.speed_mult_min()
+        && s.speed_mult <= Perihelion.Level.speed_mult_max()
+      if in_bounds do check_chain(rng2, s, n - 1) else false end
+    end
+  end
+
+  describe "next_star" do
+    test "same seed produces the same star" do
+      let (a, _) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
+      let (b, _) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
+      assert (star_eq(a, b))
+    end
+
+    test "different rng states produce different stars" do
+      let (a, rng2) = Perihelion.Level.next_star(Random.seed(42), base_star(), 400.0)
+      let (b, _) = Perihelion.Level.next_star(rng2, base_star(), 400.0)
+      assert (!star_eq(a, b))
+    end
+
+    test "a 50-star chain stays in bounds" do
+      assert (check_chain(Random.seed(7), base_star(), 50))
+    end
+  end
+
+  describe "initial_stars" do
+    test "produces 3 stars, bottom-first, strictly climbing" do
+      let (stars, _) = Perihelion.Level.initial_stars(Random.seed(42), 400.0)
+      assert (List.length(stars) == 3)
+      match stars do
+        Cons(s0, Cons(s1, Cons(s2, Nil))) ->
+          assert (s0.y > s1.y)
+          assert (s1.y > s2.y)
+          assert (s0.x == 400.0 / 2.0)
+        _ -> assert false
+      end
+    end
+  end
+
+end

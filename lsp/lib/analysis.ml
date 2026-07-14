@@ -2741,7 +2741,13 @@ let analyse ~filename ~src : t =
     make_empty_with (make_parse_diag pos msg)
 
   | Ok raw_ast ->
-    let desugared = March_desugar.Desugar.desugar_module raw_ast in
+    (* Desugar-level user errors (pipe-into-match, bad derive/satisfy, …)
+       must be reported into a context, not raised: an exception escaping
+       here would drop the entire publishDiagnostics notification and the
+       editor would show no squiggle at all. *)
+    let desugar_errors = Err.create () in
+    let desugared =
+      March_desugar.Desugar.desugar_module ~errors:desugar_errors raw_ast in
     let stdlib_decls = Stdlib_cache.load () in
     (* Resolve cross-file imports (user imports + forge dep imports).
        Build the extra lib-path list from:
@@ -2775,6 +2781,9 @@ let analyse ~filename ~src : t =
     let (errors, type_map, final_env) =
       Tc.check_module_with_env_full scratch desugared
     in
+    (* Merge desugar diagnostics into the typecheck context so they surface
+       through the same diag_to_lsp path (user-file filter, span ordering). *)
+    List.iter (Err.report errors) (Err.sorted desugar_errors);
     let def_map        = Hashtbl.create 64 in
     let use_map        = Hashtbl.create 64 in
     let doc_map        = Hashtbl.create 16 in
@@ -3912,7 +3921,7 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
   ) (* end depot_field_at match *)
 
 let keywords = [
-  "mod"; "end"; "do"; "fn"; "let"; "match"; "if"; "then"; "else";
+  "mod"; "end"; "do"; "fn"; "let"; "match"; "if"; "else";
   "type"; "interface"; "impl"; "derive"; "use"; "alias"; "needs";
   "extern"; "app"; "actor"; "protocol"; "when"; "as";
   "true"; "false"; "linear"; "affine"; "pub";

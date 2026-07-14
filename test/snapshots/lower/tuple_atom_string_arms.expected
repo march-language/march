@@ -1,0 +1,49 @@
+-- types (0) --
+-- fns (4) --
+## describe
+fn describe(pair : (Int, Int)) : String =
+  case pair of
+  $Tuple2($f1, $f2) -> case $f1 of
+  0() -> let $jp_clo8 : () -> '_ = letrec [$jp7] in
+$jp7 in
+case $f2 of
+  0() -> let $jp_clo10 : () -> '_ = letrec [$jp9] in
+$jp9 in
+"origin"
+  _ -> $jp_clo8()
+  _ -> let $jp_clo4 : () -> '_ = letrec [$jp3] in
+$jp3 in
+let y : Int = $f2 in
+let x : Int = $f1 in
+"point"
+  _ -> panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
+describe($t15) in
+println($t16);
+let $t18 : String = let $t17 : Atom = :ok in
+tag_name($t17) in
+println($t18);
+let $t19 : Int = word("yes") in
+println($t19)
+
+## tag_name
+fn tag_name(t : Atom) : String =
+  case t of
+  :ok() -> "okay"
+  :err() -> "error"
+  _ -> "unknown"
+
+## word
+fn word(s : String) : Int =
+  case s of
+  "yes"() -> let $jp_clo12 : () -> '_ = letrec [$jp11] in
+$jp11 in
+1
+  "no"() -> let $jp_clo14 : () -> '_ = letrec [$jp13] in
+$jp13 in
+0
+  _ -> negate(1)
+

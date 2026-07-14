@@ -315,7 +315,17 @@ and write_letrec_fn buf next scope (fd : fn_def) =
   write_expr buf next scope' fd.fn_body
 
 (* A top-level function: its name IS its stable identity, so it is emitted by
-   name; parameters are alpha-normalized binders. *)
+   name; parameters are alpha-normalized binders.
+
+   [fd.fn_kind] (Wave 3 Task 3) is deliberately NOT serialized here (nor in
+   [write_letrec_fn] / [write_fn_sig] below): this module produces the
+   BLAKE3-hashed [impl_hash]/[sig_hash] used for cross-binary RPC admission
+   and the CAS artifact cache key (bin/main.ml). Hashing fn_kind would change
+   every impl_hash the moment the field was introduced — a real behavior
+   change (cache invalidation, RPC admission drift), not the additive,
+   printer-invisible field this task promises. fn_kind is a same-binary
+   compiler-internal role tag, not part of a function's externally-observable
+   identity, so it stays out of the canonical serialization by design. *)
 let write_fn_def buf (fd : fn_def) =
   buf_string buf fd.fn_name;
   buf_u32_le buf (List.length fd.fn_params);
@@ -325,7 +335,8 @@ let write_fn_def buf (fd : fn_def) =
   write_expr buf next scope fd.fn_body
 
 (** Serialize only the signature of a function (name, param types, ret type).
-    Does NOT include the body or variable names — only types matter for the sig. *)
+    Does NOT include the body or variable names — only types matter for the sig.
+    Also does not include [fn_kind] — see [write_fn_def]'s comment. *)
 let write_fn_sig buf (fd : fn_def) =
   buf_string buf fd.fn_name;
   buf_u32_le buf (List.length fd.fn_params);

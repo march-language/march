@@ -1,0 +1,15 @@
+mod M do
+  fn describe(n : Int) : String do
+    match do
+      n > 0 -> "positive"
+      n < 0 -> "negative"
+      _ -> "zero"
+    end
+  end
+
+  fn main() do
+    println(describe(5))
+    println(describe(-5))
+    println(describe(0))
+  end
+end

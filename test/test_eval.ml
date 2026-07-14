@@ -45,7 +45,6 @@ let test_eval_recursion () =
 let test_eval_if () =
   let env = eval_module {|mod Test do
     fn abs(x) do if x < 0 do negate(x) else x end end
-    fn abs(x) do if x < 0 then negate(x) else x end
   end|} in
   let v = call_fn env "abs" [March_eval.Eval.VInt (-5)] in
   Alcotest.(check int) "abs(-5) = 5" 5
@@ -539,7 +538,6 @@ let test_tir_lower_let () =
 let test_tir_lower_if () =
   let m = lower_module {|mod Test do
     fn pick(b : Bool) : Int do if b do 1 else 0 end end
-    fn pick(b : Bool) : Int do if b then 1 else 0 end
   end|} in
   let f = find_fn "pick" m in
   let rec has_case = function
@@ -662,7 +660,7 @@ let test_tir_lower_qualified_auto_load () =
   March_tir.Lower._fns_ref := ref [];
   March_tir.Lower._types_ref := ref [];
   (* Try to load a nonexistent module — should not crash *)
-  !(March_tir.Lower._ensure_module_lowered) "NoSuchModule99";
+  !(March_tir.Lower._ensure_module_lowered) March_tir.Lower.empty_env "NoSuchModule99";
   Alcotest.(check bool) "nonexistent module tracked"
     true (Hashtbl.mem !(March_tir.Lower._lowered_modules) "NoSuchModule99");
   (* Fns should still be empty — no module found *)
@@ -1184,6 +1182,50 @@ let test_repl_inspect_type_and_value () =
     Alcotest.(check string) ":inspect value" "43" vs
   | _ -> Alcotest.fail ":inspect parse failed"
 
+(** Final-review regression: a desugar-time diagnostic (e.g. the B6
+    pipe-into-match check, which raises [March_errors.Errors.ParseError]
+    from [Desugar.desugar_expr] rather than from the parser) used to escape
+    [run_simple]'s per-form handling entirely — [desugar_expr] is called
+    outside any local try/with in the [ReplExpr] branch — and land in the
+    loop's outermost catch-all, which rendered it as a bare
+    "internal error: March_errors.Errors.ParseError(...)" instead of the
+    same span-rendered diagnostic the batch driver (bin/main.ml) shows.
+    This exercises the real [run_simple] loop (via `march repl` under a
+    non-tty stdin, exactly as the manual repro does), since the lightweight
+    [repl_eval_exprs] helper used by the other "repl integration" tests
+    calls [desugar_expr] directly and would not reproduce the escape. *)
+let test_repl_renders_desugar_parse_error () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  let project_root = Filename.dirname (Filename.dirname exe_dir) in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      Buffer.contents buf
+    in
+    let out = read_cmd (Printf.sprintf
+      "cd %s && echo %s | %s repl 2>&1"
+      (Filename.quote project_root)
+      (Filename.quote {|1 |> (match 2 do 1 -> "one" | 2 -> "two" | _ -> "x" end)|})
+      (Filename.quote main_exe)) in
+    Alcotest.(check bool)
+      "REPL does not render the B6 diagnostic as a bare internal error"
+      false
+      (let re = Str.regexp_string "internal error: March_errors.Errors.ParseError" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false);
+    Alcotest.(check bool)
+      "REPL renders the desugar diagnostic's message text"
+      true
+      (let re = Str.regexp_string
+         "piping into a match discards its scrutinee" in
+       try ignore (Str.search_forward re out 0); true with Not_found -> false)
+  end
+
 (** Parity: same features work in interpreter mode *)
 let test_repl_parity_closures () =
   match repl_eval_exprs [
@@ -1447,6 +1489,53 @@ let test_default_method_eval () =
     [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2] in
   Alcotest.(check bool) "neq default returns true for 1 neq 2" true
     (vbool result)
+
+let test_default_method_user_type () =
+  (* Regression: a user-declared `interface Eq(a)` (name collides with the
+     built-in Eq) with a default `neq` calling `eq`, implemented for a USER
+     type, must terminate and return the correct answer.
+
+     The builtin `eq`/`==` dispatcher resolves the impl from
+     `impl_tbl[("Eq", type)]`.  The DImpl eval used to write EVERY method of the
+     impl under that single (iface, type) key, so the injected default `neq`
+     (processed after `eq`) clobbered the `eq` entry.  A builtin `eq` on a
+     Widget then invoked `neq`, whose body called `eq`, which dispatched to
+     `neq` again → unbounded recursion (stack overflow / hang).  This mirrors
+     the "Default Implementations" example in docs/interfaces.md.
+
+     NOTE: the existing `test_default_method_eval` uses `impl Eq(Int)`, which
+     never triggered the bug: the builtin `eq` short-circuits primitives
+     (`[VInt a; VInt b] -> VBool (a = b)`) BEFORE consulting `impl_tbl`.  A user
+     ADT is required to exercise the corrupted table. *)
+  let src = {|mod Test do
+    interface Eq(a) do
+      fn eq  : a -> a -> Bool
+      fn neq : a -> a -> Bool do fn (x, y) -> !eq(x, y) end
+    end
+    type Widget = Widget(Int)
+    impl Eq(Widget) do
+      fn eq(a, b) do
+        match (a, b) do
+          (Widget(x), Widget(y)) -> x == y
+        end
+      end
+    end
+    fn neq_diff() do neq(Widget(1), Widget(2)) end
+    fn neq_same() do neq(Widget(7), Widget(7)) end
+    fn eq_diff()  do eq(Widget(1), Widget(2)) end
+    fn eq_same()  do eq(Widget(5), Widget(5)) end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check bool) "neq(Widget 1, Widget 2) = true"  true
+    (vbool (call_fn env "neq_diff" []));
+  Alcotest.(check bool) "neq(Widget 7, Widget 7) = false" false
+    (vbool (call_fn env "neq_same" []));
+  (* A direct `eq` call must also terminate: the corrupted table made even this
+     path loop, since bare `eq` on an ADT routes through the builtin dispatcher. *)
+  Alcotest.(check bool) "eq(Widget 1, Widget 2) = false"  false
+    (vbool (call_fn env "eq_diff" []));
+  Alcotest.(check bool) "eq(Widget 5, Widget 5) = true"   true
+    (vbool (call_fn env "eq_same" []))
 
 let test_missing_required_method () =
   (* Impl omits a non-default method — should error *)
@@ -2455,7 +2544,8 @@ let test_thm_defun_preserves_linearity () =
   let lambda_body = March_tir.Tir.EAtom (March_tir.Tir.AVar x_lin) in
   let lambda_fn = { March_tir.Tir.fn_name = "lam0"; fn_params = [];
                     fn_ret_ty = March_tir.Tir.TCon ("List", []);
-                    fn_body = lambda_body } in
+                    fn_body = lambda_body;
+                    fn_kind = March_tir.Tir.FnLambda } in
   let lam_var = mk_var_lin "lam_ref" (March_tir.Tir.TPtr March_tir.Tir.TUnit)
                   March_tir.Tir.Unr in
   let inner = March_tir.Tir.ELetRec ([lambda_fn],
@@ -2465,7 +2555,8 @@ let test_thm_defun_preserves_linearity () =
     inner) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
                   fn_ret_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
-                  fn_body = outer } in
+                  fn_body = outer;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [main_fn];
             tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let m' = March_tir.Defun.defunctionalize m in
@@ -2596,11 +2687,19 @@ let test_atomic_rc_local_decrc_not_atomic () =
 let test_escape_local_discarded_promoted () =
   (* A value created but never returned or stored should be stack-promoted.
      After Perceus inserts EDecRC for the dead binding, escape analysis
-     recognises EDecRC as a non-escaping position and promotes to EStackAlloc. *)
+     recognises EDecRC as a non-escaping position and promotes to EStackAlloc.
+     HISTORY (L7 fix, 2026-07-10): this test originally used a single-ctor
+     unary `Box(Int)` — a NEWTYPE-repr type whose EAlloc emits an erased
+     immediate, no heap cell. Promoting it produced a boxed stack cell that
+     consumers decoded under the erased convention (garbage at runtime —
+     invisible here because these tests inspect TIR only, never emitted IR).
+     Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
+     is a 2-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2608,6 +2707,28 @@ let test_escape_local_discarded_promoted () =
             m.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "locally discarded value is stack-promoted"
     true (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_newtype_not_promoted () =
+  (* L7 pin: a Newtype-repr alloc (single-ctor unary ADT) must NOT be
+     stack-promoted even when it provably does not escape — its EAlloc emits
+     an erased immediate ((v<<1)|1), so EStackAlloc would create a boxed
+     construction that every consumer (ECase untag, field reads) decodes
+     under the erased convention. Live symptom pre-fix:
+     `let c = R(22); match c do R(n) -> n end` printed nondeterministic
+     garbage compiled (the untagged stack ADDRESS). *)
+  let m = escape_module {|mod Test do
+    type Res = R(Int)
+    fn make_and_match() : Int do
+      let c = R(22)
+      match c do
+        R(n) -> n
+      end
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_and_match")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "newtype-repr alloc is NOT stack-promoted"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
 
 let test_escape_returned_not_promoted () =
   (* A value that is returned from the function escapes — must stay on the heap. *)
@@ -2659,11 +2780,13 @@ let test_escape_match_field_promoted () =
 
 let test_escape_decrc_eliminated_after_promotion () =
   (* After stack-promotion of a discarded value, the EDecRC that Perceus
-     inserted for it should be removed (no RC needed for stack values). *)
+     inserted for it should be removed (no RC needed for stack values).
+     Vehicle is a 2-field (Boxed-repr) ctor — see the L7 note on
+     test_escape_local_discarded_promoted. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2875,14 +2998,14 @@ let test_actor_tir_supervisor_spawn_calls_register () =
       on DoWork() do { count: state.count + 1 } end
     end
     actor Supervisor do
-      state { count : Int }
-      init { count: 0 }
+      state { worker : Int }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
         Worker worker
       end
-      on Start() do { count: state.count } end
+      on Start() do { worker: state.worker } end
     end
     fn main() : Unit do () end
   end|} in
@@ -3979,6 +4102,100 @@ end|} in
       | _ -> Alcotest.fail "bad Response shape")
    | _ -> Alcotest.fail "expected Ok(Response ...)")
 
+(* ── B16 + conn-gated CSRF: ~H auto-injection ───────────────────────────────
+   Every ~H literal containing a mutating <form method="post|put|patch|delete">
+   gets an injected `CSRF.tag_string(conn)` call — but ONLY when a `conn`
+   binding is lexically in scope (function/lambda param, block `let`, or match
+   pattern). Two regressions guarded here:
+   - B16: a standalone module WITHOUT `conn` must never see the injected call
+     (it used to get a baffling unbound-`conn` error) — renders verbatim.
+   - Bastion convention: a page fn WITH a `conn` param MUST get the injection
+     (its unconditional removal silently dropped CSRF protection from every
+     Bastion app — every POST started 403ing). *)
+
+let test_h_sigil_form_post_typechecks_standalone () =
+  (* iolist.march is self-contained (no String-module deps), so loading it
+     alone keeps the harness free of unrelated missing-builtin noise;
+     html_auto_escape is a typecheck builtin. *)
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let m = parse_and_desugar {|mod Page do
+  fn page() : String do
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end
+end|} in
+  let m = { m with March_ast.Ast.mod_decls =
+                     [iolist_decl] @ m.March_ast.Ast.mod_decls } in
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool)
+    (Printf.sprintf "standalone ~H form post: no typecheck errors (got: %s)"
+       (String.concat " | " msgs))
+    false (March_errors.Errors.has_errors errors)
+
+let test_h_sigil_form_post_runs_standalone () =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  let env = eval_with_stdlib [string_decl; iolist_decl]
+    {|mod Page do
+  fn page() : String do
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end
+end|} in
+  let result = call_fn env "page" [] in
+  (* No token injection: the template renders verbatim. *)
+  Alcotest.(check string) "form renders verbatim, no injected token"
+    {|<form method="post">x</form>|} (vstr result)
+
+(* A module with a `CSRF.tag_string` stub (the injected call's target) and a
+   Bastion-style page fn taking `conn`. The injected token must appear right
+   after the <form ...> opening tag. *)
+let csrf_stub_token = {|<input type="hidden" name="_csrf_token" value="tok123">|}
+
+let eval_csrf_page body_decl =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  eval_with_stdlib [string_decl; iolist_decl]
+    (Printf.sprintf {|mod Page do
+  mod CSRF do
+    fn tag_string(conn) : String do
+      "<input type=\"hidden\" name=\"_csrf_token\" value=\"tok123\">"
+    end
+  end
+%s
+end|} body_decl)
+
+let test_h_sigil_form_post_injects_with_conn_param () =
+  let env = eval_csrf_page {|
+  fn page(conn) : String do
+    IOList.to_string(~H"<form action=\"/login\" method=\"post\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "conn param in scope: token injected after form tag"
+    ({|<form action="/login" method="post">|} ^ csrf_stub_token ^ {|x</form>|})
+    (vstr result)
+
+let test_h_sigil_form_post_injects_with_conn_let () =
+  let env = eval_csrf_page {|
+  fn page(c) : String do
+    let conn = c
+    IOList.to_string(~H"<form method=\"post\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "block `let conn` in scope: token injected"
+    ({|<form method="post">|} ^ csrf_stub_token ^ {|x</form>|})
+    (vstr result)
+
+let test_h_sigil_get_form_not_injected_with_conn () =
+  (* Non-mutating method: no injection even with conn in scope. *)
+  let env = eval_csrf_page {|
+  fn page(conn) : String do
+    IOList.to_string(~H"<form method=\"get\">x</form>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VInt 0] in
+  Alcotest.(check string) "GET form: no injection"
+    {|<form method="get">x</form>|} (vstr result)
+
 let eval_suites =
   [
       ( "browser http",
@@ -4123,6 +4340,7 @@ let eval_suites =
           Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
           Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
@@ -4160,6 +4378,8 @@ let eval_suites =
           Alcotest.test_case "pretty: record"          `Quick test_repl_pretty_record;
           Alcotest.test_case "pretty: depth truncation" `Quick test_repl_pretty_depth_truncation;
           Alcotest.test_case ":inspect type+value"     `Quick test_repl_inspect_type_and_value;
+          Alcotest.test_case "final-review: renders desugar ParseError, not internal error"
+            `Quick test_repl_renders_desugar_parse_error;
         ] );
       ( "repl parity",
         [
@@ -4240,6 +4460,7 @@ let eval_suites =
         ] );
       ( "escape_analysis", [
           Alcotest.test_case "local discarded promoted"      `Quick test_escape_local_discarded_promoted;
+          Alcotest.test_case "newtype not promoted (L7)"     `Quick test_escape_newtype_not_promoted;
           Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
           Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
           Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;
@@ -4277,6 +4498,13 @@ let eval_suites =
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
           Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
+        ] );
+      ( "h_sigil_csrf_conn_gated", [
+          Alcotest.test_case "B16: ~H form post typechecks standalone" `Quick test_h_sigil_form_post_typechecks_standalone;
+          Alcotest.test_case "B16: ~H form post runs standalone"       `Quick test_h_sigil_form_post_runs_standalone;
+          Alcotest.test_case "conn param: CSRF token injected"         `Quick test_h_sigil_form_post_injects_with_conn_param;
+          Alcotest.test_case "block let conn: CSRF token injected"     `Quick test_h_sigil_form_post_injects_with_conn_let;
+          Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
         ] );
   ]
 

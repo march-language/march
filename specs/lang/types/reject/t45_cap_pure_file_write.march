@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: which has side effects
+-- Capabilities widening, Task 5 (F2 fix) -- `cap pure` (`check_pure_module`,
+-- `typecheck.ml:6581`), the REJECT side that the F2 fix makes possible: a
+-- `cap pure` module whose body calls the REAL effectful builtin `file_write`.
+-- Pre-fix, `pure_banned` was a hand-maintained name list that spelled the
+-- file builtin `write_file` (a name that DOES NOT EXIST) and MISSED the real
+-- `file_write` -- so this program typechecked with exit 0 (UNSOUND; only
+-- F1's body-scan HINT+WARNING fired, never `cap pure`'s own error). The fix
+-- rebuilds `pure_banned` from `builtin_cap_table` (`typecheck.ml:999`, the
+-- authoritative effect map), so every effectful builtin -- including
+-- `file_write` (mapped `IO.FileWrite`) -- is now banned. The signature is
+-- `Result(Unit, String)` because `file_write : String -> String ->
+-- Result(Unit, r)` returns a `Result`, NOT `Unit`; a naive `: Unit`
+-- signature would exit 1 for a TYPE mismatch, masking the cap violation.
+-- Here the type is correct, so the ONLY rejection is `check_pure_module`'s
+-- own: `` `write` in `mod LeakyPure` (declared `cap pure`) calls
+-- `file_write`, which has side effects. `` (A WARNING-level Check 1b
+-- body-scan diagnostic -- "requires `Cap(IO.FileWrite)`" -- also fires
+-- alongside, per F1; it does not change the exit code and is not the
+-- substring pinned here.) See core-march-types.md §2.8.11.
+mod LeakyPure do
+  cap pure
+
+  fn write(path : String, contents : String) : Result(Unit, String) do
+    file_write(path, contents)
+  end
+end

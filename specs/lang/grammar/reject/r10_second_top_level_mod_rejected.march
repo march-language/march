@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: A file may have only one top-level `mod`; everything else must live inside it.
+mod R10SecondTopLevelModFirst do
+  fn main() do
+    println(1)
+  end
+end
+
+mod R10SecondTopLevelModSecond do
+  fn helper() do
+    2
+  end
+end

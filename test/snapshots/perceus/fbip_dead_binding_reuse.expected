@@ -1,0 +1,44 @@
+-- types (2) --
+closure $Clo_$jp4$0(Ptr(Unit))
+closure $Clo_$jp13$1(Ptr(Unit))
+-- fns (4) --
+## $jp13$apply$1
+fn $jp13$apply$1($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp4$apply$0
+fn $jp4$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## bump_head
+fn bump_head(xs : List(Int)) : List(Int) =
+  case xs of
+  Cons($f2, $f3) -> dec_rc xs;
+let $jp_clo5 : () -> '_ = alloc $Clo_$jp4$0($jp4$apply$0) in
+dec_rc $jp_clo5;
+let t : List(Int) = $f3 in
+let h : Int = $f2 in
+let $t1 : Int = +(h, 1) in
+alloc List.Cons($t1, t)
+  Nil() -> dec_rc xs;
+alloc List.Nil(Int)()
+  _ -> dec_rc xs;
+panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t10 : List(Int) = let $t9 : List(Int) = let $t8 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(1, $t8) in
+bump_head($t9) in
+case $t10 of
+  Cons($f11, $f12) -> dec_rc $t10;
+dec_rc $f12;
+let $jp_clo14 : () -> '_ = alloc $Clo_$jp13$1($jp13$apply$1) in
+dec_rc $jp_clo14;
+let h : Int = $f11 in
+println(h)
+  Nil() -> dec_rc $t10;
+println(0)
+  _ -> dec_rc $t10;
+panic("non-exhaustive pattern match")
+

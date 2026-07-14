@@ -1,0 +1,50 @@
+
+=== counter ===
+
+=== stack ===
+
+=== many counters ===
+
+=== relay ===
+
+=== collector ===
+counter=12
+counter=0
+counter=98
+counter=-7
+stack=empty
+stack.size=0
+stack.top=3
+stack.size=3
+stack.size=0
+stack.top=42
+counter=11
+counter=22
+counter=33
+relay: hello
+relay: world
+relay: foo
+relay hops=3
+
+=== tasks: basic ===
+collected count=5 total=55
+6*7=42
+
+=== tasks: await_many ===
+sum=60
+
+=== tasks: async_stream ===
+sum_squares=385
+
+=== message order ===
+
+=== receive() in handler ===
+
+=== bulk messages ===
+
+done
+stack.top=5
+stack.top=3
+stack.size=3
+query+answer=12
+counter=100

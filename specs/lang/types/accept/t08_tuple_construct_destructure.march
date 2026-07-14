@@ -1,0 +1,14 @@
+mod M do
+  fn sum_pair(p : (Int, Int)) : Int do
+    let (a, b) = p
+    a + b
+  end
+
+  fn main() do
+    let triple = (1, 2, 3)
+    match triple do
+      (x, y, z) -> println(int_to_string(x + y + z))
+    end
+    println(int_to_string(sum_pair((10, 20))))
+  end
+end

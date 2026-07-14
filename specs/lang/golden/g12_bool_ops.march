@@ -1,0 +1,11 @@
+mod Main do
+  fn main() do
+    println(bool_to_string(true && true))
+    println(bool_to_string(true && false))
+    println(bool_to_string(false || true))
+    println(bool_to_string(false || false))
+    println(bool_to_string(!true))
+    println(bool_to_string(not(false)))
+    println("a" ++ "b")
+  end
+end

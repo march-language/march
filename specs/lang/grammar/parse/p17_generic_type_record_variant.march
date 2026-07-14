@@ -1,0 +1,23 @@
+mod P17GenericTypeRecordVariant do
+  type Box(a) = { value: a, label: String }
+
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+
+  pfn depth(t) do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) ->
+        let dl = depth(l)
+        let dr = depth(r)
+        if dl > dr do dl + 1 else dr + 1 end
+    end
+  end
+
+  fn main() do
+    let b = { value: 42, label: "answer" }
+    println(b.value)
+    println(b.label)
+    let t = Node(Node(Leaf, 1, Leaf), 2, Leaf)
+    println(depth(t))
+  end
+end

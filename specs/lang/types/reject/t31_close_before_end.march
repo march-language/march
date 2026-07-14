@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: Chan.close: channel is at
+mod Main do
+  -- Session-types widening, Task 3 -- close-before-End.
+  -- `Chan.close` (typecheck.ml:3537) requires the channel be at `SEnd`.
+  -- Here `cc` has just sent its one message (Send(Int,End) -> End) but `sc`
+  -- has NOT yet received it, so `sc` is still at Recv(Int, End) -- closing
+  -- it before the matching recv is the reject case.
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let cc2 = Chan.send(cc, 42)
+    Chan.close(cc2)
+    Chan.close(sc)
+  end
+end

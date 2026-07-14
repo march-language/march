@@ -1,0 +1,11 @@
+mod P12NestedConstructorTuplePattern do
+  type Shape = Pair(Int, (Int, Int)) | Solo(Int)
+
+  fn main() do
+    let s = Pair(2, (3, 4))
+    match s do
+      Pair(scale, (a, b)) -> println(scale * (a + b))
+      Solo(n) -> println(n)
+    end
+  end
+end

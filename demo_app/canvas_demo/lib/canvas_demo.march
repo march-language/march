@@ -1,0 +1,84 @@
+mod CanvasDemo do
+
+  fn draw_static_scene(ctx) : Unit do
+    Canvas.set_fill_style(ctx, "#1a1a2e")
+    Canvas.fill_rect(ctx, 0.0, 0.0, 480.0, 360.0)
+
+    Canvas.set_fill_style(ctx, "#f39c12")
+    Canvas.fill_rect(ctx, 20.0, 20.0, 80.0, 40.0)
+
+    Canvas.set_stroke_style(ctx, "#3498db")
+    Canvas.set_line_width(ctx, 3.0)
+    Canvas.stroke_rect(ctx, 120.0, 20.0, 80.0, 40.0)
+
+    Canvas.set_fill_style(ctx, "#2ecc71")
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, 260.0, 40.0, 25.0, 0.0, 6.283185307179586)
+    Canvas.fill(ctx)
+
+    Canvas.set_stroke_style(ctx, "#e74c3c")
+    Canvas.set_line_width(ctx, 2.0)
+    Canvas.begin_path(ctx)
+    Canvas.move_to(ctx, 320.0, 20.0)
+    Canvas.quadratic_curve_to(ctx, 360.0, 60.0, 400.0, 20.0)
+    Canvas.stroke(ctx)
+
+    Canvas.set_fill_style(ctx, "#eee")
+    Canvas.set_font(ctx, "16px sans-serif")
+    Canvas.fill_text(ctx, "March Canvas Demo", 20.0, 100.0)
+  end
+
+  -- Exercises translate/rotate/save/restore with a spinning bar, animated
+  -- via Dom.on_frame. The callback takes one ignored Int argument
+  -- (`fn _ -> ...`) — see stdlib/dom.march's module doc.
+  fn tick(ctx, angle) : Unit do
+    Canvas.set_fill_style(ctx, "#1a1a2e")
+    Canvas.fill_rect(ctx, 130.0, 130.0, 220.0, 140.0)
+
+    Canvas.save(ctx)
+    Canvas.translate(ctx, 240.0, 200.0)
+    Canvas.rotate(ctx, angle)
+    Canvas.set_fill_style(ctx, "#9b59b6")
+    Canvas.fill_rect(ctx, -60.0, -8.0, 120.0, 16.0)
+    Canvas.restore(ctx)
+
+    Canvas.set_fill_style(ctx, "#f1c40f")
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, 240.0, 200.0, 6.0, 0.0, 6.283185307179586)
+    Canvas.fill(ctx)
+
+    Dom.on_frame(fn _ -> tick(ctx, angle + 0.03))
+  end
+
+  fn draw_tap_marker(ctx, ev) : Unit do
+    let x = int_to_float(Dom.event_x(ev))
+    let y = int_to_float(Dom.event_y(ev))
+    Canvas.set_fill_style(ctx, "#ffffff")
+    Canvas.begin_path(ctx)
+    Canvas.arc(ctx, x, y, 4.0, 0.0, 6.283185307179586)
+    Canvas.fill(ctx)
+  end
+
+  fn load_and_draw_sprite(ctx) : Unit do
+    let url = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='18' fill='%2300d2ff'/%3E%3C/svg%3E"
+    match Canvas.load_image(url) do
+      Ok(img)  -> Canvas.draw_image(ctx, img, 420.0, 300.0)
+      Err(msg) -> println("image load failed: " ++ msg)
+    end
+  end
+
+  fn main() : Unit do
+    match Dom.find("game-canvas") do
+      None -> println("no #game-canvas found")
+      Some(node) ->
+        match Canvas.get_context(node) do
+          None -> println("2d context unavailable")
+          Some(ctx) ->
+            draw_static_scene(ctx)
+            load_and_draw_sprite(ctx)
+            Dom.listen(node, "pointerdown", fn ev -> draw_tap_marker(ctx, ev))
+            Dom.on_frame(fn _ -> tick(ctx, 0.0))
+        end
+    end
+  end
+end

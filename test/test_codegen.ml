@@ -1,6 +1,478 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
+
+let compile_to_js src =
+  let m = parse_and_desugar src in
+  March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
+    ~fn_lines:[] m
+
+let test_js_pipeline_simple_program_compiles () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn add(a: Int, b: Int) : Int do a + b end
+    fn main() : Unit do
+      let _ = add(1, 2)
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output mentions main" true
+      (Test_helpers.contains "main" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_typecheck_error_surfaces () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let _ = 1 + "not a number"
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a typecheck error, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "at least one error message" true (errs <> [])
+
+let test_js_pipeline_dom_extern_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    resource Node
+    resource Event
+    extern "dom" : Cap(Ffi) do
+      fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
+    end
+    fn main() : Unit do
+      let _ = dom_get_element_by_id("root")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references the extern symbol" true
+      (Test_helpers.contains "march_dom_get_element_by_id" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_dom_event_key_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    extern "dom" : Cap(Ffi) do
+      fn dom_event_key(ev: String) : String = "march_dom_event_key"
+    end
+    fn main() : Unit do
+      let _ = dom_event_key("x")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references march_dom_event_key" true
+      (Test_helpers.contains "march_dom_event_key" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+(* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
+
+let test_tir_names_tuple_tag () =
+  Alcotest.(check string) "tuple_tag 2" "$Tuple2" (March_tir.Tir_names.tuple_tag 2);
+  Alcotest.(check bool) "is_tuple_tag $Tuple2" true
+    (March_tir.Tir_names.is_tuple_tag (March_tir.Tir_names.tuple_tag 2));
+  Alcotest.(check bool) "is_tuple_tag $Tuple0" true
+    (March_tir.Tir_names.is_tuple_tag (March_tir.Tir_names.tuple_tag 0));
+  Alcotest.(check bool) "not is_tuple_tag Some" false
+    (March_tir.Tir_names.is_tuple_tag "Some");
+  Alcotest.(check bool) "not is_tuple_tag $fv1" false
+    (March_tir.Tir_names.is_tuple_tag "$fv1")
+
+let test_tir_names_fv_field_round_trip () =
+  Alcotest.(check string) "fv_field 1" "$fv1" (March_tir.Tir_names.fv_field 1);
+  Alcotest.(check bool) "is_fv_field $fv1" true
+    (March_tir.Tir_names.is_fv_field (March_tir.Tir_names.fv_field 1));
+  Alcotest.(check int) "fv_field_index round-trip" 42
+    (March_tir.Tir_names.fv_field_index (March_tir.Tir_names.fv_field 42));
+  Alcotest.(check bool) "not is_fv_field $Clo_foo$1" false
+    (March_tir.Tir_names.is_fv_field "$Clo_foo$1");
+  Alcotest.(check bool) "not is_fv_field plain field" false
+    (March_tir.Tir_names.is_fv_field "name")
+
+let test_tir_names_clo_struct () =
+  let n = March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:3 in
+  Alcotest.(check string) "clo_struct_name" "$Clo_foo$3" n;
+  Alcotest.(check bool) "is_clo_struct" true (March_tir.Tir_names.is_clo_struct n);
+  Alcotest.(check bool) "not is_clo_struct Option" false
+    (March_tir.Tir_names.is_clo_struct "Option")
+
+let test_tir_names_apply_fn () =
+  let n = March_tir.Tir_names.apply_fn_name ~fn_name:"foo" ~lam_uid:3 in
+  Alcotest.(check string) "apply_fn_name" "foo$apply$3" n;
+  Alcotest.(check bool) "is_apply_fn" true (March_tir.Tir_names.is_apply_fn n);
+  Alcotest.(check bool) "not is_apply_fn plain" false
+    (March_tir.Tir_names.is_apply_fn "foo");
+  (* is_apply_fn scans for the marker anywhere, not just as a suffix. *)
+  Alcotest.(check bool) "is_apply_fn marker mid-string" true
+    (March_tir.Tir_names.is_apply_fn "foo$apply$3$extra")
+
+let test_tir_names_iface_mangled () =
+  Alcotest.(check bool) "Show$Int.show is mangled" true
+    (March_tir.Tir_names.is_iface_mangled "Show$Int.show");
+  Alcotest.(check bool) "Show$List.show$List_Int is mangled" true
+    (March_tir.Tir_names.is_iface_mangled "Show$List.show$List_Int");
+  (* The critical negative case from the plan brief: a $ AFTER the last '.'
+     is an ordinary specialized generic fn, not an interface impl. *)
+  Alcotest.(check bool) "List.map$Int is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "List.map$Int");
+  Alcotest.(check bool) "ordinary qualified name is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "Crypto.base64_encode");
+  Alcotest.(check bool) "no dot at all is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "no_dots_here$weird");
+  (* A user fn named with dots but no interface mangling. *)
+  Alcotest.(check bool) "App.Core.b is NOT mangled" false
+    (March_tir.Tir_names.is_iface_mangled "App.Core.b")
+
+let test_tir_names_iface_mangle_builder () =
+  Alcotest.(check string) "iface_mangle" "Show$List.show"
+    (March_tir.Tir_names.iface_mangle ~iface:"Show" ~ty:"List" ~meth:"show")
+
+let test_tir_names_default_arg_round_trip () =
+  Alcotest.(check string) "default_arg_mangle" "greet$2"
+    (March_tir.Tir_names.default_arg_mangle "greet" 2);
+  Alcotest.(check bool) "parse round-trip" true
+    (March_tir.Tir_names.parse_default_arg
+       (March_tir.Tir_names.default_arg_mangle "greet" 2) = Some ("greet", 2));
+  Alcotest.(check bool) "parse_default_arg no dollar" true
+    (March_tir.Tir_names.parse_default_arg "greet" = None);
+  Alcotest.(check bool) "parse_default_arg empty base rejected" true
+    (March_tir.Tir_names.parse_default_arg "$2" = None);
+  Alcotest.(check bool) "parse_default_arg non-numeric suffix rejected" true
+    (March_tir.Tir_names.parse_default_arg "greet$abc" = None)
+
+let test_tir_names_actor_suffixes () =
+  Alcotest.(check bool) "is_actor_struct_name Counter_Actor" true
+    (March_tir.Tir_names.is_actor_struct_name ("Counter" ^ March_tir.Tir_names.actor_struct_suffix));
+  Alcotest.(check bool) "not is_actor_struct_name Counter" false
+    (March_tir.Tir_names.is_actor_struct_name "Counter");
+  Alcotest.(check bool) "is_actor_dispatch_fn Counter_dispatch" true
+    (March_tir.Tir_names.is_actor_dispatch_fn ("Counter" ^ March_tir.Tir_names.actor_dispatch_suffix));
+  Alcotest.(check bool) "not is_actor_dispatch_fn Counter" false
+    (March_tir.Tir_names.is_actor_dispatch_fn "Counter");
+  (* Field-sort invariant: $d_ < $e_ < $f_ < any letter (C-runtime word-index
+     coupling — see the module doc comment). *)
+  Alcotest.(check bool) "dispatch field sorts before alive field" true
+    (March_tir.Tir_names.actor_dispatch_field < March_tir.Tir_names.actor_alive_field);
+  Alcotest.(check bool) "alive field sorts before state field" true
+    (March_tir.Tir_names.actor_alive_field < March_tir.Tir_names.actor_state_field);
+  Alcotest.(check bool) "state field sorts before a plain letter field" true
+    (March_tir.Tir_names.actor_state_field < "a")
+
+let test_tir_names_runtime_prefix () =
+  Alcotest.(check bool) "has_runtime_prefix march_compare_int" true
+    (March_tir.Tir_names.has_runtime_prefix "march_compare_int");
+  (* "march_" requires the trailing underscore; "marching" has none at
+     that position, so it must NOT match. *)
+  Alcotest.(check bool) "not has_runtime_prefix marching" false
+    (March_tir.Tir_names.has_runtime_prefix "marching");
+  Alcotest.(check bool) "not has_runtime_prefix short string" false
+    (March_tir.Tir_names.has_runtime_prefix "march")
+
+let test_tir_names_try_call () =
+  Alcotest.(check bool) "is_try_call __try_call" true
+    (March_tir.Tir_names.is_try_call "__try_call");
+  Alcotest.(check bool) "is_try_call __try_call_val" true
+    (March_tir.Tir_names.is_try_call "__try_call_val");
+  Alcotest.(check bool) "not is_try_call other" false
+    (March_tir.Tir_names.is_try_call "try_call")
+
+let test_tir_names_test_and_setup_fn_names () =
+  Alcotest.(check string) "test_fn_name 0" "__march_test_0__" (March_tir.Tir_names.test_fn_name 0);
+  Alcotest.(check string) "test_fn_name 7" "__march_test_7__" (March_tir.Tir_names.test_fn_name 7);
+  Alcotest.(check string) "setup_fn_name" "__march_setup__" March_tir.Tir_names.setup_fn_name;
+  Alcotest.(check string) "setup_all_fn_name" "__march_setup_all__" March_tir.Tir_names.setup_all_fn_name
+
+let test_tir_names_specialize_mangle () =
+  (* Equality against the OLD inline expression shape mono.ml used before
+     this conversion (Wave 3 Chunk 2 Task 1): `base ^ "$" ^ mangled_ty`. *)
+  let old_shape base mangled_ty = base ^ "$" ^ mangled_ty in
+  Alcotest.(check string) "specialize_mangle matches old inline shape (single ty)"
+    (old_shape "map" "Int")
+    (March_tir.Tir_names.specialize_mangle "map" "Int");
+  Alcotest.(check string) "specialize_mangle basic" "map$Int"
+    (March_tir.Tir_names.specialize_mangle "map" "Int");
+  (* Multi-arg specialization: caller joins mangled tys with "$" itself
+     before calling (mirrors mono.ml's `mangle_name`'s
+     `String.concat "$" (List.map mangle_ty tys)`), so this helper sees
+     the already-joined suffix. *)
+  Alcotest.(check string) "specialize_mangle multi-ty suffix (pre-joined)"
+    (old_shape "map" "Int$Bool")
+    (March_tir.Tir_names.specialize_mangle "map" "Int$Bool");
+  (* The W2 interface-impl double-mangle case: applying specialize_mangle to
+     an already-iface_mangle'd base must NOT trip is_iface_mangled — the new
+     '$' lands after the base's own '.', same as the pre-existing
+     "List.map$Int" negative case. *)
+  let iface_base = March_tir.Tir_names.iface_mangle ~iface:"Show" ~ty:"List" ~meth:"show" in
+  let doubly_mangled = March_tir.Tir_names.specialize_mangle iface_base "List_Int" in
+  Alcotest.(check string) "W2 double-mangle shape" "Show$List.show$List_Int" doubly_mangled;
+  Alcotest.(check bool) "double-mangled impl name still is_iface_mangled" true
+    (March_tir.Tir_names.is_iface_mangled doubly_mangled);
+  (* Ordinary generic fn (no dots at all) specialized: must NOT be
+     is_iface_mangled — matches the existing "List.map$Int" contract. *)
+  Alcotest.(check bool) "plain specialized generic fn is NOT iface_mangled" false
+    (March_tir.Tir_names.is_iface_mangled
+       (March_tir.Tir_names.specialize_mangle "map" "Int"))
+
+let test_tir_names_bool_tags () =
+  Alcotest.(check string) "synthetic_true_tag" "True" March_tir.Tir_names.synthetic_true_tag;
+  Alcotest.(check string) "synthetic_false_tag" "False" March_tir.Tir_names.synthetic_false_tag;
+  Alcotest.(check string) "bool_lit_tag true" "true" (March_tir.Tir_names.bool_lit_tag true);
+  Alcotest.(check string) "bool_lit_tag false" "false" (March_tir.Tir_names.bool_lit_tag false)
+
+(* ── Rc_types: needs_rc / borrow_eligible divergence contract (Wave 3 Task 2) ──
+   Table-driven pin of the FULL truth table for both predicates over
+   representative types, plus an exactness check that the divergence set is
+   precisely {TFn _, bare TVar _, TTuple _, TRecord _} and nothing else.
+   If either predicate changes, this test fails and points at Rc_types's
+   module doc (each divergent constructor's fix history: a705cc95/d2cf09e/
+   fd520110 for TFn/TVar, 0b52510d/390dff00 for TTuple/TRecord). *)
+
+(* (label, ty, expected needs_rc, expected borrow_eligible) *)
+let rc_types_truth_table : (string * March_tir.Tir.ty * bool * bool) list =
+  let open March_tir.Tir in
+  [
+    "TInt",                TInt,                        false, false;
+    "TFloat",              TFloat,                      false, false;
+    "TBool",               TBool,                       false, false;
+    "TString",             TString,                     true,  true;
+    "TUnit",               TUnit,                       false, false;
+    "TTuple []",           TTuple [],                   false, true;   (* diverges *)
+    "TTuple [Int]",        TTuple [TInt],               false, true;   (* diverges *)
+    "TTuple [String]",     TTuple [TString],            false, true;   (* diverges *)
+    "TRecord []",          TRecord [],                  false, true;   (* diverges *)
+    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       false, true;   (* diverges *)
+    "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
+    "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
+    "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
+    "TCon (Atom,[Int])",   TCon ("Atom", [TInt]),       true,  true;   (* only nullary Atom is scalar *)
+    "TFn ([],Int)",        TFn ([], TInt),              true,  false;  (* diverges *)
+    "TFn ([Int],Int)",     TFn ([TInt], TInt),          true,  false;  (* diverges *)
+    "TPtr Int",            TPtr TInt,                   true,  true;
+    "TVar \"_\"",          TVar "_",                    true,  true;   (* placeholder: both conservative *)
+    "TVar \"a\"",          TVar "a",                    true,  false;  (* diverges *)
+    "TVar \"'_1234\"",     TVar "'_1234",               true,  false;  (* diverges *)
+  ]
+
+let test_rc_types_truth_table () =
+  List.iter (fun (label, ty, exp_rc, exp_be) ->
+    Alcotest.(check bool) (label ^ ": needs_rc") exp_rc
+      (March_tir.Rc_types.needs_rc ty);
+    Alcotest.(check bool) (label ^ ": borrow_eligible") exp_be
+      (March_tir.Rc_types.borrow_eligible ty)
+  ) rc_types_truth_table
+
+let test_rc_types_divergence_set_exact () =
+  (* Exactly the {TFn, bare TVar, TTuple, TRecord} rows diverge — computed
+     from the live predicates, compared against the constructor-classified
+     expectation, so a new divergence (or a silently unified arm) fails
+     loudly here even if the truth-table rows above were edited in sync. *)
+  let expected_divergent (ty : March_tir.Tir.ty) : bool =
+    match ty with
+    | March_tir.Tir.TFn _ | March_tir.Tir.TTuple _ | March_tir.Tir.TRecord _ -> true
+    | March_tir.Tir.TVar "_" -> false
+    | March_tir.Tir.TVar _ -> true
+    | _ -> false
+  in
+  List.iter (fun (label, ty, _, _) ->
+    let actual =
+      March_tir.Rc_types.needs_rc ty <> March_tir.Rc_types.borrow_eligible ty
+    in
+    Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
+      (expected_divergent ty) actual
+  ) rc_types_truth_table
+
+(* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
+   fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
+   gen_map_filter_fold — see fusion.ml) tag every generated fn_def
+   `Tir.FnFused` (added Wave 3 Chunk 1 Task 3, commit c28ff465), but until
+   now nothing ever read that field back — no consumer, no assert, no test.
+   This is exactly the "flag says X but does anything check X matches
+   reality" gap the transitional fn_kind asserts (perceus.ml, llvm_emit.ml)
+   exist to catch for the OTHER fn_kind values; FnFused had no such
+   cross-check at all.
+
+   Reachability: fusion IS already exercised by test-corpus programs — see
+   test_eval.ml's test_fusion_map_fold / test_fusion_filter_fold /
+   test_fusion_map_filter_fold (via Test_helpers.fusion_module +
+   has_fused_fn, which only sniff the "$fused_" name prefix). These tests
+   below reuse that same reachable pipeline and additionally assert the
+   fn_kind tag, closing the flag-vs-reality gap: every "$fused_" named
+   fn_def must be FnFused, and — the direction the name-only check can't
+   see — every FnFused fn_def must be named "$fused_<mf|ff|mff>_N" per
+   fusion.ml's own gensym convention. *)
+
+(** True if [name] matches fusion.ml's gensym convention: "$fused_" followed
+    by one of the three generator tags ("mf"/"ff"/"mff") then "_" and a
+    counter. Mirrors fusion.ml's [gensym] (`Printf.sprintf "$fused_%s_%d"`) —
+    kept local to this test (not a Tir_names contract: fusion.ml's synthesized
+    names have no consumer that name-sniffs them, per the Wave 3 Task 3
+    report, so there is nothing in Tir_names to centralize here). *)
+let is_fusion_gensym_name (name : string) : bool =
+  let has_prefix p s =
+    String.length s >= String.length p && String.sub s 0 (String.length p) = p
+  in
+  let strip_prefix p s = String.sub s (String.length p) (String.length s - String.length p) in
+  if not (has_prefix "$fused_" name) then false
+  else
+    let rest = strip_prefix "$fused_" name in
+    List.exists (fun tag ->
+      has_prefix (tag ^ "_") rest &&
+      (let ctr = strip_prefix (tag ^ "_") rest in
+       ctr <> "" && String.for_all (fun c -> c >= '0' && c <= '9') ctr)
+    ) ["mf"; "ff"; "mff"]
+
+(** Cross-check, over a fused module: every fn whose name matches the
+    "$fused_" gensym convention is tagged FnFused, AND every FnFused-tagged
+    fn matches the naming convention — the bidirectional check the plan
+    calls out as never having been covered. *)
+let assert_fnfused_consistent (m : March_tir.Tir.tir_module) : unit =
+  List.iter (fun (fd : March_tir.Tir.fn_def) ->
+    if is_fusion_gensym_name fd.March_tir.Tir.fn_name then
+      Alcotest.(check bool)
+        ("\"" ^ fd.March_tir.Tir.fn_name ^ "\" named like a fusion helper => FnFused")
+        true (fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused);
+    if fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused then
+      Alcotest.(check bool)
+        ("FnFused fn \"" ^ fd.March_tir.Tir.fn_name ^ "\" named like fusion.ml's gensym")
+        true (is_fusion_gensym_name fd.March_tir.Tir.fn_name)
+  ) m.March_tir.Tir.tm_fns
+
+(** At least one FnFused fn_def actually exists post-fusion (not just that
+    IF one exists it's consistent — the existence half of the gate). *)
+let assert_some_fnfused_present (m : March_tir.Tir.tir_module) : unit =
+  let any_fused = List.exists (fun (fd : March_tir.Tir.fn_def) ->
+      fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused)
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "at least one FnFused fn_def present post-fusion" true any_fused
+
+let test_fnfused_map_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = imap(xs, fn x -> x * 2)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+let test_fnfused_filter_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) ->
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = ifilter(xs, fn x -> x > 1)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for filter+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+let test_fnfused_map_filter_fold_tagged () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      INil        -> INil
+      ICons(h, t) ->
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, ICons(4, ICons(5, INil)))))
+      let ys = imap(xs, fn x -> x * 2)
+      let zs = ifilter(ys, fn x -> x > 4)
+      ifold(zs, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+filter+fold" true (has_fused_fn m);
+  assert_some_fnfused_present m;
+  assert_fnfused_consistent m
+
+(** Negative control: a non-fusible (non-list) program must have NO
+    FnFused-tagged fn_def at all — the existence check must not be
+    vacuously true for every module. *)
+let test_fnfused_absent_when_not_fused () =
+  let m = fusion_module {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Int do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "no fused fn for non-list program" false (has_fused_fn m);
+  let any_fused = List.exists (fun (fd : March_tir.Tir.fn_def) ->
+      fd.March_tir.Tir.fn_kind = March_tir.Tir.FnFused)
+      m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "no FnFused fn_def for non-list program" false any_fused
+
 let test_nested_bool_lit_pattern_no_tag_switch () =
   let ir = emit_actor_ir {|mod Test do
     fn classify(r : Result(Bool, String)) : String do
@@ -63,6 +535,125 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
     (ir_count ir "switch i32")
+
+(** Finding-19 memory-safety regression: two single-handler actors whose
+    messages, under the OLD per-actor 0-based Newtype encoding, were
+    indistinguishable at dispatch — a Logger message delivered to Counter's
+    mailbox was misrouted into Counter's Inc handler and its String payload
+    reinterpreted as an Int (memory-unsafe UB).
+
+    The fix forces each actor message type Boxed with a GLOBALLY-unique heap tag
+    and gives every dispatch ECase a dropping default arm. Assert the IR shape:
+      - Counter_dispatch switches on an i32 tag (Boxed decode — NOT a
+        tag-less Newtype value passed straight through), and
+      - has a case_default arm that decrefs the dropped message and returns
+        (the drop), rather than folding to `unreachable`, and
+      - Counter's and Logger's message ctor tags are DISTINCT (global numbering),
+        so a Logger message cannot match a Counter branch. *)
+let test_actor_foreign_msg_drop_boxed_dispatch () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    actor Logger do
+      state { seen : Int }
+      init  { seen: 0 }
+      on Log(m : String) do { seen: state.seen + 1 } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      send(c, Log("stray"))
+      run_until_idle()
+    end
+  end|} in
+  (* Boxed decode: the single-handler dispatch loads an i32 ctor tag and
+     switches on it (a tag-less Newtype would pass the value straight through
+     with no `switch i32`). *)
+  Alcotest.(check bool) "Counter dispatch switches on an i32 tag (Boxed, not Newtype)"
+    true (ir_contains ir "switch i32");
+  (* Dropping default arm: the dispatch has a case_default that releases the
+     message (via march_decrc) — the foreign-message drop, not `unreachable`. *)
+  Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
+    true (ir_contains ir "case_default");
+  (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
+     0x01000000+ actor-message tag space; distinctness is what makes a foreign
+     message fall to the default arm. The base tag 16777216 (0x01000000) is
+     assigned to the first message ctor; a second, distinct tag must also appear. *)
+  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
+    true (ir_contains ir "store i32 16777216");
+  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
+    true (ir_contains ir "store i32 16777217")
+
+(** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
+    actor's handler writes its new state back via an EReuse on the actor
+    struct. That EReuse must be UNCONDITIONAL — no refcount load/branch — or
+    the handler can race the caller's concurrent incrc/decrc on the actor
+    handle and silently lose the write (see specs/todos.md finding 20).
+    Assert the absence of the generic RC-conditional FBIP shape (an atomic RC
+    load + `icmp eq i64 _, 1` + the `fbip_fresh`/`fbip_reuse` block pair) in
+    the emitted module. *)
+let test_actor_struct_ereuse_unconditional () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      run_until_idle()
+    end
+  end|} in
+  Alcotest.(check bool) "no RC-conditional fbip_fresh block for the actor-struct reuse"
+    false (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "no atomic RC load guarding the actor-struct reuse"
+    false (ir_contains ir "load atomic i64")
+
+(** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
+    always-in-place gate must be STRUCTURAL (does this type's field 0 carry
+    the compiler-only "$d_dispatch" marker lower_actor.ml alone can construct
+    — see Repr.is_actor_struct_type), not a name-suffix heuristic. A prior
+    version gated on the type constructor name ending in "_Actor", which
+    false-positive-matched an ORDINARY user type coincidentally named
+    `Tree_Actor` — such a type's EReuse would then skip the refcount check,
+    silently corrupting a SHARED (RC>1) value in place. Assert a non-actor
+    `..._Actor`-named type's EReuse still takes the RC-conditional path. *)
+let test_actor_suffix_named_user_type_not_treated_as_actor () =
+  let ir = emit_actor_ir {|mod Test do
+    type Tree_Actor = TLeaf(Int) | TNode(Tree_Actor, Tree_Actor)
+    fn bump(t : Tree_Actor) : Tree_Actor do
+      match t do
+        TLeaf(n) -> TLeaf(n + 1)
+        TNode(l, r) -> TNode(bump(l), r)
+      end
+    end
+    fn main() : Unit do
+      let original = TNode(TLeaf(10), TLeaf(20))
+      let shared = original
+      let bumped = bump(original)
+      println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+    end
+    fn bumped_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> bumped_val(l)
+      end
+    end
+    fn shared_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> shared_val(l)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the RC-conditional fbip_fresh block"
+    true (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the atomic RC load"
+    true (ir_contains ir "load atomic i64")
 
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
@@ -205,12 +796,10 @@ let test_mutual_tco_non_tail_no_loop () =
     @[no_warn_recursion]
     fn count_f(n : Int) : Int do
       if n == 0 do 1 else count_g(n - 1) + 1 end
-      if n == 0 then 1 else count_g(n - 1) + 1
     end
     @[no_warn_recursion]
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
-      if n == 0 then 1 else count_f(n - 1) + 1
     end
     fn main() : Unit do println(int_to_string(count_f(10))) end
   end|} in
@@ -225,7 +814,6 @@ let test_mutual_tco_self_tco_unaffected () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
-      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(10))) end
   end|} in
@@ -233,6 +821,166 @@ let test_mutual_tco_self_tco_unaffected () =
     (ir_contains ir "tco_loop");
   Alcotest.(check bool) "self TCO still works: back-edge branch emitted" true
     (ir_contains ir "br label %tco_loop")
+
+(** B7 regression: Perceus wraps a borrow-induced post-call DecRC around a
+    MUTUAL (non-self) tail call — [let tmp = other_member(args) in (dec_rc v;
+    tmp)] — exactly as it does for self-tail-calls (see
+    is_trivial_dec_chain_returning's doc comment). The mutual-TCO EApp
+    interception arm has no ELet/ESeq counterparts, so this dec-chain used to
+    land in the dead "mutco_cont" block opened after the back-edge branch:
+    the DecRC never executes, leaking one heap cell every loop iteration.
+
+    build_loop/consume_loop mirror examples/rc_mutual_tco_borrowed.march:
+    `prefix` is a fresh local passed to consume_loop's BORROWED position 0
+    and is dead after that call, so Perceus emits the ELet-wrapped dec-chain
+    around the mutual tail call. Assert the DecRC executes on the live
+    back-edge path (before the branch to mutual_loop), not only in the
+    unreachable continuation block after it. *)
+let test_mutual_tco_borrowed_arg_decref_on_live_path () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    fn build_loop(seed, n) do
+      let prefix = String.repeat("a", 1)
+      if n == 0 do
+        String.byte_size(seed) + String.byte_size(prefix)
+      else
+        consume_loop(prefix, n - 1)
+      end
+    end
+    fn consume_loop(s, n) do
+      if n == 0 do
+        String.byte_size(s)
+      else
+        build_loop(s, n - 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(build_loop("z", 1000))) end
+  end|} in
+  Alcotest.(check bool) "mutual-tco borrowed-arg: mutual_loop emitted" true
+    (ir_contains ir "mutual_loop");
+  (* For each "br label %mutual_loop..." back-edge, find the LLVM basic block
+     that contains it (the text since the nearest preceding "label:") and
+     require a live "march_decrc" call inside that same block — i.e. on the
+     reachable path, executed before the branch. Before the fix, the
+     mutual-tail-call back-edge block has NO decrc (it is stranded in the
+     unreachable "mutco_cont" block emitted just after the branch instead). *)
+  let re_label = Str.regexp "\n[A-Za-z_][A-Za-z0-9_.]*:" in
+  let re_backedge = Str.regexp "br label %mutual_loop[0-9]*" in
+  let block_start_before pos =
+    let rec find_last start acc =
+      match Str.search_forward re_label ir start with
+      | exception Not_found -> acc
+      | i when i >= pos -> acc
+      | i -> find_last (i + 1) (Str.match_end ())
+    in
+    find_last 0 0
+  in
+  let rec scan_backedges start acc =
+    match Str.search_forward re_backedge ir start with
+    | exception Not_found -> acc
+    | i ->
+      let block_start = block_start_before i in
+      let block = String.sub ir block_start (i - block_start) in
+      scan_backedges (Str.match_end ()) (block :: acc)
+  in
+  let backedge_blocks = scan_backedges 0 [] in
+  Alcotest.(check bool) "mutual-tco borrowed-arg: at least one back-edge found" true
+    (List.length backedge_blocks > 0);
+  let live_decrefs = List.filter (fun b -> ir_contains b "march_decrc") backedge_blocks in
+  Alcotest.(check bool)
+    "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
+    true (List.length live_decrefs > 0)
+
+(** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
+    arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
+    at ANY position without checking [in_tail], so a Perceus-wrapped group
+    call sitting in a genuinely NON-tail spot (its result is bound and fed
+    into further arithmetic) would be invisible to the "does this SCC have
+    any non-tail group call" check.
+
+    [tail_calls_in] (which builds the Tarjan SCC edges) only recognises the
+    dec-chain wrapper as a tail call when it IS the fn's tail expression —
+    so a group edge needs at least one genuine tail call between the two
+    functions. [build_loop] below supplies that in its odd-n branch
+    (`consume_loop(prefix, n - 1)` as the branch's tail expr — the SCC forms).
+    Its even-n branch ALSO calls [consume_loop] on the very same borrowed
+    [prefix] (dead after the call, so Perceus wraps it in the same
+    post-call-DecRC dec-chain), but here the result is bound to [r] and
+    [r + 1] is returned — a genuinely non-tail group call. Pre-fix,
+    [has_non_tail_group_call] ignored [in_tail] in the dec-chain-wrapper arm
+    and reported no non-tail call, so the group was wrongly accepted; the
+    mutual-TCO back-edge emitted for this pair then stranded the `+ 1`
+    continuation in a dead block. Post-fix the group must be rejected (no
+    mutual_loop for this pair), and the program must still compile and run
+    correctly via ordinary (non-TCO) calls. *)
+let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    fn build_loop(seed, n) do
+      let prefix = String.repeat("a", 1)
+      if n == 0 do
+        String.byte_size(seed) + String.byte_size(prefix)
+      else
+        if n % 2 == 0 do
+          let r = consume_loop(prefix, n - 1)
+          r + 1
+        else
+          consume_loop(prefix, n - 1)
+        end
+      end
+    end
+    fn consume_loop(s, n) do
+      if n == 0 do
+        String.byte_size(s)
+      else
+        build_loop(s, n - 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(build_loop("z", 5))) end
+  end|} in
+  Alcotest.(check bool)
+    "non-tail dec-chain-wrapped group call: no mutual_loop formed for this pair"
+    false (ir_contains ir "mutual_loop")
+
+(** B8 regression: a pure mutually-recursive loop (is_even/is_odd style) never
+    calls a builtin and never returns to the scheduler on its own — unlike
+    emit_fn's self-TCO path (which calls emit_reduction_check at the top of
+    every tco_loop iteration), emit_mutual_tco_group never emitted a reduction
+    check anywhere in its combined dispatch function. That starves the
+    scheduler worker running the loop forever. Assert the mutual_loop body
+    contains the same reduction-check IR (@march_tls_reductions decrement +
+    @march_yield_from_compiled call) that self-TCO loops get. *)
+let test_mutual_tco_has_reduction_check () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn is_even(n : Int) : Bool do
+      if n == 0 do true else is_odd(n - 1) end
+    end
+    @[no_warn_recursion]
+    fn is_odd(n : Int) : Bool do
+      if n == 0 do false else is_even(n - 1) end
+    end
+    fn main() : Unit do println(to_string(is_even(1000000))) end
+  end|} in
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
+    (ir_contains ir "mutual_loop");
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: reduction budget loaded" true
+    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: yield call present" true
+    (ir_contains ir "@march_yield_from_compiled");
+  (* The check must be inside the loop body, not merely present somewhere else
+     in the module — find the mutual_loop label and confirm the reduction
+     check appears between it and the switch dispatch that follows it. *)
+  let loop_pos =
+    try Str.search_forward (Str.regexp "\nmutual_loop[0-9]*:") ir 0
+    with Not_found -> Alcotest.fail "mutual_loop label not found in IR"
+  in
+  let switch_pos =
+    try Str.search_forward (Str.regexp "switch i64") ir loop_pos
+    with Not_found -> Alcotest.fail "switch dispatch not found after mutual_loop label"
+  in
+  let loop_header = String.sub ir loop_pos (switch_pos - loop_pos) in
+  Alcotest.(check bool)
+    "mutual TCO is_even/is_odd: reduction check sits inside the loop header, before the dispatch switch"
+    true (ir_contains loop_header "@march_yield_from_compiled")
 
 (* ── Phase 4: Reduction Counting in Compiled Code ─────────────────────── *)
 
@@ -273,7 +1021,6 @@ let test_phase4_tco_fn_reduction_in_loop () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
-      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(100))) end
   end|} in
@@ -314,6 +1061,139 @@ let test_llvm_no_call_to_double_underscore () =
     with Not_found -> false
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
+
+(* --- name-resolution: cross-module qualified-alias hijack (RC-underflow root
+   cause) --------------------------------------------------------------------
+
+   A bulk `import Bastion` in ONE module registers the DOTTED short name
+   `Logger.debug` -> `Bastion.Logger.debug` in the program-global [_use_aliases]
+   table (register_aliases strips only the import prefix "Bastion.").  That
+   global table is consulted while lowering EVERY module.  It must NOT hijack a
+   module-qualified `Logger.debug` reference written in an UNRELATED module —
+   one that never imported Bastion, and that the typechecker bound to the stdlib
+   `Logger.debug/1`.  Pre-fix, lowering rewrote it to the arity-2
+   `Bastion.Logger.debug`, emitting a call with an uninitialised second argument
+   -> RC underflow / SIGSEGV at runtime.  The fix restricts the global
+   [_use_aliases] fallback to UNQUALIFIED (dot-free) names; the importing module
+   itself still resolves its own qualified alias via [current_module_aliases]. *)
+let test_qualified_alias_no_cross_module_hijack () =
+  let open March_tir.Lower in
+  Hashtbl.reset _fn_param_types;
+  _use_aliases := Hashtbl.create 8;
+  _module_aliases := Hashtbl.create 8;  (* isolate: resolve_use_alias's prefix fallback reads it *)
+  (* Simulate another module's `import Bastion`: a DOTTED global alias plus an
+     ordinary UNQUALIFIED one. *)
+  Hashtbl.replace !_use_aliases "Logger.debug" "Bastion.Logger.debug";
+  Hashtbl.replace !_use_aliases "helper" "Some.Mod.helper";
+  with_current_module_fns [] (fun () ->
+    (* A module that did NOT import Bastion — empty current_module_aliases. *)
+    let non_importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+    Alcotest.(check string)
+      "qualified `Logger.debug` NOT hijacked by another module's global import"
+      "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
+    (* The importing module itself still resolves its own qualified alias. *)
+    let importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+    Hashtbl.replace importer.current_module_aliases
+      "Logger.debug" "Bastion.Logger.debug";
+    Alcotest.(check string)
+      "importing module still resolves its own qualified alias"
+      "Bastion.Logger.debug" (resolve_use_alias importer "Logger.debug");
+    (* Unqualified names still resolve through the global table (unchanged). *)
+    Alcotest.(check string)
+      "unqualified global alias still applies"
+      "Some.Mod.helper" (resolve_use_alias non_importer "helper"))
+
+(* Companion to the hijack guard: the entry file's OWN top-level bulk import
+   must still resolve the partial-qualified call form.  `import Foo` (UseAll,
+   where Foo has a sub-module Foo.Sub) registers the DOTTED short name
+   `Sub.greet` -> `Foo.Sub.greet`.  After the global `_use_aliases` fallback was
+   restricted to unqualified names, the entry file's own `Sub.greet(...)` call
+   must resolve via the entry module's `current_module_aliases` — the top-level
+   DUse arms now register there too (mirroring the nested-import path).  Without
+   that, lowering emits an undefined `@Sub.greet` call (the same failure
+   direction as the hijack bug, but for a legitimate import).  This exercises the
+   full lower pipeline: pre-fix the emitted IR calls bare `@Sub.greet`, post-fix
+   it calls the qualified `@Foo.Sub.greet`. *)
+let test_entry_bulk_import_resolves_partial_qualified () =
+  let src = {|mod Main do
+    mod Foo do
+      mod Sub do
+        fn greet(n : Int) : Int do n + 1 end
+      end
+    end
+    import Foo
+    fn run(x : Int) : Int do Sub.greet(x) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  (* The qualified target must be CALLED; the bare `@Sub.greet(` (undefined /
+     unresolved) must NOT appear. Note `@Foo.Sub.greet` does not contain the
+     substring `@Sub.greet`, so the negative check is a clean discriminator. *)
+  Alcotest.(check bool) "partial-qualified call resolves to Foo.Sub.greet" true
+    (Test_helpers.contains "@Foo.Sub.greet" ir);
+  Alcotest.(check bool) "no unresolved bare @Sub.greet call" false
+    (Test_helpers.contains "@Sub.greet(" ir)
+
+(* A record type loaded from the COMPILED module registry (a dependency in the
+   `--compile`/`--test` unit, not prebound from source) stores its field types as
+   UNRESOLVED surface types that name sibling types by their BARE name (e.g.
+   `mod Conduit`'s `type UniqueConstraint = { scope : UniqueScope }` — both types
+   in one module, `UniqueScope` referenced unqualified).  When a referring module
+   annotates against `Conduit.UniqueConstraint`, [surface_ty] must expand that
+   record's fields; before the fix it expanded them in the REFERRER's env, which
+   held only the QUALIFIED sibling name (`Conduit.UniqueScope`) — [load_module_
+   into_env]/registry loading never seeded the bare `UniqueScope`.  Result: a
+   bogus "I cannot find `UniqueScope`" pointing at the definer's field span,
+   reproduced ~16x (once per test file importing the dep) under `forge test`
+   while `forge check` (which prebinds the dep FROM SOURCE, seeding bare names)
+   stayed clean.  Fix: registry type/record loading seeds the bare name too, and
+   registry-record field expansion threads the defining module's env.  This test
+   drives the exact registry path: register a module with a bare-named sibling
+   type referenced by a record field, then resolve the qualified record in a
+   separate module — pre-fix errors, post-fix clean. *)
+let test_registry_record_field_bare_sibling_type_resolves () =
+  let open March_modules.Module_registry in
+  reset ();
+  let dummy = March_ast.Ast.dummy_span in
+  let bare_ty n = March_ast.Ast.TyCon ({ March_ast.Ast.txt = n; span = dummy }, []) in
+  register "Widgets" {
+    me_name = "Widgets";
+    me_entries = [
+      (* A variant sibling type, referenced BARE by the record field below. *)
+      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true };
+      (* The record whose stored field type names `Scope` by its bare name —
+         exactly how the compiler serialises a same-module sibling reference. *)
+      { ex_name = "Constraint";
+        ex_kind = ExRecord (0, [("scope", bare_ty "Scope")]);
+        ex_public = true };
+    ];
+  };
+  (* A DIFFERENT module references the qualified record type; expanding it must
+     resolve the bare `Scope` field type. *)
+  let src = {|mod Client do
+    fn describe(c : Widgets.Constraint) : Int do 0 end
+  end|} in
+  let m = Test_helpers.parse_and_desugar src in
+  let (errors, _tm) = March_typecheck.Typecheck.check_module m in
+  reset ();
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      errors.March_errors.Errors.diagnostics in
+  let mentions_scope =
+    List.exists (fun s -> Test_helpers.contains "Scope" s
+                          && Test_helpers.contains "cannot find" s) msgs in
+  Alcotest.(check bool)
+    "no 'cannot find Scope' when expanding a registry record's bare-named field"
+    false mentions_scope;
+  Alcotest.(check bool)
+    "referrer typechecks cleanly against the registry record type"
+    false (March_errors.Errors.has_errors errors)
 
 (* --- multiline tests --- *)
 
@@ -401,11 +1281,14 @@ let test_complete_replace_with_suffix () =
 (* JIT cross-line REPL variable capture tests                         *)
 (* These tests exercise the fix for the bug where variables defined   *)
 (* on previous REPL lines could not be referenced in HOF arguments.  *)
-(* Tests are skipped gracefully when clang/runtime is unavailable.   *)
+(* Tests skip (counted) only when clang is absent; runtime-source or  *)
+(* link problems fail loudly per W2.0 — see setup_jit_runtime.        *)
 (* ------------------------------------------------------------------ *)
 
 (** Try to compile the march runtime to a shared library.
-    Returns [Some path] on success, [None] if clang or runtime.c is missing.
+    Returns [Some path] on success, [None] only when clang is absent (a
+    counted skip); a missing runtime source or a failed link is an
+    Alcotest failure, not a [None] (W2.0).
 
     The cache lives in ~/.cache/march, which is SHARED across worktrees and
     concurrent sessions — so the artifact name is keyed by a digest of every
@@ -415,9 +1298,34 @@ let test_complete_replace_with_suffix () =
     invalidated when the runtime changed, and a concurrent worktree with
     diverged runtime sources would overwrite it with an ABI-mismatched
     binary, hanging whichever test process dlopen'd the wrong build. *)
+
+(** Canary (W2 Task 2 / W2.0): the "gate is live" assertion. If clang is on
+    PATH, `setup_jit_runtime` must NEVER return `None` — every clang-gated
+    test in this file (and test_stdlib_suite.ml) silently no-ops when it
+    does, so a regression that reintroduces a swallowed link failure (or
+    breaks the runtime-source search path) would otherwise make an entire
+    class of tests vacuously pass again without any test catching it. This
+    test fails loudly if that ever happens; it only legitimately skips (via
+    the same clang-absence check) when clang itself is not installed here. *)
+let test_setup_jit_runtime_gate_is_live () =
+  if not (clang_available ()) then
+    (* Legitimate skip: no clang on PATH.  Counted directly here — this
+       canary short-circuits before setup_jit_runtime, so it would otherwise
+       be invisible in the shared skip ledger. *)
+    record_jit_skip "canary test_setup_jit_runtime_gate_is_live: no clang on PATH"
+  else
+    match setup_jit_runtime () with
+    | Some _ -> ()
+    | None ->
+      Alcotest.fail
+        "setup_jit_runtime returned None while `clang --version` succeeds — \
+         the JIT gate is broken (a link failure or missing runtime source is \
+         being silently swallowed again; see setup_jit_runtime's Alcotest.failf \
+         paths, which should have raised instead of returning None here)"
+
 let test_repl_jit_cross_line_let () =
   match setup_jit_runtime () with
-  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
   | Some runtime_so ->
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
@@ -581,6 +1489,176 @@ let test_repl_jit_cross_line_hof () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression (B11): a REPL-defined top-level `fn` (declared via a bare
+    `fn ... do ... end` at the prompt) is stored as a first-class closure in
+    a persistent slot by [emit_repl_fn_with_closure_slot] (see
+    lib/repl/repl.ml's `DFn` arm, `run_decl ~is_fn_decl:true`), so that a
+    LATER fragment referencing the function by bare name loads the slot's
+    closure value rather than re-resolving a fresh top-level call (each REPL
+    fragment gets its own [ctx], so `ctx.top_fns`/`ctx.compiled_fns` from the
+    defining fragment aren't visible — the bridge in
+    [emit_prev_slot_bridges] is what makes cross-fragment references work at
+    all).  That bridged reference is dispatched through ECallPtr, which
+    always reads the callee's result as `ptr` — the same ABI every OTHER
+    closure wrapper in llvm_emit.ml (the canonical [clo_wrap_define]) honors
+    by tagging scalar results `(n<<1)|1`.  The REPL's inline wrapper instead
+    declares the RAW concrete return type (`i64` for `mk() : Int`), so the
+    LLVM-declared return type disagrees with the indirect call's `ptr`
+    signature; the conditional-untag on the caller side reinterprets the raw
+    bits as tagged and (n odd) `ashr`s them — halving odd Int results
+    (5 -> 2).  `mk()` returns the odd literal `5` directly (no inner
+    lambda, so the *only* wrapper in play is the REPL's own); referencing
+    `mk` bare on a later REPL line and calling it must yield "5", not "2". *)
+let test_repl_jit_stored_closure_returns_untagged_int () =
+  match setup_jit_runtime () with
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       (* fn mk() do 5 end *)
+       (match parse_repl "fn mk() do\n  5\nend" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+            | _ -> failwith "expected DFn for 'fn mk() do 5 end'"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (* mk() — cross-fragment reference; bridged through the closure slot
+          (not a fresh top-level call, since ctx is fresh per fragment). *)
+       (match parse_repl "mk()" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "stored closure mk() = 5 (not halved to 2)" "5" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression (B11 review follow-up): a REPL-defined `fn` whose body
+    references ITSELF as a first-class value must not produce a duplicate
+    `$clo_wrap` definition.  [emit_repl_fn_with_closure_slot] registers the
+    fn into [ctx.top_fns] BEFORE [emit_fn] runs, so when the body takes the
+    fn as a value (e.g. `let g = selfref`), emit_atom's top-fns wrap path
+    fires [clo_wrap_define] into [ctx.extra_fns] and records the name in
+    [ctx.emitted_wraps].  The emitter's own wrapper emission must honor the
+    same emitted_wraps check-then-add guard the other two clo_wrap_define
+    call sites use — an unconditional emission appends a SECOND
+    `define ptr @selfref$clo_wrap` to the same fragment, and clang rejects
+    the duplicate symbol (compile_fragment raises "clang failed").  The
+    assertion is simply that the fragment compiles and the call returns the
+    right (odd, tag-round-tripped) value. *)
+let test_repl_jit_selfref_fn_no_duplicate_wrapper () =
+  match setup_jit_runtime () with
+  | None -> ()  (* counted skip: no clang on PATH (anything else fails loudly, W2.0) *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+       (* fn selfref(n) do let g = selfref ... end — self-reference as value *)
+       (match parse_repl
+          "fn selfref(n) do\n  let g = selfref\n  if n > 0 do\n    g(0)\n  else\n    7\n  end\nend" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.March_ast.Ast.fn_name.txt
+            | _ -> failwith "expected DFn for 'fn selfref(n) do ... end'"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          (* Pre-guard-fix this raised: Failure "clang failed ... symbol
+             'selfref$clo_wrap' is already defined". *)
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
+        | _ -> failwith "expected ReplDecl");
+       (* selfref(1) — recurses once through the self-referenced closure
+          value, returning the odd literal 7 through the ptr-ABI wrapper. *)
+       (match parse_repl "selfref(1)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "selfref(1) = 7 (single wrapper, ptr ABI)" "7" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: a top-level function referenced as a first-class VALUE (not
+    called) from a plain REPL expression or `let` RHS.  emit_atom wraps such a
+    reference in a @<fn>$clo_wrap trampoline whose definition is appended to
+    ctx.extra_fns — but emit_repl_expr / emit_repl_decl dropped extra_fns from
+    their output (unlike emit_repl_fn / emit_fns_fragment /
+    emit_repl_fn_with_closure_slot, fixed as B11), so the fragment stored the
+    address of an undefined symbol and clang rejected the IR. *)
+let test_repl_jit_topfn_first_class_value () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let desugared_decl src = match parse_repl src with
+         | March_ast.Ast.ReplDecl d -> March_desugar.Desugar.desugar_decl d
+         | _ -> failwith "expected ReplDecl" in
+       (* Module-level fns compiled into the same fragment; main's body passes
+          `double` as a bare value, forcing the clo_wrap trampoline. *)
+       let fn_decls = [
+         desugared_decl "fn double(x) do x * 2 end";
+         desugared_decl "fn call_with_21(f) do f(21) end";
+       ] in
+       let make_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
+           fn_clauses = [clause]; fn_bounds = [] } in
+         { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+           mod_decls = fn_decls @ [DFn (main_def, s)] }
+       in
+       (* Expression path (emit_repl_expr). *)
+       (match parse_repl "call_with_21(double)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          Alcotest.(check string) "expr: call_with_21(double) = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       (* Let-binding path (emit_repl_decl): same first-class use in a let RHS. *)
+       (match parse_repl "let y = call_with_21(double)" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (_, b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_mod bind_expr in
+          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (** Test: List.length works correctly in JIT REPL with stdlib precompile.
 
     This is a regression test for the defun TVar bug: when the stdlib is
@@ -636,6 +1714,107 @@ let test_repl_jit_stdlib_list_length () =
           let m = make_stdlib_mod e' in
           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
           Alcotest.(check string) "List.length [] = 0" "0" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** B12 regression: a niche-eligible ADT ([Opt = None | Some(Int)], Option-shaped
+    — one nullary ctor + one single-field ctor) defined via [:load] (a DMod,
+    exactly like the real REPL wraps user modules) in fragment 1, then matched
+    on by an expression in fragment 2.
+
+    Fragment 1 goes through [register_module_decl], which emits the producer
+    function via [emit_fns_fragment]; fragment 2's [run_expr] passes
+    [ctx.loaded_tir_types @ tir.tm_types] to [emit_repl_expr]'s `~types`.
+
+    HISTORY / why this test is shaped the way it is (best-effort RED, per the
+    task brief): pre-fix, representation decisions were driven by a single
+    module-level ref `cur_type_defs`, set ONLY by [emit_module] — which the
+    pure REPL/JIT path never calls. So in an isolated JIT-only process,
+    `cur_type_defs` sat at `[]` for the *entire* session: every fragment's
+    EAlloc/emit_case/ensure_adt_eq_fn call consistently (if accidentally)
+    computed "Boxed" for `Opt`, so running fragment 1 then fragment 2 straight
+    did NOT reproduce an observable split (verified empirically by
+    instrumenting both call sites: `cur_type_defs_len=0` at every call, with
+    no poke at all — this alone was GREEN even pre-fix).
+
+    To force the actual staleness — "the REPL/fragment entry points ... never
+    set the global — so all niche/newtype representation decisions ... run
+    against a stale or empty table" — the original RED additionally called
+    [Llvm_emit.emit_module] directly on the `Opt` module before fragment 1
+    (mimicking a prior `--compile` sharing the same process image as the
+    REPL, which is how `emit_module` legitimately runs at all) and then reset
+    the ref to `[]` before fragment 2. That combination reliably reproduced a
+    SIGSEGV pre-fix (fragment 2's emit_case read the ctor tag at offset 8 of
+    what fragment 1 had actually emitted as a bare tagged scalar, per the
+    live-at-the-time global) — confirmed by running the suite repeatedly
+    (5/5 crashes, exit 139) before the mechanical fix landed below.
+
+    Now that [cur_type_defs] is deleted (ctx.type_defs is populated
+    per-fragment from each entry point's own `types` parameter, never a
+    shared global), that historical RED recipe no longer compiles — there is
+    no global left to poke. This test keeps the two-fragment cross-ADT
+    scenario as a permanent regression pin: fragment 1 defines a niche-shaped
+    ADT and a producer, fragment 2 matches on the value the producer returns,
+    and the payload must round-trip correctly. It is GREEN post-fix (as
+    verified above); its historical RED is documented here rather than
+    reproduced in-line because reproducing it requires reintroducing the
+    deleted global. *)
+let test_repl_jit_niche_adt_cross_fragment () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       (* Fragment 1: `:load`-style DMod defining a niche-eligible ADT and a
+          producer fn, exactly as lib/repl/repl.ml wraps user :load files. *)
+       let mod_src = {|mod OptMod do
+         type Opt = None | Some(Int)
+         fn mk(x : Int) : Opt do
+           Some(x)
+         end
+       end|} in
+       let mod_ast = parse_module mod_src in
+       let dmod = March_ast.Ast.DMod
+         (mod_ast.March_ast.Ast.mod_name, March_ast.Ast.Public,
+          mod_ast.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span) in
+       (* Mirror lib/repl/repl.ml's load_decls_list exactly: check_decl with a
+          fresh error ctx, keep tc_env pre-decl ("input_tc") to hand to
+          register_module_decl, then advance tc_env past the DMod. *)
+       let input_tc = { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } in
+       let new_tc = March_typecheck.Typecheck.check_decl input_tc dmod in
+       (* Fragment 1: emits `mk`'s body — EAlloc(Opt.Some, [x]) — via
+          register_module_decl -> emit_fns_fragment, whose ctx.type_defs is
+          populated from this fragment's own `types` (containing `Opt`). *)
+       March_jit.Repl_jit.register_module_decl jit ~tc_env:input_tc dmod;
+       tc_env := { new_tc with March_typecheck.Typecheck.errors = March_errors.Errors.create () };
+       (* Between fragments: exercise an entirely unrelated emit_module call
+          (as any prior --compile in the same process would) to prove there
+          is no shared mutable state left for it to leave behind. *)
+       let unrelated_src = {|mod Unrelated do
+         fn id(x : Int) : Int do x end
+       end|} in
+       let unrelated_ast = parse_module unrelated_src in
+       let (_, unrelated_type_map) = March_typecheck.Typecheck.check_module unrelated_ast in
+       let unrelated_tir = March_tir.Lower.lower_module ~type_map:unrelated_type_map unrelated_ast in
+       let unrelated_tir = March_tir.Mono.monomorphize unrelated_tir in
+       let unrelated_tir = March_tir.Defun.defunctionalize unrelated_tir in
+       let unrelated_tir = March_tir.Perceus.perceus unrelated_tir in
+       ignore (March_tir.Llvm_emit.emit_module unrelated_tir);
+       (* Fragment 2: match on the value the fragment-1 producer returns.
+          Post-fix, the intervening emit_module call (with a `types` table
+          that doesn't even mention `Opt`) has zero effect on this fragment's
+          representation decisions. *)
+       (match parse_repl "match OptMod.mk(7) do\nSome(v) -> v\nNone -> 0\nend" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "niche ADT cross-fragment: match Some(7) = 7" "7" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
      with exn ->
@@ -2176,11 +3355,13 @@ let test_inline_pure_small () =
   let x_param = mk_var "x" March_tir.Tir.TInt in
   let double_body = app "+" [March_tir.Tir.AVar x_param; March_tir.Tir.AVar x_param] in
   let double_fn = { March_tir.Tir.fn_name = "double"; fn_params = [x_param];
-                    fn_ret_ty = March_tir.Tir.TInt; fn_body = double_body } in
+                    fn_ret_ty = March_tir.Tir.TInt; fn_body = double_body;
+                    fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "double"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [double_fn; main_fn] in
   let m' = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
@@ -2198,11 +3379,13 @@ let test_inline_impure_not_inlined () =
     app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")],
     March_tir.Tir.EAtom (March_tir.Tir.AVar x_param)) in
   let bad_fn = { March_tir.Tir.fn_name = "bad"; fn_params = [x_param];
-                 fn_ret_ty = March_tir.Tir.TInt; fn_body = bad_body } in
+                 fn_ret_ty = March_tir.Tir.TInt; fn_body = bad_body;
+                 fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "bad"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [bad_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (impure)" false !changed
@@ -2215,11 +3398,13 @@ let test_inline_recursive_not_inlined () =
                     (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
                     [March_tir.Tir.AVar n_param]) in
   let fact_fn = { March_tir.Tir.fn_name = "fact"; fn_params = [n_param];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = fact_body } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = fact_body;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let call = March_tir.Tir.EApp (mk_var "fact"
                (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
-                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call;
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [fact_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (recursive)" false !changed
@@ -2229,11 +3414,11 @@ let test_inline_mutual_recursion_not_inlined () =
   let changed = ref false in
   let x_param = mk_var "x" March_tir.Tir.TInt in
   let g_call = March_tir.Tir.EApp (mk_var "g" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
-  let f_fn = { March_tir.Tir.fn_name = "f"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = g_call } in
+  let f_fn = { March_tir.Tir.fn_name = "f"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = g_call; fn_kind = March_tir.Tir.FnNormal } in
   let f_call = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
-  let g_fn = { March_tir.Tir.fn_name = "g"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = f_call } in
+  let g_fn = { March_tir.Tir.fn_name = "g"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = f_call; fn_kind = March_tir.Tir.FnNormal } in
   let call_f = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
-  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = []; fn_ret_ty = March_tir.Tir.TInt; fn_body = call_f } in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = []; fn_ret_ty = March_tir.Tir.TInt; fn_body = call_f; fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [f_fn; g_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
@@ -2311,6 +3496,39 @@ let test_known_call_stack_alloc () =
   let m = mk_module [mk_fn "main" body] in
   let _ = March_tir.Known_call.run ~changed m in
   Alcotest.(check bool) "changed (stack-allocated closure)" true !changed
+
+(** known_call.ml's [is_clo_name] was converted from an inline 4-char
+    "$Clo" prefix check to [Tir_names.is_clo_struct] (Wave 3 Chunk 2 Task 1)
+    — pins the behavior-narrowing proof: every name ANY producer in the
+    compiler can actually mint (i.e. every name [Tir_names.clo_struct_name]
+    can produce) agrees between the old 4-char check and the new 5-char
+    predicate; the two predicates diverge ONLY on the unreachable
+    "$Clo"+non-underscore shape, which this test also documents. *)
+let test_known_call_is_clo_name_matches_tir_names () =
+  let old_is_clo_name_4char s =
+    String.length s >= 4 && String.sub s 0 4 = "$Clo"
+  in
+  let representative_names =
+    (* Every shape [Tir_names.clo_struct_name] can actually produce. *)
+    [ March_tir.Tir_names.clo_struct_name ~fn_name:"foo" ~lam_uid:0;
+      March_tir.Tir_names.clo_struct_name ~fn_name:"bar" ~lam_uid:42;
+      March_tir.Tir_names.clo_struct_name ~fn_name:"" ~lam_uid:7;
+      (* Non-closure names, must be false under both. *)
+      "Option"; "List"; "$fv1"; "$Tuple2"; "main" ]
+  in
+  List.iter (fun name ->
+    Alcotest.(check bool)
+      ("is_clo_name/is_clo_struct agree on producible name \"" ^ name ^ "\"")
+      (old_is_clo_name_4char name)
+      (March_tir.Known_call.is_clo_name name)
+  ) representative_names;
+  (* The only theoretical divergence: "$Clo"+non-underscore. Documented as
+     unreachable (no producer mints it — see is_clo_name's doc comment) but
+     pinned here so the narrowing is explicit, not silently assumed. *)
+  Alcotest.(check bool) "old 4-char check WOULD match unreachable shape" true
+    (old_is_clo_name_4char "$Clox");
+  Alcotest.(check bool) "new predicate correctly rejects unreachable shape" false
+    (March_tir.Known_call.is_clo_name "$Clox")
 
 (* ── Struct update fusion ────────────────────────────────────────── *)
 
@@ -2464,10 +3682,12 @@ let test_dce_unreachable_topfn () =
   let changed = ref false in
   let unused_fn = { March_tir.Tir.fn_name = "unused"; fn_params = [];
                     fn_ret_ty = March_tir.Tir.TInt;
-                    fn_body = March_tir.Tir.EAtom (ilit 99) } in
+                    fn_body = March_tir.Tir.EAtom (ilit 99);
+                    fn_kind = March_tir.Tir.FnNormal } in
   let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
                   fn_ret_ty = March_tir.Tir.TInt;
-                  fn_body = March_tir.Tir.EAtom (ilit 0) } in
+                  fn_body = March_tir.Tir.EAtom (ilit 0);
+                  fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [unused_fn; main_fn] in
   let m' = March_tir.Dce.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
@@ -2510,7 +3730,8 @@ let test_fast_math_emits_fast_attr () =
   let fn_var name = mk_var name (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)) in
   let body = March_tir.Tir.EApp (fn_var "+.", [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) in
   let fd = { March_tir.Tir.fn_name = "fadd_test"; fn_params = [x; y];
-             fn_ret_ty = March_tir.Tir.TFloat; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TFloat; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let ir_fast   = March_tir.Llvm_emit.emit_module ~fast_math:true  m in
   let ir_normal = March_tir.Llvm_emit.emit_module ~fast_math:false m in
@@ -3253,14 +4474,16 @@ let test_ctor_no_collision_different_tags () =
                fn_ret_ty = March_tir.Tir.TCon ("A", []);
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("A.Cons", []),
-                              [March_tir.Tir.AVar x]) } in
+                              [March_tir.Tir.AVar x]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   (* make_b: builds B.Cons — should store tag 0 (first ctor of B) *)
   let fn_b = { March_tir.Tir.fn_name = "make_b";
                fn_params = [x];
                fn_ret_ty = March_tir.Tir.TCon ("B", []);
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("B.Cons", []),
-                              [March_tir.Tir.AVar x]) } in
+                              [March_tir.Tir.AVar x]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_a; fn_b];
             tm_types = [td_a; td_b]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let ir = March_tir.Llvm_emit.emit_module m in
@@ -3288,7 +4511,8 @@ let test_ctor_arity_mismatch_raises () =
                fn_body   = March_tir.Tir.EAlloc
                              (March_tir.Tir.TCon ("A.Cons", []),
                               (* 2 args but ctor only has 1 field *)
-                              [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) } in
+                              [March_tir.Tir.AVar x; March_tir.Tir.AVar y]);
+               fn_kind   = March_tir.Tir.FnNormal } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_t];
             tm_types = [td]; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let raised =
@@ -4098,7 +5322,6 @@ let test_reduction_counter_exhausts () =
 let test_eval_yields_after_budget () =
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   March_eval.Eval.set_reduction_counting true;
@@ -4114,7 +5337,6 @@ let test_eval_no_yield_when_disabled () =
   March_eval.Eval.set_reduction_counting false;
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in
@@ -5176,15 +6398,18 @@ let hcr_boundary_module () : March_tir.Tir.tir_module =
     { fn_name = "Blog.hero";
       fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
       fn_ret_ty = TInt;
+      fn_kind = FnNormal;
       fn_body = EAtom (ALit (March_ast.Ast.LitInt 1)) } in
   let handle : fn_def =
     { fn_name = "Blog.handle";
       fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
       fn_ret_ty = TInt;
+      fn_kind = FnNormal;
       fn_body = EApp (vref "Blog.hero",
                       [AVar { v_name = "n"; v_ty = TInt; v_lin = Unr }]) } in
   let main : fn_def =
     { fn_name = "Blog.main"; fn_params = []; fn_ret_ty = TInt;
+      fn_kind = FnNormal;
       fn_body = EApp (vref "Blog.handle",
                       [ALit (March_ast.Ast.LitInt 3)]) } in
   { tm_name = "Blog"; tm_fns = [main; handle; hero]; tm_types = [];
@@ -5214,12 +6439,1858 @@ let test_hcr_entry_point_not_a_reloadable_slot () =
 
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
+(* ── Guard-exhaustion fallthrough (B3) ─────────────────────────────────────
+   A guarded match where every guard fails must panic, not silently return
+   `LitInt 0` reinterpreted at the match's real (non-Int) type — see
+   lib/tir/lower.ml's `nonexhaustive_panic` comment.  This test compiles and
+   *runs* the binary (not just inspecting IR text) because the bug's symptom
+   is a runtime crash/garbage value, not a shape in the emitted IR. *)
+let test_guard_exhaustion_panics_compiled () =
+  let main_exe = find_main_exe () in
+  (* Run from the project root so the compiler resolves its CWD-relative
+     runtime/ and stdlib/ directories (same trick as the other compiled
+     regression tests in test_stdlib_suite.ml). *)
+  let project_root = march_project_root () in
+  let src_text =
+    "mod GuardEx do\n\
+    \  fn classify(n) do\n\
+    \    match n do\n\
+    \      x when x > 0 -> \"pos\"\n\
+    \      x when x < 0 -> \"neg\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    println(classify(0))\n\
+    \  end\n\
+     end\n"
+  in
+  let tmp = Filename.temp_file "march_guardex" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "guardex.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (* Read the whole stdout+stderr of a command (trimmed). *)
+  let read_cmd cmd =
+    let ic = Unix.open_process_in cmd in
+    let buf = Buffer.create 64 in
+    (try
+       while true do Buffer.add_channel buf ic 1 done
+     with End_of_file -> ());
+    ignore (Unix.close_process_in ic);
+    String.trim (Buffer.contents buf)
+  in
+  (* --- interpreter: must already panic (parity check) --- *)
+  let interp_out = read_cmd (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "interpreter panics on guard exhaustion (non-exhaustive)" true
+    (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+  (* --- compiled: must panic (exit 1) with a non-exhaustive-match message,
+     not crash (segfault, exit 139) or exit 0 with garbage output --- *)
+  let bin = Filename.concat tmp "guardexbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled guard-exhaustion panics with a non-exhaustive-match message (not exit 0/segfault)"
+      true
+      ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
+       && ir_contains run_out "EXIT:1")
+
+(* ── Float-literal match arms (B4) ──────────────────────────────────────
+   `pat_tag_and_subs` returned `None` for `Ast.LitFloat` patterns, and the
+   match-matrix grouping loop silently discarded rows it couldn't tag — so a
+   float-literal match arm compiled to nothing, silently falling through to
+   whatever the next (typically wildcard) arm was.  The interpreter (which
+   matches on the AST directly) got this right; only the compiled backend
+   diverged.  These tests compile and *run* the binary, because the bug's
+   symptom is a wrong *value*, not a shape in the emitted IR (same rationale
+   as the guard-exhaustion test above). *)
+
+(* Read the whole stdout+stderr of a command (trimmed). Shared helper for the
+   compile-and-run regression tests in this section. *)
+let read_cmd_output cmd =
+  let ic = Unix.open_process_in cmd in
+  let buf = Buffer.create 64 in
+  (try
+     while true do Buffer.add_channel buf ic 1 done
+   with End_of_file -> ());
+  ignore (Unix.close_process_in ic);
+  String.trim (Buffer.contents buf)
+
+(** Write [src_text] to a fresh temp dir and return (project_root, main_exe,
+    src_path, tmp_dir). Shared setup for the compile-and-run tests below.
+    [find_main_exe] fails loudly if the compiler binary is missing (it is
+    never legitimately absent — see test_helpers.ml). *)
+let write_march_source ~name src_text =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file name "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (name ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (project_root, main_exe, src, tmp)
+
+let test_float_lit_match_arm_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat"
+    "mod FloatPat do\n\
+    \  fn name(x) do\n\
+    \    match x do\n\
+    \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\" | _ -> \"other\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    println(name(2.5))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter: matches the float literal correctly (baseline) --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter matches float literal arm"
+    "two-and-a-half" interp_out;
+  (* --- compiled: must match too — this is the B4 regression --- *)
+  let bin = Filename.concat tmp "floatpatbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled float literal match arm produces the SAME value as the \
+       interpreter (not silently falling through to a later/wildcard arm)"
+      "two-and-a-half" run_out
+
+(** Float arm with NO wildcard: a non-exhaustive float match must panic (the
+    Task 1 / B3 `nonexhaustive_panic` fallback), not silently fall through to
+    LLVM `unreachable` (undefined behaviour — observed, pre-fix, to print a
+    WRONG matched value with exit 0 instead of crashing). The scrutinee must
+    NOT be a compile-time constant, or the optimizer folds the whole match to
+    its statically-known arm and never reaches the fallback path at all. *)
+let test_float_lit_no_wildcard_panics_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat_nowild"
+    "mod FloatPatNoWild do\n\
+    \  fn name(x) do\n\
+    \    match x do\n\
+    \      1.5 -> \"one-and-a-half\" | 2.5 -> \"two-and-a-half\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let n = int_to_float(List.length(process_argv())) +. 3.7\n\
+    \    println(name(n))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter: must already panic (parity check) --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "interpreter panics on float non-exhaustive match" true
+    (ir_contains interp_out "non-exhaustive" || ir_contains interp_out "panic");
+  (* --- compiled: must panic (exit 1), not exit 0 with a wrong value --- *)
+  let bin = Filename.concat tmp "floatpatnowildbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled float non-exhaustive match panics with a non-exhaustive-match \
+       message (not exit 0 with a wrong value, and not a segfault)"
+      true
+      ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
+       && ir_contains run_out "EXIT:1")
+
+(* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
+   A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
+   boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
+   unresolved unification variable) reaches Perceus as `Option(TVar)`.
+   `Repr.repr_of_ty` conservatively boxes that (niche_payload_ok(TVar)=false),
+   but codegen (`llvm_case.ml`'s `effective_repr` abstract-arg recovery) niche-
+   encodes it — the value shares storage with its payload.  Pre-fix,
+   `scrutinee_shares_payload_storage` trusted `repr_of_ty`'s Boxed verdict, so
+   `add_scrutinee_free_for` treated the value as a distinct boxed cell and
+   handed it to FBIP, which rewrote `Some(conn) -> Ok(conn)` into
+   `reuse maybe_conn as Ok(conn)`.  Because `conn` aliases `maybe_conn` (niche),
+   the reuse stored the payload into its own reused cell — a self-referential
+   object → `march: RC underflow (rc was 0)` (SIGABRT, exit 134) when the
+   value is later consumed.  Fix: `scrutinee_shares_payload_storage` mirrors
+   codegen's abstract-arg niche recovery.  See docs/value-representation.md §7.
+   Runs the binary because the symptom is a runtime abort, not an IR shape. *)
+let test_erased_option_niche_fbip_no_underflow_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_erased_option_niche"
+    "mod Main do\n\
+    \  needs IO.Spawn\n\
+    \  type Conn = PgConn(Int) | LiteConn(String)\n\
+    \  actor Pool do\n\
+    \    state { n : Int }\n\
+    \    init { n: 0 }\n\
+    \    on Checkout(reply_to) do\n\
+    \      let _ = actor_reply(reply_to, Some(PgConn(42)))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn describe(c) do\n\
+    \    match c do\n\
+    \    PgConn(fd)  -> \"pg:\" ++ int_to_string(fd)\n\
+    \    LiteConn(k) -> \"lite:\" ++ k\n\
+    \    end\n\
+    \  end\n\
+    \  fn checkout(pool) do\n\
+    \    let t = task_spawn(fn _ ->\n\
+    \      match actor_call(pool, Checkout(0), 5000) do\n\
+    \      Err(e)         -> Err(e)\n\
+    \      Ok(maybe_conn) ->\n\
+    \        match maybe_conn do\n\
+    \        None       -> Err(\"none\")\n\
+    \        Some(conn) -> Ok(conn)\n\
+    \        end\n\
+    \      end\n\
+    \    )\n\
+    \    task_await_unwrap(t)\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    match checkout(spawn(Pool)) do\n\
+    \    Ok(conn) -> println(describe(conn))\n\
+    \    Err(e)   -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  (* NB: no interpreter parity check here — the interpreter's actor_call /
+     task_spawn interaction does not deliver the reply for this shape ("err: no
+     reply"), an unrelated interpreter limitation.  The RC bug is purely a
+     COMPILED-backend defect, so we assert on the compiled binary alone:
+     pre-fix it aborted with `RC underflow` (SIGABRT, exit 134); post-fix it
+     prints pg:42 and exits 0. *)
+  let bin = Filename.concat tmp "erasedoptbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased-niche-Option checkout prints pg:42 with no RC underflow \
+       (not SIGABRT/exit 134)"
+      true
+      (ir_contains run_out "pg:42"
+       && ir_contains run_out "EXIT:0"
+       && not (ir_contains run_out "RC underflow"))
+
+(* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
+   `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
+   referenced a/b/c/d as undefined global functions (`call ptr @a()`), so clang
+   rejected the module.  Root cause: the block-`let` PatTuple lowering in
+   lib/tir/lower.ml bound only *direct* PatVar tuple elements and silently
+   dropped any nested sub-pattern (`| _ -> inner`), so a nested tuple's leaf
+   vars were never bound and later resolved to global fn references.  The
+   interpreter and the equivalent `match ((1,2),(3,4)) do ((a,b),(c,d)) -> ..`
+   form always got this right; only the compiled block-`let` path diverged.
+   Compile-and-run because the symptom is a codegen failure / wrong value, not
+   an IR shape (same rationale as the float-literal tests above). *)
+let test_nested_tuple_let_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let"
+    "mod NestedTupleLet do\n\
+    \  fn main() do\n\
+    \    let ((a, b), (c, d)) = ((1, 2), (3, 4))\n\
+    \    println(int_to_string(a + b + c + d))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: destructures nested tuple correctly --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter destructures nested tuple in let" "10" interp_out;
+  (* --- compiled: must bind all four leaf vars and produce the same value --- *)
+  let bin = Filename.concat tmp "nestedtupleletbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled nested-tuple `let` binds every leaf var (a/b/c/d), producing \
+       the SAME value as the interpreter (not `use of undefined value @a`)"
+      "10" run_out
+
+(** Deeper coverage of the same recursion: 3-level nesting, a wildcard element,
+    and a nested-tuple element, all in one block-`let`.  Locks down that
+    [bind_subpat] recurses through interior tuples and skips wildcards, rather
+    than only handling the flat two-element repro above. *)
+let test_nested_tuple_let_deep_wildcard_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_tuple_let_deep"
+    "mod NestedTupleLetDeep do\n\
+    \  fn main() do\n\
+    \    let ((a, (b, c)), _, (d, e)) = ((1, (2, 3)), 99, (4, 5))\n\
+    \    println(int_to_string(a + b + c + d + e))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter: deep nested tuple let with wildcard element"
+    "15" interp_out;
+  (* --- compiled: must match --- *)
+  let bin = Filename.concat tmp "nestedtupledeepbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled deep nested-tuple `let` (3-level nesting, wildcard element, \
+       interior nested tuple) matches the interpreter"
+      "15" run_out
+
+(* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
+   A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
+   with the MANY stdlib helpers that use a conventionally-named nested
+   `fn go` (List.length, List.reverse, List.map, …).  Monomorphization's
+   [rewrite_calls] resolved every call named `go` against the module-level
+   fn_table (keyed by bare name), so the stdlib helpers' nested `go` calls were
+   silently rebound to the USER's top-level `go`.  `List.length(r)` then ran the
+   user's reverse-accumulator against an Int accumulator (0), returning a garbage
+   pointer reinterpreted as an Int (observed: len=4745871568 instead of 5).
+   The interpreter has no mangling/linking step, so it was always correct — an
+   interpreter-correct / compiled-wrong divergence.  Compile-and-run because the
+   symptom is a wrong runtime value, not an IR shape.  Fix: nested-fn names
+   shadow same-named top-level fns in mono (lib/tir/mono.ml `rewrite_calls`). *)
+let test_nested_fn_name_shadows_toplevel_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_go_collision"
+    "mod GoCollision do\n\
+    \  pfn go(xs, acc) do\n\
+    \    match xs do\n\
+    \    Nil -> acc\n\
+    \    Cons(h, t) -> go(t, Cons(h, acc))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let r = go([1, 2, 3, 4, 5], [])\n\
+    \    println(int_to_string(List.length(r)) ++ \"|\" ++ int_to_string(List.sum_int(r)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no mangling, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: user `go` reverses to a 5-element list; stdlib `go` helpers \
+     (length/sum_int) still resolve to their own bodies"
+    "5|15" interp_out;
+  (* --- compiled: must match; before the fix this printed a garbage length --- *)
+  let bin = Filename.concat tmp "gocollisionbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: stdlib nested `go` helpers are NOT captured by the user's \
+       top-level `go` — List.length/List.sum_int return the SAME values as the \
+       interpreter (not a garbage pointer reinterpreted as an Int)"
+      "5|15" run_out
+
+(* ── Non-entry-module single-field ADT: construct-vs-destructure repr ──────
+   A single-field ADT (`type Wrap = Wrap(List(Int))`, or stdlib `Bytes`)
+   defined in a NON-ENTRY module (a nested `mod`, or any MARCH_LIB_PATH library
+   like stdlib) is registered under its MODULE-QUALIFIED name ("Inner.Wrap") by
+   [Lower.lower_mod_decls], but the module's own value types reference it BARE
+   ("Wrap") — the typechecker drops the prefix on same-module references.  So
+   [Repr.find_variant]/[repr_of_ty] missed on the bare-name query and defaulted
+   to [Boxed] at construction (EAlloc) and top-level pattern sites, while the
+   codegen newtype-recovery path (`emit_case`, which looks up by CTOR name → the
+   qualified typedef) saw [Newtype].  A tuple-nested destructure
+   `match (w1,w2) do (Wrap(xs),Wrap(ys)) -> …` reaches [emit_case] with a
+   TVar-erased sub-scrutinee → took the Newtype (identity) path, so `xs` was the
+   BOX pointer, not the payload; `List.length(xs)` then read the box header
+   (tag 0) as an empty `Nil` → 0.  Entry-module ADTs are registered bare so both
+   sides agreed (Newtype) and worked — this was non-entry-only, and it made
+   compiled `Bytes.concat` (bytes.march is a non-entry module) return an empty
+   `Bytes`, hanging forgepm's Postgres handshake.  Fixed in [Repr.find_variant]:
+   reconcile a bare query against a unique module-qualified registration.
+   Compile-and-run because the symptom is a wrong runtime value across the
+   construct/destructure boundary, not an IR shape. *)
+let test_nonentry_newtype_tuple_destructure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nonentry_newtype"
+    "mod Main do\n\
+    \  needs IO.Console\n\
+    \  mod Inner do\n\
+    \    type Wrap = Wrap(List(Int))\n\
+    \    fn mk(xs) do Wrap(xs) end\n\
+    \    fn sum_pair(w1, w2) do\n\
+    \      match (w1, w2) do\n\
+    \      (Wrap(xs), Wrap(ys)) -> List.length(xs) + List.length(ys)\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let a = Inner.mk([1, 2, 3])\n\
+    \    let b = Inner.mk([4, 5])\n\
+    \    println(int_to_string(Inner.sum_pair(a, b)))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline: no repr/mangling step, so always correct --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string)
+    "interpreter: tuple-destructure of a non-entry single-field ADT unwraps \
+     both payloads (3 + 2)"
+    "5" interp_out;
+  (* --- compiled: must match; before the fix the nested Wrap destructure took
+         the Newtype (identity) path against a boxed value and printed 0 --- *)
+  let bin = Filename.concat tmp "nonentrynewtypebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: a non-entry single-field ADT is classified identically at \
+       construction and (tuple-nested) destructure — the payload is unwrapped, \
+       not read as an empty niche/newtype (which returned 0)"
+      "5" run_out
+
+(* ── EUpdate on type-erased records (B5) ─────────────────────────────────
+   `{ base with f: v }` where the base's static shape is unknown
+   (get_record_fields = [], e.g. a record_from_list/record_put result) used
+   to allocate a header-only cell and write every update past it via
+   field_index_for's (0, TVar "_") fallback.  The fix lowers the whole
+   update to ONE march_record_update_dyn call (single allocation, base
+   fields copied, named fields overwritten, runtime panic on a name missing
+   from the base shape — the typechecker's TVar branch cannot validate
+   names against an erased base). *)
+
+(** IR shape: a 3-field erased update must emit exactly ONE
+    march_record_update_dyn call — not a chain of per-field
+    march_record_put calls (which would allocate an intermediate record per
+    field and leak every non-final one: compiler-emitted temporaries are
+    invisible to Perceus). *)
+let test_erased_update_single_dyn_call_ir () =
+  let src = {|mod ErasedUpd do
+    fn get_a(r) do r.a end
+    fn main() do
+      let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
+      let u = { built with a: 10, b: 20, c: 30 }
+      println(int_to_string(get_a(u)))
+    end
+  end|} in
+  let ir = emit_actor_ir src in
+  (* Match CALL SITES only — the preamble also carries a
+     `declare ptr @march_record_update_dyn(...)` line. *)
+  Alcotest.(check int)
+    "exactly ONE march_record_update_dyn call for a 3-field erased update"
+    1 (ir_count ir "call ptr (ptr, i64, ...) @march_record_update_dyn(");
+  Alcotest.(check int)
+    "no chained march_record_put calls emitted for the update"
+    0 (ir_count ir "call ptr @march_record_put(")
+
+(** Compiled missing-field update on an erased base must PANIC (nonzero
+    exit, clear message), not silently fabricate the field.  The typechecker
+    cannot catch this: its TVar branch builds a partial record constraint
+    from the update's own field names, never checking them against the
+    base's actual fields — so `{ record_from_list([("a",1)]) with z: 99 }`
+    typechecks.  march_record_put semantics (extend on new key) would
+    silently produce a 2-field record here.  NOTE: the interpreter's
+    ERecordUpdate (lib/eval/eval.ml) used to diverge here (silently appending
+    missing update fields instead of erroring); Core March spec Task 3
+    adjudicated the compiled fail-loud contract as normative and converged
+    eval.ml to match (see specs/lang/core-march.md §4, ERecordUpdate rule).
+    This test only asserts the compiled side; the converged interpreter
+    behavior is covered by
+    test_properties.ml's test_record_update_missing_field_on_erased_base_converged. *)
+let test_erased_update_missing_field_panics_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_miss"
+    "mod ErasedUpdMiss do\n\
+    \  fn main() do\n\
+    \    let built = record_from_list([(\"a\", 1)])\n\
+    \    let bad = { built with z: 99 }\n\
+    \    match record_get(bad, \"z\") do\n\
+    \      Some(v) -> println(\"FABRICATED \" ++ int_to_string(v))\n\
+    \      None -> println(\"no z\")\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  (* Compile from the source root: the new march_record_update_dyn symbol
+     must come from the live runtime/*.c sources, not _build/default's
+     runtime copies (refreshed only when a dune rule that lists them as
+     deps runs). *)
+  let src_root = project_root in
+  let bin = Filename.concat tmp "erasedupdmissbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased update with a missing field name panics with a \
+       no-field message (not exit 0 with a silently fabricated field)"
+      true
+      (ir_contains run_out "no field"
+       && ir_contains run_out "EXIT:1"
+       && not (ir_contains run_out "FABRICATED"))
+
+(** Compiled multi-field (3-field) erased update: every updated field must
+    carry its own value (pre-fix, all updates collided on slot 0 of a
+    header-only cell) and untouched reads must not crash. *)
+let test_erased_update_multi_field_values_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_erasedupd_multi"
+    "mod ErasedUpdMulti do\n\
+    \  fn get_i(r, k) do\n\
+    \    match record_get(r, k) do\n\
+    \      Some(v) -> v\n\
+    \      None -> 0 - 1\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    let built = record_from_list([(\"a\", 1), (\"b\", 2), (\"c\", 3)])\n\
+    \    let u = { built with a: 11, b: 22, c: 33 }\n\
+    \    println(int_to_string(get_i(u, \"a\")) ++ \" \" ++\n\
+    \            int_to_string(get_i(u, \"b\")) ++ \" \" ++\n\
+    \            int_to_string(get_i(u, \"c\")))\n\
+    \  end\n\
+     end\n"
+  in
+  (* --- interpreter baseline --- *)
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter: all three updated values" "11 22 33" interp_out;
+  (* --- compiled must agree (compile from the source root — see the
+     missing-field test above for why) --- *)
+  let src_root = project_root in
+  let bin = Filename.concat tmp "erasedupdmultibin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote src_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled 3-field erased update: each field carries its own value \
+       (no slot-0 collision, no corruption)"
+      "11 22 33" run_out
+
+(* ── Interface-impl monomorphization: compiled println/show on generic
+   containers (Wave 2, Task 1) ──────────────────────────────────────────
+   Root cause (see specs/analysis or .superpowers/sdd/sortby-diagnosis.md):
+   inside `impl Show(List(a)) when Show(a)` (stdlib/prelude.march), the
+   element-level `show(x)` types as a TVar, so lower.ml defers resolution.
+   mono.ml resolves the OUTER call (`show(xs : List(Int))`) to the mangled
+   impl `Show$List.show`, but historically enqueued that impl with an EMPTY
+   substitution — so the impl body stayed generic and the nested `show(x)`
+   call survived to llvm_emit unresolved.  llvm_emit's `unqualified_fns`
+   dot-suffix fallback then resolved the bare `show` to whatever `*.show`
+   impl happened to be registered first (typically `Show$List.show`
+   itself) — the list-impl applied to a raw element.  Symptom varies by
+   element type: Int → SIGSEGV (tag-load on an erased-int treated as a
+   heap pointer), String → non-exhaustive-match panic, Option → SIGSEGV/
+   SIGBUS (varies by which impl DCE keeps first).
+
+   These four variants (Int list, String list, Option list, nested list)
+   must all produce IDENTICAL stdout in compiled and interpreted mode, and
+   the compiled binary must exit 0. *)
+
+(** Shared parity assertion: interpreter and compiled binary must print the
+    exact same stdout and the compiled binary must exit 0. Returns the
+    compiled run's raw "stdout;EXIT:n" string on failure paths so callers
+    can still assert on it directly if useful. *)
+let assert_compiled_interp_parity ~name ~src ~expected () =
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let interp_out = read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output") expected interp_out;
+  let bin = Filename.concat tmp (name ^ "bin") in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
+      (Filename.quote bin)) in
+    Alcotest.(check bool)
+      (name ^ ": compiled output matches interpreter AND exits 0 \
+       (got: " ^ run_out ^ ")")
+      true
+      (ir_contains run_out (expected ^ "\nEXIT:0")
+       || run_out = expected ^ "\nEXIT:0")
+
+(** int_div_euclid: native codegen must route through march_checked_ediv and
+    match the interpreter's Euclidean quotient across all four sign quadrants.
+    Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
+    at link time with `Undefined symbols: _int_div_euclid`. The negative-operand
+    cases exercise the truncated→Euclidean correction step (r<0 → q∓1). *)
+let test_compiled_int_div_euclid_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_div_euclid"
+    ~src:"mod IntDivEuclidParity do\n\
+         \  fn main() do\n\
+         \    println([int_div_euclid(7, 2), int_div_euclid(-7, 2), \
+                        int_div_euclid(-7, -2), int_div_euclid(7, -2)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[3, -4, 4, -3]"
+    ()
+
+(** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
+    the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
+    left the outer binding's literal mapping (`x -> 10`) in scope when the
+    shadowing RHS was not itself a literal/alias/record, so the body's uses of
+    the *new* `x` were substituted with the *old* value — a silently-wrong
+    compile on BOTH the native and JS backends (interpreter was correct). The
+    chain `((10 + 5) * 2)` discriminates cleanly: correct = 30, buggy = 10
+    (every shadow kept reading the original 10). *)
+let test_compiled_let_shadowing_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_let_shadowing"
+    ~src:"mod LetShadowParity do\n\
+         \  fn main() do\n\
+         \    let x = 10\n\
+         \    let x = x + 5\n\
+         \    let x = x * 2\n\
+         \    println(int_to_string(x))\n\
+         \  end\n\
+          end\n"
+    ~expected:"30"
+    ()
+
+(** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
+    erased-int tag (2n+1) got passed as a fresh Show$List.show's list
+    argument and the match-scrutinee tag load faulted. *)
+let test_compiled_println_int_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_intlist"
+    ~src:"mod IfaceImplIntList do\n\
+         \  fn main() do\n\
+         \    println([1, 2, 3, 4, 5])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[1, 2, 3, 4, 5]"
+    ()
+
+(** Variant 2: List(String) — pre-fix symptom was a non-exhaustive-match
+    panic (exit 1): the bogus tag load landed inside a valid string heap
+    object and hit the match's default arm. *)
+let test_compiled_println_string_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_stringlist"
+    ~src:"mod IfaceImplStringList do\n\
+         \  fn main() do\n\
+         \    println([\"a\", \"b\"])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[a, b]"
+    ()
+
+(** Variant 3: List(Option(Int)) — pre-fix symptom was SIGSEGV/SIGBUS
+    (varies with DCE impl ordering): the erased-Option payload's tag byte
+    was read through the wrong impl's scrutinee layout. *)
+let test_compiled_println_option_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_optionlist"
+    ~src:"mod IfaceImplOptionList do\n\
+         \  fn main() do\n\
+         \    println([Some(42), None])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[Some(42), None]"
+    ()
+
+(** Variant 4: List(List(Int)) — nested container. Exercises recursive
+    impl specialization (Show$List.show for the outer List must itself
+    specialize the inner Show$List.show for List(Int), which specializes
+    Show$Int.show) AND is the recursion-guard check: mono's worklist
+    dedup (done_set keyed by the fully mangled name) must terminate this
+    without looping, since Show$List's own impl calls Show$List again at
+    one level deeper. *)
+let test_compiled_println_nested_list_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_ifaceimpl_nestedlist"
+    ~src:"mod IfaceImplNestedList do\n\
+         \  fn main() do\n\
+         \    println([[1, 2], [3]])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[[1, 2], [3]]"
+    ()
+
+(** Compiled `println(:atom)` / `show(:atom)` parity.  Pre-fix symptom was a
+    LINK failure (not a runtime crash): `Show$Atom.show` was never registered
+    — [Atom] was absent from lower.ml's builtin Show injection ([show_specs]),
+    so `show(atom)` resolved to a bare, undefined `show` symbol.  `println$Atom`
+    and `march_main` both referenced `_show`, and ld failed with "Undefined
+    symbols … _show".  The interpreter rendered `:ok` fine (VAtom a -> ":" ^ a),
+    so this was a compiled-backend-only divergence.  Atoms compile to nameless
+    FNV-1a i64 hashes, so the fix also emits a compile-time hash→name reverse
+    table (`march_atom_to_string`) that the generated `Show$Atom.show` calls. *)
+let test_compiled_println_atom_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow"
+    ~src:"mod AtomShow do\n\
+         \  fn main() do\n\
+         \    println(:ok)\n\
+         \  end\n\
+          end\n"
+    ~expected:":ok"
+    ()
+
+(** Variant: multiple atoms (including one with digits/underscores) shown via
+    the explicit `show` builtin and concatenated — exercises the reverse
+    table with more than one entry and confirms each hash maps back to its
+    own name. *)
+let test_compiled_show_atom_multi_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_atomshow_multi"
+    ~src:"mod AtomShowMulti do\n\
+         \  fn main() do\n\
+         \    println(show(:hello) ++ \" \" ++ show(:world_123))\n\
+         \  end\n\
+          end\n"
+    ~expected:":hello :world_123"
+    ()
+
+(* ── Guard liveness (Wave 2 final review): positive control for
+   [fail_if_unresolved_iface_method] ─────────────────────────────────────
+   The four parity tests above prove the FIXED pipeline resolves nested
+   interface-method calls; on a healthy compiler the guard's failwith never
+   fires, so nothing exercised it.  If ctx.top_fns naming or the guard's
+   `$`-before-last-dot detection predicate ever drifts, the guard would rot
+   silently.  These tests hand-build the exact regression signature as a raw
+   Tir.tir_module — a bare `describe` call alongside a registered mangled
+   impl `Pretty$Int.describe` — precisely BECAUSE the real frontend can no
+   longer produce that state (that unreachability is what Wave 2 Task 1
+   fixed), and assert emission fails loudly, naming the symbol and the
+   candidate impl.  Full emit_module (rather than a synthetic-ctx unit test
+   of the helper alone) was chosen so the is_known_fn gating at BOTH
+   consumer call sites — the general EApp path and the ECallPtr
+   no-var-slot catch-all — stays covered too. *)
+
+let iface_guard_var name ty =
+  { March_tir.Tir.v_name = name; v_ty = ty; v_lin = March_tir.Tir.Unr }
+
+(** Minimal TIR module: one registered fn named [impl_name] plus a [main]
+    whose body is [main_body]. *)
+let iface_guard_module ~impl_name ~main_body =
+  let open March_tir.Tir in
+  let impl_fn = {
+    fn_name   = impl_name;
+    fn_params = [ iface_guard_var "x" TInt ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString "int"));
+    fn_kind   = FnNormal;
+  } in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   = main_body;
+    fn_kind   = FnNormal;
+  } in
+  { tm_name = "IfaceGuard"; tm_fns = [ impl_fn; main_fn ]; tm_types = [];
+    tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+(** A call to the bare (unqualified, unresolved) name `describe` — [mk]
+    picks the call form (EApp or ECallPtr) so both guard consumers share
+    one construction. *)
+let bare_describe_call mk =
+  let open March_tir.Tir in
+  mk (iface_guard_var "describe" (TFn ([ TInt ], TString)))
+    [ ALit (March_ast.Ast.LitInt 1) ]
+
+let assert_iface_guard_fires ~path_label m =
+  match March_tir.Llvm_emit.emit_module m with
+  | (_ : string) ->
+    Alcotest.fail
+      (path_label ^ ": emit_module was expected to raise Failure — the \
+                     unresolved-iface-method guard did not fire on a bare \
+                     `describe` call with a registered Pretty$Int.describe \
+                     impl")
+  | exception Failure msg ->
+    Alcotest.(check bool)
+      (path_label ^ ": failure names the unresolved symbol (got: " ^ msg ^ ")")
+      true (ir_contains msg "unresolved interface-method call to `describe`");
+    Alcotest.(check bool)
+      (path_label ^ ": failure names the candidate impl (got: " ^ msg ^ ")")
+      true (ir_contains msg "Pretty$Int.describe")
+
+(** Consumer 1: the general EApp direct-call path. *)
+let test_iface_guard_fires_eapp () =
+  assert_iface_guard_fires ~path_label:"EApp"
+    (iface_guard_module ~impl_name:"Pretty$Int.describe"
+       ~main_body:(bare_describe_call
+                     (fun f args -> March_tir.Tir.EApp (f, args))))
+
+(** Consumer 2: the ECallPtr no-var-slot catch-all path. *)
+let test_iface_guard_fires_ecallptr () =
+  assert_iface_guard_fires ~path_label:"ECallPtr"
+    (iface_guard_module ~impl_name:"Pretty$Int.describe"
+       ~main_body:(bare_describe_call
+                     (fun f args ->
+                        March_tir.Tir.(ECallPtr (AVar f, args)))))
+
+(** Negative control: an impl-mangled fn is registered but its dot-suffix
+    (`render`) does not match the bare callee (`describe`), so the guard
+    must NOT fire and the call must fall through to the pre-existing
+    forward-declare behavior.  Pins the predicate against false positives. *)
+let test_iface_guard_negative_control () =
+  let m = iface_guard_module ~impl_name:"Pretty$Int.render"
+      ~main_body:(bare_describe_call
+                    (fun f args -> March_tir.Tir.EApp (f, args))) in
+  let ir = March_tir.Llvm_emit.emit_module m in
+  Alcotest.(check bool) "non-matching bare call falls through to a declare"
+    true (ir_contains ir "declare ptr @describe")
+(* ── Scrutinee-borrowed conservatism: cross-branch double dec_rc (P0) ────
+   found during Wave 2 Task 4's TIR snapshot audit
+   (test/snapshots/perceus/scrutinee_borrowed_conservatism.expected).  When a
+   match arm re-matches the SAME scrutinee variable on a sub-path of its own
+   body (here, the `Cons` arm's `else` branch re-matches `xs`), Perceus's
+   "scrutinee-borrowed conservatism" (perceus.ml's ECase handling, ~line
+   1058-1080) re-adds the scrutinee to that arm's `live_before_br` to protect
+   its branch-bound vars from a premature free.  `add_cross_decrcs` (~line
+   1146) used to union `live_before_br` across ALL sibling arms and emit a
+   cross-branch `dec_rc` for "dead here, live elsewhere" variables — so a
+   SIBLING arm (here, `Nil`) that never uses the scrutinee got a cross-branch
+   `dec_rc xs` IN ADDITION TO the ordinary per-arm scrutinee free every arm
+   already receives from `add_scrutinee_free_for` (~line 984).  Two
+   `dec_rc`s on the same reference: RC underflow, exit 134, compiled only —
+   the interpreter (which does not use this RC scheme) is unaffected.  Fixed
+   by excluding the scrutinee's own variable name from `add_cross_decrcs`'s
+   liveness set: its lifecycle is exclusively owned by
+   `add_scrutinee_free_for`, which independently and correctly decides, per
+   arm, whether to free it. *)
+let test_scrutinee_borrowed_cross_branch_no_double_dec () =
+  assert_compiled_interp_parity
+    ~name:"march_scrutdbl"
+    ~src:"mod MinimalScrutDbl do\n\
+         \  fn f(xs : List(Int), flag : Bool) : Int do\n\
+         \    match xs do\n\
+         \      Cons(h, t) ->\n\
+         \        if flag do\n\
+         \          h\n\
+         \        else\n\
+         \          match xs do\n\
+         \            Cons(h2, _) -> h2\n\
+         \            Nil -> 0\n\
+         \          end\n\
+         \        end\n\
+         \      Nil -> -1\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do println(f(Nil, true)) end\n\
+          end\n"
+    ~expected:"-1"
+    ()
+
+(* ── Newtype-repr derived-method crash (P1) ─────────────────────────────
+   `type Wrap = Wrap(Int)` (single ctor, single field) is Newtype-represented
+   (Repr.repr_of_ty): the value IS its raw payload, no heap cell. Calling a
+   derived `eq`/`compare`/`hash` BY NAME on such a value used to crash the
+   compiled binary — the `==` OPERATOR path (ensure_adt_eq_fn, Repr-aware)
+   was always correct, and the interpreter was always correct; only the
+   named-method path, compiled, was broken. Root cause was two stacked
+   defects: (1) every AST node `expand_derive` mints shared one `dummy_span`,
+   so the span-keyed typechecker type_map collided across ALL derived impls
+   (last write wins) and lowering read back garbage types for derived params/
+   exprs; (2) `lower_match`'s destructured sub-pattern variables carry
+   `unknown_ty` (a TVar), so a nested match on a Newtype-repr value (derived
+   Eq's `match (a, b)`, or ANY hand-written nested destructure) reached
+   `emit_case` typed TVar and took the Boxed heap-tag-load strategy on a value
+   that has no heap header — SIGSEGV on a scalar payload, a garbage tag (non-
+   exhaustive panic) on a String payload. Fixed by (1) uniquifying every
+   derive-generated span so each node gets its own type_map entry, and (2) a
+   Newtype analogue of `emit_case`'s existing TVar niche-recovery: when every
+   branch's single Ctor-tag resolves unambiguously to a Newtype-repr type
+   (same payload tagging), commit to the Newtype decode strategy instead of
+   Boxed. Preserves interpreter semantics exactly, including the separately-
+   documented payload-IGNORING behavior of derived Ord/Hash on variants (see
+   syntax_reference.md "Semantics notes"). *)
+
+(** Discriminator: `==` (operator, always worked) vs `eq(a, b)` (named
+    method, crashed pre-fix) on the SAME Newtype-repr value, back to back —
+    isolates the named-method-only nature of the bug. *)
+let test_newtype_derived_eq_operator_vs_named_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eq_op_vs_named"
+    ~src:"mod NewtypeEqOpVsNamed do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    let a = Wrap(1)\n\
+         \    let b = Wrap(1)\n\
+         \    println(bool_to_string(a == b))\n\
+         \    println(bool_to_string(eq(a, b)))\n\
+         \    println(bool_to_string(eq(a, Wrap(2))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\ntrue\nfalse"
+    ()
+
+(** Derived `compare` (Ord) and `hash` (Hash) by name on an Int-payload
+    Newtype: pre-fix SIGSEGV (compare) — lldb showed EXC_BAD_ACCESS inside
+    `Ord$Wrap.compare` loading a ctor tag at scrut+8 from a tagged-int
+    payload. Derived Ord/Hash on variants intentionally ignore ctor payload
+    (index-only) — both calls must return 0 (single ctor, index 0). *)
+let test_newtype_derived_ord_hash_named_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_ord_hash"
+    ~src:"mod NewtypeOrdHash do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Ord, Hash for Wrap\n\
+         \  fn main() do\n\
+         \    println(int_to_string(compare(Wrap(1), Wrap(2))))\n\
+         \    println(int_to_string(hash(Wrap(7))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"0\n0"
+    ()
+
+(** String-payload Newtype: pre-fix symptom was a NON-EXHAUSTIVE PANIC
+    (not a segfault) — the garbage-tag byte at scrut+8 of a heap string
+    pointer never matched the single ctor tag. *)
+let test_newtype_derived_ord_string_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_string_payload"
+    ~src:"mod NewtypeStringPayload do\n\
+         \  type WrapS = WrapS(String)\n\
+         \  derive Eq, Ord, Hash for WrapS\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"a\"))))\n\
+         \    println(bool_to_string(eq(WrapS(\"a\"), WrapS(\"b\"))))\n\
+         \    println(int_to_string(compare(WrapS(\"a\"), WrapS(\"b\"))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n0"
+    ()
+
+(** Negative control: a 2-field single-ctor type (`Pair(Int, Int)`) is
+    Boxed, not Newtype — must be unaffected by the fix (always worked). *)
+let test_boxed_pair_derived_methods_unaffected_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_boxed_pair_control"
+    ~src:"mod BoxedPairControl do\n\
+         \  type Pair = Pair(Int, Int)\n\
+         \  derive Eq, Ord, Hash for Pair\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 2))))\n\
+         \    println(bool_to_string(eq(Pair(1, 2), Pair(1, 3))))\n\
+         \    println(int_to_string(compare(Pair(1, 2), Pair(3, 4))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n0"
+    ()
+
+(** Negative control: a multi-ctor type (2 variants) is never Newtype —
+    must be unaffected. *)
+let test_multi_ctor_derived_methods_unaffected_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_multictor_control"
+    ~src:"mod MultiCtorControl do\n\
+         \  type Shape = Circle(Int) | Square(Int)\n\
+         \  derive Eq, Ord, Hash for Shape\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Circle(1), Circle(1))))\n\
+         \    println(bool_to_string(eq(Circle(1), Square(1))))\n\
+         \    println(int_to_string(compare(Circle(1), Square(1))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\n-1"
+    ()
+
+(** Regression: a user variant type whose bare name collides with a stdlib
+    RECORD type (`Plot.Color = { r, g, b }`, always auto-loaded) must still
+    resolve its derived impls. Records register in `env.records` under their
+    BARE name globally, so pre-fix `surface_ty` / `register_impl_shape`
+    structurally expanded the variant's `impl Eq(Color)` to the record's
+    `TRecord{r,g,b}` shape; that never matched the variant's `TCon("Color")`
+    dispatch target, so typecheck reported "`Color` does not implement
+    interface `Eq`". Renaming the type (e.g. to `Status`) sidestepped it — the
+    type-NAME collision with the stdlib record was the sole trigger. Fixed by
+    `name_is_variant` guarding the record expansion in typecheck.ml. *)
+let test_derive_variant_name_collides_stdlib_record_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_stdlib_name_collision"
+    ~src:"mod ColorMod do\n\
+         \  type Color = Red | Green | Blue\n\
+         \  derive Eq, Show for Color\n\
+         \  fn main() do\n\
+         \    println(show(Green))\n\
+         \    println(bool_to_string(eq(Red, Red)))\n\
+         \    println(bool_to_string(eq(Red, Blue)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Green\ntrue\nfalse"
+    ()
+
+(** Same bug, self-contained (independent of any particular stdlib module):
+    a nested RECORD `Palette.Color` collides with the enclosing module's own
+    variant `Color`. Distinct field names (`hue/sat/lum`) prove the corrupting
+    shape is the local nested record, not stdlib `Plot.Color`, so this test
+    still guards the fix if `Plot.Color` is ever renamed or removed. *)
+let test_derive_variant_name_collides_local_record_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_local_name_collision"
+    ~src:"mod SelfContained do\n\
+         \  mod Palette do\n\
+         \    type Color = { hue: Int, sat: Int, lum: Int }\n\
+         \  end\n\
+         \  type Color = Red | Green | Blue\n\
+         \  derive Eq, Show for Color\n\
+         \  fn main() do\n\
+         \    println(show(Green))\n\
+         \    println(bool_to_string(eq(Red, Red)))\n\
+         \    println(bool_to_string(eq(Red, Blue)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Green\ntrue\nfalse"
+    ()
+
+(** A hand-written (non-derived) `impl Eq(Wrap)` with a nested destructure
+    match must also work — this isolates defect (2) (the emit_case Newtype
+    TVar-recovery) from defect (1) (derive's shared-span typecheck
+    collision): a hand-written impl has real, distinct source spans, so only
+    defect (2) could have crashed it. Pre-fix this also SIGSEGV'd. *)
+let test_handwritten_impl_nested_match_newtype_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_handwritten_impl"
+    ~src:"mod NewtypeHandwrittenImpl do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  impl Eq(Wrap) do\n\
+         \    fn eq(a, b) do\n\
+         \      match (a, b) do\n\
+         \        (Wrap(x), Wrap(y)) -> x == y\n\
+         \      end\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(eq(Wrap(1), Wrap(1))))\n\
+         \    println(bool_to_string(eq(Wrap(1), Wrap(2))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
+(* ── Newtype-repr `==` OPERATOR with a heap payload (P1, distinct bug) ────
+   Sibling of the named-method crash above, but the reverse split: the NAMED
+   `eq()`/`compare()` path was fixed by `6cc676fc`; the `==` OPERATOR path
+   (`ensure_adt_eq_fn`, `lib/tir/llvm_eq.ml`) was STILL wrong — silently, not a
+   crash — on a Newtype-repr type whose payload is a HEAP pointer. That fn
+   special-cased the Niche (Option-shaped) repr but never consulted
+   `Repr.repr_of_ty` for `Newtype`, so for a single-ctor single-field type it
+   fell to the generic Boxed ctor-table strategy: it read a "ctor tag" at
+   `payload_ptr + 8` and a "field" at `payload_ptr + 16`. For a String-payload
+   Newtype the value IS the raw string pointer (no wrapper cell), so those
+   offsets land inside the string's own heap layout and the comparison is
+   garbage. An Int-payload Newtype is a tagged scalar (i64, not ptr) and never
+   reaches `ensure_adt_eq_fn` at all — the operator control below stays green
+   with or without the fix. Fixed by a `Repr.Newtype payload` arm in
+   `ensure_adt_eq_fn` that compares the unwrapped payloads directly
+   (march_string_eq for String, recursive `ensure_adt_eq_fn` for a nested
+   heap ADT/tuple/record, scalar `icmp`/`fcmp` otherwise). *)
+
+(** Core bug: `==`/`!=` on a String-payload Newtype. Pre-fix, compiled
+    `WrapS("a") == WrapS("a")` returned FALSE (garbage tag/field offsets into
+    the raw string cell); the interpreter was always correct. *)
+let test_newtype_eq_operator_string_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_string"
+    ~src:"mod NewtypeEqOpString do\n\
+         \  type WrapS = WrapS(String)\n\
+         \  derive Eq for WrapS\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(WrapS(\"a\") == WrapS(\"a\")))\n\
+         \    println(bool_to_string(WrapS(\"a\") == WrapS(\"b\")))\n\
+         \    println(bool_to_string(WrapS(\"a\") != WrapS(\"b\")))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\ntrue"
+    ()
+
+(** Control: an Int-payload Newtype is a tagged scalar, never routed through
+    `ensure_adt_eq_fn` — the `==` operator was always correct here. Guards
+    against a fix that would perturb the scalar path. *)
+let test_newtype_eq_operator_int_payload_control_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_int"
+    ~src:"mod NewtypeEqOpInt do\n\
+         \  type Wrap = Wrap(Int)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(2)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
+(** Heap-ADT payload: a Newtype wrapping a Boxed 2-field ctor. Exercises the
+    recursive arm — inside `__march_eq_WrapR` the operands ARE the raw `Inner`
+    heap pointers, so the fix must recurse into `Inner`'s own structural
+    equality (not read a tag off the unwrapped payload). Pre-fix, compiled
+    `WrapR(Inner(1,2)) == WrapR(Inner(1,3))` returned TRUE. *)
+let test_newtype_eq_operator_boxed_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_boxed"
+    ~src:"mod NewtypeEqOpBoxed do\n\
+         \  type Inner = Inner(Int, Int)\n\
+         \  type WrapR = WrapR(Inner)\n\
+         \  derive Eq for Inner\n\
+         \  derive Eq for WrapR\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 2))))\n\
+         \    println(bool_to_string(WrapR(Inner(1, 2)) == WrapR(Inner(1, 3))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse"
+    ()
+
+(** Generic Newtype (`type Wrap(a) = Wrap(a)`) — exercises the `type_params`
+    substitution branch of the fix specifically: `repr_of_ty` returns
+    `Newtype (TVar a)` (the field type as written in the generic typedef, which
+    mono never concretises), so the arm must apply the `a -> <concrete>` subst
+    to recover the real payload type. The String instantiation must reach
+    `march_string_eq` (heap payload — the bug class; verified in `--emit-llvm`
+    that `__march_eq_Wrap_String` is a bare `march_string_eq` call), while the
+    Int instantiation stays a tagged scalar (never enters `ensure_adt_eq_fn`).
+    All three non-generic newtype tests above leave `type_params` empty, so this
+    is the only test that drives a NON-identity substitution. *)
+let test_newtype_eq_operator_generic_payload_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_eqop_generic"
+    ~src:"mod NewtypeEqOpGeneric do\n\
+         \  type Wrap(a) = Wrap(a)\n\
+         \  derive Eq for Wrap\n\
+         \  fn main() do\n\
+         \    println(bool_to_string(Wrap(\"x\") == Wrap(\"x\")))\n\
+         \    println(bool_to_string(Wrap(\"x\") == Wrap(\"y\")))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(1)))\n\
+         \    println(bool_to_string(Wrap(1) == Wrap(2)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"true\nfalse\ntrue\nfalse"
+    ()
+
+(** Cross-module ambiguous-constructor resolution (compiled-only regression).
+
+    `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
+    names `Null`/`Bool`/`Str`/`Array` at DIFFERENT tag positions (`Array` is tag 5
+    in `Value`, tag 4 in `JsonValue`). Pre-fix, an unannotated `Msgpack` function
+    resolving a bare `Array`/`Str`/`Null` could pick the sibling module's variant,
+    so:
+      • `encode_val`'s scrutinee typed as `JsonValue` → the `Int`/`Array`/`Map`
+        arms (Msgpack-only) collapsed to a non-exhaustive `switch`, and
+        `Msgpack.encode(Msgpack.int(42))` panicked with "non-exhaustive pattern
+        match" at runtime (interpreter was fine — this was compiled-only), and
+      • `decode` constructed `alloc JsonValue.Array` (tag 4) where a `Value`
+        (tag 5) was meant, so a decoded array no longer matched `Msgpack.Array`.
+    The interpreter got both right, making this a pure codegen parity divergence.
+    Fixed as a side effect of the sibling-ctor-shadowing fix (`add_ctor` moving a
+    module's own re-registered constructor to the front of its candidate list —
+    see the "sibling-ctor shadowing" entry in `specs/progress.md`). This
+    exercises the Msgpack-only arms (Int, Array, Map) through both encode and a
+    decode round-trip. *)
+let test_msgpack_cross_module_ctor_resolution_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_msgpack_ctor_resolution"
+    ~src:"mod MsgpackCtorResolution do\n\
+         \  fn describe(bs : List(Int)) : String do\n\
+         \    match Msgpack.decode(bs) do\n\
+         \      Ok(Msgpack.Int(n))   -> \"int:\" ++ String.from_int(n)\n\
+         \      Ok(Msgpack.Array(_)) -> \"array\"\n\
+         \      Ok(Msgpack.Map(_))   -> \"map\"\n\
+         \      Ok(_)                -> \"other\"\n\
+         \      Err(e)               -> \"err:\" ++ e\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(String.from_int(List.length(Msgpack.encode(Msgpack.int(42)))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.int(7))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.int(2), Nil))))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.map(Cons((Msgpack.str(\"k\"), Msgpack.int(9)), Nil)))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"1\nint:7\narray\nmap"
+    ()
+
+(** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
+
+    These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
+    hand-written preamble blob (the [Buffer.add_string buf {| ... |}]
+    literals that used to sit inside [emit_preamble], before Wave 3 Task 4
+    replaced them with [Llvm_builtins.emit_preamble] generating the same
+    text from the declarative builtin table). They are kept here ONLY as a
+    regression golden — this test's entire job is to fail loudly the
+    moment [Llvm_builtins]'s generated preamble stops matching this
+    literal byte-for-byte.
+
+    DELETE THIS GOLDEN (and loosen the test) only when someone
+    DELIBERATELY changes the preamble's content/order/whitespace — at that
+    point this test's failure is expected and its golden is stale by
+    design, not a regression. *)
+let golden_preamble_core : string = {|; Runtime declarations
+; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)
+declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
+declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
+declare void @march_dispatch_leave(i32 %name_id, i32 %version)
+declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
+declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
+declare void @march_dispatch_init(i32 %n_slots)
+declare void @march_dispatch_register_name(i32, ptr)
+declare void @march_reload_server_start(ptr)
+declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
+declare ptr  @getenv(ptr)
+declare ptr  @march_alloc(i64 %sz)
+declare void @march_incrc(ptr %p)
+declare void @march_decrc(ptr %p)
+declare i64  @march_decrc_freed(ptr %p)
+declare void @march_incrc_local(ptr %p)
+declare void @march_decrc_local(ptr %p)
+declare void @march_free(ptr %p)
+declare void @march_print(ptr %s)
+declare void @march_panic(ptr %s)
+declare ptr  @march_panic_ext(ptr %s)
+declare ptr  @march_todo_ext(ptr %s)
+declare void @march_test_init(i32 %argc, ptr %argv)
+declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
+declare void @march_test_setup_all(ptr %fn)
+declare i32  @march_test_report()
+declare void @march_println(ptr %s)
+declare void @march_print_stderr(ptr %s)
+declare ptr  @march_io_read_line()
+declare i64  @march_io_read_byte()
+declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare ptr  @march_html_auto_escape(ptr %v)
+declare i32  @march_record_shape_intern(ptr %desc)
+declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
+declare ptr  @march_record_keys(ptr %rec)
+declare ptr  @march_record_values(ptr %rec)
+declare ptr  @march_record_entries(ptr %rec)
+declare ptr  @march_record_get(ptr %rec, ptr %key, i64 %kind)
+declare i64  @march_record_has_key(ptr %rec, ptr %key)
+declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)
+declare ptr  @march_record_put3(ptr %rec, ptr %key, ptr %val)
+declare ptr  @march_record_from_list(ptr %list)
+declare ptr  @march_record_from_list_k(ptr %list, i64 %kind)
+declare ptr  @march_record_field_dyn(ptr %rec, ptr %name, i64 %len)
+declare ptr  @march_record_update_dyn(ptr %rec, i64 %n, ...)
+declare ptr  @march_int_to_string(i64 %n)
+declare ptr    @march_float_to_string(double %f)
+declare ptr    @march_bool_to_string(i64 %b)
+; Checked float division — aborts on divisor == 0.0 instead of returning inf/NaN
+declare double @march_checked_fdiv(double %a, double %b)
+; Checked integer division/remainder — panic on a zero divisor (matches interpreter)
+declare i64    @march_checked_idiv(i64 %a, i64 %b)
+declare i64    @march_checked_imod(i64 %a, i64 %b)
+declare i64    @march_checked_umod(i64 %a, i64 %b)
+declare i64    @march_checked_ediv(i64 %a, i64 %b)
+; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
+declare i64    @march_checked_div_op(i64 %a, i64 %b)
+declare i64    @march_checked_mod_op(i64 %a, i64 %b)
+declare ptr  @march_string_concat(ptr %a, ptr %b)
+declare i64  @march_string_eq(ptr %a, ptr %b)
+declare i64  @march_poly_eq(ptr %a, ptr %b)
+; Ord / Hash builtins
+declare i64    @march_compare_int(i64 %x, i64 %y)
+declare i64    @march_compare_float(double %x, double %y)
+declare i64    @march_compare_string(ptr %x, ptr %y)
+declare i64    @march_hash_int(i64 %x)
+declare i64    @march_hash_float(double %x)
+declare i64    @march_hash_string(ptr %x)
+declare i64    @march_hash_bool(i64 %x)
+declare i64  @march_string_byte_length(ptr %s)
+declare i64  @march_string_is_empty(ptr %s)
+declare ptr  @march_string_to_int(ptr %s)
+declare ptr  @march_string_join(ptr %list, ptr %sep)
+; Float builtins
+declare double @march_float_abs(double %f)
+declare i64    @march_float_ceil(double %f)
+declare i64    @march_float_floor(double %f)
+declare i64    @march_float_round(double %f)
+declare i64    @march_float_truncate(double %f)
+declare double @march_int_to_float(i64 %n)
+; Char builtins
+declare ptr    @march_char_from_int(i64 %n)
+declare i64    @march_char_to_int(ptr %c)
+declare i64    @march_char_is_digit(ptr %c)
+declare i64    @march_char_is_alphanumeric(ptr %c)
+declare i64    @march_char_is_whitespace(ptr %c)
+; Float/Int conversion builtins
+declare i64    @march_float_to_int(double %f)
+; Math builtins
+declare double @march_math_sin(double %f)
+declare double @march_math_cos(double %f)
+declare double @march_math_tan(double %f)
+declare double @march_math_asin(double %f)
+declare double @march_math_acos(double %f)
+declare double @march_math_atan(double %f)
+declare double @march_math_atan2(double %y, double %x)
+declare double @march_math_sinh(double %f)
+declare double @march_math_cosh(double %f)
+declare double @march_math_tanh(double %f)
+declare double @march_math_sqrt(double %f)
+declare double @march_math_cbrt(double %f)
+declare double @march_math_exp(double %f)
+declare double @march_math_exp2(double %f)
+declare double @march_math_log(double %f)
+declare double @march_math_log2(double %f)
+declare double @march_math_log10(double %f)
+declare double @march_math_pow(double %b, double %e)
+; Extended string builtins
+declare ptr  @march_string_chars(ptr %s)
+declare ptr  @march_string_from_chars(ptr %list)
+declare i64  @march_string_contains(ptr %s, ptr %sub)
+declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
+declare i64  @march_string_ends_with(ptr %s, ptr %suffix)
+declare ptr  @march_string_slice(ptr %s, i64 %start, i64 %len)
+declare ptr  @march_string_split(ptr %s, ptr %sep)
+declare ptr  @march_string_split_first(ptr %s, ptr %sep)
+declare ptr  @march_string_replace(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_replace_all(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_to_lowercase(ptr %s)
+declare ptr  @march_string_to_uppercase(ptr %s)
+declare ptr  @march_string_trim(ptr %s)
+declare ptr  @march_string_trim_start(ptr %s)
+declare ptr  @march_string_trim_end(ptr %s)
+declare ptr  @march_string_repeat(ptr %s, i64 %n)
+declare ptr  @march_string_reverse(ptr %s)
+declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
+declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
+declare i64  @march_string_grapheme_count(ptr %s)
+declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_to_float(ptr %s)
+; List builtins
+declare ptr  @march_list_append(ptr %a, ptr %b)
+declare ptr  @march_list_concat(ptr %lists)
+; IOList builtins
+declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
+; Vault (key-value store) builtins
+declare ptr  @march_vault_new(ptr %name)
+declare ptr  @march_vault_whereis(ptr %name)
+declare ptr  @march_vault_set(ptr %table, ptr %key, ptr %value)
+declare ptr  @march_vault_set_ttl(ptr %table, ptr %key, ptr %value, i64 %ttl)
+declare i64  @march_vault_put_new(ptr %table, ptr %key, ptr %value, i64 %ttl)
+declare i64  @march_vault_incr(ptr %table, ptr %key, i64 %delta)
+declare ptr  @march_vault_push_capped(ptr %table, ptr %key, ptr %value, i64 %max)
+declare ptr  @march_vault_get(ptr %table, ptr %key)
+declare ptr  @march_vault_drop(ptr %table, ptr %key)
+declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
+declare i64  @march_vault_size(ptr %table)
+declare ptr  @march_vault_keys(ptr %table)
+declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)
+declare ptr  @march_vault_ns_get(ptr %ns, ptr %key)
+declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
+; Crypto / hash builtins
+declare ptr  @march_md5(ptr %b)
+declare ptr  @march_sha256(ptr %b)
+declare ptr  @march_sha512(ptr %b)
+declare ptr  @march_sha1_bytes(ptr %b)
+declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
+declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)
+declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
+declare ptr  @march_base64_encode(ptr %b)
+declare ptr  @march_base64_decode(ptr %s)
+declare ptr  @march_random_bytes(i64 %n)
+; Compression builtins (runtime/march_compress.c)
+declare ptr  @march_gzip_encode(ptr %b, i64 %level)
+declare ptr  @march_gzip_decode(ptr %b)
+declare ptr  @march_deflate_encode(ptr %b)
+declare ptr  @march_deflate_decode(ptr %b)
+declare ptr  @march_zstd_encode(ptr %b, i64 %level)
+declare ptr  @march_zstd_decode(ptr %b)
+declare ptr  @march_brotli_encode(ptr %b, i64 %mode, i64 %quality)
+declare ptr  @march_brotli_decode(ptr %b)
+; System introspection builtins
+declare i64  @march_sys_uptime_ms()
+declare i64  @march_sys_heap_bytes()
+declare i64  @march_sys_word_size()
+declare i64  @march_sys_minor_gcs()
+declare i64  @march_sys_major_gcs()
+declare i64  @march_sys_actor_count()
+declare i64  @march_sys_cpu_count()
+declare i64  @march_sys_cpu_load_milli()
+declare i64  @march_sys_mem_total_bytes()
+declare i64  @march_sys_mem_available_bytes()
+declare ptr  @march_sys_os()
+declare ptr  @march_sys_arch()
+declare ptr  @march_get_version()
+; UUID / identity builtins
+declare ptr  @march_uuid_v4()
+; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)
+declare void @march_remote_init()
+declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)
+declare i64  @march_remote_count()
+declare i64  @march_remote_check_march(ptr %impl_hash, ptr %sig_hash)
+declare ptr  @march_remote_invoke_march(ptr %impl_hash, ptr %args)
+; Integer math helpers
+declare i64  @march_int_pow(i64 %base, i64 %exp)
+; LLVM intrinsics
+declare i64  @llvm.ctpop.i64(i64 %val)
+declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
+declare ptr  @llvm.stacksave()
+declare void @llvm.stackrestore(ptr %ptr)
+; Logger builtins
+declare ptr  @march_logger_set_level(i64 %level)
+declare i64  @march_logger_get_level()
+declare ptr  @march_logger_add_context(ptr %key, ptr %value)
+declare ptr  @march_logger_clear_context()
+declare ptr  @march_logger_get_context()
+declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)
+; REPL JIT persistent variable slot table (march_extras.c)
+declare i64  @march_repl_get(i64 %slot)
+declare void @march_repl_set(i64 %slot, i64 %val)
+
+|}
+
+let golden_preamble_native_actor : string = {|; Actor builtins
+declare void @march_kill(ptr %actor)
+declare i64  @march_is_alive(ptr %actor)
+declare ptr  @march_send(ptr %actor, ptr %msg)
+declare ptr  @march_send_linear(ptr %actor, ptr %msg)
+declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
+declare ptr  @march_spawn(ptr %actor)
+declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
+declare void @march_actor_reply(ptr %ref, ptr %result)
+declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
+|}
+
+let golden_preamble_native_net_io : string = {|
+; TCP/network builtins
+declare ptr  @march_tcp_listen(i64 %port)
+declare ptr  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
+declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
+declare ptr  @march_tcp_send_all(i64 %fd, ptr %data)
+declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_tcp_peer_addr(i64 %fd)
+declare ptr  @march_http_parse_request(ptr %raw)
+declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
+declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare void @march_http_server_wait(i64 %handle)
+declare void @march_ws_handshake(i64 %fd, ptr %key)
+declare ptr  @march_ws_recv(i64 %fd)
+declare void @march_ws_send(i64 %fd, ptr %frame)
+declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
+; File/Dir builtins
+declare i64  @march_file_exists(ptr %s)
+declare i64  @march_dir_exists(ptr %s)
+declare ptr  @march_file_open(ptr %path)
+declare ptr  @march_file_close(ptr %handle)
+declare ptr  @march_file_read(ptr %path)
+declare ptr  @march_file_read_line(ptr %handle)
+declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
+declare ptr  @march_file_write(ptr %path, ptr %data)
+declare ptr  @march_file_append(ptr %path, ptr %data)
+declare ptr  @march_file_delete(ptr %path)
+declare ptr  @march_file_copy(ptr %src, ptr %dst)
+declare ptr  @march_file_rename(ptr %src, ptr %dst)
+declare ptr  @march_file_stat(ptr %path)
+declare ptr  @march_dir_mkdir(ptr %path)
+declare ptr  @march_dir_mkdir_p(ptr %path)
+declare ptr  @march_dir_rmdir(ptr %path)
+declare ptr  @march_dir_rm_rf(ptr %path)
+declare ptr  @march_dir_list(ptr %path)
+declare ptr  @march_dir_list_full(ptr %path)
+declare ptr  @march_process_argv()
+declare ptr  @march_process_cwd()
+declare ptr  @march_process_env(ptr %name)
+declare i64  @march_process_set_env(ptr %name, ptr %value)
+declare i64  @march_process_exit(i64 %code)
+declare i64  @march_process_pid()
+declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)
+declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)
+declare ptr  @march_process_spawn_async(ptr %cmd, ptr %args)
+declare ptr  @march_process_read_line(ptr %proc)
+declare i64  @march_process_write(ptr %proc, ptr %data)
+declare i64  @march_process_kill_proc(ptr %proc)
+declare i64  @march_process_wait_proc(ptr %proc)
+; TCP recv-all
+declare ptr  @march_tcp_recv_all(i64 %fd, i64 %max_bytes, i64 %timeout_ms)
+declare ptr  @march_tcp_recv_chunk(i64 %fd, i64 %max_bytes)
+declare ptr  @march_tcp_recv_http_headers(i64 %fd)
+declare ptr  @march_tcp_recv_chunked_frame(i64 %fd)
+; TLS builtins
+declare ptr  @march_tls_client_ctx(ptr %ca_file, ptr %alpn_list, i64 %verify_peer, i64 %timeout_ms)
+declare ptr  @march_tls_server_ctx(ptr %cert_file, ptr %key_file, ptr %ca_file, ptr %alpn_list, i64 %verify_peer)
+declare ptr  @march_tls_connect(i64 %fd, i64 %ctx_handle, ptr %hostname)
+declare ptr  @march_tls_accept(i64 %fd, i64 %ctx_handle)
+declare ptr  @march_tls_read(i64 %ssl_handle, i64 %max_bytes)
+declare ptr  @march_tls_write(i64 %ssl_handle, ptr %data)
+declare void @march_tls_close(i64 %ssl_handle)
+declare void @march_tls_ctx_free(i64 %ctx_handle)
+declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)
+declare ptr  @march_tls_peer_cn(i64 %ssl_handle)
+; TypedArray builtins
+declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)
+declare ptr  @march_typed_array_from_list(ptr %list)
+declare ptr  @march_typed_array_to_list(ptr %arr)
+declare i64  @march_typed_array_length(ptr %arr)
+declare ptr  @march_typed_array_get(ptr %arr, i64 %i)
+declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
+declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+; NativeIntArr builtins — flat i64 arrays for vectorizable loops
+declare ptr    @native_int_arr_make(i64 %len, i64 %def)
+declare i64    @native_int_arr_length(ptr %arr)
+declare i64    @native_int_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
+declare i64    @native_int_arr_sum(ptr %arr)
+declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_int_arr_from_list(ptr %lst)
+declare ptr    @native_int_arr_to_list(ptr %arr)
+declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
+; NativeFloatArr builtins — flat double arrays for vectorizable loops
+declare ptr    @native_float_arr_make(i64 %len, double %def)
+declare i64    @native_float_arr_length(ptr %arr)
+declare double @native_float_arr_get(ptr %arr, i64 %i)
+declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
+declare double @native_float_arr_sum(ptr %arr)
+declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_float_arr_from_list(ptr %lst)
+declare ptr    @native_float_arr_to_list(ptr %arr)
+declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
+; Time builtins
+declare double @march_unix_time()
+declare ptr  @march_tcp_connect(ptr %host, i64 %port)
+; HTTP client builtins
+declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
+declare ptr  @march_http_parse_response(ptr %raw)
+; CSV builtins
+declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
+declare ptr  @march_csv_next_row(ptr %handle)
+declare ptr  @march_csv_close(ptr %handle)
+; Resource ownership
+declare void @march_own(ptr %pid, ptr %value)
+; Capability builtins
+declare ptr  @march_cap_narrow(ptr %cap)
+; Monitor/supervision builtins
+declare void @march_demonitor(i64 %ref)
+declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare i64  @march_mailbox_size(ptr %pid)
+declare void @march_run_until_idle()
+declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
+declare ptr  @march_get_cap(ptr %pid)
+declare void @march_send_checked(ptr %cap, ptr %msg)
+declare ptr  @march_pid_of_int(i64 %n)
+declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
+declare void @march_link(ptr %actor_a, ptr %actor_b)
+declare void @march_unlink(ptr %actor_a, ptr %actor_b)
+declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
+declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx)
+declare i64  @march_pid_index_of(ptr %actor)
+declare ptr  @march_value_to_string(ptr %v)
+; Session-typed channel builtins (binary)
+declare ptr  @march_chan_new(ptr %proto_name)
+declare ptr  @march_chan_send(ptr %ep, ptr %val)
+declare ptr  @march_chan_recv(ptr %ep)
+declare i64  @march_chan_close(ptr %ep)
+declare ptr  @march_chan_choose(ptr %ep, ptr %label)
+declare ptr  @march_chan_offer(ptr %ep)
+; Multi-party session type (MPST) builtins
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
+declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
+declare i64  @march_mpst_close(ptr %ep)
+|}
+
+let golden_preamble_wasm_stub : string = {|; WASM: plain global (no TLS), no-op scheduler stub
+@march_tls_reductions = external global i64
+declare void @march_yield_from_compiled()
+declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
+declare ptr  @march_task_await(ptr %task)
+declare ptr  @march_task_await_value(ptr %task)
+declare void @march_sched_yield()
+declare ptr  @march_sched_recv()
+declare ptr  @march_cancel_token_new()
+declare void @march_cancel_token_cancel(ptr %tok)
+declare i64  @march_cancel_token_is_cancelled(ptr %tok)
+declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
+declare void @march_task_cancel_by_id(ptr %task)
+|}
+
+(** Reassemble the historical preamble text for a given (is_wasm, repl)
+    combination exactly as the OLD [emit_preamble] used to nest its
+    [Buffer.add_string] calls — see the deleted function's structure (git
+    history, commit before W3C2.4). *)
+let golden_preamble ~(is_wasm : bool) ~(repl : bool) : string =
+  if is_wasm then
+    golden_preamble_core ^ golden_preamble_wasm_stub
+  else
+    let tls_insert =
+      if repl then ""
+      else "@march_tls_reductions = external thread_local global i64
+declare void @march_yield_from_compiled()
+"
+    in
+    golden_preamble_core ^ golden_preamble_native_actor ^ tls_insert ^ golden_preamble_native_net_io
+
+let test_preamble_byte_identical_native () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false ~triple:"x86_64-unknown-linux-gnu" ~repl:false buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "x86_64-unknown-linux-gnu"
+    ^ golden_preamble ~is_wasm:false ~repl:false
+  in
+  Alcotest.(check string) "native, non-repl preamble byte-identical to historical blob" expected actual
+
+let test_preamble_byte_identical_native_repl () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false ~triple:"x86_64-unknown-linux-gnu" ~repl:true buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "x86_64-unknown-linux-gnu"
+    ^ golden_preamble ~is_wasm:false ~repl:true
+  in
+  Alcotest.(check string) "native, REPL preamble byte-identical to historical blob" expected actual
+
+let test_preamble_byte_identical_wasm () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:true ~triple:"wasm64-wasi" ~repl:false buf;
+  let actual = Buffer.contents buf in
+  let expected =
+    Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" "wasm64-wasi"
+    ^ golden_preamble ~is_wasm:true ~repl:false
+  in
+  Alcotest.(check string) "WASM preamble byte-identical to historical blob" expected actual
+
+(** [Llvm_emit.emit_preamble] (the thin wrapper) must delegate to
+    [Llvm_builtins.emit_preamble] with no behavior change: same output for
+    the same [target_config]/[repl] as calling the new function directly
+    with the equivalent [is_wasm]/[triple]. *)
+let test_preamble_wrapper_delegates () =
+  let buf_old = Buffer.create 4096 in
+  March_tir.Llvm_emit.emit_preamble ~target:March_tir.Llvm_emit.Native ~repl:false buf_old;
+  let buf_new = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble ~is_wasm:false
+    ~triple:(March_tir.Llvm_emit.target_triple March_tir.Llvm_emit.Native) ~repl:false buf_new;
+  Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
+    (Buffer.contents buf_new) (Buffer.contents buf_old)
+
+(* ── Robustness: an unreadable sibling directory must not crash the compiler ──
+   The compiler auto-discovers sibling `.march` modules in the entry file's own
+   source directory (`resolve_imports` plus the early-CAS sibling hash both walk
+   it via `collect_lib_files`).  That recursive walk called `Sys.readdir` on
+   every subdirectory with no exception guard, so a permission-denied sibling
+   directory — e.g. macOS's `$TMPDIR/TemporaryItems`, which is "Operation not
+   permitted" — raised an uncaught `Sys_error` and killed an otherwise
+   well-typed compile (exit 2, no output).  The walk now skips directories it
+   cannot read.  `--check` exercises the exact crashing path (it shares the
+   early-CAS/resolver walk with `--compile`) without needing clang, so this
+   test runs everywhere.  Perms on the 0000 dir are always restored via
+   [Fun.protect] so it never lingers to break later cleanup. *)
+let test_unreadable_sibling_dir_does_not_crash_check () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_permdenied"
+      "mod PdEntry do\n\
+      \  fn main() : Int do\n\
+      \    1 + 2\n\
+      \  end\n\
+       end\n"
+  in
+  (* A permission-denied sibling directory beside the entry file.  Its contents
+     are irrelevant: the crash was in [Sys.readdir] on the directory itself,
+     which fails before any entry can be read. *)
+  let denied = Filename.concat tmp "TemporaryItems" in
+  Unix.mkdir denied 0o755;
+  Unix.chmod denied 0o000;
+  Fun.protect
+    ~finally:(fun () ->
+      (* Restore perms so the temp tree can be reclaimed; ignore if already gone. *)
+      (try Unix.chmod denied 0o755 with Unix.Unix_error _ -> ()))
+    (fun () ->
+      (* Run from the project root so the compiler resolves its CWD-relative
+         stdlib/ (same trick as the other compiled-regression tests).  The
+         scanned directory is [Filename.dirname src] = [tmp] (an absolute
+         path), independent of CWD. *)
+      let cmd = Printf.sprintf "cd %s && %s --check %s 2>&1; echo EXIT:$?"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote src) in
+      let out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        (Printf.sprintf
+          "--check exits 0 despite an unreadable sibling dir (no Sys_error crash); got:\n%s"
+          out)
+        true
+        (ir_contains out "EXIT:0"))
+
+(* ── Cross-compile: TLS (OpenSSL) + gzip (zlib) for linux/amd64 (P3) ────────
+   Cross-compile a program that references BOTH the TLS runtime
+   (march_tls_write / march_tls_close) AND the gzip runtime (march_gzip_encode /
+   march_gzip_decode), then assert the output is a valid Linux x86-64 ELF whose
+   DT_NEEDED lists libssl.so.3, libcrypto.so.3 and libz.so.1 — i.e. the cross
+   link resolved the external symbols against the target sysroot instead of
+   failing with "undefined symbol: march_tls_write" (the P1 pure-compute
+   behaviour this fix replaces).
+
+   This is a LINK-STRUCTURE test: the binary is x86-64 Linux and cannot RUN on
+   the (arm64/macOS) test host, so we inspect the ELF, we do not execute it.  It
+   REQUIRES `zig` (the cross driver) and the target sysroot cache
+   (scripts/fetch-cross-sysroot.sh amd64); when either is absent it SKIPS
+   cleanly via the tool-absence ledger rather than failing — mirroring the
+   clang-absence policy for the JIT tests. *)
+let test_cross_tls_gzip_linux_amd64_elf () =
+  if not (zig_available ()) then
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no zig on PATH (cross driver absent)"
+  else match cross_sysroot_dir "amd64" with
+  | None ->
+    record_jit_skip
+      "cross TLS+gzip linux/amd64: no target sysroot \
+       (run scripts/fetch-cross-sysroot.sh amd64)"
+  | Some _sysroot ->
+    let main_exe = find_main_exe () in
+    let project_root = march_project_root () in
+    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+       libssl/libcrypto would be dropped and the assertion below would be a
+       false negative.  The gzip calls are unconditional. *)
+    let src_text =
+      "mod XTls do\n\
+      \  needs IO.NetConnect.TLS\n\
+      \  fn main() do\n\
+      \    let payload = Bytes.from_string(\"march cross tls+gzip probe\")\n\
+      \    let gz = match stdlib_gzip_encode(payload, -1) do\n\
+      \      Ok(c)  -> c\n\
+      \      Err(_) -> payload\n\
+      \    end\n\
+      \    let restored = match stdlib_gzip_decode(gz) do\n\
+      \      Ok(o)  -> o\n\
+      \      Err(_) -> gz\n\
+      \    end\n\
+      \    if Bytes.length(restored) > 1000000000 do\n\
+      \      let _ = tls_write(0, \"ping\")\n\
+      \      tls_close(0)\n\
+      \    else\n\
+      \      ()\n\
+      \    end\n\
+      \    println(\"probe ok\")\n\
+      \  end\n\
+       end\n"
+    in
+    let tmp = Filename.temp_file "march_xtls" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "xtls.march" in
+    let oc = open_out src in
+    output_string oc src_text;
+    close_out oc;
+    let bin = Filename.concat tmp "xtls_linux" in
+    let read_cmd cmd =
+      let ic = Unix.open_process_in cmd in
+      let buf = Buffer.create 256 in
+      (try while true do Buffer.add_channel buf ic 1 done with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      String.trim (Buffer.contents buf)
+    in
+    let compile_out = read_cmd (Printf.sprintf
+      "cd %s && %s --compile --target linux/amd64 -o %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote bin) (Filename.quote src)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "cross-compile succeeds (no undefined march_tls_*/march_gzip_* \
+                       symbols); output:\n%s" compile_out)
+      true (ir_contains compile_out "EXIT:0" && Sys.file_exists bin);
+    (* Assert Linux x86-64 ELF via `file`. *)
+    let file_out = read_cmd (Printf.sprintf "file %s" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      (Printf.sprintf "output is a Linux x86-64 ELF; `file` said:\n%s" file_out)
+      true
+      (ir_contains file_out "ELF 64-bit"
+       && ir_contains file_out "x86-64"
+       && ir_contains file_out "GNU/Linux");
+    (* Assert DT_NEEDED lists all three target sonames.  `objdump -p` parses the
+       Linux ELF fine on the host; llvm-readelf would work too. *)
+    let needed = read_cmd (Printf.sprintf
+      "objdump -p %s 2>/dev/null | grep NEEDED || true" (Filename.quote bin)) in
+    List.iter (fun so ->
+        Alcotest.(check bool)
+          (Printf.sprintf "DT_NEEDED contains %s; NEEDED lines:\n%s" so needed)
+          true (ir_contains needed so))
+      ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"]
+
 let codegen_suites =
   [
+      ( "cross_compile", [
+          Alcotest.test_case
+            "linux/amd64 TLS+gzip links to valid ELF w/ libssl/libcrypto/libz NEEDED (P3)"
+            `Quick test_cross_tls_gzip_linux_amd64_elf;
+        ] );
+      ( "tir_names", [
+          Alcotest.test_case "tuple_tag round-trip"       `Quick test_tir_names_tuple_tag;
+          Alcotest.test_case "fv_field round-trip"        `Quick test_tir_names_fv_field_round_trip;
+          Alcotest.test_case "clo_struct_name/is_clo_struct" `Quick test_tir_names_clo_struct;
+          Alcotest.test_case "apply_fn_name/is_apply_fn"  `Quick test_tir_names_apply_fn;
+          Alcotest.test_case "is_iface_mangled"            `Quick test_tir_names_iface_mangled;
+          Alcotest.test_case "iface_mangle builder"        `Quick test_tir_names_iface_mangle_builder;
+          Alcotest.test_case "default_arg_mangle round-trip" `Quick test_tir_names_default_arg_round_trip;
+          Alcotest.test_case "actor suffixes + field sort" `Quick test_tir_names_actor_suffixes;
+          Alcotest.test_case "runtime_prefix"              `Quick test_tir_names_runtime_prefix;
+          Alcotest.test_case "is_try_call"                 `Quick test_tir_names_try_call;
+          Alcotest.test_case "test/setup fn names"         `Quick test_tir_names_test_and_setup_fn_names;
+          Alcotest.test_case "specialize_mangle"           `Quick test_tir_names_specialize_mangle;
+          Alcotest.test_case "bool tags"                   `Quick test_tir_names_bool_tags;
+        ] );
+      ( "fnfused_coverage", [
+          Alcotest.test_case "map+fold fused fn is FnFused"        `Quick test_fnfused_map_fold_tagged;
+          Alcotest.test_case "filter+fold fused fn is FnFused"     `Quick test_fnfused_filter_fold_tagged;
+          Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
+          Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
+        ] );
+      ( "rc_types", [
+          Alcotest.test_case "needs_rc/borrow_eligible truth table" `Quick test_rc_types_truth_table;
+          Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple, TRecord}" `Quick test_rc_types_divergence_set_exact;
+        ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
           Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
+        ] );
+      ( "actor_dispatch_codegen", [
+          Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
+            `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
+            `Quick test_actor_struct_ereuse_unconditional;
+          Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
+            `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
@@ -5233,6 +8304,12 @@ let codegen_suites =
           Alcotest.test_case "state machine mutual TCO" `Quick test_mutual_tco_state_machine;
           Alcotest.test_case "non-tail mutual: no loop" `Quick test_mutual_tco_non_tail_no_loop;
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
+          Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
+            `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
+            `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
+          Alcotest.test_case "B8: reduction check present in mutual loop"
+            `Quick test_mutual_tco_has_reduction_check;
         ] );
       ( "phase4_reduction_codegen", [
           Alcotest.test_case "non-leaf has reduction check"      `Quick test_phase4_nonleaf_has_reduction_check;
@@ -5251,10 +8328,15 @@ let codegen_suites =
         Alcotest.test_case "is_complete open block" `Quick test_multiline_is_complete_open_block;
       ];
       "repl_jit_cross_line", [
+        Alcotest.test_case "W2.0 canary: setup_jit_runtime gate is live" `Quick test_setup_jit_runtime_gate_is_live;
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
+        Alcotest.test_case "B11: stored closure returns untagged Int" `Quick test_repl_jit_stored_closure_returns_untagged_int;
+        Alcotest.test_case "B11: self-referencing fn no duplicate clo_wrap" `Quick test_repl_jit_selfref_fn_no_duplicate_wrapper;
+        Alcotest.test_case "top-level fn as first-class value" `Quick test_repl_jit_topfn_first_class_value;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
+        Alcotest.test_case "B12: niche ADT cross-fragment (:load DMod then match)" `Quick test_repl_jit_niche_adt_cross_fragment;
       ];
       "repl_jit_regression", [
         Alcotest.test_case "list literal compiles" `Quick test_repl_list_literal;
@@ -5385,6 +8467,8 @@ let codegen_suites =
         Alcotest.test_case "unknown_unchanged" `Quick test_known_call_unknown_unchanged;
         Alcotest.test_case "two_closures"    `Quick test_known_call_two_closures;
         Alcotest.test_case "stack_alloc"     `Quick test_known_call_stack_alloc;
+        Alcotest.test_case "is_clo_name matches Tir_names.is_clo_struct (W3C2.1)" `Quick
+          test_known_call_is_clo_name_matches_tir_names;
       ]);
       ("struct_fusion", [
         Alcotest.test_case "two_updates"       `Quick test_struct_fusion_two_updates;
@@ -5648,5 +8732,128 @@ let codegen_suites =
           Alcotest.test_case "transitive CAS hash still propagates"       `Quick test_hcr_transitive_hash_still_propagates_for_cas;
           Alcotest.test_case "entry point excluded from reloadable slots" `Quick test_hcr_entry_point_not_a_reloadable_slot;
         ] );
+      ( "guard_exhaustion_codegen", [
+          Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
+            test_guard_exhaustion_panics_compiled;
+        ] );
+      ( "float_lit_match_codegen", [
+          Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
+            test_float_lit_match_arm_compiled;
+          Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
+            test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "erased_option_niche_fbip_codegen", [
+          Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
+            test_erased_option_niche_fbip_no_underflow_compiled;
+        ] );
+      ( "nested_tuple_let_codegen", [
+          Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
+            test_nested_tuple_let_destructure_compiled;
+          Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
+            test_nested_tuple_let_deep_wildcard_compiled;
+        ] );
+      ( "nested_fn_name_collision_codegen", [
+          Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
+            test_nested_fn_name_shadows_toplevel_compiled;
+        ] );
+      ( "nonentry_newtype_repr_codegen", [
+          Alcotest.test_case "non-entry single-field ADT: construct/destructure repr agree (tuple-nested)" `Quick
+            test_nonentry_newtype_tuple_destructure_compiled;
+        ] );
+      ( "erased_record_update_codegen", [
+          Alcotest.test_case "single march_record_update_dyn call in IR (B5)" `Quick
+            test_erased_update_single_dyn_call_ir;
+          Alcotest.test_case "compiled missing-field update panics (B5)" `Quick
+            test_erased_update_missing_field_panics_compiled;
+          Alcotest.test_case "compiled multi-field update values (B5)" `Quick
+            test_erased_update_multi_field_values_compiled;
+        ] );
+      ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
+            test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
+            test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
+            test_compiled_println_int_list_parity;
+          Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
+            test_compiled_println_string_list_parity;
+          Alcotest.test_case "compiled println(List(Option(Int))) parity (Wave2 T1)" `Quick
+            test_compiled_println_option_list_parity;
+          Alcotest.test_case "compiled println(List(List(Int))) parity + mono termination (Wave2 T1)" `Quick
+            test_compiled_println_nested_list_parity;
+          Alcotest.test_case "compiled println(:atom) parity (Show$Atom)" `Quick
+            test_compiled_println_atom_parity;
+          Alcotest.test_case "compiled show(:atom) multi-atom parity (Show$Atom)" `Quick
+            test_compiled_show_atom_multi_parity;
+          Alcotest.test_case "unresolved-iface-method guard fires: EApp path (Wave2 review)" `Quick
+            test_iface_guard_fires_eapp;
+          Alcotest.test_case "unresolved-iface-method guard fires: ECallPtr path (Wave2 review)" `Quick
+            test_iface_guard_fires_ecallptr;
+          Alcotest.test_case "unresolved-iface-method guard: negative control (Wave2 review)" `Quick
+            test_iface_guard_negative_control;
+        ] );
+      ( "scrutinee_borrowed_cross_branch_dec_codegen", [
+          Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
+            test_scrutinee_borrowed_cross_branch_no_double_dec;
+        ] );
+      ( "newtype_derived_method_crash", [
+          Alcotest.test_case "derived Eq: == operator vs named eq() parity (P1)" `Quick
+            test_newtype_derived_eq_operator_vs_named_parity;
+          Alcotest.test_case "derived Ord/Hash named compare()/hash() on Int-payload newtype (P1)" `Quick
+            test_newtype_derived_ord_hash_named_compiled;
+          Alcotest.test_case "derived Eq/Ord/Hash named on String-payload newtype (P1)" `Quick
+            test_newtype_derived_ord_string_payload_compiled;
+          Alcotest.test_case "control: Boxed 2-field ctor derived methods unaffected (P1)" `Quick
+            test_boxed_pair_derived_methods_unaffected_compiled;
+          Alcotest.test_case "control: multi-ctor derived methods unaffected (P1)" `Quick
+            test_multi_ctor_derived_methods_unaffected_compiled;
+          Alcotest.test_case "derive on variant whose name collides with a stdlib record" `Quick
+            test_derive_variant_name_collides_stdlib_record_compiled;
+          Alcotest.test_case "derive on variant whose name collides with a local nested record" `Quick
+            test_derive_variant_name_collides_local_record_compiled;
+          Alcotest.test_case "hand-written impl nested-destructure match on newtype (P1)" `Quick
+            test_handwritten_impl_nested_match_newtype_compiled;
+          Alcotest.test_case "== operator on String-payload newtype (P1, distinct bug)" `Quick
+            test_newtype_eq_operator_string_payload_compiled;
+          Alcotest.test_case "control: == operator on Int-payload newtype (tagged scalar) (P1)" `Quick
+            test_newtype_eq_operator_int_payload_control_compiled;
+          Alcotest.test_case "== operator on Boxed-ADT-payload newtype (recursive) (P1)" `Quick
+            test_newtype_eq_operator_boxed_payload_compiled;
+          Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
+            test_newtype_eq_operator_generic_payload_compiled;
+        ] );
+      ( "cross_module_ctor_resolution", [
+          Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
+            test_msgpack_cross_module_ctor_resolution_compiled;
+        ] );
+      ( "llvm_builtins_preamble_golden", [
+          Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_native;
+          Alcotest.test_case "native, REPL preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_native_repl;
+          Alcotest.test_case "WASM preamble byte-identical (W3C2.4 / H2)" `Quick
+            test_preamble_byte_identical_wasm;
+          Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
+            test_preamble_wrapper_delegates;
+        ] );
+      ( "compiler_robustness", [
+          Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
+            test_unreadable_sibling_dir_does_not_crash_check;
+        ] );
+      ( "name_resolution", [
+          Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
+            test_qualified_alias_no_cross_module_hijack;
+          Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
+            test_entry_bulk_import_resolves_partial_qualified;
+          Alcotest.test_case "registry record's bare-named sibling field type resolves" `Quick
+            test_registry_record_field_bare_sibling_type_resolves;
+        ] );
+      ( "js_pipeline", [
+          Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
+          Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
+          Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
+          Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
+        ] );
   ]
+  @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
 

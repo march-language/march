@@ -1,0 +1,18 @@
+mod M do
+  -- Operational dispatch witness (core-march.md §4.2.2): the built-in
+  -- type-directed interfaces (Show, Eq) dispatch via the runtime `impl_tbl`
+  -- hashtable keyed (iface, type_name) -- a genuine lookup on the ARGUMENT'S
+  -- dynamic type, not lexical env binding. `derive Show, Eq for Color`
+  -- expands (desugar-time) to ordinary DImpl blocks that register into
+  -- `impl_tbl` under ("Show","Color") / ("Eq","Color"); the builtins `show`
+  -- and `==` then find and invoke them by Red/Blue's runtime type tag.
+  type Color = Red | Green | Blue
+
+  derive Show, Eq for Color
+
+  fn main() do
+    println(show(Red))
+    println(Green == Green)
+    println(Red == Blue)
+  end
+end

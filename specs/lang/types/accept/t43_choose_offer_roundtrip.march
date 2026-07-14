@@ -1,0 +1,34 @@
+mod Main do
+  -- Session-types widening, Task 3 -- choose/offer full round-trip (accept).
+  -- Complements t41 (plain send/recv/close). `Decision`'s two branches carry
+  -- DIFFERENT payload types (Int vs String) so the MPST merge rule (F4,
+  -- core-march-types.md finding 20) does not collapse Server's projection --
+  -- this protocol's binary duality holds cleanly. `Chan.choose` (typecheck.ml
+  -- :3564) requires SChoose and advances to the chosen branch's continuation;
+  -- `Chan.offer` (:3614) requires SOffer and returns (Atom, Chan at the
+  -- FIRST branch's continuation -- F5/finding 21's conservative
+  -- approximation). Because the chooser always picks `:ok` here and `:ok` IS
+  -- the first branch, the approximation happens to be exact for this
+  -- witness -- see F5 for why that isn't true in general.
+  type Client = Client
+  type Server = Server
+
+  protocol Decision do
+    choose by Client:
+      ok  -> Client -> Server : Int
+      err -> Client -> Server : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Decision)
+    let cc2 = Chan.choose(cc, :ok)
+    let cc3 = Chan.send(cc2, 42)
+    Chan.close(cc3)
+    let (lbl, sc2) = Chan.offer(sc)
+    let (n, sc3) = Chan.recv(sc2)
+    Chan.close(sc3)
+    println(lbl)
+    println(int_to_string(n))
+  end
+end

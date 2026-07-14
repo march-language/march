@@ -254,6 +254,88 @@ let test_parse_underscore_param () =
     Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
   | _ -> Alcotest.fail "expected single DFn with underscore param"
 
+(* ── `with ... else` multi-arm parsing (token-filter arm separators) ────── *)
+
+(* Parse a module whose single fn body is a `with ... else ... end` and return
+   the number of branches in the desugared EMatch. `with pat <- e do body else
+   arms... end` builds `EMatch(e, ok_branch :: arms)`, so the branch count is
+   [1 + number of else-arms]. Multi-arm else forms used to fail to parse at all
+   because the token filter swallowed the newlines separating the arms. *)
+let with_else_match_branches src =
+  let lexbuf = Lexing.from_string src in
+  let m =
+    March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.March_ast.Ast.fn_clauses with
+     | [clause] ->
+       (match clause.March_ast.Ast.fc_body with
+        | March_ast.Ast.EMatch (_, branches, _) -> List.length branches
+        | _ -> Alcotest.fail "expected `with` body to desugar to EMatch")
+     | _ -> Alcotest.fail "expected single fn clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_with_else_single_arm () =
+  (* Regression guard: the single-arm form already worked and must keep doing so. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- lookup() do
+        Ok(user)
+      else
+        Err(e) -> Err(e)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 1 else arm" 2 (with_else_match_branches src)
+
+let test_parse_with_else_two_nullary_arms () =
+  (* The bug: two nullary-constructor else arms failed to parse entirely, with
+     the caret landing on the second arm's `->`. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- lookup() do
+        Ok(user)
+      else
+        ErrA -> Err(ErrA)
+        ErrC -> Err(ErrC)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 2 else arms" 3 (with_else_match_branches src)
+
+let test_parse_with_else_three_payload_arms () =
+  (* Three arms mixing nullary, payload, and nested-payload constructor
+     patterns — mirrors the 3-arm example in docs/pattern-matching.md. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(user) <- authenticate() do
+        Ok(user)
+      else
+        Err(AuthFailed) -> Err(AuthFailed)
+        Err(NotFound(kind)) -> Err(NotFound(kind))
+        Err(Timeout) -> Err(Timeout)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 3 else arms" 4 (with_else_match_branches src)
+
+let test_parse_with_else_infix_bodies () =
+  (* Arm bodies containing infix operators must not confuse arm-boundary
+     detection: each arm still terminates at its trailing newline. *)
+  let src = {|mod Test do
+    fn g() do
+      with Ok(name) <- fetch() do
+        Ok(name)
+      else
+        Err(a) -> Err("bad: " ++ a)
+        Err(b) -> Err("worse: " ++ b)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1 ok branch + 2 infix-body else arms" 3 (with_else_match_branches src)
+
 (* ── Helpers for desugar + typecheck tests ─────────────────────────────── *)
 
 let test_desugar_pipe () =
@@ -355,12 +437,35 @@ let test_tc_dotted_sibling_module_order () =
   Alcotest.(check bool) "dotted sibling ordered before callers: no errors"
     false (has_errors ctx)
 
+let test_tc_private_nested_member_diagnostic () =
+  (* A same-file qualified reference to a PRIVATE nested-module member (`A.secret`
+     where `secret` is a `pfn`) is rejected — but must be diagnosed as "private to
+     module `A`", NOT the misleading "Unknown module `A`".  The private member is
+     never exported into env.vars, so the registry-based qualified_error_msg saw
+     no in-file module `A` at all and misreported it as absent; env.local_mods now
+     records each nested module's private members to recover the accurate message. *)
+  let ctx = typecheck {|mod Main do
+    mod A do
+      pfn secret() : Int do 42 end
+      fn pub_fn() : Int do 1 end
+    end
+    fn main() : Int do A.secret() end
+  end|} in
+  Alcotest.(check bool) "private nested member: rejected" true (has_errors ctx);
+  let says_private =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "is private to module `A`") d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool)
+    "diagnostic names the private member, not 'Unknown module'" true says_private
+
 let test_tc_if_bad_cond () =
-  (* Condition must be Bool — using Int + 1 should produce an error.
-     if/then/else needs no `end`; only fn do…end and match…end do. *)
+  (* Condition must be Bool — using Int + 1 should produce an error. *)
   let ctx = typecheck {|mod Test do
     fn bad(x) do if x + 1 do 0 else 1 end end
-    fn bad(x) do if x + 1 then 0 else 1 end
   end|} in
   Alcotest.(check bool) "non-Bool condition is an error" true (has_errors ctx)
 
@@ -401,30 +506,33 @@ let test_tc_hole () =
    which is how a conduit test typo — fake_workflow_storage_new() with 0 args —
    became a non-deterministic hang. *)
 let test_tc_arity_under_application () =
+  (* The arity error is on the call itself; no trailing `()` — a `<call>)(`
+     juxtaposition like `add(1) ()` is now a parse error (curried-call guard,
+     token_filter.ml), so the direct call carries the arity mismatch. *)
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1) () end
+    fn main() : Unit do let _ = add(1) end
   end|} in
   Alcotest.(check bool) "under-application is an error" true (has_errors ctx)
 
 let test_tc_arity_zero_args () =
   let ctx = typecheck {|mod Test do
     fn mk(name : String) : Int do string_byte_length(name) end
-    fn main() : Unit do let _ = mk() () end
+    fn main() : Unit do let _ = mk() end
   end|} in
   Alcotest.(check bool) "0-arg call of 1-arg fn is an error" true (has_errors ctx)
 
 let test_tc_arity_over_application () =
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1, 2, 3) () end
+    fn main() : Unit do let _ = add(1, 2, 3) end
   end|} in
   Alcotest.(check bool) "over-application is an error" true (has_errors ctx)
 
 let test_tc_arity_correct_ok () =
   let ctx = typecheck {|mod Test do
     fn add(a : Int, b : Int) : Int do a + b end
-    fn main() : Unit do let _ = add(1, 2) () end
+    fn main() : Unit do let _ = add(1, 2) end
   end|} in
   Alcotest.(check bool) "correct-arity call: no error" false (has_errors ctx)
 
@@ -808,16 +916,28 @@ let test_protocol_duplicate_error () =
 (* ── H6: Linear types through record fields (direct field access) ─────────── *)
 
 let test_linear_field_double_access_error () =
-  (* Accessing a linear record field twice directly on a named variable should error.
-     The sentinel "r#data" is created when r is bound, and record_use is called
-     on it each time r.data is evaluated. *)
+  (* Accessing a linear record field twice must error for a LET-BOUND record —
+     the sentinel "p#data" is created when p is let-bound
+     (bind_linear_field_sentinels) and record_use fires on each p.data.
+     HISTORY (slice 7): this test originally used a fn-PARAM-bound record
+     (`fn bad(r: Packet) do r.data + r.data end`) and passed VACUOUSLY on the
+     L2 constraint-discharge leak ("`linear Int` does not implement Num") —
+     params never get field sentinels (L3), so no double-use error ever fired.
+     Rewritten to the let-bound shape, where the real double-use check runs;
+     the param shape is pinned by test_linear_field_param_warning_only. *)
   let ctx = typecheck {|mod Test do
     type Packet = { linear data: Int, size: Int }
-    fn bad(r: Packet) : Int do
-      r.data + r.data
+    fn mk() : Packet do
+      { data: 1, size: 2 }
+    end
+    fn bad() : Int do
+      let p = mk()
+      let x = p.data
+      let y = p.data
+      x + y
     end
   end|} in
-  Alcotest.(check bool) "linear field direct double-access: error" true (has_errors ctx)
+  Alcotest.(check bool) "linear field let-bound double-access: error" true (has_errors ctx)
 
 let test_linear_field_single_access_ok () =
   (* Accessing a linear record field exactly once should be fine. *)
@@ -828,6 +948,55 @@ let test_linear_field_single_access_ok () =
     end
   end|} in
   Alcotest.(check bool) "linear field single access: no error" false (has_errors ctx)
+
+(* ── Slice 7 (L2): TLin must be transparent to constraint discharge ──────── *)
+
+let test_linear_field_arith_single_use_ok () =
+  (* L2: a single arithmetic use of a linear Int field must typecheck —
+     constraint discharge must strip the TLin wrapper (like impl_matches_ty
+     already does) instead of rejecting `linear Int` as not-Num.  The leak
+     bites expression-position TLin: the EField result type reaches the Num
+     constraint still wrapped (var-position TLin is already stripped at
+     binding time by bind_pattern_bindings/bind_linear). *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn ok2(p: Packet) : Int do
+      p.data + 1
+    end
+  end|} in
+  Alcotest.(check bool) "linear Int field arithmetic: no error" false (has_errors ctx)
+
+let test_linear_return_arith_ok () =
+  (* L2, second expression-position shape: a call whose declared return type
+     is `linear Int`, used directly in arithmetic (the tutorial's FFI
+     `malloc : linear Ptr(a)` pattern). *)
+  let ctx = typecheck {|mod Test do
+    fn mk() : linear Int do
+      1
+    end
+    fn f() : Int do
+      mk() + 1
+    end
+  end|} in
+  Alcotest.(check bool) "linear return type arithmetic: no error" false (has_errors ctx)
+
+let test_linear_field_param_warning_only () =
+  (* L3 pin: for a fn-PARAM-bound record, linear-field tracking degrades to a
+     WARNING — field sentinels are only registered at let-binding sites
+     (bind_linear_field_sentinels), so double access through a param is not
+     an error today.  Each let below consumes its own (inherited-linear)
+     binding exactly once; only the missing p sentinel is at issue.  If this
+     test starts failing because an error now fires, L3 got fixed: update the
+     finding in specs/todos.md and flip this expectation. *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn bad(p: Packet) : Int do
+      let x = p.data
+      let y = p.data
+      x + y
+    end
+  end|} in
+  Alcotest.(check bool) "param-bound linear field: warning-only (L3)" false (has_errors ctx)
 
 (* ── H8: Protocol participant cross-checking ─────────────────────────────── *)
 
@@ -890,6 +1059,72 @@ let test_session_duality_holds () =
   Alcotest.(check bool) "dual(client) = server"
     true
     (March_typecheck.Typecheck.session_ty_equal dual_client server_ty)
+
+let test_session_binary_choice_identical_branches () =
+  (* Regression (F4 / finding 20): the MPST "mergeability" rule must NOT be
+     applied to BINARY (2-role) protocols.  In a binary `choose by Server`, the
+     non-chooser (Client) is the chooser's only peer — the offerer — and MUST
+     always observe the choice.  Previously the merge rule fired unconditionally,
+     so when both branches carried an identical payload type the Client
+     projection collapsed from Offer{...} to the bare shared local type
+     (Recv(Int, End)), which is not the dual of Server's Choose{...}; duality then
+     failed and a perfectly legal protocol was rejected as "not duals".
+     Post-fix the merge is gated on `multiparty`, so Client stays an Offer and
+     duality holds. *)
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Decision do
+      choose by Server:
+        ok  -> Server -> Client : Int
+        err -> Server -> Client : Int
+      end
+    end
+  end|} in
+  (* The protocol must typecheck (projection + binary duality both pass). *)
+  Alcotest.(check bool) "binary identical-branch choice: no errors"
+    false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Decision" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  (* The non-chooser peer must remain an Offer{...} — NOT merged away. *)
+  (match client_ty with
+   | March_typecheck.Typecheck.SOffer _ ->
+     Alcotest.(check bool) "Client projects to Offer (not merged)" true true
+   | other ->
+     Alcotest.failf "Client should project to Offer{...} but got: %s" (pp_sty other));
+  (* And that Offer is exactly the dual of Server's Choose{...}. *)
+  let dual_server = March_typecheck.Typecheck.dual_session_ty server_ty in
+  Alcotest.(check bool) "dual(Server) = Client"
+    true
+    (March_typecheck.Typecheck.session_ty_equal dual_server client_ty)
+
+let test_session_mpst_bystander_still_merges () =
+  (* Regression companion to test_session_binary_choice_identical_branches:
+     the merge rule MUST still fire for MULTIPARTY (>2 role) protocols, where a
+     genuine bystander role does not observe a choice made between two OTHER
+     roles.  Here `C` sends to `A` before `A` chooses between two A->B branches;
+     `C` is uninvolved in the choice, so its projection across both branches is
+     identical and merges to a single transparent local type (MSend(A, Int, End))
+     rather than an Offer.  This proves the `multiparty &&` gate did not disable
+     the MPST merge. *)
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Coord do
+      C -> A : Int
+      choose by A:
+        go   -> A -> B : Int
+        stop -> A -> B : Int
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "3-role protocol: no errors" false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Coord" env.March_typecheck.Typecheck.protocols in
+  let c_ty = List.assoc "C" pi.March_typecheck.Typecheck.pi_projections in
+  (* Bystander C merges across the choice — a plain MSend, never an Offer. *)
+  (match c_ty with
+   | March_typecheck.Typecheck.SOffer _ ->
+     Alcotest.failf "bystander C should merge (not Offer) but got: %s" (pp_sty c_ty)
+   | _ -> ());
+  Alcotest.(check string) "bystander C merges to a single local type"
+    "MSend(A, Int, End)" (pp_sty c_ty)
 
 let test_session_loop_projection () =
   (* A protocol with a loop: generates SRec/SVar *)
@@ -1296,6 +1531,279 @@ let test_actor_handler_cap_missing_needs_error () =
   end|} in
   Alcotest.(check bool) "actor handler cap without needs: error" true (has_errors ctx)
 
+(* ── C1 fix: actor handler BODY IO with no declared `needs` ───────────────
+   Finding C1 (final whole-branch review, HCR Phase 5C): [record_fn_caps] was
+   never called for actor handlers at all, so handler functions ended up as
+   `.hcr_manifest` boundary entries with an empty `caps=` field regardless of
+   what IO they actually performed — invisible to the hot-deploy monotonicity
+   gate. Part 2 of the fix folds handler bodies into the SAME body-scan
+   [check_module_needs]'s `body_cap_uses` already does for `DFn`/`DLet`
+   bodies, so a handler calling an IO builtin with no covering `needs`
+   now produces the same "capability not declared in needs" diagnostic a
+   plain function body would (Check 1b — a warning, matching the existing
+   DFn/DLet body-scan diagnostic's severity).
+
+   This fixture uses a 2-level-deep nested module (`Outer.Inner`) to also
+   exercise the qualified-name path through [check_module_needs]'s
+   [cap_qname_prefix] threading (mirrors the nesting depth Task 2's earlier
+   `DFn` qualified-name fix was verified against). *)
+let test_actor_handler_body_io_missing_needs_warns () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "IO.Console") m 0); true
+           with Not_found -> false)
+          && (try ignore (Str.search_forward (Str.regexp_string "needs") m 0); true
+              with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with no needs: warns to declare needs IO.Console"
+    true has_warning
+
+(* Counterpart: when the module DOES declare the needed cap, no such warning
+   fires — confirms the new body-scan doesn't introduce a false positive. *)
+let test_actor_handler_body_io_with_needs_no_warning () =
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      needs IO.Console
+      actor Weeble do
+        state { count: Int }
+        init { count: 0 }
+        on Zorp(msg: String) do
+          println(msg)
+          state
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "needs declared: no hard error" false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (let m = d.March_errors.Errors.message in
+          (try ignore (Str.search_forward (Str.regexp_string "not declare") m 0); true
+           with Not_found -> false))
+    ) diags
+  in
+  Alcotest.(check bool)
+    "actor handler body IO with needs declared: no missing-needs warning"
+    false has_warning
+
+(* ── spawn requires a plain actor name, not a computed expression ─────────
+   Regression: a well-typed `spawn(<computed expr>)` — e.g. an `if` that
+   evaluates to an actor name — passed `--check` (exit 0) but crashed
+   `--compile` with an uncaught
+   `Failure("TIR lower: ESpawn argument must be a plain actor name")`.  Both
+   backends dispatch `spawn` by the actor's *name* at compile time (it selects
+   a statically generated `<Actor>_spawn` function); the TIR lowering only
+   handles a bare actor name (`ECon(_,[],_)`/`EVar`).  The shape restriction now
+   lives in the typechecker as a structured diagnostic, so the program is
+   rejected uniformly (check / compile / interpret) before it can reach the
+   internal failwith. *)
+let test_spawn_computed_actor_rejected () =
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value: Int }
+      init { value: 0 }
+      on Inc(n: Int) do
+        { state with value: state.value + n }
+      end
+    end
+    fn main() : Unit do
+      let c = spawn(if true do Counter else Counter end)
+      kill(c)
+    end
+  end|} in
+  Alcotest.(check bool) "computed actor spawn: error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let mentions m needle =
+    try ignore (Str.search_forward (Str.regexp_string needle) m 0); true
+    with Not_found -> false
+  in
+  let explains_spawn =
+    List.exists (fun d ->
+      let m = d.March_errors.Errors.message in
+      mentions m "spawn" && mentions m "plain actor name")
+      diags
+  in
+  Alcotest.(check bool)
+    "diagnostic explains spawn needs a plain actor name" true explains_spawn
+
+(* Counterpart: a bare actor name still typechecks cleanly — the guard must
+   not flag the valid `spawn(Counter)` form. *)
+let test_spawn_plain_actor_name_ok () =
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value: Int }
+      init { value: 0 }
+      on Inc(n: Int) do
+        { state with value: state.value + n }
+      end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      kill(c)
+    end
+  end|} in
+  Alcotest.(check bool) "plain actor spawn: no errors" false (has_errors ctx)
+
+(* ── Finding 16: let-binding type annotations are enforced ──────────────── *)
+
+(* Count the Error diagnostics whose message contains [needle]. *)
+let count_errors_matching ctx needle =
+  List.fold_left (fun acc (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+         && (try ignore (Str.search_forward (Str.regexp_string needle)
+                           d.March_errors.Errors.message 0); true
+             with Not_found -> false)
+      then acc + 1 else acc)
+    0 (March_errors.Errors.sorted ctx)
+
+(* `let x : Int = "foo"` must now be rejected — the annotation is a checking
+   context for the RHS (finding 16). *)
+let test_let_annot_mismatch_rejects () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let x : Int = "foo"
+      println(int_to_string(x))
+    end
+  end|} in
+  Alcotest.(check bool) "let : Int = String rejected" true (has_errors ctx);
+  Alcotest.(check bool) "mismatch names Int vs String" true
+    (count_errors_matching ctx "expected `Int` but got `String`." >= 1)
+
+(* A correct annotation still typechecks. *)
+let test_let_annot_correct_accepts () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let x : Int = 5
+      println(int_to_string(x))
+    end
+  end|} in
+  Alcotest.(check bool) "let : Int = 5 accepted" false (has_errors ctx)
+
+(* A polymorphic RHS bound at a more specific annotated type still works — the
+   annotation must be a checking context, not a monomorphizing constraint on
+   the RHS's own general type. *)
+let test_let_annot_poly_instance_accepts () =
+  let ctx = typecheck {|mod M do
+    fn main() do
+      let f : (Int) -> Int = fn n -> n
+      println(int_to_string(f(5)))
+    end
+  end|} in
+  Alcotest.(check bool) "let : (Int)->Int = fn n -> n accepted" false (has_errors ctx)
+
+(* ── Finding 13: ELetFn return-annotation mismatch reported ONCE ────────── *)
+
+(* A local recursive fn whose return annotation conflicts with its
+   self-consistent body must report the mismatch exactly ONCE, not twice (the
+   direct return-annotation unify and the self-type/arrow reconciliation both
+   used to rediscover the same conflict through the self-reference). *)
+let test_letfn_ret_annot_mismatch_single_diagnostic () =
+  let ctx = typecheck {|mod M do
+    fn describe(n : Int) do
+      fn go(k) : Int do
+        match k do
+          0 -> "done"
+          _ -> go(k - 1)
+        end
+      end
+      go(n)
+    end
+    fn main() do
+      println(int_to_string(describe(3)))
+    end
+  end|} in
+  Alcotest.(check bool) "ELetFn ret-annot conflict rejected" true (has_errors ctx);
+  Alcotest.(check int) "reported exactly once"
+    1 (count_errors_matching ctx "expected `Int` but got `String`.")
+
+(* Safety: two genuinely-distinct type errors must both still be reported —
+   the dedup must not swallow the second, unrelated error. *)
+let test_letfn_two_distinct_errors_both_report () =
+  let ctx = typecheck {|mod M do
+    fn describe(n : Int) do
+      fn go(k) : Int do
+        match k do
+          0 -> "done"
+          _ -> go(k - 1)
+        end
+      end
+      let bad : Bool = 42
+      go(n)
+    end
+    fn main() do
+      println(int_to_string(describe(3)))
+    end
+  end|} in
+  Alcotest.(check int) "ELetFn conflict reported once"
+    1 (count_errors_matching ctx "expected `Int` but got `String`.");
+  Alcotest.(check int) "distinct Bool/Int error still reported"
+    1 (count_errors_matching ctx "expected `Bool` but got `Int`.")
+
+(* ── Finding 15: generic when-constraint re-checked at call sites ───────── *)
+
+(* An explicit `when Eq(a)` bound on an UNANNOTATED generic parameter must be
+   re-checked at call sites: `same(Rood, Rood)` on an ADT with no `Eq` impl is
+   rejected, just as a direct `Rood == Rood` would be. *)
+let test_generic_when_constraint_unsatisfied_rejects () =
+  let ctx = typecheck {|mod M do
+    type Hue = Rood | Bloo
+    fn same(a, b) when Eq(a) do a == b end
+    fn main() do
+      if same(Rood, Rood) do println("y") else println("n") end
+    end
+  end|} in
+  Alcotest.(check bool) "unsatisfied generic when-constraint rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "names Hue/Eq" true
+    (count_errors_matching ctx "`Hue` does not implement interface `Eq`." >= 1)
+
+(* Safety valve: a generic `when Ord(a)` / `when Eq(a)` bound that IS satisfied
+   at the call site (Int implements both) must still typecheck — the re-check
+   must not reject discharged constraints. *)
+let test_generic_when_constraint_satisfied_accepts () =
+  let ctx = typecheck {|mod M do
+    fn max(a, b) when Ord(a) do if a > b do a else b end end
+    fn same(a, b) when Eq(a) do a == b end
+    fn main() do
+      println(int_to_string(max(1, 2)))
+      if same(1, 1) do println("eq") else println("neq") end
+      if same("x", "y") do println("eq") else println("neq") end
+    end
+  end|} in
+  Alcotest.(check bool) "satisfied generic when-constraint accepted" false
+    (has_errors ctx)
+
+(* Safety valve: an ordinary unconstrained generic function is unaffected. *)
+let test_generic_no_constraint_accepts () =
+  let ctx = typecheck {|mod M do
+    fn id(a) do a end
+    fn main() do
+      println(int_to_string(id(5)))
+      println(id("hi"))
+    end
+  end|} in
+  Alcotest.(check bool) "unconstrained generic accepted" false (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -1353,7 +1861,7 @@ let test_session_eval_send_recv () =
     end
     fn run() do
       let (sc, rc) = Chan.new(Echo)
-      let sc2 = Chan.send(sc, 42)
+      let sc2 = Chan.send(sc, 43)
       let (n, rc2) = Chan.recv(rc)
       let rc3 = Chan.send(rc2, n + 1)
       let (result, sc3) = Chan.recv(sc2)
@@ -1363,7 +1871,9 @@ let test_session_eval_send_recv () =
     end
   end|} in
   let v = call_fn env "run" [] in
-  Alcotest.(check int) "eval echo protocol: result = 43" 43 (vint v)
+  (* Odd payload (43) exercises the erased-i64 tag path both legs; the compiled
+     value round-trip is asserted by test_session_compile_odd_int_roundtrip. *)
+  Alcotest.(check int) "eval echo protocol: result = 44" 44 (vint v)
 
 (* ── SRec multi-turn protocol tests ─────────────────────────────────────── *)
 
@@ -2045,6 +2555,119 @@ let test_session_compile_full_pipeline_no_crash () =
   end|} in
   Alcotest.(check bool) "session compile full pipeline: no crash" true true
 
+(* ── Compiled channel-payload value round-trips (F1/F2 regression) ────────
+   The IR-shape tests above assert only that `march_chan_*` symbols APPEAR in
+   the emitted module — they never run the compiled binary or check a carried
+   value, so they stayed green while every ODD Int payload compiled to
+   `(v-1)/2` and every Bool flipped `true→false`.  Root cause: `march_chan_send`
+   received the payload as a bare untagged `i64`, while `march_chan_recv`'s
+   returned payload went through the erased-i64 CONDITIONAL-UNTAG restore
+   (ashr iff low bit set) — an asymmetric coercion.  The fix tags the payload
+   at the send site (llvm_emit.ml `chan_send`/`chan_choose`/`mpst_send` arms,
+   `emit_atom_as ctx "ptr"`) so send/recv are symmetric.  These tests compile
+   and RUN the binary, checking the printed value: they FAIL on the pre-fix
+   binary (43→21, true→false) and pass after.  Modelled on the compile-and-run
+   regression tests in test_codegen.ml (write source to a temp dir, run interp
+   for the baseline, then compile + run + check the printed value). *)
+
+(* Read the whole stdout+stderr of a command (trimmed). *)
+let session_read_cmd_output cmd =
+  let ic = Unix.open_process_in cmd in
+  let buf = Buffer.create 64 in
+  (try while true do Buffer.add_channel buf ic 1 done
+   with End_of_file -> ());
+  ignore (Unix.close_process_in ic);
+  String.trim (Buffer.contents buf)
+
+(* Write [src_text] to a fresh temp dir; return (project_root, main_exe, src, tmp). *)
+let session_write_src ~name src_text =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file name "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (name ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (project_root, main_exe, src, tmp)
+
+(** Odd Int payload (43) round-trips through Chan.send/recv compiled.  The
+    interpreter is the baseline (already correct); the compiled binary must
+    print the SAME value.  Pre-fix, the compiled run printed 21 (=(43-1)/2). *)
+let test_session_compile_odd_int_roundtrip () =
+  let (project_root, main_exe, src, tmp) =
+    session_write_src ~name:"march_session_oddint"
+      "mod Main do\n\
+      \  protocol Echo do\n\
+      \    Client -> Server : Int\n\
+      \    Server -> Client : Int\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let (cc, sc) = Chan.new(Echo)\n\
+      \    let cc2 = Chan.send(cc, 43)\n\
+      \    let (n, sc2) = Chan.recv(sc)\n\
+      \    let sc3 = Chan.send(sc2, n)\n\
+      \    let (result, cc3) = Chan.recv(cc2)\n\
+      \    Chan.close(cc3)\n\
+      \    Chan.close(sc3)\n\
+      \    println(int_to_string(result))\n\
+      \  end\n\
+       end\n"
+  in
+  (* interpreter baseline: the odd payload round-trips as 43 *)
+  let interp_out = session_read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interp: odd Int channel payload round-trips (43)"
+    "43" interp_out;
+  (* compiled: MUST print 43 too — pre-fix this printed 21 (the F1 miscompile) *)
+  let bin = Filename.concat tmp "sessoddintbin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = session_read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: odd Int channel payload round-trips as 43 (not 21 — F1 tag fix)"
+      "43" run_out
+
+(** Bool payload (true) round-trips through Chan.send/recv compiled.  Pre-fix,
+    the compiled run flipped true→false (the F2 miscompile). *)
+let test_session_compile_bool_roundtrip () =
+  let (project_root, main_exe, src, tmp) =
+    session_write_src ~name:"march_session_bool"
+      "mod Main do\n\
+      \  protocol B do\n\
+      \    Client -> Server : Bool\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let (cc, sc) = Chan.new(B)\n\
+      \    let cc2 = Chan.send(cc, true)\n\
+      \    let (b, sc2) = Chan.recv(sc)\n\
+      \    Chan.close(cc2)\n\
+      \    Chan.close(sc2)\n\
+      \    if b do println(\"TRUE\") else println(\"FALSE\") end\n\
+      \  end\n\
+       end\n"
+  in
+  let interp_out = session_read_cmd_output (Printf.sprintf
+    "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interp: Bool channel payload round-trips (true)"
+    "TRUE" interp_out;
+  let bin = Filename.concat tmp "sessboolbin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = session_read_cmd_output (Filename.quote bin) in
+    Alcotest.(check string)
+      "compiled: Bool channel payload round-trips as TRUE (not FALSE — F2 tag fix)"
+      "TRUE" run_out
+
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
 let test_actor_handler_extra_field () =
@@ -2392,7 +3015,7 @@ let test_fn_when_constraint_satisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -2408,7 +3031,7 @@ let test_fn_when_constraint_unsatisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -2435,6 +3058,111 @@ let test_qualified_show_call () =
     fn to_str(x : Int) : String do Show.show(x) end
   end|} in
   Alcotest.(check bool) "Show.show(x) resolves: no errors" false (has_errors ctx)
+
+(* Regression (modules widening slice 2, Task 1): cross-module visibility for
+   private FUNCTIONS. `Array.lst_rev` is a real private `pfn`
+   (stdlib/array.march). It must NOT be callable by qualification from another
+   module. The bug: `load_module_into_env` loaded `ExFn`/`ExValue` entries
+   UNCONDITIONALLY (never consulting `ex_public`), unlike the adjacent `ExCtor`
+   arm which correctly gates on it — so a private `pfn` from any
+   registry-loadable module (any stdlib module) was silently callable from
+   unrelated code, typecheck AND runtime, both backends. The fix adds the
+   `ex_public` gate to the `ExFn`/`ExValue` arm: the qualified lookup now misses,
+   and `qualified_error_msg` reports "… is private to module `Array`.".
+   This exercises the `Module_registry.ensure_loaded` fallback path (the buggy
+   one) — the module is discovered on disk by the registry, not spliced in as a
+   `DMod`, so it does NOT go through the same-file `pub_set` gate that was
+   already correct. *)
+let has_message_containing ctx needle =
+  List.exists (fun d ->
+    let m = d.March_errors.Errors.message in
+    let nl = String.length needle and ml = String.length m in
+    let rec scan i = i + nl <= ml && (String.sub m i nl = needle || scan (i + 1)) in
+    scan 0)
+    ctx.March_errors.Errors.diagnostics
+
+let test_cross_module_private_fn_rejected () =
+  let ctx = typecheck {|mod Main do
+    fn main() : Int do
+      let r = Array.lst_rev(Cons(1, Cons(2, Cons(3, Nil))))
+      match r do
+        Nil -> 0
+        Cons(h, _) -> h
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "private cross-module pfn call is rejected"
+    true (has_errors ctx);
+  Alcotest.(check bool) "rejection cites 'is private to module `Array`'"
+    true (has_message_containing ctx "is private to module `Array`")
+
+(* Companion: the gate is NARROW — a PUBLIC cross-module call still resolves.
+   `Array.empty`/`Array.length` are public `fn`s reached through the same
+   registry fallback; they must remain callable (no visibility error). *)
+let test_cross_module_public_fn_accepted () =
+  let ctx = typecheck {|mod Main do
+    fn main() : Int do
+      let v = Array.empty()
+      Array.length(v)
+    end
+  end|} in
+  Alcotest.(check bool) "public cross-module fn call: no errors"
+    false (has_errors ctx)
+
+(* Regression: a module-qualified type reference (`Token.Token`) from OUTSIDE a
+   module must be the SAME nominal type as the bare `Token` the module's own
+   constructor/accessor produce.  `surface_ty` used to resolve the qualified
+   reference to a distinct `TCon("Token.Token")` that would not unify with the
+   bare `TCon("Token")`, so a value crossing the module boundary failed with
+   "expected `Token.Token` but got `Token`".  This is the variant/opaque-type
+   analogue of the `Cfg.Site` record leak (see test/dune whole_program rule).
+   Exercises BOTH directions: a bare-typed value flowing into a qualified-typed
+   parameter (`use_it(Token.make ...)`), and a qualified-typed value flowing
+   into a bare-typed parameter (`Token.value(t)`). *)
+let test_qualified_opaque_type_unifies_bare () =
+  let ctx = typecheck {|mod TokenDemo do
+    mod Token do
+      opaque type Token = Token(String)
+      fn make(raw : String) : Token do Token(raw) end
+      fn value(t : Token) : String do
+        match t do Token(s) -> s end
+      end
+    end
+
+    fn use_it(t : Token.Token) : String do
+      Token.value(t)
+    end
+
+    fn main() : String do
+      use_it(Token.make("hi"))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "qualified `Token.Token` unifies with bare `Token`: no errors"
+    false (has_errors ctx)
+
+(* The same fixture must also evaluate end-to-end: the round-trip through the
+   qualified annotation returns the string threaded through the opaque type. *)
+let test_qualified_opaque_type_evals () =
+  let env = eval_module {|mod TokenDemo do
+    mod Token do
+      opaque type Token = Token(String)
+      fn make(raw : String) : Token do Token(raw) end
+      fn value(t : Token) : String do
+        match t do Token(s) -> s end
+      end
+    end
+
+    fn use_it(t : Token.Token) : String do
+      Token.value(t)
+    end
+
+    fn main() : String do
+      use_it(Token.make("hi"))
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "qualified opaque round-trip evaluates to \"hi\"" "hi" (vstr v)
 
 (* F5: linear let binding — used exactly once is ok *)
 let test_linear_let_ok () =
@@ -2801,6 +3529,98 @@ let test_resolver_skips_dangling_symlink () =
   Alcotest.(check bool) "dangling symlink not collected"
     false (List.exists (fun p -> Filename.basename p = "broken") files)
 
+(** Regression test for the O(var-refs * imports) blowup in
+    [Typecheck.record_use]: every EVar lookup used to linearly scan
+    [env.import_tracker], whose length is one entry per use/import/alias
+    declaration across the WHOLE combined program (stdlib + every file
+    pulled in via MARCH_LIB_PATH auto-discovery).  On a real multi-hundred-
+    file project (forgepm + bastion + depot + march_doc, ~200 files) this
+    made `march check` hang for 30+ minutes burning 100% CPU in
+    List.mem/compare_val (confirmed via `sample`), instead of completing in
+    seconds.  This test builds a synthetic MARCH_LIB_PATH with many
+    auto-discovered modules, each importing a shared module (`import Shared`)
+    and referencing several of its functions -- the exact shape that
+    stresses [record_use]'s import-tracker lookup -- and asserts the check
+    completes within a bound chosen to clearly separate "linear" from
+    "quadratic blowup" at this N.  Measured directly (CAS cache cleared
+    between runs, so these are real typecheck times, not cache hits):
+      files   pre-fix (quadratic)   post-fix (indexed)
+       400          ~1.2s                ~0.6s
+      1200          ~8.2s                ~1.4s   (~6x)
+      2000         ~21.1s                ~2.3s   (~9x)
+      3000         ~45.5s                ~3.7s  (~12x)
+    Pre-fix time roughly follows n^2 (k ~= 5e-6); post-fix is ~linear.  This
+    test uses N = 2500 files, where the pre-fix code would take ~31s (already
+    past the 30s bound below) while the fixed code takes ~3s -- comfortably
+    separating "would time out" from "clearly fine" without making the test
+    itself slow. *)
+let test_large_multi_file_check_is_not_quadratic () =
+  let dir = Filename.temp_file "march_lib_path_scale_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    (* Best-effort cleanup: this test writes thousands of small files. *)
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in
+    output_string oc contents;
+    close_out oc
+  in
+  (* One shared module with several functions, imported by every generated
+     module below via `import Shared` (a UseAll-style bulk import) -- this
+     populates one [import_tracker] entry per importing file, and each
+     `helperN()` call inside those files is an EVar lookup that must mark
+     the right entry used via [record_use]. *)
+  let n_helpers = 20 in
+  let shared_src =
+    let buf = Buffer.create 1024 in
+    Buffer.add_string buf "mod Shared do\n";
+    for i = 0 to n_helpers - 1 do
+      Buffer.add_string buf (Printf.sprintf "  fn helper%d() do\n    %d\n  end\n" i i)
+    done;
+    Buffer.add_string buf "end\n";
+    Buffer.contents buf
+  in
+  write_file (Filename.concat dir "shared.march") shared_src;
+  let n_files = 2500 in
+  let n_refs  = 30 in
+  for i = 0 to n_files - 1 do
+    let buf = Buffer.create 512 in
+    Buffer.add_string buf (Printf.sprintf "mod Wu%d do\n" i);
+    Buffer.add_string buf "  import Shared\n";
+    Buffer.add_string buf "  fn value() do\n";
+    for j = 0 to n_refs - 1 do
+      Buffer.add_string buf
+        (Printf.sprintf "    let x%d = helper%d() + %d\n" j (j mod n_helpers) j)
+    done;
+    Buffer.add_string buf "    x0\n  end\nend\n";
+    write_file (Filename.concat dir (Printf.sprintf "wu%d.march" i)) (Buffer.contents buf)
+  done;
+  (* Entry file: trivial, imports nothing itself -- all the files above are
+     pulled in purely via MARCH_LIB_PATH auto-discovery (resolve_imports's
+     step 2), exactly like forgepm's `.march` tree under MARCH_LIB_PATH. *)
+  let entry_src = "mod Entry do\n  fn main() do\n    0\n  end\nend\n" in
+  Unix.putenv "MARCH_LIB_PATH" dir;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let m = parse_and_desugar entry_src in
+    let start = Unix.gettimeofday () in
+    let (resolve_errors, extra_decls, _user_files) =
+      March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+    Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+    let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+    let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+    let elapsed = Unix.gettimeofday () -. start in
+    Alcotest.(check bool) "no typecheck errors" false (has_errors errors);
+    (* 30s bound: the fixed (indexed) code finishes this N in ~3-5s even on a
+       loaded CI box; the pre-fix O(var-refs * imports) scan measured ~31s+
+       at this exact N (see the doc comment above) -- comfortably on the far
+       side of this bound, so a regression back to the linear-scan version
+       would fail this test rather than merely being "a bit slower". *)
+    Alcotest.(check bool)
+      (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
+      true (elapsed < 30.0)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -3077,7 +3897,8 @@ let mk_tagged_fn policy_name body =
   { March_tir.Tir.fn_name = "process";
     fn_params = [mk_tagged_param policy_name];
     fn_ret_ty  = March_tir.Tir.TInt;
-    fn_body    = body }
+    fn_body    = body;
+    fn_kind    = March_tir.Tir.FnNormal }
 
 let tir_int_lit n =
   March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt n))
@@ -3119,7 +3940,8 @@ let test_policy_nopanic_transitive () =
     [March_tir.Tir.TString] March_tir.Tir.TUnit
     [March_tir.Tir.ALit (March_ast.Ast.LitString "oops")] in
   let helper = { March_tir.Tir.fn_name = "my_helper"; fn_params = [];
-                 fn_ret_ty = March_tir.Tir.TUnit; fn_body = helper_body } in
+                 fn_ret_ty = March_tir.Tir.TUnit; fn_body = helper_body;
+                 fn_kind = March_tir.Tir.FnNormal } in
   (* Tagged fn calls the helper *)
   let body = tir_call "my_helper" [] March_tir.Tir.TUnit [] in
   let fd = mk_tagged_fn "NoPanic" body in
@@ -3145,7 +3967,8 @@ let test_policy_realtime_clean () =
 let test_policy_untagged_not_checked () =
   let body = March_tir.Tir.EAlloc (March_tir.Tir.TCon ("List", [March_tir.Tir.TInt]), []) in
   let fd = { March_tir.Tir.fn_name = "normal_fn"; fn_params = [];
-             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body;
+             fn_kind = March_tir.Tir.FnNormal } in
   let m = mk_module [fd] in
   let v = March_tir.Policy_dce.audit m in
   Alcotest.(check bool) "Untagged fn with alloc: no violation" true (v = [])
@@ -3320,6 +4143,109 @@ let test_cap_no_panic_two_safe_sibling_fns_ok () =
   end|} in
   Alcotest.(check bool) "cap no_panic + two safe sibling fns: no error" false (has_errors ctx)
 
+(* F3: a NON-exhaustive `match` lowers to a runtime "no matching clause" panic,
+   so a `cap no_panic` module must reject it — the missing-`None` arm below is a
+   panic surface just like an explicit `panic`. *)
+let test_cap_no_panic_nonexhaustive_match_error () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + non-exhaustive match: error" true (has_errors ctx)
+
+(* An EXHAUSTIVE match (all constructors covered) in a `cap no_panic` module
+   cannot panic and must still accept. *)
+let test_cap_no_panic_exhaustive_match_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + exhaustive match: no error" false (has_errors ctx)
+
+(* A `_ -> ...` catch-all makes the match total → still accepts. *)
+let test_cap_no_panic_wildcard_match_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+        _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + wildcard match: no error" false (has_errors ctx)
+
+(* KEY REGRESSION GUARD (F3): a PLAIN (non-cap) module's non-exhaustive match
+   must stay a non-blocking Warning — it must NOT become an error. The fix is
+   scoped to `cap no_panic` modules only. *)
+let test_plain_nonexhaustive_match_ok () =
+  let ctx = typecheck {|mod Plain do
+    fn get(opt : Option(Int)) : Int do
+      match opt do
+        Some(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "plain (non-cap) non-exhaustive match: no error" false (has_errors ctx)
+
+(* fix-campaign batch 3 — the GUARDED-match gap. A `match` with a `when` guard
+   used to short-circuit `check_exhaustiveness` entirely, so a guarded,
+   genuinely non-exhaustive match slipped past F3's error path. Here the
+   GUARDLESS arms are just `{None}` (missing an unguarded `Some`); when the
+   guard fails at runtime the match panics — a `cap no_panic` module must
+   reject it. RED pre-fix (accepted, exit 0), GREEN after. *)
+let test_cap_no_panic_guarded_nonexhaustive_match_error () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + guarded non-exhaustive match: error" true (has_errors ctx)
+
+(* A guarded match whose GUARDLESS arms ARE exhaustive can never fall through —
+   the unguarded `Some(v)` + `None` cover the whole domain — so it must still
+   accept even inside a `cap no_panic` module. Proves the fix is not
+   over-rejecting every guarded match. *)
+let test_cap_no_panic_guarded_guardless_catchall_ok () =
+  let ctx = typecheck {|mod Safe do
+    cap no_panic
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        Some(v) -> 0
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap no_panic + guarded match w/ guardless catch-all: no error" false (has_errors ctx)
+
+(* REGRESSION GUARD: a PLAIN (non-cap) module's guarded non-exhaustive match
+   must stay silent (no error) — the guarded-match fix records the span but
+   emits NO global Warning, and promotion is still gated to `cap no_panic`. *)
+let test_plain_guarded_nonexhaustive_match_ok () =
+  let ctx = typecheck {|mod Plain do
+    fn classify(opt : Option(Int)) : Int do
+      match opt do
+        Some(v) when v > 0 -> v
+        None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "plain (non-cap) guarded non-exhaustive match: no error" false (has_errors ctx)
+
 (* Division-safety guard / path-context tests *)
 
 let test_divsafety_match_guard_neq_zero_ok () =
@@ -3419,6 +4345,51 @@ let test_cap_pure_uuid_error () =
   end|} in
   Alcotest.(check bool) "cap pure + uuid_v4: error" true (has_errors ctx)
 
+(* ── F2 regression: `cap pure`/`cap deterministic` must reject the REAL
+   effectful builtins, not the nonexistent names the stale `pure_banned`/
+   `deterministic_banned` lists spelled.
+
+   ⚠️ These use REAL, type-correct builtins so `has_errors` (which counts only
+   `severity = Error`, never the F1 body-scan WARNING) is TRUE *solely* because
+   the behavioral-cap check fires. They are RED on the pre-fix compiler (the
+   stale lists missed `file_write`/`file_read`/`random_bytes`/`unix_time_ms`,
+   so only a WARNING+HINT fired and `has_errors` was false) and GREEN after the
+   F2 fix derives the banned sets from `builtin_cap_table`.
+
+   Contrast the four `now_ms`/`random_int` cases above: those pass even on the
+   pre-fix compiler for the WRONG reason — `now_ms`/`random_int` are NOT
+   builtins, so the program ALSO gets an "I cannot find" unbound ERROR that
+   satisfies `has_errors` regardless of the cap ban. *)
+
+(* `file_write : String -> String -> Result(Unit, r)` — the signature is
+   `Result(Unit, String)` (NOT `Unit`) so the ONLY Error is the cap ban, not a
+   type mismatch. *)
+let test_cap_pure_file_write_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn save(path : String, data : String) : Result(Unit, String) do
+      file_write(path, data)
+    end
+  end|} in
+  Alcotest.(check bool) "cap pure + file_write (real builtin): error" true (has_errors ctx)
+
+let test_cap_pure_file_read_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn load(path : String) : Result(String, String) do
+      file_read(path)
+    end
+  end|} in
+  Alcotest.(check bool) "cap pure + file_read (real builtin): error" true (has_errors ctx)
+
+(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct. *)
+let test_cap_pure_random_bytes_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn gen() : Bytes do random_bytes(16) end
+  end|} in
+  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true (has_errors ctx)
+
 let test_cap_no_extern_regular_fn_ok () =
   let ctx = typecheck {|mod Safe do
     cap no_extern
@@ -3447,12 +4418,856 @@ let test_cap_deterministic_now_ms_error () =
   end|} in
   Alcotest.(check bool) "cap deterministic + now_ms: error" true (has_errors ctx)
 
+(* ── F2 regression (deterministic side): the REAL wall-clock builtin
+   `unix_time_ms : Unit -> Int` must be rejected. Type-correct (`: Int`,
+   `unix_time_ms(())`), so `has_errors` is TRUE only because the cap ban fires.
+   RED pre-fix (stale list spelled the nonexistent `now_ms`, missed this). *)
+let test_cap_deterministic_unix_time_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn ts() : Int do unix_time_ms(()) end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + unix_time_ms (real builtin): error"
+    true (has_errors ctx)
+
+(* `cap deterministic` is WEAKER than `cap pure`: it bans clock/RNG but not
+   ordinary IO. A deterministic `file_read` (mapped `IO.FileRead`, NOT a
+   nondeterminism source) must STILL be accepted — no `Error` from the cap
+   check. (A WARNING-level Check-1b body-scan diagnostic fires, but `has_errors`
+   ignores warnings.) This pins the intended semantics and guards against the
+   fix over-banning deterministic-but-effectful builtins. *)
+let test_cap_deterministic_file_read_ok () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn load(path : String) : Result(String, String) do
+      file_read(path)
+    end
+  end|} in
+  Alcotest.(check bool) "cap deterministic + file_read: no error (weaker than pure)"
+    false (has_errors ctx)
+
 let test_cap_deterministic_arithmetic_ok () =
   let ctx = typecheck {|mod Det do
     cap deterministic
     fn add(a : Int, b : Int) : Int do a + b end
   end|} in
   Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
+
+(* ── Proof-cap mint soundness (Part 1: cap_narrow restriction) ────────────
+   cap_narrow's polymorphic result Cap(a) let ANY holder of a plain Cap(IO)
+   forge a nominal proof capability at a proof-cap-typed call site (inline arg,
+   let-binding, or return position) — a soundness hole Check 6 (declared-return
+   only) structurally cannot see. Part 1 rejects any cap_narrow whose pinned
+   result is a proof cap. RED pre-fix (forge accepted, exit 0), GREEN after. *)
+let test_cap_narrow_cannot_mint_proof_cap () =
+  (* R1: consume(cap_narrow(cap)) at a Cap(Db.Migrated) call site, holding only
+     Cap(IO). Pre-fix this typechecks; the fix rejects it. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        consume(cap_narrow(cap))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forging a proof cap (inline arg): error"
+    true (has_errors ctx)
+
+let test_cap_narrow_forge_let () =
+  (* R7: let forged : Cap(Db.Migrated) = cap_narrow(cap) — let-binding position. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn consume(_m : Cap(Db.Migrated)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        let forged : Cap(Db.Migrated) = cap_narrow(cap)
+        consume(forged)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forging a proof cap (let binding): error"
+    true (has_errors ctx)
+
+let test_cap_narrow_io_narrow_still_ok () =
+  (* R4 regression guard: narrowing Cap(IO) -> Cap(IO.Network) is an IO-lattice
+     attenuation, NOT a proof-cap mint — Part 1 must leave it accepted. *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(cap_narrow(cap))
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow IO-lattice narrow: no error"
+    false (has_errors ctx)
+
+let test_cap_narrow_forge_generalized_let () =
+  (* Residual-forge witness (let-generalized launder): a cap_narrow result bound
+     with `let`, then passed to a proof-cap-typed callee.  The RHS is expansive,
+     so `stolen` must stay MONOMORPHIC (value restriction) — without it, `stolen`
+     generalized to ∀a.Cap(a) and each use forged a fresh proof cap while the
+     compiler's recorded node stayed unbound.  RED pre-fix (exit 0), GREEN after. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn use_proof(_m : Cap(Db.P)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        let stolen = cap_narrow(cap)
+        use_proof(stolen)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow let-generalized launder to proof cap: error"
+    true (has_errors ctx)
+
+let test_cap_narrow_forge_through_generic_fn () =
+  (* Residual-forge witness (laundered through a polymorphic user fn): a generic
+     `fn id(x) do x end` carries a cap_narrow result to a proof-cap-typed callee.
+     Closed by taint propagation through the call + the unify use-site hook.
+     RED pre-fix (exit 0), GREEN after. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn id(x) do x end
+      fn consume(_m : Cap(Db.P)) : Int do 1 end
+      fn forge(cap : Cap(IO)) : Int do
+        consume(id(cap_narrow(cap)))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow laundered through generic fn to proof cap: error"
+    true (has_errors ctx)
+
+let test_cap_narrow_launder_io_still_ok () =
+  (* Regression guard for the taint machinery: laundering a cap_narrow result
+     through a generic fn to an IO-cap callee must STAY accepted — only proof
+     caps are rejected. *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn id(x) do x end
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(id(cap_narrow(cap)))
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow laundered through generic fn to IO cap: no error"
+    false (has_errors ctx)
+
+(* ── Proof-cap mint (Part 2: gated mint_cap primitive) ────────────────────
+   mint_cap is the ONLY way to construct a proof cap; it typechecks iff used in
+   a PUBLIC fn of the cap's DECLARING module. cap_narrow can no longer produce a
+   proof cap (Part 1), so mint_cap is the sanctioned mint surface. *)
+let test_mint_cap_public_declaring_ok () =
+  (* R3-migrated: Db's public fn mints its own proof cap via mint_cap. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      mint_cap(cap)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in public declaring-module fn: no error"
+    false (has_errors ctx)
+
+let test_mint_cap_pfn_rejected () =
+  (* mint_cap in a PRIVATE fn of the declaring module is rejected — only public
+     fns are the minting surface. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    pfn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      mint_cap(cap)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in pfn: error" true (has_errors ctx)
+
+let test_mint_cap_external_rejected () =
+  (* mint_cap in a fn of a NON-declaring module is rejected (unforgeability). *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
+        mint_cap(cap)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in external module: error" true (has_errors ctx)
+
+let test_mint_cap_lambda_declaring_ok () =
+  (* Lambda-inherit rule: a mint inside a lambda inside a public declaring-module
+     fn accepts when the cap type is pinned at the call site (immediately-applied
+     lambda). Confirms the enclosing fn's public-ness is inherited by the lambda. *)
+  let ctx = typecheck {|mod Db do
+    proof cap Migrated
+    needs IO
+    fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+      (fn _ -> mint_cap(cap))(0)
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in applied lambda in public declaring fn: no error"
+    false (has_errors ctx)
+
+let test_mint_cap_lambda_external_rejected () =
+  (* The forge via a lambda in a non-declaring module must still be rejected. *)
+  let ctx = typecheck {|mod Top do
+    mod Db do
+      proof cap Migrated
+    end
+    mod App do
+      needs IO
+      needs Db.Migrated
+      fn forge(cap : Cap(IO)) : Cap(Db.Migrated) do
+        (fn _ -> mint_cap(cap))(0)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap in applied lambda in external module: error"
+    true (has_errors ctx)
+
+let test_mint_cap_io_target_rejected () =
+  (* mint_cap is proof-cap-only: aiming it at an IO cap is rejected (that's
+     cap_narrow's job). *)
+  let ctx = typecheck {|mod App do
+    needs IO
+    fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+    fn boot(cap : Cap(IO)) : Int do
+      use_net(mint_cap(cap))
+    end
+  end|} in
+  Alcotest.(check bool) "mint_cap at IO-cap target: error" true (has_errors ctx)
+
+(* ── Container/factory cap_narrow-taint gap (todos.md finding, Batch-A
+   follow-up) ──────────────────────────────────────────────────────────────
+   `tag_cap_producer_result` (the tagger) was shallow — it only tagged a bare
+   `Cap(a)`/`TVar`, while `ty_has_tagged_cap_producer` (the detector gating the
+   call/factory taint-propagation sites) already recursed into tuples/records/
+   TCon args — an asymmetry: the detector could find a tag buried in a
+   container, but the tagger's own `| _ -> ()` catch-all silently dropped it
+   when asked to mark one. Investigation traced the historically-filed repro
+   (a nested-module `box(x) = (x, 0)` called as `box(cap_narrow(cap))`) and
+   found it does NOT currently forge on this tree for a DIFFERENT reason than
+   the shallow tagger: `demote_to_monomorphic`'s value restriction pins the
+   ORIGINAL `cap_narrow`-tagged var to level 0 the instant it's produced, so
+   it is never swept into any later generalization — the same physical var
+   flows through arbitrary tuple/record/generic wrapping by reference, and
+   `unify`'s own hook (plus its "propagate the tag to whatever var this one
+   gets bound to" logic) keeps the taint alive across the underlying var
+   graph regardless of syntactic nesting. (An EARLIER instance of the exact
+   `box(cap_narrow(cap))` program DID forge, confirmed live via a source A/B
+   against commit `66b6716a` — but that reproduced the UNRELATED qualified-
+   prebind type-erasure bug, fixed three commits later in the same line of
+   work: `box`, an unannotated helper in a nested module, had its qualified
+   reference resolve to a decoupled placeholder that bypassed normal
+   unification entirely, which is what actually let the forge through.)
+
+   Given the tagger/detector asymmetry is real regardless, `tag_cap_producer_result`
+   was still made to recurse identically to `ty_has_tagged_cap_producer` — closing
+   the architectural gap outright rather than resting on the incidental
+   protection above, at zero rejection cost (tagging only ever marks a still-
+   UNBOUND var; anything already resolved to a concrete type via ordinary
+   argument-passing is untouched, so it cannot introduce a false positive).
+   The tests below are honest about what they demonstrate: they lock in the
+   currently-correct reject/accept behavior for every container shape the
+   original finding named (tuple, Option, cross-module, single-module,
+   forward-referenced, multi-hop — all exhaustively verified live before this
+   change), but on THIS tree they pass whether or not the tagger recurses,
+   since value restriction's own robustness already covers them. *)
+let test_container_launder_tuple_forge () =
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn mkbox(cap) do (cap_narrow(cap), 0) end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do
+        let (c, _) = mkbox(cap)
+        consume(c)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forged via an unannotated tuple-wrapping factory: error"
+    true (has_errors ctx)
+
+let test_container_launder_option_forge () =
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn wrap(x) do Some(x) end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do
+        match wrap(cap_narrow(cap)) do
+          Some(c) -> consume(c)
+          None -> 0
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "cap_narrow forged via an Option-wrapping factory: error"
+    true (has_errors ctx)
+
+let test_container_launder_io_still_ok () =
+  (* Regression guard: an ordinary IO-cap narrow, wrapped in a tuple by an
+     unannotated generic factory, must STAY accepted. *)
+  let ctx = typecheck {|mod Top do mod App do
+    needs IO
+    fn box(x) do (x, 0) end
+    fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+    fn go(cap : Cap(IO)) : Int do
+      let (c, _) = box(cap_narrow(cap))
+      use_net(c)
+    end
+  end end|} in
+  Alcotest.(check bool) "IO-cap narrow wrapped in a tuple factory: no error"
+    false (has_errors ctx)
+
+let test_container_combine_legit_proof_cap_still_ok () =
+  (* Over-rejection guard: a generic factory tuples a tainted cap_narrow result
+     together with an UNRELATED, already-legitimate proof-cap parameter passed
+     straight through. Tagging must not spill onto the legit slot — the
+     already-concrete `Cap(Db.P)` param has no unbound var left to tag by the
+     time the factory's result is examined (it was already unified against the
+     caller's concrete argument type). *)
+  let ctx = typecheck {|mod Top do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn combine(io_cap, db_cap) do (cap_narrow(io_cap), db_cap) end
+      fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn go(io : Cap(IO), db : Cap(Db.P)) : Int do
+        let (net, passed) = combine(io, db)
+        use_net(net) + consume(passed)
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "tainted IO narrow tupled with an unrelated legit proof-cap passthrough: no error"
+    false (has_errors ctx)
+
+(* ── Nested-module qualified-prebind type-erasure hole ────────────────────
+   ROOT CAUSE (confirmed): an UNANNOTATED public fn defined inside a NESTED
+   `mod` gets its QUALIFIED name (`Mod.fn`) prebound to a fresh `Mono (fresh_var)`
+   by prebind_mod_members (typecheck.ml, prebind_fn_scheme returns None for an
+   unannotated fn).  desugar's qualify_module_refs rewrites every intra-nested-
+   module reference to that qualified form, and check_decl's DFn branch used to
+   rebind ONLY the bare name — never the qualified one.  So every call to the
+   helper resolved a stale `Mono '_v` placeholder that behaves as `∀. a -> b`,
+   ERASING the type of anything laundered through it: base types, ADTs, and Cap
+   alike.  The proof-cap forge was one exploitation of a GENERAL memory-safety
+   hole.  Fixed by reconciling the qualified prebind with the real inferred
+   scheme in check_decl's DFn branch.
+
+   All F* cases below are RED pre-fix (forge accepted, exit 0) and GREEN after.
+   The P* / *_ok cases are GREEN-STAYS-GREEN guards. *)
+
+(* F4 — the clearest witness that this is NOT proof-cap-specific: a plain Int is
+   laundered into a String parameter through a nested unannotated `id`, a genuine
+   type-soundness / memory-safety break. *)
+let test_nested_launder_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn id(x) do x end
+      fn takes_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do
+        let n = 12345
+        takes_str(id(n))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* F3 — nested Box(String) laundered where Box(Int) is required. *)
+let test_nested_launder_box_arg () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn id(x) do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* F1 — nested proof-cap forge: Cap(IO) laundered into a Cap(Db.P) callee. *)
+let test_nested_launder_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn id(x) do x end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* F2 — same launder, Cap(IO) -> Cap(IO.Network) (an IO-cap coercion, proving the
+   erasure is any-Cap, not proof-cap-only). *)
+let test_nested_launder_io_subcap () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      needs IO
+      fn id(x) do x end
+      fn use_net(_c : Cap(IO.Network)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do use_net(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated id coerces Cap(IO) into Cap(IO.Network): error"
+    true (has_errors ctx)
+
+(* F5 — three levels of nesting: the qualified prefix accumulates (Mid.App.id);
+   the fix must reconcile at every depth. *)
+let test_nested_launder_three_deep () =
+  let ctx = typecheck {|mod Outer do
+    mod Mid do
+      mod App do
+        type Box(a) = Box(a)
+        fn id(x) do x end
+        fn need_int(_b : Box(Int)) : Int do 1 end
+        fn attack() : Int do
+          let bx = Box("hi")
+          need_int(id(bx))
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "3-deep nested unannotated id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* Container/HOF variant — the launderer is an unannotated factory
+   `fn wrap(x) do (x, 0) end` returning a tuple; destructuring it and feeding the
+   payload to a Box(Int) callee still forges pre-fix. *)
+let test_nested_launder_container_factory () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn wrap(x) do (x, 0) end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        match wrap(bx) do
+          (b, _) -> need_int(b)
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested unannotated tuple factory launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: nested unannotated id passing Cap(IO) through UNCHANGED
+   (identity, no coercion) must stay accepted — the fix reconciles the real
+   `∀a. a -> a` scheme, it does not reject legitimate passthrough. *)
+let test_nested_cap_passthrough_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      needs IO
+      fn id(x) do x end
+      fn use_io(_c : Cap(IO)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do use_io(id(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested id passes Cap(IO) through unchanged: no error"
+    false (has_errors ctx)
+
+(* RED→GREEN (a second, independent witness of the SAME bug in the opposite
+   direction): pre-fix, an unannotated nested `id` is NOT actually polymorphic —
+   the stale qualified placeholder pins to the FIRST use, so using it at Int AND
+   String is a spurious ERROR pre-fix.  The fix reconciles `id` to its real
+   `∀a. a -> a` scheme, RESTORING legitimate polymorphism → no error.  This also
+   proves the fix does not over-monomorphise. *)
+let test_nested_id_polymorphic_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn id(x) do x end
+      fn use_int() : Int do id(1) end
+      fn use_str() : String do id("hi") end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN guard: an ANNOTATED nested id already rejects the forge
+   (prebind_fn_scheme builds a real Poly scheme, so no stale placeholder).  The
+   fix must not change this — it stays an error. *)
+let test_nested_launder_annotated_id_still_rejected () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn id(x : a) : a do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested ANNOTATED id still rejects Box(String)->Box(Int): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN guard: a PRIVATE (pfn) nested id already rejects the forge
+   (prebind_mod_members only prebinds public fns, so no qualified placeholder;
+   the reference falls through to the local Poly scheme).  Unchanged by the fix. *)
+let test_nested_launder_private_id_still_rejected () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      pfn id(x) do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested PRIVATE (pfn) id still rejects Box(String)->Box(Int): error"
+    true (has_errors ctx)
+
+(* ── Round 2: residual erasures the first fix missed ──────────────────────
+   CRITICAL #1 — FORWARD REFERENCE: the unannotated helper is defined AFTER its
+   caller.  The caller pins the qualified prebind (`App.id`) to its own decoupled
+   use before `id`'s DFn runs, so a post-hoc rebind is too late.  Closed by
+   teaching [dependency_order_dfn_run]'s [deps_of] to see the qualified reference
+   (`App.id`) as a dependency on the local `id`, ordering the helper FIRST.
+   CRITICAL #2 — DISTINCT-TVAR ANNOTATION: `fn launder(x:a):b do x` gets a prebind
+   built from annotation SYNTAX (`a -> b`, never unified against the body
+   constraint `a ~ b`).  Closed by rebinding the qualified name to the fn's REAL
+   body-checked scheme UNCONDITIONALLY (not only bare-placeholder prebinds).
+   All RED on commit 10249488; GREEN after round 2. *)
+
+(* C1 forward-ref, Int -> String (general memory-safety). *)
+let test_nested_fwdref_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(id(42)) end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* C1 forward-ref, Box(String) -> Box(Int). *)
+let test_nested_fwdref_box () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(id(bx))
+      end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* C1 forward-ref, Cap(IO) -> Cap(Db.P) proof-cap forge. *)
+let test_nested_fwdref_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(id(cap)) end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Int -> String. *)
+let test_nested_distinct_tvar_int_as_string () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn launder(x : a) : b do x end
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack(n : Int) : Int do need_str(launder(n)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Int into String param: error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Box(String) -> Box(Int). *)
+let test_nested_distinct_tvar_box () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      type Box(a) = Box(a)
+      fn launder(x : a) : b do x end
+      fn need_int(_b : Box(Int)) : Int do 1 end
+      fn attack() : Int do
+        let bx = Box("hi")
+        need_int(launder(bx))
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* C2 distinct-tvar annotation, Cap(IO) -> Cap(Db.P). *)
+let test_nested_distinct_tvar_proof_cap () =
+  let ctx = typecheck {|mod T do
+    mod Db do proof cap P end
+    mod App do
+      needs IO
+      needs Db.P
+      fn launder(x : a) : b do x end
+      fn consume(_c : Cap(Db.P)) : Int do 1 end
+      fn attack(cap : Cap(IO)) : Int do consume(launder(cap)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "distinct-tvar annotated launder erases Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: forward-ref helper used legitimately (identity passthrough
+   of the SAME type) must still accept — the dependency ordering + real-scheme
+   rebind restore true polymorphism, they do not over-reject. *)
+let test_nested_fwdref_legit_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn dbl(n : Int) : Int do n + n end
+      fn a() : Int do dbl(id(5)) end
+      fn b() : String do id("hi") end
+      fn id(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: a genuinely-polymorphic annotated helper `fn id(x:a):a`
+   (SAME tvar in and out) forward-referenced must still accept at two types. *)
+let test_nested_annotated_same_tvar_ok () =
+  let ctx = typecheck {|mod T do
+    mod App do
+      fn u1() : Int do id(1) end
+      fn u2() : String do id("hi") end
+      fn id(x : a) : a do x end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref nested annotated id (a->a) used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* ── Round 3: entry-module self-qualified prebind erasure ─────────────────
+   [prebind_mod_members m.mod_name.txt] (check_module_core) seeds the ENTRY
+   module's own top-level unannotated fns under a qualified key `EntryMod.id`,
+   but [cap_qual_prefix] is "" for entry-level fns, so the round-2 rebind (gated
+   `cap_qual_prefix <> ""`) never reconciled it — the explicit `EntryMod.id`
+   reference form (or a nested sibling's reference to the entry module by name)
+   kept a decoupled `?a -> ?b` and erased.  Closed by ALSO reconciling the
+   `current_module`-based key.  All RED on d19dc519 (exit 0). *)
+
+(* E1 — Main.id self-qualified launder, Int -> String (general memory-safety). *)
+let test_entry_self_qualified_int_as_string () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Int into String param: error"
+    true (has_errors ctx)
+
+(* E1 — Main.id self-qualified launder, Box(String) -> Box(Int). *)
+let test_entry_self_qualified_box () =
+  let ctx = typecheck {|mod Main do
+    type Box(a) = Box(a)
+    fn id(x) do x end
+    fn need_int(_b : Box(Int)) : Int do 1 end
+    fn attack() : Int do
+      let bx = Box("hi")
+      need_int(Main.id(bx))
+    end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Box(String) into Box(Int): error"
+    true (has_errors ctx)
+
+(* E1 — Main.id self-qualified launder, Cap(IO) -> Cap(Db.P) proof-cap forge. *)
+let test_entry_self_qualified_proof_cap () =
+  let ctx = typecheck {|mod Main do
+    mod Db do proof cap P end
+    needs IO
+    needs Db.P
+    fn id(x) do x end
+    fn consume(_c : Cap(Db.P)) : Int do 1 end
+    fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id launders Cap(IO) into Cap(Db.P): error"
+    true (has_errors ctx)
+
+(* E2 — a nested sibling references the ENTRY module by name (`T.id`). *)
+let test_entry_qualified_from_nested_sibling () =
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(T.id(42)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested sibling launders via entry-qualified T.id (Int into String): error"
+    true (has_errors ctx)
+
+(* E3 — entry self-qualified with a FORWARD reference (id defined after caller). *)
+let test_entry_self_qualified_forward_ref () =
+  let ctx = typecheck {|mod Main do
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+    fn id(x) do x end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module forward-ref Main.id launders Int into String: error"
+    true (has_errors ctx)
+
+(* GREEN-STAYS-GREEN / RED->GREEN: an entry-qualified reference to a genuinely
+   polymorphic entry `id`, used at TWO types, must ACCEPT.  (This spuriously
+   ERRORED on d19dc519 — the erasure made entry `id` non-polymorphic — so it is a
+   second, independent witness that the fix restores true polymorphism.) *)
+let test_entry_self_qualified_polymorphic_ok () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn ui() : Int do Main.id(1) end
+    fn us() : String do Main.id("hi") end
+  end|} in
+  Alcotest.(check bool)
+    "entry-module Main.id used at Int AND String: no error"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN: a nested sibling using the entry `T.id` at a CONSISTENT
+   type must still accept — the fix does not over-reject legit entry-qualified use. *)
+let test_entry_qualified_nested_consistent_ok () =
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_int(n : Int) : Int do n end
+      fn attack() : Int do need_int(T.id(5)) end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested sibling uses entry T.id at consistent type: no error"
+    false (has_errors ctx)
+
+(* ── fix-batch regressions: F6 (Cap(X) hierarchy args) + revoke_cap/is_cap_valid
+   typecheck registration + finding 17 (derive unknown type) ──────────────── *)
+
+(* F6: all 18 capability-hierarchy roots are valid `Cap(X)` type arguments.
+   The 8 previously-unregistered ones (IO.Random, IO.Mut, IO.Foreign,
+   IO.Telemetry, …) were rejected `Unknown module IO` as a type argument even
+   though they were valid `needs` targets. RED pre-fix (Unknown module IO
+   error), GREEN after registering them in `builtin_types`. *)
+let test_cap_hierarchy_args_ok () =
+  let ctx = typecheck {|mod HierApp do
+    needs IO.Random
+    needs IO.Mut
+    needs IO.Foreign
+    needs IO.Telemetry
+    fn use_caps(
+      _r : Cap(IO.Random),
+      _m : Cap(IO.Mut),
+      _f : Cap(IO.Foreign),
+      _t : Cap(IO.Telemetry)
+    ) : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error"
+    false (has_errors ctx)
+
+(* A previously-unregistered leaf path with a dot in its own name. *)
+let test_cap_hierarchy_tls_arg_ok () =
+  let ctx = typecheck {|mod TlsApp do
+    needs IO.NetConnect.TLS
+    fn connect(_c : Cap(IO.NetConnect.TLS)) : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "Cap(IO.NetConnect.TLS) arg: no error" false (has_errors ctx)
+
+(* revoke_cap / is_cap_valid are now typecheck-registered builtins. A surface
+   program obtaining a Cap via get_cap and calling both must typecheck. RED
+   pre-fix (`I cannot find revoke_cap`), GREEN after registration. *)
+let test_revoke_cap_typechecks () =
+  let ctx = typecheck {|mod CapPlane do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc() do { count: state.count + 1 } end
+    end
+    fn check() : Bool do
+      let p = spawn(Counter)
+      match get_cap(p) do
+        Some(cap) ->
+          let _ = revoke_cap(cap)
+          is_cap_valid(cap)
+        None -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "revoke_cap/is_cap_valid: no error" false (has_errors ctx)
+
+(* finding 17: `derive X for UnknownType` now ERRORs (was a silent no-op).
+   The error is emitted at DESUGAR time, so this uses `desugar_has_errors`
+   (the plain `typecheck` helper discards desugar-phase errors). *)
+let test_derive_unknown_type_error () =
+  Alcotest.(check bool) "derive for unknown type: error" true
+    (desugar_has_errors {|mod Main do
+      derive Show for NoSuchType
+      fn main() : Int do 0 end
+    end|})
+
+(* Guard: `derive` for a REAL, declared type still expands cleanly (no error) —
+   the finding-17 fix must not newly-reject legitimate derives. *)
+let test_derive_known_type_ok () =
+  Alcotest.(check bool) "derive for declared type: no error" false
+    (desugar_has_errors {|mod Main do
+      type Color = Red | Green | Blue
+      derive Show for Color
+      fn main() : Int do 0 end
+    end|})
 
 (* ── cap no_alloc tests ─────────────────────────────────────────────────── *)
 
@@ -4134,6 +5949,216 @@ let test_cap_body_foreign_blocking () =
   Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
     (has_warning_with ctx "IO.Foreign.Blocking")
 
+(* ── fn_capability_closures: per-function IO-capability closure (Phase5C-A.2) ─
+   check_module_needs records, per fully-qualified function name, the
+   normalized set of IO capabilities it requires. These tests exercise the
+   accessor directly via typecheck_full's returned env. *)
+
+(* A function with only declared `needs` on the module — the accessor returns
+   that declared set (normalized) attributed to the function. *)
+(* NOTE on expected keys: [Greeter]/[Reader]/[Bindings] here are the ENTRY
+   module (this is the whole source passed to [typecheck_full]/[check_module]),
+   and TIR unwraps the entry module — its own top-level functions are lowered
+   under their BARE name with no module prefix (confirmed empirically against
+   [lib/tir/lower.ml]'s entry-module handling, ~line 2238: "the entry module's
+   own top-level function names" get no prefix, unlike a nested/sibling DMod's
+   functions which DO get `mod_prefix ^ fn_name`). So the cap-closure key here
+   must be the bare fn name, not "Greeter.greet" etc. — see
+   test_fn_cap_closure_two_level_nesting below for the nested-DMod case where
+   a prefix IS expected. *)
+let test_fn_cap_closure_declared_needs () =
+  let (_errors, env) = typecheck_full {|mod Greeter do
+    needs IO.Console
+    fn greet(name) do name end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "greet" closures in
+  Alcotest.(check bool) "declared needs recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
+
+(* A function calling an IO builtin with no declared `needs` — the accessor
+   returns the inferred set from builtin_cap_table for that function. *)
+let test_fn_cap_closure_inferred_builtin () =
+  let (_errors, env) = typecheck_full {|mod Reader do
+    fn load(path) do file_read(path) end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "load" closures in
+  Alcotest.(check bool) "inferred builtin cap recorded for fn" true
+    (match caps with Some cs -> List.mem "IO.FileRead" cs | None -> false)
+
+(* An extern function — the accessor returns a set including IO.Foreign. *)
+let test_fn_cap_closure_extern () =
+  let (_errors, env) = typecheck_full {|mod Bindings do
+    needs IO.Foreign
+    needs IO.FileSystem
+    extern "libc": Cap(IO.FileSystem) do
+      fn read(fd : Int) : Int
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "read" closures in
+  Alcotest.(check bool) "extern fn recorded with IO.Foreign" true
+    (match caps with Some cs -> List.mem "IO.Foreign" cs | None -> false)
+
+(* A function that imports a module needing IO (Check 4 propagation) — the
+   accessor returns the union, normalized, including the propagated cap. *)
+let test_fn_cap_closure_propagated_import () =
+  let (_errors, env) = typecheck_full {|mod Outer do
+    mod Lib do
+      needs IO.Mut
+      fn setup() do
+        let _ = vault_new("t")
+        ()
+      end
+    end
+    mod Consumer do
+      needs IO.Mut
+      fn run() do () end
+    end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  let caps = List.assoc_opt "Consumer.run" closures in
+  Alcotest.(check bool) "propagated import cap recorded for consumer fn" true
+    (match caps with Some cs -> List.mem "IO.Mut" cs | None -> false)
+
+(* A function nested THREE levels deep (Entry > Lib > Sub > f) must be keyed
+   by its full dotted path relative to the entry module ("Lib.Sub.f"), NOT by
+   just its immediately-enclosing DMod's own name ("Sub.f"). This matches
+   TIR's [mod_prefix] accumulation in lib/tir/lower.ml (line ~2174), which
+   bin/main.ml's manifest writer uses to look up `hr_impl_hashes` keys —
+   before this fix, the two naming schemes disagreed for any nesting depth
+   greater than one, causing a silently-empty caps list in HCR manifests for
+   real multi-module code (see task-2/3 capability-manifest security review). *)
+let test_fn_cap_closure_two_level_nesting () =
+  let (_errors, env) = typecheck_full {|mod Entry do
+    mod Lib do
+      mod Sub do
+        needs IO.Console
+        fn f(x) do println(x) end
+      end
+    end
+    fn main() do Lib.Sub.f("hi") end
+  end|} in
+  let closures = March_typecheck.Typecheck.fn_capability_closures env in
+  Alcotest.(check bool) "not falsely keyed under bare immediate-parent name" true
+    (List.assoc_opt "Sub.f" closures = None);
+  let caps = List.assoc_opt "Lib.Sub.f" closures in
+  Alcotest.(check bool) "fully-qualified key records IO.Console" true
+    (match caps with Some cs -> List.mem "IO.Console" cs | None -> false)
+
+(* ── fn_own_capability_closures / migrate_state IO-free check (Phase5C-C.5) ─
+   [fn_own_capability_closures] is the OWN-caps-only projection (no
+   [module_wide_caps] merge) — the projection the migrate_state IO-free
+   check must use. These tests exercise both the projection itself and the
+   compile error it powers. *)
+
+(* Local substring helper (the shared [_contains_substr] is defined later in
+   this file, after these tests) — same naive O(n*m) scan. *)
+let migrate_test_contains_substr haystack needle =
+  let hn = String.length haystack and nn = String.length needle in
+  if nn = 0 then true
+  else begin
+    let found = ref false in
+    for i = 0 to hn - nn do
+      if String.sub haystack i nn = needle then found := true
+    done;
+    !found
+  end
+
+(* The load-bearing test: a module declares `needs IO.Console` (as if for its
+   handlers) alongside two functions — one that actually calls `println`
+   (own caps = IO.Console) and one pure function (own caps = []).
+   [fn_capability_closures] (merged) attributes IO.Console to BOTH, since the
+   module-wide `needs` folds into every function's closure. But
+   [fn_own_capability_closures] must give the pure function an EMPTY own-caps
+   entry — proving the own-caps table only records what a function itself
+   uses, not what its module declares. *)
+let test_fn_own_cap_closure_excludes_module_wide () =
+  let (_errors, env) = typecheck_full {|mod Actor do
+    needs IO.Console
+    fn noisy(x) do println(x) end
+    fn pure_fn(x) do x + 1 end
+  end|} in
+  let merged = March_typecheck.Typecheck.fn_capability_closures env in
+  let own = March_typecheck.Typecheck.fn_own_capability_closures env in
+  Alcotest.(check bool) "merged closure attributes module-wide needs to noisy" true
+    (match List.assoc_opt "noisy" merged with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check bool) "merged closure ALSO attributes module-wide needs to pure_fn (the bug being guarded against)" true
+    (match List.assoc_opt "pure_fn" merged with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check bool) "own closure attributes IO.Console to noisy (it actually calls println)" true
+    (match List.assoc_opt "noisy" own with Some cs -> List.mem "IO.Console" cs | None -> false);
+  Alcotest.(check (list string)) "own closure is EMPTY for pure_fn (module-wide needs excluded)" []
+    (match List.assoc_opt "pure_fn" own with Some cs -> cs | None -> [])
+
+(* migrate_state calling file_write with no declared needs -> IO-free error. *)
+let test_migrate_state_file_write_error () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do
+      let _ = file_write("x", "y")
+      old
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state calling file_write: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* migrate_state calling println -> IO-free error. *)
+let test_migrate_state_println_error () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do
+      let _ = println(old)
+      old
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state calling println: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* migrate_state whose OWN signature is Cap(IO.Foreign)-implied via an extern
+   block sharing the naming convention -> IO-free error (extern-implied cap). *)
+let test_migrate_state_extern_error () =
+  let ctx = typecheck {|mod Counter do
+    needs IO.Foreign
+    extern "libc" : Cap(IO.Foreign) do
+      fn counter_migrate_state(fd : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "migrate_state as extern fn: compile error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let all_text = List.concat_map (fun d ->
+    d.March_errors.Errors.message :: d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions migrate_state must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "migrate_state must be io-free") all_text)
+
+(* THE crux test: a pure migrate_state in a module that DOES declare a
+   module-level `needs IO.Console` (as if for its handlers) must compile
+   CLEAN — no error. This is the exact case the merged closure would wrongly
+   reject; it only passes if the check consumes the own-caps projection. *)
+let test_migrate_state_pure_with_module_needs_clean () =
+  let ctx = typecheck {|mod Counter do
+    needs IO.Console
+    fn counter_migrate_state(old) do old end
+    fn handle_inc(state) do
+      let _ = println("incrementing")
+      state
+    end
+  end|} in
+  Alcotest.(check bool) "pure migrate_state in module with needs IO.Console: no error" false (has_errors ctx)
+
+(* A pure migrate_state in a module with no needs at all -> clean. *)
+let test_migrate_state_pure_no_needs_clean () =
+  let ctx = typecheck {|mod Counter do
+    fn counter_migrate_state(old) do old end
+  end|} in
+  Alcotest.(check bool) "pure migrate_state, no module needs: no error" false (has_errors ctx)
+
 (* ── cap_propagation: needs suppressed when required by a sibling DMod ──── *)
 
 (* A module that declares `needs IO.Mut` only to satisfy transitive enforcement
@@ -4634,6 +6659,18 @@ let test_parse_error_then_primary_message () =
   Alcotest.(check bool) "if-then error: primary message is about `then`, not else" true
     (not (_contains_substr output "always need an `else` branch"))
 
+let test_parse_error_then_else_form_rejected () =
+  (* W4.4: the complete `if c then e1 else e2` expression form used to be
+     silently ACCEPTED by an undocumented production while the docs claimed
+     `then` did not exist.  The production is removed; the form must now hit
+     the same targeted error as the incomplete then-form, naming do/end. *)
+  let src = "mod Test do\n  fn f(x) do\n    if x then 1 else 2\n  end\nend" in
+  let output = render_parse_err src in
+  Alcotest.(check bool) "if-then-else form rejected: targeted message names `then`" true
+    (_contains_substr output "I don't recognize `then` here");
+  Alcotest.(check bool) "if-then-else form rejected: hint shows do/end shape" true
+    (_contains_substr output "do/end")
+
 let test_if_branch_mismatch_reason_is_if_specific () =
   (* When if-branch types disagree, the reason note should say "if expression",
      not "All branches of a match must have the same type." *)
@@ -4804,12 +6841,577 @@ let test_return_infer_if_guard_infers_pos () =
       (has_pred infers "abs" "r > 0")
 
 
+(* B15: a raw newline inside a plain "..." string literal must advance the
+   lexer's line tracking (Lexing.new_line), matching the triple-string rule's
+   existing behavior. Before the fix, read_string/read_string_interp consumed
+   the newline character without calling Lexing.new_line, so every span after
+   the string was off by the number of embedded raw newlines. *)
+let test_string_literal_raw_newline_tracks_line () =
+  let src =
+    "mod StrNL do\n\
+    \  fn greet() do \"hello\nworld\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Source lines: 1 `mod StrNL do`, 2 `fn greet() ... "hello`, 3 `world" end`
+       (the raw newline inside the string literal splits the `greet` decl
+       across lines 2-3), 4 `fn second() do 42 end`. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
+let test_string_interp_raw_newline_tracks_line () =
+  let src =
+    "mod StrInterpNL do\n\
+    \  fn greet(name) do \"hi\n${name}\" end\n\
+    \  fn second() do 42 end\n\
+     end\n" in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn (_, _); March_ast.Ast.DFn (_, second_span) ] ->
+    (* Same reasoning as above, but the raw newline is inside the prefix of a
+       string-interpolation segment (read_string_interp), one line earlier
+       than the interpolation hole. *)
+    Alcotest.(check int) "fn second() span line after raw newline in string interp" 4
+      second_span.March_ast.Ast.start_line
+  | decls ->
+    Alcotest.fail (Printf.sprintf "expected two DFn decls, got %d decls" (List.length decls))
+
+(* FLOAT missing from token filter's pattern-start set (token_filter.ml
+   is_pattern_start). Without FLOAT in the set, the contextual newline
+   filter treats a newline-led float-literal match arm as a body
+   continuation rather than the start of a new arm, so the parser sees a
+   malformed arm and fails with "expecting `end`" at the float token. *)
+let test_float_literal_match_arm_parses () =
+  let src = {|mod FloatArms do
+  fn name(x) do
+    match x do
+      1.5 -> "a"
+      2.5 -> "b"
+      _ -> "c"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Negative float-literal patterns (`MINUS; FLOAT` in simple_pattern) must
+   also be recognized as a pattern start — MINUS was already in the set, but
+   cover it explicitly alongside FLOAT so a newline-led `-1.5 -> ...` arm
+   parses too. *)
+let test_negative_float_literal_match_arm_parses () =
+  let src = {|mod NegFloatArms do
+  fn sign(x) do
+    match x do
+      -1.5 -> "neg"
+      1.5 -> "pos"
+      _ -> "zero"
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "negative float-literal match arms parse to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* Audit of simple_pattern (parser.mly ~1289-1308) against is_pattern_start:
+   simple_pattern's id = soft_lower_name case accepts several keyword tokens
+   as variable-pattern starters (STATE, INIT, LOOP, ON, PROTOCOL, APP, AS,
+   WITH, WHEN, USE, IN, FOR, TAG), none of which were in is_pattern_start.
+   A newline-led arm bound to one of these soft keywords as a var pattern
+   would suffer the same "treated as body continuation" bug as FLOAT. Cover
+   one representative case per missing token family: a soft-keyword var
+   pattern used as a catch-all binder. (CHAR does not exist as a token in
+   this grammar, so there is nothing to add for it.) *)
+(* B6: `x |> (match scrut do ... end)` used to desugar by silently throwing
+   away `scrut` and matching on `x` — verified silent wrong code. It must be
+   a compile-time diagnostic instead. Uses the diagnostics-capture pattern
+   (desugar_module ~errors) like the satisfy/derive desugar error tests. *)
+let test_pipe_into_match_reports_error () =
+  let src = {|mod PipeMatch do
+  fn go() do
+    1 |> (match 2 do 1 -> "one" | 2 -> "two" | _ -> "x" end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe into match: desugar error" true (has_errors errors);
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "message names the discarded scrutinee" true
+    (List.exists (fun m ->
+         try ignore (Str.search_forward (Str.regexp_string "discards its scrutinee") m 0); true
+         with Not_found -> false) msgs);
+  (* Diagnostic must be positioned at the offending match, not dummy. *)
+  let spans = List.map (fun (d : March_errors.Errors.diagnostic) -> d.span)
+      (March_errors.Errors.sorted errors) in
+  Alcotest.(check bool) "diagnostic carries a real span" true
+    (List.exists (fun (s : March_ast.Ast.span) -> s.start_line = 3) spans)
+
+(* B6 sibling: the ECond pipe branch's expr→pattern conversion used a bare
+   `failwith` (uncaught Failure in entry points without a handler). It must
+   go through the same diagnostic mechanism. `foo(1)` is not convertible to
+   a pattern, so this arm triggers the conversion failure. *)
+let test_pipe_into_cond_bad_pattern_reports_error () =
+  let src = {|mod PipeCondBad do
+  fn go(x) do
+    x |> (match do
+      foo(1) -> "a"
+      other -> "b"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "pipe cond bad pattern: desugar error (not Failure)" true
+    (has_errors errors)
+
+(* Positive control: the scrutinee-less `x |> (match do pat -> ... end)` form
+   is the supported pipe-match syntax and must keep desugaring cleanly.
+   (A variable arm becomes a PatVar catch-all through expr_to_pat.) *)
+let test_pipe_into_scrutineeless_match_still_works () =
+  let src = {|mod PipeCondOk do
+  fn go(x) do
+    x |> (match do
+      1 -> "one"
+      other -> "other"
+    end)
+  end
+end|} in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "scrutinee-less pipe match: no desugar error" false
+    (has_errors errors)
+
+let test_soft_keyword_var_pattern_match_arm_parses () =
+  let src = {|mod SoftKwArms do
+  fn describe(x) do
+    match x do
+      0 -> "zero"
+      state -> state
+    end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+(* ── Cond-form / when-guard newline-led arms with comparison operators ────────
+
+   The contextual newline filter (token_filter.ml lookahead_is_new_arm) decides
+   whether the tokens after an arm body's NL start a NEW arm or continue the
+   current arm body by scanning to the first depth-0 ARROW (=new arm) or NL
+   (=continuation). It used to bail out early — declaring "body continuation" —
+   the moment it saw one of a set of binary operators (LEQ/GEQ/EQEQ/NEQ/AND/OR/
+   PLUSPLUS/…). That is correct for a plain `Pattern -> body` arm (a bare pattern
+   can never be followed by `>=`), but WRONG in two positions where the thing
+   before `->` is a full boolean expression rather than a plain pattern:
+
+     (A) the cond form `match do BoolExpr -> body end` (no scrutinee), and
+     (B) a guard's expression `Pattern when GuardExpr -> body`.
+
+   In both, a second consecutive arm whose expression begins `ident OP …` (e.g.
+   `score >= 80 -> …`, `x == 0 -> …`) was glued onto the previous arm's body,
+   producing a parse error. Strict `<`/`>` (LT/GT, never in the bail set) always
+   worked, which is why only the *other* comparison operators regressed. The
+   helper below digs the ECond / EMatch out of a single-expression fn body so we
+   can assert the arms are kept SEPARATE (correct count), not merely that the
+   module parsed. *)
+
+let cond_branches_of_module m =
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DFn (def, _) :: _ ->
+    (match def.March_ast.Ast.fn_clauses with
+     | { March_ast.Ast.fc_body = March_ast.Ast.ECond (branches, _); _ } :: _ -> branches
+     | { March_ast.Ast.fc_body; _ } :: _ ->
+       Alcotest.failf "expected ECond fn body, got %s"
+         (March_ast.Ast.show_expr fc_body)
+     | [] -> Alcotest.fail "expected at least one fn clause")
+  | _ -> Alcotest.fail "expected a leading DFn declaration"
+
+let match_branches_of_module m =
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DFn (def, _) :: _ ->
+    (match def.March_ast.Ast.fn_clauses with
+     | { March_ast.Ast.fc_body = March_ast.Ast.EMatch (_, branches, _); _ } :: _ -> branches
+     | { March_ast.Ast.fc_body; _ } :: _ ->
+       Alcotest.failf "expected EMatch fn body, got %s"
+         (March_ast.Ast.show_expr fc_body)
+     | [] -> Alcotest.fail "expected at least one fn clause")
+  | _ -> Alcotest.fail "expected a leading DFn declaration"
+
+(* (A) Cond form with two consecutive `>=` arms — verbatim from the
+   pattern-matching.md "Cond" section grade example. Before the fix this failed
+   with "I got stuck here" at the second `>=`. *)
+let test_cond_ge_arms_parse () =
+  let src = {|mod Test do
+  fn grade(score : Int) : String do
+    match do
+      score >= 90 -> "A"
+      score >= 80 -> "B"
+      _ -> "F"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three >= cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (A) Cond form with two consecutive `==` arms. *)
+let test_cond_eqeq_arms_parse () =
+  let src = {|mod Test do
+  fn classify(n : Int) : String do
+    match do
+      n == 0 -> "zero"
+      n == 1 -> "one"
+      _ -> "many"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three == cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (A) Cond form with two consecutive `<=` arms. *)
+let test_cond_le_arms_parse () =
+  let src = {|mod Test do
+  fn band(n : Int) : String do
+    match do
+      n <= 10 -> "low"
+      n <= 20 -> "mid"
+      _ -> "high"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three <= cond arms stay separate" 3
+    (List.length (cond_branches_of_module (parse_module src)))
+
+(* (B) Match-arm guards with two consecutive `==` guards — verbatim guard style
+   from the pattern-matching.md "Guards" section. Before the fix this failed
+   with "I was expecting `end` to close the match here" at the second guard. *)
+let test_guard_eqeq_arms_parse () =
+  let src = {|mod Test do
+  fn label(n : Int) : String do
+    match n do
+      x when x == 1 -> "one"
+      x when x == 0 -> "zero"
+      _ -> "other"
+    end
+  end
+end|} in
+  let branches = match_branches_of_module (parse_module src) in
+  Alcotest.(check int) "three guarded == arms stay separate" 3
+    (List.length branches);
+  let guarded =
+    List.filter (fun (b : March_ast.Ast.branch) -> b.branch_guard <> None) branches
+  in
+  Alcotest.(check int) "first two arms carry a when-guard" 2 (List.length guarded)
+
+(* (B) Match-arm guards with two consecutive `>=` guards. *)
+let test_guard_ge_arms_parse () =
+  let src = {|mod Test do
+  fn size(n : Int) : String do
+    match n do
+      x when x >= 100 -> "big"
+      x when x >= 10 -> "medium"
+      _ -> "small"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three guarded >= arms stay separate" 3
+    (List.length (match_branches_of_module (parse_module src)))
+
+(* (B) Match-arm guards with two consecutive `<=` guards. *)
+let test_guard_le_arms_parse () =
+  let src = {|mod Test do
+  fn size(n : Int) : String do
+    match n do
+      x when x <= 0 -> "nonpos"
+      x when x <= 10 -> "small"
+      _ -> "large"
+    end
+  end
+end|} in
+  Alcotest.(check int) "three guarded <= arms stay separate" 3
+    (List.length (match_branches_of_module (parse_module src)))
+
+(* B14: group_fn_clauses merges only ADJACENT same-name fn clauses; a
+   same-name group appearing again later at the same level (interleaved
+   with another decl) used to compile with the earlier group silently
+   dead. It must be a positioned parse-time error naming the function and
+   both locations. *)
+let test_interleaved_fn_clauses_error () =
+  let src = {|mod Interleaved do
+  fn f(0) do 0 end
+  fn other() do 1 end
+  fn f(n) do n end
+end|} in
+  let result =
+    try ignore (parse_module src); None
+    with March_errors.Errors.ParseError (msg, _hint, pos) -> Some (msg, pos)
+  in
+  match result with
+  | None -> Alcotest.fail "interleaved same-name fn clause groups must not parse"
+  | Some (msg, pos) ->
+    let contains needle hay =
+      try ignore (Str.search_forward (Str.regexp_string needle) hay 0); true
+      with Not_found -> false in
+    Alcotest.(check bool) "message names `f`" true (contains "`f`" msg);
+    (* both locations: earlier group's line in the message, second group's
+       line as the error position *)
+    Alcotest.(check bool) "message points at earlier clauses (line 2)" true
+      (contains "line 2" msg);
+    Alcotest.(check int) "error positioned at the second group (line 4)" 4
+      pos.Lexing.pos_lnum
+
+(* Adjacent multi-head clauses (the supported form) must keep parsing,
+   including when another decl FOLLOWS the group. *)
+let test_adjacent_fn_clauses_still_parse () =
+  let src = {|mod Adjacent do
+  fn f(0) do 0 end
+  fn f(n) do n end
+  fn other() do 1 end
+end|} in
+  let m = parse_module src in
+  (* f's clauses merged into one DFn; other is separate *)
+  Alcotest.(check int) "two decls after grouping" 2
+    (List.length m.March_ast.Ast.mod_decls)
+
+(* The check is per module level: the same fn name in a NESTED module is a
+   different scope and must not trip the adjacency validation. *)
+let test_same_fn_name_in_nested_mod_ok () =
+  let src = {|mod Outer do
+  fn f(x) do x end
+  mod Inner do
+    fn f(y) do y end
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check int) "outer fn + nested mod parse" 2
+    (List.length m.March_ast.Ast.mod_decls)
+
+(* ── Diagnostic dedup: a broken ctor field type is reported once, not once
+   per instantiation ──────────────────────────────────────────────────── *)
+
+(* [instantiate_ctor] (typecheck.ml) re-resolves a constructor's stored
+   surface argument types via [surface_ty] on EVERY instantiation (needed
+   since polymorphic ctors need fresh type variables per use site) — but
+   when one of those argument types fails to resolve, [surface_ty] used to
+   re-emit the identical (span, message) diagnostic on every instantiation,
+   not just once. `Wrap` below is instantiated 3 times (two pattern
+   matches + one constructor call); its bogus `Bogus` field type must be
+   reported exactly once, not 3 times. *)
+let test_broken_ctor_field_type_reported_once () =
+  let ctx = typecheck {|mod M do
+    type Wrap = Wrap(Bogus)
+
+    fn f1(w : Wrap) : Int do
+      match w do
+        Wrap(_) -> 1
+      end
+    end
+
+    fn f2(w : Wrap) : Int do
+      match w do
+        Wrap(_) -> 2
+      end
+    end
+
+    fn f3() : Wrap do
+      Wrap(1)
+    end
+  end|} in
+  Alcotest.(check int) "`Bogus` unresolved-type error reported exactly once" 1
+    (count_errors_matching ctx "I cannot find `Bogus`.")
+
+(* ── Entry-module self-qualified type erasure ─────────────────────────────
+   An UNANNOTATED fn at the ENTRY module's top level, referenced by the
+   entry-module-qualified name (`EntryMod.fn` — produced by desugar's
+   [qualify_module_refs] to disambiguate a shadowing nested local, or written
+   by hand), must be exactly as type-safe as the bare reference.  The entry
+   module is UNWRAPPED at the combined module's top level, so — unlike a wrapped
+   sibling module, whose public members are re-exported under `Sib.fn` with
+   their real schemes when the sibling's DMod is checked — its own top-level fns
+   are only ever seeded by [check_module_core]'s Pass 1b
+   (`prebind_mod_members m.mod_name.txt`) as a bare `Mono (fresh_var 1)`
+   placeholder ([prebind_fn_scheme] returns None for an unannotated fn).  Before
+   the fix that decoupled `?a -> ?b` placeholder was never reconciled with the
+   fn's real body-checked scheme, so `EntryMod.id` ERASED the type of anything
+   laundered through it — a general memory-safety hole (an Int laundered into a
+   String parameter typechecked).  The DFn branch of [check_decl] now rebinds
+   the entry-qualified name to the validated scheme.  These launder cases are
+   RED before the fix (each typechecks clean) and GREEN after. *)
+
+let test_entry_qual_launders_int_as_string () =
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.id(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_launders_box () =
+  let ctx = typecheck {|mod Main do
+    type Box(a) = Box(a)
+    fn id(x) do x end
+    fn need_int(_b : Box(Int)) : Int do 0 end
+    fn attack() : Int do need_int(Main.id(Box("hi"))) end
+  end|} in
+  Alcotest.(check bool) "Main.id laundering Box(String) into Box(Int): rejected" true
+    (has_errors ctx)
+
+let test_entry_qual_forges_proof_cap () =
+  (* The proof-cap forge: `Main.id` must not launder a `Cap(IO)` into a
+     `Cap(Db.P)` parameter.  The module also lacks `needs` declarations (which
+     raise their own, unrelated errors), so assert on the FORGE-SPECIFIC
+     mismatch rather than the error count: it is absent (count 0) when the type
+     erases and present (>= 1) when the forge is caught. *)
+  let ctx = typecheck {|mod Main do
+    mod Db do
+      proof cap P
+    end
+    fn id(x) do x end
+    fn consume(_c : Cap(Db.P)) : Int do 0 end
+    fn attack(cap : Cap(IO)) : Int do consume(Main.id(cap)) end
+  end|} in
+  Alcotest.(check bool) "Main.id forging Cap(IO) -> Cap(Db.P): mismatch caught" true
+    (count_errors_matching ctx "expected `Db.P` but got `IO`." >= 1)
+
+let test_entry_qual_distinct_tvar_launders () =
+  (* C2 variant: an ANNOTATED but distinct-tvar helper `fn f(x:a):b do x` gets a
+     prebind built purely from annotation SYNTAX (`a -> b`, never unified against
+     the body constraint a~b), so `Main.f` erased just like the unannotated case.
+     The unconditional rebind to the body-checked scheme closes this too. *)
+  let ctx = typecheck {|mod Main do
+    fn launder(x : a) : b do x end
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(Main.launder(42)) end
+  end|} in
+  Alcotest.(check bool) "Main.launder (a->b) laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+let test_entry_qual_from_nested_sibling () =
+  (* The entry-qualified reference can also come from a NESTED module: `T.id`
+     used inside `mod App` (nested in the entry `T`) resolves the same
+     entry-level `T.id` prebind and must be reconciled just as a top-level
+     `T.id` reference is. *)
+  let ctx = typecheck {|mod T do
+    fn id(x) do x end
+    mod App do
+      fn need_str(s : String) : Int do string_length(s) end
+      fn attack() : Int do need_str(T.id(42)) end
+    end
+  end|} in
+  Alcotest.(check bool) "T.id from nested App laundering Int into a String param: rejected" true
+    (has_errors ctx);
+  Alcotest.(check bool) "diagnostic names String vs Int" true
+    (count_errors_matching ctx "expected `String` but got `Int`." >= 1)
+
+(* ── Stdlib HOF-callback annotations must be curried, not tuple-arrow ──────
+   March's uncurried-collection convention calls callbacks with N-ary call
+   syntax (`f(acc, x)`), which [infer_app] treats as peeling one `TArrow`
+   layer per argument (purely curried — there is no auto-tupling special
+   case).  Annotating such a callback param as a TUPLE-arrow (`f : (b, a) ->
+   b`, parsed as `TArrow(TTuple[b;a], b)`) instead of a curried chain
+   (`f : b -> a -> b`) therefore makes the recursive self-call inside the
+   function's OWN body check its first arg against the tuple `(b,a)` and
+   fail — a real, self-contained type error entirely internal to the stdlib
+   file, independent of any other module.  (An earlier hypothesis blamed
+   this on cross-module bare-name collisions when many stdlib modules are
+   merged as typecheck siblings — e.g. `fold_left` existing in both
+   `prelude.march` and `list.march`; that was investigated and falsified:
+   the error reproduces identically with the offending file typechecked
+   completely alone.)  Such an error is invisible via the normal CLI
+   because `bin/main.ml`'s `is_user_file` filter drops any diagnostic
+   whose span points into a stdlib file — so this class of bug can persist
+   silently until something (e.g. a pipeline that does NOT filter by file,
+   like a browser/playground compile target) surfaces it.  `fold_left`
+   (prelude.march, iterable.march), `cmp`/`fold` (ordered_map.march,
+   sorted_set.march), and `reduce` (range.march) all had this typo; fixed
+   to curried-arrow form.  Guard each by typechecking the file completely
+   standalone (no other stdlib siblings) via [check_module_core], mirroring
+   how `bin/main.ml`'s `get_stdlib_tc_env` typechecks stdlib. *)
+
+let assert_stdlib_file_typechecks_cleanly name =
+  let dmod = load_stdlib_file_for_test name in
+  let m = March_ast.Ast.{
+    mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
+    mod_decls = [dmod];
+  } in
+  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+  Alcotest.(check bool)
+    (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
+    false (has_errors errors)
+
+let test_stdlib_prelude_fold_left_curried () =
+  assert_stdlib_file_typechecks_cleanly "prelude.march"
+
+let test_stdlib_iterable_fold_curried () =
+  assert_stdlib_file_typechecks_cleanly "iterable.march"
+
+let test_stdlib_ordered_map_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "ordered_map.march"
+
+let test_stdlib_sorted_set_cmp_curried () =
+  assert_stdlib_file_typechecks_cleanly "sorted_set.march"
+
+let test_stdlib_range_reduce_curried () =
+  assert_stdlib_file_typechecks_cleanly "range.march"
+
+(* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
+
+let test_entry_qual_same_type_ok () =
+  (* `Main.id` used at a single, consistent type stays clean (green before and
+     after the fix). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int only: no error" false (has_errors ctx)
+
+let test_entry_qual_polymorphic_ok () =
+  (* Reconciling `Main.id` to the fn's REAL scheme (rather than a pinned
+     placeholder) also RESTORES polymorphism: the bare `id` is `∀a. a -> a`, so
+     `Main.id` used at BOTH Int and String must typecheck exactly as the bare
+     name does.  RED before the fix — the placeholder `?a` was pinned to Int by
+     the first use, so the String use spuriously failed (an over-rejection). *)
+  let ctx = typecheck {|mod Main do
+    fn id(x) do x end
+    fn use_int() : Int do Main.id(42) end
+    fn use_str() : String do Main.id("hi") end
+  end|} in
+  Alcotest.(check bool) "Main.id used at Int AND String: no error" false (has_errors ctx)
+
+let test_entry_qual_annotated_same_tvar_ok () =
+  (* An annotated `a -> a` entry fn used consistently stays clean — its prebind
+     is already a real, body-consistent scheme, and the rebind to [sch] keeps it
+     that way. *)
+  let ctx = typecheck {|mod Main do
+    fn identity(x : a) : a do x end
+    fn ok() : Int do Main.identity(42) end
+  end|} in
+  Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick
             test_resolver_skips_dangling_symlink;
+          Alcotest.test_case
+            "large multi-file MARCH_LIB_PATH check is not quadratic (record_use import_tracker)"
+            `Slow test_large_multi_file_check_is_not_quadratic;
+        ] );
+      ( "diagnostic dedup",
+        [
+          Alcotest.test_case "broken ctor field type reported once, not once per instantiation" `Quick
+            test_broken_ctor_field_type_reported_once;
         ] );
       ( "app",
         [
@@ -4894,6 +7496,10 @@ let compiler_suites =
           Alcotest.test_case "refinement node present" `Quick test_parse_refinement_node_present;
           Alcotest.test_case "refined param typechecks as base" `Quick test_refined_param_typechecks_as_base;
           Alcotest.test_case "record type still parses" `Quick test_record_type_still_parses;
+          Alcotest.test_case "with-else single arm" `Quick test_parse_with_else_single_arm;
+          Alcotest.test_case "with-else two nullary arms" `Quick test_parse_with_else_two_nullary_arms;
+          Alcotest.test_case "with-else three payload arms" `Quick test_parse_with_else_three_payload_arms;
+          Alcotest.test_case "with-else infix arm bodies" `Quick test_parse_with_else_infix_bodies;
         ] );
       ( "module",
         [
@@ -4918,6 +7524,7 @@ let compiler_suites =
           Alcotest.test_case "identity fn"         `Quick test_tc_fn_identity;
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
+          Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
           Alcotest.test_case "match expression"    `Quick test_tc_match;
@@ -4969,6 +7576,12 @@ let compiler_suites =
           (* F2: qualified method calls Eq.eq, Show.show *)
           Alcotest.test_case "qualified Eq.eq call"          `Quick test_qualified_method_call;
           Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
+          (* Modules widening slice 2, Task 1: cross-module visibility gate *)
+          Alcotest.test_case "cross-module private pfn rejected" `Quick test_cross_module_private_fn_rejected;
+          Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
+          (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
+          Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
+          Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
           Alcotest.test_case "linear let double use"         `Quick test_linear_let_double_use;
@@ -4980,6 +7593,10 @@ let compiler_suites =
           (* H6: Linear field direct field-access tracking *)
           Alcotest.test_case "linear field double access"    `Quick test_linear_field_double_access_error;
           Alcotest.test_case "linear field single access ok" `Quick test_linear_field_single_access_ok;
+          (* Slice 7 (L2/L3): TLin transparent to constraint discharge *)
+          Alcotest.test_case "linear field arith single use" `Quick test_linear_field_arith_single_use_ok;
+          Alcotest.test_case "linear return arith"           `Quick test_linear_return_arith_ok;
+          Alcotest.test_case "linear field param warning only (L3)" `Quick test_linear_field_param_warning_only;
           (* Fix 3/H8: Session type validation + participant cross-check *)
           Alcotest.test_case "protocol self-message"         `Quick test_protocol_self_message_error;
           Alcotest.test_case "protocol empty loop"           `Quick test_protocol_empty_loop_error;
@@ -4990,6 +7607,8 @@ let compiler_suites =
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;
+          Alcotest.test_case "session binary choice identical branches" `Quick test_session_binary_choice_identical_branches;
+          Alcotest.test_case "session mpst bystander still merges"       `Quick test_session_mpst_bystander_still_merges;
           Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
           Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
@@ -5033,6 +7652,12 @@ let compiler_suites =
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
+          (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
+          Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
+          Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
+          (* spawn argument must be a plain actor name (not a computed expr) *)
+          Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
+          Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
           Alcotest.test_case "actor handler wrong return type"         `Quick test_actor_handler_wrong_return_type;
@@ -5114,6 +7739,8 @@ let compiler_suites =
           Alcotest.test_case "Chan.new/send/recv/close in IR"   `Quick test_session_compile_chan_new;
           Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
+          Alcotest.test_case "compiled odd Int payload round-trips (F1)" `Quick test_session_compile_odd_int_roundtrip;
+          Alcotest.test_case "compiled Bool payload round-trips (F2)"    `Quick test_session_compile_bool_roundtrip;
         ] );
       ( "policy_dce", [
           Alcotest.test_case "NoAlloc fn with EAlloc: violation"          `Quick test_policy_noalloc_alloc_violation;
@@ -5138,6 +7765,13 @@ let compiler_suites =
           Alcotest.test_case "cap no_panic + safe local helper: no error" `Quick test_cap_no_panic_safe_helper_ok;
           Alcotest.test_case "cap no_panic + transitive panic: error"     `Quick test_cap_no_panic_transitive_error;
           Alcotest.test_case "cap no_panic + safe sibling fns: no error"  `Quick test_cap_no_panic_two_safe_sibling_fns_ok;
+          Alcotest.test_case "cap no_panic + non-exhaustive match: error" `Quick test_cap_no_panic_nonexhaustive_match_error;
+          Alcotest.test_case "cap no_panic + exhaustive match: no error"  `Quick test_cap_no_panic_exhaustive_match_ok;
+          Alcotest.test_case "cap no_panic + wildcard match: no error"    `Quick test_cap_no_panic_wildcard_match_ok;
+          Alcotest.test_case "plain non-exhaustive match: no error"       `Quick test_plain_nonexhaustive_match_ok;
+          Alcotest.test_case "cap no_panic + guarded non-exhaustive match: error" `Quick test_cap_no_panic_guarded_nonexhaustive_match_error;
+          Alcotest.test_case "cap no_panic + guarded guardless-catchall: no error" `Quick test_cap_no_panic_guarded_guardless_catchall_ok;
+          Alcotest.test_case "plain guarded non-exhaustive match: no error" `Quick test_plain_guarded_nonexhaustive_match_ok;
           (* Division-safety Z3 cases *)
           Alcotest.test_case "divsafety: v > 0 refinement suppresses"     `Quick test_divsafety_positive_refinement_ok;
           Alcotest.test_case "divsafety: v != 0 refinement suppresses"    `Quick test_divsafety_nonzero_refinement_ok;
@@ -5161,11 +7795,74 @@ let compiler_suites =
           Alcotest.test_case "cap pure + now_ms: error"               `Quick test_cap_pure_now_ms_error;
           Alcotest.test_case "cap pure + random_int: error"           `Quick test_cap_pure_random_int_error;
           Alcotest.test_case "cap pure + uuid_v4: error"              `Quick test_cap_pure_uuid_error;
+          Alcotest.test_case "cap pure + file_write (real): error"    `Quick test_cap_pure_file_write_error;
+          Alcotest.test_case "cap pure + file_read (real): error"     `Quick test_cap_pure_file_read_error;
+          Alcotest.test_case "cap pure + random_bytes (real): error"  `Quick test_cap_pure_random_bytes_error;
           Alcotest.test_case "cap no_extern + regular fn: no error"   `Quick test_cap_no_extern_regular_fn_ok;
           Alcotest.test_case "cap deterministic + random_int: error"  `Quick test_cap_deterministic_random_int_error;
           Alcotest.test_case "cap deterministic + uuid_v4: error"     `Quick test_cap_deterministic_uuid_error;
           Alcotest.test_case "cap deterministic + now_ms: error"      `Quick test_cap_deterministic_now_ms_error;
+          Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
+          Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+        ] );
+      ( "proof_cap_mint", [
+          Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
+          Alcotest.test_case "cap_narrow cannot mint proof cap (let binding): error" `Quick test_cap_narrow_forge_let;
+          Alcotest.test_case "cap_narrow IO-lattice narrow: no error"       `Quick test_cap_narrow_io_narrow_still_ok;
+          Alcotest.test_case "cap_narrow let-generalized launder: error"    `Quick test_cap_narrow_forge_generalized_let;
+          Alcotest.test_case "cap_narrow laundered through generic fn: error" `Quick test_cap_narrow_forge_through_generic_fn;
+          Alcotest.test_case "cap_narrow laundered to IO cap: no error"      `Quick test_cap_narrow_launder_io_still_ok;
+          Alcotest.test_case "mint_cap in public declaring-module fn: no error" `Quick test_mint_cap_public_declaring_ok;
+          Alcotest.test_case "mint_cap in pfn: error"                       `Quick test_mint_cap_pfn_rejected;
+          Alcotest.test_case "mint_cap in external module: error"           `Quick test_mint_cap_external_rejected;
+          Alcotest.test_case "mint_cap in applied lambda in declaring fn: no error" `Quick test_mint_cap_lambda_declaring_ok;
+          Alcotest.test_case "mint_cap in applied lambda in external module: error" `Quick test_mint_cap_lambda_external_rejected;
+          Alcotest.test_case "mint_cap at IO-cap target: error"             `Quick test_mint_cap_io_target_rejected;
+          Alcotest.test_case "container/factory taint: tuple-wrapped forge: error" `Quick test_container_launder_tuple_forge;
+          Alcotest.test_case "container/factory taint: Option-wrapped forge: error" `Quick test_container_launder_option_forge;
+          Alcotest.test_case "container/factory taint: IO narrow in a tuple: no error" `Quick test_container_launder_io_still_ok;
+          Alcotest.test_case "container/factory taint: legit proof-cap passthrough beside a tainted slot: no error" `Quick test_container_combine_legit_proof_cap_still_ok;
+        ] );
+      ( "nested_mod_prebind_erasure", [
+          (* RED pre-fix (forge accepted), GREEN after the qualified-prebind reconciliation. *)
+          Alcotest.test_case "nested id launders Int into String param: error"        `Quick test_nested_launder_int_as_string;
+          Alcotest.test_case "nested id launders Box(String)->Box(Int): error"        `Quick test_nested_launder_box_arg;
+          Alcotest.test_case "nested id launders Cap(IO)->Cap(Db.P): error"           `Quick test_nested_launder_proof_cap;
+          Alcotest.test_case "nested id coerces Cap(IO)->Cap(IO.Network): error"      `Quick test_nested_launder_io_subcap;
+          Alcotest.test_case "3-deep nested id launders Box(String)->Box(Int): error" `Quick test_nested_launder_three_deep;
+          Alcotest.test_case "nested tuple factory launders Box(String)->Box(Int): error" `Quick test_nested_launder_container_factory;
+          (* GREEN-STAYS-GREEN guards. *)
+          Alcotest.test_case "nested id passes Cap(IO) through unchanged: no error"   `Quick test_nested_cap_passthrough_ok;
+          Alcotest.test_case "nested id used at Int AND String: no error"            `Quick test_nested_id_polymorphic_ok;
+          Alcotest.test_case "nested ANNOTATED id still rejects forge: error"        `Quick test_nested_launder_annotated_id_still_rejected;
+          Alcotest.test_case "nested PRIVATE (pfn) id still rejects forge: error"    `Quick test_nested_launder_private_id_still_rejected;
+          (* Round 2 — residual erasures (RED on 10249488, GREEN after). *)
+          Alcotest.test_case "C1 forward-ref id launders Int->String: error"        `Quick test_nested_fwdref_int_as_string;
+          Alcotest.test_case "C1 forward-ref id launders Box(String)->Box(Int): error" `Quick test_nested_fwdref_box;
+          Alcotest.test_case "C1 forward-ref id launders Cap(IO)->Cap(Db.P): error" `Quick test_nested_fwdref_proof_cap;
+          Alcotest.test_case "C2 distinct-tvar launder erases Int->String: error"    `Quick test_nested_distinct_tvar_int_as_string;
+          Alcotest.test_case "C2 distinct-tvar launder erases Box(String)->Box(Int): error" `Quick test_nested_distinct_tvar_box;
+          Alcotest.test_case "C2 distinct-tvar launder erases Cap(IO)->Cap(Db.P): error" `Quick test_nested_distinct_tvar_proof_cap;
+          (* Round 2 green-stays-green guards. *)
+          Alcotest.test_case "forward-ref id used at Int AND String: no error"       `Quick test_nested_fwdref_legit_ok;
+          Alcotest.test_case "forward-ref annotated id (a->a) at Int AND String: no error" `Quick test_nested_annotated_same_tvar_ok;
+          (* Round 3 — entry-module self-qualified erasure (RED on d19dc519, GREEN after). *)
+          Alcotest.test_case "entry Main.id launders Int->String: error"           `Quick test_entry_self_qualified_int_as_string;
+          Alcotest.test_case "entry Main.id launders Box(String)->Box(Int): error" `Quick test_entry_self_qualified_box;
+          Alcotest.test_case "entry Main.id launders Cap(IO)->Cap(Db.P): error"     `Quick test_entry_self_qualified_proof_cap;
+          Alcotest.test_case "nested sibling launders via entry T.id: error"        `Quick test_entry_qualified_from_nested_sibling;
+          Alcotest.test_case "entry forward-ref Main.id launders Int->String: error" `Quick test_entry_self_qualified_forward_ref;
+          (* Round 3 green-stays-green / red->green guards. *)
+          Alcotest.test_case "entry Main.id used at Int AND String: no error"       `Quick test_entry_self_qualified_polymorphic_ok;
+          Alcotest.test_case "nested sibling uses entry T.id consistent: no error"  `Quick test_entry_qualified_nested_consistent_ok;
+        ] );
+      ( "fix_batch_regressions", [
+          Alcotest.test_case "Cap(IO.Random/Mut/Foreign/Telemetry) args: no error" `Quick test_cap_hierarchy_args_ok;
+          Alcotest.test_case "Cap(IO.NetConnect.TLS) arg: no error"     `Quick test_cap_hierarchy_tls_arg_ok;
+          Alcotest.test_case "revoke_cap/is_cap_valid: no error"        `Quick test_revoke_cap_typechecks;
+          Alcotest.test_case "derive for unknown type: error"           `Quick test_derive_unknown_type_error;
+          Alcotest.test_case "derive for declared type: no error"       `Quick test_derive_known_type_ok;
         ] );
       ( "cap_no_alloc", [
           Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
@@ -5229,6 +7926,17 @@ let compiler_suites =
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
           Alcotest.test_case "needs IO umbrella covers IO.Foreign"         `Quick test_cap_body_foreign_parent_ok;
           Alcotest.test_case "blocking extern missing IO.Foreign.Blocking" `Quick test_cap_body_foreign_blocking;
+          Alcotest.test_case "fn_capability_closures: declared needs"       `Quick test_fn_cap_closure_declared_needs;
+          Alcotest.test_case "fn_capability_closures: inferred builtin"     `Quick test_fn_cap_closure_inferred_builtin;
+          Alcotest.test_case "fn_capability_closures: extern IO.Foreign"    `Quick test_fn_cap_closure_extern;
+          Alcotest.test_case "fn_capability_closures: propagated import"    `Quick test_fn_cap_closure_propagated_import;
+          Alcotest.test_case "fn_capability_closures: two-level nesting"    `Quick test_fn_cap_closure_two_level_nesting;
+          Alcotest.test_case "fn_own_capability_closures: excludes module-wide needs" `Quick test_fn_own_cap_closure_excludes_module_wide;
+          Alcotest.test_case "migrate_state calling file_write: error"     `Quick test_migrate_state_file_write_error;
+          Alcotest.test_case "migrate_state calling println: error"       `Quick test_migrate_state_println_error;
+          Alcotest.test_case "migrate_state as extern fn: error"          `Quick test_migrate_state_extern_error;
+          Alcotest.test_case "pure migrate_state + module needs: clean"   `Quick test_migrate_state_pure_with_module_needs_clean;
+          Alcotest.test_case "pure migrate_state, no needs: clean"        `Quick test_migrate_state_pure_no_needs_clean;
         ] );
       ( "cap_propagation", [
           Alcotest.test_case "needs from import suppresses unused-cap warn" `Quick test_cap_propagation_no_unused_warn;
@@ -5268,17 +7976,74 @@ let compiler_suites =
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;
+          Alcotest.test_case "W4.4: complete if-then-else form rejected"    `Quick test_parse_error_then_else_form_rejected;
           Alcotest.test_case "fix: if-branch mismatch reason says if expr"  `Quick test_if_branch_mismatch_reason_is_if_specific;
           Alcotest.test_case "fix: if-branch mismatch no 'match' in note"   `Quick test_if_branch_mismatch_reason_not_match;
           Alcotest.test_case "top-level mod + sibling fn: clear error"      `Quick test_toplevel_mod_plus_sibling_fn_error;
           Alcotest.test_case "nested inline match arm parses (no do/end)"   `Quick test_nested_inline_match_arm_parses;
           Alcotest.test_case "same-name type collision: explanatory note"   `Quick test_same_name_type_collision_note;
         ] );
+      ( "let_annotations", [
+          Alcotest.test_case "finding 16: let : Int = String rejected"       `Quick test_let_annot_mismatch_rejects;
+          Alcotest.test_case "finding 16: let : Int = 5 accepted"            `Quick test_let_annot_correct_accepts;
+          Alcotest.test_case "finding 16: let : (Int)->Int = fn n->n accept" `Quick test_let_annot_poly_instance_accepts;
+        ] );
+      ( "letfn_ret_annot", [
+          Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
+          Alcotest.test_case "finding 13: two distinct errors both report"   `Quick test_letfn_two_distinct_errors_both_report;
+        ] );
+      ( "generic_when_constraints", [
+          Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
+          Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
+          Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
+        ] );
       ( "return_refine_guard", [
           Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;
           Alcotest.test_case "match guard: both arms positive infers r > 0" `Quick test_return_infer_match_guard_both_arms_pos;
           Alcotest.test_case "match guard: disagreeing arms kills r > 0"    `Quick test_return_infer_match_guard_intersection_kills;
           Alcotest.test_case "if guard: abs infers r > 0"                   `Quick test_return_infer_if_guard_infers_pos;
+        ] );
+      ( "lexer_line_tracking", [
+          Alcotest.test_case "B15: raw newline in string literal tracks line"      `Quick test_string_literal_raw_newline_tracks_line;
+          Alcotest.test_case "B15: raw newline in string interp tracks line"       `Quick test_string_interp_raw_newline_tracks_line;
+        ] );
+      ( "token_filter_pattern_start", [
+          Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
+          Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
+          Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
+        ] );
+      ( "token_filter_cond_guard_operators", [
+          Alcotest.test_case "cond form: 2+ >= arms parse without parens"          `Quick test_cond_ge_arms_parse;
+          Alcotest.test_case "cond form: 2+ == arms parse without parens"          `Quick test_cond_eqeq_arms_parse;
+          Alcotest.test_case "cond form: 2+ <= arms parse without parens"          `Quick test_cond_le_arms_parse;
+          Alcotest.test_case "when-guard: 2+ == guards parse without parens"       `Quick test_guard_eqeq_arms_parse;
+          Alcotest.test_case "when-guard: 2+ >= guards parse without parens"       `Quick test_guard_ge_arms_parse;
+          Alcotest.test_case "when-guard: 2+ <= guards parse without parens"       `Quick test_guard_le_arms_parse;
+        ] );
+      ( "pipe_into_match", [
+          Alcotest.test_case "B6: pipe into match reports desugar error"           `Quick test_pipe_into_match_reports_error;
+          Alcotest.test_case "B6: pipe cond bad pattern reports desugar error"     `Quick test_pipe_into_cond_bad_pattern_reports_error;
+          Alcotest.test_case "B6: scrutinee-less pipe match still works"           `Quick test_pipe_into_scrutineeless_match_still_works;
+        ] );
+      ( "fn_clause_grouping", [
+          Alcotest.test_case "B14: interleaved same-name fn groups error"          `Quick test_interleaved_fn_clauses_error;
+          Alcotest.test_case "B14: adjacent multi-head clauses still parse"        `Quick test_adjacent_fn_clauses_still_parse;
+          Alcotest.test_case "B14: same fn name in nested mod is fine"             `Quick test_same_fn_name_in_nested_mod_ok;
+        ] );
+      ( "entry_mod_qual_erasure", [
+          Alcotest.test_case "Main.id launders Int -> String: error"              `Quick test_entry_qual_launders_int_as_string;
+          Alcotest.test_case "Main.id launders Box(String) -> Box(Int): error"    `Quick test_entry_qual_launders_box;
+          Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
+          Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
+          Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
+          Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
+          Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;
+          Alcotest.test_case "sorted_set.march cmp/fold: curried, no internal error"  `Quick test_stdlib_sorted_set_cmp_curried;
+          Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
+          Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
+          Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
+          Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;
         ] );
   ]
 

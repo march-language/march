@@ -1,0 +1,686 @@
+-- Tests for Perihelion.Combat — pure combat rules.
+-- Run from repo root:
+--   MARCH_STDLIB=$PWD/_build/default/stdlib \
+--   MARCH_LIB_PATH=$PWD/demo_app/perihelion/lib \
+--   ./_build/default/bin/main.exe test demo_app/perihelion/test/test_combat.march
+mod TestPerihelionCombat do
+
+  pfn fabs(x : Float) : Float do
+    if x < 0.0 do 0.0 - x else x end
+  end
+
+  pfn approx(a : Float, b : Float) : Bool do
+    fabs(a - b) < 0.001
+  end
+
+  pfn mk_star(x : Float, y : Float) : Star do
+    { x: x, y: y, radius: 18.0, capture_radius: 54.0, speed_mult: 1.0,
+      orbits: Cons({ radius: 54.0, speed_mult: 1.0 }, Nil) }
+  end
+
+  -- Random.Rng is a plain record (no Eq impl), so compare its state fields.
+  pfn rng_eq(a : Random.Rng, b : Random.Rng) : Bool do
+    a.s0 == b.s0 && a.s1 == b.s1 && a.s2 == b.s2 && a.s3 == b.s3
+  end
+
+  pfn base_game(angle : Float) : Game do
+    let s0 = mk_star(200.0, 520.0)
+    let s1 = mk_star(200.0, 360.0)
+    { seed: 7,
+      phase: Playing,
+      ball_x: s0.x + Math.cos(angle) * s0.capture_radius,
+      ball_y: s0.y + Math.sin(angle) * s0.capture_radius,
+      mode: Orbiting(0, 0, angle),
+      stars: Cons(s0, Cons(s1, Nil)),
+      current: 0, score: 0, best: 0,
+      camera_y: 136.0,
+      camera_x: 0.0,
+      rng: Random.seed(7),
+      asteroids: Nil, ships: Nil, player_shots: Nil, enemy_shots: Nil, pickups: Nil,
+      shield: 0, multiplier: 1, max_mult: 1,
+      owned_weapons: Cons(Perihelion.Upgrades.Base, Nil),
+      active_weapon_idx: 0,
+      fire_rate_stacks: 0,
+      bullet_ward: false,
+      deflector_plating: false,
+      shield_reinforced: false,
+      special: None,
+      special_charges: 0,
+      starkiller_target_offset: 0,
+      starkiller_cooldown: 0.0,
+      milestone_choices: Nil,
+      stars_chained: 0,
+      loop_angle: 0.0, fire_cooldown: 0.0, spawn_timer: 4.0, runs: Nil,
+      view_w: 400.0, view_h: 640.0,
+      fx_bursts: Nil, capture_flash: None }
+  end
+
+  pfn space() : List(String) do
+    Cons(" ", Nil)
+  end
+
+  pfn spawn_n(game : Game, star_idx : Int, n : Int) : Game do
+    if n == 0 do
+      game
+    else
+      spawn_n(Perihelion.Combat.maybe_spawn_ship(game, star_idx), star_idx, n - 1)
+    end
+  end
+
+  -- Step Combat (step + collide) `n` times without touching Core.update --
+  -- this file tests Combat in isolation.
+  pfn run_n_ticks(game : Game, n : Int) : Game do
+    if n == 0 do
+      game
+    else
+      let g2 = Perihelion.Combat.collide(Perihelion.Combat.step(game, dt()))
+      run_n_ticks(g2, n - 1)
+    end
+  end
+
+  pfn no_keys() : List(String) do
+    Nil
+  end
+
+  pfn dt() : Float do
+    Perihelion.Core.dt()
+  end
+
+  -- Cursor at screen (354, 384): with camera_y 136, world y = 520 = base_game(0.0)'s
+  -- ball_y, and world x 354 is +100px from ball_x 254 -- a pure +x aim direction.
+  pfn cursor_east() : (Int, Int) do
+    (354, 384)
+  end
+
+  pfn is_over(g : Game) : Bool do
+    match g.phase do
+      Over -> true
+      _ -> false
+    end
+  end
+
+  pfn is_milestone(g : Game) : Bool do
+    match g.phase do
+      Milestone -> true
+      _ -> false
+    end
+  end
+
+  describe "firing" do
+    test "spacebar while orbiting fires toward the cursor" do
+      -- angle 0: ball is at (254, 520); cursor_east() aims purely +x.
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, space(), cursor_east(), dt())
+      assert (List.length(g2.player_shots) == 1)
+      match g2.player_shots do
+        Cons(s, Nil) ->
+          assert (s.vx > 0.0)
+          assert (approx(s.vy, 0.0))
+          assert (approx(Math.sqrt(s.vx * s.vx + s.vy * s.vy), Perihelion.Combat.player_shot_speed()))
+        _ -> assert false
+      end
+      assert (g2.fire_cooldown > 0.0)
+    end
+
+    test "fires along the radial direction when the cursor sits on the ball" do
+      -- angle pi/2: ball at (~200, 574). Cursor world coords == ball coords is
+      -- a degenerate (zero-length) aim, so fire() falls back to the star->ball
+      -- radial direction, which here points straight down (+y).
+      let g = base_game(Math.pi() / 2.0)
+      let g2 = Perihelion.Combat.fire(g, space(), (200, 438), dt())
+      assert (List.length(g2.player_shots) == 1)
+      match g2.player_shots do
+        Cons(s, Nil) ->
+          assert (s.vy > 0.0)
+          assert (approx(fabs(s.vx), 0.0))
+        _ -> assert false
+      end
+    end
+
+    test "cooldown blocks a second shot" do
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, space(), cursor_east(), dt())
+      let g3 = Perihelion.Combat.fire(g2, space(), cursor_east(), dt())
+      assert (List.length(g3.player_shots) == 1)
+    end
+
+    test "firing while flying works and kicks the ball back opposite the shot" do
+      let g0 = base_game(0.0)
+      let g = { g0 with mode: Flying(0.0, 0.0 - 300.0) }
+      let g2 = Perihelion.Combat.fire(g, space(), cursor_east(), dt())
+      assert (List.length(g2.player_shots) == 1)
+      match g2.mode do
+        Flying(vx, vy) ->
+          -- cursor_east() aims +x, so recoil pushes vx negative; vy (the
+          -- perpendicular, unaimed component) is untouched.
+          assert (vx < 0.0)
+          assert (approx(vy, 0.0 - 300.0))
+        _ -> assert false
+      end
+    end
+
+    test "no fire without spacebar" do
+      let g = base_game(0.0)
+      let g2 = Perihelion.Combat.fire(g, no_keys(), cursor_east(), dt())
+      assert (List.is_empty(g2.player_shots))
+    end
+
+    test "fire_rate_stacks reduces the effective cooldown" do
+      let g0 = { base_game(0.0) with fire_rate_stacks: 2 }
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      -- base cooldown 0.4, -0.05/stack, floor 0.15 -- 2 stacks = 0.3
+      assert (approx(g2.fire_cooldown, 0.3))
+    end
+
+    test "fire rate cooldown floors at 0.15 regardless of stack count" do
+      let g0 = { base_game(0.0) with fire_rate_stacks: 20 }
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (approx(g2.fire_cooldown, 0.15))
+    end
+
+    test "spread fire spawns 5 shots in a fan around the aim direction" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Spread, Nil)), active_weapon_idx: 1 }
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (List.length(g2.player_shots) == 5)
+    end
+
+    test "homing missile curves toward a nearby asteroid instead of flying straight" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.Homing, Nil)), active_weapon_idx: 1 }
+      -- asteroid directly ABOVE the fire point, but aim is due east (cursor_east) --
+      -- a straight shot would never approach it; a homing shot should curve toward it.
+      let ast = { x: g0.ball_x, y: g0.ball_y - 100.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: Perihelion.Combat.AsteroidDrifting }
+      let g1 = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.fire(g1, space(), cursor_east(), dt())
+      let g3 = Perihelion.Combat.step(g2, dt())
+      match g3.player_shots do
+        Cons(s, Nil) -> assert (s.vy < 0.0) -- steered upward toward the asteroid, not staying vy≈0
+        _ -> assert false
+      end
+    end
+  end
+
+  describe "step" do
+    test "spawn timer eventually spawns an asteroid inside the band" do
+      let g0 = base_game(0.0)
+      let g = { g0 with spawn_timer: 0.01 }
+      let g2 = Perihelion.Combat.step(g, dt())
+      assert (List.length(g2.asteroids) == 1)
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          assert (a.y > g.camera_y - 1.0)
+          assert (a.y < g.camera_y + g.view_h + 1.0)
+          assert (fabs(a.vx) > 0.0)
+        _ -> assert false
+      end
+      assert (g2.spawn_timer > 0.0)
+    end
+
+    test "asteroids drift, arc toward a nearby star, and shots age" do
+      let g0 = base_game(0.0)
+      let ast = { x: 100.0, y: 300.0, vx: 90.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let shot = { x: 50.0, y: 300.0, vx: 0.0, vy: 0.0, ttl: 0.01, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          assert (a.x > 100.0)
+          -- star 1 (200, 360) is within gravity range and below-right of the
+          -- asteroid's straight-line path (vy started at 0.0): the arc bend
+          -- must have pulled some +y component into the velocity.
+          assert (a.vy > 0.0)
+          match a.mode do
+            AsteroidDrifting -> assert true
+            _ -> assert false
+          end
+        _ -> assert false
+      end
+      let g3 = Perihelion.Combat.step(g2, dt())
+      assert (List.is_empty(g3.player_shots))
+    end
+
+    test "an asteroid crossing a star's ring either keeps drifting or gets captured into orbit around it" do
+      let g0 = base_game(0.0)
+      -- Well inside star 1's (200, 360) capture ring (54px) from the start,
+      -- so arrived_star matches on the very first step regardless of the
+      -- gravity bend's exact direction.
+      let ast = { x: 200.0, y: 320.0, vx: 0.0, vy: 20.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil), rng: Random.seed(7) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          match a.mode do
+            AsteroidDrifting -> assert true
+            AsteroidOrbiting(idx, _) -> assert (idx == 1)
+          end
+        _ -> assert false
+      end
+    end
+
+    test "an orbiting asteroid advances its angle and stays pinned to its inset ring (inside the capture radius)" do
+      let g0 = base_game(0.0)
+      let s1 = mk_star(200.0, 360.0)
+      let ast = { x: s1.x + s1.capture_radius, y: s1.y, vx: 0.0, vy: 0.0,
+                  radius: 10.0, shape_seed: 0.0, mode: AsteroidOrbiting(1, 0.0) }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      match g2.asteroids do
+        Cons(a, Nil) ->
+          match a.mode do
+            AsteroidOrbiting(idx, angle) ->
+              assert (idx == 1)
+              assert (angle > 0.0)
+              let d = Math.sqrt((a.x - s1.x) * (a.x - s1.x) + (a.y - s1.y) * (a.y - s1.y))
+              assert (approx(d, s1.capture_radius * Perihelion.Combat.asteroid_orbit_mult()))
+              assert (d < s1.capture_radius)
+            AsteroidDrifting -> assert false
+          end
+        _ -> assert false
+      end
+    end
+
+    test "ship in range fires at the ball" do
+      let g0 = base_game(0.0)
+      let s1 = mk_star(200.0, 360.0)
+      let r = s1.capture_radius * Perihelion.Combat.ship_orbit_mult()
+      let ship = { star_idx: 1, x: s1.x + Math.cos(0.0) * r, y: s1.y + Math.sin(0.0) * r,
+                   mode: ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 10.0, hunter: false }
+      let g = { g0 with ships: Cons(ship, Nil) }
+      let g2 = Perihelion.Combat.step(g, dt())
+      assert (List.length(g2.enemy_shots) == 1)
+      match g2.enemy_shots do
+        Cons(s, Nil) ->
+          -- ship orbits star 1 (200,360); ball at (254,520): aim has +y component
+          assert (s.vy > 0.0)
+        _ -> assert false
+      end
+      match g2.ships do
+        Cons(sh, Nil) -> assert (sh.fire_cooldown > 0.0)
+        _ -> assert false
+      end
+    end
+  end
+
+  describe "ship spawn rate" do
+    test "score-gated rolls actually produce ships at a healthy rate" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 15, rng: Random.seed(1) }   -- chance capped at 0.35
+      let g2 = spawn_n(g, 1, 40)
+      -- ~14 expected at 0.35 over 40 rolls; a hard floor well below that
+      assert (List.length(g2.ships) >= 5)
+    end
+
+    test "no ships spawn below the score gate" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 3, rng: Random.seed(1) }    -- below ship_score_min (4)
+      let g2 = spawn_n(g, 1, 40)
+      assert (List.is_empty(g2.ships))
+    end
+  end
+
+  describe "hunter (star-hopping pursuit)" do
+    -- Jump-target choice is the ONLY difference between the two ship kinds:
+    -- a hunter releases toward the star nearest the PLAYER, a turret toward
+    -- the star nearest ITSELF. Same board, opposite pick.
+    test "a hunter jumps toward the player; a turret toward itself" do
+      let g0 = base_game(0.0)
+      let ship_star = mk_star(200.0, 500.0)     -- the ship's current star
+      let near_player = mk_star(200.0, 150.0)   -- close to the player (200,100)
+      let near_ship = mk_star(500.0, 500.0)     -- close to the ship, far from player
+      let board = { g0 with
+                      stars: Cons(ship_star, Cons(near_player, Cons(near_ship, Nil))),
+                      ball_x: 200.0, ball_y: 100.0 }
+      -- hunter (idle expired) releases toward near_player -> flies up (vy < 0)
+      let hunter = { star_idx: 0, x: 200.0, y: 500.0, mode: ShipOrbiting(0.0),
+                     fire_cooldown: 5.0, idle_timer: 0.0, hunter: true }
+      match (Perihelion.Combat.step({ board with ships: Cons(hunter, Nil) }, dt())).ships do
+        Cons(sh, Nil) ->
+          match sh.mode do
+            ShipFlying(vx, vy) -> assert (vy < 0.0)
+            _ -> assert false
+          end
+        _ -> assert false
+      end
+      -- turret (idle expired) releases toward near_ship -> flies right (vx > 0)
+      let turret = { star_idx: 0, x: 200.0, y: 500.0, mode: ShipOrbiting(0.0),
+                     fire_cooldown: 5.0, idle_timer: 0.0, hunter: false }
+      match (Perihelion.Combat.step({ board with ships: Cons(turret, Nil) }, dt())).ships do
+        Cons(sh, Nil) ->
+          match sh.mode do
+            ShipFlying(vx, vy) -> assert (vx > 0.0)
+            _ -> assert false
+          end
+        _ -> assert false
+      end
+    end
+
+    -- Hunters are ordinary star-orbiting ships now (no free-flight, no special
+    -- pass-through) -- touching one ends the run like any ship.
+    test "a hunter is a contact hazard like any ship" do
+      let g0 = base_game(0.0)   -- ball at (254, 520)
+      let hunter = { star_idx: 0, x: 254.0, y: 520.0, mode: ShipOrbiting(0.0),
+                     fire_cooldown: 5.0, idle_timer: 10.0, hunter: true }
+      let g2 = Perihelion.Combat.collide({ g0 with ships: Cons(hunter, Nil) })
+      assert (is_over(g2))
+    end
+  end
+
+  describe "collide" do
+    test "player shot kills asteroid and scores multiplier" do
+      let g0 = base_game(0.0)
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let shot = { x: 305.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil), multiplier: 3 }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.is_empty(g2.asteroids))
+      assert (List.is_empty(g2.player_shots))
+      assert (g2.score == 3)
+    end
+
+    test "shot misses outside radii sum" do
+      let g0 = base_game(0.0)
+      let ast = { x: 300.0, y: 400.0, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let shot = { x: 315.0, y: 400.0, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with asteroids: Cons(ast, Nil), player_shots: Cons(shot, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.length(g2.asteroids) == 1)
+      assert (List.length(g2.player_shots) == 1)
+      assert (g2.score == 0)
+    end
+
+    test "shot kills ship, scores 2x multiplier, deterministic drop per seed" do
+      let g0 = base_game(0.0)
+      let s1 = mk_star(200.0, 360.0)
+      let r = s1.capture_radius * Perihelion.Combat.ship_orbit_mult()
+      let ship = { star_idx: 1, x: s1.x + Math.cos(0.0) * r, y: s1.y + Math.sin(0.0) * r,
+                   mode: ShipOrbiting(0.0), fire_cooldown: 1.0, idle_timer: 10.0, hunter: false }
+      let pos = Perihelion.Combat.ship_pos(ship)
+      let (sx, sy) = pos
+      let shot = { x: sx, y: sy, vx: 0.0, vy: 0.0, ttl: 1.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with ships: Cons(ship, Nil), player_shots: Cons(shot, Nil), multiplier: 2, rng: Random.seed(12345) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.is_empty(g2.ships))
+      assert (g2.score == 4)
+      let drops = List.length(g2.pickups)
+      assert (drops == 0 || drops == 1)
+      assert (!rng_eq(g2.rng, Random.seed(12345)))
+    end
+
+    test "ball hit without shield ends the run" do
+      let g0 = base_game(0.0)
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_over(g2))
+      assert (List.length(g2.runs) == 1)
+    end
+
+    test "shield absorbs the hit and despawns the hazard" do
+      let g0 = base_game(0.0)
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil), shield: 1 }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+      assert (g2.shield == 0)
+      assert (List.is_empty(g2.asteroids))
+    end
+
+    test "ball collects a pickup" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield > 0)
+      assert (List.is_empty(g2.pickups))
+    end
+
+    test "already-shielded ball still collects a shield pickup (uncapped stacking)" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
+      let g = { g0 with pickups: Cons(p, Nil), shield: 1 }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield == 2)
+      assert (List.is_empty(g2.pickups))
+    end
+  end
+
+  describe "maybe_spawn_ship" do
+    test "no ships below the score threshold" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 2 }
+      let g2 = Perihelion.Combat.maybe_spawn_ship(g, 1)
+      assert (List.is_empty(g2.ships))
+    end
+
+    test "spawns deterministically per seed at high score" do
+      let g0 = base_game(0.0)
+      let g = { g0 with score: 50, rng: Random.seed(999) }
+      let g2 = Perihelion.Combat.maybe_spawn_ship(g, 1)
+      let g3 = { g0 with score: 50, rng: Random.seed(999) }
+      let g4 = Perihelion.Combat.maybe_spawn_ship(g3, 1)
+      assert (List.length(g2.ships) == List.length(g4.ships))
+      assert (rng_eq(g2.rng, g4.rng))
+      assert (!rng_eq(g2.rng, Random.seed(999)))
+    end
+  end
+
+  describe "star killer" do
+    test "firing while StarKiller is active spawns exactly one shot aimed at the targeted star" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)), active_weapon_idx: 1 }
+      -- targets current+1 = star index 1 (star at 200, 360)
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (List.length(g2.player_shots) == 1)
+      assert (g2.starkiller_cooldown > 0.0)
+    end
+
+    test "holding space with StarKiller on cooldown does not reapply recoil every tick" do
+      -- Flying mode makes apply_recoil's effect observable (it's a no-op
+      -- while Orbiting) -- same setup as the "firing while flying" test above,
+      -- but with StarKiller equipped and space held across several more
+      -- fire() calls while starkiller_cooldown is still counting down.
+      let g0 = { base_game(0.0) with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   mode: Flying(0.0, 0.0 - 300.0) }
+      let g1 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      assert (List.length(g1.player_shots) == 1)
+      assert (g1.starkiller_cooldown > 0.0)
+      match g1.mode do
+        Flying(vx1, vy1) ->
+          assert (vx1 < 0.0) -- recoil WAS applied on the actual fire
+          -- Before the fix, fire_cooldown stays 0.0 for StarKiller (its own
+          -- starkiller_cooldown gates it instead), so the outer guard never
+          -- blocked re-entry and every one of these calls re-ran apply_recoil.
+          let g2 = Perihelion.Combat.fire(g1, space(), cursor_east(), dt())
+          let g3 = Perihelion.Combat.fire(g2, space(), cursor_east(), dt())
+          let g4 = Perihelion.Combat.fire(g3, space(), cursor_east(), dt())
+          assert (List.length(g4.player_shots) == 1)
+          match g4.mode do
+            Flying(vx4, vy4) ->
+              assert (approx(vx4, vx1))
+              assert (approx(vy4, vy1))
+            _ -> assert false
+          end
+        _ -> assert false
+      end
+    end
+
+    test "star-killer projectile reaching its target star destroys it and shifts the ladder" do
+      let g0 = { base_game(0.0) with owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)), active_weapon_idx: 1 }
+      let g2 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      -- run enough steps for the shot to reach star 1 (200, 360) from the fire point
+      let g3 = run_n_ticks(g2, 200)
+      assert (List.length(g3.stars) == 1)
+    end
+
+    test "a ship parked further up the ladder than the destroyed star is re-indexed, not silently reattached to the wrong star" do
+      let s2 = mk_star(200.0, 100.0) -- a 3rd star, ahead of the star-killer's target (idx 1)
+      let base = base_game(0.0)
+      let g0 = { base with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   stars: List.append(base.stars, Cons(s2, Nil)) }
+      let ship = { star_idx: 2, x: s2.x, y: s2.y, mode: ShipOrbiting(0.0),
+                   fire_cooldown: 5.0, idle_timer: 10.0, hunter: false }
+      let g1 = { g0 with ships: Cons(ship, Nil) }
+      let g2 = Perihelion.Combat.fire(g1, space(), cursor_east(), dt())
+      -- run enough steps for the shot to reach star 1 (200, 360), destroying it;
+      -- star 2 (200, 100) shifts down to index 1
+      let g3 = run_n_ticks(g2, 200)
+      assert (List.length(g3.stars) == 2)
+      match g3.ships do
+        Cons(sh, Nil) -> assert (sh.star_idx == 1)
+        _ -> assert false
+      end
+    end
+
+    test "retargeting mid-flight doesn't desync a live star-killer shot from its locked target" do
+      let s2 = mk_star(200.0, 100.0) -- a 3rd star, one further out than the initial target
+      let base = base_game(0.0)
+      let g0 = { base with
+                   owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)),
+                   active_weapon_idx: 1,
+                   stars: List.append(base.stars, Cons(s2, Nil)) }
+      -- offset 0 -> targets + locks onto star 1 (200, 360)
+      let g1 = Perihelion.Combat.fire(g0, space(), cursor_east(), dt())
+      match g1.player_shots do
+        Cons(shot, Nil) ->
+          assert (approx(shot.target_x, 200.0))
+          assert (approx(shot.target_y, 360.0))
+        _ -> assert false
+      end
+      -- Simulate W/D retargeting the reticle to star 2 (200, 100) WHILE the
+      -- shot is still in flight -- Core.step_playing runs
+      -- adjust_starkiller_target unconditionally every tick regardless of
+      -- the active weapon, so this can happen even with StarKiller merely
+      -- equipped (not yet fired again).
+      let g2 = { g1 with starkiller_target_offset: 1 }
+      -- run enough steps for the shot to reach its ORIGINAL target, star 1
+      let g3 = run_n_ticks(g2, 200)
+      match g3.stars do
+        Cons(s0, Cons(s1, Nil)) ->
+          -- star 1 (the shot's locked target) died; star 2 (the
+          -- retargeted-to star) survived untouched, proving the shot wasn't
+          -- diverted onto whatever the live reticle points at now.
+          assert (approx(s0.y, 520.0))
+          assert (approx(s1.y, 100.0))
+        _ -> assert false
+      end
+    end
+  end
+
+  describe "defense: bullet ward" do
+    test "absorbs one enemy shot hit, then is consumed" do
+      let g0 = { base_game(0.0) with bullet_ward: true }
+      let es = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, ttl: 5.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with enemy_shots: Cons(es, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+      assert (!g2.bullet_ward)
+      assert (List.is_empty(g2.enemy_shots))
+    end
+
+    test "without bullet ward, the same hit ends the run (no shield either)" do
+      let g0 = base_game(0.0)
+      let es = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, ttl: 5.0, homing: false, star_killer: false, target_x: 0.0, target_y: 0.0 }
+      let g = { g0 with enemy_shots: Cons(es, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_over(g2))
+    end
+  end
+
+  describe "defense: deflector plating" do
+    test "a lucky roll deflects an asteroid hit instead of ending the run" do
+      -- Random.seed(2) (the brief's suggested seed) rolls >= 0.5 (not deflected)
+      -- with this Rng; empirically checked 0..10 and seed(0) is the first that
+      -- rolls < 0.5 on the very first draw() -- pinned here per this file's
+      -- established RNG-seed-pinning convention (see the shield-drop-chance
+      -- tests above).
+      let g0 = { base_game(0.0) with deflector_plating: true, rng: Random.seed(0) }
+      let ast = { x: g0.ball_x, y: g0.ball_y, vx: 0.0, vy: 0.0, radius: 10.0, shape_seed: 0.0, mode: Perihelion.Combat.AsteroidDrifting }
+      let g = { g0 with asteroids: Cons(ast, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (!is_over(g2))
+    end
+  end
+
+  describe "defense: reinforced shield" do
+    test "picking up a shield grants 2 charges instead of 1 when reinforced" do
+      let g0 = { base_game(0.0) with shield_reinforced: true }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.DefenseShield }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.shield == 2)
+    end
+  end
+
+  describe "generalized pickups" do
+    test "roll_drops can drop a non-shield upgrade kind" do
+      let g0 = { base_game(0.0) with rng: Random.seed(1) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      -- with seed 1, drop_chance() succeeds (empirically checked seeds 0..39
+      -- against Perihelion.Level.draw_pub's first draw; seed 1 rolls ~0.088,
+      -- well under drop_chance()'s 0.25) -- just assert a pickup landed with
+      -- SOME UpgradeKind, not asserting which
+      match g2.pickups do
+        Cons(p, Nil) -> assert true -- p.kind exists and typechecks; that's the point of this test
+        _ -> assert false
+      end
+    end
+
+    -- Star-killer is drop-only (excluded from milestone_pool/roll_one), so it
+    -- needs its own independent rare roll layered on top of the base
+    -- drop_chance() roll in roll_drops -- see starkiller_drop_chance() in
+    -- perihelion_combat.march. Seed 87 empirically lands BOTH the base
+    -- drop_chance() roll (~0.032, well under 0.25) and the star-killer roll
+    -- (~0.0018, well under starkiller_drop_chance()'s 0.08) as successes
+    -- (swept seeds 0..500 against Perihelion.Level.draw_pub's first two
+    -- draws), same seed-pinning convention as the test above.
+    test "roll_drops can drop StarKiller via its own rare roll when not owned" do
+      let g0 = { base_game(0.0) with rng: Random.seed(87) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      match g2.pickups do
+        Cons(p, Nil) -> assert (p.kind == Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.StarKiller))
+        _ -> assert false
+      end
+    end
+
+    test "roll_drops never drops a duplicate StarKiller once already owned, even on the same lucky seed" do
+      let g0 = { base_game(0.0) with rng: Random.seed(87), owned_weapons: Cons(Perihelion.Upgrades.Base, Cons(Perihelion.Upgrades.StarKiller, Nil)) }
+      let sh = { star_idx: 0, x: 50.0, y: 50.0, mode: Perihelion.Combat.ShipOrbiting(0.0), fire_cooldown: 0.0, idle_timer: 0.0, hunter: false }
+      let g2 = Perihelion.Combat.roll_drops(g0, Cons(sh, Nil))
+      match g2.pickups do
+        Cons(p, Nil) -> assert (p.kind != Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.StarKiller))
+        _ -> assert false
+      end
+    end
+
+    test "collecting an offense pickup adds the weapon, not a shield" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.OffenseWeapon(Perihelion.Upgrades.Homing) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (List.member(g2.owned_weapons, Perihelion.Upgrades.Homing))
+      assert (g2.shield == 0)
+    end
+
+    test "collecting a special pickup while none equipped auto-equips it" do
+      let g0 = base_game(0.0)
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarJump) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (g2.special == Some(Perihelion.Upgrades.StarJump))
+    end
+
+    test "collecting a special pickup while one IS equipped opens a 1-choice milestone-style prompt instead of auto-swapping" do
+      let g0 = { base_game(0.0) with special: Some(Perihelion.Upgrades.StarThrust), special_charges: 1 }
+      let p = { x: g0.ball_x, y: g0.ball_y, ttl: 5.0, kind: Perihelion.Upgrades.SpecialItem(Perihelion.Upgrades.StarJump) }
+      let g = { g0 with pickups: Cons(p, Nil) }
+      let g2 = Perihelion.Combat.collide(g)
+      assert (is_milestone(g2))
+      assert (g2.special == Some(Perihelion.Upgrades.StarThrust)) -- unchanged until the player picks
+    end
+  end
+
+end

@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <sys/time.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -384,8 +385,26 @@ void *march_int_to_string(int64_t n) {
 }
 
 void *march_float_to_string(double f) {
+    /* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
+     * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
+     *   - `%.12g` gives the same 12-significant-digit form as OCaml's
+     *     format_float (both defer to the platform libc);
+     *   - valid_float_lexem appends a bare '.' when every character is a
+     *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
+     * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
+     * interpreter on both precision and whole numbers — the golden oracle
+     * (specs/lang/golden/g09_float_show.march) now pins the agreement. */
     char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%g", f);
+    int len = snprintf(buf, sizeof(buf), "%.12g", f);
+    int bare_int = 1;
+    for (int i = 0; i < len; i++) {
+        char c = buf[i];
+        if (!((c >= '0' && c <= '9') || c == '-')) { bare_int = 0; break; }
+    }
+    if (bare_int && len > 0 && len < (int)sizeof(buf) - 1) {
+        buf[len++] = '.';
+        buf[len] = '\0';
+    }
     return march_string_lit(buf, len);
 }
 
@@ -698,6 +717,12 @@ static void march_print_backtrace(void) {
  * which is defined just below. */
 void march_panic(void *s);
 
+/* Forward declaration: do_actor_death (defined further below, after the
+ * restart strategies) is called from actor_green_thread's crash-recovery
+ * branch (below) and from march_kill / the restart helpers, both of which
+ * are also defined earlier in the file than do_actor_death itself. */
+static void do_actor_death(void *actor);
+
 /* panic_ / todo_ / unreachable_: internal runtime primitives called by the
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
  * return NULL (unreachable, but needed to satisfy the polymorphic return type
@@ -725,6 +750,16 @@ void march_panic(void *s) {
         march_test_fail_buf[len] = '\0';
         longjmp(march_test_jmp_buf, 1);
     }
+    /* Compiled actor supervision: a panic inside a supervised child's
+     * message handler longjmp's back into actor_green_thread instead of
+     * exit(1)-ing the whole process (see march_proc.crash_jmp's doc
+     * comment in march_scheduler.h for why this is stored on the proc,
+     * not a _Thread_local — this scheduler is work-stealing across
+     * multiple OS threads, so the currently-running proc can migrate). */
+    march_proc *cur_proc = march_sched_current();
+    if (cur_proc && cur_proc->crash_jmp) {
+        longjmp(*cur_proc->crash_jmp, 1);
+    }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
     fputc('\n', stderr);
@@ -735,8 +770,9 @@ void march_panic(void *s) {
 
 /* ── Checked integer division / remainder ────────────────────────────────── */
 /*
- * The compiled backend lowers int_div / int_mod / int_mod_euclid through
- * these helpers instead of emitting a raw sdiv/srem/urem so that a zero
+ * The compiled backend lowers int_div / int_mod / int_mod_euclid /
+ * int_div_euclid through these helpers instead of emitting a raw
+ * sdiv/srem/urem so that a zero
  * divisor traps via march_panic — matching the interpreter, which raises
  * "<op>: division by zero" (see eval.ml).  Raw hardware division by zero is
  * undefined (SIGFPE on x86, garbage on some ARM paths); pre-fix, compiled
@@ -771,6 +807,20 @@ int64_t march_checked_imod(int64_t a, int64_t b) {
 int64_t march_checked_umod(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_mod_euclid");
     return (int64_t)((uint64_t)a % (uint64_t)b);
+}
+
+/* Euclidean division (int_div_euclid): the quotient q such that the Euclidean
+ * remainder a - q*b is always non-negative. Mirrors eval.ml byte-for-byte:
+ *   q = a / b; r = a - q*b; if r < 0 then (b > 0 ? q-1 : q+1) else q
+ * C's `/` truncates toward zero like OCaml's, so the correction step is what
+ * turns truncated division into Euclidean division. Signed throughout —
+ * unlike the umod sibling above, which is genuinely unsigned. */
+int64_t march_checked_ediv(int64_t a, int64_t b) {
+    if (b == 0) return march_div_by_zero("int_div_euclid");
+    int64_t q = a / b;
+    int64_t r = a - q * b;
+    if (r < 0) return (b > 0) ? q - 1 : q + 1;
+    return q;
 }
 
 /* The `/` and `%` infix operators (is_int_arith in llvm_emit.ml) lower to these
@@ -1131,6 +1181,15 @@ void *__try_call_val(void *thunk) {
  *   [3] alive      ($alive field   — 1 = alive, 0 = dead)
  *   [4+] state fields (alphabetical order)
  *
+ * This word order is not incidental: it is guaranteed by lower_actor's
+ * $d_dispatch/$e_alive/$f_state field-name sort-prefix contract — the
+ * TIR-side struct fields are named so that an alphabetical sort ($d < $e
+ * < $f < any user field name) reproduces exactly this word order. See
+ * lib/tir/tir_names.ml (actor_dispatch_field/actor_alive_field/
+ * actor_state_field) for the producer contract these hardcoded a[2]/a[3]/
+ * a[4] reads on the C side mirror; changing that sort prefix without
+ * updating these indices (or vice versa) desyncs the two sides silently.
+ *
  * RC / FBIP contract
  * ──────────────────
  * march_send does NOT call march_incrc on the message.  Perceus at the call
@@ -1163,6 +1222,24 @@ typedef struct march_monitor_node {
     struct march_monitor_node  *next;
 } march_monitor_node;
 
+/* One entry per child declared in a `supervise do ... end` block. Set once
+ * at initial spawn time (march_actor_register_child) and read by every
+ * restart (compiled actor supervision, Task 4/5). */
+typedef struct {
+    /* <ActorName>_spawn, referenced as a first-class value from
+     * lower_actor.ml — the compiler ALWAYS represents a bare top-level
+     * function reference this way (a heap-allocated March closure cell
+     * whose offset-16 word holds a $clo_wrap function pointer; see how
+     * $d_dispatch is stored/consumed for actors, and how do_actor_death's
+     * cleanup callbacks are invoked), never a raw C function pointer.
+     * march_respawn_child unwraps it the same way. Called fresh on every
+     * restart. */
+    void *spawn_clo;
+    int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
+                                  state fields; this child's Int-encoded pid lives at
+                                  ((int64_t*)supervisor)[4 + word_idx] */
+} march_sup_child;
+
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
@@ -1184,6 +1261,18 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* Set on a CHILD when it is spawned by a supervisor; NULL for every
+     * other actor, including a supervisor's own meta. */
+    void                        *supervisor;
+    int                          sup_child_index;
+    /* Set on a SUPERVISOR (an actor that itself declares `supervise do ... end`);
+     * NULL/0 for every other actor, including its own children. */
+    march_sup_child             *sup_children;
+    int                          sup_num_children;
+    /* Restart-history timestamps (seconds), for max_restarts-within-window
+     * throttling; valid only when this actor IS a supervisor. */
+    double                      *sup_restart_ts;
+    int                          sup_restart_len;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1301,6 +1390,26 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     return m;
 }
 
+/* Shared by march_is_cap_valid, march_pid_of_int, and the restart-strategy
+ * code below: locate an actor's meta entry by its sequential spawn index —
+ * the value a compiled Int field uses to encode a Pid (see
+ * march_actor_register_child). Returns NULL if no actor was ever assigned
+ * this index. */
+static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = NULL;
+    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
+        march_actor_meta *cur = g_actor_tbl[i];
+        while (cur) {
+            if (cur->pid_index == pid_index) { m = cur; break; }
+            cur = cur->tbl_next;
+        }
+        if (m) break;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
 /* ── Actor green thread loop ─────────────────────────────────────── */
 
 /* Each actor runs as a green thread that loops on recv→dispatch.
@@ -1311,6 +1420,47 @@ static void actor_green_thread(void *arg) {
     void *actor = meta->actor;
     int64_t *a = (int64_t *)actor;
 
+    /* self is THIS green thread's own proc — march_sched_current() reads
+     * tl_sched->current, which correctly names "whatever proc this OS
+     * thread's scheduler is running right now" regardless of which OS
+     * thread that happens to be (see march_proc.crash_jmp's doc comment
+     * in march_scheduler.h for why the trap pointer lives on the proc,
+     * not a _Thread_local — this scheduler steals procs across OS
+     * threads, so a raw thread-local would go stale after a migration). */
+    march_proc *self = march_sched_current();
+    jmp_buf crash_jmp;
+    jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
+    /* Read meta->supervisor once, under g_tbl_mu, and cache it in a local —
+     * march_actor_register_child (called by the supervisor, on a DIFFERENT
+     * thread, right after this child's march_spawn already started this
+     * green thread running) writes meta->supervisor under the same lock.
+     * Without this, an unlocked read here races with that write (confirmed
+     * via ThreadSanitizer): reading stale NULL just misses installing the
+     * crash trap for that specific child on that specific timing window —
+     * not memory-unsafe, but silently defeats supervision for it. Caching
+     * one snapshot also avoids a TOCTOU between the two "meta->supervisor"
+     * checks below (register_child could run in between two separate reads). */
+    pthread_mutex_lock(&g_tbl_mu);
+    int has_supervisor = meta->supervisor != NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (has_supervisor && self) {
+        /* Only a supervised child gets crash-isolated — an unsupervised
+         * actor's panic keeps today's exit(1) behavior (see march_panic). */
+        self->crash_jmp = &crash_jmp;
+    }
+    if (has_supervisor && self && setjmp(crash_jmp) != 0) {
+        /* march_panic longjmp'd here instead of exit(1)-ing the process.
+         * do_actor_death mirrors what march_kill would have done, and
+         * (since this actor has a supervisor) triggers a restart — kill/
+         * crash-notify parity with the interpreter's kill = crash_actor. */
+        self->crash_jmp = saved_jmp;
+        do_actor_death(actor);
+        pthread_mutex_lock(&g_tbl_mu);
+        meta->green_thread = NULL;
+        pthread_mutex_unlock(&g_tbl_mu);
+        return;
+    }
+
     while (a[3]) {  /* while alive */
         void *msg = march_sched_recv();
         if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
@@ -1319,10 +1469,20 @@ static void actor_green_thread(void *arg) {
          * Check BEFORE the alive gate so the message is always freed even if
          * the actor died between injection and receipt.
          * The migrate message is malloc'd (not march-heap), so free with free().
-         * Guard against msg==NULL: zero-arg constructors (e.g. Inc()) are
-         * legitimately represented as the null pointer by the niche optimization;
-         * they are never migrate messages. */
-        if (msg != NULL && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+         * Gates, in order:
+         *   - dispatch_name_id: march_actor_broadcast_migrate only ever
+         *     targets hot-reload actors (it filters on this id), so regular
+         *     actors must skip the check entirely — both for speed and so a
+         *     user message whose word 1 happens to equal MARCH_MIGRATE_TAG
+         *     can never be misread as a migrate message.
+         *   - IS_HEAP_PTR: niche/newtype-optimized messages are immediates —
+         *     zero-arg constructors (e.g. Probe()) arrive as NULL and unary
+         *     scalar constructors (e.g. Inc(10)) arrive as odd tagged values.
+         *     Dereferencing those SIGSEGVs; a real migrate message is always
+         *     a malloc'd struct, which IS_HEAP_PTR accepts. */
+        if (meta->dispatch_name_id
+                && IS_HEAP_PTR(msg)
+                && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
             march_migrate_msg_t *mm = (march_migrate_msg_t *)msg;
             if (a[3] && mm->migrate_fn) {
                 /* a[4] is the state record pointer (state indirection layout).
@@ -1370,11 +1530,166 @@ static void actor_green_thread(void *arg) {
 
         march_sched_tick();
     }
+
+    /* The loop has exited (actor killed, or woken without a message at
+     * scheduler shutdown) and this proc is about to die and be freed by
+     * sched_loop.  Clear the meta handle so march_kill / march_send observe
+     * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
+    if (self) self->crash_jmp = saved_jmp;
+    pthread_mutex_lock(&g_tbl_mu);
+    meta->green_thread = NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
 
-void march_kill(void *actor) {
+/* Returns 1 (and appends `now` to sup_meta's restart history) if a restart
+ * is currently permitted under its max_restarts-within-window budget;
+ * returns 0 (budget exceeded — caller must crash the supervisor itself)
+ * otherwise. Mirrors the identical window-check inlined in all three of
+ * eval.ml's one_for_one_restart / one_for_all_restart / rest_for_one_restart. */
+static int march_restart_budget_ok(march_actor_meta *sup_meta) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    double window = (double)sup_meta->supervisor_window_secs;
+    int kept = 0;
+    for (int i = 0; i < sup_meta->sup_restart_len; i++) {
+        if (now - sup_meta->sup_restart_ts[i] < window) {
+            sup_meta->sup_restart_ts[kept++] = sup_meta->sup_restart_ts[i];
+        }
+    }
+    sup_meta->sup_restart_len = kept;
+    if (kept >= sup_meta->supervisor_max_restarts) return 0;
+    sup_meta->sup_restart_ts = realloc(sup_meta->sup_restart_ts,
+                                        (size_t)(kept + 1) * sizeof(double));
+    sup_meta->sup_restart_ts[kept] = now;
+    sup_meta->sup_restart_len = kept + 1;
+    return 1;
+}
+
+/* Spawn a fresh replacement for sup_children[child_idx], link it to the
+ * supervisor in that SAME slot (never appends — march_actor_register_child
+ * is only for a child's initial spawn), inherit the crashed child's
+ * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
+ * inheritance), and write the new pid_index into the supervisor's state. */
+static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    march_sup_child *child = &sup_meta->sup_children[child_idx];
+    int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
+    march_actor_meta *old_meta = find_meta_by_pid_index(old_pid_index);
+    int64_t inherited_epoch = old_meta ? old_meta->epoch + 1 : 0;
+
+    /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
+     * pointer), NOT a raw C function pointer — see march_sup_child's field
+     * comment. <ActorName>_spawn is a zero-arg function, so its wrapper's
+     * only parameter is the closure cell itself (contrast the 2-arg
+     * cleanup-closure convention in do_actor_death, whose underlying
+     * function is Unit -> Unit). */
+    typedef void *(*spawn_clo_fn_t)(void *);
+    void **clo_fields = (void **)((char *)child->spawn_clo + 16);
+    spawn_clo_fn_t fn_ptr = (spawn_clo_fn_t)(*clo_fields);
+    void *raw = fn_ptr(child->spawn_clo);
+    void *new_child = march_spawn(raw);
+    march_actor_meta *new_meta = find_or_create_meta(new_child);
+    new_meta->supervisor = supervisor;
+    new_meta->sup_child_index = child_idx;
+    new_meta->epoch = inherited_epoch;
+    ((int64_t *)supervisor)[4 + child->word_idx] = new_meta->pid_index;
+    return new_child;
+}
+
+/* one_for_one: only the crashed child is respawned; siblings untouched.
+ * Mirrors eval.ml:1588-1637. */
+static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    march_respawn_child(supervisor, sup_meta, child_idx);
+}
+
+/* one_for_all: every child is killed and respawned when any one crashes.
+ * Mirrors eval.ml:1640-1687. child_idx (which one originally crashed) is
+ * unused here — ALL children are affected identically. */
+static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    (void)child_idx;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    if (n == 0) return;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) {
+        live_children[i] = NULL;
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        /* The originally-crashed child is already dead at this point (Task 4's
+         * do_actor_death ran on it before calling march_supervisor_notify) —
+         * march_is_alive is false for it, so it's correctly skipped here and
+         * only respawned (not double-killed) in the loop below. */
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
+/* rest_for_one: the crashed child and every child declared AFTER it (in
+ * sup_children array order, which matches sc_order — Task 3's field
+ * injection walks sc.sc_fields in declaration order) are killed and
+ * respawned; earlier siblings are untouched. Mirrors eval.ml:1691-1761. */
+static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) live_children[i] = NULL;
+    for (int i = child_idx + 1; i < n; i++) {
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = child_idx + 1; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = child_idx; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
+static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
+    march_actor_meta *sup_meta = find_meta(supervisor);
+    if (!sup_meta) return;
+    int child_idx = crashed_meta->sup_child_index;
+    switch (sup_meta->supervisor_strategy) {
+        case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
+        case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
+        case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
+        default: break;
+    }
+}
+
+/* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
+ * wake its green thread — and, notify its supervisor (if it has one) for a
+ * possible restart. The ONE place that does this, called both by an
+ * explicit kill() and by a panic inside a supervised actor's handler
+ * (the crash trap in actor_green_thread below) — mirrors the interpreter's
+ * kill = crash_actor unification (eval.ml:3004-3006). */
+static void do_actor_death(void *actor) {
     int64_t *fields = (int64_t *)actor;
     if (!fields[3]) return;   /* Already dead */
 
@@ -1434,6 +1749,14 @@ void march_kill(void *actor) {
     if (meta && meta->green_thread) {
         march_sched_wake(meta->green_thread);
     }
+
+    if (meta && meta->supervisor) {
+        march_supervisor_notify(meta->supervisor, meta);
+    }
+}
+
+void march_kill(void *actor) {
+    do_actor_death(actor);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -1455,7 +1778,10 @@ void *march_spawn(void *actor) {
             memory_order_acq_rel, memory_order_acquire)) {
         march_sched_init();
     }
-    meta->green_thread = march_sched_spawn(actor_green_thread, meta);
+    /* Daemon: an actor recv loop parks forever unless killed; it must not
+     * keep the scheduler (and thus the process) alive once main and all
+     * task procs have finished — see wake_idle_daemons in march_scheduler.c. */
+    meta->green_thread = march_sched_spawn_daemon(actor_green_thread, meta);
     /* Start the scheduler in a background thread so actor green threads run
      * even when the main thread is blocked inside the HTTP event loop.
      * For non-HTTP programs this is harmless: march_run_scheduler() joins
@@ -1613,12 +1939,17 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
     wa->task = task;
-    march_proc *p = march_sched_spawn(march_thunk_trampoline, wa);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16: proc handle */
-        task[3] = (int64_t)0;              /* field 1 at offset 24: result (tagged, init 0) */
-        task[4] = (int64_t)0;              /* field 2 at offset 32: done flag (init 0) */
-    }
+    /* Publish the proc LAST.  Once march_sched_spawn returns, a work-stealing
+     * scheduler on another OS thread may already be running march_thunk_trampoline
+     * for this proc — which writes task[2] (proc handle), task[3] (result) and
+     * task[4] (done flag).  Any store to the task object here, AFTER the spawn,
+     * therefore races the trampoline with no synchronization between them and
+     * can clobber a completed result/done flag back to zero (confirmed by
+     * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
+     * nothing to write: march_alloc() zero-initialises the whole object (so
+     * result/done start at 0) and the trampoline records task[2] itself as its
+     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+    (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
 
@@ -1628,7 +1959,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
  * release-stores 1 into it.  We never dereference the proc ptr (word 2)
  * after the proc may have been freed by sched_loop — doing so caused a
  * use-after-free where calloc reuse zeroed the freed memory, making
- * p->status read as PROC_READY (0) forever. */
+ * p->status read as PROC_RUNNABLE (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
@@ -1674,12 +2005,10 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->clo  = clo_ptr;
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
-    march_proc *p = march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;
-        task[3] = (int64_t)0;   /* tagged result, init 0 */
-        task[4] = (int64_t)0;   /* done flag, init 0 */
-    }
+    /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
+     * the task object after the spawn races the trampoline.  march_alloc zeroed
+     * the object and the trampoline records task[2] itself. */
+    (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
 
@@ -3133,6 +3462,46 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
     meta->supervisor_window_secs  = window_secs;
 }
 
+/* Called once per declared supervise-block child, from the generated
+ * Name_spawn() body, right after BOTH the child and the supervisor itself
+ * have been spawned (march_spawn already ran on both). Links parent->child
+ * (for the crash trap to find "is this actor supervised, and by whom") and
+ * records enough for a later restart: which March closure respawns this
+ * child (spawn_clo — a reference to <ActorName>_spawn as a first-class
+ * value, NOT a raw C function pointer; see march_sup_child's field
+ * comment), and which Int-typed state-field slot of the supervisor holds
+ * its encoded pid (word_idx, see march_sup_child above). spawn_clo arrives
+ * with ownership transferred from the caller (the normal convention for a
+ * non-borrowed argument) and is held here permanently — never decref'd —
+ * so it stays valid for every future restart, exactly like a cleanup
+ * closure stored on meta->cleanup_head. */
+void march_actor_register_child(void *supervisor, void *child,
+                                 void *spawn_clo, int64_t word_idx) {
+    march_actor_meta *sup_meta = find_or_create_meta(supervisor);
+    march_actor_meta *child_meta = find_or_create_meta(child);
+    /* The child's green thread is already running by this point (march_spawn
+     * started it before this registration call) and reads meta->supervisor
+     * at its own startup under the same g_tbl_mu (see actor_green_thread) —
+     * confirmed via ThreadSanitizer as an unsynchronized publish otherwise. */
+    pthread_mutex_lock(&g_tbl_mu);
+    child_meta->supervisor = supervisor;
+    pthread_mutex_unlock(&g_tbl_mu);
+    child_meta->sup_child_index = sup_meta->sup_num_children;
+    int idx = sup_meta->sup_num_children;
+    sup_meta->sup_children = realloc(sup_meta->sup_children,
+                                      (size_t)(idx + 1) * sizeof(march_sup_child));
+    sup_meta->sup_children[idx].spawn_clo = spawn_clo;
+    sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_num_children = idx + 1;
+}
+
+/* pid_index_of: the Int a compiled supervisor stores in its own state field
+ * to represent a just-spawned child's Pid (see march_pid_of_int for the
+ * reverse direction). */
+int64_t march_pid_index_of(void *actor) {
+    return find_or_create_meta(actor)->pid_index;
+}
+
 /* monitor: establish a monitor link from watcher to target.
    Returns a unique monitor ref.  If target is already dead,
    delivers Down immediately by incrementing watcher's down_count. */
@@ -3175,8 +3544,23 @@ int64_t march_mailbox_size(void *pid) {
     return atomic_load_explicit(&meta->down_count, memory_order_relaxed);
 }
 
-/* run_until_idle: flush the async message queue by running the scheduler. */
+/* run_until_idle: flush the async message queue.
+ *
+ * Compiled main() runs as a green thread inside the scheduler
+ * (march_spawn_main), so the common case is the in-scheduler one: yield
+ * cooperatively until no other proc is runnable and no mailbox is non-empty.
+ * The old unconditional march_run_scheduler() call was a silent NO-OP here —
+ * its g_in_scheduler re-entrancy guard returned immediately, so pending
+ * messages were NOT drained and a following kill() raced the handlers.
+ *
+ * From outside the scheduler (REPL/JIT main thread with the background
+ * scheduler running), fall through to march_run_scheduler, which requests
+ * shutdown and joins the background thread. */
 void march_run_until_idle(void) {
+    if (march_sched_in_scheduler()) {
+        march_sched_wait_idle();
+        return;
+    }
     march_run_scheduler();
 }
 
@@ -3250,23 +3634,13 @@ void march_revoke_cap(int64_t pid_index, int64_t epoch) {
     pthread_mutex_unlock(&g_revoc_mu);
 }
 
+
 /* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
  * A capability is invalid if it is in the revocation table, the actor is dead,
  * or the actor's current epoch differs. */
 int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
     if (revoc_contains(pid_index, epoch)) return 0;
-    /* Look up actor by pid_index to check liveness and current epoch. */
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = NULL;
-    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
-        march_actor_meta *cur = g_actor_tbl[i];
-        while (cur) {
-            if (cur->pid_index == pid_index) { m = cur; break; }
-            cur = cur->tbl_next;
-        }
-        if (m) break;
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
+    march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
     if (m->epoch != epoch) return 0;
     return 1;
@@ -3306,17 +3680,30 @@ void march_send_checked(void *cap, void *msg) {
     march_decrc(result);
 }
 
-/* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */
-void *march_pid_of_int(int64_t n) {
-    return (void *)(intptr_t)n;
-}
+/* march_pid_of_int(n) is an escape hatch: March code that stores a child's
+ * pid as a plain Int (e.g. a supervisor's Int-typed state field, see Task 3)
+ * converts it back to a usable Pid via this call. When n does not name any
+ * actor this process has spawned (a stale/garbage index), march_send /
+ * march_kill / march_is_alive all read their `actor` argument's $e_alive
+ * flag (word index 3) UNCONDITIONALLY with no NULL check — returning NULL
+ * here would crash every one of them. Instead return a pointer to a static,
+ * already-"dead" actor struct: same header/dispatch/alive word layout as a
+ * real actor, with $e_alive already 0, so every caller's EXISTING
+ * "actor already dead" early-return path (march_kill's `if (!fields[3])
+ * return;`, march_send's `if (!a[3]) { ...none...; return; }`,
+ * march_is_alive's plain read) handles it exactly like any other actor
+ * that was already killed — no new code path, nothing to get wrong.
+ * rc starts at a billion: no realistic amount of incrc/decrc traffic on a
+ * Pid value approaches that within one process's lifetime, so this static
+ * object is never freed. */
+static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
+    march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
+                                   .dispatch = 0, .alive = 0 };
 
-/* get_actor_field: retrieve a named field from an actor's state. Stub: returns None. */
-void *march_get_actor_field(void *pid, void *name) {
-    (void)pid; (void)name;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
+void *march_pid_of_int(int64_t n) {
+    march_actor_meta *m = find_meta_by_pid_index(n);
+    if (m) return m->actor;
+    return &march_dead_actor_sentinel;
 }
 
 /* ── Value pretty-printing ───────────────────────────────────────────── */

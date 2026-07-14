@@ -1,0 +1,6 @@
+mod M do
+  fn classify(n : Int) : String do
+    if n > 0 do "pos" else "nonpos" end
+  end
+  fn main() do println(classify(5)) end
+end

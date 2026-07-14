@@ -1,0 +1,37 @@
+mod Main do
+  -- Operational actor witness (core-march.md §4.10): spawn + async send +
+  -- run_until_idle. A single observable Counter actor accumulates state via an
+  -- `on Inc(n)` handler (each returns the NEW state record), then a `Report`
+  -- handler prints the accumulated count. Determinism: one actor, a
+  -- strictly-ordered send sequence, drained by ONE run_until_idle() to a fixed
+  -- point — output does NOT depend on scheduler interleaving, so it is
+  -- byte-identical interpreted vs compiled. Observation is via a handler that
+  -- println's — deliberately self-contained rather than reading state back out
+  -- via external get_actor_field / pid_of_int (those now work compiled as of the
+  -- 2026-07-08 supervision plan, but a println-observed single actor keeps this
+  -- witness minimal and interleaving-independent).
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc(n : Int) do
+      let total = state.count + n
+      { count: total }
+    end
+
+    on Report() do
+      println("count=" ++ int_to_string(state.count))
+      { count: state.count }
+    end
+  end
+
+  fn main() do
+    let c = spawn(Counter)
+    send(c, Inc(1))
+    send(c, Inc(3))
+    send(c, Inc(4))
+    send(c, Report())
+    run_until_idle()
+    println("done")
+  end
+end

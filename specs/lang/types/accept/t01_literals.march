@@ -1,0 +1,10 @@
+mod M do
+  fn main() do
+    let n = 42
+    let b = true
+    let s = "hi"
+    println(int_to_string(n))
+    println(bool_to_string(b))
+    println(s)
+  end
+end

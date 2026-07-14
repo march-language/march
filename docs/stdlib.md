@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 107 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 110 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -113,7 +113,7 @@ List.find([1, 2, 3], fn x -> x > 1)      -- Some(2)
 List.find_index([10, 20, 30], fn x -> x == 20)  -- Some(1)
 
 -- Iteration (side effects)
-List.iter([1, 2, 3], fn x -> println(int_to_string(x)))
+List.each([1, 2, 3], fn x -> println(int_to_string(x)))
 
 -- Sorting
 List.sort_by([3, 1, 2], fn (a, b) -> a < b)   -- [1, 2, 3]
@@ -707,9 +707,85 @@ Dom.on_keydown(el, fn ev -> ...)
 Dom.dispatch(el, "custom-event")
 Dom.prevent_default(ev)
 Dom.stop_propagation(ev)
+Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
+Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
+Dom.store_get("save")          -- Option(String) — localStorage read
+Dom.store_set("save", data)    -- localStorage write
+Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
+Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
+
+---
+
+## Canvas (JS only)
+
+`canvas.march` — 2D drawing bindings for `--target js` builds, wrapping the browser's `CanvasRenderingContext2D`. Auto-loaded; no import needed.
+
+```march
+-- Setup
+Dom.find("my-canvas")                          -- Option(Node), from Dom
+Canvas.get_context(node)                       -- Option(Context)
+
+-- State stack
+Canvas.save(ctx)
+Canvas.restore(ctx)
+Canvas.translate(ctx, 10.0, 10.0)
+Canvas.rotate(ctx, 0.5)
+Canvas.scale(ctx, 2.0, 2.0)
+
+-- Style
+Canvas.set_fill_style(ctx, "#e74c3c")
+Canvas.set_stroke_style(ctx, "#3498db")
+Canvas.set_line_width(ctx, 2.0)
+Canvas.set_global_alpha(ctx, 0.8)
+Canvas.set_font(ctx, "16px sans-serif")
+
+-- Rects
+Canvas.clear_rect(ctx, 0.0, 0.0, 480.0, 360.0)
+Canvas.fill_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+Canvas.stroke_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+
+-- Paths
+Canvas.begin_path(ctx)
+Canvas.move_to(ctx, 0.0, 0.0)
+Canvas.line_to(ctx, 100.0, 100.0)
+Canvas.arc(ctx, 50.0, 50.0, 20.0, 0.0, 6.283185307179586)
+Canvas.quadratic_curve_to(ctx, 60.0, 0.0, 120.0, 40.0)
+Canvas.bezier_curve_to(ctx, 20.0, 0.0, 80.0, 0.0, 100.0, 40.0)
+Canvas.fill(ctx)
+Canvas.stroke(ctx)
+
+-- Text
+Canvas.fill_text(ctx, "score: 0", 10.0, 20.0)
+Canvas.stroke_text(ctx, "score: 0", 10.0, 20.0)
+Canvas.set_text_align(ctx, "center")
+
+-- Images
+Canvas.load_image("sprite.png")                -- Result(Image, String)
+Canvas.draw_image(ctx, img, 0.0, 0.0)
+Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
+```
+
+`Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
+
+---
+
+## Audio (JS only)
+
+`audio.march` — procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files — no assets, no licensing. Auto-loaded; no import needed.
+
+```march
+Audio.create()                                 -- Ctx
+Audio.resume(actx)                             -- unlock output; call from a user-gesture handler
+Audio.beep(actx, 440.0, 0.1, "sine")            -- flat tone: "sine"/"square"/"sawtooth"/"triangle"
+Audio.sweep(actx, 200.0, 800.0, 0.2, "square")  -- frequency ramp (chirps, risers, fall-offs)
+Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impacts, explosions)
+Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
+```
+
+`Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
 
 ---
 
@@ -854,6 +930,7 @@ tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
 | `Datetime` | — | Date and time |
 
 | `Dom` | — | Browser DOM bindings (JS only, auto-loaded for `--target js`) |
+| `Canvas` | — | 2D canvas drawing bindings (JS only, auto-loaded for `--target js`) |
 
 | `NodeIdentity` | — | Cluster node identity (name, node\_id, incarnation) |
 | `NetFrame` | — | Length-prefixed TCP framing |

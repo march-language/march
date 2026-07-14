@@ -1,0 +1,33 @@
+mod Main do
+  -- Session-typed channel operational witness (core-march.md §4.11): a plain
+  -- binary Chan.new/send/recv/close round-trip carrying an ODD Int payload.
+  -- This is exactly the value class Task 1's codegen fix (F1/F2, filed in
+  -- specs/todos.md) made byte-identical compiled: `march_chan_send` now tags
+  -- the payload at the send call site so `march_chan_recv`'s conditional
+  -- erased-i64 untag (ashr iff odd) is symmetric instead of corrupting every
+  -- odd Int (43 used to come back as 21 compiled). Roles are declared as
+  -- their own nullary types so the undeclared-participant HINT (F8) does not
+  -- fire — not required for a golden MATCH (the HINT lands on stderr only),
+  -- but keeps this program's `--check`/run output quiet. Every `send` is
+  -- textually before its matching `recv` (the runtime has no scheduler —
+  -- F6): Client sends 42, Server receives it, replies with 43 (odd), Client
+  -- receives 43 and prints it.
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let cc2 = Chan.send(cc, 42)
+    let (n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.send(sc2, n + 1)
+    let (result, cc3) = Chan.recv(cc2)
+    Chan.close(cc3)
+    Chan.close(sc3)
+    println(int_to_string(result))
+  end
+end

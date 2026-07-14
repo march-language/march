@@ -211,4 +211,68 @@ mod Path do
     else joined end end
   end
 
+  doc """
+  Join a list of path segments into a single path, inserting `/` separators.
+  Respects a trailing `/` on any segment (avoids doubling). An empty list
+  returns the empty string.
+
+  ## Examples
+
+      march> Path.join_all(["usr", "local", "bin"])
+      "usr/local/bin"
+      march> Path.join_all(["/var/store", "packages", "ab", "cd"])
+      "/var/store/packages/ab/cd"
+      march> Path.join_all([])
+      ""
+  """
+  fn join_all(parts) do
+    match parts do
+    Nil -> ""
+    Cons(head, rest) ->
+      List.fold_left(rest, head, fn (acc, s) -> join(acc, s))
+    end
+  end
+
+  doc """
+  Remove a single leading `/` from a path, if present.
+  A path that does not start with `/` is returned unchanged.
+  An empty path is returned unchanged.
+
+  ## Examples
+
+      march> Path.strip_leading_slash("/foo/bar")
+      "foo/bar"
+      march> Path.strip_leading_slash("foo/bar")
+      "foo/bar"
+      march> Path.strip_leading_slash("/")
+      ""
+  """
+  fn strip_leading_slash(path) do
+    if String.starts_with(path, "/") do
+      String.slice_bytes(path, 1, String.byte_size(path) - 1)
+    else
+      path
+    end
+  end
+
+  doc """
+  Panic if `path` contains any `..` component (path traversal attempt).
+  Call this before joining a user-supplied path segment into a filesystem path.
+
+  ## Examples
+
+      march> Path.assert_no_traversal("foo/bar")
+      ()
+      march> Path.assert_no_traversal("../etc/passwd")
+      ** panic: path traversal detected: ../etc/passwd
+  """
+  fn assert_no_traversal(path) do
+    let parts = components(path)
+    if List.member(parts, "..") do
+      panic("path traversal detected: " ++ path)
+    else
+      ()
+    end
+  end
+
 end

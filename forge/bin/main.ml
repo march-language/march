@@ -9,7 +9,7 @@ let handle = function
 
 let known_builtin_names =
   [ "new"; "init"; "build"; "check"; "run"; "compile"; "test"; "lint"; "refactor"; "format";
-    "interactive"; "i"; "clean"; "deps"; "add"; "publish";
+    "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
@@ -151,7 +151,9 @@ let build_cmd =
   let target =
     Arg.(value & opt (some string) None &
          info ["target"] ~docv:"TARGET"
-           ~doc:"Compilation target: native (default), js, wasm32-unknown-unknown, wasm64-wasi, wasm32-wasi. \
+           ~doc:"Compilation target: native (default), linux/amd64, linux/arm64, js, \
+                 wasm32-unknown-unknown, wasm64-wasi, wasm32-wasi. The $(b,linux/*) targets \
+                 cross-compile a dynamic-glibc Linux binary via $(b,zig cc). \
                  Use $(b,js) to emit an ES module (.mjs) for browsers and Node.js.")
   in
   let run r d f pkg tgt =
@@ -532,9 +534,42 @@ let publish_cmd =
     Arg.(value & flag & info ["dry-run"]
            ~doc:"Validate only; do not submit to registry")
   in
-  let run o d = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ()) in
+  let registry =
+    Arg.(value & opt (some string) None &
+         info ["registry"] ~docv:"URL"
+           ~doc:"Registry base URL (default: $(b,FORGE_REGISTRY) env var, or https://forgepm.org)")
+  in
+  let insecure =
+    Arg.(value & flag & info ["insecure"]
+           ~doc:"Allow a http:// registry (local dev only)")
+  in
+  let run o d r ins = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ~registry:r ~insecure:ins ()) in
   Cmd.v (Cmd.info "publish" ~doc:"Validate and publish the current package")
-    Term.(const run $ old_source $ dry_run)
+    Term.(const run $ old_source $ dry_run $ registry $ insecure)
+
+(* ---------------------------------------------------------------- forge retire *)
+
+let retire_cmd =
+  let version_arg =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"VERSION" ~doc:"Version to retire, e.g. 1.2.3")
+  in
+  let reason =
+    Arg.(value & opt string "" &
+         info ["reason"] ~docv:"TEXT" ~doc:"Retirement reason (stored on the registry)")
+  in
+  let registry =
+    Arg.(value & opt (some string) None &
+         info ["registry"] ~docv:"URL"
+           ~doc:"Registry base URL (default: $(b,FORGE_REGISTRY) env var, or https://forgepm.org)")
+  in
+  let insecure =
+    Arg.(value & flag & info ["insecure"]
+           ~doc:"Allow a http:// registry (local dev only)")
+  in
+  let run v r reg ins = handle (Cmd_retire.run ~version:v ~reason:r ~registry:reg ~insecure:ins ()) in
+  Cmd.v (Cmd.info "retire" ~doc:"Retire a published version of the current package")
+    Term.(const run $ version_arg $ reason $ registry $ insecure)
 
 (* -------------------------------------------------------------- forge install *)
 
@@ -958,13 +993,29 @@ let deploy_hot_cmd =
          info ["timeout"] ~docv:"MS"
            ~doc:"Canary health-check window in milliseconds (default: 30000).")
   in
-  let run o s e c t =
+  let grant_cap =
+    Arg.(value & opt_all string [] &
+         info ["grant-cap"] ~docv:"CAP"
+           ~doc:"Authorize a specific capability widening (repeatable). Each occurrence \
+                 permits one capability (or anything it subsumes) that the running \
+                 version did not previously hold.")
+  in
+  let no_cap_gate =
+    Arg.(value & flag &
+         info ["no-cap-gate"]
+           ~doc:"Escape hatch (Phase 5C Part C): force the legacy ACTIVATE3 protocol, \
+                 skipping cap_root/capability admission entirely. Use this to deploy \
+                 against a server that predates capability admission, or to \
+                 deliberately bypass the gate.")
+  in
+  let run o s e c t grant_caps no_cap_gate =
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
-        Cmd_deploy_hot.deploy ~output:o ~so:s ()
+        Cmd_deploy_hot.deploy ~output:o ~so:s ~grant_caps ~no_cap_gate ()
       else
-        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t ()
+        Cmd_deploy_hot.deploy_env ~output:o ~so:s ~env:e ~canary:c ~timeout_ms:t
+          ~grant_caps ~no_cap_gate ()
     in
     match result with
     | Ok () -> ()
@@ -972,7 +1023,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-    Term.(const run $ output $ so $ env_name $ canary $ timeout)
+    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
@@ -1053,8 +1104,31 @@ let completions_cmd =
 
 (* --------------------------------------------------------------------- root *)
 
+(* The current project's own [archive.task.*] entries, if any — separate
+   from the registry loop below, since a project is never registered as
+   its own installed archive (see find_task's matching fix). *)
+let self_man_blocks () =
+  match Project.find_forge_toml () with
+  | None -> []
+  | Some project_root ->
+    let self_name =
+      try (Project.load_from project_root).Project.name
+      with Sys_error _ | Failure _ | Toml.Parse_error _ -> ""
+    in
+    if self_name = "" then []
+    else
+      let tasks = Archive_store.list_archive_tasks project_root in
+      if tasks = [] then []
+      else
+        [`S (String.uppercase_ascii self_name ^ " TASKS")]
+        @ List.map (fun (cmd, _, doc) ->
+            let desc = if doc = "" then " " else doc in
+            `I ("$(b,forge " ^ cmd ^ ")", desc)
+          ) tasks
+
 let archive_man_blocks () =
   let entries = Archive_store.load_registry () in
+  self_man_blocks () @
   List.concat (List.map (fun (name, entry) ->
       let root = match entry.Archive_store.source with
         | Archive_store.Path p -> p
@@ -1081,7 +1155,7 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; check_cmd; fix_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; refactor_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;

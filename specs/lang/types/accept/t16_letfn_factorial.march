@@ -1,0 +1,15 @@
+mod M do
+  fn compute(n : Int) : Int do
+    fn go(k, acc) do
+      match k do
+        0 -> acc
+        _ -> go(k - 1, acc * k)
+      end
+    end
+    go(n, 1)
+  end
+
+  fn main() do
+    println(int_to_string(compute(5)))
+  end
+end

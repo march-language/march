@@ -1,0 +1,33 @@
+-- types (1) --
+closure $Clo_$jp3$0(Ptr(Unit))
+-- fns (3) --
+## $jp3$apply$0
+fn $jp3$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## head_opt
+fn head_opt(xs : List(Int)) : Option(Int) =
+  case xs of
+  Cons($f1, $f2) -> dec_rc xs;
+dec_rc $f2;
+let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$0($jp3$apply$0) in
+dec_rc $jp_clo4;
+let h : Int = $f1 in
+alloc Option.Some(h)
+  Nil() -> dec_rc xs;
+alloc Option.None(Int)()
+  _ -> dec_rc xs;
+panic("non-exhaustive pattern match")
+
+## main
+fn main() : () =
+  let $t9 : Option(Int) = let $t8 : List(Int) = let $t7 : List(Int) = alloc List.Nil(Int)() in
+alloc List.Cons(3, $t7) in
+head_opt($t8) in
+case $t9 of
+  Some($f10) -> let v : Int = $f10 in
+println(v)
+  None() -> println(0)
+  _ -> dec_rc $t9;
+panic("non-exhaustive pattern match")
+

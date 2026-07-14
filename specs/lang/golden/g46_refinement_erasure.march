@@ -1,0 +1,28 @@
+mod Main do
+  -- Typing witness for zero runtime footprint (core-march-types.md §2.14 —
+  -- widening slice 12): `{T | pred}` is checked ONLY by `--check`/`--compile`'s
+  -- front end (the separate lib/refinecheck post-typecheck pass) — typecheck.ml
+  -- itself erases every `TyRefine` to its base type (`repr` strips it,
+  -- typecheck.ml:168), and NEITHER backend inserts any runtime predicate
+  -- check. So a program that PASSES --check (every refinement provably
+  -- satisfied) must run byte-identically interpreted and compiled, with the
+  -- annotations contributing nothing observable at runtime — the same
+  -- erasure property golden g41 established for linear/affine annotations.
+  --
+  -- `clamp_nonneg`'s exhaustive guard proves its `{Int | _ >= 0}` return type
+  -- for EVERY input (postcondition, checked once at its definition — see
+  -- accept/t76); `take_n`'s `{Int | _ >= 0}` parameter is then satisfied at
+  -- both call sites by that proof (precondition, checked per direct call —
+  -- see accept/t75). `--check` exits 0; nothing here is a division-safety
+  -- or HOF case (accept/t77, t78; reject/t71-t73 cover those and the
+  -- violations).
+  fn clamp_nonneg(n : Int) : {Int | _ >= 0} do
+    if n >= 0 do n else 0 end
+  end
+  fn take_n(n : {Int | _ >= 0}) : Int do n * 2 end
+  fn main() do
+    println(int_to_string(take_n(clamp_nonneg(5))))
+    println(int_to_string(take_n(clamp_nonneg(-7))))
+    println("done")
+  end
+end

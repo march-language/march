@@ -1,0 +1,165 @@
+-- Canvas — 2D drawing bindings for March compiled with --target js.
+--
+-- Wraps the browser's CanvasRenderingContext2D. Requires --target js;
+-- calling these functions from a native build panics.
+--
+-- Usage:
+--   match Dom.find("game-canvas") do
+--     None    -> ()
+--     Some(node) ->
+--       match Canvas.get_context(node) do
+--         None      -> ()
+--         Some(ctx) ->
+--           Canvas.set_fill_style(ctx, "#e74c3c")
+--           Canvas.fill_rect(ctx, 10.0, 10.0, 80.0, 40.0)
+--       end
+--   end
+
+mod Canvas do
+  needs Ffi
+
+  -- Opaque handle to a CanvasRenderingContext2D.
+  resource Context
+
+  -- Opaque handle to a loaded browser Image.
+  resource Image
+
+  extern "canvas" : Cap(Ffi) do
+    -- ── Setup ──────────────────────────────────────────────────────────
+    fn canvas_get_context(node: Node)                               : Option(Context) = "march_canvas_get_context"
+
+    -- ── State stack ────────────────────────────────────────────────────
+    fn canvas_save(ctx: Context)                                    : Unit = "march_canvas_save"
+    fn canvas_restore(ctx: Context)                                 : Unit = "march_canvas_restore"
+    fn canvas_translate(ctx: Context, x: Float, y: Float)           : Unit = "march_canvas_translate"
+    fn canvas_rotate(ctx: Context, angle: Float)                    : Unit = "march_canvas_rotate"
+    fn canvas_scale(ctx: Context, sx: Float, sy: Float)             : Unit = "march_canvas_scale"
+
+    -- ── Style ──────────────────────────────────────────────────────────
+    fn canvas_set_fill_style(ctx: Context, color: String)           : Unit = "march_canvas_set_fill_style"
+    fn canvas_set_stroke_style(ctx: Context, color: String)         : Unit = "march_canvas_set_stroke_style"
+    fn canvas_set_line_width(ctx: Context, w: Float)                : Unit = "march_canvas_set_line_width"
+    fn canvas_set_global_alpha(ctx: Context, a: Float)              : Unit = "march_canvas_set_global_alpha"
+    fn canvas_set_font(ctx: Context, font: String)                  : Unit = "march_canvas_set_font"
+
+    -- ── Rects ──────────────────────────────────────────────────────────
+    fn canvas_clear_rect(ctx: Context, x: Float, y: Float, w: Float, h: Float)  : Unit = "march_canvas_clear_rect"
+    fn canvas_fill_rect(ctx: Context, x: Float, y: Float, w: Float, h: Float)   : Unit = "march_canvas_fill_rect"
+    fn canvas_stroke_rect(ctx: Context, x: Float, y: Float, w: Float, h: Float) : Unit = "march_canvas_stroke_rect"
+
+    -- ── Paths ──────────────────────────────────────────────────────────
+    fn canvas_begin_path(ctx: Context)                              : Unit = "march_canvas_begin_path"
+    fn canvas_close_path(ctx: Context)                              : Unit = "march_canvas_close_path"
+    fn canvas_move_to(ctx: Context, x: Float, y: Float)             : Unit = "march_canvas_move_to"
+    fn canvas_line_to(ctx: Context, x: Float, y: Float)             : Unit = "march_canvas_line_to"
+    fn canvas_arc(ctx: Context, x: Float, y: Float, radius: Float, start_angle: Float, end_angle: Float) : Unit = "march_canvas_arc"
+    fn canvas_quadratic_curve_to(ctx: Context, cpx: Float, cpy: Float, x: Float, y: Float) : Unit = "march_canvas_quadratic_curve_to"
+    fn canvas_bezier_curve_to(ctx: Context, cp1x: Float, cp1y: Float, cp2x: Float, cp2y: Float, x: Float, y: Float) : Unit = "march_canvas_bezier_curve_to"
+    fn canvas_fill(ctx: Context)                                    : Unit = "march_canvas_fill"
+    fn canvas_stroke(ctx: Context)                                  : Unit = "march_canvas_stroke"
+    fn canvas_fill_noise_circle(ctx: Context, cx: Float, cy: Float, radius: Float, alpha: Float) : Unit = "march_canvas_fill_noise_circle"
+
+    -- ── Text ───────────────────────────────────────────────────────────
+    fn canvas_fill_text(ctx: Context, text: String, x: Float, y: Float)   : Unit = "march_canvas_fill_text"
+    fn canvas_stroke_text(ctx: Context, text: String, x: Float, y: Float) : Unit = "march_canvas_stroke_text"
+    fn canvas_set_text_align(ctx: Context, align: String)                 : Unit = "march_canvas_set_text_align"
+
+    -- ── Images ─────────────────────────────────────────────────────────
+    blocking raises fn canvas_load_image(url: String)                    : Result(Image, String) = "march_canvas_load_image"
+    fn canvas_draw_image(ctx: Context, img: Image, x: Float, y: Float)   : Unit = "march_canvas_draw_image"
+    fn canvas_draw_image_scaled(ctx: Context, img: Image, x: Float, y: Float, w: Float, h: Float) : Unit = "march_canvas_draw_image_scaled"
+  end
+
+  -- ── Public API ─────────────────────────────────────────────────────────
+
+  doc "Get the 2D drawing context for a `<canvas>` element. Returns `None` if `node` is not a canvas element."
+  fn get_context(node)                 do canvas_get_context(node) end
+
+  doc "Push the current drawing state (transform, styles) onto a stack. Pair with `restore`."
+  fn save(ctx)                         do canvas_save(ctx) end
+
+  doc "Pop the most recently `save`d drawing state, restoring transform and styles."
+  fn restore(ctx)                      do canvas_restore(ctx) end
+
+  doc "Translate the drawing origin by `(x, y)`."
+  fn translate(ctx, x, y)              do canvas_translate(ctx, x, y) end
+
+  doc "Rotate subsequent drawing by `angle` radians, clockwise around the current origin."
+  fn rotate(ctx, angle)                do canvas_rotate(ctx, angle) end
+
+  doc "Scale subsequent drawing by `(sx, sy)`."
+  fn scale(ctx, sx, sy)                do canvas_scale(ctx, sx, sy) end
+
+  doc "Set the fill color/style used by `fill_rect`, `fill`, and `fill_text` (any CSS color string, e.g. \"#e74c3c\" or \"rgba(0,0,0,0.5)\")."
+  fn set_fill_style(ctx, color)        do canvas_set_fill_style(ctx, color) end
+
+  doc "Set the stroke color/style used by `stroke_rect`, `stroke`, and `stroke_text`."
+  fn set_stroke_style(ctx, color)      do canvas_set_stroke_style(ctx, color) end
+
+  doc "Set the line width (in canvas units) used by `stroke_rect` and `stroke`."
+  fn set_line_width(ctx, w)            do canvas_set_line_width(ctx, w) end
+
+  doc "Set the global alpha (opacity) for subsequent drawing, from 0.0 (transparent) to 1.0 (opaque)."
+  fn set_global_alpha(ctx, a)          do canvas_set_global_alpha(ctx, a) end
+
+  doc "Set the font used by `fill_text`/`stroke_text` (CSS font shorthand, e.g. \"16px sans-serif\")."
+  fn set_font(ctx, font)               do canvas_set_font(ctx, font) end
+
+  doc "Clear the rectangle at `(x, y)` of size `(w, h)` to fully transparent."
+  fn clear_rect(ctx, x, y, w, h)       do canvas_clear_rect(ctx, x, y, w, h) end
+
+  doc "Fill the rectangle at `(x, y)` of size `(w, h)` with the current fill style."
+  fn fill_rect(ctx, x, y, w, h)        do canvas_fill_rect(ctx, x, y, w, h) end
+
+  doc "Stroke the outline of the rectangle at `(x, y)` of size `(w, h)` with the current stroke style."
+  fn stroke_rect(ctx, x, y, w, h)      do canvas_stroke_rect(ctx, x, y, w, h) end
+
+  doc "Start a new path, discarding any path built so far."
+  fn begin_path(ctx)                   do canvas_begin_path(ctx) end
+
+  doc "Close the current path by drawing a straight line back to its start point."
+  fn close_path(ctx)                   do canvas_close_path(ctx) end
+
+  doc "Move the path's current point to `(x, y)` without drawing."
+  fn move_to(ctx, x, y)                do canvas_move_to(ctx, x, y) end
+
+  doc "Add a straight line from the path's current point to `(x, y)`."
+  fn line_to(ctx, x, y)                do canvas_line_to(ctx, x, y) end
+
+  doc "Add a circular arc centered at `(x, y)` with the given `radius`, from `start_angle` to `end_angle` (radians, clockwise). Use `start_angle = 0.0, end_angle = 6.283185307179586` (2*pi) for a full circle."
+  fn arc(ctx, x, y, radius, start_angle, end_angle) do canvas_arc(ctx, x, y, radius, start_angle, end_angle) end
+
+  doc "Add a quadratic Bezier curve from the path's current point to `(x, y)`, using `(cpx, cpy)` as the control point."
+  fn quadratic_curve_to(ctx, cpx, cpy, x, y) do canvas_quadratic_curve_to(ctx, cpx, cpy, x, y) end
+
+  doc "Add a cubic Bezier curve from the path's current point to `(x, y)`, using `(cp1x, cp1y)` and `(cp2x, cp2y)` as control points."
+  fn bezier_curve_to(ctx, cp1x, cp1y, cp2x, cp2y, x, y) do canvas_bezier_curve_to(ctx, cp1x, cp1y, cp2x, cp2y, x, y) end
+
+  doc "Fill the current path with the current fill style."
+  fn fill(ctx)                         do canvas_fill(ctx) end
+
+  doc "Stroke the current path's outline with the current stroke style."
+  fn stroke(ctx)                       do canvas_stroke(ctx) end
+
+  doc "Fill a circle centered at `(cx, cy)` with radius `radius` using a tileable, world-aligned value-noise texture (a soft cloudy/wispy look), faded to transparent at the edge. `alpha` caps the overall opacity. The noise tile is generated once and cached, so repeated calls are cheap."
+  fn fill_noise_circle(ctx, cx, cy, radius, alpha) do canvas_fill_noise_circle(ctx, cx, cy, radius, alpha) end
+
+  doc "Draw `text` filled with the current fill style, baseline at `(x, y)`."
+  fn fill_text(ctx, text, x, y)        do canvas_fill_text(ctx, text, x, y) end
+
+  doc "Draw `text` outlined with the current stroke style, baseline at `(x, y)`."
+  fn stroke_text(ctx, text, x, y)      do canvas_stroke_text(ctx, text, x, y) end
+
+  doc "Set horizontal text alignment for `fill_text`/`stroke_text`: \"left\", \"center\", or \"right\"."
+  fn set_text_align(ctx, align)        do canvas_set_text_align(ctx, align) end
+
+  doc "Load an image from `url` (asynchronously). Returns `Err` with a message if the image fails to load."
+  fn load_image(url)                   do canvas_load_image(url) end
+
+  doc "Draw `img` at `(x, y)` using its natural size."
+  fn draw_image(ctx, img, x, y)        do canvas_draw_image(ctx, img, x, y) end
+
+  doc "Draw `img` at `(x, y)`, scaled to `(w, h)`."
+  fn draw_image_scaled(ctx, img, x, y, w, h) do canvas_draw_image_scaled(ctx, img, x, y, w, h) end
+
+end

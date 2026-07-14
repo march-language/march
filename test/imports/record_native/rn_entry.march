@@ -5,6 +5,9 @@
 -- values/entries/get/put/has_key/from_list (interpreter-only before this)
 -- work in compiled binaries, including records EXTENDED at runtime by
 -- record_put and records built dynamically from record_from_list([]).
+-- Also covers EUpdate (`{ x with f: v }`) on the same type-erased records
+-- (B5): the erased-shape fallback routes through march_record_update_dyn
+-- instead of writing at a hardcoded offset into a header-only allocation.
 mod RnEntry do
 
 fn check(name, cond) do
@@ -49,6 +52,35 @@ fn from_list_a() do
   built.a
 end
 
+-- EUpdate (`{ x with f: v }`) on a type-erased base (record_from_list /
+-- record_put result: static shape is TVar "_", so get_record_fields
+-- returns [] and field offsets aren't known at compile time).  B5 regression:
+-- the erased path used to write updates at a hardcoded offset into a
+-- header-only allocation (emit_heap_alloc ctx 0 0), corrupting memory past
+-- the cell instead of routing through the runtime shape registry.
+fn update_dyn_single() do
+  let built = record_from_list([("a", 1), ("b", 2)])
+  { built with a: 99 }
+end
+
+fn update_dyn_multi() do
+  let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
+  { built with a: 100, c: 300 }
+end
+
+-- All three fields updated in ONE expression: exercises the single
+-- march_record_update_dyn call with three varargs quadruples (one
+-- allocation, no chained record_put intermediates).
+fn update_dyn_all_three() do
+  let built = record_from_list([("a", 1), ("b", 2), ("c", 3)])
+  { built with a: 11, b: 22, c: 33 }
+end
+
+fn update_dyn_string_field() do
+  let built = build_dyn([("name", "Alice"), ("city", "Springfield")])
+  { built with name: "Bob" }
+end
+
 fn main() do
   let r = { name: "Alice", age: 30 }
   let nums = { x: 10, y: 20 }
@@ -78,6 +110,26 @@ fn main() do
             keys_csv(build_dyn([("password", "p"), ("email", "e")])) == "email,password")
     + check("dynamic blank flow value",
             get_str(build_dyn([("password", "p"), ("email", "e")]), "password") == "p")
+    + check("EUpdate erased single field updated",
+            get_int(update_dyn_single(), "a", -1) == 99)
+    + check("EUpdate erased single field preserved",
+            get_int(update_dyn_single(), "b", -1) == 2)
+    + check("EUpdate erased multi field a updated",
+            get_int(update_dyn_multi(), "a", -1) == 100)
+    + check("EUpdate erased multi field b preserved",
+            get_int(update_dyn_multi(), "b", -1) == 2)
+    + check("EUpdate erased multi field c updated",
+            get_int(update_dyn_multi(), "c", -1) == 300)
+    + check("EUpdate erased all-three a",
+            get_int(update_dyn_all_three(), "a", -1) == 11)
+    + check("EUpdate erased all-three b",
+            get_int(update_dyn_all_three(), "b", -1) == 22)
+    + check("EUpdate erased all-three c",
+            get_int(update_dyn_all_three(), "c", -1) == 33)
+    + check("EUpdate erased string field updated",
+            get_str(update_dyn_string_field(), "name") == "Bob")
+    + check("EUpdate erased string field preserved",
+            get_str(update_dyn_string_field(), "city") == "Springfield")
   if failures == 0 do
     println("all ok")
   else

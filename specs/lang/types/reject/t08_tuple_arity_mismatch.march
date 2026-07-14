@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: expected `(Int, Int)` but got `(Int, Int, Int)`.
+mod M do
+  fn takes_pair(p : (Int, Int)) : Int do
+    let (a, b) = p
+    a + b
+  end
+
+  fn main() do
+    println(int_to_string(takes_pair((1, 2, 3))))
+  end
+end

@@ -10,8 +10,38 @@
 #include <stdatomic.h>
 #include <ucontext.h>
 #include <pthread.h>
+#include <setjmp.h>
 
 #include "march_deque.h"
+
+/* Portable AddressSanitizer detection (clang's __has_feature vs. GCC's
+ * __SANITIZE_ADDRESS__ define) — guards the fiber-switch annotations below. */
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define MARCH_ASAN_BUILD 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(MARCH_ASAN_BUILD)
+#  define MARCH_ASAN_BUILD 1
+#endif
+#ifdef MARCH_ASAN_BUILD
+#  include <sanitizer/common_interface_defs.h>
+#endif
+
+/* Portable ThreadSanitizer detection — same rationale as MARCH_ASAN_BUILD
+ * above, but TSan has its own dedicated fiber API (__tsan_create_fiber /
+ * __tsan_switch_to_fiber), distinct from ASan's start/finish_switch_fiber. */
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define MARCH_TSAN_BUILD 1
+#  endif
+#endif
+#if defined(__SANITIZE_THREAD__) && !defined(MARCH_TSAN_BUILD)
+#  define MARCH_TSAN_BUILD 1
+#endif
+#ifdef MARCH_TSAN_BUILD
+#  include <sanitizer/tsan_interface.h>
+#endif
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 
@@ -49,14 +79,40 @@
 #endif
 
 /* ── Process status ───────────────────────────────────────────────────── */
+/* Queue-membership invariant (the heart of the scheduler's memory safety):
+ *
+ *   A march_proc is in AT MOST ONE run structure (one scheduler's local
+ *   Chase-Lev deque, or the global run queue) at any instant.  Membership is
+ *   authorized by exactly one atomic transition INTO PROC_RUNNABLE; only the
+ *   thread that wins that transition performs the enqueue.  A scheduler runs
+ *   a proc only after claiming it RUNNABLE→RUNNING; because a runnable proc
+ *   is single-membership, no two OS threads can ever swapcontext into the
+ *   same proc (= the same green-thread stack) concurrently.
+ *
+ *   State         | in a run queue? | meaning
+ *   ------------- | --------------- | -------------------------------------
+ *   PROC_RUNNABLE | yes, exactly one| Enqueued, waiting for a CPU.
+ *   PROC_RUNNING  | no              | Claimed by one scheduler; that
+ *                 |                 | scheduler is swapcontext-ed into it.
+ *   PROC_WAITING  | no              | Parked on recv, context saved.  A
+ *                 |                 | waker moves it WAITING→RUNNABLE.
+ *   PROC_PARKED   | no              | Transient: recv set it, swapcontext
+ *                 |                 | not yet returned to the scheduler.
+ *   PROC_DEAD     | no              | Finished.  Never re-enqueued.
+ *
+ *   Authorized transitions into RUNNABLE (winner, and only winner, enqueues):
+ *     NEW     → RUNNABLE   at spawn
+ *     WAITING → RUNNABLE   at wake (message arrival, kill-wake, shutdown wake)
+ *     RUNNING → RUNNABLE   at yield (only the running proc itself does this)
+ */
 typedef enum {
-    PROC_READY   = 0,  /* In run queue, waiting for a CPU turn              */
-    PROC_RUNNING = 1,  /* Currently executing on the scheduler thread       */
-    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in run queue          */
-    PROC_DEAD    = 3,  /* Finished; resources will be freed by the scheduler */
+    PROC_RUNNABLE = 0, /* In exactly one run queue, waiting for a CPU turn  */
+    PROC_RUNNING = 1,  /* Currently executing on one scheduler thread       */
+    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in any run queue      */
+    PROC_DEAD    = 3,  /* Finished; never re-enqueued (leak-don't-free)     */
     PROC_PARKED  = 4   /* Transitioning to WAITING: status set but swapcontext
                         * not yet called.  Wakers must spin-wait on this state
-                        * before pushing to a deque, to avoid resuming a process
+                        * before enqueueing, to avoid resuming a process
                         * whose context has not yet been saved.              */
 } march_proc_status;
 
@@ -91,18 +147,79 @@ typedef struct march_proc {
     ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */
-    struct march_proc         *next;         /* Intrusive link (unused with deque, kept for compat) */
+    struct march_proc         *next;         /* Intrusive link for the global run queue (mutex FIFO);
+                                              * only valid while the proc is IN that queue. */
     struct march_scheduler    *owner_sched;  /* Scheduler that last ran this process */
+    int                        is_daemon;    /* Daemon procs (actor recv loops) do not keep the
+                                              * scheduler alive: at shutdown, once no non-daemon
+                                              * procs remain and nothing is runnable, parked
+                                              * daemons are woken without a message so their
+                                              * loops exit and the process can terminate. */
+    /* Compiled actor supervision: set (to a jmp_buf on THIS proc's own
+     * green-thread stack) only while dispatching a message to an actor
+     * that is a supervised child. march_panic longjmp's here instead of
+     * exit(1)-ing the whole process. Deliberately stored on march_proc,
+     * not as a _Thread_local — this scheduler is work-stealing across
+     * MARCH_NUM_SCHEDULERS OS threads (march_deque_steal), so a proc can
+     * resume on a DIFFERENT OS thread than the one that set the trap; a
+     * thread-local would read the wrong (or another proc's) value after
+     * such a migration. This field migrates with the proc itself. */
+    jmp_buf                   *crash_jmp;
+#ifdef MARCH_ASAN_BUILD
+    /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
+     * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
+     * around every swapcontext() call that suspends or resumes it. Without
+     * this, ASan is unaware that march's raw ucontext-based green threads
+     * hop between independently-mmap'd stacks, and cannot correctly track
+     * stack-use-after-return / stack-buffer-overflow across a switch. */
+    void                       *asan_fake_stack;
+#endif
+#ifdef MARCH_TSAN_BUILD
+    /* TSan fiber handle for this proc, created once (via __tsan_create_fiber)
+     * at spawn time and passed to __tsan_switch_to_fiber before every
+     * swapcontext() that resumes it. Same rationale as asan_fake_stack. */
+    void                       *tsan_fiber;
+#endif
+#ifdef MARCH_DEBUG
+    /* Regression tripwires for the single-owner run-queue invariant (build
+     * with -DMARCH_DEBUG to arm; zero release-mode cost).  In the fixed
+     * design these must NEVER fire:
+     *   dbg_queued     — 1 while the proc sits in exactly one run structure
+     *                    (a local deque or the global runq).  Enqueue sites
+     *                    assert 0→1; dequeue sites assert 1→0, so a
+     *                    double-enqueue aborts at the moment it happens.
+     *   dbg_running_on — scheduler id + 1 while one scheduler is dispatched
+     *                    (swapcontext-ed) into the proc, else 0.  A second
+     *                    dispatcher aborts instead of corrupting the stack. */
+    _Atomic int                 dbg_queued;
+    _Atomic int                 dbg_running_on;
+#endif
 } march_proc;
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
-    march_deque     local_queue;  /* Work-stealing deque of READY processes      */
+    march_deque     local_queue;  /* Work-stealing deque of RUNNABLE processes   */
     march_proc     *current;      /* Currently running process (NULL = in sched) */
     ucontext_t      sched_ctx;    /* Scheduler context; processes yield here     */
-    int             running;      /* Non-zero while scheduler loop is active     */
+    _Atomic int     running;      /* Non-zero while scheduler loop is active.
+                                   * Atomic: written by the owning scheduler
+                                   * thread, read concurrently by the preemption
+                                   * daemon (preempt_daemon) to decide whom to
+                                   * SIGUSR1 — a plain int there is a data race
+                                   * (TSan: sched_loop write vs preempt_daemon
+                                   * read). */
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
+#ifdef MARCH_ASAN_BUILD
+    /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
+     * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
+    void           *asan_fake_stack;
+#endif
+#ifdef MARCH_TSAN_BUILD
+    /* TSan fiber handle for THIS scheduler's own native OS-thread execution,
+     * captured once via __tsan_get_current_fiber() at the top of sched_loop. */
+    void           *tsan_fiber;
+#endif
 } march_scheduler;
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -124,8 +241,20 @@ void         march_sched_request_shutdown(void);
  * Safe to call from within a running process (nested spawn). */
 march_proc  *march_sched_spawn(void (*fn)(void *), void *arg);
 
+/* Spawn a daemon green thread (see march_proc.is_daemon): daemons do not
+ * keep the scheduler alive at shutdown.  Used for actor recv loops, which
+ * park forever unless killed and must not prevent program exit once main
+ * and all task procs have completed. */
+march_proc  *march_sched_spawn_daemon(void (*fn)(void *), void *arg);
+
 /* Cooperatively yield the CPU back to the scheduler. */
 void         march_sched_yield(void);
+
+/* Cooperatively yield until no OTHER process is runnable or mid-work
+ * (RUNNABLE, RUNNING, PARKED, or WAITING with a non-empty mailbox).  This is
+ * the in-scheduler implementation of run_until_idle(): callable only from
+ * inside a green thread; a no-op otherwise. */
+void         march_sched_wait_idle(void);
 
 /* Decrement the reduction counter; yield automatically if budget runs out.
  * Call once per "reduction" (function application, match arm, etc.) in

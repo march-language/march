@@ -1,0 +1,17 @@
+mod P15MultiHeadFnMerge do
+  fn fib(0) do
+    0
+  end
+
+  fn fib(1) do
+    1
+  end
+
+  fn fib(n) do
+    fib(n - 1) + fib(n - 2)
+  end
+
+  fn main() do
+    println(fib(10))
+  end
+end

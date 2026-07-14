@@ -18,7 +18,7 @@ let builtin_names : StringSet.t =
       "<"; ">"; "<="; ">="; "&&"; "||";
       "=="; "!="; "++";
       "print"; "println"; "print_stderr"; "print_int"; "print_float";
-      "int_to_string"; "float_to_string"; "bool_to_string";
+      "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
       "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
@@ -75,7 +75,7 @@ let builtin_names : StringSet.t =
       (* Resource ownership *)
       "own";
       (* Capability builtins *)
-      "cap_narrow"; "root_cap";
+      "cap_narrow"; "root_cap"; "mint_cap";
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size";
       "run_until_idle"; "register_resource"; "get_cap";
@@ -343,12 +343,12 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
 let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
-  let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
-  let apply_name = Printf.sprintf "%s$apply$%d" fn.Tir.fn_name lam.lam_uid in
+  let clo_name = Tir_names.clo_struct_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
+  let apply_name = Tir_names.apply_fn_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
   (* TDClosure struct: [fn_ptr: TPtr(TUnit), fv0_ty, fv1_ty, ...] *)
   let td = Tir.TDClosure (clo_name, Tir.TPtr Tir.TUnit :: List.map (fun v -> v.Tir.v_ty) fvs) in
   (* $clo parameter — opaque pointer to the closure struct itself *)
-  let clo_param = { Tir.v_name = "$clo"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+  let clo_param = { Tir.v_name = Tir_names.clo_param_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
   (* Wrap the original body with ELet bindings that load each free variable
      from the closure struct.  Field indices: fn_ptr=0, fv[i]=i+1.
      Prepend a binding [let fn_name = $clo] so that recursive self-calls
@@ -368,7 +368,7 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let wrapped_body =
     add_self_binding (
       List.fold_right (fun (i, (fv : Tir.var)) acc ->
-          let field_name = "$fv" ^ string_of_int (i + 1) in
+          let field_name = Tir_names.fv_field (i + 1) in
           let load_expr  = Tir.EField (Tir.AVar clo_param, field_name) in
           Tir.ELet (fv, load_expr, acc)
         ) (List.mapi (fun i fv -> (i, fv)) fvs) fn.Tir.fn_body)
@@ -378,6 +378,9 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
     fn_params = clo_param :: fn.Tir.fn_params;
     fn_ret_ty = fn.Tir.fn_ret_ty;
     fn_body   = wrapped_body;
+    (* This IS the synthesis site Tir_names.is_apply_fn / the former
+       perceus.ml + llvm_emit.ml name-sniffing copies were detecting. *)
+    fn_kind   = Tir.FnApply;
   } in
   (td, apply_fn)
 
@@ -407,12 +410,12 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          only for the lambda that was collected from THIS exact ELetRec node. *)
       (match List.find_opt (fun (_, lam) -> lam.lam_fn == fn) known_lambdas with
        | Some (_, lam) ->
-         let apply_name = Printf.sprintf "%s$apply$%d" fn.Tir.fn_name lam.lam_uid in
+         let apply_name = Tir_names.apply_fn_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
          let fn_ptr_atom = Tir.AVar { Tir.v_name = apply_name;
                                        v_ty = Tir.TPtr Tir.TUnit;
                                        v_lin = Tir.Unr } in
          let fv_atoms = List.map (fun (v : Tir.var) -> Tir.AVar v) lam.lam_fvs in
-         let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
+         let clo_name = Tir_names.clo_struct_name ~fn_name:fn.Tir.fn_name ~lam_uid:lam.lam_uid in
          Tir.EAlloc (Tir.TCon (clo_name, []), fn_ptr_atom :: fv_atoms)
        | None ->
          (* Not a known lambda — rewrite children *)

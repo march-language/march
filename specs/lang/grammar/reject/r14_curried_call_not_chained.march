@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: is not a chained call — March functions are not curried
+mod R14CurriedCallNotChained do
+  fn adder(x) do
+    fn (y) -> x + y
+  end
+  fn side(n) do n end
+  fn main() do
+    let r = adder(1)(side(99))
+    r
+  end
+end

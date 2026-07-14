@@ -175,6 +175,75 @@ react  = "^18.3.0"
 
 The generated `package.json` sets `"type": "module"` so your `.mjs` output loads cleanly. For Deno or Bun, use their native specifiers (`npm:lodash`, `jsr:@std/path`) directly in the `extern` lib name — no `[js_deps]` needed since those runtimes fetch packages on demand.
 
+### Cross-compiling to Linux
+
+March can build a **Linux** binary from any host — including macOS — the way Go's
+`GOOS=linux go build` does. Pass a `linux/*` target and you get a native Linux
+ELF without a Linux box, VM, or Docker build step:
+
+```sh
+march --compile --target linux/amd64 app.march -o app   # x86-64 Linux
+march --compile --target linux/arm64 app.march -o app   # aarch64 Linux
+
+forge build --target linux/amd64                          # via forge
+forge build --target linux/arm64
+```
+
+Accepted aliases: `linux/amd64` (= `linux/x86_64`) and `linux/arm64`
+(= `linux/aarch64`).
+
+**Prerequisite — `zig`.** Cross-compilation uses [`zig cc`](https://ziglang.org)
+as the C cross-compiler (it bundles a clang plus the Linux sysroots, so there's
+nothing else to install). Put `zig` on your `PATH`:
+
+```sh
+brew install zig          # macOS
+# or download from https://ziglang.org/download/
+```
+
+`forge build --target linux/…` checks for `zig` up front and tells you if it's
+missing; a bare `march --compile --target linux/…` will fail at the link step
+without it.
+
+**Output.** `forge` writes cross builds to a per-target directory so they never
+clobber your host binary:
+
+```
+.march/build/linux-amd64/debug/<name>
+.march/build/linux-arm64/release/<name>
+```
+
+**What you get.** A **dynamically-linked glibc** binary (minimum glibc 2.31 —
+Ubuntu 20.04 / Debian 11 and newer). It runs on mainstream distributions and in
+glibc-based containers (`debian:*-slim`, `ubuntu:*`, distroless-cc), e.g.:
+
+```dockerfile
+FROM debian:bookworm-slim
+COPY app /usr/local/bin/app
+CMD ["app"]
+```
+
+```sh
+# Smoke-test a cross build locally, without deploying:
+march --compile --target linux/amd64 app.march -o app
+docker run --rm --platform linux/amd64 -v "$PWD/app":/app:ro debian:bookworm-slim /app
+```
+
+**Scope (current).** Cross-compilation currently targets **compute and CLI
+workloads**. Not yet included in a cross build:
+
+- **TLS/HTTPS** and **compression** (zstd/brotli/zlib) — these runtime modules are
+  omitted from cross builds for now.
+- **Hot code reload** — the reload `.so` path is host-only today; deploy a
+  pre-built artifact instead (see [Hot Code Reload](hot-code-reload.md)).
+- **Rust FFI** (`[ffi.rust]`) — `forge build --target linux/…` fails with a clear
+  message rather than mislinking a host-architecture static library.
+- **Concurrency/actor programs** are not yet validated on cross targets.
+
+Correctness is guarded by a differential test that cross-compiles a corpus and
+checks each program's output against the native build byte-for-byte, so a
+codegen regression on a cross target is caught in CI.
+
 ### Checking Types
 
 `forge check` typechecks every `.march` file in the project without producing a binary. It's fast — use it for pre-commit checks or continuous editor feedback:
@@ -345,6 +414,72 @@ forge search --rebuild
 ```
 
 The search index is cached at `.march/search-index.json` and rebuilt when source changes.
+
+---
+
+## AI assistant search — spec-search Claude Skill
+
+`forge search` (above) finds *code* — functions, types, signatures. `spec-search`
+is its counterpart for *documentation*: a Claude Code skill that full-text
+searches March's language reference (`specs/lang/`), internals reference
+(`specs/impl/`), and feature design docs (`specs/features/`) — roughly 44
+files, 20-25k lines — via a bundled SQLite [FTS5](https://sqlite.org/fts5.html)
+index.
+
+It's fully self-contained: the markdown docs and the prebuilt index ship
+*inside* the skill directory, so it works in any March project, not just a
+checkout of the compiler repo.
+
+### Installing
+
+Install once, at the user level, and it's available to Claude in every
+project on the machine:
+
+```bash
+git clone https://github.com/march-language/march.git
+mkdir -p ~/.claude/skills
+cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
+```
+
+(Vendoring a copy into a specific project's own `.claude/skills/` instead
+also works, if you want that project pinned to a particular spec snapshot —
+the directory is self-contained either way.)
+
+### Using it
+
+Claude invokes the skill automatically for March language/design questions
+that go beyond syntax basics — actor supervision semantics, refinement
+types, session types, capabilities, module resolution, etc. You can also
+run the query script directly:
+
+```bash
+~/.claude/skills/spec-search/spec-search.sh "actor supervision restart"
+~/.claude/skills/spec-search/spec-search.sh --json -n 5 "refinement predicate"
+```
+
+Output is ranked by relevance (SQLite's `bm25()`), one hit per matched
+markdown section — file, heading path, line range, and a highlighted
+snippet — so answers are grounded in a precise slice of the docs rather
+than a whole 1000-line chapter.
+
+### Rebuilding the index
+
+Run this from a clone of the [march-language/march](https://github.com/march-language/march)
+repo after `specs/lang/`, `specs/impl/`, or `specs/features/` change:
+
+```bash
+./scripts/build-spec-index.sh
+```
+
+This vendors the current docs and rebuilds `.claude/skills/spec-search/spec-search.db`
+in place. Review the diff, commit it, then re-copy the directory to
+`~/.claude/skills/spec-search/` to pick up the change. The index carries a
+`meta` table stamping the source commit and build date — check it if search
+results ever look out of date:
+
+```bash
+sqlite3 ~/.claude/skills/spec-search/spec-search.db "SELECT * FROM meta;"
+```
 
 ---
 

@@ -1,0 +1,13 @@
+mod P22CapabilityDirectives do
+  needs IO.Network, IO.Clock
+  proof cap Trusted
+  cap no_panic
+
+  fn add(a: Int, b: Int): Int do
+    a + b
+  end
+
+  fn main() do
+    println(add(2, 3))
+  end
+end

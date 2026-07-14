@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: expected `Int` but got `String`.
+mod M do
+  fn main() do
+    let x : Int = "foo"
+    println(int_to_string(x))
+  end
+end

@@ -12,6 +12,36 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "4851", "--directory", "/Users/80197052/code/march/demo_app/dom_demo"],
       "port": 4851
+    },
+    {
+      "name": "canvas-demo",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4852", "--directory", "/Users/80197052/code/march/.claude/worktrees/fervent-nightingale-d0cfe8/demo_app/canvas_demo"],
+      "port": 4852
+    },
+    {
+      "name": "tetris",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4854", "--directory", "/Users/80197052/code/march/.claude/worktrees/quizzical-hamilton-a4633d/demo_app/tetris"],
+      "port": 4854
+    },
+    {
+      "name": "docs-jekyll",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/80197052/code/march/.claude/worktrees/quizzical-hamilton-a4633d/docs && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 mise exec ruby@3.3 -- bundle exec jekyll serve --port 4853"],
+      "port": 4853
+    },
+    {
+      "name": "perihelion",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4855", "--directory", "/Users/80197052/code/march/.claude/worktrees/fervent-nightingale-d0cfe8/demo_app/perihelion"],
+      "port": 4855
+    },
+    {
+      "name": "perihelion-site-preview",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "4856", "--directory", "/tmp/perihelion-site-preview"],
+      "port": 4856
     }
   ]
 }

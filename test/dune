@@ -23,14 +23,20 @@
 (library
  (name march_test_codegen)
  (wrapped false)
- (modules test_codegen)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (modules test_codegen test_ir_verify)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
  (name march_test_stdlib_suite)
  (wrapped false)
  (modules test_stdlib_suite)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+
+(library
+ (name march_test_snapshots)
+ (wrapped false)
+ (modules test_snapshots)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_tir alcotest str unix))
 
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
 ; -e: show test-case error details inline (no digging through log files).
@@ -57,6 +63,23 @@
  (name run_stdlib)
  (modules run_stdlib)
  (libraries march_test_stdlib_suite alcotest)
+ (action (run %{test} -e)))
+
+; ── TIR golden-snapshot tests (Wave 2 Task 4 / W2.2) ──────────────────────
+; A separate runner (not folded into run_compiler/run_codegen): snapshot
+; tests have distinct semantics from ordinary alcotest assertions — an
+; UPDATE_SNAPSHOTS=1 regeneration run is expected to WRITE files and still
+; exit 0, which would be a confusing mode to enable ambient inside one of
+; the five existing suites (accidentally regenerating unrelated compiler or
+; codegen `.expected` fixtures was never a risk anyone had to consider
+; before). Keeping `-e` semantics clean per-runner (per the task brief) and
+; giving this corpus its own `test/snapshots/{src,lower,perceus}/` tree a
+; single obvious home. See test/test_snapshots.ml's top-of-file comment for
+; the regen workflow.
+(test
+ (name run_snapshots)
+ (modules run_snapshots)
+ (libraries march_test_snapshots alcotest)
  (action (run %{test} -e)))
 
 ; ── C scheduler tests ────────────────────────────────────────────────────
@@ -96,6 +119,150 @@
  (alias   runtest)
  (deps    (file test_dispatch_runner))
  (action  (run ./test_dispatch_runner)))
+
+; ── HCR capability-lattice C table unit test ──────────────────────────────
+; Verifies runtime/march_cap_lattice.{h,c} (generated from
+; lib/caps/cap_lattice.ml by lib/caps/emit_c_table.ml) against the
+; hand-verified hierarchy, exhaustively over every pair.
+(rule
+ (targets test_cap_lattice_runner)
+ (deps    test_cap_lattice.c
+          ../runtime/march_cap_lattice.c
+          ../runtime/march_cap_lattice.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_cap_lattice.c ../runtime/march_cap_lattice.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_cap_lattice_runner))
+ (action  (run ./test_cap_lattice_runner)))
+
+; ── BLAKE3 cross-implementation agreement (Phase5C-C.2) ───────────────────
+; The compiler's cap_root (Phase5C-A) is BLAKE3 via March_cas.Blake3 (OCaml
+; FFI over libblake3, lib/cas/blake3_stubs.c). The reload server
+; (runtime/march_reload.c, Phase5C-C.3) must recompute cap_root with the
+; *same* algorithm using runtime/march_blake3.c, a pure-C helper over the
+; same libblake3 API. This test proves the two agree on a fixed fixture
+; string whose expected hex digest is also asserted OCaml-side in
+; test_cas.ml's test_blake3_cross_impl_agreement_fixture — a single literal
+; can only satisfy both assertions if the implementations match bit-for-bit.
+; Reuses the same discovered blake3_cflags.sexp/blake3_libs.sexp that
+; lib/cas/dune uses (via lib/cas/discover.exe), so the include/lib paths
+; never drift from the OCaml side's probe.
+(rule
+ (targets test_blake3_agreement_runner)
+ (deps    test_blake3_agreement.c
+          ../runtime/march_blake3.c
+          ../runtime/march_blake3.h
+          ../lib/cas/blake3_cflags.sexp
+          ../lib/cas/blake3_libs.sexp)
+ (action
+  (run bash -c
+   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
+    %{cc} -std=gnu11 -Wall -Wextra -I../runtime \
+      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+      -o %{targets} test_blake3_agreement.c ../runtime/march_blake3.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp)")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_blake3_agreement_runner))
+ (action  (run ./test_blake3_agreement_runner)))
+
+; ── ACTIVATE4 cap_root admission end-to-end (Phase5C-C.3) ─────────────────
+; Starts the real reload server (march_reload.c) on a Unix-domain socket and
+; drives the ACTIVATE4 wire protocol as a real client would: builds a signed
+; message, signs it with a real ed25519 key, and asserts the server's cap_root
+; tamper check / MARCH_DEPLOY_POLICY gate behave per specs/hot-code-reload.md.
+;
+; The signing pubkey is baked into march_reload.c at compile time via
+; -DMARCH_SIGNING_PUBKEY_HEX (mirrors bin/main.ml's --signing-pubkey flow), so
+; a keypair must exist *before* compiling the test binary. test_reload_keygen
+; generates one at build time; its stdout (pubkey_hex\nsk_hex\n) is captured
+; to reload_keys.txt, whose first line seeds the -D flag for the real test,
+; and whose full contents the test binary re-reads at run time to sign.
+(rule
+ (targets test_reload_keygen_runner)
+ (deps    test_reload_keygen.c ../runtime/tweetnacl.c ../runtime/tweetnacl.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets} test_reload_keygen.c ../runtime/tweetnacl.c)))
+
+(rule
+ (targets reload_keys.txt)
+ (deps    (file test_reload_keygen_runner))
+ (action  (with-stdout-to reload_keys.txt (run ./test_reload_keygen_runner))))
+
+(rule
+ (targets test_reload_activate4_runner)
+ (deps    test_reload_activate4.c
+          reload_keys.txt
+          ../runtime/march_reload.c ../runtime/march_reload.h
+          ../runtime/march_dispatch.c ../runtime/march_dispatch.h
+          ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
+          ../runtime/march_blake3.c ../runtime/march_blake3.h
+          ../runtime/tweetnacl.c ../runtime/tweetnacl.h
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
+          ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
+          (glob_files ../runtime/*.h))
+ (action
+  (run bash -c
+   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
+    PK=$(head -n1 reload_keys.txt); \
+    %{cc} -std=gnu11 -Wall -I../runtime -O2 -DMARCH_SIGNING_PUBKEY_HEX=\\\"$PK\\\" \
+      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+      -o %{targets} test_reload_activate4.c \
+      ../runtime/march_reload.c ../runtime/march_dispatch.c \
+      ../runtime/march_cap_lattice.c ../runtime/march_blake3.c \
+      ../runtime/tweetnacl.c ../runtime/march_runtime.c \
+      ../runtime/march_scheduler.c ../runtime/march_message.c \
+      ../runtime/march_heap.c ../runtime/march_gc.c \
+      ../runtime/march_monitor_registry.c \
+      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm")))
+
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt))
+ (action (run ./test_reload_activate4_runner reload_keys.txt)))
+
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt))
+ (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
+          (run ./test_reload_activate4_runner reload_keys.txt policy))))
+
+; ── HCR capability-lattice anti-drift check ───────────────────────────────
+; Regenerates runtime/march_cap_lattice.{h,c} from lib/caps/cap_lattice.ml
+; via the emitter and diffs the result against the checked-in copy, so the
+; two can never silently drift apart (see lib/caps/emit_c_table.ml).
+(rule
+ (targets cap_lattice_fresh_march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.c)
+ (deps    (file %{exe:../lib/caps/emit_c_table.exe}))
+ (action  (run %{exe:../lib/caps/emit_c_table.exe} . cap_lattice_fresh_)))
+
+(rule
+ (alias cap_lattice_check)
+ (deps  ../runtime/march_cap_lattice.h
+        ../runtime/march_cap_lattice.c
+        cap_lattice_fresh_march_cap_lattice.h
+        cap_lattice_fresh_march_cap_lattice.c)
+ (action
+  (progn
+   (diff ../runtime/march_cap_lattice.h cap_lattice_fresh_march_cap_lattice.h)
+   (diff ../runtime/march_cap_lattice.c cap_lattice_fresh_march_cap_lattice.c))))
+
+; Also run as part of `dune runtest` (CI), but exposed as its own alias
+; above so it can be targeted directly (`dune build @test/cap_lattice_check`)
+; without pulling in the rest of the (large, slow) runtest universe.
+(alias
+ (name runtest)
+ (deps (alias cap_lattice_check)))
 
 ; ── Distributed-OTP function-by-identity registry unit test ──────────────
 (rule
@@ -239,6 +406,37 @@
  (action (setenv MARCH_BIN %{exe:../bin/main.exe}
           (run ./test_oracle.exe))))
 
+; ── Core March static-semantics (typing) conformance check ────────────────
+; specs/lang/types/{accept,reject}/*.march + check_types.sh — the type-side
+; analog of the `oracle` alias above, but NOT the same shape: `reject/`
+; programs deliberately fail to typecheck, so they cannot ride `test_oracle`'s
+; both-ways interpret-vs-compile sweep (a reject program would just look like
+; an ordinary compile failure there). This corpus needs its own `--check`-only
+; harness instead (specs/lang/core-march-types.md §3, specs/lang/types/INDEX.md).
+; Own alias (`types-check`), NOT folded into `runtest` or `oracle` — run
+; directly with `dune build @types-check`.
+(rule
+ (alias types-check)
+ (deps (source_tree %{project_root}/specs/lang/types)
+       (file %{exe:../bin/main.exe}))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{project_root}/specs/lang/types/check_types.sh))))
+
+; ── Resolved-grammar surface-syntax conformance check ─────────────────────
+; specs/lang/grammar/{parse,reject}/*.march + check_grammar.sh — the grammar-side
+; analog of the `types-check` alias above, same shape: `reject/` programs
+; deliberately fail to PARSE, so they cannot ride `test_oracle`'s both-ways
+; interpret-vs-compile sweep either. This corpus needs its own `--check`-only
+; harness instead (specs/lang/grammar.md "Conformance corpus", specs/lang/grammar/INDEX.md).
+; Own alias (`grammar-check`), NOT folded into `runtest` or `oracle` — run
+; directly with `dune build @grammar-check`.
+(rule
+ (alias grammar-check)
+ (deps (source_tree %{project_root}/specs/lang/grammar)
+       (file %{exe:../bin/main.exe}))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{project_root}/specs/lang/grammar/check_grammar.sh))))
+
 (test
  (name test_supervision)
  (modules test_supervision)
@@ -264,6 +462,11 @@
  (name test_refine)
  (modules test_refine)
  (libraries march_refine alcotest unix))
+
+(test
+ (name test_caps)
+ (modules test_caps)
+ (libraries march_caps alcotest))
 
 (test
  (name test_refinecheck)
@@ -443,6 +646,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (setenv MARCH_LIB_PATH imports/tq_ctor
           (run %{exe:../bin/main.exe} --check imports/tq_ctor/tq_ctor_entry.march))))
 
+; ── Regression: TYPE-qualified reference to a sibling's OPAQUE VARIANT type ──
+; A sibling module (`OqToken`) auto-discovered via MARCH_LIB_PATH declares an
+; `opaque type Token = Token(String)`.  The entry references it under its
+; qualified name (`OqToken.Token`) in a parameter annotation.  surface_ty
+; resolved the qualified path to a distinct nominal `TCon("OqToken.Token")`
+; that would not unify with the BARE `TCon("Token")` produced by OqToken's own
+; `make`/`value`, so values crossing the boundary failed with
+; "expected `OqToken.Token` but got `Token`" (and the reverse).  The bare name
+; is the canonical global identity (constructor `ci_type` is bare), so the
+; qualified reference must canonicalize to it.  `--check` must exit 0.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/opaque_qual/*.march))
+ (action (setenv MARCH_LIB_PATH imports/opaque_qual
+          (run %{exe:../bin/main.exe} --check imports/opaque_qual/oq_entry.march))))
+
 ; ── Regression: local fn definitions must shadow bulk imports ──
 ; `import X` (UseAll) rebound every public `X.name` as bare `name`,
 ; clobbering the importing module's OWN pass-1 placeholder when it defines a
@@ -522,6 +742,97 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/lazy_niche.expected native_lazy_niche.out)))
+
+; ── Regression: burst-of-task_spawn must not race the Task object ──
+; march_task_spawn_thunk initialised the Task's proc-handle/result/done-flag
+; AFTER march_sched_spawn published the proc, so a work-stealing scheduler
+; thread could run the thunk trampoline (which writes the result and
+; release-stores the done flag) before the spawner returned — the spawner then
+; clobbered the completed result/done flag back to zero (TSan-confirmed race
+; at march_runtime.c:1833 vs the post-spawn store; symptom: task_await hangs or
+; returns a zeroed result).  This program spawns a burst of tasks up front,
+; then awaits them all and checks the exact sum, repeated over many rounds so
+; the non-deterministic race is likely to fire.  Compile natively, run, diff.
+; To also catch it under a race detector: compile with MARCH_SANITIZE=thread
+; and run ~100x — expect no ThreadSanitizer report.
+(rule
+ (targets native_task_burst_await native_task_burst_await.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_burst_await.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_burst_await
+        native/task_burst_await.march)
+   (with-stdout-to native_task_burst_await.out
+        (system "./native_task_burst_await")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_burst_await.expected native_task_burst_await.out)))
+
+; ── Regression: bare sibling call 2 levels deep in a stdlib file must
+; qualify with the file's OWN top-level mod name, not just the immediate
+; enclosing submodule (desugar's qualify_module_refs; see
+; nested_mod_qualcall.march's header comment for the full story). ──
+(rule
+ (targets native_nested_mod_qualcall native_nested_mod_qualcall.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/nested_mod_qualcall.march)
+       (file ../stdlib/crdt.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_mod_qualcall
+        native/nested_mod_qualcall.march)
+   (with-stdout-to native_nested_mod_qualcall.out
+        (system "./native_nested_mod_qualcall")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_mod_qualcall.expected native_nested_mod_qualcall.out)))
+
+; ── Regression: `alias Long.Path as Short` inside a NON-entry (auto-
+; discovered via MARCH_LIB_PATH) module body must resolve `Short.member`
+; to `Long.Path.member` at codegen.  lower_mod_decls' inner decl match had
+; no DAlias case (only the entry file's top-level DAlias handler existed),
+; so a lib module's alias was silently dropped: the call emitted `_Short.
+; member` while the definition was `Long.Path.member` — undefined at link.
+; This bit forgepm (bastion's IslandSocket `alias Bastion.PubSub as PubSub`,
+; calling PubSub.subscribe/unsubscribe/broadcast_from).  The fix registers an
+; order-independent prefix mapping consulted by resolve_use_alias.  Fixtures
+; live in alias_codegen/ (ac_caller.march is the non-entry aliasing module;
+; ac_entry.march is the compile entry). ──
+(rule
+ (targets native_alias_codegen native_alias_codegen.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files alias_codegen/*.march))
+ (action
+  (progn
+   (setenv MARCH_LIB_PATH alias_codegen
+    (run %{exe:../bin/main.exe} --compile -o native_alias_codegen
+         alias_codegen/ac_entry.march))
+   (with-stdout-to native_alias_codegen.out
+        (system "./native_alias_codegen")))))
+
+(rule
+ (alias runtest)
+ (action (diff alias_codegen/ac_entry.expected native_alias_codegen.out)))
 
 ; ── Regression: RPC CAS impl_hash stable across separate compilations ──
 ; The remote_ref_hashes / march_remote_register admission check compares a
@@ -679,6 +990,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/let_tuple_destructure.expected native_let_tuple_destructure.out)))
+
+; ── Regression: shadowed same-block `let` rebinding a name off its own prior
+; value (`let x = 5 in let x = x + 1 in ...`). js_emit.ml did not alpha-rename
+; the second binding, so JS block-scope TDZ made the IIFE initializer's `x`
+; resolve to its own not-yet-initialized `const x` instead of the outer one.
+; Cprop.ml had a related bug: it never invalidated a name's known-literal
+; entry on a non-literal rebind, so downstream uses of the rebound name
+; silently substituted the STALE literal from before the rebind (wrong value,
+; not a crash) — this fired even in the native/LLVM backend since Cprop runs
+; in the opt-enabled default pipeline for every target. Both fixed together;
+; compile natively, run, diff stdout.
+(rule
+ (targets native_let_shadow_rebind native_let_shadow_rebind.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/let_shadow_rebind.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_let_shadow_rebind
+        native/let_shadow_rebind.march)
+   (with-stdout-to native_let_shadow_rebind.out
+        (system "./native_let_shadow_rebind")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/let_shadow_rebind.expected native_let_shadow_rebind.out)))
 
 ; ── Regression: zero-arg closure param in a default-arg fn freed too early ──
 ; A module-nested fn with default-arg params AND a trailing zero-arg closure
@@ -992,6 +1336,250 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_counter.expected native_actor_counter.out)))
+
+; ── Regression: pid_of_int must return a real actor pointer, not a raw
+; int-to-ptr cast (compiled march_pid_of_int used to reinterpret a small
+; pid_index integer as a heap address, corrupting/hanging on any use).
+(rule
+ (targets native_pid_of_int_roundtrip native_pid_of_int_roundtrip.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/pid_of_int_roundtrip.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_of_int_roundtrip
+        native/pid_of_int_roundtrip.march)
+   (with-stdout-to native_pid_of_int_roundtrip.out
+        (system "./native_pid_of_int_roundtrip")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_of_int_roundtrip.expected native_pid_of_int_roundtrip.out)))
+
+; ── Regression: get_actor_field must resolve real state fields, not always
+; return None (the C stub march_get_actor_field always did) — this exercises
+; the compile-time field-resolution codegen directly on a non-supervised
+; actor's own Int fields, isolated from Task 3's spawn-injection.
+(rule
+ (targets native_get_actor_field_direct native_get_actor_field_direct.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/get_actor_field_direct.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_get_actor_field_direct
+        native/get_actor_field_direct.march)
+   (with-stdout-to native_get_actor_field_direct.out
+        (system "./native_get_actor_field_direct")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/get_actor_field_direct.expected native_get_actor_field_direct.out)))
+
+; ── Regression: a compiled supervisor must actually spawn its declared
+; children (the old lowering only registered the supervision strategy and
+; left child state fields at their literal init values, e.g. wa=0/wb=0).
+(rule
+ (targets native_supervisor_spawn_children native_supervisor_spawn_children.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_spawn_children.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_spawn_children
+        native/supervisor_spawn_children.march)
+   (with-stdout-to native_supervisor_spawn_children.out
+        (system "./native_supervisor_spawn_children")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
+
+; ── Regression: a panic inside a SUPERVISED actor's message handler must
+; not exit(1) the whole process — it must crash-isolate to that actor's own
+; green thread and trigger a one_for_one restart (before this fix, kill()
+; on a supervised child did nothing: no crash trap, no restart notify).
+(rule
+ (targets native_supervisor_one_for_one_restart native_supervisor_one_for_one_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_one_for_one_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_one_for_one_restart
+        native/supervisor_one_for_one_restart.march)
+   (with-stdout-to native_supervisor_one_for_one_restart.out
+        (system "./native_supervisor_one_for_one_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_one_for_one_restart.expected native_supervisor_one_for_one_restart.out)))
+
+; ── Regression: one_for_all — crashing any one supervised child must
+; restart ALL of them (siblings included), not just the crashed one.
+(rule
+ (targets native_supervisor_one_for_all_restart native_supervisor_one_for_all_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_one_for_all_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_one_for_all_restart
+        native/supervisor_one_for_all_restart.march)
+   (with-stdout-to native_supervisor_one_for_all_restart.out
+        (system "./native_supervisor_one_for_all_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_one_for_all_restart.expected native_supervisor_one_for_all_restart.out)))
+
+; ── Regression: rest_for_one — crashing a middle child must restart it and
+; every child declared AFTER it, but leave earlier siblings untouched.
+(rule
+ (targets native_supervisor_rest_for_one_restart native_supervisor_rest_for_one_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/supervisor_rest_for_one_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_rest_for_one_restart
+        native/supervisor_rest_for_one_restart.march)
+   (with-stdout-to native_supervisor_rest_for_one_restart.out
+        (system "./native_supervisor_rest_for_one_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_rest_for_one_restart.expected native_supervisor_rest_for_one_restart.out)))
+
+; ── Regression: Task.await / await_many / async_stream must untag i64 Ok
+; ── payloads.  The thunk trampoline double-tags scalar results (task[3] =
+; ── 4*n+3); march_task_await wraps that straight into Ok, and the Ok(n)
+; ── destructure untags only once, leaving 2*n+1.  Pre-fix this printed
+; ── await=85 / sum=123 / stream_sum=115 instead of 42 / 60 / 55.  Compile
+; ── natively, run single-threaded (deterministic), diff stdout.
+(rule
+ (targets native_task_await_int native_task_await_int.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_int.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_int
+        native/task_await_int.march)
+   (with-stdout-to native_task_await_int.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_int")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_int.expected native_task_await_int.out)))
+
+; ── Actor + task runtime stress (test/apps/actor_stress.march): five actors,
+; ── receive()-in-handler, FIFO ordering, and Task async/await/await_many/
+; ── async_stream, end-to-end in one compiled binary.  Fire-and-forget `send`
+; ── output is deferred to scheduler drain; run under MARCH_NUM_SCHEDULERS=1
+; ── so the concurrent println's serialise deterministically (multi-thread
+; ── mode interleaves them mid-line).  Compile natively, run, diff stdout.
+(rule
+ (targets native_actor_stress native_actor_stress.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file apps/actor_stress.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_stress
+        apps/actor_stress.march)
+   (with-stdout-to native_actor_stress.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_actor_stress")))))
+
+(rule
+ (alias runtest)
+ (action (diff apps/actor_stress.expected native_actor_stress.out)))
+
+; ── Regression: compiled Task.await on a heap (ptr) result must untag the Ok
+; ── payload.  The thunk trampoline stores task[3] = (apply_ret << 1)|1;
+; ── march_task_await wraps it into Ok, but the Ok(x) destructure loads a ptr
+; ── field raw, so pre-fix the String/List payload was a wild ~2*addr pointer
+; ── -> `march: out of memory` / SIGSEGV.  The i64 case (6*7 -> 42) guards the
+; ── shared single-ashr untag path (double-tag 4*n+3).  Run single-threaded so
+; ── the sequential await prints serialise deterministically; diff stdout.
+(rule
+ (targets native_task_await_ptr native_task_await_ptr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/task_await_ptr.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_task_await_ptr
+        native/task_await_ptr.march)
+   (with-stdout-to native_task_await_ptr.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_task_await_ptr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_await_ptr.expected native_task_await_ptr.out)))
 
 ; ── FFI Phase 2: borrowed extern args must be freed caller-side (no leak) ──
 (rule
@@ -1340,6 +1928,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps (file ../runtime/march_runtime.mjs))
  (action (copy ../runtime/march_runtime.mjs march_runtime.mjs)))
 
+; Same for march_dom.mjs, needed by any JS test that actually calls a Dom
+; extern (the generated import is the relative specifier "./march_dom.mjs").
+(rule
+ (targets march_dom.mjs)
+ (deps (file ../runtime/march_dom.mjs))
+ (action (copy ../runtime/march_dom.mjs march_dom.mjs)))
+
 (rule
  (targets js_atom_ctor_field.mjs)
  (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
@@ -1409,6 +2004,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_let_tuple_destructure.out (run node js_let_tuple_destructure.mjs))))
 
 (rule (alias runtest) (action (diff native/let_tuple_destructure.expected js_let_tuple_destructure.out)))
+
+; ── Regression: shadowed same-block `let` under --target js (TDZ crash) ────
+; See the native_let_shadow_rebind rule above for the full writeup — this is
+; the JS-target half of the same regression.
+(rule
+ (targets js_let_shadow_rebind.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/let_shadow_rebind.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_shadow_rebind.mjs native/let_shadow_rebind.march)))
+
+(rule
+ (targets js_let_shadow_rebind.out)
+ (deps js_let_shadow_rebind.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_shadow_rebind.out (run node js_let_shadow_rebind.mjs))))
+
+(rule (alias runtest) (action (diff native/let_shadow_rebind.expected js_let_shadow_rebind.out)))
 
 (rule
  (targets js_newtype_counter.mjs)
@@ -1495,6 +2107,112 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_dom_available.expected js_dom_available.out)))
 
+; js_dom_timeout_callback — verifies Dom.set_timeout's `Int -> Unit` callback
+; (dummy ignored arg, not `Unit -> Unit`) both typechecks with `fn _ -> ...`
+; and actually fires via the `cb._0(cb, 0)` ABI in march_dom.mjs.
+(rule
+ (targets js_dom_timeout_callback.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_dom_timeout_callback.march) march_runtime.mjs march_dom.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_dom_timeout_callback.mjs native/js_dom_timeout_callback.march)))
+
+(rule
+ (targets js_dom_timeout_callback.out)
+ (deps js_dom_timeout_callback.mjs march_runtime.mjs march_dom.mjs)
+ (action (with-stdout-to js_dom_timeout_callback.out (run node js_dom_timeout_callback.mjs))))
+
+(rule (alias runtest) (action (diff native/js_dom_timeout_callback.expected js_dom_timeout_callback.out)))
+
+; js_canvas_available — verifies that canvas.march is auto-loaded for --target js builds
+(rule
+ (targets js_canvas_available.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_canvas_available.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_canvas_available.mjs native/js_canvas_available.march)))
+
+(rule
+ (targets js_canvas_available.out)
+ (deps js_canvas_available.mjs march_runtime.mjs)
+ (action (with-stdout-to js_canvas_available.out (run node js_canvas_available.mjs))))
+
+(rule (alias runtest) (action (diff native/js_canvas_available.expected js_canvas_available.out)))
+
+; js_random_determinism — pins stdlib Random on the JS target: the fixture
+; self-checks range/distinctness and the golden diff pins cross-run
+; determinism. Random's sfc32 core is exact on every backend, so the
+; .expected values are identical to the interpreter's and native's output.
+(rule
+ (targets js_random_determinism.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_random_determinism.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_random_determinism.mjs native/js_random_determinism.march)))
+
+(rule
+ (targets js_random_determinism.out)
+ (deps js_random_determinism.mjs march_runtime.mjs)
+ (action (with-stdout-to js_random_determinism.out (run node js_random_determinism.mjs))))
+
+(rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
+
+; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
+; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
+; const. Pins native/JS parity with the interpreter (values in the fixture).
+; js_match_stmt_fallthrough — statement-position match arms must break, not fall
+; through the emitted switch into the non-exhaustive default throw
+(rule
+ (targets js_match_stmt_fallthrough.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_match_stmt_fallthrough.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_match_stmt_fallthrough.mjs native/js_match_stmt_fallthrough.march)))
+
+(rule
+ (targets js_match_stmt_fallthrough.out)
+ (deps js_match_stmt_fallthrough.mjs march_runtime.mjs)
+ (action (with-stdout-to js_match_stmt_fallthrough.out (run node js_match_stmt_fallthrough.mjs))))
+
+(rule (alias runtest) (action (diff native/js_match_stmt_fallthrough.expected js_match_stmt_fallthrough.out)))
+
+; js_self_tail_call_rc_drop — a self-recursive tail call whose Cons-branch
+; drops a heap-allocated (RC'd) binding it never read must still return its
+; own value, not `undefined`. Perceus keeps self-tail-calls in the shape
+; ESeq(call, EDecRC(dead_var)...) so llvm_emit.ml's TCO pass can recognize
+; and rewrite them; the JS backend has no such rewrite and was emitting the
+; call as a bare (unreturned) statement, discarding its result.
+(rule
+ (targets js_self_tail_call_rc_drop.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_self_tail_call_rc_drop.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_self_tail_call_rc_drop.mjs native/js_self_tail_call_rc_drop.march)))
+
+(rule
+ (targets js_self_tail_call_rc_drop.out)
+ (deps js_self_tail_call_rc_drop.mjs march_runtime.mjs)
+ (action (with-stdout-to js_self_tail_call_rc_drop.out (run node js_self_tail_call_rc_drop.mjs))))
+
+(rule (alias runtest) (action (diff native/js_self_tail_call_rc_drop.expected js_self_tail_call_rc_drop.out)))
+
+; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
+; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
+; const. Pins native/JS parity with the interpreter (values in the fixture).
+(rule
+ (targets js_let_shadowing.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_let_shadowing.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_let_shadowing.mjs native/js_let_shadowing.march)))
+
+(rule
+ (targets js_let_shadowing.out)
+ (deps js_let_shadowing.mjs march_runtime.mjs)
+ (action (with-stdout-to js_let_shadowing.out (run node js_let_shadowing.mjs))))
+
+(rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)
@@ -1562,6 +2280,20 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
          -o js_ffi_cbacked.mjs native/js_ffi_cbacked.march)))))
 
 (rule (alias runtest) (action (diff native/js_ffi_cbacked.expected js_ffi_cbacked.err)))
+
+; js_unmapped_builtin — negative test: a builtin with no JS mapping must be a
+; compile error (previously a silent bare-call emit → runtime ReferenceError)
+(rule
+ (targets js_unmapped_builtin.err)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_unmapped_builtin.march))
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to js_unmapped_builtin.err
+    (run %{exe:../bin/main.exe} --target js
+         -o js_unmapped_builtin.mjs native/js_unmapped_builtin.march)))))
+
+(rule (alias runtest) (action (diff native/js_unmapped_builtin.expected js_unmapped_builtin.err)))
 
 ; js_ffi_blocking_raises — both flags set: await + try/catch → Ok/Err
 (rule
@@ -1787,3 +2519,61 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/rpc_auto_enroll.expected native_rpc_auto_enroll.out)))
+
+; ── Regression (2026-07-02): a user local named with the march_ prefix
+; (`let march_bin = ...`) must take the normal local-load path, not be
+; emitted as a bare @global by emit_atom's march_-extern arm (the B9 arm
+; needed the var_slot shadow guard; first hit: bastion forge/console.march).
+(rule
+ (targets native_march_prefixed_local native_march_prefixed_local.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/march_prefixed_local.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_march_prefixed_local
+        native/march_prefixed_local.march)
+   (with-stdout-to native_march_prefixed_local.out
+        (system "./native_march_prefixed_local")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/march_prefixed_local.expected native_march_prefixed_local.out)))
+
+; ── Regression: self-referencing block-let shadowing (`let x = x + 5`).
+; Lowering emitted both bindings under the source name `x`, so name-based TIR
+; passes (copy-prop/fold) captured across the shadow and folded the inner
+; USE site to the OUTER value (e.g. single(10) -> 10 instead of 15), silently
+; miscompiling on native (and JS) while the interpreter stayed correct. Fixed
+; by Lower_decls.uniquify_fn (alpha-rename shadowed local binders). Covers
+; single, chained, and match-arm-body shadows; compiled stdout must equal the
+; interpreter's (native/shadow_selfref_let.expected).
+(rule
+ (targets native_shadow_selfref_let native_shadow_selfref_let.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/shadow_selfref_let.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadow_selfref_let
+        native/shadow_selfref_let.march)
+   (with-stdout-to native_shadow_selfref_let.out
+        (system "./native_shadow_selfref_let")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadow_selfref_let.expected native_shadow_selfref_let.out)))

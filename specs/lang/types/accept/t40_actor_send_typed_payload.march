@@ -1,0 +1,30 @@
+mod Main do
+  -- Widening actors slice, Task 3 -- MESSAGE PAYLOAD TYPING (the accept path).
+  -- A message constructor's payload IS type-checked, via the ORDINARY
+  -- constructor-typing path. In the `ESend` arm (`typecheck.ml:4177`) the
+  -- message expression is typed by `let msg_ty = infer_expr env msg` (`:4179`),
+  -- so `Inc(3)` goes through the normal `ECon` constructor arm: the handler
+  -- registered `Inc` with payload type `Int` (`on Inc(x : Int)`, message ctor
+  -- `Counter_Msg`, §2.6.1 step 3), and `3 : Int` matches, so the send typechecks.
+  -- `check_sendable` (`:3335`, invoked at `:4180`) then walks the message type
+  -- and finds no `RingBuf`-family constructor, so it raises nothing.
+  --
+  -- The target Pid (`cap`) is INFERRED THEN DISCARDED (`ignore (infer_expr env
+  -- cap)`, `:4178`): the message is NOT checked against what `counter` accepts —
+  -- only the payload SHAPE is checked. See core-march-types.md §2.6.4 and the
+  -- affinity non-guarantee (finding 19).
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc(x : Int) do
+      { count: state.count + x }
+    end
+  end
+
+  fn main() do
+    let counter = spawn(Counter)
+    send(counter, Inc(3))
+    println(bool_to_string(is_alive(counter)))
+  end
+end

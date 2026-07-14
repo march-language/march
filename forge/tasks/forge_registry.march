@@ -1,0 +1,411 @@
+-- forge registry client — `forge publish` / `forge retire` over march's NATIVE
+-- HTTP/TLS (no curl, no cohttp). Run by the OCaml shims (cmd_publish.ml /
+-- cmd_retire.ml), which COMPILE this file (native TLS only works compiled) and run
+-- it with env:
+--   FORGE_ACTION    "publish" | "retire"           (default publish)
+--   FORGE_TOKEN     API key (Bearer) with publish/retire permission (required)
+--   FORGE_REGISTRY  registry base URL              (default https://forgepm.org)
+--   FORGE_PKG_DIR   package dir (has forge.toml)   (publish; default ".")
+--   FORGE_VERSION   version to retire              (retire)
+--   FORGE_REASON    retirement reason text         (retire; default "")
+--   FORGE_INSECURE  "1" to allow an http:// registry (local dev)
+-- Exit codes (specs/forge-publish-client.md §7): 0 ok · 1 config · 2 local ·
+-- 3 transport · 4 server 4xx · 5 server 5xx.  self-contained: only the stdlib
+-- (Tls/tcp_*, Crypto, Toml, Uri, Process, File) + one `tar` shell-out.
+mod ForgeRegistry do
+
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetConnect.TLS
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Random
+
+  import Process
+
+type PublishResult = Published(String, String, String) | Rejected(String, String, Int)
+
+-- ── HTTP/1.1 over native TLS (https) or raw TCP (http) ────────────────────
+
+pfn strip_crlf(s) do String.replace_all(String.replace_all(s, "\r", ""), "\n", "") end
+
+pfn header_lines_go(headers, acc) do
+  match headers do
+  Nil                -> acc
+  Cons((n, v), rest) -> header_lines_go(rest, acc ++ strip_crlf(n) ++ ": " ++ strip_crlf(v) ++ "\r\n")
+  end
+end
+
+pfn build_request(method, path, host, headers, body) do
+  let req_line = strip_crlf(method) ++ " " ++ strip_crlf(path) ++ " HTTP/1.1\r\n"
+  let host_hdr = "Host: " ++ strip_crlf(host) ++ "\r\n"
+  let clen_hdr = "Content-Length: " ++ int_to_string(String.byte_size(body)) ++ "\r\n"
+  req_line ++ host_hdr ++ header_lines_go(headers, "") ++ clen_hdr ++ "Connection: close\r\n\r\n" ++ body
+end
+
+pfn before_space(s) do
+  match String.split_first(s, " ") do
+  Some((tok, _)) -> tok
+  None           -> s
+  end
+end
+
+pfn before_cr(s) do
+  match String.split_first(s, "\r") do
+  Some((tok, _)) -> tok
+  None           -> s
+  end
+end
+
+pfn parse_status(raw) do
+  match String.split_first(raw, " ") do
+  None            -> 0
+  Some((_, rest)) ->
+    match string_to_int(before_cr(before_space(rest))) do
+    Some(n) -> n
+    None    -> 0
+    end
+  end
+end
+
+pfn response_body(raw) do
+  match String.split_first(raw, "\r\n\r\n") do
+  Some((_, body)) -> body
+  None            -> ""
+  end
+end
+
+-- Read the TLS response into a chunk list (O(n) join), clean_eof if Ok("").
+pfn read_chunks(conn, acc) do
+  match Tls.read(conn, 65536) do
+  Err(_)    -> (acc, false)
+  Ok(chunk) -> if String.byte_size(chunk) == 0 do (acc, true) else read_chunks(conn, Cons(chunk, acc)) end
+  end
+end
+
+-- Return (status, body) as a tuple, not a record — a record double-projection
+-- (resp.status then resp.body) trips a compiled RC-underflow on the success path.
+fn finalize(raw) do (parse_status(raw), response_body(raw)) end
+
+pfn send_over(conn, fd, method, full_path, host, headers, body) do
+  match Tls.write(conn, build_request(method, full_path, host, headers, body)) do
+  Err(e) -> do
+    Tls.close(conn)
+    tcp_close(fd)
+    Err("write failed: " ++ Tls.error_to_string(e))
+  end
+  Ok(_) -> do
+    match read_chunks(conn, Nil) do
+    (rev, _) -> do
+      Tls.close(conn)
+      tcp_close(fd)
+      Ok(finalize(String.join(List.reverse(rev), "")))
+    end
+    end
+  end
+  end
+end
+
+pfn send_tls(method, host, port, full_path, headers, body) do
+  match Tls.client_ctx(Tls.default_client_config()) do
+  Err(e) -> Err("tls ctx: " ++ Tls.error_to_string(e))
+  Ok(ctx) ->
+    match tcp_connect(host, port) do
+    Err(m) -> Err("connect " ++ host ++ ": " ++ m)
+    Ok(fd) ->
+      match Tls.connect(fd, ctx, host) do
+      Err(e) -> do
+        tcp_close(fd)
+        Err("handshake: " ++ Tls.error_to_string(e))
+      end
+      Ok(conn) -> send_over(conn, fd, method, full_path, host, headers, body)
+      end
+    end
+  end
+end
+
+pfn send_plain(method, host, port, full_path, headers, body) do
+  match tcp_connect(host, port) do
+  Err(m) -> Err("connect " ++ host ++ ": " ++ m)
+  Ok(fd) ->
+    match tcp_send_all(fd, build_request(method, full_path, host, headers, body)) do
+    Err(e) -> do
+      tcp_close(fd)
+      Err("write failed: " ++ e)
+    end
+    Ok(_) ->
+      match tcp_recv_http(fd, 16777216) do
+      Err(e) -> do
+        tcp_close(fd)
+        Err("read failed: " ++ e)
+      end
+      Ok(raw) -> do
+        tcp_close(fd)
+        Ok(finalize(raw))
+      end
+      end
+    end
+  end
+end
+
+pfn path_or_root(path, query) do
+  let p = if String.byte_size(path) == 0 do "/" else path end
+  if String.byte_size(query) > 0 do p ++ "?" ++ query else p end
+end
+
+fn request(method, url, headers, body) do
+  match Uri.parse(url) do
+  URI(scheme, host, port_opt, path, query, _) ->
+    let full_path = path_or_root(path, query)
+    if scheme == "http" do
+      let port = match port_opt do
+                 Some(p) -> p
+                 None    -> 80
+                 end
+      send_plain(method, host, port, full_path, headers, body)
+    else
+      let port = match port_opt do
+                 Some(p) -> p
+                 None    -> 443
+                 end
+      send_tls(method, host, port, full_path, headers, body)
+    end
+  end
+end
+
+-- ── Multipart body ────────────────────────────────────────────────────────
+
+fn multipart(boundary, tarball, filename, checksum) do
+  let dash = "--" ++ boundary
+  let p1 = dash ++ "\r\nContent-Disposition: form-data; name=\"tarball\"; filename=\"" ++ filename ++ "\"\r\nContent-Type: application/octet-stream\r\n\r\n" ++ tarball ++ "\r\n"
+  let p2 = dash ++ "\r\nContent-Disposition: form-data; name=\"checksum\"\r\n\r\n" ++ checksum ++ "\r\n"
+  p1 ++ p2 ++ dash ++ "--\r\n"
+end
+
+-- ── Registry URLs + response classification ───────────────────────────────
+
+pfn no_trailing_slash(s) do
+  if String.ends_with(s, "/") do String.slice_bytes(s, 0, String.byte_size(s) - 1) else s end
+end
+
+fn publish_url(registry, name) do no_trailing_slash(registry) ++ "/api/v1/packages/" ++ name ++ "/releases" end
+fn retire_url(registry, name, vsn) do publish_url(registry, name) ++ "/" ++ vsn end
+
+pfn json_str(body, key) do
+  match String.split_first(body, "\"" ++ key ++ "\":\"") do
+  None            -> ""
+  Some((_, rest)) ->
+    match String.split_first(rest, "\"") do
+    Some((val, _)) -> val
+    None           -> ""
+    end
+  end
+end
+
+fn friendly(code, server_msg, status) do
+  match code do
+  "2fa_required"             -> "enable 2FA in your account settings before publishing"
+  "account_not_approved"     -> "your account is awaiting admin approval to publish"
+  "insufficient_permissions" -> "this API key lacks the required permission"
+  "reserved_name"            -> "that package name is reserved"
+  "version_exists"           -> "that version is already published — bump the version in forge.toml"
+  "checksum_mismatch"        -> "tarball checksum mismatch (client and server disagree)"
+  "name_mismatch"            -> "forge.toml name does not match the package name"
+  "invalid_tarball"          -> "the tarball could not be parsed"
+  "invalid_name"             -> "invalid package name"
+  "forbidden"                -> "this package is owned by another account"
+  "name_too_similar"         -> "name is confusable with an existing package"
+  "not_found"                -> "no such package/version"
+  "" -> if String.byte_size(server_msg) > 0 do server_msg else "server returned HTTP " ++ int_to_string(status) end
+  _  -> if String.byte_size(server_msg) > 0 do server_msg else code end
+  end
+end
+
+fn classify(status, body) do
+  if status >= 200 && status < 300 do
+    Published(json_str(body, "name"), json_str(body, "version"), json_str(body, "checksum"))
+  else
+    let code = json_str(body, "error")
+    Rejected(code, friendly(code, json_str(body, "message"), status), status)
+  end
+end
+
+pfn exit_code(result) do
+  match result do
+  Published(_, _, _)   -> 0
+  Rejected(_, _, http) -> if http >= 500 do 5 else 4 end
+  end
+end
+
+-- ── Manifest (forge.toml -> name, version) ────────────────────────────────
+
+fn read_name_version(toml_str) do
+  match Toml.parse(toml_str) do
+  Err(_)   -> Err("forge.toml: could not parse TOML")
+  Ok(root) ->
+    match Toml.get_table(root, "package") do
+    None      -> Err("forge.toml: missing [package] table")
+    Some(pkg) ->
+      match Toml.get_str(pkg, "name") do
+      None     -> Err("forge.toml: [package] has no name")
+      Some(nm) ->
+        match Toml.get_str(pkg, "version") do
+        None      -> Err("forge.toml: [package] has no version")
+        Some(vsn) -> Ok((nm, vsn))
+        end
+      end
+    end
+  end
+end
+
+-- ── Packaging + orchestration ─────────────────────────────────────────────
+
+-- Package the source tree, excluding VCS/build/agent junk. Without these
+-- excludes the tarball sweeps in .git, .claude/worktrees, build caches, and
+-- compiled .ll IR — bloating it past the registry/CDN body limit (HTTP 413).
+-- Bare-name patterns match a dir at any depth in both BSD and GNU tar; excluding
+-- a directory drops its whole subtree.
+pfn make_tarball(pkg_dir, out_path) do
+  match Process.run("tar", ["czf", out_path,
+    "--exclude=.git", "--exclude=.claude", "--exclude=.march", "--exclude=_build",
+    "--exclude=node_modules", "--exclude=.forge", "--exclude=.DS_Store", "--exclude=*.ll",
+    "--exclude=trace", "--exclude=march-phases", "--exclude=playwright-report",
+    "--exclude=*.bak",
+    "-C", Path.dirname(pkg_dir), Path.basename(pkg_dir)]) do
+  Err(e)  -> Err("tar failed: " ++ e)
+  Ok(res) ->
+    match res do
+    ProcessResult(code, _, stderr) ->
+      if code == 0 do Ok(out_path) else Err("tar exit " ++ int_to_string(code) ++ ": " ++ stderr) end
+    end
+  end
+end
+
+pfn auth_headers(token) do [("Authorization", "Bearer " ++ token)] end
+
+pfn do_publish(registry, token, pkg_dir) do
+  match File.read(Path.join(pkg_dir, "forge.toml")) do
+  Err(_)       -> Err("cannot read " ++ Path.join(pkg_dir, "forge.toml"))
+  Ok(toml_str) ->
+    match read_name_version(toml_str) do
+    Err(e)              -> Err(e)
+    Ok((name, version)) ->
+      let out = "/tmp/forge-publish-" ++ Crypto.random_hex(8) ++ ".tar.gz"
+      match make_tarball(pkg_dir, out) do
+      Err(e) -> Err(e)
+      Ok(_)  ->
+        match File.read(out) do
+        Err(_)      -> Err("cannot read built tarball at " ++ out)
+        Ok(tarball) ->
+          let checksum = Crypto.sha256(tarball)
+          let boundary = "forgeMultipart" ++ Crypto.random_hex(16)
+          let headers  = List.append(auth_headers(token), [("Content-Type", "multipart/form-data; boundary=" ++ boundary)])
+          let body     = multipart(boundary, tarball, name ++ "-" ++ version ++ ".tar.gz", checksum)
+          match request("POST", publish_url(registry, name), headers, body) do
+          Err(e)       -> Err("transport: " ++ e)
+          Ok((st, bd)) -> Ok(classify(st, bd))
+          end
+        end
+      end
+    end
+  end
+end
+
+pfn do_retire(registry, token, name, version, reason) do
+  match request("DELETE", retire_url(registry, name, version), auth_headers(token), reason) do
+  Err(e)       -> Err("transport: " ++ e)
+  Ok((st, bd)) ->
+    if st >= 200 && st < 300 do Ok(Published(name, version, ""))
+    else Ok(Rejected(json_str(bd, "error"), friendly(json_str(bd, "error"), json_str(bd, "message"), st), st)) end
+  end
+end
+
+-- ── Entry points (called from main) ───────────────────────────────────────
+
+fn run_publish() do
+  let registry = Env.get("FORGE_REGISTRY", "https://forgepm.org")
+  let token    = Env.get("FORGE_TOKEN", "")
+  let pkg_dir  = Env.get("FORGE_PKG_DIR", ".")
+  if String.byte_size(token) == 0 do
+    println("error: FORGE_TOKEN is required (an API key with the 'publish' permission)")
+    Process.exit(1)
+  else
+    match do_publish(registry, token, pkg_dir) do
+    Err(e)     -> do println("publish failed: " ++ e) Process.exit(3) end
+    Ok(result) ->
+      match result do
+      Published(nm, vsn, cs)    -> do println("published " ++ nm ++ " " ++ vsn ++ " (sha256 " ++ String.slice_bytes(cs, 0, 12) ++ ")") Process.exit(0) end
+      Rejected(code, msg, http) -> do println("rejected [" ++ int_to_string(http) ++ " " ++ code ++ "]: " ++ msg) Process.exit(if http >= 500 do 5 else 4 end) end
+      end
+    end
+  end
+end
+
+fn run_retire() do
+  let registry = Env.get("FORGE_REGISTRY", "https://forgepm.org")
+  let token    = Env.get("FORGE_TOKEN", "")
+  let pkg_dir  = Env.get("FORGE_PKG_DIR", ".")
+  let version  = Env.get("FORGE_VERSION", "")
+  let reason   = Env.get("FORGE_REASON", "")
+  if String.byte_size(token) == 0 do
+    println("error: FORGE_TOKEN is required (an API key with the 'retire' permission)")
+    Process.exit(1)
+  else if String.byte_size(version) == 0 do
+    println("error: a version to retire is required")
+    Process.exit(1)
+  else
+    match File.read(Path.join(pkg_dir, "forge.toml")) do
+    Err(_)       -> do println("cannot read forge.toml to determine the package name") Process.exit(2) end
+    Ok(toml_str) ->
+      match read_name_version(toml_str) do
+      Err(e)          -> do println(e) Process.exit(2) end
+      Ok((name, _))   ->
+        match do_retire(registry, token, name, version, reason) do
+        Err(e)     -> do println("retire failed: " ++ e) Process.exit(3) end
+        Ok(result) ->
+          match result do
+          Published(nm, vsn, _)     -> do println("retired " ++ nm ++ " " ++ vsn) Process.exit(0) end
+          Rejected(code, msg, http) -> do println("rejected [" ++ int_to_string(http) ++ " " ++ code ++ "]: " ++ msg) Process.exit(if http >= 500 do 5 else 4 end) end
+          end
+        end
+      end
+    end
+  end
+  end
+end
+
+-- Read action (dependency resolution): GET FORGE_URL over native HTTP/TLS and
+-- write the raw response body to FORGE_OUT. Used by `forge deps` to fetch
+-- registry metadata JSON and package tarballs (the OCaml side has no HTTP
+-- client and we avoid curl). No token needed — reads are public. Exit codes
+-- match the publish convention: 0 ok, 2 local (write), 3 transport, 4 http 4xx.
+pfn run_fetch() do
+  let url = Env.get("FORGE_URL", "")
+  let out = Env.get("FORGE_OUT", "")
+  if String.byte_size(url) == 0 || String.byte_size(out) == 0 do
+    do println("error: FORGE_URL and FORGE_OUT are required") Process.exit(1) end
+  else
+    match request("GET", url, [], "") do
+    Err(e)       -> do println("transport: " ++ e) Process.exit(3) end
+    Ok((st, bd)) ->
+      if st >= 200 && st < 300 do
+        match File.write(out, bd) do
+        Err(e) -> do println("write failed: " ++ e) Process.exit(2) end
+        Ok(_)  -> do println("ok " ++ int_to_string(st) ++ " " ++ int_to_string(String.byte_size(bd))) Process.exit(0) end
+        end
+      else
+        do println("http " ++ int_to_string(st)) Process.exit(4) end
+      end
+    end
+  end
+end
+
+fn main() do
+  match Env.get("FORGE_ACTION", "publish") do
+  "retire" -> run_retire()
+  "fetch"  -> run_fetch()
+  _        -> run_publish()
+  end
+end
+
+end

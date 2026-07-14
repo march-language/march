@@ -38,7 +38,21 @@ type ctx = { mutable diagnostics : diagnostic list }
 
 let create () = { diagnostics = [] }
 
-let report ctx diag = ctx.diagnostics <- diag :: ctx.diagnostics
+(* Some diagnostics get re-derived at every use of a declaration whose own
+   definition is broken (e.g. instantiating a constructor re-resolves its
+   stored surface argument types on each use, needed for fresh per-use type
+   variables) — a name that fails to resolve there gets reported once per
+   instantiation instead of once.  A diagnostic identical in severity, span,
+   AND message can only be the same fact re-derived, never two independent
+   issues that coincide byte-for-byte at the same source location, so
+   suppress an exact repeat rather than showing the user the same error
+   three times. *)
+let report ctx diag =
+  let is_dup (d : diagnostic) =
+    d.severity = diag.severity && d.span = diag.span && d.message = diag.message
+  in
+  if not (List.exists is_dup ctx.diagnostics) then
+    ctx.diagnostics <- diag :: ctx.diagnostics
 
 let error ctx ~span message =
   report ctx

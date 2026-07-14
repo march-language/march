@@ -22,6 +22,15 @@ type fn_manifest = {
   fn_impl_hash : string;
   fn_sig_hash  : string;
   fn_callers   : string list;  (* Phase 8: functions that call this one *)
+  fn_caps      : string list;  (* Phase 5C: IO-capability authority required (this
+                                   function's OWN caps as of the 2026-07-04
+                                   granularity revision — no longer an
+                                   artifact-wide union) *)
+  fn_has_caps  : bool;  (* true iff the manifest FN line carried a `caps=`
+                           field at all (even `caps=`, empty). Distinguishes
+                           a genuinely pre-Phase-5C legacy manifest (no fn
+                           has this field) from a current manifest where a
+                           capless function legitimately has fn_caps = []. *)
 }
 
 type manifest = {
@@ -40,24 +49,59 @@ let parse_manifest path : (manifest, string) result =
          (* # cas_hash <hex> *)
          if String.length line > 10 && String.sub line 0 10 = "# cas_hash" then
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
+       end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
+         (* Legacy pre-2026-07-04 manifests may still carry a
+            "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
+            Recognize and skip it so `String.split_on_char ' '` doesn't
+            otherwise fall into the FN-line branches below and fabricate a
+            phantom function named "ROOT". *)
+         ()
        end else begin
+         let has_prefix field prefix =
+           let plen = String.length prefix in
+           String.length field >= plen && String.sub field 0 plen = prefix
+         in
          let parse_callers field =
-           if String.length field > 8 && String.sub field 0 8 = "callers:" then
+           if has_prefix field "callers:" then
              let s = String.sub field 8 (String.length field - 8) in
              if s = "" then [] else String.split_on_char ',' s
            else []
          in
+         let parse_caps field =
+           if has_prefix field "caps=" then
+             let s = String.sub field 5 (String.length field - 5) in
+             if s = "" then [] else String.split_on_char ',' s
+           else []
+         in
+         (* caps= is not at a fixed field index — it sits after `callers:`
+            only when a `callers:` token is present, so scan the trailing
+            tokens for whichever one carries the `caps=` prefix instead of
+            indexing positionally. *)
+         let extract_from_tail tail =
+           let callers =
+             match List.find_opt (fun f -> has_prefix f "callers:") tail with
+             | Some f -> parse_callers f
+             | None -> []
+           in
+           let has_caps = List.exists (fun f -> has_prefix f "caps=") tail in
+           let caps =
+             match List.find_opt (fun f -> has_prefix f "caps=") tail with
+             | Some f -> parse_caps f
+             | None -> []
+           in
+           (callers, caps, has_caps)
+         in
          (match String.split_on_char ' ' line with
-         | name :: impl_h :: sig_h :: callers_field :: _ ->
-           let callers = parse_callers callers_field in
+         | name :: impl_h :: sig_h :: tail when tail <> [] ->
+           let (callers, caps, has_caps) = extract_from_tail tail in
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = callers } :: !fns
+                    fn_callers = callers; fn_caps = caps; fn_has_caps = has_caps } :: !fns
          | [name; impl_h; sig_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = sig_h;
-                    fn_callers = [] } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
          | [name; impl_h] ->
            fns := { fn_name = name; fn_impl_hash = impl_h; fn_sig_hash = "";
-                    fn_callers = [] } :: !fns
+                    fn_callers = []; fn_caps = []; fn_has_caps = false } :: !fns
          | _ -> ())  (* skip malformed lines *)
        end
      done with End_of_file -> ());
@@ -65,6 +109,210 @@ let parse_manifest path : (manifest, string) result =
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
     else Ok { cas_hash = !cas_hash; functions = List.rev !fns }
   with Sys_error m -> Error m
+
+(** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
+    function line carries a `caps=` field at all. A current manifest always
+    has `caps=` on every FN line (possibly `caps=` empty for a capless
+    function), so this only fires for manifests written before Phase 5C
+    Part A landed. *)
+let is_legacy_manifest (m : manifest) : bool =
+  not (List.exists (fun fm -> fm.fn_has_caps) m.functions)
+
+(** [fn_cap_root own_caps] — per-function cap_root, matching byte-for-byte the
+    server's recompute recipe in runtime/march_reload.c's compute_cap_root:
+    split → sort_uniq → march_cap_normalize → join "\n" → blake3. Mirrored
+    here as: Cap_lattice.normalize (order-preserving) then List.sort (to
+    match the server's sort-before-normalize canonical order) then
+    concat "\n" then Blake3.hash_string. *)
+let fn_cap_root (own_caps : string list) : string =
+  let normalized = March_caps.Cap_lattice.normalize own_caps in
+  let sorted = List.sort String.compare normalized in
+  March_cas.Blake3.hash_string (String.concat "\n" sorted)
+
+(* ─── Capability monotonicity gate (Phase 5C Part B, Task 4/5) ───────────────
+
+   A hot deploy may narrow the running system's IO-capability authority
+   freely, but widening it is blocked unless the operator explicitly
+   authorizes the widening with one or more repeatable `--grant-cap <C>`
+   flags (Task 5; see `filter_granted_widening` below).
+
+   [compute_cap_widening ~prior ~new_caps] returns the subset of [new_caps]
+   not already subsumed by some cap in [prior] — i.e. the caps a hot deploy
+   would newly introduce.  Both lists are expected to already be
+   [March_caps.Cap_lattice.normalize]d, but this function does not require that. *)
+let compute_cap_widening ~(prior : string list) ~(new_caps : string list) : string list =
+  List.filter (fun c -> not (List.exists (fun p -> March_caps.Cap_lattice.cap_subsumes p c) prior)) new_caps
+
+(** [compute_cap_narrowing ~prior ~new_caps] — prior caps no longer present in
+    the new build.  Log-only: narrowing is always allowed.
+
+    I2 fix: use [Cap_lattice.cap_subsumes] (the same way [compute_cap_widening]
+    above already does) rather than exact-match [List.mem].  Both lists are
+    normalized (subsumed-duplicate caps already dropped), so an exact-match
+    filter misreports narrowing whenever the new build still holds a broader
+    cap that covers the prior one — e.g. new build holds [IO] (root), prior
+    held [IO.FileRead]: exact match would report [IO.FileRead] as "narrowed
+    away" even though [IO] still covers it, so no narrowing actually
+    occurred.  A prior cap only counts as genuinely narrowed if nothing in
+    [new_caps] subsumes it. *)
+let compute_cap_narrowing ~(prior : string list) ~(new_caps : string list) : string list =
+  List.filter (fun p -> not (List.exists (fun n -> March_caps.Cap_lattice.cap_subsumes n p) new_caps)) prior
+
+(** [compute_scoped_caps ~to_activate ~prior] — pure factoring of the
+    per-function-scoped monotonicity gate (Granularity revision, 2026-07-04).
+
+    Returns [(prior_caps, new_caps)], both normalized, ready to hand to
+    [compute_cap_widening] / [compute_cap_narrowing]:
+
+      - [prior = None] (no baseline — first deploy / legacy): returns
+        [([], normalize (union of to_activate's own caps))], matching the
+        permissive "NOTE" branch in [run].
+      - [prior = Some prior_manifest]: for each function being activated,
+        look up that SAME function's own caps in the prior baseline by name
+        ([] if the function is new relative to the baseline — not present in
+        the prior manifest at all), union and normalize across all activated
+        functions for [prior_caps]; union and normalize each activated
+        function's CURRENT own caps for [new_caps]. This is scoped to
+        [to_activate] only — deliberately not the whole-artifact union, which
+        is dominated by the linked stdlib and app-invariant, so it can't
+        discriminate a real widening. *)
+let compute_scoped_caps ~(to_activate : fn_manifest list) ~(prior : manifest option)
+  : string list * string list =
+  let new_caps =
+    March_caps.Cap_lattice.normalize
+      (List.concat_map (fun fm -> fm.fn_caps) to_activate)
+  in
+  match prior with
+  | None -> ([], new_caps)
+  | Some prior_manifest ->
+    let prior_by_name : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun fm -> Hashtbl.replace prior_by_name fm.fn_name fm.fn_caps)
+      prior_manifest.functions;
+    let prior_caps =
+      March_caps.Cap_lattice.normalize
+        (List.concat_map (fun fm ->
+             Option.value ~default:[] (Hashtbl.find_opt prior_by_name fm.fn_name))
+            to_activate)
+    in
+    (prior_caps, new_caps)
+
+(* ─── ACTIVATE3 / ACTIVATE4 wire-line builders (Phase 5C Part C, Task C4) ────
+
+   Factored into pure functions (no socket I/O) so the wire shape is
+   unit-testable without a live server. Each returns the `signed` message
+   (the exact string that gets ed25519-signed) and the `wire_prefix` — the
+   unsigned command line MINUS the trailing " <sig_b64> ..." suffix that the
+   caller appends once it has computed the signature (avoids duplicating the
+   signing step inside this pure helper). Concretely:
+
+     wire_line = wire_prefix ^ " " ^ sig_b64 ^ " " ^ <rest>
+
+   where <rest> is protocol-specific (see each builder). *)
+
+(** ACTIVATE3 (legacy / --no-cap-gate fallback; byte-for-byte unchanged shape).
+    Returns [(signed, wire_head)] where:
+      signed   = "ACTIVATE3 <name> <impl> <cas> <migrate> epoch:<N> callers:<csv>"
+      wire_head = "ACTIVATE3 <name> <impl> <cas>"  (caller appends " <sig_b64> <migrate> epoch:<N> callers:<csv>") *)
+let build_activate3_lines ~name ~impl ~cas ~migrate ~epoch ~callers_csv : string * string =
+  let signed = Printf.sprintf "ACTIVATE3 %s %s %s %d epoch:%d callers:%s"
+    name impl cas migrate epoch callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE3 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** ACTIVATE4 (Phase 5C Part C): adds cap_root (signed) + caps (unsigned).
+    Returns [(signed, wire_head)] where:
+      signed    = "ACTIVATE4 <name> <impl> <cas> <migrate> epoch:<N> cap_root:<hex> callers:<csv>"
+                  — caps is deliberately NOT in the signed message (see
+                  runtime/march_reload.c ACTIVATE4 handler: trust comes from
+                  the server recomputing cap_root over the received caps and
+                  matching it against this signed value).
+      wire_head = "ACTIVATE4 <name> <impl> <cas>"  (caller appends
+                  " <sig_b64> <migrate> epoch:<N> cap_root:<hex> caps:<csv> callers:<csv>")
+    cap_root and caps both precede callers on the wire (server scans
+    `callers:` to end-of-line, so nothing may follow it). *)
+let build_activate4_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~callers_csv : string * string =
+  let signed = Printf.sprintf "ACTIVATE4 %s %s %s %d epoch:%d cap_root:%s callers:%s"
+    name impl cas migrate epoch cap_root callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE4 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** For each widened cap, find a function in [functions] whose [fn_caps]
+    contains (or subsumes-would-need) that cap — used to attribute the
+    widening to a specific manifest line in the diagnostic.  Picks the first
+    function (in manifest name order) that literally lists the cap.
+
+    M5 fix: [functions] arrives here in [manifest.functions]'s order, which
+    the manifest-file writer emits via [Hashtbl.iter] (unspecified order) —
+    so which function got blamed in the diagnostic could vary build-to-build
+    for the exact same source.  Sort by [fn_name] first so the search (and
+    thus the diagnostic) is deterministic and reproducible. *)
+let attribute_widening (functions : fn_manifest list) (widening : string list) : (string * string) list =
+  let sorted_functions =
+    List.sort (fun a b -> String.compare a.fn_name b.fn_name) functions in
+  List.map (fun cap ->
+    let introducer =
+      match List.find_opt (fun fm -> List.mem cap fm.fn_caps) sorted_functions with
+      | Some fm -> fm.fn_name
+      | None -> "?"
+    in
+    (cap, introducer)
+  ) widening
+
+(** [filter_granted_widening ~widening ~grant_caps] — Phase 5C Part B, Task 5.
+    Removes from [widening] every cap authorized by some entry in
+    [grant_caps], via subsumption (not exact string match): a grant of a
+    broader cap (e.g. [IO.FileSystem]) covers a narrower widened cap (e.g.
+    [IO.FileWrite]). Grants for caps that aren't actually being widened are
+    simply inert — they have no effect and produce no error. *)
+let filter_granted_widening ~(widening : string list) ~(grant_caps : string list) : string list =
+  List.filter (fun c -> not (List.exists (fun g -> March_caps.Cap_lattice.cap_subsumes g c) grant_caps)) widening
+
+(** Print the "hot deploy would add authority" diagnostic to stderr in the
+    fixed shape depended on by tooling/tests:
+
+      error: hot deploy would add authority not held by the running version
+        running version caps:  IO.Console, IO.NetConnect
+        new version adds:      IO.Process   (from MyApp.Server.handle)
+        A hot deploy may only narrow authority. To authorize this widening, re-run with:
+            forge deploy hot --grant-cap IO.Process
+        The grant is signed and recorded in the audit log.
+
+    Only caps still ungranted (after `filter_granted_widening` has removed
+    any covered by `--grant-cap`) are ever passed in via [attributed]. *)
+let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string * string) list) =
+  Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
+  Printf.eprintf "  running version caps:  %s\n"
+    (if prior_caps = [] then "(none)" else String.concat ", " prior_caps);
+  (* M3 fix: the padding width used to be a hardcoded 12, which misaligned
+     for caps longer than 12 chars (e.g. "IO.NetConnect.TLS",
+     "IO.Foreign.Blocking"). Compute it dynamically from the longest cap name
+     actually being printed so alignment holds regardless of cap length. *)
+  let pad_width =
+    List.fold_left (fun acc (cap, _) -> max acc (String.length cap)) 12 attributed in
+  List.iter (fun (cap, fn_name) ->
+    Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
+  ) attributed;
+  Printf.eprintf "  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n";
+  List.iter (fun (cap, _) ->
+    Printf.eprintf "      forge deploy hot --grant-cap %s\n" cap
+  ) attributed
+
+(** After a successful deploy, copy the just-deployed .hcr_manifest over the
+    baseline file, so next time's "prior" is this time's "new" — mirrors
+    [save_schemas_baseline] exactly. *)
+let save_manifest_baseline ~new_manifest_path ~prev_manifest_path =
+  if Sys.file_exists new_manifest_path then
+    (try
+      let ic = open_in new_manifest_path in
+      let content = In_channel.input_all ic in
+      close_in ic;
+      let march_dir = Filename.dirname prev_manifest_path in
+      (if not (Sys.file_exists march_dir) then
+         try Unix.mkdir march_dir 0o755 with Unix_error _ -> ());
+      let oc = open_out prev_manifest_path in
+      output_string oc content;
+      close_out oc
+    with Sys_error _ -> ())
 
 (* ─── Socket I/O ─────────────────────────────────────────────────────────── *)
 
@@ -110,20 +358,6 @@ let send_binary conn data offset len =
   in
   loop offset len
 
-(* ─── SHA-256 via digestif for CAS hash of the .so ─────────────────────── *)
-
-let sha256_file path =
-  let ic = open_in_bin path in
-  let ctx = Digestif.SHA256.empty in
-  let buf = Bytes.create 65536 in
-  let ctx = ref ctx in
-  (try while true do
-     let n = input ic buf 0 65536 in
-     if n = 0 then raise Exit;
-     ctx := Digestif.SHA256.feed_bytes !ctx (Bytes.sub buf 0 n)
-   done with Exit | End_of_file -> ());
-  close_in ic;
-  Digestif.SHA256.get !ctx |> Digestif.SHA256.to_hex
 
 (* ─── SSH tunnel ─────────────────────────────────────────────────────────── *)
 
@@ -297,7 +531,8 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
-    ?(provided_epoch=0) () =
+    ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
+    ?(no_cap_gate=false) () =
   let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
 
   (* 1. SSH tunnel *)
@@ -449,14 +684,71 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           if abi_violations <> [] && missing_callers = [] then
             Printf.printf "Coordinated upgrade: sig_hash changed, all callers covered.\n%!";
 
+          (* Phase 5C Part B, Task 4: capability monotonicity gate.
+             Absent baseline (first deploy ever) ⇒ permissive, matching the
+             old_schemas_path <> "" precedent above — log a note and proceed. *)
+          let prior_manifest_opt =
+            if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+              match parse_manifest old_manifest_path with
+              | Ok m -> Some m
+              | Error _ -> None
+            else None
+          in
+          (* Granularity revision (2026-07-04): scope the monotonicity gate to
+             the functions actually being activated (to_activate), not the
+             whole-artifact union — the union is dominated by the linked
+             stdlib and is app-invariant, so it can't discriminate a real
+             widening. For each activated function, compare its new own-caps
+             to that SAME function's own-caps in the prior baseline ([] if
+             the function is new relative to the baseline). *)
+          (match prior_manifest_opt with
+          | None ->
+            Printf.printf
+              "NOTE: no prior capability baseline found — capability widening gate is permissive for this deploy (legacy/first deploy).\n%!"
+          | Some _ ->
+            let (prior_caps, new_caps) =
+              compute_scoped_caps ~to_activate ~prior:prior_manifest_opt
+            in
+            let widening = compute_cap_widening ~prior:prior_caps ~new_caps in
+            let narrowing = compute_cap_narrowing ~prior:prior_caps ~new_caps in
+            if narrowing <> [] then
+              Printf.printf "NOTE: this deploy narrows capability authority (allowed): %s\n%!"
+                (String.concat ", " narrowing);
+            if widening <> [] then begin
+              (* Phase 5C Part B, Task 5: --grant-cap authorizes specific
+                 widenings (subsumption-matched, not exact string match). *)
+              let ungranted = filter_granted_widening ~widening ~grant_caps in
+              let granted_caps = List.filter (fun c -> not (List.mem c ungranted)) widening in
+              List.iter (fun cap ->
+                let covering_grant =
+                  match List.find_opt (fun g -> March_caps.Cap_lattice.cap_subsumes g cap) grant_caps with
+                  | Some g -> g
+                  | None -> cap
+                in
+                Printf.printf "  granted widening: %s (via --grant-cap %s)\n%!" cap covering_grant
+              ) granted_caps;
+              if ungranted <> [] then begin
+                let attributed = attribute_widening to_activate ungranted in
+                print_widening_diagnostic ~prior_caps ~attributed;
+                Unix.close fd;
+                raise (Failure "capability widening — deploy aborted")
+              end
+            end);
+
           (* 6. CAS_PUT the .so if not already present *)
-          (* Verify the .so on disk matches the manifest's cas_hash before
-             signing or uploading — catches manifest/binary skew. *)
-          let actual_hash = sha256_file so_path in
-          if actual_hash <> manifest.cas_hash then
-            raise (Failure (Printf.sprintf
-              "so file hash mismatch: manifest has %s but %s hashes to %s"
-              manifest.cas_hash so_path actual_hash));
+          (* NOTE (2026-07-04): the former skew check SHA-256-hashed the .so
+             to `manifest.cas_hash`, but cas_hash is the compiler's BLAKE3
+             *compilation hash* (blake3 of impl_hash+target+identities+flags,
+             March_cas.Cas.compilation_hash), NOT a SHA-256 of the .so bytes — the
+             two are different algorithms over different inputs and can never be
+             equal, so the check aborted every real deploy. It was dead-broken and
+             unexercised since it landed (df4fec3f, ACTIVATE3). Removed here to
+             unblock deploys. Proper manifest/binary skew detection needs a real
+             content hash recorded in the manifest (e.g. a `# so_blake3 <hex>` line
+             written by bin/main.ml after linking, verified here with the same
+             blake3) — tracked as a follow-up. Integrity today rests on the
+             ed25519 signature over (impl_hash, cas_hash) and the server keying the
+             artifact by cas_hash. *)
           let cas_hash = manifest.cas_hash in
           if not (cas_check conn cas_hash) then begin
             Printf.printf "Uploading artifact %s...\n%!" so_path;
@@ -558,31 +850,89 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                   | Error _ -> 1)
               else 0
             in
-            (* Protocol v3 (ACTIVATE3): migrate_required is also signed so it
-               can't be forged between the signature and the server. *)
+            (* Protocol v3/v4: migrate_required is also signed so it can't be
+               forged between the signature and the server.
+
+               Phase 5C Part C, Task C4 (revised 2026-07-04 for granularity):
+               emit ACTIVATE4 (cap_root admission) when this manifest carries
+               per-fn caps= fields and the operator hasn't forced the legacy
+               path with --no-cap-gate. A genuinely pre-Phase-5C legacy
+               manifest (no fn line anywhere carries caps=) always falls back
+               to ACTIVATE3, since there is no per-fn cap data to admit
+               against. Each activated function now sends its OWN cap_root,
+               computed from its OWN caps — never the whole-artifact union. *)
             let callers_sorted = List.sort String.compare fm.fn_callers in
             let callers_csv = String.concat "," callers_sorted in
             let epoch_n = if hcr_epoch > 0 then hcr_epoch else 0 in
-            let msg = Printf.sprintf "ACTIVATE3 %s %s %s %d epoch:%d callers:%s"
-              fm.fn_name fm.fn_impl_hash cas_hash migrate_required epoch_n callers_csv in
-            let sig_bytes = March_ed25519.Ed25519.sign_str msg sk in
-            let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-            let cmd = Printf.sprintf "ACTIVATE3 %s %s %s %s %d epoch:%d callers:%s"
-              fm.fn_name fm.fn_impl_hash cas_hash sig_b64 migrate_required
-              epoch_n callers_csv in
-            send_line conn cmd;
-            let resp = recv_line conn in
-            if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
-              Printf.printf "  activated: %s\n%!" fm.fn_name;
-              incr activated
-            end else if resp = "ERR unknown_command" then begin
-              Printf.eprintf
-                "  FAILED %s: server predates protocol v3 — restart the server binary\n%!"
+            let use_activate4 = (not (is_legacy_manifest manifest)) && not no_cap_gate in
+            if not use_activate4 && (not (is_legacy_manifest manifest)) && no_cap_gate then
+              Printf.printf
+                "  NOTE: %s — --no-cap-gate forces legacy ACTIVATE3 (capability admission skipped)\n%!"
+                fm.fn_name
+            else if not use_activate4 then
+              Printf.printf
+                "  NOTE: %s — legacy manifest (no caps= fields) — emitting ACTIVATE3\n%!"
                 fm.fn_name;
-              incr failed
+            if use_activate4 then begin
+              let fn_caps_sorted = List.sort String.compare fm.fn_caps in
+              let caps_csv = String.concat "," fn_caps_sorted in
+              let this_cap_root = fn_cap_root fm.fn_caps in
+              let (signed, wire_head) =
+                build_activate4_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                  ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                  ~callers_csv
+              in
+              let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
+              let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
+              let cmd = Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
+                wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv in
+              send_line conn cmd;
+              let resp = recv_line conn in
+              if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
+                Printf.printf "  activated: %s\n%!" fm.fn_name;
+                incr activated
+              end else if resp = "ERR unknown_command" then begin
+                Printf.eprintf
+                  "  FAILED %s: server predates capability admission (Phase 5C); upgrade the server or re-run with --no-cap-gate\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if resp = "ERR cap_tamper" then begin
+                Printf.eprintf
+                  "  FAILED %s: cap_tamper — server-recomputed cap_root did not match the signed value; deploy rejected\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if String.length resp >= 15 && String.sub resp 0 15 = "ERR cap_policy " then begin
+                Printf.eprintf
+                  "  FAILED %s: %s — deploy rejected by node capability policy\n%!"
+                  fm.fn_name resp;
+                incr failed
+              end else begin
+                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
+                incr failed
+              end
             end else begin
-              Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
-              incr failed
+              let (signed, wire_head) =
+                build_activate3_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                  ~migrate:migrate_required ~epoch:epoch_n ~callers_csv
+              in
+              let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
+              let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
+              let cmd = Printf.sprintf "%s %s %d epoch:%d callers:%s"
+                wire_head sig_b64 migrate_required epoch_n callers_csv in
+              send_line conn cmd;
+              let resp = recv_line conn in
+              if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
+                Printf.printf "  activated: %s\n%!" fm.fn_name;
+                incr activated
+              end else if resp = "ERR unknown_command" then begin
+                Printf.eprintf
+                  "  FAILED %s: server predates protocol v3 — restart the server binary\n%!"
+                  fm.fn_name;
+                incr failed
+              end else begin
+                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
+                incr failed
+              end
             end
           ) to_activate;
 
@@ -828,7 +1178,8 @@ let build_so ~proj ~output : (string * string, string) result =
     When [so] is non-empty, it is used as the pre-built .so (the build step is
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
-let deploy ?(output="") ?(so="") () : (unit, string) result =
+let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
+    : (unit, string) result =
   (* Load project *)
   match Project.load () with
   | Error m -> Error m
@@ -885,6 +1236,11 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
               let prev_schemas_path = Filename.concat
                   (Filename.concat proj.Project.root ".march")
                   (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+              (* Phase 5C Part B, Task 4: capability-monotonicity baseline —
+                 parallels prev_schemas_path exactly. *)
+              let prev_manifest_path = Filename.concat
+                  (Filename.concat proj.Project.root ".march")
+                  (proj.Project.name ^ "_hot.so.hcr_manifest.prev") in
               let entry_path =
                 match proj.Project.entrypoint with
                 | Some e -> Filename.concat proj.Project.root e
@@ -903,6 +1259,9 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                   ~old_schemas_path:prev_schemas_path
                   ~new_schemas_path
                   ~entry_path
+                  ~old_manifest_path:prev_manifest_path
+                  ~grant_caps
+                  ~no_cap_gate
                   ()
               in
               (* After successful deploy, save new schemas as the baseline for next time *)
@@ -921,6 +1280,9 @@ let deploy ?(output="") ?(so="") () : (unit, string) result =
                   close_out oc
                 with Sys_error _ -> ())
               | _ -> ());
+              (match result2 with
+              | Ok _ -> save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path
+              | Error _ -> ());
               result2 |> Result.map ignore
       end
 
@@ -947,7 +1309,8 @@ let ping_server ~ssh_host ~remote_socket : bool =
     Pass [~provided_epoch] to use a pre-fetched cluster-wide epoch (Phase 10)
     instead of calling GET_EPOCH on the server. *)
 let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
-    ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(provided_epoch=0) ()
+    ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
+    ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
     : (int, string) result =
   let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
   let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
@@ -957,7 +1320,10 @@ let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
     ~remote_socket:srv.Project.hre_socket
     ~signing_pubkey:pubkey
     ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path ~entry_path
+    ~old_manifest_path
     ~provided_epoch
+    ~grant_caps
+    ~no_cap_gate
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -978,7 +1344,8 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [env]: name of the [[hot-reload.env]] group (empty → use flat [hot-reload] config).
     - [canary]: if > 0, deploy to the first n servers, health-check, then roll out to rest.
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
-let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) () : (unit, string) result =
+let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
+    ?(grant_caps=([] : string list)) ?(no_cap_gate=false) () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
@@ -1032,6 +1399,8 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
             | Ok manifest ->
               let new_schemas_path = so_path2 ^ ".schemas.json" in
               let prev_schemas_path = out_prefix ^ ".so.schemas.json.prev" in
+              (* Phase 5C Part B, Task 4: capability-monotonicity baseline. *)
+              let prev_manifest_path = out_prefix ^ ".so.hcr_manifest.prev" in
 
               let entry_path =
                 match proj.Project.entrypoint with
@@ -1070,7 +1439,8 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                 List.map (fun srv ->
                   (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                           ~old_schemas_path:prev_schemas_path
-                          ~new_schemas_path ~entry_path ~provided_epoch:shared_epoch ())
+                          ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
+                          ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ())
                 ) srvs
               in
 
@@ -1082,7 +1452,8 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                   if not !stop then begin
                     let r = deploy_one ~srv ~sk ~manifest ~so_path:so_path2
                         ~old_schemas_path:prev_schemas_path
-                        ~new_schemas_path ~entry_path ~provided_epoch:shared_epoch () in
+                        ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
+                        ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate () in
                     results := (srv, r) :: !results;
                     (match r with
                     | Error _ -> stop := true
@@ -1145,6 +1516,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                         | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) rest_res in
                     if failed = [] then begin
                       save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                      save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
                       Ok ()
                     end else
                       Error (Printf.sprintf "%d server(s) failed during rollout" (List.length failed))
@@ -1160,6 +1532,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                     | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
                 if failed = [] then begin
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                  save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";
@@ -1178,6 +1551,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000) (
                 if failed = [] then begin
                   (* Only advance the schema baseline when all servers succeeded. *)
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
+                  save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
                   Ok ()
                 end else begin
                   Printf.eprintf "\nFailed servers:\n";

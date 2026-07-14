@@ -1,0 +1,5 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+mod M do
+  fn f(x : Int) : Int do x ++ "no" end
+  fn main() do () end
+end

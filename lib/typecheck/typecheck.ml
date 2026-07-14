@@ -423,6 +423,41 @@ type import_entry = {
   ie_used    : bool ref;
 }
 
+(* Index bookkeeping for [record_use]'s import-tracker lookup.  [record_use]
+   runs once per EVar in the WHOLE combined program (stdlib + every
+   auto-discovered file), so it must not re-scan the full [import_tracker]
+   list (whose length is O(total use/import/alias decls across the whole
+   program)) on every call -- that pairing is O(var-refs * imports), which
+   is quadratic-and-then-some on a multi-hundred-file project.  Instead each
+   entry is also indexed by every literal name it can EXACT-match (module
+   short names / aliased names) into [ie_exact_index], and by its
+   qualification prefix (the module/alias name before the dot) into
+   [ie_prefix_index], so [record_use] does two O(1)-average Hashtbl lookups
+   instead of an O(n) scan.  This mirrors -- but does not replace -- each
+   entry's original [ie_matches] closure, which remains the source of truth
+   used at entry-creation time to populate the index (no behavior change,
+   just no longer scanning the flat list at lookup time). *)
+type import_index = {
+  ie_exact_index  : (string, import_entry list) Hashtbl.t;
+  (** name -> entries that match it via an EXACT name (short_names / n.txt /
+      short_name), populated with the same names the closures compare against. *)
+  ie_prefix_index : (string, import_entry list) Hashtbl.t;
+  (** prefix root (mod_str for Use*, alias short_name for DAlias) -> entries
+      that also accept a qualified reference under that prefix.  [record_use]
+      only consults this when the looked-up name contains a '.'. *)
+}
+
+let make_import_index () =
+  { ie_exact_index = Hashtbl.create 64; ie_prefix_index = Hashtbl.create 16 }
+
+let import_index_add_exact idx key entry =
+  let prev = try Hashtbl.find idx.ie_exact_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_exact_index key (entry :: prev)
+
+let import_index_add_prefix idx key entry =
+  let prev = try Hashtbl.find idx.ie_prefix_index key with Not_found -> [] in
+  Hashtbl.replace idx.ie_prefix_index key (entry :: prev)
+
 (** Computed session-type information for a declared [protocol].
     Stored in [env.protocols] after [DProtocol] is checked. *)
 type proto_info = {
@@ -456,6 +491,11 @@ type env = {
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
+  import_idx : import_index;
+  (** O(1)-average-lookup index mirroring [import_tracker] -- see
+      [import_index] for why [record_use] must not scan [import_tracker]
+      directly.  Shared (mutable) across all env copies derived from the
+      same root, same as [import_tracker]. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -481,12 +521,72 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  cur_fn_public : bool;
+  (** True while checking the body of a PUBLIC (fn, not pfn) function — read by
+      the proof-cap mint gate. Lambdas inherit it; nested named fns/modules reset
+      it via their own check_fn. *)
+  cap_qual_prefix : string;
+  (** Accumulated dotted-path prefix of enclosing [DMod]s, for keying
+      [cap_closures] so it matches TIR's fully-qualified function-name
+      convention (see [lib/tir/lower.ml]'s [mod_prefix] accumulation).  Unlike
+      [current_module] (which is REPLACED, not accumulated, on entry to each
+      nested module — see the [Ast.DMod] branch of [check_decl] — and is used
+      elsewhere for unrelated purposes that must not be perturbed),
+      [cap_qual_prefix] accumulates across nesting: "" at the entry module,
+      then "Lib", then "Lib.Sub", etc., mirroring [prebind_mod_members]'s
+      [prefix ^ "." ^ mname.txt] recursion. The entry module's own name is
+      NOT included (TIR unwraps the entry module), so this starts empty. *)
   no_panic_mod : bool;
   (** True when the module currently being checked has `cap no_panic`.
       Set by [check_decl] on [DOpts ["no_panic"]]; read by [check_no_panic_module]. *)
   no_panic_modules : string list;
   (** Names of modules (siblings/imports) that have been verified as [cap no_panic].
       Functions from these modules are treated as safe in [check_no_panic_module]. *)
+  nonexhaustive_match_spans : Ast.span list ref;
+  (** Spans of every NON-exhaustive [match] discovered by [check_exhaustiveness]
+      anywhere in the compilation.  A non-exhaustive match lowers to a runtime
+      "no matching clause" panic, so it is a panic surface that
+      [check_no_panic_module] must reject — but only for matches nested inside a
+      `cap no_panic` module's OWN function bodies (attributed by span
+      containment, see [span_within]).  A mutable ref shared (like
+      [import_tracker]) across every env copy so all sites append to one list;
+      recording here is cheap and never itself an error — the read/attribution
+      is gated inside [check_no_panic_module], which only runs for
+      `cap no_panic` modules, so a PLAIN module's non-exhaustive match stays a
+      Warning and is never promoted to an error. *)
+  cap_producer_ivars : (int, Ast.span) Hashtbl.t;
+  (** Inner cap-argument [TVar] id → the [cap_narrow] application span that
+      produced it.  A [cap_narrow(cap)] result is [Cap(a)]; we tag [a]'s id here.
+      [unify] consults this table: the instant [a] (or any var linked to it) is
+      bound to a nominal proof cap [TCon(p,[])] with [p] in [proof_caps], it is a
+      forge (a proof cap can ONLY come from [mint_cap] in a public declaring-
+      module fn or from a parameter pass-through — never from [cap_narrow]) and
+      the binding is rejected.  IO caps are not in [proof_caps], so legitimate
+      IO-lattice narrowing ([Cap(IO) -> Cap(IO.Network)]) is unaffected in every
+      position, including laundering through a polymorphic function.  A shared
+      hashtable (like [cap_closures]) so every env copy sees the same tags. *)
+  cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
+  (** Names of user functions whose body IS (or launders) a [cap_narrow] result —
+      a "cap-narrow factory" (e.g. `fn mk(cap) do cap_narrow(cap) end`).  A
+      cross-module reference to such a fn resolves to its PREBOUND scheme (whose
+      vars are distinct from the pass-2 [check_fn] vars we tag), so the unify hook
+      cannot see the taint through the call.  We instead record the factory name
+      here and, at the call site, taint the call's result.  (NOTE: this path does
+      not yet close the nested-module cross-resolution route — see the batch-a
+      report's Critical-fix section; it is retained as it closes same-module
+      factory calls and is harmless.)  Shared hashtable so every env copy sees the
+      same factory set. *)
+  mint_cap_sites : (Ast.span * ty * bool * string) list ref;
+  (** Every [mint_cap(_)] application site, recorded as
+      (span, result_type, cur_fn_public, current_module).  The mint GATE is
+      checked by a post-checking sweep ([check_mint_cap_sites]): the result
+      type is pinned by later unification (so it can only be inspected after the
+      whole compilation is checked), while the enclosing-fn/module CONTEXT
+      ([cur_fn_public], [current_module]) must be captured HERE because it is
+      per-site and unavailable at sweep time.  A [mint_cap] typechecks iff its
+      pinned result is [Cap(P)] with [P] a proof cap whose declaring module is
+      [current_module] AND [cur_fn_public]; a proof cap from another module, a
+      private fn, or a non-proof (IO) target is rejected. *)
   pure_mod : bool;
   (** True when the module currently being checked has `cap pure`.
       Set by [check_decl] on [DOpts ["pure"]]; read by [check_pure_module]. *)
@@ -496,6 +596,36 @@ type env = {
   deterministic_mod : bool;
   (** True when the module currently being checked has `cap deterministic`.
       Set by [check_decl] on [DOpts ["deterministic"]]; read by [check_deterministic_module]. *)
+  cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function inferred IO-capability closure: fully-qualified function
+      name ("Mod.fn") → normalized list of cap paths that function requires,
+      as computed by [check_module_needs] (declared [needs] in scope, Cap-typed
+      signatures, body-scanned builtin calls, extern-implied caps, and
+      transitively-imported module needs). Mutated in place (shared across all
+      [env] copies derived from the same root, like [type_map]) so it survives
+      threading through [check_decl]'s per-declaration env folds. Read via
+      [fn_capability_closures]; a later hot-deploy manifest task consumes this. *)
+  own_cap_closures : (string, string list) Hashtbl.t;
+  (** Per-function OWN inferred IO-capability closure: fully-qualified function
+      name ("Mod.fn") -> normalized list of cap paths that function's own
+      signature/body/extern usage requires, WITHOUT the [module_wide_caps]
+      merge that [cap_closures] performs. Accumulated across the multiple
+      [record_fn_caps] call sites per function (sig + body + extern) exactly
+      like [cap_closures], just without folding in the module-level [needs].
+      This is the projection the migrate_state IO-free check needs: a
+      [migrate_state] function living in an actor module that declares
+      [needs IO.Console] for its *handlers* must not be falsely flagged just
+      because the module-wide merge would attribute that cap to it too.
+      Read via [fn_own_capability_closures]. *)
+  local_mods : string list StrMap.t;
+  (** In-file nested modules → their PRIVATE value/function member names.
+      Populated by the [Ast.DMod] export step.  A same-file qualified reference
+      to a private member (e.g. `A.secret` where `secret` is a [pfn]) never gets
+      an "A.secret" key in [vars] (only public members are exported), so the
+      registry-based [qualified_error_msg] would misreport "Unknown module `A`"
+      for a module that plainly exists in this file.  This lets that path
+      recognize the member is merely private and emit the accurate
+      "Function `secret` is private to module `A`." instead. *)
 }
 
 let make_env errors type_map = {
@@ -505,20 +635,128 @@ let make_env errors type_map = {
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
+  import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  cur_fn_public = false;
+  cap_qual_prefix = "";
   no_panic_mod = false;
   no_panic_modules = [];
+  nonexhaustive_match_spans = ref [];
+  cap_producer_ivars = Hashtbl.create 16;
+  cap_narrow_factory_fns = Hashtbl.create 16;
+  mint_cap_sites = ref [];
   pure_mod = false;
   no_extern_mod = false;
   deterministic_mod = false;
+  cap_closures = Hashtbl.create 64;
+  own_cap_closures = Hashtbl.create 64;
+  local_mods = StrMap.empty;
 }
 
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
+
+(** Value restriction for capability-producer applications.  Lower every
+    [Unbound] TVar reachable in [ty] to level 0 IN PLACE, so [generalize]
+    (which quantifies vars at [l > level] for any [level >= 0]) can NEVER
+    quantify them.  The result type of a [cap_narrow]/[mint_cap] application is
+    expansive (a function call) and must not be let-generalized: if
+    [let x = cap_narrow(cap)] generalized [x] to [∀a. Cap(a)], each use would
+    instantiate a FRESH [a] pinned to that use's type while the compiler's
+    single recorded result node stayed an unbound quantified var — defeating the
+    post-checking proof-cap sweep and REOPENING the forge in every let-/generic-
+    flow position (a value narrowed once and reused as different caps).  Pinning
+    the result to a single monomorphic var makes the use-site's type flow back to
+    the recorded node, so the sweep sees the concrete cap.  Consequence: a single
+    [cap_narrow]/[mint_cap] value used at two DIFFERENT cap types no longer
+    typechecks (the one var can't unify with both) — that pattern is not
+    least-privilege threading and does not occur in real code. *)
+let rec demote_to_monomorphic (t : ty) : unit =
+  match t with
+  | TVar r ->
+    (match !r with
+     | Unbound (id, l) -> if l > 0 then r := Unbound (id, 0)
+     | Link t'         -> demote_to_monomorphic t')
+  | TCon   (_, args)    -> List.iter demote_to_monomorphic args
+  | TArrow (a, b)       -> demote_to_monomorphic a; demote_to_monomorphic b
+  | TTuple ts           -> List.iter demote_to_monomorphic ts
+  | TRecord flds        -> List.iter (fun (_, t) -> demote_to_monomorphic t) flds
+  | TLin   (_, t)       -> demote_to_monomorphic t
+  | TNatOp (_, a, b)    -> demote_to_monomorphic a; demote_to_monomorphic b
+  | TChan  _            -> ()
+  | TRefine (base, _, _) -> demote_to_monomorphic base
+  | TNat _ | TError     -> ()
+
+(** Tag the inner cap-argument var of a [cap_narrow] result [Cap(a)] so [unify]
+    can reject the instant [a] is bound to a nominal proof cap — closing the
+    forge even when the value is laundered through a polymorphic function.  Two
+    shapes are tagged: [Cap(a)] (tag the inner var [a]) and a bare var [r] (the
+    whole value type is a still-unknown var — as happens when a laundering fn's
+    return decouples from its param; tag [r] itself).  If the type is already a
+    concrete cap, tagging is a no-op.
+
+    RECURSES into container shapes (tuples, records, and other [TCon] type
+    arguments) so the tag reaches a cap-producer var wrapped by a factory
+    function's return type — e.g. [(Cap(a), Int)] or [Option(Cap(a))] — not
+    just a bare top-level [Cap(a)]/[TVar].  Mirrors
+    [ty_has_tagged_cap_producer]'s traversal exactly: that detector already
+    walks containers to decide WHETHER to propagate the taint into a call's
+    result (see its call sites below); before this fix, the tagging half of
+    that pairing silently no-opped on any container shape it found (`| _ -> ()`),
+    so a container-wrapped cap-producer var reaching a truly fresh (never
+    independently tagged) result var never got marked.  (In practice this was
+    not independently exploitable on this tree — the ORIGINAL cap_narrow-tagged
+    var is forced monomorphic by [demote_to_monomorphic] and so is never
+    re-instantiated by generalization, and [unify]'s hook propagates the tag to
+    any var it gets bound to, including through element-wise tuple/record
+    unification — but the asymmetry left the detector/tagger pairing at the
+    call-propagation sites below inert for container-shaped results, which is
+    latent risk independent of that protection.) *)
+let rec tag_cap_producer_result (env : env) (rty : ty) (sp : Ast.span) : unit =
+  match repr rty with
+  | TCon ("Cap", [inner]) ->
+    (match repr inner with
+     | TVar r ->
+       (match !r with
+        | Unbound (id, _) -> Hashtbl.replace env.cap_producer_ivars id sp
+        | Link _ -> ())
+     | _ -> ())
+  | TVar r ->
+    (match !r with
+     | Unbound (id, _) -> Hashtbl.replace env.cap_producer_ivars id sp
+     | Link _ -> ())
+  | TCon (_, args)       -> List.iter (fun t -> tag_cap_producer_result env t sp) args
+  | TArrow (a, b)        -> tag_cap_producer_result env a sp; tag_cap_producer_result env b sp
+  | TTuple ts            -> List.iter (fun t -> tag_cap_producer_result env t sp) ts
+  | TRecord flds         -> List.iter (fun (_, t) -> tag_cap_producer_result env t sp) flds
+  | TLin (_, t)          -> tag_cap_producer_result env t sp
+  | TNatOp (_, a, b)     -> tag_cap_producer_result env a sp; tag_cap_producer_result env b sp
+  | TRefine (base, _, _) -> tag_cap_producer_result env base sp
+  | TChan _ | TNat _ | TError -> ()
+
+(** True if [ty] carries a [cap_narrow]-tagged cap-producer var anywhere — the
+    inner var of a [Cap(a)] whose [a] is tagged, or a bare tagged var.  Used to
+    propagate the forge taint through a call: an argument whose type is tainted
+    laundered a cap_narrow result, so the call's result must be tainted too. *)
+let ty_has_tagged_cap_producer (env : env) (ty : ty) : bool =
+  let tagged r = match !r with
+    | Unbound (id, _) -> Hashtbl.mem env.cap_producer_ivars id
+    | Link _ -> false in
+  let rec go t = match repr t with
+    | TVar r             -> tagged r
+    | TCon   (_, args)   -> List.exists go args
+    | TArrow (a, b)      -> go a || go b
+    | TTuple ts          -> List.exists go ts
+    | TRecord flds       -> List.exists (fun (_, t) -> go t) flds
+    | TLin   (_, t)      -> go t
+    | TNatOp (_, a, b)   -> go a || go b
+    | TRefine (base, _, _) -> go base
+    | TChan _ | TNat _ | TError -> false
+  in go ty
 
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
@@ -539,10 +777,25 @@ let lookup_ctor_in_type name type_name env =
   | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
-    Deduplicates: if a ctor_info structurally identical (same ci_type,
-    ci_params, and ci_arg_tys) already exists, no-op.  Two types with
-    the same short name but different arity (e.g. stdlib's `Tree(a)` and
-    a user's `Tree`) are kept as distinct candidates. *)
+    Deduplicates STRUCTURALLY (same ci_type, ci_params, and ci_arg_tys) —
+    but by MOVING the existing entry to the FRONT rather than no-op'ing.
+    Two types with the same short name but different arity (e.g. stdlib's
+    `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+
+    Why move-to-front matters (sibling-ctor shadowing regression,
+    2026-07-10): Pass-1 prebind seeds every nested module's bare ctor keys
+    for order-independent cross-module resolution (d95fe942), in module
+    declaration order — so a later sibling `mod B`'s `Mk` sits AHEAD of
+    `mod A`'s same-named `Mk`.  Pass-2 then re-registers each module's own
+    ctors (check_decl DType) right before checking that module's bodies —
+    but the re-registration is structurally identical to the Pass-1 seed,
+    so a no-op dedup left B's candidate at the head and A's OWN body
+    resolved `Mk(1)` against B's `Mk(String)` ("expected String but got
+    Int" pointing inside A).  Moving the re-registered entry to the front
+    restores the declaring module's recency for its own body check (the
+    pre-d95fe942 semantics) while keeping the Pass-1 seeds — and therefore
+    the cross-module order-independence — intact.  A singleton list is
+    unaffected; only genuinely shared names reorder. *)
 let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
   let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
   let same c =
@@ -550,7 +803,10 @@ let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
     && c.ci_params = ci.ci_params
     && c.ci_arg_tys = ci.ci_arg_tys
   in
-  if List.exists same lst then ctors
+  if List.exists same lst then
+    (match lst with
+     | first :: _ when same first -> ctors   (* already at the front *)
+     | _ -> StrMap.add key (ci :: List.filter (fun c -> not (same c)) lst) ctors)
   else StrMap.add key (ci :: lst) ctors
 
 (* ── Qualified module resolution ─────────────────────────────────────
@@ -625,16 +881,49 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
     let qname = mod_name ^ "." ^ entry.ex_name in
     match entry.ex_kind with
     | ExFn | ExValue ->
-      if StrMap.mem qname env.vars then env
+      (* Visibility gate (mirrors the [ExCtor] arm below): a private [pfn] /
+         private [let] is NOT importable across modules. Skipping the binding
+         here (rather than adding it) lets the later [lookup_var] miss fall
+         through to [qualified_error_msg], which detects [not e.ex_public] and
+         reports "<name> is private to module `<mod>`." — the same message the
+         [ExCtor] path already produces for private constructors.
+         [ExType]/[ExRecord] stay UNGATED on purpose: March uses the opaque-type
+         pattern, where a private [ptype]'s bare NAME stays referenceable across
+         modules (e.g. `ConsistentHash.HashRing(String)` on a public param) while
+         only its CONSTRUCTOR is hidden — enforced by the [ExCtor] gate below. *)
+      if not entry.ex_public then env
+      else if StrMap.mem qname env.vars then env
       else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
     | ExType arity ->
-      if StrMap.mem qname env.types then env
-      else { env with types = StrMap.add qname arity env.types }
+      (* Register the qualified name AND the BARE type name.  March uses a single
+         global type namespace (see [surface_ty]'s [canon_name]): a type's bare
+         name is its canonical identity, and a sibling module resolves a peer
+         type UNQUALIFIED (`scope : UniqueScope`, no `use`/`import`).  When the
+         defining module is PREBOUND FROM SOURCE, [prebind_mod_members] (:8931)
+         seeds the bare name; when it is loaded from the compiled Module_registry
+         instead (e.g. a dependency in the `--compile`/`--test` unit), only the
+         qualified key was seeded — so expanding a registry-loaded RECORD whose
+         field references a bare sibling type failed with a bogus "I cannot find
+         `UniqueScope`" pointing at the definer's field span.  Seed the bare name
+         too, first-wins (don't clobber a name a source module already bound),
+         mirroring the source-prebind path. *)
+      let env = if StrMap.mem qname env.types then env
+                else { env with types = StrMap.add qname arity env.types } in
+      if StrMap.mem entry.ex_name env.types then env
+      else { env with types = StrMap.add entry.ex_name arity env.types }
     | ExRecord (arity, field_decls) ->
+      let param_names = List.init arity (fun i -> Printf.sprintf "$t%d" i) in
       let env1 = if StrMap.mem qname env.types then env
                  else { env with types = StrMap.add qname arity env.types } in
-      let param_names = List.init arity (fun i -> Printf.sprintf "$t%d" i) in
-      { env1 with records = StrMap.add qname (param_names, field_decls) env1.records }
+      (* Bare type name too — see the [ExType] arm's rationale. *)
+      let env1 = if StrMap.mem entry.ex_name env1.types then env1
+                 else { env1 with types = StrMap.add entry.ex_name arity env1.types } in
+      (* Register the record's fields under BOTH the qualified and bare keys so a
+         bare cross-module reference (or a peer module's bare field type) expands
+         structurally instead of staying an opaque TCon. *)
+      let env1 = { env1 with records = StrMap.add qname (param_names, field_decls) env1.records } in
+      if StrMap.mem entry.ex_name env1.records then env1
+      else { env1 with records = StrMap.add entry.ex_name (param_names, field_decls) env1.records }
     | ExCtor (parent_type, _ctor_arity) ->
       begin
         (* Find the parent type's param names from the module's type exports *)
@@ -712,9 +1001,18 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   !best
 
 (** Produce an error message for a qualified name that failed to resolve. *)
-let qualified_error_msg (name : string) : string =
+let qualified_error_msg (name : string) (env : env) : string =
   match split_qualified name with
   | None -> Printf.sprintf "I cannot find `%s`." name
+  | Some (mod_name, member)
+    when (match StrMap.find_opt mod_name env.local_mods with
+          | Some priv -> List.mem member priv
+          | None -> false) ->
+    (* An in-file nested module `mod_name` declares `member` privately (`pfn` /
+       private `let`).  Private members are never exported into [env.vars], so
+       the registry lookup below would misreport "Unknown module" for a module
+       that plainly exists in this file.  Report the real cause instead. *)
+    Printf.sprintf "Function `%s` is private to module `%s`." member mod_name
   | Some (mod_name, member) ->
     match March_modules.Module_registry.ensure_loaded mod_name with
     | None ->
@@ -867,6 +1165,17 @@ let instantiate level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
+    (* Proof-cap forge taint survives generalization: if a quantified var was a
+       [cap_narrow]-tagged cap-producer var (e.g. an un-annotated helper
+       `fn mk(cap) do cap_narrow(cap) end` whose return got generalized), tag its
+       fresh instantiation too, so the unify hook still fires when the laundered
+       result is bound to a proof cap at THIS call site. *)
+    List.iter (fun (id, fresh) ->
+        if Hashtbl.mem env.cap_producer_ivars id then
+          let cn_sp = Hashtbl.find env.cap_producer_ivars id in
+          (match fresh with
+           | TVar r -> (match !r with Unbound (nid, _) -> Hashtbl.replace env.cap_producer_ivars nid cn_sp | Link _ -> ())
+           | _ -> ())) subst;
     let rec inst t =
       (* Preserve a refinement wrapper through instantiation so call sites see
          the predicate on the parameter type; only the base is instantiated. *)
@@ -924,32 +1233,10 @@ let _t_pid    = t_pid
 
 (* =================================================================
    Capability hierarchy for needs / Cap checking.
-   Each entry: (cap_path, parent_path option).
-   Paths are dot-joined strings, e.g. "IO.FileRead".
-   FFI caps like "LibC" are valid but not in this table — they are
-   their own roots and have no subtyping relationship.
+   Moved to March_caps.Cap_lattice (Phase5C-A.1) — shared with
+   March_refinecheck.Cap_infer, which previously carried a verbatim
+   duplicate of this table.
    ================================================================= *)
-
-let io_cap_hierarchy : (string * string option) list = [
-  ("IO",            None);
-  ("IO.Console",    Some "IO");
-  ("IO.FileSystem", Some "IO");
-  ("IO.FileRead",   Some "IO.FileSystem");
-  ("IO.FileWrite",  Some "IO.FileSystem");
-  ("IO.Network",    Some "IO");
-  ("IO.NetConnect", Some "IO.Network");
-  ("IO.NetListen",  Some "IO.Network");
-  ("IO.Process",    Some "IO");
-  ("IO.Clock",      Some "IO");
-  ("IO.Random",     Some "IO");
-  ("IO.Database",   Some "IO.NetConnect");
-  ("IO.Spawn",      Some "IO");
-  ("IO.Mut",        Some "IO");
-  ("IO.Telemetry",  Some "IO");
-  ("IO.NetConnect.TLS", Some "IO.NetConnect");
-  ("IO.Foreign",         Some "IO");
-  ("IO.Foreign.Blocking", Some "IO.Foreign");
-]
 
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
@@ -1054,22 +1341,10 @@ let builtin_cap_table : (string * string) list = [
   ("tls_peer_cn",           "IO.NetConnect.TLS");
 ]
 
-(** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
-    E.g., "IO.FileRead" → ["IO.FileRead"; "IO.FileSystem"; "IO"].
-    FFI caps not in the table return just themselves. *)
-let cap_ancestors cap =
-  let rec go c acc =
-    let acc' = c :: acc in
-    match List.assoc_opt c io_cap_hierarchy with
-    | Some (Some parent) -> go parent acc'
-    | _ -> acc'
-  in
-  List.rev (go cap [])
-
 (** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
-    E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
-let cap_subsumes parent child =
-  List.mem parent (cap_ancestors child)
+    E.g., cap_subsumes "IO" "IO.FileRead" = true.
+    See [March_caps.Cap_lattice.cap_subsumes]. *)
+let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
 
 (** [cap_path_of_names names] joins AST name list to dot-string. *)
 let cap_path_of_names names =
@@ -1152,9 +1427,14 @@ let builtin_impls : (string * ty) list =
     ("Eq",   t_bool);  ("Eq",   t_unit);  ("Eq",   t_atom);
     (* Ord *)
     ("Ord",  t_int);   ("Ord",  t_float); ("Ord",  t_string);
-    (* Show *)
+    (* Show — Atom included so `show(:tag)` / `show` on an Atom-typed value
+       typechecks (compiled backend lowers it to Show$Atom.show; the
+       interpreter renders VAtom a as ":" ^ a).  Without this, a direct
+       `show(a)` on a concretely-Atom-typed `a` failed with "Atom does not
+       implement interface Show" in BOTH modes even though `println(a)`
+       worked via the generic prelude path. *)
     ("Show", t_int);   ("Show", t_float); ("Show", t_string);
-    ("Show", t_bool);  ("Show", t_unit);
+    ("Show", t_bool);  ("Show", t_unit);  ("Show", t_atom);
     (* Hash *)
     ("Hash", t_int);   ("Hash", t_float); ("Hash", t_string);
     ("Hash", t_bool);
@@ -1277,6 +1557,8 @@ let builtin_bindings : (string * scheme) list =
     ("string_to_int",   Mono (TArrow (t_string, t_option t_int)));
     ("string_to_float", Mono (TArrow (t_string, t_option t_float)));
     ("string_length",   Mono (TArrow (t_string, t_int)));
+    ("string_to_codepoints",  Mono (TArrow (t_string, t_list t_int)));
+    ("string_from_codepoint", Mono (TArrow (t_int, t_option t_string)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("read_byte",      Mono (TArrow (t_unit,   t_int)));
@@ -1421,6 +1703,12 @@ let builtin_bindings : (string * scheme) list =
     (* Capability builtins *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
     ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
+       (Cap(IO) -> Cap(a)); the GATE (declaring-module + public fn, proof-cap
+       target only) is enforced in the EApp special-case, not the scheme.
+       Runtime-erased: aliases cap_narrow in eval/defun/llvm (caps compile to
+       null/VUnit). *)
+    ("mint_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
     (* Phase 1: Monitor/link builtins *)
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
@@ -1437,6 +1725,8 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 3: Epoch-based capability builtins *)
     ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
     ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
+    ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
@@ -1642,9 +1932,8 @@ let builtin_bindings : (string * scheme) list =
     ("stdlib_hmac_sha256",    Mono (TArrow (t_string, TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
     (* Compress builtins — gzip, deflate, zstd, brotli C-level shims.
-       Called directly by stdlib/compress.march and forgepm's tarball.march
-       (stdlib_gzip_decode). Restored: these lived on a divergent commit line
-       (26b79245 / 673ddeeb) not in this branch's history. *)
+       Called directly by stdlib/compress.march and any code that needs
+       compression without `import Compress` (not in stdlib_file_list). *)
     ("stdlib_gzip_encode",    Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
     ("stdlib_gzip_decode",    Mono (TArrow (TCon ("Bytes", []),
@@ -1820,11 +2109,14 @@ let builtin_types : (string * int) list =
     ("Tagged", 2);
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
-    (* Capability token types — used as arguments to Cap(X) *)
+    (* Capability token types — used as arguments to Cap(X).
+       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
-    ("IO.Clock",      0);
+    ("IO.Clock",      0); ("IO.Random",     0); ("IO.Database",   0);
+    ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
+    ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
@@ -2082,6 +2374,14 @@ let assert_trecord_sorted flds label =
         (String.concat ", " sorted))
   | None -> ()
 
+(** Forward ref to [expand_record], which is defined later because it depends on
+    [surface_ty].  [unify] uses it to reconcile a nominal record [TCon] with the
+    structural [TRecord] the same type expands to elsewhere (see the
+    [TCon]/[TRecord] case in [unify]).  Wired up immediately after
+    [expand_record] is defined. *)
+let expand_record_ref : (env -> ty -> ty option) ref =
+  ref (fun _ _ -> None)
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
@@ -2101,8 +2401,50 @@ let rec unify env ~span ?(reason = None) t1 t2 =
        if occurs id level t then begin
          report_mismatch env ~span ~reason t1 t2;
          r := Link TError
-       end else
+       end else begin
+         (* Proof-cap forge hook: if [r] is a tagged [cap_narrow]-result inner
+            var (see [cap_producer_ivars]), reject the instant it is bound to a
+            nominal proof cap — a cap_narrow value can NEVER become a proof cap,
+            in any position or flow (direct, let-generalized, or laundered
+            through a polymorphic function). If it binds to ANOTHER var, propagate
+            the tag so the check fires when that var is eventually pinned. IO caps
+            are not in [proof_caps], so IO-lattice narrowing is never affected. *)
+         (match Hashtbl.find_opt env.cap_producer_ivars id with
+          | Some cn_sp ->
+            let forge_error p =
+              Err.error env.errors ~span:cn_sp
+                (render_parts [
+                  MPText "cap_narrow cannot produce "; MPCode ("Cap(" ^ p ^ ")");
+                  MPText " — "; MPCode ("Cap(" ^ p ^ ")");
+                  MPText " is a proof capability, not an IO capability.";
+                  MPBreak;
+                  MPText "hint: a proof capability may only be minted by a public function of its declaring module via ";
+                  MPCode "mint_cap";
+                  MPText "; cap_narrow only attenuates IO capabilities." ])
+            in
+            (match repr t with
+             (* Tag is on the inner cap var: [a] binds directly to a proof cap. *)
+             | TCon (p, []) when List.mem_assoc p env.proof_caps -> forge_error p
+             (* Tag is on a whole-value var (laundered result): binds to Cap(P). *)
+             | TCon ("Cap", [inner]) ->
+               (match repr inner with
+                | TCon (p, []) when List.mem_assoc p env.proof_caps -> forge_error p
+                | TVar r2 ->
+                  (* Cap of an unbound var: propagate the tag to the inner var. *)
+                  (match !r2 with
+                   | Unbound (id2, _) -> Hashtbl.replace env.cap_producer_ivars id2 cn_sp
+                   | Link _ -> ())
+                | _ -> ())
+             (* Binds to another bare var: propagate the tag so the check fires
+                when that var is eventually pinned. *)
+             | TVar r2 ->
+               (match !r2 with
+                | Unbound (id2, _) -> Hashtbl.replace env.cap_producer_ivars id2 cn_sp
+                | Link _ -> ())
+             | _ -> ())
+          | None -> ());
          r := Link t
+       end
      | Link _ -> assert false)  (* repr should have resolved links *)
 
   | TCon (n1, a1), TCon (n2, a2) ->
@@ -2131,6 +2473,24 @@ let rec unify env ~span ?(reason = None) t1 t2 =
       List.iter2
         (fun (_, t1) (_, t2) -> unify env ~span ~reason t1 t2)
         f1 f2
+
+  (* Reconcile a nominal record [TCon] with its structural [TRecord] form.
+     A record type's *name* and its *field structure* are interchangeable in
+     March's structural record model, but the two representations reach [unify]
+     from different paths: [surface_ty] expands a record annotation to a
+     [TRecord], while lighter-weight converters (notably [prebind_fn_scheme],
+     which pre-binds cross-module function signatures in Pass 1 without record
+     field information) leave the same type as a nominal [TCon(Name)].  When a
+     cross-module qualified reference like `Cfg.Site` meets the owning module's
+     own structural use, the two sides collide as `TCon` vs `TRecord`.  Expand
+     the [TCon] side via the [expand_record_ref] hook (a no-op unless [Name]
+     denotes a known record that is not also a colliding variant — variants and
+     opaque types stay nominal) and retry; fall back to a genuine mismatch if it
+     does not name an unambiguous record. *)
+  | (TCon _ as tc), (TRecord _ as tr) | (TRecord _ as tr), (TCon _ as tc) ->
+    (match !expand_record_ref env tc with
+     | Some (TRecord _ as expanded) -> unify env ~span ~reason expanded tr
+     | _ -> report_mismatch env ~span ~reason t1 t2)
 
   | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
     unify env ~span ~reason inner1 inner2
@@ -2193,6 +2553,29 @@ and solve_nat_eq env ~span ~reason op a b n =
    §11  Surface-type → internal-type conversion
    ================================================================= *)
 
+(** True when [name] denotes a variant/sum type in scope — i.e. some
+    constructor has it as its parent type ([ci_type], matched bare or as a
+    [.name] suffix since [ci_type] may be module-qualified).
+
+    Records register in [env.records] under their BARE name globally, so a
+    user's `type Color = Red | Green | Blue` collides in that flat namespace
+    with, e.g., stdlib `Plot.Color = { r, g, b }`.  Without this guard the
+    record-structural expansion below (and in [register_impl_shape]) rewrites
+    the variant's `impl Eq(Color)` to the record's `TRecord{r,g,b}` shape,
+    which then never matches the variant's `TCon("Color")` dispatch target —
+    the derived impl becomes invisible and the type "does not implement Eq".
+    A variant type is never itself a record, so suppressing the expansion for
+    variant names only removes incorrect expansions. *)
+let name_is_variant env name =
+  let matches ci_type =
+    ci_type = name ||
+    (let n = String.length name and l = String.length ci_type in
+     l > n && ci_type.[l - n - 1] = '.' && String.sub ci_type (l - n) n = name)
+  in
+  StrMap.exists
+    (fun _ cis -> List.exists (fun (ci : ctor_info) -> matches ci.ci_type) cis)
+    env.ctors
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -2236,7 +2619,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | _, Some a -> a
         | _ ->
           Err.error env.errors ~span:name.span
-            (qualified_error_msg name.txt);
+            (qualified_error_msg name.txt env);
           0
     in
     (* March uses a single global type namespace: a type declared inside a
@@ -2267,9 +2650,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
            name.txt arity (List.length args'));
     (* If this is a named record type, expand it structurally so that
-       type annotations like `: Point` unify correctly with record literals. *)
+       type annotations like `: Point` unify correctly with record literals.
+       Skip when the name also denotes a variant (see [name_is_variant]): the
+       local variant shadows a same-named record from another module. *)
     (match StrMap.find_opt name.txt env.records with
-     | Some (params, field_decls) when List.length params = List.length args' ->
+     | Some (params, field_decls)
+       when List.length params = List.length args'
+            && not (name_is_variant env name.txt) ->
        let saved = !tvars in
        List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
        let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
@@ -2296,15 +2683,28 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
                    | ExRecord (arity, fields) when entry.ex_name = member ->
                      let params = List.init arity
                        (fun i -> Printf.sprintf "$t%d" i) in
-                     Some (params, fields)
+                     (* Thread an env enriched with the DEFINING module's exports
+                        so the record's field types — stored as UNRESOLVED surface
+                        types that name sibling types by their BARE name (`scope :
+                        UniqueScope`) — resolve against those siblings' bare names.
+                        Without this the fields would be expanded in the referrer's
+                        env, which has only the qualified sibling names, failing
+                        with a bogus "I cannot find `UniqueScope`" pointing at the
+                        definer's field span.  [load_module_into_env] seeds both
+                        the qualified and bare forms (first-wins), so this cannot
+                        clobber a name the referrer already bound. *)
+                     let fenv = load_module_into_env mod_name exports env in
+                     Some (params, fields, fenv)
                    | _ -> None)
               ) None exports.me_entries)
        in
        (match registry_record with
-        | Some (params, field_decls) when List.length params = List.length args' ->
+        | Some (params, field_decls, fenv)
+          when List.length params = List.length args'
+               && not (name_is_variant env name.txt) ->
           let saved = !tvars in
           List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
-          let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
+          let flds = List.map (fun (fn, fty) -> (fn, surface_ty fenv ~tvars fty)) field_decls in
           tvars := saved;
           TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
         | _ ->
@@ -2452,6 +2852,19 @@ let expand_record env ty =
      | _ -> None)
   | _ -> None
 
+(* Wire up the forward ref so [unify] (defined earlier) can reconcile a nominal
+   record [TCon] with its structural [TRecord] form.  Guard with
+   [name_is_variant] exactly as [surface_ty]'s own record-expansion does: in a
+   global-namespace collision a variant and a record can share a printed name
+   (and the record leaks into [env.records] under that bare name), so a bare
+   [TCon] naming the *variant* must NOT be expanded into the colliding record's
+   structure — that would silently unify two genuinely distinct types and
+   swallow the "two distinct types share the name" diagnostic. *)
+let () = expand_record_ref := (fun env ty ->
+  match repr ty with
+  | TCon (name, _) when name_is_variant env name -> None
+  | _ -> expand_record env ty)
+
 (** Register per-field linear sentinels for a named record variable [varname].
     When [ty] is or expands to a TRecord with linear fields, adds phantom
     ["varname#fieldname"] entries to env.lin so that EField accesses on
@@ -2475,11 +2888,42 @@ let bind_linear_field_sentinels varname ty env =
 
 (** Record a use of variable [name].  Errors if a linear var is used
     more than once. *)
+(* Linear-field sentinels are tracked under the internal name
+   "varname#fieldname" (see bind_linear_field_sentinels).  Diagnostics must
+   not leak that internal spelling (slice-7 finding L5) — render it as the
+   user-facing field-access form instead. *)
+let lin_display_name n =
+  match String.index_opt n '#' with
+  | Some i ->
+    Printf.sprintf "%s.%s"
+      (String.sub n 0 i) (String.sub n (i + 1) (String.length n - i - 1))
+  | None -> n
+
 let record_use name span env =
-  (* Mark any import entry that matches this name as used. *)
-  if !(env.import_tracker) <> [] then
-    List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
-      !(env.import_tracker);
+  (* Mark any import entry that matches this name as used.
+     [import_tracker] can hold one entry per use/import/alias declaration
+     across the WHOLE combined program (stdlib + every file pulled in via
+     MARCH_LIB_PATH auto-discovery) and [record_use] runs once per EVar in
+     that same combined program, so a linear scan here is O(var-refs *
+     imports) -- quadratic in project size and the dominant cost on any
+     multi-hundred-file project (confirmed via `sample` showing
+     List.mem/compare_val as the hot path during `march check`).  Use the
+     Hashtbl-backed [import_idx] instead: an exact-name lookup for the
+     common (unqualified) case, plus a prefix-root lookup only when [name]
+     is qualified (contains a '.').  Both indices were populated from the
+     exact same names/prefixes each entry's [ie_matches] closure compares
+     against, so this is behavior-preserving, just no longer O(n) per call. *)
+  (match Hashtbl.find_opt env.import_idx.ie_exact_index name with
+   | None -> ()
+   | Some entries -> List.iter (fun ie -> ie.ie_used := true) entries);
+  (match String.index_opt name '.' with
+   | None -> ()
+   | Some dot ->
+     let prefix_root = String.sub name 0 dot in
+     match Hashtbl.find_opt env.import_idx.ie_prefix_index prefix_root with
+     | None -> ()
+     | Some entries ->
+       List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true) entries);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
@@ -2489,12 +2933,12 @@ let record_use name span env =
          (Printf.sprintf
             "The linear value `%s` is used more than once here.\n\
              Linear values must be consumed exactly once — they cannot \
-             be copied or ignored." name)
+             be copied or ignored." (lin_display_name name))
      | Ast.Affine when !(le.le_used) ->
        Err.error env.errors ~span
          (Printf.sprintf
             "The affine value `%s` is used more than once here.\n\
-             Affine values may be used at most once." name)
+             Affine values may be used at most once." (lin_display_name name))
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true
      | Ast.Unrestricted -> ())
@@ -2568,7 +3012,7 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
           (Printf.sprintf
              "The linear value `%s` was never used.\n\
               Linear values must be consumed exactly once — did you \
-              mean to pass it somewhere?" le.le_name)
+              mean to pass it somewhere?" (lin_display_name le.le_name))
     ) env.lin
 
 (* =================================================================
@@ -2633,7 +3077,7 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let candidates = suggest_ctors name.txt env in
        let hint =
          if candidates = [] then
-           qualified_error_msg name.txt
+           qualified_error_msg name.txt env
          else
            let lines = List.map (fun (k, ty) ->
                Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -3173,33 +3617,71 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
   ) branches
 
 (** Emit a Warning if the match on [scrut_ty] with [branches] is non-exhaustive.
-    Skips the check when any branch has a guard (coverage becomes undecidable). *)
+
+    When any branch carries a [when] guard, exact coverage is undecidable in
+    general (we cannot know at typecheck time whether a guard succeeds), so we do
+    NOT emit the ordinary Warning. But a guarded match can still DEFINITELY panic:
+    a branch whose pattern is only reachable behind a guard cannot be relied on to
+    match, so it contributes nothing to GUARANTEED coverage. If the GUARDLESS
+    branches alone are non-exhaustive, then when every guard happens to fail at
+    runtime no arm matches and the match panics ("no matching clause"). For the
+    guarded case we therefore compute exhaustiveness over the guardless branches
+    only and, if that sub-match is non-exhaustive, RECORD the span (so
+    [check_no_panic_module] can promote it to an error inside a `cap no_panic`
+    module) WITHOUT emitting a global Warning — guarded matches are common in
+    ordinary code and get no such warning today, so only `cap no_panic` modules
+    (which opt into strictness) are made stricter. *)
 let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let has_guards =
     List.exists (fun (br : Ast.branch) -> br.branch_guard <> None) branches
   in
-  if has_guards then ()
+  if has_guards then begin
+    (* Coverage guaranteed by the GUARDLESS branches only (an all-guarded match
+       yields an empty matrix, which [find_missing_mc] correctly reports as
+       non-exhaustive rather than crashing). If those alone are exhaustive the
+       match can never fall through → safe. Otherwise record the span so
+       [check_no_panic_module] rejects it; no global Warning here. *)
+    let guardless_matrix =
+      List.filter_map
+        (fun (br : Ast.branch) ->
+          match br.branch_guard with
+          | None   -> Some [norm_pat br.branch_pat]
+          | Some _ -> None)
+        branches
+    in
+    match find_missing_mc env [scrut_ty] guardless_matrix with
+    | None -> ()
+    | Some _ ->
+      env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans)
+  end
   else begin
     let matrix =
       List.map (fun (br : Ast.branch) -> [norm_pat br.branch_pat]) branches
     in
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
-    | Some (ex :: _) ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
-          labels  = [];
-          notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-          code    = None; fix = None }
-    | Some [] ->
-      Err.report env.errors
-        { Err.severity = Warning; span;
-          message = "Non-exhaustive pattern match";
-          labels  = [];
-          notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
-          code    = None; fix = None }
+    | Some missing ->
+      (* Record the non-exhaustive match's span so [check_no_panic_module] can
+         reject it as a runtime panic surface inside a `cap no_panic` module.
+         Recording is unconditional (cheap, non-error); attribution/promotion to
+         an error is gated there by span containment. *)
+      env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans);
+      (match missing with
+       | ex :: _ ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
+             labels  = [];
+             notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
+             code    = None; fix = None }
+       | [] ->
+         Err.report env.errors
+           { Err.severity = Warning; span;
+             message = "Non-exhaustive pattern match";
+             labels  = [];
+             notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
+             code    = None; fix = None })
   end
 
 (** Unfold one step of a recursive session type.
@@ -3286,7 +3768,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
             | None ->
               let msg =
                 if String.contains name.txt '.' then
-                  qualified_error_msg name.txt
+                  qualified_error_msg name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
                   match suggest_var_in_scope name.txt env with
@@ -3707,6 +4189,58 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (pp_ty ch_ty));
          TError)
 
+    (* Restrict cap_narrow (Part 1): its result must never be a nominal proof
+       cap. cap_narrow is the ONLY polymorphic cap producer, so closing this
+       closes the proof-cap forge in every expression position (inline arg,
+       let-binding, return, and laundered through a polymorphic function).
+       IO-lattice narrowing (Cap(IO) -> Cap(IO.Network)) is unaffected because IO
+       caps are not in env.proof_caps; proof-cap minting goes through `mint_cap`
+       (gated).
+
+       WHY A CALL-SITE / POST-CHECKING SWEEP IS INSUFFICIENT: at this point the
+       result var `a` in `Cap(a)` is NOT yet pinned — `infer_app` only pins the
+       ARGUMENT against `Cap(IO)`; `a` is pinned by LATER unification.  A recorded
+       side-table read after checking catches the directly-pinned positions
+       (R1/R7), but when the value is laundered through a polymorphic user
+       function (`consume(id(cap_narrow(cap)))`) the recorded node stays unbound
+       forever — indistinguishable from legitimate laundered IO narrowing.
+
+       THE FIX (two complementary, both here):
+       - VALUE RESTRICTION [demote_to_monomorphic]: a cap_narrow application is
+         expansive, so its result must never let-generalize.  Demoting the result
+         var to level 0 keeps `let x = cap_narrow(cap)` monomorphic so its single
+         use pins the one var.
+       - USE-SITE HOOK [tag_cap_producer_result] + the [unify] proof-cap-forge
+         arm: tag the inner cap var `a`; the instant `a` (or any var it later
+         links to) is unified with a nominal proof cap, [unify] rejects it —
+         position- and flow-independent, and it fires ONLY for proof caps so
+         IO narrowing (including through a polymorphic fn) is never touched. *)
+    | Ast.EApp (Ast.EVar { txt = "cap_narrow"; _ } as fv, [arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [arg] 0 in
+      demote_to_monomorphic rty;
+      tag_cap_producer_result env rty sp;
+      rty
+
+    (* mint_cap (Part 2): the GATED proof-cap mint.  Same Cap(IO) -> Cap(a)
+       inference as cap_narrow; the gate — target must be a proof cap whose
+       declaring module is the enclosing module, and the enclosing fn must be
+       public — is enforced by the post-checking sweep because (like cap_narrow)
+       the result var is not pinned until the surrounding unification runs.  We
+       capture the enclosing fn/module CONTEXT here (env.cur_fn_public,
+       env.current_module — lambdas inherit the enclosing fn's public-ness) since
+       that context is unavailable at sweep time. *)
+    | Ast.EApp (Ast.EVar { txt = "mint_cap"; _ } as fv, [arg], sp) ->
+      let f_ty = infer_expr env fv in
+      let rty = infer_app env sp f_ty [arg] 0 in
+      (* Same value restriction as cap_narrow: a mint_cap application is
+         expansive and must not let-generalize, so the gate sweep sees the
+         concrete pinned cap rather than an unbound quantified var. *)
+      demote_to_monomorphic rty;
+      env.mint_cap_sites :=
+        (sp, rty, env.cur_fn_public, env.current_module) :: !(env.mint_cap_sites);
+      rty
+
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
       (* Reject wrong-arity calls of known (module-defined) functions.  March
@@ -3749,7 +4283,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
        | None ->
-         infer_app env sp f_ty args 0)
+         let res = infer_app env sp f_ty args 0 in
+         (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
+            result — recorded in check_fn), taint the call's result so the unify
+            hook fires when it is later bound to a proof cap.  This closes the
+            cross-module factory route (`consume(mk(cap))`) whose prebound scheme
+            hides the per-var taint from the hook. *)
+         (match f with
+          | Ast.EVar name when Hashtbl.mem env.cap_narrow_factory_fns name.txt ->
+            tag_cap_producer_result env res sp
+          | _ -> ());
+         res)
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
@@ -3765,7 +4309,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          let candidates = suggest_ctors name.txt env in
          let hint =
            if candidates = [] then
-             qualified_error_msg name.txt
+             qualified_error_msg name.txt env
            else
              let lines = List.map (fun (k, ty) ->
                  Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -3848,8 +4392,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── let binding (block-scoped) ───────────────────────────────── *)
     | Ast.ELet (b, sp) ->
       (* When ELet appears as the last expression in a block it's a
-         programmer error, but we give it type Unit and move on. *)
-      let rhs_ty = infer_expr env b.bind_expr in
+         programmer error, but we give it type Unit and move on.  Still honour
+         a type annotation on the binding (`let x : T = e`) so the RHS is
+         checked against it, mirroring the normal infer_block ELet arm. *)
+      let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
       let bindings, pat_ty = infer_pattern env b.bind_pat in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
@@ -4080,6 +4626,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     | Ast.ESpawn (actor, _) ->
       ignore (infer_expr env actor);
+      (* Both backends dispatch `spawn` by the actor's *name*, resolved at
+         compile time (it selects a statically generated `<Actor>_spawn`
+         function).  There is no runtime actor-descriptor value, so the argument
+         must be a plain actor name — not a computed expression.  The TIR
+         lowering assumes exactly this shape (`ECon(_, [], _)` / `EVar`); reject
+         anything else here with a clean diagnostic rather than letting a
+         well-typed program reach the internal `failwith` in lowering. *)
+      (match actor with
+       | Ast.ECon (_, [], _) | Ast.EVar _ -> ()
+       | _ ->
+         Err.error env.errors ~span:(span_of_expr actor)
+           "`spawn` needs a plain actor name written directly, like \
+            `spawn(Counter)`.\n\
+            A computed actor expression (from an `if`, `match`, or function \
+            call) isn't supported: March resolves which actor to spawn at \
+            compile time from its name.");
       TCon ("Pid", [fresh_var env.level])
 
     (* ── REPL result reference ─────────────────────────────────────── *)
@@ -4251,6 +4813,16 @@ and infer_app env span f_ty args idx =
   | arg :: rest, TArrow (param_ty, ret_ty) ->
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));
+    (* Proof-cap forge taint: if this argument laundered a [cap_narrow] result
+       (its type — now unified with [param_ty] — carries a tagged cap-producer
+       var), taint [ret_ty].  This closes the launder-through-a-polymorphic-fn
+       routes (e.g. [consume(id(cap_narrow(cap)))]) where the fn's return
+       decouples from its param and would otherwise slip past the direct unify
+       hook: the tainted result is then rejected when it is bound to a proof cap.
+       Only proof caps are ever rejected downstream, so IO narrowing through the
+       same fn is unaffected. *)
+    if ty_has_tagged_cap_producer env param_ty then
+      tag_cap_producer_result env ret_ty span;
     infer_app env span ret_ty rest (idx + 1)
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -4259,6 +4831,10 @@ and infer_app env span f_ty args idx =
     unify env ~span
       ~reason:(Some (RBuiltin "A value being applied like a function must have a function type."))
       f_ty (TArrow (arg_ty, ret_ty));
+    (* Proof-cap forge taint (same as the TArrow branch): a laundered cap_narrow
+       argument taints the call's result so the unify hook still fires downstream. *)
+    if ty_has_tagged_cap_producer env arg_ty then
+      tag_cap_producer_result env ret_ty span;
     infer_app env span ret_ty rest (idx + 1)
   | _, TError ->
     List.iter (fun a -> ignore (infer_expr env a)) args;
@@ -4291,6 +4867,35 @@ and infer_match env span scrut scrut_ty branches =
   check_redundant_arms env scrut_ty branches;
   result_ty
 
+(** Compute the type of a `let`-binding RHS, honouring an optional type
+    annotation (`let x : T = e`, finding 16).  When [bind_ty] is present the
+    annotation becomes a CHECKING context for the RHS (via [check_expr]) — a
+    mismatch like `let x : Int = "foo"` is rejected, while a polymorphic RHS
+    bound at a more specific instance (`let f : (Int) -> Int = fn x -> x`)
+    still typechecks.
+
+    The annotation is resolved into a scratch error context first: if
+    [surface_ty] cannot resolve it (e.g. a phantom/typestate tag used in type
+    position, `let h : Handle(Open) = …`, which is a data constructor, not a
+    type name), we discard the scratch errors and fall back to plain inference
+    — exactly the pre-finding-16 behaviour for annotations the type grammar
+    can't express, so no legitimate program starts being rejected. *)
+and infer_let_annotated env sp bind_ty bind_expr =
+  match bind_ty with
+  | None -> infer_expr env bind_expr
+  | Some ann ->
+    let scratch = March_errors.Errors.create () in
+    let tvars = ref [] in
+    let ann_ty = surface_ty { env with errors = scratch } ~tvars ann in
+    if March_errors.Errors.has_errors scratch then
+      (* Annotation not expressible as a resolvable type — ignore it (legacy
+         behaviour) and infer from the RHS alone. *)
+      infer_expr env bind_expr
+    else begin
+      check_expr env bind_expr ann_ty ~reason:(Some (RAnnotation sp));
+      ann_ty
+    end
+
 (** Infer types of all expressions in a block, threading [ELet] bindings. *)
 and infer_block env exprs =
   match exprs with
@@ -4305,7 +4910,13 @@ and infer_block env exprs =
        `let f1 = f(acc); f1(k)` to instantiate a fresh TVar for f1 rather than
        unifying the original t_r1 that links f's curried return chain. *)
     let env_rhs = enter_level env in
-    let rhs_ty  = infer_expr env_rhs b.bind_expr in
+    (* If the binding carries a type annotation (`let x : T = e`), CHECK the
+       RHS against the annotated type rather than inferring it bare.  Using
+       check_expr (not just a post-hoc unify) gives a legitimately polymorphic
+       RHS a checking context, so `let f : (Int) -> Int = fn x -> x` still
+       works while `let x : Int = "foo"` is rejected.  The annotated type then
+       becomes the binding's type, so the pattern unifies against it. *)
+    let rhs_ty = infer_let_annotated env_rhs sp b.bind_ty b.bind_expr in
     let bindings, pat_ty = infer_pattern env_rhs b.bind_pat in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
@@ -4386,6 +4997,14 @@ and infer_block env exprs =
         Hashtbl.replace env.type_map p.param_name.span (repr pty)
       ) params param_tys;
     let body_ty = infer_block env_inner [body] in
+    (* Track whether the return-annotation unify (below) already reported a
+       mismatch, so the later self-type/arrow-type reconciliation does not
+       rediscover and DOUBLE-REPORT the identical conflict once it flows
+       through the self-reference `fn_ty` (finding 13).  We compare the
+       diagnostic count before/after rather than a boolean, so a genuinely
+       distinct error from the self-reference (which grows the count on the
+       arrow unify but NOT here) is still surfaced. *)
+    let errs_before_ret = List.length env.errors.March_errors.Errors.diagnostics in
     let ret_ty  = match ret_ann with
       | None -> body_ty
       | Some ann ->
@@ -4394,8 +5013,18 @@ and infer_block env exprs =
         unify env ~span:sp ~reason:None body_ty expected;
         expected
     in
+    let ret_annot_reported =
+      List.length env.errors.March_errors.Errors.diagnostics > errs_before_ret
+    in
     let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
-    unify env ~span:sp ~reason:None fn_ty arrow_ty;
+    if ret_annot_reported then
+      (* The return-annotation unify already reported this mismatch; run the
+         arrow reconciliation for its type-linking side effects only, routing
+         any (duplicate) report to a scratch context that we discard. *)
+      unify { env with errors = March_errors.Errors.create () }
+        ~span:sp ~reason:None fn_ty arrow_ty
+    else
+      unify env ~span:sp ~reason:None fn_ty arrow_ty;
     let gen_ty = generalize (env.level - 1) arrow_ty in
     let env' = bind_var name.txt gen_ty env in
     infer_block env' rest
@@ -4444,7 +5073,14 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
 let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   match e with
   | Ast.EVar n ->
-    if List.mem n.txt bound || String.contains n.txt '.' then [] else [n.txt]
+    (* Keep DOTTED names too (e.g. `App.id`, produced by desugar's
+       [qualify_module_refs] for an intra-nested-module reference).  The only two
+       callers are [dependency_order_dfn_run]'s [deps_of] — which maps a dotted
+       name's suffix to a local fn so a nested-module forward reference is ordered
+       helper-first (closing the qualified-prebind type-erasure forward-ref hole)
+       — and [warn_unused_params], which only compares against bare param names, so
+       a dotted entry is inert there.  A bound name is still dropped. *)
+    if List.mem n.txt bound then [] else [n.txt]
   | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
   | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
   | Ast.EApp (f, args, _) ->
@@ -4674,6 +5310,13 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           ) clause.fc_params ([], env_rec)
       in
 
+      (* Proof-cap mint gate context: the body is inside a PUBLIC fn iff fn_vis
+         is Public. Set on body_env so the `mint_cap` EApp special-case can
+         require declaring-module + public provenance. Lambdas inherit this
+         (they don't call check_fn); nested named fns/modules reset it via their
+         own check_fn. *)
+      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
+
       (* Record each named parameter's type in the type map *)
       List.iter2 (fun fp pty ->
           match fp with
@@ -4703,11 +5346,22 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 let ty = match List.assoc_opt v.txt !fn_tvars with
                   | Some t -> t
                   | None   ->
-                    (* Type var not yet in fn_tvars (e.g. declared only in constraint).
-                       Create a fresh var and register it. *)
-                    let fv = fresh_var env'.level in
-                    fn_tvars := (v.txt, fv) :: !fn_tvars;
-                    fv
+                    (* Not a signature type-variable name (e.g. the annotation
+                       type-var `a` in `fn f(x : a) when Eq(a)`, or a bound
+                       `[s : I]`).  In `fn same(a, b) when Eq(a)` the `a` names
+                       a VALUE PARAMETER whose type is a fresh var bound in
+                       body_env — resolve to THAT type so the constraint rides
+                       on the parameter's own type variable and is re-checked at
+                       call sites (finding 15).  Only if the name is neither a
+                       signature type var nor a bound value do we fall back to a
+                       fresh, registered placeholder. *)
+                    (match lookup_var v.txt body_env with
+                     | Some (Mono t) -> t
+                     | Some (Poly (_, _, t)) -> t
+                     | None ->
+                       let fv = fresh_var env'.level in
+                       fn_tvars := (v.txt, fv) :: !fn_tvars;
+                       fv)
                 in
                 Some (CInterface (iface_name.txt, ty))
               | _ -> None
@@ -4739,6 +5393,25 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
 
       (* Warn about unrestricted params not referenced in the body *)
       warn_unused_params env clause.fc_params clause.fc_body fn_span;
+
+      (* Proof-cap forge value restriction across fn boundaries: if this fn's
+         body is (or launders) a [cap_narrow] result (e.g.
+         `fn mk(cap) do cap_narrow(cap) end`), its cap-producer return var must
+         NOT generalize — otherwise each cross-module call instantiates a fresh,
+         untagged copy that escapes the unify hook and can be forged into a proof
+         cap.  Demote the return type's vars to level 0 so [generalize] below
+         keeps them monomorphic, and re-tag so the shared var is caught when a
+         call binds it to a proof cap. *)
+      (* Record a cap-narrow-factory fn: its body launders a [cap_narrow] result,
+         so a cross-module call to it (which resolves to the prebound scheme,
+         invisible to the unify hook's per-var tag) must taint its result at the
+         call site — see the [EApp] handling of a factory name. *)
+      if ty_has_tagged_cap_producer env body_ty then begin
+        Hashtbl.replace env.cap_narrow_factory_fns def.fn_name.txt fn_span;
+        if env.current_module <> "" then
+          Hashtbl.replace env.cap_narrow_factory_fns
+            (env.current_module ^ "." ^ def.fn_name.txt) fn_span
+      end;
 
       let fn_ty =
         List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
@@ -4858,9 +5531,13 @@ let register_impl_shape env (idef : Ast.impl_def) =
          (`TRecord [...]`); they don't unify, so `impl Iface(Record)` is invisible
          to a call in a module checked before the impl's own module — which is
          exactly the cross-module / multi-file case. Variant types are unaffected
-         (they are not in [env.records] and stay nominal). *)
+         (they are not in [env.records] and stay nominal) — except a variant
+         whose bare name collides with a record from another module, which
+         [name_is_variant] guards against exactly as [surface_ty] does. *)
       (match StrMap.find_opt n.txt env.records with
-       | Some (params, field_decls) when List.length params = List.length args' ->
+       | Some (params, field_decls)
+         when List.length params = List.length args'
+              && not (name_is_variant env n.txt) ->
          let saved = !tvars in
          List.iter2 (fun pname arg -> tvars := M.add pname arg !tvars) params args';
          let flds = List.map (fun (fn, fty) -> (fn, lenient_ty fty)) field_decls in
@@ -4932,6 +5609,19 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
 let discharge_constraints env span =
+  (* Linearity is transparent to constraint discharge: `linear T` satisfies
+     exactly the constraints `T` satisfies.  impl_matches_ty already strips
+     TLin (its TLin/TLin arm) and unification coerces TLin transparently —
+     but the discharge arms below match on the repr'd type directly, so
+     without this strip an expression-position `linear Int` (a linear
+     record-field access, or a `linear Int`-returning call, used in
+     arithmetic) falls to the catch-all and rejects with "`linear Int` does
+     not implement Num" before the linearity tracker ever runs (slice-7
+     finding L2). *)
+  let rec strip_lin t = match repr t with
+    | TLin (_, inner) -> strip_lin inner
+    | t' -> t'
+  in
   (* Dedup CInterface constraints: when the same concrete type is constrained
      on the same interface multiple times (e.g., 10 calls to Storage.get on
      the same storage variable), we only need to check the impl once.
@@ -4940,7 +5630,7 @@ let discharge_constraints env span =
   List.iter (fun c ->
       let dominated = match c with
         | CInterface (name, t) ->
-          let rt = repr t in
+          let rt = strip_lin t in
           (match rt with
            | TVar _ -> false  (* polymorphic -- will be skipped anyway *)
            | _ ->
@@ -4952,7 +5642,7 @@ let discharge_constraints env span =
       if not dominated then
       match c with
       | CNum t | COrd t ->
-        let ty   = repr t in
+        let ty   = strip_lin t in
         let kind = match c with CNum _ -> "Num" | COrd _ -> "Ord" | _ -> assert false in
         (match ty with
          | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
@@ -4970,7 +5660,7 @@ let discharge_constraints env span =
            Err.error env.errors ~span
              (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
       | CInterface (iface_name, t) ->
-        let ty = repr t in
+        let ty = strip_lin t in
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
@@ -5177,15 +5867,86 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELit _ | Ast.EVar _ -> acc
   | _ -> acc
 
+(** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless of
+    which actor it belongs to — the hot-reload state-migration naming
+    convention (Phase5C-C.5). This is a local copy of
+    [March_tir.Tir_names.is_migrate_fn_name]: [march_typecheck] cannot depend
+    on [march_tir] ([march_tir]'s dune already depends on
+    [march_typecheck]), so the bare-suffix predicate this module's
+    migrate_state IO-free check needs (see below) is duplicated here rather
+    than shared. Keep byte-identical to [Tir_names.is_migrate_fn_name] if
+    either changes. *)
+let is_migrate_fn_name (fn_name : string) : bool =
+  let sfx = "_migrate_state" in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
-    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate. *)
-let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list) =
+    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate.
+
+    [cap_qname_prefix] is the fully-accumulated dotted path (from
+    [env.cap_qual_prefix] extended by [mod_name.txt], or [mod_name.txt] alone
+    at the entry module) used ONLY to key [env.cap_closures] so it matches
+    TIR's fully-qualified function-name convention (see [lib/tir/lower.ml]'s
+    [mod_prefix]). [mod_name] itself continues to be used for all
+    diagnostics/messages and the [proof_caps] self-declaration check below,
+    unchanged. *)
+let check_module_needs (env : env) (mod_name : Ast.name)
+    ~(cap_qname_prefix : string) (decls : Ast.decl list) =
+  (* [cap_qname_prefix] carries no trailing dot (e.g. "", "Lib", "Lib.Sub").
+     Build the fully-qualified cap-closure key for a function/extern name,
+     omitting the leading dot when the prefix is empty (top-level function of
+     the entry module) — matching TIR's [mod_prefix ^ name] convention where
+     [mod_prefix] is "" at the entry level. *)
+  let cap_qname (leaf_name : string) : string =
+    if cap_qname_prefix = "" then leaf_name
+    else cap_qname_prefix ^ "." ^ leaf_name
+  in
   let declared_needs = List.concat_map (function
     | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
     | _ -> []
   ) decls in
+  (* Per-function inferred IO-capability closure (Phase5C-A.2): attributes the
+     same cap data the checks below already compute to the owning function and
+     records it into [env.cap_closures] for a later hot-deploy
+     capability-manifest task. Purely additive bookkeeping — does not affect
+     any Check 1/1b/1c/2/3/4/5/6 validation logic or diagnostics below.
+     [record_fn_caps] is called as a side effect from within [used_caps],
+     [body_cap_uses], and [extern_cap_uses] below (each of which already
+     iterates [decls] and already computes sig/body/extern caps per-DFn or
+     per-DExtern) rather than via a separate re-traversal, so no function body
+     or signature is walked twice. Merge order across the three call sites
+     doesn't matter: [record_fn_caps] always merges with whatever is already
+     in [env.cap_closures] for that qualified name. *)
+  let module_wide_caps : string list =
+    (* Caps that apply to every function in this module regardless of which
+       function's own signature/body/extern-block produced them: declared
+       [needs] (in-scope for the whole module body) and caps propagated in
+       from imported modules (Check 4). *)
+    let propagated = List.concat_map (function
+      | Ast.DUse (ud, _) ->
+        let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+        (match List.assoc_opt imported env.module_caps with
+         | None -> [] | Some req_caps -> req_caps)
+      | _ -> []
+    ) decls in
+    declared_needs @ propagated
+  in
+  let record_fn_caps (fn_qname : string) (own_caps : string list) =
+    let prior = Option.value ~default:[] (Hashtbl.find_opt env.cap_closures fn_qname) in
+    let merged = March_caps.Cap_lattice.normalize (module_wide_caps @ own_caps @ prior) in
+    Hashtbl.replace env.cap_closures fn_qname merged;
+    (* Parallel own-caps-only projection (Phase5C-C.5 design correction): same
+       accumulate-across-call-sites behavior as [cap_closures] above, but
+       WITHOUT folding in [module_wide_caps]. This is what the migrate_state
+       IO-free check needs — the merged closure would falsely blame a pure
+       migrate_state for its module's handler-level [needs]. *)
+    let prior_own = Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures fn_qname) in
+    let merged_own = March_caps.Cap_lattice.normalize (own_caps @ prior_own) in
+    Hashtbl.replace env.own_cap_closures fn_qname merged_own
+  in
   let used_caps : (string * Ast.span) list = List.concat_map (function
     | Ast.DFn (def, sp) ->
       let param_tys = List.filter_map (fun p ->
@@ -5194,13 +5955,33 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         | _ -> None
       ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
       let ret_tys = Option.to_list def.fn_ret_ty in
-      List.concat_map (fun t ->
-        List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
-      ) (param_tys @ ret_tys)
+      let sig_caps = List.concat_map cap_paths_in_surface_ty (param_tys @ ret_tys) in
+      let qname = cap_qname def.fn_name.txt in
+      record_fn_caps qname sig_caps;
+      List.map (fun cap -> (cap, sp)) sig_caps
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
-    | Ast.DActor (_, _, actor, sp) ->
+    | Ast.DActor (_, name, actor, sp) ->
+      (* C1 fix: also record each handler's own per-function cap closure,
+         keyed EXACTLY the way TIR names the synthesized handler function
+         (see lib/tir/lower.ml's [lower_handler]: [fn_name = name ^ "_" ^
+         h.ah_msg.txt], where [name] there is the actor's OWN BARE name —
+         never module-prefixed, confirmed empirically: a handler on actor
+         [Weeble] nested inside [App.Sub] still lowers to bare
+         [Weeble_Zorp], NOT [Sub.Weeble_Zorp], even though sibling [DFn]s in
+         the same nested module DO get the "Sub." prefix). So the handler's
+         qualified name must use the actor's bare [name.txt] directly — NOT
+         [cap_qname name.txt] — while the signature-cap diagnostics above
+         and the body-scanned caps below still merge in [module_wide_caps]
+         via [record_fn_caps] the same way [DFn] does. *)
+      List.iter (fun (h : Ast.actor_handler) ->
+          let fn_qname = name.txt ^ "_" ^ h.ah_msg.txt in
+          let body_caps = List.filter_map (fun (call_name, _) ->
+              List.assoc_opt call_name builtin_cap_table
+            ) (calls_in_expr [] h.Ast.ah_body) in
+          record_fn_caps fn_qname body_caps
+        ) actor.actor_handlers;
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
@@ -5219,19 +6000,38 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
   let body_cap_uses : (string * Ast.span) list =
     let all = List.concat_map (function
       | Ast.DFn (def, _) ->
-        List.concat_map (fun clause ->
+        let per_clause = List.map (fun clause ->
           List.filter_map (fun (call_name, call_span) ->
             match List.assoc_opt call_name builtin_cap_table with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
           ) (calls_in_expr [] clause.Ast.fc_body)
-        ) def.fn_clauses
+        ) def.fn_clauses in
+        let qname = cap_qname def.fn_name.txt in
+        record_fn_caps qname (List.concat_map (List.map fst) per_clause);
+        List.concat per_clause
       | Ast.DLet (_vis, b, _) ->
         List.filter_map (fun (call_name, call_span) ->
           match List.assoc_opt call_name builtin_cap_table with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
         ) (calls_in_expr [] b.Ast.bind_expr)
+      (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
+         this branch already performs for DFn/DLet, rather than a second/
+         parallel AST walk — a handler doing undeclared IO must trip the
+         same "capability not declared in needs" diagnostic (Check 1b,
+         below) that a plain function body would. Cap-closure recording for
+         handlers already happened above in [used_caps]'s DActor branch (so
+         it isn't duplicated here); this only needs to surface the
+         (cap, span) pairs for the Check 1b/Check 2 diagnostics. *)
+      | Ast.DActor (_, _, actor, _) ->
+        List.concat_map (fun (h : Ast.actor_handler) ->
+            List.filter_map (fun (call_name, call_span) ->
+              match List.assoc_opt call_name builtin_cap_table with
+              | Some cap_name -> Some (cap_name, call_span)
+              | None -> None
+            ) (calls_in_expr [] h.Ast.ah_body)
+          ) actor.actor_handlers
       | _ -> []
     ) decls in
     List.fold_left (fun acc (cap_name, sp) ->
@@ -5244,6 +6044,11 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       | Ast.DExtern (edef, sp) ->
         let base = [("IO.Foreign", sp)] in
         let has_blocking = List.exists (fun ef -> ef.Ast.ef_blocking) edef.ext_fns in
+        List.iter (fun (ef : Ast.extern_fn) ->
+            let qname = cap_qname ef.ef_name.txt in
+            let own = if ef.Ast.ef_blocking then ["IO.Foreign"; "IO.Foreign.Blocking"] else ["IO.Foreign"] in
+            record_fn_caps qname own
+          ) edef.ext_fns;
         if has_blocking then base @ [("IO.Foreign.Blocking", sp)] else base
       | _ -> []
     ) decls
@@ -5491,7 +6296,123 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
           end
         ) all_param_tys
     | _ -> ()
+  ) decls;
+  (* Check 8 - migrate_state must be IO-free, Phase5C-C.5.
+     State-migration functions, the actor_lower plus _migrate_state naming
+     convention, see is_migrate_fn_name, run during the hot-migration window,
+     ahead of any pending user messages; doing IO there is dangerous. Use the
+     own-caps projection, env.own_cap_closures / fn_own_capability_closures,
+     NOT the merged cap_closures: the merged closure folds in the module
+     declared needs, typically present for the module handlers, which
+     would falsely flag a migrate_state whose own body or signature touches
+     no capability at all. *)
+  let check_migrate_fn_io_free (qname : string) (sp : Ast.span) =
+    let own_caps =
+      Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures qname)
+    in
+    if own_caps <> [] then
+      Err.error env.errors ~span:sp
+        (render_parts [
+          MPText "migrate_state must be IO-free"; MPBreak;
+          MPCode qname; MPText " calls capabilities that need ";
+          MPCode (String.concat ", " own_caps); MPText ".";
+          MPBreak; MPText "migrate_state runs during the hot-migration window, before user messages.";
+          MPBreak; MPText "hint: move side effects into a normal handler that runs after migration completes." ])
+  in
+  List.iter (function
+    | Ast.DFn (def, sp) when is_migrate_fn_name def.fn_name.txt ->
+      check_migrate_fn_io_free (cap_qname def.fn_name.txt) sp
+    (* An extern-declared fn following the migrate_state naming convention is
+       equally recognized: its own caps were recorded under [ef_name.txt] by
+       the extern-implied-caps pass above (any extern block is IO.Foreign,
+       [blocking] adds IO.Foreign.Blocking), and that alone must fail the
+       IO-free bound just like a body-scanned builtin call would for a DFn. *)
+    | Ast.DExtern (edef, sp) ->
+      List.iter (fun (ef : Ast.extern_fn) ->
+        if is_migrate_fn_name ef.Ast.ef_name.txt then
+          check_migrate_fn_io_free (cap_qname ef.Ast.ef_name.txt) sp
+      ) edef.ext_fns
+    | _ -> ()
   ) decls
+
+(** Post-checking sweep (Part 2): enforce the [mint_cap] gate for every recorded
+    site, now that its result type is pinned by later unification.  [mint_cap(x)]
+    typechecks iff its pinned result is [Cap(P)] with [P] a proof cap whose
+    declaring module equals the site's enclosing module AND the site's enclosing
+    fn is public.  A proof cap from another module or a mint in a private/non-
+    declaring fn is rejected (unforgeability); a non-proof (IO) target is
+    rejected too — attenuating IO caps is [cap_narrow]'s job.  The enclosing
+    fn/module context was captured at record time (unavailable now). *)
+let check_mint_cap_sites (env : env) : unit =
+  List.iter (fun (sp, rty, cur_fn_public, current_module) ->
+      match repr rty with
+      | TCon ("Cap", [inner]) ->
+        (match repr inner with
+         | TCon (p, []) ->
+           (match List.assoc_opt p env.proof_caps with
+            | Some declaring_mod ->
+              if not (declaring_mod = current_module && cur_fn_public) then
+                Err.error env.errors ~span:sp
+                  (render_parts [
+                    MPText "mint_cap "; MPCode ("Cap(" ^ p ^ ")");
+                    MPText " is only allowed inside a public function of its declaring module ";
+                    MPCode declaring_mod; MPText ".";
+                    MPBreak;
+                    MPText "hint: to obtain "; MPCode ("Cap(" ^ p ^ ")");
+                    MPText " elsewhere, receive it as a parameter and pass it through, or call a public factory in ";
+                    MPCode declaring_mod; MPText "." ])
+            | None ->
+              (* mint_cap used to produce a non-proof (IO) cap — disallow; that's
+                 cap_narrow's job. *)
+              Err.error env.errors ~span:sp
+                (render_parts [
+                  MPText "mint_cap is only for proof capabilities; use ";
+                  MPCode "cap_narrow"; MPText " to attenuate IO capabilities." ]))
+         | _ ->
+           (* Result is not a concrete cap constructor — an unbound (generalized)
+              cap var that never got pinned to a specific proof cap.  This
+              happens when the mint is inside a [let]-bound lambda that gets
+              generalized to [forall a. _ -> Cap(a)]: such a value is a
+              polymorphic cap producer that could mint ANY cap (a forge vector),
+              so it is rejected regardless of the enclosing fn.  A mint whose
+              target proof cap is fixed at the call site (direct mint, or an
+              immediately-applied / type-annotated lambda) pins the result and
+              is checked against the declaring-module + public gate above. *)
+           Err.error env.errors ~span:sp
+             (render_parts [
+               MPText "mint_cap here does not have a determinable proof-capability result type.";
+               MPBreak;
+               MPText "hint: mint_cap must produce a specific ";
+               MPCode "Cap(Mod.Name)";
+               MPText " fixed at the call site. A mint captured in a generalized (let-bound) lambda is polymorphic in the capability and is rejected — mint directly, or fix the capability type (e.g. annotate the return or apply the lambda in place)." ]))
+      | _ -> ()
+    ) !(env.mint_cap_sites)
+
+(** [fn_capability_closures env] returns the per-function inferred IO-capability
+    closure recorded by [check_module_needs] for every function checked so far
+    in [env]'s lineage: [(fully_qualified_fn_name, normalized_cap_paths)] pairs,
+    one per function ("Mod.fn" for [DFn]/actor-owning modules, "Mod.extern_fn"
+    for FFI functions declared in an [extern] block). The list combines each
+    function's own inferred requirements (Cap-typed signature, body-scanned
+    builtin calls, extern-implied [IO.Foreign]/[IO.Foreign.Blocking]) with the
+    caps that apply to every function in its module (declared [needs] and
+    caps propagated in from imported modules per Check 4), normalized via
+    [March_caps.Cap_lattice.normalize]. Order is unspecified (backed by a hashtable).
+    Consumed by the (future) hot-deploy capability manifest. *)
+let fn_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.cap_closures []
+
+(** [fn_own_capability_closures env] returns each function's OWN inferred
+    IO-capability closure — [(fully_qualified_fn_name, normalized_cap_paths)]
+    pairs — WITHOUT the module-wide [needs]/import-propagated merge that
+    [fn_capability_closures] performs. Use this projection, not the merged
+    one, for any "is this one function IO-free" question (e.g. the
+    migrate_state check): the merged closure attributes a module's
+    handler-level [needs] to every function in the module, including a pure
+    migrate_state, which would falsely fail such a check. Order is
+    unspecified (backed by a hashtable). *)
+let fn_own_capability_closures (env : env) : (string * string list) list =
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
 
 (* =================================================================
    §16a  Session type projection and duality
@@ -5541,11 +6462,17 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
        else begin
          (* Mergeability: if all branches project to the same local type for
             this role, merge them into that type (the role need not observe
-            the choice at all).  This is the standard MPST merge rule. *)
+            the choice at all).  This is the standard MPST merge rule, and it
+            only applies to MULTIPARTY protocols (>2 roles), where a bystander
+            role genuinely does not observe a choice made between two OTHER
+            roles.  In a BINARY (2-role) protocol the non-chooser is the
+            chooser's only peer — the offerer — who MUST always observe the
+            choice (it runs [Chan.offer]); so we never merge there, even when
+            the branches happen to carry identical payload types. *)
          match branch_tys with
          | [] -> SOffer branch_tys
          | (_, first_ty) :: rest ->
-           if List.for_all (fun (_, ty) -> session_ty_exact_equal ty first_ty) rest then
+           if multiparty && List.for_all (fun (_, ty) -> session_ty_exact_equal ty first_ty) rest then
              first_ty   (* role not involved — merged/transparent *)
            else
              SOffer branch_tys
@@ -5717,10 +6644,28 @@ let dependency_order_dfn_run (run : Ast.decl list) : Ast.decl list =
     let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
     let by_name : (string, Ast.fn_def * Ast.span) Hashtbl.t = Hashtbl.create 16 in
     List.iter (fun (n, ds) -> Hashtbl.replace by_name n ds) info;
+    (* Map a body reference to a local fn name.  A BARE name matches directly; a
+       DOTTED name (`App.id`, produced by desugar's [qualify_module_refs] for an
+       intra-nested-module reference) is mapped by its suffix after the last `.` —
+       so a nested-module call to a sibling `id` is recognised as a dependency on
+       the local `id`, and [dependency_order_dfn_run] orders the helper BEFORE its
+       caller.  Without this, a forward reference (`fn attack() do need_str(id(x))`
+       defined ABOVE `fn id`) left `App.id`'s prebind pinned to the caller's
+       decoupled use, and the qualified-prebind reconciliation (see the DFn branch
+       of [check_decl]) ran too late to un-erase the already-checked caller. *)
+    let local_of n =
+      if StringSet.mem n name_set then Some n
+      else match String.rindex_opt n '.' with
+        | Some i ->
+          let suffix = String.sub n (i + 1) (String.length n - i - 1) in
+          if StringSet.mem suffix name_set then Some suffix else None
+        | None -> None
+    in
     let deps_of (d : Ast.fn_def) =
       List.concat_map (fun (c : Ast.fn_clause) -> free_vars_expr [] c.Ast.fc_body)
         d.Ast.fn_clauses
-      |> List.filter (fun n -> n <> d.Ast.fn_name.txt && StringSet.mem n name_set)
+      |> List.filter_map local_of
+      |> List.filter (fun n -> n <> d.Ast.fn_name.txt)
     in
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
@@ -5959,7 +6904,12 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
       names;
     !dup
   in
-  if has_dup then run
+  if has_dup then begin
+    if Sys.getenv_opt "MARCH_DEBUG_ORDER" <> None then
+      Printf.eprintf "[order] has_dup=true, skipping reorder of %d-mod run: %s\n%!"
+        (List.length names) (String.concat "," names);
+    run
+  end
   else begin
     let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
     let by_name : (string, Ast.decl list * Ast.decl) Hashtbl.t = Hashtbl.create 16 in
@@ -5984,8 +6934,40 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
              | _ -> ())
           | _ -> ()) decls
       ) info;
+    (* [hard_deps] (unqualified bare ctor/type refs) are a correctness
+       requirement: a bare name is only visible in [env] once the defining
+       sibling's DMod has actually been processed by [check_decl] (its ctors
+       are exported at that point — see the [new_ctors]/[qual_ctors] merge in
+       the [DMod] case of [check_decl]).  There is no pass-1 placeholder for
+       bare ctor names the way there is for qualified "Mod.fn" names, so
+       violating a hard dependency is a hard failure ("I cannot find
+       `Ctor`"), not just an imprecise type.
+       [module_refs_in_decls] (qualified "Mod.fn"/"Mod.Ctor" refs) is only a
+       precision nicety: those names ARE pre-bound as pass-1 placeholders
+       regardless of order (see [prebind_mod_members]), so ordering by them
+       just avoids callers unifying against a still-generalizing Mono
+       placeholder — never required for resolution to succeed.
+       Sibling modules commonly form real reference cycles through qualified
+       calls (e.g. a facade module delegating to an internal one, which in
+       turn bare-pattern-matches a type owned by the facade's module). A
+       single DFS over the union of both kinds of edges lets a soft
+       (qualified) cycle silently reorder a hard (bare) dependency the wrong
+       way — whichever edge the traversal happens to reach the ancestor
+       through "wins", independent of which one is actually load-bearing.
+       So: compute the preferred order via the existing combined-edge DFS
+       (unchanged — this is what every existing case, including cycle-free
+       ones, already relies on for precision), then verify it against the
+       hard edges ALONE.  If it already satisfies every hard edge (the
+       common case: no hard/soft cycle exists) return it unchanged.  Only
+       when a hard edge is actually violated do we recompute a corrected
+       order via Kahn's algorithm restricted to hard edges, using the
+       preferred order purely as a tie-break — this guarantees every hard
+       dependency is satisfied while still respecting the soft-edge
+       preference everywhere it doesn't conflict. *)
+    let hard_deps_of decls = unqualified_module_deps ~type_owner ~ctor_owner decls in
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
+    let dbg = Sys.getenv_opt "MARCH_DEBUG_ORDER" <> None in
     let rec visit name =
       if not (Hashtbl.mem visited name) then begin
         Hashtbl.replace visited name ();
@@ -5996,15 +6978,103 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
               (StringSet.inter name_set
                  (StringSet.union
                     (module_refs_in_decls decls)
-                    (unqualified_module_deps ~type_owner ~ctor_owner decls)))
+                    (hard_deps_of decls)))
           in
+          if dbg then
+            Printf.eprintf "[order] visit %s deps=[%s]\n%!" name
+              (String.concat "," (StringSet.elements deps));
           StringSet.iter visit deps;
           out := dm :: !out
         | None -> ()
       end
     in
     List.iter (fun n -> visit n) names;
-    List.rev !out
+    let preferred = List.rev !out in
+    (* Hard-dependency graph, restricted to sibling names, self-edges removed. *)
+    let hard_graph : (string, StringSet.t) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (modname, (decls, _)) ->
+        let deps = StringSet.remove modname (StringSet.inter name_set (hard_deps_of decls)) in
+        Hashtbl.replace hard_graph modname deps)
+      info;
+    let pos : (string, int) Hashtbl.t = Hashtbl.create 16 in
+    List.iteri (fun i d -> match d with
+        | Ast.DMod (n, _, _, _) -> Hashtbl.replace pos n.Ast.txt i
+        | _ -> ())
+      preferred;
+    let satisfies_hard_deps order =
+      let p = Hashtbl.create 16 in
+      List.iteri (fun i n -> Hashtbl.replace p n i) order;
+      List.for_all (fun n ->
+          let deps = Option.value ~default:StringSet.empty (Hashtbl.find_opt hard_graph n) in
+          StringSet.for_all (fun d ->
+              match Hashtbl.find_opt p d, Hashtbl.find_opt p n with
+              | Some pd, Some pn -> pd < pn
+              | _ -> true)
+            deps)
+        names
+    in
+    let preferred_names =
+      List.filter_map (function Ast.DMod (n, _, _, _) -> Some n.Ast.txt | _ -> None) preferred
+    in
+    let final =
+      if satisfies_hard_deps preferred_names then preferred
+      else begin
+        if dbg then
+          Printf.eprintf
+            "[order] hard-dependency violation in combined order — falling back to \
+             hard-edge Kahn's-algorithm order for: %s\n%!"
+            (String.concat "," preferred_names);
+        (* Kahn's algorithm over [hard_graph], breaking ties by [pos]
+           (the combined-edge DFS's preferred order) so behavior stays as
+           close to the previous output as the hard constraints allow. *)
+        let in_degree : (string, int) Hashtbl.t = Hashtbl.create 16 in
+        let enables : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+        List.iter (fun n ->
+            let deps = Option.value ~default:StringSet.empty (Hashtbl.find_opt hard_graph n) in
+            Hashtbl.replace in_degree n (StringSet.cardinal deps);
+            StringSet.iter (fun d ->
+                Hashtbl.replace enables d (n :: Option.value ~default:[] (Hashtbl.find_opt enables d)))
+              deps)
+          names;
+        let ready = ref (List.filter (fun n -> Hashtbl.find in_degree n = 0) names) in
+        let by_pos a b =
+          compare (Option.value ~default:max_int (Hashtbl.find_opt pos a))
+                  (Option.value ~default:max_int (Hashtbl.find_opt pos b))
+        in
+        let corrected = ref [] in
+        let remaining = ref (List.length names) in
+        while !remaining > 0 do
+          match List.sort by_pos !ready with
+          | [] ->
+            (* Genuine hard cycle: no way to satisfy every constraint.
+               Emit whatever is left in preferred order (best effort,
+               matches the previous behavior for irreducible cycles). *)
+            List.iter (fun n ->
+                if not (List.mem n !corrected) then corrected := n :: !corrected)
+              preferred_names;
+            remaining := 0
+          | n :: _ ->
+            ready := List.filter (fun x -> x <> n) !ready;
+            corrected := n :: !corrected;
+            decr remaining;
+            List.iter (fun dependent ->
+                let d = Hashtbl.find in_degree dependent - 1 in
+                Hashtbl.replace in_degree dependent d;
+                if d = 0 then ready := dependent :: !ready)
+              (Option.value ~default:[] (Hashtbl.find_opt enables n))
+        done;
+        (* [corrected] was built by prepending as each node finished, so its
+           head is the LAST node processed — reverse to restore the actual
+           topological (processing) order before mapping back to decls. *)
+        List.map (fun n -> snd (Hashtbl.find by_name n)) (List.rev !corrected)
+      end
+    in
+    if dbg then
+      Printf.eprintf "[order] final order (%d mods): %s\n%!"
+        (List.length final)
+        (String.concat ","
+           (List.filter_map (function Ast.DMod (n, _, _, _) -> Some n.Ast.txt | _ -> None) final));
+    final
   end
 
 (* Reorder both function runs (by call dependency) and module runs (by module
@@ -6114,6 +7184,20 @@ let rec calls_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ELit _ | Ast.EVar _ -> acc
   | _ -> acc
 
+(** [span_within inner outer] is true when [inner] is nested inside [outer] by
+    source position — same file, and [inner]'s start/end fall within [outer]'s
+    line/column bounds.  Used to attribute a recorded non-exhaustive-match span
+    to the enclosing `cap no_panic` function whose body it lives in, so a match
+    in some UNRELATED (plain) module is never blamed on the no_panic module. *)
+let span_within (inner : Ast.span) (outer : Ast.span) : bool =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line > outer.Ast.start_line
+      || (inner.Ast.start_line = outer.Ast.start_line
+          && inner.Ast.start_col >= outer.Ast.start_col))
+  && (inner.Ast.end_line < outer.Ast.end_line
+      || (inner.Ast.end_line = outer.Ast.end_line
+          && inner.Ast.end_col <= outer.Ast.end_col))
+
 let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let fn_entries : (string * (string * Ast.span) list * Ast.span) list =
     List.filter_map (fun d ->
@@ -6191,17 +7275,49 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
         let _ = fn_span in
         Err.error errors ~span:site_span msg
     end
+  ) fn_entries;
+  (* A NON-exhaustive `match` lowers to a runtime "no matching clause" panic, so
+     it is a panic surface just like `panic`/`unwrap`.  [check_exhaustiveness]
+     already found and recorded every non-exhaustive match's span (see
+     [env.nonexhaustive_match_spans]); here we reject any that falls inside one
+     of THIS `cap no_panic` module's own function bodies.  Span containment
+     attributes each match to its enclosing fn, so a non-exhaustive match in an
+     unrelated (plain) module is never blamed on this module. *)
+  let mod_name = env.current_module in
+  let ne_spans = !(env.nonexhaustive_match_spans) in
+  List.iter (fun (fn_name, _calls, fn_span) ->
+    List.iter (fun (msp : Ast.span) ->
+      if span_within msp fn_span then
+        Err.error errors ~span:msp
+          (Printf.sprintf
+             "`%s` in `mod %s` (declared `cap no_panic`) contains a non-exhaustive \
+              `match`, which panics at runtime when no clause matches.\n\n\
+              A `cap no_panic` module must handle every case, or add a `_ -> ...` \
+              catch-all arm."
+             fn_name mod_name)
+    ) ne_spans
   ) fn_entries
 
 (* ── cap pure: ban side-effectful builtins ───────────────────────────────── *)
 
-let pure_banned : StringSet.t = StringSet.of_list [
-  "spawn"; "send"; "print"; "println"; "eprint"; "eprintln";
-  "read_line"; "read_byte"; "exit"; "random_int"; "random_float"; "random_bool";
-  "uuid_v4"; "now_ms"; "sleep_ms"; "vault_put"; "vault_get";
-  "vault_delete"; "vault_update"; "vault_keys"; "write_file";
-  "read_file"; "append_file"; "delete_file";
-]
+(* A cap tag denotes a NONDETERMINISM source (wall-clock or RNG) — the only
+   effects a `cap deterministic` module must reject. Ordinary IO
+   (file/console/network) is deterministic-ish and stays allowed. *)
+let is_nondeterministic_cap (cap : string) : bool =
+  cap = "IO.Clock" || cap = "IO.Random"
+
+(* `cap pure` = NO side effect at all → ban every builtin the authoritative
+   effect map (`builtin_cap_table`) attributes an IO/effect cap to. Derived
+   from the table (not a hand-guessed parallel list) so it stays in lockstep
+   with the real builtin surface. `spawn`/`send`/`exit` are impure surface
+   names not carried in the table (they route through other mechanisms) —
+   union them in as incidental-correct extras. `read_byte` (raw stdin read,
+   like `read_line`) is another such stdin-effect surface name not in the
+   table, so union it in too. *)
+let pure_banned : StringSet.t =
+  let from_table = builtin_cap_table |> List.map fst |> StringSet.of_list in
+  StringSet.union from_table
+    (StringSet.of_list [ "spawn"; "send"; "exit"; "read_byte" ])
 
 let pure_suggestion : string =
   "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
@@ -6257,10 +7373,15 @@ let check_no_extern_module (errors : Err.ctx) (env : env) (decls : Ast.decl list
 
 (* ── cap deterministic: ban non-deterministic builtins ───────────────────── *)
 
-let deterministic_banned : StringSet.t = StringSet.of_list [
-  "random_int"; "random_float"; "random_bool"; "random_bytes";
-  "uuid_v4"; "now_ms"; "now_ns"; "monotonic_ms";
-]
+(* `cap deterministic` = no dependence on wall-clock time or an RNG (a weaker
+   claim than `pure` — a deterministic module MAY still do ordinary IO like
+   `println` or a `file_read`). Ban only the builtins the effect map attributes
+   to `IO.Clock`/`IO.Random`, derived from the same authoritative table. *)
+let deterministic_banned : StringSet.t =
+  builtin_cap_table
+  |> List.filter (fun (_, cap) -> is_nondeterministic_cap cap)
+  |> List.map fst
+  |> StringSet.of_list
 
 let deterministic_suggestion : string =
   "Use deterministic operations only in a `cap deterministic` module. \
@@ -6290,7 +7411,58 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
     discharge_constraints env sp;
-    bind_var def.fn_name.txt sch env
+    let env = bind_var def.fn_name.txt sch env in
+    (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the fn's REAL body-checked
+       scheme.  desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites
+       every intra-nested-module reference to the qualified form (e.g. `App.id`),
+       and [prebind_mod_members] seeds that name with either a fresh
+       `Mono (fresh_var 1)` placeholder (UNANNOTATED fn — [prebind_fn_scheme]
+       returned None) or a scheme built purely from annotation SYNTAX
+       (ANNOTATED fn — never unified against the body, so `fn launder(x:a):b do x`
+       keeps a decoupled `a -> b` that erases through every call).  Either way the
+       prebind is NOT the validated scheme; a sibling fn resolving the qualified
+       name gets a decoupled `?a -> ?b` that ERASES the type of anything laundered
+       through it (a general type-soundness hole; the proof-cap forge was one
+       exploitation).  Bind the qualified name to [sch] — the scheme [check_fn]
+       actually validated against the body — UNCONDITIONALLY (both the placeholder
+       and the un-body-validated-annotation cases).  This is codegen-safe: mono/TIR
+       key on the per-span [type_map] types, not this env scheme, and the full
+       [llvm_ir_validity_gate] (CRDT/distributed fixtures) is clean under it.
+       Forward references — where a caller earlier in the module already pinned the
+       placeholder to its own decoupled use — are handled UPSTREAM by
+       [dependency_order_dfn_run]: its [deps_of]/[local_of] now sees the qualified
+       reference (`App.id`) as a dependency on the local `id`, so `id` is checked
+       (and this rebind runs) BEFORE any caller.
+
+       [prebind_mod_members] seeds a fn's qualified key under TWO prefixes,
+       reconcile BOTH so no qualified key retains a decoupled scheme:
+       - [cap_qual_prefix] — the accumulated dotted path of ENCLOSING nested
+         modules ("" at the entry module, then the nested names, entry mod
+         stripped): matches [prebind_mod_members]'s [prefix] recursion (:8626).
+       - [current_module] — the CURRENT module's own name.  At the ENTRY module,
+         [check_module_core] seeds the entry's own top-level fns under
+         `EntryMod.fn` (`prebind_mod_members m.mod_name.txt`, :8732) while
+         [cap_qual_prefix] is still "", so the entry-self-qualified key
+         (`Main.id`, or a nested sibling's `T.id` reference to the entry `T`)
+         would otherwise never be reconciled — a memory-unsafe erasure when the
+         explicit `EntryMod.id` form is written.  (For a nested module both
+         prefixes may coincide or nest; deduping by the [<>""] guards + a set
+         avoids a redundant rebind, and rebinding the same real [sch] twice is
+         harmless anyway.) *)
+    let reconcile_qkey env prefix =
+      if prefix = "" then env
+      else
+        let qname = prefix ^ "." ^ def.fn_name.txt in
+        (match StrMap.find_opt qname env.vars with
+         | Some _ -> bind_var qname sch env
+         | None   -> env)
+    in
+    let env = reconcile_qkey env env.cap_qual_prefix in
+    let env =
+      if env.current_module <> env.cap_qual_prefix
+      then reconcile_qkey env env.current_module else env
+    in
+    env
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
@@ -6466,7 +7638,10 @@ let rec check_decl env (d : Ast.decl) : env =
                            fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities } in
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
-      ) { env with local_fns = StrMap.empty; current_module = name.txt } decls in
+      ) { env with local_fns = StrMap.empty; current_module = name.txt;
+          cap_qual_prefix =
+            (if env.cap_qual_prefix = "" then name.txt
+             else env.cap_qual_prefix ^ "." ^ name.txt) } decls in
     let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
@@ -6488,6 +7663,19 @@ let rec check_decl env (d : Ast.decl) : env =
            its methods (bound as "IfaceName.method" in inner_env) get exported
            as "ModName.IfaceName.method" into the outer scope. *)
         | Ast.DInterface (idef, _) -> Some idef.iface_name.txt
+        | _ -> None
+      ) decls
+    in
+    (* Private value/function members of this module (declared but not exported).
+       Recorded in [env.local_mods] under the module's name so a same-file
+       qualified reference to one (e.g. `A.secret` where `secret` is a `pfn`)
+       is diagnosed as "private to module `A`" instead of the misleading
+       "Unknown module `A`" (see [qualified_error_msg]). *)
+    let priv_members =
+      List.filter_map (function
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Private -> Some def.fn_name.txt
+        | Ast.DLet (Ast.Private, b, _) ->
+          (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
         | _ -> None
       ) decls
     in
@@ -6535,7 +7723,9 @@ let rec check_decl env (d : Ast.decl) : env =
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
     (* Validate capability declarations for this module *)
-    check_module_needs env name decls;
+    check_module_needs env name decls
+      ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
+                         else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)
     validate_island_protocol env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
@@ -6622,7 +7812,10 @@ let rec check_decl env (d : Ast.decl) : env =
       module_caps = (name.txt, inner_needs) :: env'.module_caps;
       proof_caps = inner_env.proof_caps;
       always_linear_types = inner_env.always_linear_types;
-      no_panic_modules = no_panic_modules' }
+      no_panic_modules = no_panic_modules';
+      local_mods =
+        (if priv_members = [] then env'.local_mods
+         else StrMap.add name.txt priv_members env'.local_mods) }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
@@ -6927,7 +8120,19 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         (* Index for O(1) [record_use] lookup: every rebound short name is an
+            exact-match key, as is the bare module name itself (ie_matches's
+            "name = mod_str" clause -- an EVar referencing the module path
+            literally); the module's first path segment is the prefix-index
+            key a qualified reference (e.g. "Depot.Gate.foo") hashes to (see
+            [record_use] -- it looks up by first-dot-split, matching
+            [split_qualified]'s convention elsewhere in this file). *)
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env
      | Ast.UseNames names ->
@@ -6942,6 +8147,7 @@ let rec check_decl env (d : Ast.decl) : env =
                          ; ie_matches = (fun name -> name = n.Ast.txt)
                          ; ie_used = ref false } in
              env.import_tracker := entry :: !(env.import_tracker);
+             import_index_add_exact env.import_idx n.Ast.txt entry;
              bind_var n.Ast.txt sch env
            | None ->
              Err.error env.errors ~span:n.Ast.span
@@ -6978,7 +8184,12 @@ let rec check_decl env (d : Ast.decl) : env =
                          || (String.length name > String.length prefix
                              && String.sub name 0 (String.length prefix) = prefix))
                      ; ie_used = ref false } in
-         env.import_tracker := entry :: !(env.import_tracker)
+         env.import_tracker := entry :: !(env.import_tracker);
+         List.iter (fun n -> import_index_add_exact env.import_idx n entry) short_names;
+         import_index_add_exact env.import_idx mod_str entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
        end;
        bind_vars matching env)
 
@@ -7005,7 +8216,12 @@ let rec check_decl env (d : Ast.decl) : env =
                       (String.length name >= plen && String.sub name 0 plen = short_prefix)
                       || name = short_name)
                   ; ie_used = ref false } in
-      env.import_tracker := entry :: !(env.import_tracker)
+      env.import_tracker := entry :: !(env.import_tracker);
+      (* [short_name] has no dots, so it is both the exact-match key (bare
+         alias reference) and the prefix-index key (qualified reference
+         "FB.baz" first-dot-splits to exactly "FB" = short_name). *)
+      import_index_add_exact env.import_idx short_name entry;
+      import_index_add_prefix env.import_idx short_name entry
     end;
     bind_vars new_bindings env
 
@@ -7628,9 +8844,24 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
   let rec conv (s : Ast.ty) : ty option =
     match s with
     | Ast.TyCon (name, args) ->
-      (match opt_all (List.map conv args) with
-       | Some args' -> Some (TCon (name.txt, args'))
-       | None -> None)
+      (* Decline to build a scheme from a QUALIFIED type name.  This prebind
+         pass has no env, so it cannot reproduce [surface_ty]'s type resolution:
+         [surface_ty] canonicalizes a qualified variant to its bare nominal
+         (`Conduit.ConduitError` -> `ConduitError`) AND expands a qualified
+         record to a structural [TRecord].  Emitting a verbatim qualified nominal
+         `TCon("Mod.T")` here made a prebind fn scheme — used at a call site
+         checked BEFORE the callee's Pass-2 re-derivation — mismatch the bare
+         (or structural) type the caller's argument carries, an order-dependent
+         "expected Mod.T but got T".  Guessing bare unconditionally instead
+         wrongly conflates two same-suffixed types (`Conduit.Config` vs stdlib
+         `Config`).  Returning None falls back to the [fresh_var] placeholder,
+         which unifies with anything and imposes no false constraint; the
+         callee's own [check_fn] still derives and enforces its real type. *)
+      if String.contains name.txt '.' then None
+      else
+        (match opt_all (List.map conv args) with
+         | Some args' -> Some (TCon (name.txt, args'))
+         | None -> None)
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -7669,15 +8900,41 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
 
     Pass 2: check declarations in order, updating the environment.
 
-    Returns the [Err.ctx] containing all diagnostics. *)
-let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
+    Returns the [Err.ctx] containing all diagnostics.
+
+    [seed_env], when given, is used as pass 1's starting environment instead
+    of [base_env errors type_map] — its [vars]/[types]/[ctors]/[interfaces]/etc.
+    (e.g. an already-typechecked stdlib) are visible to [m]'s own forward-reference
+    prebinding and [check_decl] pass with NO other change to pass 1/1b/2's
+    structure, so passing [None] is exactly today's behavior. [seed_env]'s own
+    [type_map] is reused (shared, mutated in place with [m]'s new span→type
+    entries) instead of allocating a fresh one, so a caller who built [seed_env]
+    from a separately-checked module can still recover types for BOTH that
+    module's spans and [m]'s own via the single returned [type_map]. *)
+let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  let type_map = Hashtbl.create 256 in
+  let type_map = match seed_env with
+    | Some (se : env) -> se.type_map
+    | None -> Hashtbl.create 256
+  in
   (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
      declarations so that cross-module forward references are pre-bound in
      pass 1. This mirrors the eval.ml global module_registry approach.
      Only pre-binds public functions to preserve private-access restrictions. *)
-  let rec prebind_mod_members prefix env decls =
+  let rec prebind_mod_members ?(opaque = StringSet.empty) prefix env decls =
+    (* Opaque type names per submodule, taken from a sibling `sig <Mod>`
+       declaration.  A type a signature exports opaquely (`type Stack a`, no
+       constructors) must keep its constructors HIDDEN outside the module — so
+       the bare-constructor seeding below is suppressed for them, matching the
+       Pass-2 export filter (:7467) and preserving order-independence (hidden
+       ctors stay unreferenceable cross-module by design). *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -7692,14 +8949,40 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -7715,7 +8998,30 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              (* Register both local name and fully-qualified name in env.records
@@ -7730,11 +9036,23 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) env decls
   in
   (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
+  (* Opaque type names per top-level module, from sibling `sig <Mod>` decls: the
+     entry module is unwrapped so its `sig`/`mod` pairs are siblings here, not
+     inside [prebind_mod_members] (see the same map built there). *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -7750,7 +9068,9 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
-        let env = prebind_mod_members mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
@@ -7817,7 +9137,10 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
             | _ -> e
           ) env inner_decls
       | _ -> env
-    ) (base_env errors type_map) m.Ast.mod_decls
+    ) (match seed_env with
+        | Some se -> { se with errors; type_map }
+        | None -> base_env errors type_map)
+      m.Ast.mod_decls
   in
   (* Pass 1b: the entry module's own declarations live at the TOP LEVEL of the
      combined module (only the imported sibling modules are wrapped in [DMod]).
@@ -7838,8 +9161,26 @@ let check_module_core ?(errors = Err.create ()) (m : Ast.module_)
   (* Pass 2: full checking *)
   let pre_env = { pre_env with current_module = m.Ast.mod_name.txt } in
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
+  (* Part 1: the cap_narrow proof-cap forge is closed by the [unify] hook
+     ([cap_producer_ivars]), which fires at the exact moment a cap_narrow-derived
+     inner var is bound to a nominal proof cap — position- and flow-independent
+     (direct, let-generalized, or laundered through a polymorphic function).  A
+     post-checking recorded-node sweep is NOT used for cap_narrow: a laundered
+     value leaves the recorded node unbound, which the sweep cannot distinguish
+     from legitimate laundered IO narrowing.
+     Part 2: enforce the mint_cap gate on every recorded site (result now pinned;
+     enclosing fn/module context captured at record time). Shared ref → one sweep
+     at the entry module covers every nested module's sites. *)
+  check_mint_cap_sites final_env;
   (* Validate capability declarations for the top-level module *)
-  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  (* The entry module's own name is NOT a prefix segment for cap-closure keys:
+     TIR unwraps the entry module (see [lib/tir/lower.ml]'s [mod_prefix]
+     accumulation, which starts empty at the entry level), so top-level
+     functions are keyed by their bare name and nested DMod functions are
+     keyed starting from that nested module's own name (e.g. "Lib.Sub.f"),
+     never "EntryName.Lib.Sub.f". *)
+  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
+    ~cap_qname_prefix:"";
   (* Validate cap no_panic invariant if declared *)
   if final_env.no_panic_mod then
     check_no_panic_module errors final_env m.Ast.mod_decls;
@@ -7878,7 +9219,16 @@ let last_with_env_final : env ref = ref (make_env (Err.create ()) (Hashtbl.creat
 let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let errors = env.errors in
   let type_map = env.type_map in
-  let rec prebind_mod_members_inc prefix e decls =
+  let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =
+    (* See [prebind_mod_members]: suppress bare-constructor seeding for types a
+       sibling `sig` exports opaquely. *)
+    let sub_opaque =
+      List.fold_left (fun m d -> match d with
+        | Ast.DSig (sname, sdef, _) ->
+          let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                     StringSet.empty sdef.Ast.sig_types in
+          StrMap.add sname.Ast.txt ts m
+        | _ -> m) StrMap.empty decls in
     List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
@@ -7888,14 +9238,40 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         | Ast.DType (vis, name, params, typedef, _)
         | Ast.DAlwaysLinearType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if StrMap.mem qname e.types then e
-            else { e with types = StrMap.add qname (List.length params) e.types } in
+          let e1 =
+            let e = if StrMap.mem qname e.types then e
+              else { e with types = StrMap.add qname (List.length params) e.types } in
+            (* Register the BARE type name too, not just the module-qualified
+               one.  A submodule of a cyclically-dependent module set (e.g.
+               `Conduit.WorkflowContext` referencing `WorkflowError`, defined in
+               parent `Conduit`) has no `use`/`import` and resolves the parent's
+               types by bare name.  With only the qualified key seeded in Pass 1,
+               the bare form was registered lazily during the definer's Pass-2
+               check — so a referrer checked BEFORE the definer failed, making
+               resolution depend on check order (which a cyclic module graph
+               cannot make deterministic).  Top-level types (:8929) and records
+               (below) already seed the bare name here; this closes the gap for
+               nested-module types.  Don't clobber a bare name already bound by a
+               top-level/entry definition. *)
+            if StrMap.mem name.txt e.types then e
+            else { e with types = StrMap.add name.txt (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 let ci = { ci_type = qname; ci_params = param_names;
+                 (* [ci_type] is the BARE type name, matching check_decl (:7217)
+                    and the top-level Pass-1 path (:8929).  Using the qualified
+                    [qname] here was the sole site producing a qualified nominal
+                    type for a constructor: a cross-module fully-qualified
+                    reference (`Conduit.Telemetry.JobEnqueued`) resolved through
+                    this prebind entry BEFORE the definer's Pass-2 check yielded
+                    `TCon("Conduit.Telemetry.ConduitTelemetryEvent")`, which does
+                    not unify with the bare `ConduitTelemetryEvent` that every
+                    signature uses ("expected X but got Mod.X").  The type side
+                    already canonicalizes qualified->bare (see [canon_name]); the
+                    constructor side must agree by carrying the bare type. *)
+                 let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
                  (* Also register the disambiguated module.type.ctor form
@@ -7911,7 +9287,30 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
+                   let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
+                   (* A type exported opaquely by a sibling `sig` keeps its
+                      constructors hidden: don't seed the short (bare / bare-type)
+                      forms that would let a cross-module reference reach them. *)
+                   if StringSet.mem name.txt opaque then acc
+                   else
+                     (* The disambiguation form written in code uses the BARE type
+                        name (`WorkflowError.Failed`), not the module-qualified
+                        type (`Conduit.WorkflowError.Failed`).  The top-level path
+                        (:8929 `qual_key`) seeds this bare-type key; nested-module
+                        types need it too, else a cross-module `Type.Ctor`
+                        reference stays order-dependent even after the bare-ctor
+                        key is seeded. *)
+                     let bare_type_qctor = name.txt ^ "." ^ v.var_name.txt in
+                     let acc = { acc with ctors = add_ctor bare_type_qctor type_ci acc.ctors } in
+                     (* Seed the BARE constructor key with the same [ci_type =
+                        name.txt] the top-level path (:8929) and check_decl use, so
+                        a cross-module bare reference (e.g. `StorageError` from a
+                        sibling of the defining `Conduit` module) resolves
+                        regardless of check order.  add_ctor dedups by ci_type, so
+                        this is a no-op once the definer's Pass-2 check registers
+                        the same bare key — it does not manufacture a spurious
+                        "defined by multiple types" ambiguity. *)
+                     { acc with ctors = add_ctor v.var_name.txt type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -7923,11 +9322,20 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
            | _ -> e1)
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
-          prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
+          let child_opaque = Option.value ~default:StringSet.empty
+              (StrMap.find_opt mname.Ast.txt sub_opaque) in
+          prebind_mod_members_inc ~opaque:child_opaque (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
       ) e decls
   in
   (* Pass 1: forward-reference placeholders for new declarations *)
+  let top_sub_opaque =
+    List.fold_left (fun m d -> match d with
+      | Ast.DSig (sname, sdef, _) ->
+        let ts = List.fold_left (fun s ((tn : Ast.name), _) -> StringSet.add tn.Ast.txt s)
+                   StringSet.empty sdef.Ast.sig_types in
+        StrMap.add sname.Ast.txt ts m
+      | _ -> m) StrMap.empty m.Ast.mod_decls in
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -7937,7 +9345,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
         (* Register the sibling module's members, then its interface impls — an
            impl declared in a sibling must satisfy constraints unit-wide
            regardless of check order (mirrors check_module_core's pass 1). *)
-        let env = prebind_mod_members_inc mname.txt env inner_decls in
+        let child_opaque = Option.value ~default:StringSet.empty
+            (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
+        let env = prebind_mod_members_inc ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
             | Ast.DImpl (idef, _) -> register_impl_shape e idef
             | _ -> e
@@ -8012,9 +9422,9 @@ let check_module_with_env_full (env : env) (m : Ast.module_)
     a reduced duplicate here previously skipped the pass-1 type/ctor/record
     prebinding, so qualified type annotations (Bastion.Channel.ChannelConn)
     failed to resolve only in the LSP. *)
-let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
+let check_module_full ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
-  check_module_core ~errors m
+  check_module_core ~errors ?seed_env m
 
 let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   let env' = enter_level env in

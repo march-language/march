@@ -1,0 +1,38 @@
+mod Main do
+  -- Session-types widening, Task 2 -- BINARY protocol declaration + projection
+  -- + duality + `Chan(Role, Proto)` typing (core-march-types.md §2.7).
+  -- `protocol Echo` has exactly 2 roles (`Client`/`Server`), each declared as
+  -- its own nullary type to avoid the undeclared-role HINT (§2.7.1).
+  -- `project_protocol` (`typecheck.ml:5952`) projects each role's local
+  -- `session_ty` (`:105-116`) and verifies BINARY DUALITY:
+  -- dual(Client's projection) == Server's projection (`dual_session_ty`,
+  -- `:5935`; the check at `:5972-5986`). `Chan(Client, Echo)`/
+  -- `Chan(Server, Echo)` resolve via `surface_ty`'s `TyCon("Chan", ...)`
+  -- special case (`:2285-2311`) to a LINEAR `TChan` endpoint (`:95`) wrapping
+  -- each role's projected session type. `Chan.new(Echo)` constructs both
+  -- endpoints; the send/recv/close sequence below is written send-before-
+  -- matching-recv in program order (the channel runtime is synchronous,
+  -- non-blocking -- see core-march.md for the operational account).
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  fn run(cc : Chan(Client, Echo), sc : Chan(Server, Echo)) : Int do
+    let cc2 = Chan.send(cc, 42)
+    let (n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.send(sc2, n + 1)
+    let (result, cc3) = Chan.recv(cc2)
+    Chan.close(cc3)
+    Chan.close(sc3)
+    result
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    println(int_to_string(run(cc, sc)))
+  end
+end

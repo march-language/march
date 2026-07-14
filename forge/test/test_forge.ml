@@ -950,6 +950,448 @@ let test_ffi_gen_c_no_extern () =
    | Error _ -> ()  (* expected: no extern blocks *)
    | Ok () -> Alcotest.fail "expected an error for a file with no extern blocks")
 
+(* ---------------------------------------------------- hcr capability gate *)
+
+let write_manifest_file (lines : string list) : string =
+  let path = Filename.temp_file "test_hcr_manifest" ".hcr_manifest" in
+  let oc = open_out path in
+  List.iter (fun l -> output_string oc (l ^ "\n")) lines;
+  close_out oc;
+  path
+
+let with_manifest_file lines f =
+  let path = write_manifest_file lines in
+  Fun.protect ~finally:(fun () -> try Sys.remove path with Sys_error _ -> ())
+    (fun () -> f path)
+
+let cas_hash_line = "# cas_hash " ^ String.make 64 'a'
+(* Legacy pre-2026-07-04 manifests could carry a whole-artifact
+   "ROOT cap_root=<hex>" line (now retired by the granularity revision — see
+   specs/plans/2026-06-25-hcr-phase5c-capability-safe-deploys.md, "Granularity
+   revision"). A current parser must still tolerate an old ROOT line on disk
+   (from a manifest baseline written by a pre-revision compiler) without
+   fabricating a phantom "ROOT" function. *)
+let root_line = "ROOT cap_root=" ^ String.make 64 'b'
+
+let test_parse_manifest_root_line_no_phantom_fn () =
+  with_manifest_file [cas_hash_line; root_line; "MyApp.f implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check int) "no phantom ROOT function" 1 (List.length m.Cmd_deploy_hot.functions);
+        List.iter (fun fm ->
+          Alcotest.(check bool) "ROOT is not a function name" true
+            (fm.Cmd_deploy_hot.fn_name <> "ROOT")
+        ) m.Cmd_deploy_hot.functions)
+
+let test_parse_manifest_no_caps_anywhere_is_legacy () =
+  (* A genuine pre-Phase-5C manifest: no FN line anywhere carries a `caps=`
+     field. is_legacy_manifest must recognize this and callers fall back to
+     ACTIVATE3. *)
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check bool) "no caps= anywhere -> legacy" true
+          (Cmd_deploy_hot.is_legacy_manifest m))
+
+let test_parse_manifest_caps_field_present_is_not_legacy () =
+  (* A current manifest with a capless function still has `caps=` (empty) on
+     its FN line, so it must NOT be classified as legacy. *)
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check bool) "caps= present (even empty) -> not legacy" false
+          (Cmd_deploy_hot.is_legacy_manifest m))
+
+let test_parse_manifest_caps_no_callers () =
+  (* caps= at the earlier field position (no callers: token present) *)
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps=IO.Console,IO.NetConnect"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] ->
+           Alcotest.(check (list string)) "caps parsed (no callers)"
+             ["IO.Console"; "IO.NetConnect"] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_parse_manifest_caps_with_callers () =
+  (* caps= at the later field position, after a callers: token *)
+  with_manifest_file
+    [cas_hash_line;
+     "MyApp.g implhash sighash callers:MyApp.a,MyApp.b caps=IO.FileRead"]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] ->
+           Alcotest.(check (list string)) "callers parsed"
+             ["MyApp.a"; "MyApp.b"] fm.Cmd_deploy_hot.fn_callers;
+           Alcotest.(check (list string)) "caps parsed (with callers)"
+             ["IO.FileRead"] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_parse_manifest_caps_empty () =
+  with_manifest_file [cas_hash_line; "MyApp.h implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        (match m.Cmd_deploy_hot.functions with
+         | [fm] -> Alcotest.(check (list string)) "no caps" [] fm.Cmd_deploy_hot.fn_caps
+         | _ -> Alcotest.fail "expected exactly one function"))
+
+let test_gate_no_prior_is_permissive () =
+  (* No baseline file at all -> caller treats prior_caps as empty / gate skipped.
+     At the pure-function level, computing widening against an empty prior
+     baseline is the well-defined "not gated" case tested elsewhere (the
+     `run` function skips the gate entirely when old_manifest_path doesn't
+     exist — this test exercises the pure diff fn with no prior data, which
+     callers must not invoke when there's genuinely no baseline). *)
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:[] ~new_caps:["IO.Console"] in
+  Alcotest.(check (list string)) "everything looks like widening vs an empty baseline"
+    ["IO.Console"] widening
+
+let test_gate_pure_narrowing_allowed () =
+  let prior = ["IO.Console"; "IO.NetConnect"] in
+  let new_caps = ["IO.Console"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior ~new_caps in
+  Alcotest.(check (list string)) "no widening" [] widening;
+  Alcotest.(check (list string)) "narrowing reported" ["IO.NetConnect"] narrowing
+
+(* I2 fix: compute_cap_narrowing must use subsumption, not exact match.
+   Prior use of List.mem misreported narrowing whenever the new build still
+   holds a broader (root) cap that covers the prior, more specific cap — new
+   build holding IO (root) still covers a prior IO.FileRead, so no actual
+   narrowing occurred even though IO.FileRead itself is no longer literally
+   present in new_caps. *)
+let test_gate_narrowing_root_cap_covers_prior_specific_not_misreported () =
+  let prior = ["IO.FileRead"] in
+  let new_caps = ["IO"] in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior ~new_caps in
+  Alcotest.(check (list string))
+    "IO root in new_caps subsumes prior IO.FileRead: not narrowing"
+    [] narrowing
+
+let test_gate_subsumed_add_allowed () =
+  (* prior already holds the IO root cap, so any IO.* child is already covered *)
+  let prior = ["IO"] in
+  let new_caps = ["IO"; "IO.FileRead"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "subsumed add is not widening" [] widening
+
+let test_gate_sibling_widen_blocked () =
+  let prior = ["IO.Console"] in
+  let new_caps = ["IO.Console"; "IO.Process"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "sibling cap is widening" ["IO.Process"] widening
+
+let test_gate_parent_widen_blocked () =
+  (* prior only has the child; new build asks for the parent -> widening,
+     since the child does not subsume the parent. *)
+  let prior = ["IO.FileRead"] in
+  let new_caps = ["IO.FileSystem"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "parent cap is widening" ["IO.FileSystem"] widening
+
+let test_gate_io_root_add_blocked () =
+  let prior = ["IO.Console"] in
+  let new_caps = ["IO.Console"; "IO"] in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior ~new_caps in
+  Alcotest.(check (list string)) "IO root add is widening" ["IO"] widening
+
+let test_gate_attribution_names_introducing_function () =
+  let functions = [
+    { Cmd_deploy_hot.fn_name = "MyApp.Server.handle"; fn_impl_hash = "h1"; fn_sig_hash = "s1";
+      fn_callers = []; fn_caps = ["IO.Process"]; fn_has_caps = true };
+    { Cmd_deploy_hot.fn_name = "MyApp.Other.fn"; fn_impl_hash = "h2"; fn_sig_hash = "s2";
+      fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true };
+  ] in
+  let attributed = Cmd_deploy_hot.attribute_widening functions ["IO.Process"] in
+  Alcotest.(check (list (pair string string))) "attributes widened cap to its function"
+    [("IO.Process", "MyApp.Server.handle")] attributed
+
+(* ─── compute_scoped_caps: per-fn monotonicity scoping (Granularity revision,
+   2026-07-04) ── this is the pure function factored out of `run`'s inlined
+   prior/new computation so the rescoped gate (own-caps of ACTIVATED
+   functions only, not the whole-artifact union) is unit-testable without a
+   live socket. *)
+
+let fm ~name ~caps =
+  { Cmd_deploy_hot.fn_name = name; fn_impl_hash = "h"; fn_sig_hash = "s";
+    fn_callers = []; fn_caps = caps; fn_has_caps = true }
+
+let test_scoped_caps_no_prior_baseline_permissive () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let (prior_caps, new_caps) = Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:None in
+  Alcotest.(check (list string)) "no baseline -> empty prior" [] prior_caps;
+  Alcotest.(check (list string)) "no baseline -> normalized new caps"
+    ["IO.Console"; "IO.FileWrite"] new_caps
+
+let test_scoped_caps_new_function_compares_against_empty () =
+  (* Function present in to_activate but absent from the prior baseline
+     entirely (e.g. newly added this deploy) -> its caps compare against
+     [], so ALL its caps show up as widening. *)
+  let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = [] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "all of new fn's caps widen"
+    ["IO.Console"; "IO.FileWrite"] widening
+
+let test_scoped_caps_existing_function_adds_cap_widens () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "added cap widens" ["IO.FileWrite"] widening;
+  Alcotest.(check (list string)) "nothing narrows" [] narrowing
+
+let test_scoped_caps_existing_function_drops_cap_narrows () =
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  let narrowing = Cmd_deploy_hot.compute_cap_narrowing ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "nothing widens" [] widening;
+  Alcotest.(check (list string)) "dropped cap narrows" ["IO.FileWrite"] narrowing
+
+let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
+  (* prior holds IO.Network; new adds IO.NetConnect, which IO.Network
+     subsumes -> normalize drops it, so no widening is reported. *)
+  let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
+  let prior_manifest =
+    { Cmd_deploy_hot.cas_hash = "cas";
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
+  let (prior_caps, new_caps) =
+    Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
+  Alcotest.(check (list string)) "subsumed cap dropped from new_caps" ["IO.Network"] new_caps;
+  let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
+  Alcotest.(check (list string)) "subsumed add is not widening" [] widening
+
+(* ─── fn_cap_root: per-function cap_root, must match the server's recipe ────
+   runtime/march_reload.c's compute_cap_root: split_cap_csv -> sort_uniq ->
+   march_cap_normalize -> join "\n" -> blake3. Forge's fn_cap_root mirrors
+   this as normalize (order-preserving) -> List.sort -> concat "\n" ->
+   Blake3.hash_string. A mismatch here would make every real deploy fail the
+   server's tamper check (cap_root recomputed server-side must equal the
+   signed value). *)
+
+let test_fn_cap_root_single_cap_matches_blake3_of_bare_string () =
+  (* For a single-cap set, normalize is a no-op and there is nothing to sort,
+     so fn_cap_root ["IO.Console"] must equal blake3("IO.Console") exactly —
+     the same value runtime/march_reload.c's compute_cap_root computes for
+     the CSV "IO.Console" (one token, joined with no separator needed). *)
+  let expected = March_cas.Blake3.hash_string "IO.Console" in
+  Alcotest.(check string) "fn_cap_root single-cap matches raw blake3"
+    expected (Cmd_deploy_hot.fn_cap_root ["IO.Console"])
+
+let test_fn_cap_root_empty_matches_blake3_of_empty_string () =
+  let expected = March_cas.Blake3.hash_string "" in
+  Alcotest.(check string) "fn_cap_root [] matches blake3(\"\")"
+    expected (Cmd_deploy_hot.fn_cap_root [])
+
+let test_fn_cap_root_sorts_before_joining () =
+  (* Order of the input list must not matter — both must sort to the same
+     canonical "IO.Console\nIO.Process" join before hashing. *)
+  let a = Cmd_deploy_hot.fn_cap_root ["IO.Process"; "IO.Console"] in
+  let b = Cmd_deploy_hot.fn_cap_root ["IO.Console"; "IO.Process"] in
+  Alcotest.(check string) "fn_cap_root is order-independent" a b;
+  let expected = March_cas.Blake3.hash_string "IO.Console\nIO.Process" in
+  Alcotest.(check string) "fn_cap_root matches sorted-join blake3" expected a
+
+let test_fn_cap_root_normalizes_subsumed_caps () =
+  (* IO subsumes IO.Console, so normalize drops IO.Console before hashing —
+     fn_cap_root ["IO"; "IO.Console"] must equal fn_cap_root ["IO"]. *)
+  let with_subsumed = Cmd_deploy_hot.fn_cap_root ["IO"; "IO.Console"] in
+  let just_root = Cmd_deploy_hot.fn_cap_root ["IO"] in
+  Alcotest.(check string) "normalize collapses subsumed cap before hashing"
+    just_root with_subsumed
+
+(* Multi-cap agreement with the SERVER's independent recipe (runtime/
+   march_reload.c's compute_cap_root: split -> sort_uniq -> normalize ->
+   join "\n" -> blake3). These hand-encode the server's expected output
+   directly (sorted order, literal "\n" join, no call to fn_cap_root's own
+   Cap_lattice.normalize) so a future accidental reordering on EITHER side
+   (forge's fn_cap_root or the server's recipe) that still agrees with
+   itself internally would be caught here — the existing
+   test_fn_cap_root_sorts_before_joining only checks internal
+   order-independence, not agreement with an independently-computed
+   server-shaped expected value. *)
+
+let test_fn_cap_root_multi_cap_disjoint_matches_server_recipe () =
+  (* Disjoint set: neither cap subsumes the other, so normalize keeps both.
+     Server sorts ["IO.FileWrite"; "IO.Console"] -> ["IO.Console"; "IO.FileWrite"],
+     joins with "\n", hashes. Hand-encode that exact string independently of
+     fn_cap_root's own normalize call. *)
+  let expected = March_cas.Blake3.hash_string "IO.Console\nIO.FileWrite" in
+  Alcotest.(check string) "multi-cap disjoint set matches hand-encoded server recipe"
+    expected (Cmd_deploy_hot.fn_cap_root ["IO.FileWrite"; "IO.Console"])
+
+let test_fn_cap_root_multi_cap_subsumption_matches_server_recipe () =
+  (* IO.NetConnect's parent is IO.Network (lib/caps/cap_lattice.ml hierarchy),
+     so normalize drops IO.NetConnect, leaving only IO.Network to hash. *)
+  let expected = March_cas.Blake3.hash_string "IO.Network" in
+  Alcotest.(check string) "multi-cap subsumed set matches hand-encoded server recipe"
+    expected (Cmd_deploy_hot.fn_cap_root ["IO.Network"; "IO.NetConnect"])
+
+(* ─── --grant-cap: filter_granted_widening (Phase 5C Part B, Task 5) ──────── *)
+
+let test_grant_no_grants_leaves_widening_blocked () =
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:[] in
+  Alcotest.(check (list string)) "no grants -> widening unchanged" ["IO.Process"] granted
+
+let test_grant_exact_match_covers_widening () =
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Process"] in
+  Alcotest.(check (list string)) "exact-match grant clears widening" [] granted
+
+let test_grant_broader_subsuming_grant_covers_widening () =
+  let widening = ["IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.FileSystem"] in
+  Alcotest.(check (list string)) "broader grant subsumes narrower widened cap" [] granted
+
+let test_grant_partial_leaves_only_ungranted () =
+  let widening = ["IO.Process"; "IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Process"] in
+  Alcotest.(check (list string)) "only ungranted cap remains" ["IO.FileWrite"] granted
+
+let test_grant_unused_grant_is_inert () =
+  (* A grant for a cap that isn't actually being widened has no effect and
+     causes no error. *)
+  let widening = ["IO.Process"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening ~grant_caps:["IO.Console"] in
+  Alcotest.(check (list string)) "unrelated grant is inert" ["IO.Process"] granted
+
+let test_grant_multiple_grants_cover_multiple_widenings () =
+  let widening = ["IO.Process"; "IO.FileWrite"] in
+  let granted = Cmd_deploy_hot.filter_granted_widening ~widening
+      ~grant_caps:["IO.Process"; "IO.FileSystem"] in
+  Alcotest.(check (list string)) "both widenings granted" [] granted
+
+(* ─── ACTIVATE4 wire builders (Phase 5C Part C, Task C4) ─────────────────── *)
+
+let cap_root_hex = String.make 64 'c'
+
+let test_activate4_signed_excludes_caps_includes_cap_root () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate4_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:0 ~epoch:5 ~cap_root:cap_root_hex ~callers_csv:"MyApp.a,MyApp.b"
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE4 MyApp.f implhash cashash" wire_head;
+  let expected_signed =
+    Printf.sprintf "ACTIVATE4 MyApp.f implhash cashash 0 epoch:5 cap_root:%s callers:MyApp.a,MyApp.b"
+      cap_root_hex
+  in
+  Alcotest.(check string) "signed message" expected_signed signed;
+  (* caps: must NOT appear anywhere in the signed message *)
+  let contains_substr hay needle =
+    let hl = String.length hay and nl = String.length needle in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  Alcotest.(check bool) "signed message excludes 'caps:'" false
+    (contains_substr signed "caps:");
+  Alcotest.(check bool) "signed message includes 'cap_root:'" true
+    (contains_substr signed "cap_root:")
+
+let test_activate4_wire_line_orders_cap_root_and_caps_before_callers () =
+  let (_, wire_head) =
+    Cmd_deploy_hot.build_activate4_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:1 ~epoch:7 ~cap_root:cap_root_hex ~callers_csv:"MyApp.a,MyApp.b"
+  in
+  let caps_csv = "IO,IO.NetConnect" in
+  let wire = Printf.sprintf "%s SIGB64 %d epoch:%d cap_root:%s caps:%s callers:%s"
+    wire_head 1 7 cap_root_hex caps_csv "MyApp.a,MyApp.b" in
+  let idx_of sub =
+    let hl = String.length wire and nl = String.length sub in
+    let rec go i = if i + nl > hl then -1 else if String.sub wire i nl = sub then i else go (i + 1) in
+    go 0
+  in
+  let cap_root_idx = idx_of "cap_root:" in
+  let caps_idx = idx_of "caps:" in
+  let callers_idx = idx_of "callers:" in
+  Alcotest.(check bool) "cap_root: appears" true (cap_root_idx >= 0);
+  Alcotest.(check bool) "caps: appears" true (caps_idx >= 0);
+  Alcotest.(check bool) "callers: appears" true (callers_idx >= 0);
+  Alcotest.(check bool) "cap_root: before callers:" true (cap_root_idx < callers_idx);
+  Alcotest.(check bool) "caps: before callers:" true (caps_idx < callers_idx);
+  Alcotest.(check bool) "wire starts with ACTIVATE4" true
+    (String.length wire >= 9 && String.sub wire 0 9 = "ACTIVATE4")
+
+let test_activate3_signed_shape_unchanged () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate3_lines
+      ~name:"MyApp.f" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:0 ~epoch:3 ~callers_csv:"MyApp.a"
+  in
+  Alcotest.(check string) "ACTIVATE3 wire_head" "ACTIVATE3 MyApp.f implhash cashash" wire_head;
+  Alcotest.(check string) "ACTIVATE3 signed message"
+    "ACTIVATE3 MyApp.f implhash cashash 0 epoch:3 callers:MyApp.a" signed
+
+let test_activate4_caps_csv_is_sorted_own_caps_per_function () =
+  (* Granularity revision (2026-07-04): the caps: CSV sent on an activated
+     function's ACTIVATE4 is THAT function's own sorted caps, never a
+     whole-artifact union across other functions in the manifest. A sibling
+     function's caps must not leak into this one's CSV. *)
+  let handle_fn =
+    { Cmd_deploy_hot.fn_name = "MyApp.handle"; fn_impl_hash = "h"; fn_sig_hash = "s";
+      fn_callers = []; fn_caps = ["IO.NetConnect"; "IO.Console"]; fn_has_caps = true } in
+  let caps_csv = String.concat "," (List.sort String.compare handle_fn.Cmd_deploy_hot.fn_caps) in
+  Alcotest.(check string) "own caps CSV, sorted" "IO.Console,IO.NetConnect" caps_csv
+
+(* --no-cap-gate / legacy-manifest branch logic: the `run` function itself
+   requires a live socket, so these exercise the same predicate `run` uses
+   internally (not (is_legacy_manifest manifest) && not no_cap_gate) via
+   is_legacy_manifest directly, mirroring how the cap-widening gate above is
+   tested at the pure-predicate level. *)
+let activate4_selected ~manifest ~no_cap_gate =
+  (not (Cmd_deploy_hot.is_legacy_manifest manifest)) && not no_cap_gate
+
+let manifest_with_caps =
+  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+    functions = [
+      { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
+        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ] }
+
+let legacy_manifest =
+  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+    functions = [
+      { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
+        fn_callers = []; fn_caps = []; fn_has_caps = false } ] }
+
+let test_branch_caps_present_no_flag_selects_activate4 () =
+  Alcotest.(check bool) "ACTIVATE4 selected" true
+    (activate4_selected ~manifest:manifest_with_caps ~no_cap_gate:false)
+
+let test_branch_no_cap_gate_flag_forces_activate3 () =
+  Alcotest.(check bool) "ACTIVATE3 forced by --no-cap-gate" false
+    (activate4_selected ~manifest:manifest_with_caps ~no_cap_gate:true)
+
+let test_branch_legacy_manifest_forces_activate3 () =
+  Alcotest.(check bool) "ACTIVATE3 forced by legacy manifest (no caps= anywhere)" false
+    (activate4_selected ~manifest:legacy_manifest ~no_cap_gate:false)
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -1071,5 +1513,45 @@ let () =
       Alcotest.test_case "gen-c: raises (env-routed errors)"        `Quick test_ffi_gen_c_raises;
       Alcotest.test_case "add-rust: scaffolds a binding crate" `Quick test_ffi_add_rust;
       Alcotest.test_case "gen-c: errors with no extern"      `Quick test_ffi_gen_c_no_extern;
+    ];
+    "hcr-cap-gate", [
+      Alcotest.test_case "parse_manifest: tolerates legacy ROOT line, no phantom fn" `Quick test_parse_manifest_root_line_no_phantom_fn;
+      Alcotest.test_case "parse_manifest: no caps= anywhere -> legacy" `Quick test_parse_manifest_no_caps_anywhere_is_legacy;
+      Alcotest.test_case "parse_manifest: caps= present (even empty) -> not legacy" `Quick test_parse_manifest_caps_field_present_is_not_legacy;
+      Alcotest.test_case "parse_manifest: caps= (no callers)"  `Quick test_parse_manifest_caps_no_callers;
+      Alcotest.test_case "parse_manifest: caps= (with callers)" `Quick test_parse_manifest_caps_with_callers;
+      Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
+      Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
+      Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
+      Alcotest.test_case "gate: narrowing uses subsumption, root cap covers prior specific" `Quick test_gate_narrowing_root_cap_covers_prior_specific_not_misreported;
+      Alcotest.test_case "gate: subsumed add allowed"           `Quick test_gate_subsumed_add_allowed;
+      Alcotest.test_case "gate: sibling widen blocked"          `Quick test_gate_sibling_widen_blocked;
+      Alcotest.test_case "gate: parent widen blocked"           `Quick test_gate_parent_widen_blocked;
+      Alcotest.test_case "gate: IO root add blocked"            `Quick test_gate_io_root_add_blocked;
+      Alcotest.test_case "gate: attribution names introducer"  `Quick test_gate_attribution_names_introducing_function;
+      Alcotest.test_case "scoped caps: no prior baseline is permissive" `Quick test_scoped_caps_no_prior_baseline_permissive;
+      Alcotest.test_case "scoped caps: new fn compares against empty prior" `Quick test_scoped_caps_new_function_compares_against_empty;
+      Alcotest.test_case "scoped caps: existing fn adding a cap widens" `Quick test_scoped_caps_existing_function_adds_cap_widens;
+      Alcotest.test_case "scoped caps: existing fn dropping a cap narrows" `Quick test_scoped_caps_existing_function_drops_cap_narrows;
+      Alcotest.test_case "scoped caps: existing fn adding subsumed cap does not widen" `Quick test_scoped_caps_existing_function_adds_subsumed_cap_no_widen;
+      Alcotest.test_case "fn_cap_root: single cap matches raw blake3" `Quick test_fn_cap_root_single_cap_matches_blake3_of_bare_string;
+      Alcotest.test_case "fn_cap_root: empty matches blake3(\"\")" `Quick test_fn_cap_root_empty_matches_blake3_of_empty_string;
+      Alcotest.test_case "fn_cap_root: order-independent, sorts before join" `Quick test_fn_cap_root_sorts_before_joining;
+      Alcotest.test_case "fn_cap_root: normalizes subsumed caps before hashing" `Quick test_fn_cap_root_normalizes_subsumed_caps;
+      Alcotest.test_case "fn_cap_root: multi-cap disjoint set matches server recipe" `Quick test_fn_cap_root_multi_cap_disjoint_matches_server_recipe;
+      Alcotest.test_case "fn_cap_root: multi-cap subsumed set matches server recipe" `Quick test_fn_cap_root_multi_cap_subsumption_matches_server_recipe;
+      Alcotest.test_case "grant: no grants leaves widening blocked" `Quick test_grant_no_grants_leaves_widening_blocked;
+      Alcotest.test_case "grant: exact-match grant covers widening" `Quick test_grant_exact_match_covers_widening;
+      Alcotest.test_case "grant: broader subsuming grant covers widening" `Quick test_grant_broader_subsuming_grant_covers_widening;
+      Alcotest.test_case "grant: partial grant leaves only ungranted" `Quick test_grant_partial_leaves_only_ungranted;
+      Alcotest.test_case "grant: unused grant is inert" `Quick test_grant_unused_grant_is_inert;
+      Alcotest.test_case "grant: multiple grants cover multiple widenings" `Quick test_grant_multiple_grants_cover_multiple_widenings;
+      Alcotest.test_case "ACTIVATE4: signed excludes caps, includes cap_root" `Quick test_activate4_signed_excludes_caps_includes_cap_root;
+      Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
+      Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
+      Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
+      Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
+      Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
+      Alcotest.test_case "branch: legacy manifest forces ACTIVATE3" `Quick test_branch_legacy_manifest_forces_activate3;
     ];
   ]

@@ -1,6 +1,6 @@
 (library
  (name march_forge)
- (libraries unix march_ast march_lexer march_parser march_search march_format march_lint march_refactor yojson digestif march_ed25519))
+ (libraries unix march_ast march_lexer march_parser march_search march_format march_lint march_refactor yojson digestif march_ed25519 march_caps march_cas))
 
 (rule
  (target notebook_march_src.ml)
@@ -32,3 +32,13 @@
     (echo "let content = {march_phase_viewer|\n")
     (cat %{dep:../../tools/phase-viewer.html})
     (echo "\n|march_phase_viewer}\n")))))
+
+(rule
+ (target registry_march_src.ml)
+ (deps ../tasks/forge_registry.march)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {forge_registry_march|\n")
+    (cat %{dep:../tasks/forge_registry.march})
+    (echo "\n|forge_registry_march}\n")))))

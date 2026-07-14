@@ -1,0 +1,12 @@
+mod P08ComparisonBindsTighterThanBool do
+  fn main() do
+    -- `1 < 2 && 3 > 2` only type-checks (and only makes semantic sense) if
+    -- `<`/`>` (expr_cmp) bind TIGHTER than `&&` (expr_and): it must parse
+    -- as `(1 < 2) && (3 > 2)`, both Bool operands to `&&`. If `&&` bound
+    -- tighter than the comparisons, this would try to parse/typecheck as
+    -- `1 < (2 && 3) > 2` — `&&` on the Ints 2 and 3 — a type error, not a
+    -- parse error, but the compiler accepts this program and prints
+    -- `true`, which is only well-typed under the stated precedence.
+    println(1 < 2 && 3 > 2)
+  end
+end

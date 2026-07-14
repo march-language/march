@@ -1,0 +1,12 @@
+mod P07ListComprehensionWithGuard do
+  fn main() do
+    -- `[expr for pat in expr, pred]` desugars (in-parser, expr_atom level)
+    -- to List.map(List.filter(src, fn pat -> pred), fn pat -> expr).
+    -- Only entries with x > 2 survive the filter (3, 4, 5), then each
+    -- survivor is doubled: [3,4,5] -> [6,8,10]. The exact list value
+    -- witnesses the comprehension's bracket-delimited grammar (binds a
+    -- `pattern` after FOR, a source `expr` after IN, an optional guard
+    -- `expr` after COMMA) resolving to filter-then-map desugaring.
+    println([x * 2 for x in [1, 2, 3, 4, 5], x > 2])
+  end
+end

@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Session-types widening, Task 3 -- linear channel endpoint used twice.
+  -- `Chan(Role, Proto)` resolves to `TLin (Linear, TChan ...)` (§2.7.6):
+  -- a `let`-bound channel continuation must be consumed EXACTLY ONCE. This
+  -- is enforced by the GENERIC linear-let tracker (not session-specific
+  -- accounting) -- closing `cc2` twice is a plain double-use of a linear
+  -- binding, same diagnostic as any other linear value used twice.
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let cc2 = Chan.send(cc, 42)
+    Chan.close(cc2)
+    Chan.close(cc2)
+    let (n, sc2) = Chan.recv(sc)
+    Chan.close(sc2)
+    println(int_to_string(n))
+  end
+end

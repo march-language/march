@@ -279,13 +279,7 @@ else
 end
 ```
 
-`else` is optional (returns `()` if omitted):
-
-```march
-if debug_mode do
-  println("debug info")
-end
-```
+`else` is mandatory — an `if` without `else` is a parse error ("March `if` expressions always need an `else` branch").
 
 Both branches can contain multiple expressions:
 
@@ -299,7 +293,7 @@ else
 end
 ```
 
-There is no `then` keyword in March.
+There is no `then` keyword in March — `if c then e1 else e2` is rejected with "I don't recognize `then` here — March uses do/end blocks instead."
 
 ---
 

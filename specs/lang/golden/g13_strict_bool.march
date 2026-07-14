@@ -1,0 +1,18 @@
+mod Main do
+  fn side(tag) do
+    println(tag)
+    true
+  end
+
+  fn main() do
+    -- Both `&&`/`||` operands are ALWAYS evaluated (strict builtins, not
+    -- short-circuit special forms — see core-march.md §4.4.1). A
+    -- short-circuiting `||` would never evaluate `side(...)` here because
+    -- the left operand is already `true`; a strict `||` evaluates it anyway,
+    -- so its println fires. Likewise for `&&` with a `false` left operand.
+    let r1 = true || side("or-rhs-evaluated")
+    let r2 = false && side("and-rhs-evaluated")
+    println(bool_to_string(r1))
+    println(bool_to_string(r2))
+  end
+end

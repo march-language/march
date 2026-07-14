@@ -1,0 +1,27 @@
+mod P13RichTypeAnnotation do
+  type Pair(a, b) = MkPair(a, b)
+
+  fn swap(p: Pair(a, b)) do
+    match p do
+      MkPair(x, y) -> MkPair(y, x)
+    end
+  end
+
+  fn build(mk: Int -> (Int, Int) -> { x: Int, y: Int }, scale: Int, pair: (Int, Int)) do
+    let step = mk(scale)
+    step(pair)
+  end
+
+  fn main() do
+    let maker = fn scale ->
+      fn pair ->
+        let (a, b) = pair
+        { x: scale * a, y: scale * b }
+    let r = build(maker, 10, (1, 2))
+    println(r.x)
+    println(r.y)
+    match swap(MkPair(1, "one")) do
+      MkPair(s, n) -> println(s)
+    end
+  end
+end

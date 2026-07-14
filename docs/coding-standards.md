@@ -138,6 +138,8 @@ else if status == 500 do
 else
   "unknown"
 end
+end
+end
 
 -- Good
 match status do
@@ -470,8 +472,9 @@ fn parse_int(s : String) : Result(Int, String) do
 end
 ```
 
-Detection: a `panic` call inside a module that has no `fn main()` and is not a
-`_test.march` file.
+Detection: a `panic` call in a file that is not the application entry point
+(`main.march`) and is not test code — i.e. neither a `_test.march` file nor a
+file under a `test/` (or `tests/`) directory.
 
 ---
 

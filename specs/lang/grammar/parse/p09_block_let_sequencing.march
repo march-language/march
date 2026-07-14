@@ -1,0 +1,12 @@
+mod P09BlockLetSequencing do
+  fn compute() do
+    let a = 2
+    let b = a * 3
+    let c = b + 4
+    c
+  end
+
+  fn main() do
+    println(compute())
+  end
+end

@@ -39,6 +39,7 @@ end
 
 **Backend**
 - Compiles to LLVM IR, linked to native binaries via `clang` — or to `.wasm` via `--target wasm64-wasi`
+- Cross-compiles Linux binaries (`linux/amd64`, `linux/arm64`) from any host via `zig cc`, Go's `GOOS=linux` style
 - Perceus reference counting — deterministic memory management, no GC pauses
 - **FBIP (Functional But In-Place)** — when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
 - Escape analysis promotes allocations to the stack where possible
@@ -103,7 +104,7 @@ FBIP fires automatically on any function that:
 
 This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
 
-For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see `specs/design.md` § Perceus Reference Counting and FBIP.
+For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see the language reference umbrella `specs/lang/index.md` (compiler-internals pointer: `specs/impl/index.md`, landing in Task 5 of the spec-consolidation plan).
 
 ## Quick start
 
@@ -114,6 +115,10 @@ march file.march
 # Compile to a native binary
 march --compile file.march        # produces ./file
 march --compile -o hello file.march
+
+# Cross-compile a Linux binary from any host (requires zig — see Cross-compilation below)
+march --compile --target linux/amd64 file.march -o app   # x86-64 Linux ELF
+march --compile --target linux/arm64 file.march -o app   # aarch64 Linux ELF
 
 # Compile to WebAssembly (requires wasi-sdk + wasmtime — see below)
 march --compile --target wasm64-wasi file.march   # produces file.wasm
@@ -260,7 +265,21 @@ export WASI_SDK_PATH=/path/to/wasi-sdk
 march --compile --target wasm64-wasi file.march
 ```
 
-Available targets: `native` (default), `wasm64-wasi`, `wasm32-wasi`, `wasm32-unknown-unknown`.
+Available targets: `native` (default), `linux/amd64`, `linux/arm64`, `wasm64-wasi`, `wasm32-wasi`, `wasm32-unknown-unknown`, `js`.
+
+## Cross-compilation to Linux
+
+Build a Linux binary from any host — including macOS — the way Go's `GOOS=linux go build` does, using [`zig cc`](https://ziglang.org) as the C cross-compiler:
+
+```bash
+brew install zig          # macOS; or download from https://ziglang.org/download/
+
+march --compile --target linux/amd64 file.march -o app   # x86-64 Linux ELF
+march --compile --target linux/arm64 file.march -o app   # aarch64 Linux ELF
+forge build --target linux/amd64                          # via forge (per-target output dir)
+```
+
+You get a dynamically-linked **glibc** binary (min glibc 2.31) that runs on mainstream distributions and in glibc containers (`debian:*-slim`, `ubuntu:*`, distroless-cc). Cross builds currently cover **compute and CLI workloads**; TLS/HTTPS, compression, hot code reload, and Rust FFI are not yet included. See the [cross-compilation guide](docs/tooling.md#cross-compiling-to-linux) for details.
 
 ## Running the tests
 
@@ -307,6 +326,24 @@ forge licenses               # list each dependency and its declared license
 forge licenses --strict      # non-zero if any dependency has no license
 forge build --frozen         # CI: fail if forge.lock is out of date (don't re-resolve)
 ```
+
+## AI assistant support
+
+March ships a portable Claude Code skill, `spec-search`, that full-text
+searches the language reference and design docs (`specs/lang/`,
+`specs/impl/`, `specs/features/`) via a bundled SQLite FTS5 index — no
+network access, no dependency on the compiler repo being checked out in
+whatever project you're working in:
+
+```bash
+git clone https://github.com/march-language/march.git
+mkdir -p ~/.claude/skills
+cp -R march/.claude/skills/spec-search ~/.claude/skills/spec-search
+```
+
+Once installed at `~/.claude/skills/spec-search/`, it's available to Claude
+in any project on the machine. See [docs/tooling.md](docs/tooling.md#ai-assistant-search--spec-search-claude-skill)
+for query syntax and how to refresh the index after a compiler update.
 
 ## Language tour
 

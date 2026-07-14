@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
@@ -329,13 +330,36 @@ static void *make_none(void) { return (void *)0; }
  * cases (Float 0.0 and raw-0 Unit read as None) — the same trade the
  * compiled convention already makes; consistency wins. */
 
+/* Float is the one record kind that is NOT niche-safe: 0.0's bits are 0, which
+ * collides with the None niche, and a nonzero float's bits are not a valid heap
+ * pointer.  llvm_emit decodes a *concrete* Option(Float) as BOXED
+ * (Repr.niche_payload_ok TFloat = false): None = tag-0 heap cell, Some(f) =
+ * tag-1 cell with the double at offset 16 (see EAlloc alloc-none-boxed /
+ * alloc-some-boxed).  So for an 'f' *call site* we must return that boxed shape;
+ * the uniform niche return would read stored 0.0 back as None and make the boxed
+ * decoder dereference raw float bits as a pointer → SIGSEGV.
+ *
+ * Keyed on the CALL-SITE expected_kind, never the stored kind: an erased ('g')
+ * read still gets the niche encoding both sides expect, so this does not
+ * reintroduce the boxed-cell-misread-by-niche-decoder regression (the "74 depot
+ * failures" that motivated niche-for-erased). */
+static void *rec_box_none_float(void) {
+    return march_alloc(16);                     /* tag=0 (None), no fields */
+}
+static void *rec_box_some_float(int64_t bits) {
+    void *r = march_alloc(16 + 8);
+    *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
+    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
+    return r;
+}
+
 static void *rec_some_k(int64_t bits, char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_some_float(bits);
     return (void *)(uintptr_t)bits;
 }
 
 static void *rec_none_k(char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_none_float();
     return (void *)0;
 }
 
@@ -1727,11 +1751,12 @@ void march_repl_set(int64_t slot, int64_t val) {
  *     conditionally (ashr iff odd); 'f' raw double bits; 'p'/'g' bits as-is.
  *     Compiled tuple slots are uniform too (ETuple stores scalars through
  *     coerce i64→ptr = tag), so pair snd MUST be tagged, not natural.
- *   - IN (record_put value): NATURAL repr with an explicit kind argument
- *     supplied by the call site (the EApp special case passes raw i64 bits).
- *     If a kind-'i' value's bits look like a heap pointer, the static type
- *     lied (type-erased heterogeneous flow) and the field kind is downgraded
- *     to 'g' so the bits round-trip unmodified.
+ *   - IN (record_put value): UNIFORM repr with an explicit kind argument
+ *     supplied by the call site (the EApp special case tags scalar i64s;
+ *     natural repr would make an even Int >= 4096 indistinguishable from a
+ *     heap pointer).  An even plausible-heap value under a scalar kind means
+ *     the static type lied (type-erased heterogeneous flow) and the field
+ *     kind is downgraded to 'g' so the bits round-trip unmodified.
  *   - IN (record_from_list pair values): UNIFORM repr (the pairs come from
  *     compiled tuple slots / record_entries) — 'i' values are conditionally
  *     untagged to natural before storing.
@@ -1858,12 +1883,12 @@ static int64_t rec_field_copy(void *rec, int32_t i, char kind) {
 /* Normalize an incoming (bits, kind) pair to the natural slot value and the
  * honest field kind, then take any needed +1 reference.
  *
- *   'i'  natural i64 from the record_put EApp special case.  If the bits look
- *        like a heap pointer the static type lied (type-erased heterogeneous
- *        flow) — downgrade the field to 'g' so the bits round-trip verbatim.
- *   'g'  UNIFORM bits from generic call paths / record_from_list pair snd:
- *        odd = tagged int (untag to natural, kind 'i'); even = heap pointer
- *        or erased raw bits (store verbatim, kind 'g', guarded incrc).
+ *   'i'/'g'  UNIFORM bits (record_put call sites tag scalars, generic paths
+ *        and record_from_list pair snd are uniform already): odd = tagged int
+ *        (untag to natural, kind 'i'); even = heap pointer or erased raw bits
+ *        flowing through a lying static type (store verbatim, kind 'g',
+ *        guarded incrc).  Natural repr would be ambiguous here: an even int
+ *        >= 4096 is bit-identical to a heap pointer.
  *   'f'  raw double bits.   'p'  heap pointer (+1 ref).
  */
 static int64_t rec_field_norm_uniform(int64_t bits, char *kind) {
@@ -1880,11 +1905,6 @@ static int64_t rec_field_norm_uniform(int64_t bits, char *kind) {
 static int64_t rec_field_norm_in(int64_t bits, char *kind) {
     switch (*kind) {
     case 'i':
-        if (REC_PLAUSIBLE_HEAP(bits)) {
-            *kind = 'g';
-            march_incrc((void *)(intptr_t)bits);    /* guarded */
-        }
-        return bits;
     case 'g':
         return rec_field_norm_uniform(bits, kind);
     case 'p':
@@ -1995,7 +2015,9 @@ void *march_record_get(void *rec, void *key, int64_t expected_kind) {
     march_string *ks = (march_string *)key;
     int32_t i = rec_find_field(s, ks->data, ks->len);
     if (i < 0) return rec_none_k((char)expected_kind);
-    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), s->kinds[i]);
+    /* Representation must match the call-site decoder (expected_kind), which for
+     * a concrete Option(Float) is BOXED — not the stored kind. */
+    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), (char)expected_kind);
 }
 
 /* record_has_key(rec, key) -> Bool (i64 0/1). */
@@ -2043,8 +2065,9 @@ static char *rec_desc_with_kind(march_record_shape *s, int32_t fi, char kind) {
 }
 
 /* record_put(rec, key, value, kind) -> new record with the field set (or
- * added, interning an extended shape at runtime).  [value] arrives in natural
- * representation; [kind] is the call site's static kind char. */
+ * added, interning an extended shape at runtime).  [value] arrives in UNIFORM
+ * representation (scalars low-bit tagged); [kind] is the call site's static
+ * kind char. */
 void *march_record_put(void *rec, void *key, void *value, int64_t kind) {
     march_record_shape *s = rec_shape_or_panic(rec, "record_put");
     march_string *ks = (march_string *)key;
@@ -2190,6 +2213,110 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
     int64_t raw = rec_field_raw(rec, i);
     if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
     return (void *)(intptr_t)raw;
+}
+
+/* get_actor_field(pid, field): a PARTIAL lookup, unlike march_record_field_dyn
+ * above (a total EField read that panics on a missing name) — March code,
+ * most often through a small generic helper (e.g. supervision_strategies
+ * .march's child_int), reads a named actor state field without statically
+ * knowing whether it exists, and expects Option(b): None if absent. Reuses
+ * the SAME runtime shape registry march_record_field_dyn consults — a shape
+ * id stamped into the actor struct header's pad word at spawn time (the
+ * EAlloc actor-struct branch in llvm_emit.ml, guarded by
+ * Tir_names.is_actor_struct_name) — so this works regardless of whether the
+ * caller's static Pid(a) type is concrete or still an unresolved type
+ * variable (the realistic case: nothing in get_actor_field's own signature
+ * forces monomorphization on `a` through an indirecting helper function).
+ * Returns a niche-tagged Option: NULL = None, (n<<1)|1 = Some(n) for an 'i'
+ * (Int/Bool/Unit/Atom) field, the raw pointer verbatim for anything else —
+ * matching march_record_field_dyn's found-value convention exactly. */
+void *march_get_actor_field(void *pid, void *name) {
+    march_string *ns = (march_string *)name;
+    march_record_shape *s = rec_shape_of(pid);
+    if (!s) return NULL;
+    int32_t i = rec_find_field(s, ns->data, ns->len);
+    if (i < 0) return NULL;
+    int64_t raw = rec_field_raw(pid, i);
+    if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
+    return (void *)(intptr_t)raw;
+}
+
+/* Record update (`{ r with f: v, ... }`) for statically-unknown record types
+ * (the EUpdate counterpart of march_record_field_dyn above): one allocation,
+ * the base cell's fields copied, the named fields overwritten.  Varargs are
+ * [n] quadruples of (const char *name, int64_t name_len, void *value, int64_t
+ * kind); values arrive in UNIFORM representation (scalars low-bit tagged)
+ * with the call site's static kind char, exactly like march_record_put.
+ * PANICS if any update name is
+ * missing from the base shape (mirroring march_record_field_dyn): unlike a
+ * statically-known update, the typechecker cannot validate names against a
+ * type-erased base, and silently extending the record (march_record_put's
+ * new-key behavior) would fabricate fields the program never declared.
+ * Update semantics on duplicate names: the LAST occurrence wins (matches the
+ * interpreter's assoc-override order). */
+void *march_record_update_dyn(void *rec, int64_t n, ...) {
+    march_record_shape *s = rec_shape_or_panic(rec, "record update");
+    const char **names = calloc(n > 0 ? (size_t)n : 1, sizeof(char *));
+    int64_t *lens  = calloc(n > 0 ? (size_t)n : 1, sizeof(int64_t));
+    void   **vals  = calloc(n > 0 ? (size_t)n : 1, sizeof(void *));
+    char    *kins  = calloc(n > 0 ? (size_t)n : 1, 1);
+    int32_t *idx   = calloc(n > 0 ? (size_t)n : 1, sizeof(int32_t));
+    va_list ap;
+    va_start(ap, n);
+    for (int64_t j = 0; j < n; j++) {
+        names[j] = va_arg(ap, const char *);
+        lens[j]  = va_arg(ap, int64_t);
+        vals[j]  = va_arg(ap, void *);
+        kins[j]  = (char)va_arg(ap, int64_t);
+    }
+    va_end(ap);
+    /* Resolve every name FIRST — fail loudly before touching refcounts. */
+    for (int64_t j = 0; j < n; j++) {
+        idx[j] = rec_find_field(s, names[j], lens[j]);
+        if (idx[j] < 0) {
+            char buf[160];
+            snprintf(buf, sizeof buf, "record update: no field \"%.*s\" in record",
+                     (int)(lens[j] < 100 ? lens[j] : 100), names[j]);
+            rec_panic(buf);
+        }
+    }
+    /* Normalize the winning update per field (walk in reverse so the LAST
+     * duplicate wins and only the winner takes its +1 reference). */
+    char    *is_upd    = calloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1, 1);
+    int64_t *upd_bits  = calloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1,
+                                sizeof(int64_t));
+    char    *new_kinds = malloc((size_t)s->nfields > 0 ? (size_t)s->nfields : 1);
+    memcpy(new_kinds, s->kinds, (size_t)s->nfields);
+    for (int64_t j = n - 1; j >= 0; j--) {
+        int32_t fi = idx[j];
+        if (is_upd[fi]) continue;
+        char k = kins[j];
+        upd_bits[fi]  = rec_field_norm_in((int64_t)(intptr_t)vals[j], &k);
+        new_kinds[fi] = k;
+        is_upd[fi]    = 1;
+    }
+    /* Single allocation: copy untouched fields (+1 ref on heap children,
+     * matching march_record_put), write the updated ones. */
+    void *out = march_alloc(16 + (size_t)s->nfields * 8);
+    for (int32_t i = 0; i < s->nfields; i++) {
+        if (is_upd[i]) rec_field_set(out, i, upd_bits[i]);
+        else           rec_field_set(out, i, rec_field_copy(rec, i, s->kinds[i]));
+    }
+    /* Shape: unchanged kinds reuse the base's id; otherwise intern the
+     * kind-adjusted descriptor (same policy as march_record_put). */
+    if (memcmp(new_kinds, s->kinds, (size_t)s->nfields) == 0) {
+        ((march_hdr *)out)->pad = ((march_hdr *)rec)->pad;
+    } else {
+        char *desc = malloc(strlen(s->desc) + 1);
+        size_t w = 0;
+        for (int32_t i = 0; i < s->nfields; i++)
+            w += (size_t)sprintf(desc + w, "%s:%c;", s->names[i], new_kinds[i]);
+        ((march_hdr *)out)->pad = march_record_shape_intern(desc);
+        free(desc);
+    }
+    free(names); free(lens); free(vals); free(kins); free(idx);
+    free(is_upd); free(upd_bits); free(new_kinds);
+    return out;
 }
 
 /* ── ~H sigil: html_auto_escape ──────────────────────────────────────────────

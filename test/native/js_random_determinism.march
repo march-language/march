@@ -1,0 +1,24 @@
+-- Golden: stdlib Random on --target js (wired in test/dune; fixed 2026-07-10).
+-- Random's core is sfc32 on 32-bit words, so every intermediate stays below
+-- 2^53 and the sequence is exact — and IDENTICAL — on the interpreter,
+-- native, and JS backends; the .expected file is that shared output.
+-- The int bitwise builtins (int_and/or/xor/shl/shr, int_mod, ...) are mapped
+-- to checked implementations in runtime/march_runtime.mjs, and an unmapped
+-- builtin on the JS target is now a compile error rather than a silent
+-- bare-call emit (the original failure mode here: xoshiro-based Random threw
+-- `ReferenceError: int_max_value is not defined` at runtime).
+-- Self-checks: value range and distinctness; the golden diff additionally
+-- pins cross-run determinism.
+mod JsRandomDeterminism do
+  fn main() : Unit do
+    let rng = Random.seed(42)
+    let (a, rng2) = Random.range(rng, 0, 1000000)
+    let (b, rng3) = Random.range(rng2, 0, 1000000)
+    let (f, _) = Random.next_float(rng3)
+    println(int_to_string(a))
+    println(int_to_string(b))
+    println(if f >= 0.0 && f < 1.0 do "float-ok" else "float-bad" end)
+    println(if a == b do "collision" else "distinct" end)
+    println(if a >= 0 && a <= 1000000 && b >= 0 && b <= 1000000 do "range-ok" else "range-bad" end)
+  end
+end

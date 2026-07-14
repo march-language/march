@@ -13,12 +13,20 @@
     - NL immediately before END is suppressed
     This gives the parser a clean stream: [DO NL branch NL branch END]. *)
 
-type context = Match | Block | Paren
+(* [With] marks the block opened by a monadic `with pat <- e do ... end`.
+   It behaves like [Block] inside the body (newlines swallowed), but its
+   [else] arms are match-style: at the [else] keyword the context is promoted
+   to [Match] so newlines separate the arms (see the ELSE handler). *)
+type context = Match | Block | Paren | With
 
 (* Per-match state for tracking whether we're inside an arm body *)
 type match_state = {
   mutable ms_suppress_nl : bool;  (* suppress NLs after ARROW *)
   mutable ms_in_arm_body : bool;  (* inside arm body (past first token after ARROW) *)
+  ms_is_cond : bool;              (* cond form (`match do ... end`, no scrutinee):
+                                     arm "patterns" are full boolean expressions,
+                                     so the new-arm lookahead must not bail on the
+                                     operators those expressions legitimately use *)
 }
 
 (* A token together with the lexbuf positions it was lexed at.
@@ -73,12 +81,47 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
   in
   let stack : context Stack.t = Stack.create () in
   let pending_match_depths : int Stack.t = Stack.create () in
+  (* Parallel to pending_match_depths: whether each pending MATCH is a cond
+     form (`match do`, no scrutinee). Pushed at MATCH, popped by the matching
+     DO in lockstep with pending_match_depths so they stay aligned. *)
+  let pending_match_conds : bool Stack.t = Stack.create () in
+  (* Paren-depths at which a monadic `with` is awaiting its opening [DO], so
+     that [DO] pushes a [With] context rather than a plain [Block]. Recorded on
+     the [<-] (GETS) token, which appears only in with-bindings. *)
+  let pending_with_depths : int Stack.t = Stack.create () in
   let paren_depth = ref 0 in
   (* Buffer stores tokens with their original lexbuf positions so
      that re-queued tokens restore the correct span information. *)
   let buffer : tok_with_pos Queue.t = Queue.create () in
   (* Stack of match states, one per nested match level *)
   let match_states : match_state Stack.t = Stack.create () in
+
+  (* Curried-call juxtaposition guard (grammar §7.3).
+     March functions are uncurried, so `f(1)(2)` is not a chained call; the
+     old parser silently split it into two statements and DISCARDED `(2)`.
+     We reject it as a newline-sensitive parse error instead, while still
+     accepting an IIFE `(fn x -> x)(5)` (the `)` closes a GROUP, not a call)
+     and a two-line `f(1)⏎(g(2))` (the newline signals two statements).
+
+     [paren_kinds] classifies each emitted [LPAREN]: [true] = a CALL's arg
+     list (the preceding significant token is value-ending), [false] = a
+     grouping/tuple/lambda paren. Popped on the matching [RPAREN].
+     [last_closed_call] records whether the most-recently-closed paren was a
+     call, so the guard can tell `f(1)(` (reject) from `(expr)(` (allow).
+     [prev_significant] is the last non-NL token emitted to the parser;
+     [saw_nl_since_significant] is set whenever an NL passes through the
+     stream (even one that is later swallowed) and cleared on any non-NL
+     token — this is the ONLY place the newline survives, since the parser
+     never sees these NLs. *)
+  let paren_kinds : bool Stack.t = Stack.create () in
+  let last_closed_call = ref false in
+  let prev_significant : Parser.token option ref = ref None in
+  let saw_nl_since_significant = ref false in
+  let is_value_ending = function
+    | Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _
+    | Parser.RPAREN | Parser.RBRACKET -> true
+    | _ -> false
+  in
 
   let in_match () =
     not (Stack.is_empty stack) && Stack.top stack = Match
@@ -111,14 +154,26 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     } buffer
   in
 
-  (* Check if a token could start a match arm pattern *)
+  (* Check if a token could start a match arm pattern.
+
+     Kept in sync with the grammar's `pattern` / `simple_pattern` rules
+     (parser.mly): `pattern` accepts qualified_upper (UPPER_IDENT), ATOM,
+     and simple_pattern; `simple_pattern` accepts UNDERSCORE,
+     soft_lower_name (LOWER_IDENT plus the soft keywords below), INT,
+     MINUS INT, FLOAT, MINUS FLOAT, STRING, BOOL, LPAREN, and LBRACKET.
+     There is no CHAR token in this grammar. *)
   let is_pattern_start tok =
     match tok with
     | Parser.UPPER_IDENT _ | Parser.LOWER_IDENT _
-    | Parser.UNDERSCORE | Parser.INT _ | Parser.STRING _
+    | Parser.UNDERSCORE | Parser.INT _ | Parser.FLOAT _ | Parser.STRING _
     | Parser.BOOL _
     | Parser.LPAREN | Parser.LBRACKET | Parser.MINUS
-    | Parser.ATOM _ -> true
+    | Parser.ATOM _
+    (* soft_lower_name keywords also usable as a var-pattern binder *)
+    | Parser.STATE | Parser.INIT | Parser.LOOP | Parser.ON
+    | Parser.PROTOCOL | Parser.APP | Parser.AS | Parser.WITH
+    | Parser.WHEN | Parser.USE | Parser.IN | Parser.FOR
+    | Parser.TAG -> true
     | _ -> false
   in
 
@@ -129,8 +184,20 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      Strategy: process first_tok then read more tokens until we see
      either ARROW at depth=0 or NL at depth=0.
      If ARROW -> new arm. If NL -> body continuation.
-     Also bail on tokens that can't appear in patterns at depth=0. *)
-  let lookahead_is_new_arm first_tok lexbuf =
+     Also bail on tokens that can't appear in patterns at depth=0.
+
+     [is_cond] is true when the enclosing match is the cond form
+     (`match do BoolExpr -> body end`), where the thing before `->` is a full
+     boolean expression rather than a plain pattern. In that mode — and, for a
+     scrutinee match, once a WHEN token has been seen (we are now scanning the
+     guard expression of `Pattern when GuardExpr -> body`) — the binary
+     operators below are legitimate parts of the expression, NOT a signal that
+     this is a body continuation, so we must keep scanning toward the ARROW
+     instead of bailing. The structural bail-outs (EQUALS/DO/LET/IF/MATCH/FN/
+     PFN/ASSERT) stay unconditional: those only ever appear in a body
+     continuation, and they guard against a spurious depth-0 ARROW from a
+     nested lambda/construct being mistaken for an arm separator. *)
+  let lookahead_is_new_arm ~is_cond first_tok lexbuf =
     let buffered_tokens : tok_with_pos Queue.t = Queue.create () in
     (* first_tok was just returned by raw lexbuf, so current positions are its *)
     Queue.push {
@@ -141,8 +208,15 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     let depth = ref 0 in
     let result = ref false in
     let done_ = ref false in
+    (* Set once a depth-0 WHEN is seen: everything after it up to the ARROW is
+       guard-expression territory, so suppress the operator bail-out just like
+       cond mode does. *)
+    let seen_when = ref false in
 
     let process tok =
+      (* Binary operators are only a bail-out signal outside boolean-expression
+         territory (i.e. not a cond arm and not past a guard's WHEN). *)
+      let suppress_operators = is_cond || !seen_when in
       match tok with
       | Parser.ARROW when !depth = 0 ->
         result := true;
@@ -164,12 +238,18 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           result := false;
           done_ := true
         end
-      | Parser.EQUALS | Parser.PLUS | Parser.STAR | Parser.SLASH
-      | Parser.PERCENT | Parser.PIPE_ARROW | Parser.DO | Parser.LET | Parser.IF
+      | Parser.WHEN when !depth = 0 ->
+        (* Entering a match arm's guard expression. *)
+        seen_when := true
+      | Parser.EQUALS | Parser.DO | Parser.LET | Parser.IF
       | Parser.MATCH | Parser.FN | Parser.PFN | Parser.ASSERT
-      | Parser.LEQ | Parser.GEQ | Parser.EQEQ | Parser.NEQ
-      | Parser.AND | Parser.OR | Parser.PLUSPLUS
         when !depth = 0 ->
+        result := false;
+        done_ := true
+      | Parser.PLUS | Parser.STAR | Parser.SLASH | Parser.PERCENT
+      | Parser.PIPE_ARROW | Parser.LEQ | Parser.GEQ | Parser.EQEQ
+      | Parser.NEQ | Parser.AND | Parser.OR | Parser.PLUSPLUS
+        when !depth = 0 && not suppress_operators ->
         result := false;
         done_ := true
       | _ -> ()
@@ -212,10 +292,34 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     dispatch tok lexbuf
 
   and dispatch tok lexbuf =
+    (* Record every newline that passes through the emit stream — even ones
+       swallowed below — so the LPAREN guard in [emit] can tell `f(1)(2)`
+       (reject) from `f(1)⏎(g(2))` (two statements, allow). *)
+    (match tok with Parser.NL -> saw_nl_since_significant := true | _ -> ());
     check_arm_body_transition tok;
     match tok with
     | Parser.MATCH ->
       Stack.push !paren_depth pending_match_depths;
+      (* Cond form iff DO immediately follows the `match` keyword (`match do`,
+         no scrutinee). Peek exactly one token and re-queue it so dispatch
+         proceeds unchanged — re-queuing whatever we saw (including an NL)
+         leaves the downstream NL handling byte-for-byte as before. The
+         idiomatic cond form always writes `match do` on one line, so no NL
+         ever sits between the keyword and DO here. *)
+      let peeked = raw lexbuf in
+      Stack.push (peeked = Parser.DO) pending_match_conds;
+      push_buf peeked lexbuf;
+      tok
+
+    (* `<-` (GETS) appears only in monadic with-bindings. Record the with's
+       paren-depth so the following [DO] opens a [With] block whose [else]
+       arms are newline-separated. Multiple bindings of one `with` share a
+       paren-depth; dedup them to a single pending entry so exactly one [DO]
+       consumes it. *)
+    | Parser.GETS ->
+      if Stack.is_empty pending_with_depths
+         || Stack.top pending_with_depths <> !paren_depth
+      then Stack.push !paren_depth pending_with_depths;
       tok
 
     (* CHOOSE BY chooser: ... END has END without DO — peek ahead
@@ -226,7 +330,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
        | Parser.BY ->
          (* Protocol choose block — push Match so NL works as branch separator *)
          Stack.push Match stack;
-         Stack.push { ms_suppress_nl = false; ms_in_arm_body = false } match_states;
+         Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = false } match_states;
          push_buf Parser.BY lexbuf;
          tok
        | other ->
@@ -238,8 +342,22 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          && Stack.top pending_match_depths = !paren_depth
       then begin
         ignore (Stack.pop pending_match_depths);
+        (* pending_match_conds is pushed for every MATCH and popped here in
+           lockstep, so it is non-empty whenever pending_match_depths matched. *)
+        let is_cond =
+          if Stack.is_empty pending_match_conds then false
+          else Stack.pop pending_match_conds
+        in
         Stack.push Match stack;
-        Stack.push { ms_suppress_nl = false; ms_in_arm_body = false } match_states
+        Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = is_cond } match_states
+      end
+      else if not (Stack.is_empty pending_with_depths)
+         && Stack.top pending_with_depths = !paren_depth
+      then begin
+        (* This is a monadic `with`'s DO. The body is block-style (like a
+           plain Block); the ELSE handler promotes it to Match for the arms. *)
+        ignore (Stack.pop pending_with_depths);
+        Stack.push With stack
       end else
         Stack.push Block stack;
       tok
@@ -269,6 +387,17 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          ms.ms_suppress_nl <- true;
          ms.ms_in_arm_body <- false
        | None -> ());
+      tok
+
+    | Parser.ELSE
+      when (not (Stack.is_empty stack)) && Stack.top stack = With ->
+      (* Entering the else-arms of a monadic `with`. Promote the With block to
+         a Match context so newlines separate the arms exactly like a `match`
+         body; the single matching END pops this Match context. The arms are
+         ordinary pattern arms (not the cond form), so ms_is_cond = false. *)
+      ignore (Stack.pop stack);
+      Stack.push Match stack;
+      Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = false } match_states;
       tok
 
     | Parser.NL ->
@@ -301,7 +430,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
             (* Could be a new arm or a body continuation.
                Use lookahead: pass tok_after as the first token, then
                scan for ARROW vs NL *)
-            if lookahead_is_new_arm tok_after lexbuf then begin
+            if lookahead_is_new_arm ~is_cond:ms.ms_is_cond tok_after lexbuf then begin
               (* New arm — emit NL as arm separator *)
               ms.ms_in_arm_body <- false;
               Parser.NL
@@ -335,4 +464,47 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     | _ ->
       tok
   in
-  next
+
+  (* Single outermost boundary for the curried-call guard. [next] produces the
+     token actually handed to the parser; here — and ONLY here, so swallowed
+     NLs and lookahead re-queues can never double-count — we maintain the
+     paren-kind stack, remember the previous significant token, and reject a
+     [LPAREN] that immediately follows a call's closing [RPAREN] with no
+     intervening newline. *)
+  let emit lexbuf =
+    let tok = next lexbuf in
+    (match tok with
+     | Parser.LPAREN ->
+       (* Guard: `<call>)( ...` on one line is a curried-call juxtaposition. *)
+       if !prev_significant = Some Parser.RPAREN
+          && not !saw_nl_since_significant
+          && !last_closed_call
+       then
+         raise (March_errors.Errors.ParseError
+           ("`f(...)(...)` is not a chained call — March functions are not \
+             curried.",
+            Some "Write `f(a, b)` for a multi-argument call, or put the second \
+                  call on its own line if you meant two separate statements.",
+            lexbuf.Lexing.lex_start_p));
+       (* Classify this paren: a CALL's arg list iff the preceding significant
+          token is value-ending (`f(`/`Con(`/`g()(`/`xs[i](`), else a group.
+          [prev_significant] still holds the token before this LPAREN — it is
+          not updated until the bottom of [emit]. *)
+       let is_call =
+         match !prev_significant with
+         | Some t -> is_value_ending t
+         | None -> false
+       in
+       Stack.push is_call paren_kinds
+     | Parser.RPAREN ->
+       last_closed_call :=
+         (if Stack.is_empty paren_kinds then false else Stack.pop paren_kinds)
+     | _ -> ());
+    (match tok with
+     | Parser.NL -> ()  (* keep saw_nl set; prev_significant unchanged *)
+     | _ ->
+       prev_significant := Some tok;
+       saw_nl_since_significant := false);
+    tok
+  in
+  emit

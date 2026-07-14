@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: March does not coerce Int to Bool
+mod M do
+  fn main() do
+    println(int_to_string(1 && true))
+  end
+end

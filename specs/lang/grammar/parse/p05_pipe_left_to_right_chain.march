@@ -1,0 +1,19 @@
+mod P05PipeLeftToRightChain do
+  fn double(x) do
+    x * 2
+  end
+
+  fn inc(x) do
+    x + 1
+  end
+
+  fn main() do
+    -- `3 |> double |> inc` only equals 7 if |> is left-associative:
+    -- (3 |> double) |> inc == inc(double(3)) == inc(6) == 7.
+    -- Right-associative would try double(inc(3)) == double(4) == 8 (moot,
+    -- since |>'s grammar is left-recursive: expr_pipe PIPE_ARROW expr_or —
+    -- but the VALUE proves the resolved behavior, not just the shape of
+    -- the rule).
+    println(3 |> double |> inc)
+  end
+end

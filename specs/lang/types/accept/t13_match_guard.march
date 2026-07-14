@@ -1,0 +1,15 @@
+mod M do
+  fn classify(n : Int) : String do
+    match n do
+      n when n > 0 -> "pos"
+      n when n < 0 -> "neg"
+      _ -> "zero"
+    end
+  end
+
+  fn main() do
+    println(classify(5))
+    println(classify(-3))
+    println(classify(0))
+  end
+end

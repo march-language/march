@@ -1,0 +1,17 @@
+mod Main do
+  type Opt = Non | Som(Int)
+  type Boxed = Wrap((Int, Opt))
+  -- A PatCon (Wrap) whose sole sub-pattern is a PatTuple, whose second
+  -- component is itself a PatCon (Som/Non): nested matching recurses through
+  -- match_list (eval.ml:832) at three depths — con → tuple → con → var.
+  fn total(b) do
+    match b do
+      Wrap((k, Som(v))) -> k + v
+      Wrap((k, Non)) -> k
+    end
+  end
+  fn main() do
+    println(int_to_string(total(Wrap((3, Som(4))))))
+    println(int_to_string(total(Wrap((9, Non)))))
+  end
+end

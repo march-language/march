@@ -1,0 +1,15 @@
+-- Borrowed-field escape: a field extracted from a BORROWED record parameter
+-- is returned (escapes the function), so it must be IncRC'd at extraction
+-- rather than freed with the (never-owned) parent record.
+mod BorrowedFieldEscape do
+  type Box = { inner : String }
+
+  fn peek(b : Box) : String do
+    b.inner
+  end
+
+  fn main() do
+    let b = { inner: "wrapped" }
+    println(peek(b))
+  end
+end

@@ -1,0 +1,28 @@
+mod Main do
+  -- ECond (the scrutinee-less `match do cond -> body end` boolean chain).
+  -- The interpreter evaluates each arm's CONDITION top-to-bottom and selects
+  -- the body of the FIRST arm whose condition is `VBool true`
+  -- (eval.ml:7097-7106: `go` walks the arm list; `VBool true` -> run body,
+  -- `VBool false` -> `go rest`). Here `grade(75)` makes the FIRST condition
+  -- (`s > 89`) false and the SECOND (`s > 69`) true, so the MIDDLE arm is
+  -- selected — earlier false arms are skipped, later arms (including the
+  -- terminal `true` catch-all) are never consulted once one is selected.
+  -- (The thresholds use `>` rather than `>=`: a `>=` in an ECond arm currently
+  -- confuses the token filter's arm-boundary lookahead and fails to parse —
+  -- an out-of-scope parser gotcha, routed around here since middle-arm
+  -- selection is what this program exercises, not the comparison operator.)
+  fn grade(s) do
+    match do
+      s > 89 -> "A"
+      s > 69 -> "B"
+      s > 49 -> "C"
+      true   -> "F"
+    end
+  end
+  fn main() do
+    println(grade(95))
+    println(grade(75))
+    println(grade(60))
+    println(grade(30))
+  end
+end

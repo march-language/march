@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: All branches of a match must have the same type.
+mod M do
+  type Shape = Circle(Int) | Square(Int)
+
+  fn describe(s) do
+    match s do
+      Circle(r) -> r
+      Square(side) -> "square"
+    end
+  end
+
+  fn main() do
+    println(int_to_string(describe(Circle(1))))
+  end
+end

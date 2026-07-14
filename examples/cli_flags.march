@@ -1,0 +1,13 @@
+mod Main do
+  fn main() do
+    let specs = [Cli.value_flag("name", "the name"), Cli.flag("verbose", "verbose mode")]
+    match Cli.parse(specs, ["--name", "alice", "--verbose", "input.txt"]) do
+      Ok(p) ->
+        println(Cli.get_string_or(p, "name", "anon"))
+        println(bool_to_string(Cli.get_bool(p, "verbose")))
+        println(bool_to_string(Cli.get_bool(p, "quiet")))
+        println(String.join(Cli.positional(p), ","))
+      Err(e) -> println("err: " ++ Cli.error_message(e))
+    end
+  end
+end

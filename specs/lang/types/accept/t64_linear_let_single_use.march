@@ -1,0 +1,18 @@
+mod Main do
+  -- Linearity widening slice 7 -- (T-LinMark)/(T-LinUse) positive: a
+  -- `linear let` binding consumed exactly once typechecks. `take(r)` is the
+  -- single consuming use; check_linear_all_consumed at scope close sees
+  -- le_used = true. See core-march-types.md §2.9.1-§2.9.2.
+  type Res = R(Int)
+  fn take(r : Res) : Int do
+    match r do
+      R(n) -> n
+      _    -> 0
+    end
+  end
+  fn main() : () do
+    linear let r : Res = R(1)
+    let _ = take(r)
+    ()
+  end
+end

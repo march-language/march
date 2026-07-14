@@ -44,8 +44,11 @@ lint_docs() {
     echo README.md
     echo CLAUDE.md
     echo syntax_reference.md
+    echo specs/perceus-invariants.md
     find docs -name '*.md' 2>/dev/null || true
     find specs/features -name '*.md' 2>/dev/null || true
+    find specs/lang -name '*.md' 2>/dev/null || true
+    find specs/impl -name '*.md' 2>/dev/null || true
     echo .claude/skills/march-lang/SKILL.md
   } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done \
     | grep -vE '/plans/|/superpowers/'   # historical/plan corpora & vendored plugin docs are not current-truth
@@ -114,6 +117,173 @@ while IFS= read -r doc; do
   done < <(grep -niE '[0-9]+ (March )?(stdlib )?modules' "$doc" 2>/dev/null || true)
 done < <(lint_docs)
 [ "$b_problems" -eq 0 ] && echo "  ok — no stale stdlib counts"
+
+# ─── Check C: conformance-corpus INDEX count consistency ─────────────────────
+#
+# Each conformance corpus ships an INDEX.md that states, in a few well-known
+# AUTHORITATIVE forms, the total program count that is supposed to equal the
+# number of `.march` files on disk. Human review missed a stale count three
+# times running; this lint kills the class.
+#
+#   golden: actual = #(specs/lang/golden/*.march). Authoritative sites in
+#           specs/lang/golden/INDEX.md:
+#             - the `# … (g01–gNN)` title range-end,
+#             - the `N/N MATCH` run-instructions count.
+#   types:  actual accept = #(specs/lang/types/accept/*.march),
+#           actual reject = #(specs/lang/types/reject/*.march), total = sum.
+#           Authoritative sites in specs/lang/types/INDEX.md:
+#             - the `# … (t01–tAA accept, t01–tRR reject)` title range-ends,
+#             - the `currently T/T — A accept, B reject` run line,
+#             - the `**Result: T / T (A accept, B reject).**` footer.
+#
+# DELIBERATELY narrow: only these two INDEX files, only their total-count sites.
+# Reference docs elsewhere in specs/ carry illustrative/partial/historical
+# `N/N` numbers that are NOT the full corpus total — linting them all would be a
+# false-positive machine. A count line bearing `doc-lint:ignore-count` opts out
+# (e.g. a deliberately-partial illustrative table), same marker as Check B.
+#
+# emit_mismatch FILE LINENO CLAIMED ACTUAL LABEL — records one failure.
+emit_mismatch() {
+  echo "  COUNT MISMATCH: $1:$2 claims $5=$3, actual is $4"
+  c_problems=$((c_problems + 1))
+  fail=1
+}
+# check_line FILE LINENO TEXT CLAIMED ACTUAL LABEL — compare unless suppressed.
+check_line() {
+  echo "$3" | grep -q 'doc-lint:ignore-count' && return 0
+  [ -n "$4" ] && [ "$4" != "$5" ] && emit_mismatch "$1" "$2" "$4" "$5" "$6"
+  return 0
+}
+# num_at FILE LINENO — the raw text of one line (for suppression + extraction).
+line_text() { sed -n "${2}p" "$1" 2>/dev/null; }
+
+g_dir="specs/lang/golden"
+g_index="$g_dir/INDEX.md"
+t_accept="specs/lang/types/accept"
+t_reject="specs/lang/types/reject"
+t_index="specs/lang/types/INDEX.md"
+gr_parse="specs/lang/grammar/parse"
+gr_reject="specs/lang/grammar/reject"
+gr_index="specs/lang/grammar/INDEX.md"
+
+g_actual=$(find "$g_dir" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+ta_actual=$(find "$t_accept" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+tr_actual=$(find "$t_reject" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+tt_actual=$((ta_actual + tr_actual))
+grp_actual=$(find "$gr_parse" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+grr_actual=$(find "$gr_reject" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+grt_actual=$((grp_actual + grr_actual))
+
+echo "== Check C: conformance-corpus INDEX counts (golden: $g_actual; types: $tt_actual = $ta_actual accept + $tr_actual reject; grammar: $grt_actual = $grp_actual parse + $grr_actual reject) =="
+c_problems=0
+
+if [ -f "$g_index" ]; then
+  # Title: `# Golden corpus index (g01–g37)` — trailing gNN is the count.
+  gt_line=$(grep -niE '^#[^#].*\(g[0-9]+' "$g_index" | head -1)
+  if [ -n "$gt_line" ]; then
+    ln=${gt_line%%:*}; txt=$(line_text "$g_index" "$ln")
+    n=$(echo "$txt" | grep -oiE 'g[0-9]+' | tail -1 | grep -oE '[0-9]+')
+    check_line "$g_index" "$ln" "$txt" "$n" "$g_actual" "golden total"
+  fi
+  # Run line: `… (N/N MATCH …)` — both numbers must equal the golden count.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    ln=${m%%:*}; txt=$(line_text "$g_index" "$ln")
+    a=$(echo "$txt" | grep -oiE '[0-9]+ */ *[0-9]+ +MATCH' | grep -oE '[0-9]+' | head -1)
+    b=$(echo "$txt" | grep -oiE '[0-9]+ */ *[0-9]+ +MATCH' | grep -oE '[0-9]+' | sed -n 2p)
+    check_line "$g_index" "$ln" "$txt" "$a" "$g_actual" "golden MATCH (lhs)"
+    check_line "$g_index" "$ln" "$txt" "$b" "$g_actual" "golden MATCH (rhs)"
+  done < <(grep -niE '[0-9]+ */ *[0-9]+ +MATCH' "$g_index")
+else
+  echo "  note: $g_index not found — skipping golden corpus"
+fi
+
+if [ -f "$t_index" ]; then
+  # Title: `# Typing corpus index (t01–t40 accept, t01–t29 reject)`.
+  tt_line=$(grep -niE '^#[^#].*t[0-9]+[^0-9]+accept' "$t_index" | head -1)
+  if [ -n "$tt_line" ]; then
+    ln=${tt_line%%:*}; txt=$(line_text "$t_index" "$ln")
+    na=$(echo "$txt" | grep -oiE 't[0-9]+[^0-9]+accept' | grep -oE '[0-9]+' | tail -1)
+    nr=$(echo "$txt" | grep -oiE 't[0-9]+[^0-9]+reject' | grep -oE '[0-9]+' | tail -1)
+    check_line "$t_index" "$ln" "$txt" "$na" "$ta_actual" "types title accept"
+    check_line "$t_index" "$ln" "$txt" "$nr" "$tr_actual" "types title reject"
+  fi
+  # Run line: `… currently N/N — A accept, B reject …` (may wrap; A/B may be on
+  # the next physical line, so read the run line plus its continuation).
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    ln=${m%%:*}; txt=$(line_text "$t_index" "$ln")
+    nxt=$(line_text "$t_index" "$((ln + 1))")
+    joined="$txt $nxt"
+    tot=$(echo "$txt" | grep -oiE 'currently +[0-9]+ */ *[0-9]+' | grep -oE '[0-9]+' | head -1)
+    na=$(echo "$joined" | grep -oiE '[0-9]+ +accept' | grep -oE '[0-9]+' | head -1)
+    nr=$(echo "$joined" | grep -oiE '[0-9]+ +reject' | grep -oE '[0-9]+' | head -1)
+    check_line "$t_index" "$ln" "$txt" "$tot" "$tt_actual" "types currently total"
+    check_line "$t_index" "$ln" "$txt" "$na" "$ta_actual" "types currently accept"
+    check_line "$t_index" "$ln" "$txt" "$nr" "$tr_actual" "types currently reject"
+  done < <(grep -niE 'currently +[0-9]+ */ *[0-9]+' "$t_index")
+  # Footer: `**Result: N / N (A accept, B reject).**`.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    ln=${m%%:*}; txt=$(line_text "$t_index" "$ln")
+    tot=$(echo "$txt" | grep -oiE 'result: *[0-9]+ */ *[0-9]+' | grep -oE '[0-9]+' | head -1)
+    na=$(echo "$txt" | grep -oiE '[0-9]+ +accept' | grep -oE '[0-9]+' | head -1)
+    nr=$(echo "$txt" | grep -oiE '[0-9]+ +reject' | grep -oE '[0-9]+' | head -1)
+    check_line "$t_index" "$ln" "$txt" "$tot" "$tt_actual" "types Result total"
+    check_line "$t_index" "$ln" "$txt" "$na" "$ta_actual" "types Result accept"
+    check_line "$t_index" "$ln" "$txt" "$nr" "$tr_actual" "types Result reject"
+  done < <(grep -niE '\*\*result: *[0-9]+ */ *[0-9]+' "$t_index")
+else
+  echo "  note: $t_index not found — skipping types corpus"
+fi
+
+# grammar: parse/ + reject/ corpus (pNN/rNN naming, its own INDEX). Three
+# authoritative count sites, all of which have drifted before this guard
+# existed: the title range-ends, the `currently N/N — A parse, B reject` run
+# line, and the `N programs total (A parse, B reject)` footer.
+if [ -f "$gr_index" ]; then
+  # Title: `# Grammar corpus index (p01–p24 parse, r01–r14 reject; …)`.
+  grt_line=$(grep -niE '^#[^#].*p[0-9]+[^0-9]+parse' "$gr_index" | head -1)
+  if [ -n "$grt_line" ]; then
+    ln=${grt_line%%:*}; txt=$(line_text "$gr_index" "$ln")
+    # The only `pNN…parse` / `rNN…reject` substrings in the title are its own
+    # range-ends; the parenthetical task-history uses `pNN–pMM/rKK` forms with
+    # no trailing `parse`/`reject`, so a plain grep + last-number is safe (do
+    # NOT strip the `(…)` — the ranges live inside it). `|| true` guards the
+    # grep-returns-1 case under the script's error mode.
+    np=$( { echo "$txt" | grep -oiE 'p[0-9]+[^0-9]+parse' | grep -oE '[0-9]+' | tail -1; } || true )
+    nr=$( { echo "$txt" | grep -oiE 'r[0-9]+[^0-9]+reject' | grep -oE '[0-9]+' | tail -1; } || true )
+    check_line "$gr_index" "$ln" "$txt" "$np" "$grp_actual" "grammar title parse"
+    check_line "$gr_index" "$ln" "$txt" "$nr" "$grr_actual" "grammar title reject"
+  fi
+  # Run line: `… currently N/N — A parse, B reject …`.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    ln=${m%%:*}; txt=$(line_text "$gr_index" "$ln")
+    nxt=$(line_text "$gr_index" "$((ln + 1))")
+    joined="$txt $nxt"
+    tot=$(echo "$txt" | grep -oiE 'currently +[0-9]+ */ *[0-9]+' | grep -oE '[0-9]+' | head -1)
+    np=$(echo "$joined" | grep -oiE '[0-9]+ +parse' | grep -oE '[0-9]+' | head -1)
+    nr=$(echo "$joined" | grep -oiE '[0-9]+ +reject' | grep -oE '[0-9]+' | head -1)
+    check_line "$gr_index" "$ln" "$txt" "$tot" "$grt_actual" "grammar currently total"
+    check_line "$gr_index" "$ln" "$txt" "$np" "$grp_actual" "grammar currently parse"
+    check_line "$gr_index" "$ln" "$txt" "$nr" "$grr_actual" "grammar currently reject"
+  done < <(grep -niE 'currently +[0-9]+ */ *[0-9]+' "$gr_index")
+  # Footer: `N programs total (A parse, B reject)`.
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    ln=${m%%:*}; txt=$(line_text "$gr_index" "$ln")
+    tot=$(echo "$txt" | grep -oiE '[0-9]+ +programs +total' | grep -oE '[0-9]+' | head -1)
+    np=$(echo "$txt" | grep -oiE '[0-9]+ +.?parse' | grep -oE '[0-9]+' | head -1)
+    nr=$(echo "$txt" | grep -oiE '[0-9]+ +.?reject' | grep -oE '[0-9]+' | head -1)
+    check_line "$gr_index" "$ln" "$txt" "$tot" "$grt_actual" "grammar total"
+    check_line "$gr_index" "$ln" "$txt" "$np" "$grp_actual" "grammar total parse"
+    check_line "$gr_index" "$ln" "$txt" "$nr" "$grr_actual" "grammar total reject"
+  done < <(grep -niE '[0-9]+ +programs +total' "$gr_index")
+else
+  echo "  note: $gr_index not found — skipping grammar corpus"
+fi
+[ "$c_problems" -eq 0 ] && echo "  ok — corpus INDEX counts match on-disk file counts"
 
 echo
 if [ "$fail" -ne 0 ]; then

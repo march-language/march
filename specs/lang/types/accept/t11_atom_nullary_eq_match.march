@@ -1,0 +1,22 @@
+mod M do
+  fn status() : Atom do
+    :ok
+  end
+
+  fn is_ok(a : Atom) : Bool do
+    a == :ok
+  end
+
+  fn describe(a : Atom) : String do
+    match a do
+      :ok -> "all good"
+      _ -> "something else"
+    end
+  end
+
+  fn main() do
+    println(bool_to_string(is_ok(status())))
+    println(describe(status()))
+    println(describe(:nope))
+  end
+end

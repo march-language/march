@@ -1,0 +1,37 @@
+mod Main do
+  -- Session-typed channel operational witness (core-march.md §4.11):
+  -- `Chan.choose`/`Chan.offer` branch selection. `Chan.choose` IS
+  -- `chan_send` of the chosen label atom (eval.ml:5581); `Chan.offer` IS
+  -- `chan_recv` of that atom (eval.ml:5588) — so branch selection is
+  -- literally an atom sent over the same FIFO queue as any other payload.
+  -- `Decision`'s two branches carry TYPE-DISTINCT payloads (Int vs String)
+  -- so the MPST-merge-rule-into-binary-duality pitfall (F4, already filed)
+  -- does not fire — identical-type branches would wrongly reject this
+  -- protocol as "not duals." The chooser (Client) picks `:ok` and sends an
+  -- Int (42 + 1 = 43, the same Task-1-fixed odd-payload class as g38); the
+  -- offerer (Server) receives the label, then the Int, and prints both.
+  -- Roles are declared as their own nullary types to keep the undeclared-
+  -- participant HINT (F8) quiet; every send precedes its matching recv in
+  -- program order (no scheduler — F6).
+  type Client = Client
+  type Server = Server
+
+  protocol Decision do
+    choose by Client:
+      ok  -> Client -> Server : Int
+      err -> Client -> Server : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Decision)
+    let cc2 = Chan.choose(cc, :ok)
+    let cc3 = Chan.send(cc2, 42 + 1)
+    Chan.close(cc3)
+    let (lbl, sc2) = Chan.offer(sc)
+    let (n, sc3) = Chan.recv(sc2)
+    Chan.close(sc3)
+    println(lbl)
+    println(int_to_string(n))
+  end
+end

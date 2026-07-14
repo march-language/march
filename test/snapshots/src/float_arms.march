@@ -1,0 +1,15 @@
+-- Float-literal match arms: pins how ALit(LitFloat _) branches lower
+-- (equality-compiled float literals, not a range/guard rewrite).
+mod FloatArms do
+  fn describe(x : Float) : String do
+    match x do
+      0.0 -> "zero"
+      1.5 -> "one-half-more"
+      _ -> "other"
+    end
+  end
+
+  fn main() do
+    println(describe(1.5))
+  end
+end

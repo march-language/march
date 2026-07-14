@@ -1,0 +1,53 @@
+-- Regression: Task.await / await_many / async_stream must untag i64 Ok
+-- payloads in native codegen.
+--
+-- The thunk trampoline stores task[3] = (apply_ret << 1) | 1.  For an Int
+-- result the apply fn already returns a tagged scalar (2*n+1), so task[3] is
+-- double-tagged (4*n+3).  `march_task_await` wraps task[3] straight into an
+-- Ok, and the normal `Ok(n)` destructure untags only once — leaving 2*n+1.
+-- Pre-fix this printed await=85 / sum=123 / stream_sum=115 instead of
+-- 42 / 60 / 55.  `Task.await_unwrap` already double-untags (commit 291f6b5f);
+-- the last line guards that it stays correct.
+--
+-- All output is produced by a single main green thread after each blocking
+-- await, and folds preserve list order, so the output is deterministic —
+-- suitable for a native compiled-run golden (see test/dune).
+mod TaskAwaitInt do
+
+  needs IO.Console
+
+  fn main() : Unit do
+    -- Task.await on Int: expect Ok(42), not Ok(85).
+    let t = Task.async(fn () -> 6 * 7)
+    match Task.await(t) do
+      Ok(n)  -> println("await=" ++ int_to_string(n))
+      Err(e) -> println("await_err=" ++ e)
+    end
+
+    -- Task.await_many: [10,20,30] summed via in-order fold → 60, not 123.
+    let ts = [Task.async(fn () -> 10),
+              Task.async(fn () -> 20),
+              Task.async(fn () -> 30)]
+    let many_sum = List.fold_left(Task.await_many(ts), 0, fn (acc, r) ->
+      match r do
+        Ok(n)  -> acc + n
+        Err(_) -> acc
+      end
+    )
+    println("await_many_sum=" ++ int_to_string(many_sum))
+
+    -- Task.async_stream: squares of 1..5 summed → 55, not 115.
+    let squares = Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n)
+    let stream_sum = List.fold_left(squares, 0, fn (acc, r) ->
+      match r do
+        Ok(n)  -> acc + n
+        Err(_) -> acc
+      end
+    )
+    println("stream_sum=" ++ int_to_string(stream_sum))
+
+    -- Regression guard: task_await_unwrap already untags correctly.
+    println("await_unwrap=" ++ int_to_string(Task.await_unwrap(Task.async(fn () -> 99))))
+  end
+
+end

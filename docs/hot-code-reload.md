@@ -25,6 +25,8 @@ When you run `forge deploy hot`, the build tool:
 
 Actors that have a state schema change receive a `migrate_state` call before they handle any new messages, so they are never left in an inconsistent state.
 
+Deploys are also **capability-gated**: each changed function carries its own IO capabilities, and both the deploy tool and the receiving node can refuse a patch that reaches for more authority than the running version — or the node's policy — allows. See [Capability-safe deploys](#capability-safe-deploys) below.
+
 ---
 
 ## Server setup
@@ -76,6 +78,13 @@ forge deploy hot
 forge deploy hot --so /path/to/my_app.so
 ```
 
+> **Cross-host note.** `forge deploy hot` (no `--so`) builds the reload
+> `.so` for your **host** platform, so deploying from macOS to a Linux server
+> needs a Linux-built artifact passed via `--so`. Native cross-compilation of
+> reload units (`--compile-so --target linux/…`) is planned; today, cross builds
+> cover the initial binary — see
+> [Cross-compiling to Linux](tooling.md#cross-compiling-to-linux).
+
 On a successful deploy you see:
 
 ```
@@ -93,6 +102,185 @@ If nothing has changed since the last deploy, forge detects this from the conten
 ```
 No changes detected — server is already up to date.
 ```
+
+---
+
+## Capability-safe deploys
+
+A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded with `dlopen`, and starts handling requests. The ed25519 signature on each patch answers one question — *is this really from us?* It says nothing about a second, equally important one: *is this code allowed to do what it does?*
+
+That gap is real. A patch you signed could call `file_delete`, open a network connection, or spawn a process — even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
+
+Capability-safe deploys add the missing check. March already knows each function's IO capabilities from compile time — its `needs` declarations plus the effects inferred from its body. A hot deploy carries those capabilities with it, and **two gates** decide whether the new code may run: one on your machine when you deploy, and one on the server when it activates.
+
+### The unit of enforcement: per-activated-function caps
+
+A hot deploy only re-activates the functions that **changed**. Each changed function carries **its own** inferred IO capabilities — the effects its own body requires — not the capabilities of the whole artifact.
+
+This granularity matters. `--hot-reload` links the entire standard library into every patch, so a *whole-artifact* capability set would be dominated by the stdlib's footprint (filesystem, network, process, clock, …) and would be identical for every app — useless for a policy. Gating on the **changed function's own caps** is what makes the check discriminating: a patch that adds `file_write` to one function is caught precisely because that function now declares `IO.FileWrite`, regardless of what the rest of the linked code can do.
+
+The trust boundary follows from this: the **base server binary is trusted** — you built and started it, with a policy. Each **hot-patched function** is the mobile code the gates govern.
+
+### Two gates
+
+1. **Monotonicity gate (deploy-time, on your machine).** *Monotonicity* just means the capabilities can only move in one direction. Across deploys, a function's set of capabilities may get *smaller* on its own, but it can't get *bigger* without your say-so.
+
+   - **Dropping** a capability is always allowed — a function that used to write files and no longer does is strictly safer, so it deploys without ceremony.
+   - **Adding** a capability is called a **widening** — for example, a function that gains the ability to write files, open a socket, or spawn a process that its running version didn't have. A widening **stops the deploy** and asks you to confirm it explicitly with `--grant-cap`.
+
+   The point of this one-directional rule is that a routine code push can't quietly grant your running system new powers; the moment a patch reaches for more, you have to sign off on it by name.
+
+2. **Node policy gate (activation-time, on the server).** If the node sets `MARCH_DEPLOY_POLICY`, the server refuses to activate any function whose capabilities exceed the node's policy — regardless of who signed it. This is enforced independently of the deploy tooling, so it holds even if the deploy pipeline is bypassed or compromised.
+
+### A worked example
+
+Start from a server whose reloadable handler only writes to the console:
+
+```march
+-- server.march (v1)
+mod App do
+  needs IO.NetListen
+  needs IO.Console
+  mod Server do
+    needs IO.Console
+    fn handle(x : Int) : Int do
+      println("handle v1 (console only)")
+      x + 1
+    end
+  end
+  fn main() do
+    println("cap-demo server up")
+    let _ = Server.handle(1)
+    match tcp_listen(9099) do
+      Err(e) -> println("listen err: " ++ e)
+      Ok(fd) -> let _ = tcp_accept(fd)  println("server shutting down")
+    end
+  end
+end
+```
+
+`Server.handle`'s own capabilities are just `{IO.Console}`. Run the node with a policy that permits only console I/O:
+
+```sh
+# on the server host
+printf 'IO.Console\n' > /etc/march/deploy-policy.txt
+MARCH_HOT_RELOAD_SOCKET=/tmp/app.sock \
+MARCH_DEPLOY_POLICY=/etc/march/deploy-policy.txt \
+  ./cap_server
+```
+
+Now a `v2` that adds a filesystem write to the same function:
+
+```march
+  mod Server do
+    needs IO.Console
+    needs IO.FileWrite
+    fn handle(x : Int) : Int do
+      println("handle v2 (now writes a file!)")
+      let _ = file_write("/var/log/app-debug.log", "handled " ++ int_to_string(x))  -- needs IO.FileWrite
+      x + 2
+    end
+  end
+```
+
+`Server.handle`'s own caps are now `{IO.Console, IO.FileWrite}`.
+
+**Step 1 — deploy v2 with no grant.** The monotonicity gate aborts on the client, before anything is uploaded:
+
+```
+$ forge deploy hot --so v2.so
+Deploying 1 changed function(s)...
+error: hot deploy would add authority not held by the running version
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (from Server.handle)
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+error: capability widening — deploy aborted
+```
+
+Note the diagnostic names the exact capability *and* the specific function that introduced it. Widening the authority of a live system mid-flight is exactly the event an operator should consciously sign off on.
+
+**Step 2 — grant the widening, but the node policy forbids it.** With `--grant-cap` you pass the deploy-time gate, the artifact uploads, and the server's policy gate rejects the activation:
+
+```
+$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
+Deploying 1 changed function(s)...
+  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
+  Uploading artifact v2.so... Artifact uploaded.
+  FAILED Server.handle: ERR cap_policy IO.FileWrite — deploy rejected by node capability policy
+  Rolled back: 1 function(s) failed, server state unchanged.
+error: 1 function(s) failed to activate
+```
+
+The node had the final say. The batch rolled back cleanly — the live system is unchanged.
+
+**Step 3 — a node whose policy permits it.** Update the policy on the node and restart it (the policy is read once at startup):
+
+```sh
+printf 'IO.Console\nIO.FileWrite\n' > /etc/march/deploy-policy.txt
+# restart the server so it re-reads the policy
+```
+
+```
+$ forge deploy hot --grant-cap IO.FileWrite --so v2.so
+Deploying 1 changed function(s)...
+  granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
+  activated: Server.handle
+Deploy complete: 1 function(s) activated.
+```
+
+The same signed patch is admitted here and rejected on the console-only node — per-node authority, enforced at the node.
+
+### Configuring `MARCH_DEPLOY_POLICY`
+
+`MARCH_DEPLOY_POLICY` is the path to a newline-delimited file of permitted capability paths. The check is **subsumption-aware**: listing a parent capability permits its children (`IO.Network` permits `IO.NetConnect`, `IO.NetConnect.TLS`, `IO.NetListen`, …). See [Capabilities]({{ site.baseurl }}/docs/capabilities/) for the full hierarchy.
+
+```
+# /etc/march/deploy-policy.txt — this node may only gain console + read-only + outbound TLS
+IO.Console
+IO.FileRead
+IO.NetConnect.TLS
+```
+
+A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature. An empty policy file or an unset `MARCH_DEPLOY_POLICY` ⇒ permissive (all activations admitted) — the default, for backward compatibility. The policy is loaded once at startup; change it by restarting the server.
+
+A useful pattern is to size the policy from the app's own manifest: build the app, inspect the `caps=` fields in the `.hcr_manifest`, and grant exactly the capabilities the running boundary functions declare — then any future patch that reaches for more is caught.
+
+### `--grant-cap`
+
+`--grant-cap <CAP>` is repeatable and subsumption-matched — `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. Each grant is folded into the deploy's signed payload and recorded in the audit log, so an authorized widening is tamper-evident and traceable to the signer.
+
+```sh
+forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
+```
+
+The grant only relaxes the client-side monotonicity gate. It does **not** override a node's `MARCH_DEPLOY_POLICY` — as the worked example shows, a granted widening still gets `ERR cap_policy` at a node that forbids the capability.
+
+### `migrate_state` must be IO-free
+
+A `migrate_state` function runs in the migration window, ahead of any pending user messages — a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function whose own body performs any IO builtin or `extern` call is a compile error.
+
+```
+error: migrate_state must be IO-free
+  MyApp.Counter.counter_migrate_state calls `file_write` (needs IO.FileWrite)
+  migrate_state runs during the hot-migration window, before user messages.
+  Move side effects into a normal handler that runs after migration completes.
+```
+
+The check uses the migration function's **own** effects — a `migrate_state` in a module that declares `needs IO.Console` for its *handlers* still compiles cleanly, because the migration body itself does no IO.
+
+### Threat model — what the gates do and do not prove
+
+The capability manifest is **self-reported by the compiler**. The node's checks prove *integrity* (the capability set was signed and has not been tampered with — a `cap_root` mismatch aborts with `ERR cap_tamper`) and *policy* (the declared authority fits the node), but **not truthfulness** (that the compiled machine code actually stays within the declared caps — the server cannot recompute effects from a shared object).
+
+- **Defends against:** accidental authority creep by an honest toolchain (the common case); operator error shipping the wrong build to a restricted node; a compromised deploy *pipeline* that still builds with the real compiler; tampering with the capability set in transit.
+- **Does not defend against:** a party holding the signing key who hand-crafts a `.so` with a lying manifest. Capability admission is authorization *on top of* authentication — a defense-in-depth layer, not a sandbox. For stronger guarantees, combine it with OS-level confinement of the reload server.
+
+A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
+
+### Backward compatibility
+
+Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A node with no `MARCH_DEPLOY_POLICY` admits everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading — re-run with `--no-cap-gate` if you deliberately want the legacy path.
 
 ---
 
@@ -326,6 +514,7 @@ The deploy flow gains one step: forge calls `GET_EPOCH` to receive the batch's e
 
 ## Next Steps
 
+- [Capabilities]({{ site.baseurl }}/docs/capabilities/) — the capability system behind capability-safe deploys, including the full IO capability hierarchy
 - [Actors]({{ site.baseurl }}/docs/actors/) — the actor model hot reload builds on
 - [Supervision Trees]({{ site.baseurl }}/docs/supervision/) — combine hot reload with fault-tolerant supervision
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) — the type-level system behind `@invariant` checking

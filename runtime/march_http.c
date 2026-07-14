@@ -273,10 +273,10 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
 
     while (!found_end && (int64_t)hdr_len < max_bytes) {
         ssize_t n = recv(sock, readbuf, sizeof(readbuf), 0);
-        if (n <= 0) return NULL;
+        if (n <= 0) return make_err("tcp_recv_http: connection closed before response headers");
 
         char *buf = recv_buf_grow(hdr_len + (size_t)n);
-        if (!buf) return NULL;
+        if (!buf) return make_err("tcp_recv_http: out of memory growing header buffer");
         memcpy(buf + hdr_len, readbuf, (size_t)n);
         hdr_len += (size_t)n;
 
@@ -292,13 +292,13 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             }
         }
     }
-    if (!found_end) return NULL;
+    if (!found_end) return make_err("tcp_recv_http: response headers exceeded max_bytes without a CRLFCRLF terminator");
 
     /* Phase 2: find Content-Length.  Temporarily null-terminate at hdrs_end. */
     int64_t content_length = -1;
     {
         char *buf = recv_buf_grow(hdrs_end + 1);
-        if (!buf) return NULL;
+        if (!buf) return make_err("tcp_recv_http: out of memory");
         char saved = buf[hdrs_end];
         buf[hdrs_end] = '\0';
         const char *p = buf;
@@ -328,7 +328,7 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             to_read = max_bytes - (int64_t)hdrs_end;
         if (to_read > 0) {
             body_buf = malloc((size_t)to_read);
-            if (!body_buf) return NULL;
+            if (!body_buf) return make_err("tcp_recv_http: out of memory allocating body buffer");
             size_t already = hdr_len - hdrs_end;
             if (already > (size_t)to_read) already = (size_t)to_read;
             if (already > 0)
@@ -348,7 +348,7 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
      * tl_recv_buf.buf is NOT freed — it is reused by the next request. */
     size_t total = hdrs_end + body_len;
     march_string *result = malloc(sizeof(march_string) + total + 1);
-    if (!result) { free(body_buf); return NULL; }
+    if (!result) { free(body_buf); return make_err("tcp_recv_http: out of memory allocating result"); }
     atomic_store_explicit((_Atomic int64_t *)&result->rc, 1, memory_order_relaxed);
     result->tag = MARCH_STRING_TAG;
     result->pad = 0;
@@ -359,7 +359,12 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
         free(body_buf);
     }
     result->data[total] = '\0';
-    return result;
+    /* Wrap in Ok(...) — the declared type is Result(String, String).  Returning
+       a bare march_string (or NULL below) makes the compiled `match … Ok/Err`
+       hit neither arm of the boxed Result and panic "non-exhaustive pattern
+       match" (only the plain-TCP client path uses this; the TLS path reads
+       differently, which is why it went unnoticed). */
+    return make_ok(result);
 }
 
 /* Send all bytes of a march_string to fd.
@@ -1466,6 +1471,11 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
 /* Per-connection read buffer size.  Large enough to hold many pipelined
  * GET requests in one recv() (wrk sends 16 at a time ≈ 1.5–2 KB). */
 #define CONN_BUF_SIZE (64 * 1024)
+/* Upper bound a single request (headers + body) may grow to before a 413.
+ * The per-connection buffer starts at CONN_BUF_SIZE and doubles on demand up to
+ * this cap, so large request bodies — e.g. registry package tarball uploads —
+ * are accepted instead of being rejected at the initial 64KB. */
+#define MAX_REQ_SIZE (32 * 1024 * 1024)
 
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
@@ -1508,8 +1518,10 @@ static void *connection_thread(void *arg) {
     char        *clo = (char *)pipeline;
     closure_fn_t fn  = *(closure_fn_t *)(clo + 16);
 
-    /* Persistent per-connection read buffer. */
-    char  *buf     = malloc(CONN_BUF_SIZE);
+    /* Persistent per-connection read buffer.  Starts at CONN_BUF_SIZE and grows
+       on demand (see the recv step below) up to MAX_REQ_SIZE. */
+    size_t buf_cap = CONN_BUF_SIZE;
+    char  *buf     = malloc(buf_cap);
     size_t buf_len = 0;   /* valid bytes in buf */
 
     if (!buf) { close(fd); return NULL; }
@@ -1657,12 +1669,28 @@ static void *connection_thread(void *arg) {
         if (!running) break;
 
         /* 4. Read more data from the socket. */
-        size_t space = CONN_BUF_SIZE - buf_len;
+        size_t space = buf_cap - buf_len;
         if (space == 0) {
-            /* Buffer full with no complete request — request too large. */
-            march_http_send_response(fd, 413, make_nil(),
-                                     march_string_lit("Request Too Large", 17));
-            break;
+            /* Buffer full with no complete request yet — grow it (doubling) up
+               to MAX_REQ_SIZE before giving up, so large request bodies (e.g.
+               registry tarball uploads) are accepted rather than 413'd at the
+               initial 64KB.  Only a request that exceeds the cap gets a 413. */
+            if (buf_cap >= MAX_REQ_SIZE) {
+                march_http_send_response(fd, 413, make_nil(),
+                                         march_string_lit("Request Too Large", 17));
+                break;
+            }
+            size_t new_cap = buf_cap * 2;
+            if (new_cap > MAX_REQ_SIZE) new_cap = MAX_REQ_SIZE;
+            char *nbuf = realloc(buf, new_cap);
+            if (!nbuf) {
+                march_http_send_response(fd, 413, make_nil(),
+                                         march_string_lit("Request Too Large", 17));
+                break;
+            }
+            buf     = nbuf;
+            buf_cap = new_cap;
+            space   = buf_cap - buf_len;
         }
         ssize_t n = recv(fd, buf + buf_len, space, 0);
         if (n <= 0) break;  /* EOF, reset, or timeout */
@@ -2024,6 +2052,10 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
 void *march_ws_recv(int64_t fd) {
     int sock = (int)fd;
     uint8_t hdr2[2];
+    /* Declared before any `goto closed` so the cleanup free() at the label
+       never sees an uninitialized pointer — the header/length/mask read
+       failures below jump to `closed` before payload is otherwise set. */
+    uint8_t *payload = NULL;
 
     /* Read 2-byte frame header */
     if (recv_exact(sock, hdr2, 2) < 0)
@@ -2055,13 +2087,14 @@ void *march_ws_recv(int64_t fd) {
     }
 
     /* Read payload */
-    uint8_t *payload = NULL;
     if (payload_len > 0) {
         if (payload_len > 16 * 1024 * 1024) goto closed;  /* 16MB limit */
         payload = malloc(payload_len + 1);
         if (!payload) goto closed;
         if (recv_exact(sock, payload, payload_len) < 0) {
-            free(payload); goto closed;
+            /* `closed:` frees payload — jumping straight there avoids a
+               double-free (freeing here and again at the label). */
+            goto closed;
         }
         /* Unmask */
         if (masked) {

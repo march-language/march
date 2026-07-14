@@ -1,0 +1,17 @@
+-- The B1 shape: a single variable occupies BOTH an owned and a borrowed
+-- call-argument position in the same call.  Pins the fixed owned+borrowed
+-- double-dec behavior (perceus.ml find_inc_vars / post_dec_vars).
+mod MixedOwnedBorrowedArgs do
+  fn both(owned : String, borrowed : String, n : Int) : String do
+    if n > 0 do
+      owned
+    else
+      borrowed
+    end
+  end
+
+  fn main() do
+    let s = "shared"
+    println(both(s, s, 1))
+  end
+end

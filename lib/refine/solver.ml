@@ -25,10 +25,31 @@ let create () : t option =
   match find_z3 () with
   | None -> None
   | Some path ->
-      let stdin_r, stdin_w = Unix.pipe () in
-      let stdout_r, stdout_w = Unix.pipe () in
+      (* A write to a dead z3's stdin must surface as a catchable EPIPE error
+         (so Refine can restart the solver), not SIGPIPE process death.  Only
+         claim the signal if the host application hasn't installed a handler. *)
+      (try
+         match Sys.signal Sys.sigpipe Sys.Signal_ignore with
+         | Sys.Signal_default -> ()
+         | prev -> Sys.set_signal Sys.sigpipe prev
+       with Invalid_argument _ -> ());
+      (* cloexec on all four ends: without it the z3 child inherits the write
+         end of its OWN stdin pipe, so after an unclean parent exit it never
+         sees EOF and blocks on read(0) forever — an immortal orphan.  With
+         cloexec, parent death closes the last write end and z3 exits on EOF.
+         (create_process dup2s the child ends onto fd 0/1, which clears
+         close-on-exec on those copies.) *)
+      let stdin_r, stdin_w = Unix.pipe ~cloexec:true () in
+      let stdout_r, stdout_w = Unix.pipe ~cloexec:true () in
       let pid =
-        Unix.create_process path [| path; "-in" |] stdin_r stdout_w Unix.stderr
+        try
+          Unix.create_process path [| path; "-in" |] stdin_r stdout_w
+            Unix.stderr
+        with e ->
+          List.iter
+            (fun fd -> try Unix.close fd with _ -> ())
+            [ stdin_r; stdin_w; stdout_r; stdout_w ];
+          raise e
       in
       Unix.close stdin_r;
       Unix.close stdout_w;
@@ -92,6 +113,9 @@ let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
   flush t.oc;
   result
 
+(* Terminate and REAP the child.  Graceful (exit)+EOF first, then SIGKILL so
+   the following waitpid can never block on a wedged solver; the unreaped
+   child holds its pid, so the kill cannot race a pid reuse. *)
 let close (t : t) : unit =
   (try
      output_string t.oc "(exit)\n";
@@ -99,4 +123,5 @@ let close (t : t) : unit =
    with _ -> ());
   (try close_out t.oc with _ -> ());
   (try close_in t.ic with _ -> ());
+  (try Unix.kill t.pid Sys.sigkill with _ -> ());
   (try ignore (Unix.waitpid [] t.pid) with _ -> ())

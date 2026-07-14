@@ -1,0 +1,13 @@
+mod P20ProtocolChooseSessionType do
+  protocol Decision do
+    Client -> Server : Int
+    choose by Server:
+      ok  -> Server -> Client : Bool
+      err -> Server -> Client : Int
+    end
+  end
+
+  fn main() do
+    println(1)
+  end
+end

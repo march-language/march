@@ -230,6 +230,36 @@ end|} in
   in
   Alcotest.(check bool) "arity mismatch has relatedInformation" true has_related
 
+let test_analyse_desugar_error_produces_diagnostic () =
+  (* Desugar-time user errors (pipe-into-match, B6) must surface as
+     positioned LSP diagnostics. Before the ~errors wiring, desugar raised
+     a ParseError that escaped analyse — the editor showed no squiggle at
+     all because the publishDiagnostics notification was dropped. *)
+  let src = {|mod Test do
+  fn go() : String do
+    1 |> (match 2 do
+      1 -> "one"
+      _ -> "x"
+    end)
+  end
+end|} in
+  let a = analyse src in
+  let positioned =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        d.severity = Some Lsp.Types.DiagnosticSeverity.Error
+        && d.range.Lsp.Types.Range.start.line = 2
+        && (match d.message with
+            | `String s ->
+              (try ignore (Str.search_forward
+                             (Str.regexp_string "discards its scrutinee") s 0);
+                 true
+               with Not_found -> false)
+            | _ -> false))
+      a.diagnostics
+  in
+  Alcotest.(check bool) "pipe-into-match yields positioned error diagnostic"
+    true positioned
+
 (* ------------------------------------------------------------------ *)
 (* 3. Analysis — document symbols                                      *)
 (* ------------------------------------------------------------------ *)
@@ -625,12 +655,12 @@ let test_actor_info_at_actor_name () =
   let src = {|mod Test do
   actor Counter do
     state { value : Int }
-    init { value = 0 }
+    init { value: 0 }
     on Increment(n : Int) do
-      { state with value = state.value + n }
+      { state with value: state.value + n }
     end
     on Reset() do
-      { state with value = 0 }
+      { state with value: 0 }
     end
   end
 end|} in
@@ -657,7 +687,7 @@ let test_actor_info_state_fields () =
   let src = {|mod Test do
   actor Store do
     state { name : String, count : Int }
-    init { name = "x", count = 0 }
+    init { name: "x", count: 0 }
     on Get() do state end
   end
 end|} in
@@ -2221,7 +2251,7 @@ let test_named_record_hover_shows_name () =
   let src = {|mod Test do
   type R = { a : Int, b : Int }
   fn mk(x : Int) do
-    { a = x, b = x }
+    { a: x, b: x }
   end
 end|} in
   let a = analyse src in
@@ -2242,7 +2272,7 @@ let test_named_record_return_annotation_uses_name () =
   let src = {|mod Test do
   type R = { a : Int, b : Int }
   fn mk(x : Int) do
-    { a = x, b = x }
+    { a: x, b: x }
   end
 end|} in
   let a = analyse src in
@@ -2761,8 +2791,8 @@ let test_perf_tail_call_not_flagged () =
   let src = {|
 mod Test do
   pfn count_down(n: Int, acc: Int): Int do
-    if n == 0 then acc
-    else count_down(n - 1, acc + 1)
+    if n == 0 do acc
+    else count_down(n - 1, acc + 1) end
   end
 end
 |} in
@@ -3438,7 +3468,7 @@ let test_dot_completion_record_fields () =
   let src =
     "mod M do\n\
     \  fn f() : Int do\n\
-    \    let r = { x = 1, y = 2 }\n\
+    \    let r = { x: 1, y: 2 }\n\
     \    r.x\n\
     \  end\n\
      end\n"
@@ -4641,7 +4671,7 @@ let test_actor_boilerplate_offered () =
   let src = {|mod M do
   actor Counter do
     state { count: Int }
-    init { count = 0 }
+    init { count: 0 }
     on Inc() do
       count
     end
@@ -4926,7 +4956,7 @@ let test_annotation_for_named_record_return () =
   let src = {|mod M do
   type R = { a : Int, b : Int }
   fn mk(x : Int) do
-    { a = x, b = x }
+    { a: x, b: x }
   end
 end|} in
   let acts = actions_at src "mk" in
@@ -5446,7 +5476,7 @@ let test_cross_file_interface_resolves () =
     \  impl Summarize(Widget) do\n\
     \    fn summarize(w) do int_to_string(w.n) end\n\
     \  end\n\
-    \  fn use_it() : String do summarize({ n = 5 }) end\n\
+    \  fn use_it() : String do summarize({ n: 5 }) end\n\
      end\n"
   in
   (* Interface in lib/, impl in lib/sub/ — cross-subdir is the realistic layout
@@ -5649,7 +5679,7 @@ module Depot = March_lsp_lib.Depot
 let test_depot_schema_extract () =
   let src = {|mod M do
   fn user_schema() do
-    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+    Depot.Schema.define("users", { fields: { name: "String", age: ("Int", { default: 0 }) } })
   end
 end|} in
   let a = analyse src in
@@ -5664,7 +5694,7 @@ let test_query_schema_resolution () =
   (* Use from_table (simpler resolution path) *)
   let src = {|mod M do
   fn s() do
-    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+    Depot.Schema.define("users", { fields: { name: "String", age: ("Int", { default: 0 }) } })
   end
   fn q() do
     Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18")
@@ -5681,7 +5711,7 @@ let test_query_schema_resolution_from_fn () =
   (* Use from(schema_fn()) path - resolves schema by fn name *)
   let src = {|mod M do
   fn user_schema() do
-    Depot.Schema.define("users", { fields = { email = "String", age = ("Int", { default = 0 }) } })
+    Depot.Schema.define("users", { fields: { email: "String", age: ("Int", { default: 0 }) } })
   end
   fn q() do
     Depot.Query.from(user_schema()) |> Depot.Query.where_eq("email", "x")
@@ -5695,7 +5725,7 @@ end|} in
 let test_depot_schemas_field () =
   let src = {|mod M do
   fn user_schema() do
-    Depot.Schema.define("users", { fields = { name = "String" } })
+    Depot.Schema.define("users", { fields: { name: "String" } })
   end
 end|} in
   let a = analyse src in
@@ -5703,7 +5733,7 @@ end|} in
 
 let test_depot_column_completion () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } }) end
+  fn s() do Depot.Schema.define("users", { fields: { name: "String", age: ("Int", { default: 0 }) } }) end
   fn q() do
     Depot.Query.from_table("users") |> Depot.Query.where_eq("ag", "18")
   end
@@ -5722,7 +5752,7 @@ end|} in
 let test_depot_column_completion_no_dilution () =
   (* When inside a column-arg string, ONLY column names should be returned *)
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { email = "String" } }) end
+  fn s() do Depot.Schema.define("users", { fields: { email: "String" } }) end
   fn q() do
     Depot.Query.from_table("users") |> Depot.Query.where_eq("em", "x")
   end
@@ -5737,7 +5767,7 @@ end|} in
 
 let test_depot_unknown_column () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn s() do Depot.Schema.define("users", { fields: { age: ("Int", { default: 0 }) } }) end
   fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("ag", "18") end
 end|} in
   let a = analyse src in
@@ -5748,7 +5778,7 @@ end|} in
 
 let test_depot_known_column_not_flagged () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn s() do Depot.Schema.define("users", { fields: { age: ("Int", { default: 0 }) } }) end
   fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
 end|} in
   let a = analyse src in
@@ -5771,7 +5801,7 @@ end|} in
 let test_imported_decls_retained () =
   let src = {|mod App do
   fn user_schema() do
-    Depot.Schema.define("users", { fields = { name = "String", age = ("Int", { default = 0 }) } })
+    Depot.Schema.define("users", { fields: { name: "String", age: ("Int", { default: 0 }) } })
   end
   fn list_users() do
     Depot.Query.from(user_schema())
@@ -5783,7 +5813,7 @@ end|} in
 
 let test_depot_table_completion () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { name = "String" } }) end
+  fn s() do Depot.Schema.define("users", { fields: { name: "String" } }) end
   fn q() do Depot.Query.from_table("us") end
 end|} in
   let a = analyse src in
@@ -5794,7 +5824,7 @@ end|} in
 
 let test_depot_unknown_table () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { name = "String" } }) end
+  fn s() do Depot.Schema.define("users", { fields: { name: "String" } }) end
   fn q() do Depot.Query.from_table("bogus") end
 end|} in
   let a = analyse src in
@@ -5806,10 +5836,10 @@ end|} in
 let test_depot_migration_ops () =
   let src = {|mod M do
   fn m1() do
-    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+    Depot.Migration.create_table("users", { name: "String", age: "Int" })
   end
   fn m2() do
-    Depot.Migration.alter_table("users", { add = { score = "Float" }, remove = ["old_col"] })
+    Depot.Migration.alter_table("users", { add: { score: "Float" }, remove: ["old_col"] })
   end
 end|} in
   let a = analyse src in
@@ -5822,10 +5852,10 @@ end|} in
 let test_depot_schema_drift () =
   let src = {|mod M do
   fn s() do
-    Depot.Schema.define("users", { fields = { name = "String" } })
+    Depot.Schema.define("users", { fields: { name: "String" } })
   end
   fn mig() do
-    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+    Depot.Migration.create_table("users", { name: "String", age: "Int" })
   end
   fn q() do
     Depot.Query.from_table("users") |> Depot.Query.where_eq("name", "Alice")
@@ -5840,10 +5870,10 @@ end|} in
 let test_depot_no_drift_when_aligned () =
   let src = {|mod M do
   fn s() do
-    Depot.Schema.define("users", { fields = { name = "String", age = "Int" } })
+    Depot.Schema.define("users", { fields: { name: "String", age: "Int" } })
   end
   fn mig() do
-    Depot.Migration.create_table("users", { name = "String", age = "Int" })
+    Depot.Migration.create_table("users", { name: "String", age: "Int" })
   end
   fn q() do
     Depot.Query.from_table("users") |> Depot.Query.where_eq("name", "Alice")
@@ -5859,10 +5889,10 @@ end|} in
 let test_depot_fk_column_valid () =
   let src = {|mod M do
   fn s() do
-    Depot.Schema.define("posts", { fields = { post_id = "Int", title = "String" } })
+    Depot.Schema.define("posts", { fields: { post_id: "Int", title: "String" } })
   end
   fn mig() do
-    Depot.Migration.references("posts", { column = "post_id" })
+    Depot.Migration.references("posts", { column: "post_id" })
   end
 end|} in
   let a = analyse src in
@@ -5874,10 +5904,10 @@ end|} in
 let test_depot_fk_column_invalid () =
   let src = {|mod M do
   fn s() do
-    Depot.Schema.define("posts", { fields = { post_id = "Int" } })
+    Depot.Schema.define("posts", { fields: { post_id: "Int" } })
   end
   fn mig() do
-    Depot.Migration.references("posts", { column = "bogus_id" })
+    Depot.Migration.references("posts", { column: "bogus_id" })
   end
 end|} in
   let a = analyse src in
@@ -5888,7 +5918,7 @@ end|} in
 
 let test_depot_col_hover () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn s() do Depot.Schema.define("users", { fields: { age: ("Int", { default: 0 }) } }) end
   fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
 end|} in
   let a = analyse src in
@@ -5899,7 +5929,7 @@ end|} in
 
 let test_depot_col_def () =
   let src = {|mod M do
-  fn s() do Depot.Schema.define("users", { fields = { age = ("Int", { default = 0 }) } }) end
+  fn s() do Depot.Schema.define("users", { fields: { age: ("Int", { default: 0 }) } }) end
   fn q() do Depot.Query.from_table("users") |> Depot.Query.where_eq("age", "18") end
 end|} in
   let a = analyse src in
@@ -6159,6 +6189,7 @@ let () =
       Alcotest.test_case "type error → diagnostic"               `Quick test_analyse_type_error_produces_diagnostic;
       Alcotest.test_case "parse error → diagnostic"              `Quick test_analyse_parse_error_produces_diagnostic;
       Alcotest.test_case "multiple errors all reported"          `Quick test_analyse_multiple_errors_all_reported;
+      Alcotest.test_case "desugar error → positioned diagnostic" `Quick test_analyse_desugar_error_produces_diagnostic;
       Alcotest.test_case "warning severity"                      `Quick test_analyse_warning_severity;
       Alcotest.test_case "notes appended to message"             `Quick test_analyse_notes_appended_to_message;
       Alcotest.test_case "type mismatch has relatedInformation"  `Quick test_analyse_related_information_on_type_mismatch;

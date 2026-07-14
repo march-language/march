@@ -1,0 +1,9 @@
+mod P04MulBindsTighterThanAdd do
+  fn main() do
+    -- 1 + 2 * 3 == 7, not 9: `*` (expr_mul) binds tighter than `+`
+    -- (expr_add) because expr_add's operands are expr_mul, not expr_add's own
+    -- level again for the RHS of `*` -- the stratification itself encodes
+    -- this without any %prec declaration.
+    println(1 + 2 * 3)
+  end
+end

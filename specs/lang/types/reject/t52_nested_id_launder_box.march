@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- Slice 6 (nested-module soundness), the ADT-arg witness -- the same nested
+-- unannotated `id`-launder as `reject/t51`, but the laundered value is an ADT
+-- payload: `Box("hi") : Box(String)` is coerced to `Box(Int)`. Pre-fix, the
+-- decoupled `?a -> ?b` placeholder for the nested qualified `App.id` erased
+-- the ADT argument's type just as it erased base types, so `unbox_int` (which
+-- adds 1 to a `Box(Int)`'s payload) accepted a `Box(String)` (exit 0) -- a
+-- memory-unsafe read of a heap String pointer as an Int. The P0 prebind fix
+-- makes `id` genuinely polymorphic (`a -> a`), so `Box(String)` no longer
+-- unifies with the `Box(Int)` parameter. IMPOSSIBLE to reject pre-fix. See
+-- core-march-types.md §2.8.13.
+mod Outer do
+  mod App do
+    type Box(a) = Box(a)
+
+    fn id(x) do x end
+
+    fn unbox_int(b : Box(Int)) : Int do
+      match b do
+        Box(n) -> n + 1
+      end
+    end
+
+    fn attack() : Int do unbox_int(id(Box("hi"))) end
+  end
+end
