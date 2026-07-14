@@ -2053,17 +2053,20 @@ void *march_send(void *actor, void *msg) {
     int64_t *a = (int64_t *)actor;
 
     if (!a[3]) {
-        /* Actor dead: release the reference we were given. */
+        /* Actor dead: release the reference we were given.  Return NULL —
+         * send's Option(...) result is decoded NICHE at compiled call sites
+         * (None = 0, Some = non-null), so the old boxed tag-0 "None" cell
+         * here read as SOME (interp: None — the §4.10.6 dead-send
+         * divergence).  The live path's boxed Some(()) cell below is
+         * correct under the niche decode (non-null heap ptr). */
         march_decrc(msg);
-        void *none = march_alloc(16);
-        return none;
+        return NULL;
     }
 
     march_actor_meta *meta = find_or_create_meta(actor);
     if (!meta->green_thread) {
         march_decrc(msg);
-        void *none = march_alloc(16);
-        return none;
+        return NULL;
     }
 
     march_sched_send(meta->green_thread, msg);
@@ -3593,11 +3596,36 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
 
 /* get_cap: get the capability associated with an actor pid.
    Returns None (tag=0) — capability enforcement is compile-time only. */
+/* Atom interning hash — must match lib/tir/llvm_ctx.ml's [atom_hash]:
+ * FNV-1a 64-bit of the name with bit63 forced equal to bit62, so the value
+ * survives the tagged (n<<1)|1 round-trip through generic ptr slots. */
+static int64_t march_atom_i64(const char *s) {
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    const uint64_t prime = UINT64_C(0x100000001b3);
+    for (const char *p = s; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= prime;
+    }
+    uint64_t bit62 = (h >> 62) & 1;
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    return (int64_t)h;
+}
+
+/* get_cap(pid): epoch-stamped capability for a LIVE actor, else None.
+ * The Option(Cap(a)) result is decoded NICHE at compiled call sites
+ * (None = NULL, Some(cap) = the cap pointer itself).  The cap object is
+ * the layout march_send_checked documents: header + {actor ptr, pid_index,
+ * epoch} at words[2..4].  Mirrors eval.ml's get_cap (Some(VCap(pid,
+ * epoch)) iff registered + alive). */
 void *march_get_cap(void *pid) {
-    (void)pid;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
+    int64_t *a = (int64_t *)pid;
+    if (!a[3]) return NULL;                       /* dead → niche None */
+    march_actor_meta *meta = find_or_create_meta(pid);
+    void *cap = march_alloc(16 + 3 * 8);
+    MARCH_FIELD(cap, 0) = (int64_t)(uintptr_t)pid;
+    MARCH_FIELD(cap, 1) = meta->pid_index;
+    MARCH_FIELD(cap, 2) = meta->epoch;
+    return cap;                                   /* niche Some(cap) = cap */
 }
 
 /* ── Capability revocation table ──────────────────────────────────────── */
@@ -3668,10 +3696,10 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
  *
  * If cap is not a heap pointer (e.g. None/null), silently drop the message.
  */
-void march_send_checked(void *cap, void *msg) {
+int64_t march_send_checked(void *cap, void *msg) {
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return;
+        return march_atom_i64("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     void    *actor     = (void *)(uintptr_t)cap_words[2];
@@ -3679,15 +3707,35 @@ void march_send_checked(void *cap, void *msg) {
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return;
+        return march_atom_i64("error");
     }
     march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
+    if (!meta || meta->pid_index != pidx || meta->epoch != epoch
+        || !march_is_alive(actor)) {
         march_decrc(msg);
-        return;
+        return march_atom_i64("error");
     }
     void *result = march_send(actor, msg);
     march_decrc(result);
+    return march_atom_i64("ok");
+}
+
+/* Cap-taking wrappers for the March-surface builtins `revoke_cap` /
+ * `is_cap_valid` (eval.ml: revoke_cap returns :ok always, idempotent;
+ * is_cap_valid returns Bool).  The (pid_index, epoch) internals above keep
+ * their existing signatures for the supervision/restart machinery. */
+int64_t march_revoke_cap_v(void *cap) {
+    if (cap && IS_HEAP_PTR(cap)) {
+        int64_t *w = (int64_t *)cap;
+        march_revoke_cap(w[3], w[4]);
+    }
+    return march_atom_i64("ok");
+}
+
+int64_t march_is_cap_valid_v(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return 0;
+    int64_t *w = (int64_t *)cap;
+    return march_is_cap_valid(w[3], w[4]);
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's

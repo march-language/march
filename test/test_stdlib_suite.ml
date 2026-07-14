@@ -10757,6 +10757,80 @@ let test_compiled_derived_structural_show () =
     Alcotest.(check string)
       "println of a tuple links and renders" "(9, Pt)" (String.trim out)
 
+(* Regression (epoch-Cap / dead-send plane, fixed 2026-07-13): the compiled
+   capability plane was non-functional — march_get_cap was a stub returning
+   a BOXED None cell that the niche Option(Cap) decode misread as Some (so
+   the "cap" was a 16-byte cell whose pid_index/epoch words were OOB
+   reads); march_send_checked returned void while March expects an Atom
+   (garbage compared equal to neither :ok nor :error); march_send's dead
+   paths returned a boxed None cell that the niche Option decode misread
+   as Some; revoke_cap/is_cap_valid had no compiled plumbing at all
+   (undefined symbol at link).  Now: get_cap builds the real cap object
+   (None = NULL under the niche decode), send_checked returns interned
+   :ok/:error atoms (march_atom_i64, bit63:=bit62 forced like llvm_ctx's
+   atom_hash), dead send returns NULL (niche None), and
+   march_revoke_cap_v/march_is_cap_valid_v wrap the (pid_index, epoch)
+   internals for the cap-taking surface builtins.  The program below is
+   the exact interp-vs-compiled witness: expected output is what the
+   interpreter prints. *)
+let test_compiled_epoch_cap_plane () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_capplane" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "capplane.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod CapPlaneRegress do\n\
+    \  actor Target do\n\
+    \    state { n : Int }\n\
+    \    init { n: 0 }\n\
+    \    on Bump(k : Int) do\n\
+    \      { state with n: state.n + k }\n\
+    \    end\n\
+    \  end\n\
+    \  fn classify(r : Atom) : String do\n\
+    \    match r do\n\
+    \      :ok -> \"ok\"\n\
+    \      :error -> \"error\"\n\
+    \      _ -> \"other\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn show_bool(b : Bool) : String do\n\
+    \    if b do \"true\" else \"false\" end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let p = spawn(Target)\n\
+    \    match get_cap(p) do\n\
+    \      Some(cap) ->\n\
+    \        println(\"valid pre: \" ++ show_bool(is_cap_valid(cap)))\n\
+    \        println(\"sc live: \" ++ classify(send_checked(cap, Bump(1))))\n\
+    \        println(\"revoke: \" ++ classify(revoke_cap(cap)))\n\
+    \        println(\"valid post: \" ++ show_bool(is_cap_valid(cap)))\n\
+    \        println(\"sc revoked: \" ++ classify(send_checked(cap, Bump(2))))\n\
+    \      None ->\n\
+    \        println(\"no cap\")\n\
+    \    end\n\
+    \    kill(p)\n\
+    \    match send(p, Bump(3)) do\n\
+    \      Some(_) -> println(\"dead send: Some\")\n\
+    \      None -> println(\"dead send: None\")\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let alarm_wrap cmd = "perl -e 'alarm shift @ARGV; exec @ARGV' 30 " ^ cmd in
+  let bin = Filename.concat tmp "capplanebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let (run_rc, out) = run_capture_rc (alarm_wrap (Filename.quote bin)) in
+    Alcotest.(check int) "compiled epoch-cap witness exits 0" 0 run_rc;
+    Alcotest.(check string)
+      "compiled epoch-Cap plane matches the interpreter"
+      "valid pre: true\nsc live: ok\nrevoke: ok\nvalid post: false\nsc revoked: error\ndead send: None"
+      (String.trim out)
+
 (* Regression (curried-comparator, fixed 2026-07-13 via the STAGED
    monomorphism restriction): an unannotated let-bound curried lambda was
    let-generalized, so its apply fns kept the erased (tagged-ptr) calling
@@ -12892,6 +12966,8 @@ let stdlib_suites =
           test_compiled_curried_comparator_mergesort;
         Alcotest.test_case "derived structural show: tuples/ADTs/trees (compiled)" `Slow
           test_compiled_derived_structural_show;
+        Alcotest.test_case "epoch-Cap / dead-send plane matches interp (compiled)" `Slow
+          test_compiled_epoch_cap_plane;
         Alcotest.test_case "record_put even Int >= 4096: no ptr misclassification (compiled, 20k loop)" `Slow
           test_compiled_record_put_large_even_int;
         Alcotest.test_case "record-field poly projection: Option niche/box repr consistent (compiled, no SIGSEGV)" `Slow

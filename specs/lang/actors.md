@@ -13,9 +13,8 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 
 **Compiled-actor status:** the core actor message plane runs both in the tree-walking interpreter and in ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`) — multiple OS threads, each running many lightweight green threads, with work-stealing across threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, `runtime/march_runtime.c`); each actor runs as its own green thread. Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. Two *other* planes still **diverge compiled** and are documented interpreter-first below, each a filed open finding (`specs/todos.md`):
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The **capability / dead-`send` plane** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid) is also backend-identical as of 2026-07-13: compiled `get_cap` returns a real epoch-stamped cap (`None` for a dead actor), `send_checked` validates liveness/epoch/revocation and returns `:ok`/`:error` like the interpreter, `revoke_cap`/`is_cap_valid` are wired compiled, and a plain `send` to a dead pid returns `None` on both backends — pinned by `test_compiled_epoch_cap_plane` (`test/test_stdlib_suite.ml`); see [`core-march.md`](core-march.md) §4.10.6 for the historical divergence table. One plane still **diverges compiled** and is documented interpreter-first below, a filed open finding (`specs/todos.md`):
 
-- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, plain `send` to a *dead* pid): compiled `send_checked` performs no epoch validation and returns an uninterned garbage atom for every cap; a plain `send` to a dead pid returns `Some` compiled but `None` interpreted. See [`core-march.md`](core-march.md) §4.10.6.
 - **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` (the only surface way to reach a supervised child) **SIGSEGV compiled** (`examples/supervision_strategies.march` exits 139), and the compiled supervisor does not run its children's `init` at `spawn`. See [`core-march.md`](core-march.md) §4.10.7.
 
 The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
@@ -105,10 +104,11 @@ match send(counter, Increment(1)) do
 end
 ```
 
-> **Interp-vs-compiled note.** The dead-actor drop (`None`) is the *interpreter's*
-> behavior; the compiled backend returns `Some` for a `send` to a dead pid (a filed
-> divergence — [`core-march.md`](core-march.md) §4.10.6). A `send` to a *live* actor
-> agrees on both backends. See §4.10.2 for the async-enqueue operational rule.
+> **Interp-vs-compiled note.** Both backends agree since 2026-07-13: a `send` to a
+> dead pid returns `None` compiled too (the compiled runtime previously returned a
+> value that read as `Some` — the historical §4.10.6 divergence, now fixed and pinned
+> by `test_compiled_epoch_cap_plane`). See §4.10.2 for the async-enqueue operational
+> rule.
 
 ---
 
@@ -198,15 +198,13 @@ end
 
 Use capabilities when you hold a reference across an actor restart boundary and need to know whether the message was delivered to the *current* incarnation of the actor. Under a supervisor, a restarted actor gets a fresh epoch, invalidating caps from before the restart.
 
-> **Interpreter-only.** The epoch-`Cap` validation plane described here is the
-> **interpreter's** semantics. Compiled, `send_checked` performs *no* epoch validation and
-> returns an uninterned garbage atom for every cap — matching neither `:ok` nor `:error`
-> (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
-> on liveness. The entire capability mechanism is therefore non-functional in compiled
-> binaries today; it is a filed open finding ([`core-march.md`](core-march.md) §4.10.6, and
-> `specs/todos.md`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
-> additionally not registered in the typechecker, so they are not surface-callable at all.
-> Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
+> **Backend parity (since 2026-07-13).** The epoch-`Cap` validation plane works
+> identically compiled and interpreted: `get_cap` gates on liveness and returns a real
+> epoch-stamped cap, `send_checked` validates liveness/epoch/revocation and returns
+> `:ok`/`:error`, and `revoke_cap`/`is_cap_valid` are surface-callable on both backends.
+> (Historical: compiled `send_checked` used to return an uninterned garbage atom and
+> `get_cap` was a stub — the §4.10.6 finding, now closed and pinned by
+> `test_compiled_epoch_cap_plane`.)
 
 ---
 
@@ -519,8 +517,8 @@ Backends: **both** = byte-identical interpreted vs compiled (the live-message pl
 | `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup, safe compiled) |
 | `self()` | `→ Pid` | both | Current actor's Pid |
 | `run_until_idle()` | `→ ()` | both | Drain the scheduler to a fixed point (interpreter / tests) |
-| `get_cap(pid)` | `→ Option(Cap(Msg))` | interp-only | Obtain an epoch-tagged capability (compiled `get_cap` does not gate on liveness) |
-| `send_checked(cap, msg)` | `→ :ok \| :error` | interp-only | Epoch-validated send; **non-functional compiled** — returns a garbage atom for every cap (§4.10.6 finding) |
+| `get_cap(pid)` | `→ Option(Cap(Msg))` | both | Obtain an epoch-tagged capability (`None` if the actor is dead) |
+| `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send (liveness + epoch + revocation) |
 | `pid_of_int(n)` | `→ Pid` | interp-only | Convert Int to Pid — **SIGSEGVs compiled** (unsafe int→ptr cast, §4.10.7 finding) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | interp-only | Read an actor's state field — **crashes compiled** (hard stub returns `None`, then a deref SIGSEGVs, §4.10.7 finding) |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |

@@ -634,8 +634,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)" };
   { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("Cap", [Tir.TVar "a"])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_cap(ptr %pid)" };
-  { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_send_checked(ptr %cap, ptr %msg)" };
+  { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some (Tir.TCon ("Atom", []));
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_send_checked(ptr %cap, ptr %msg)" };
+  { march_name = "revoke_cap"; c_name = Some "march_revoke_cap_v"; ret_ty = Some (Tir.TCon ("Atom", []));
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_revoke_cap_v(ptr %cap)" };
+  { march_name = "is_cap_valid"; c_name = Some "march_is_cap_valid_v"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_is_cap_valid_v(ptr %cap)" };
   { march_name = "pid_of_int"; c_name = Some "march_pid_of_int"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
@@ -1232,6 +1236,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_register_resource";
   PDeclare "march_get_cap";
   PDeclare "march_send_checked";
+  PDeclare "march_revoke_cap_v";
+  PDeclare "march_is_cap_valid_v";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
   PDeclare "march_link";

@@ -2185,6 +2185,15 @@ precondition for being a golden `MATCH` at all.
 
 #### 4.10.6 Lifecycle (`kill` / `is_alive`) and epoch-stamped capabilities
 
+> **Status update (2026-07-13):** the interp-vs-compiled divergences this
+> subsection documents for the capability / dead-`send` plane are FIXED — the
+> compiled runtime now matches the interpreter semantics stated here
+> (`get_cap` liveness-gated real caps, `send_checked` → `:ok`/`:error`,
+> `revoke_cap`/`is_cap_valid` surface-callable, dead `send` → `None`), pinned
+> by `test_compiled_epoch_cap_plane` (`test/test_stdlib_suite.ml`). The
+> divergence descriptions below are retained as the historical record of what
+> was fixed.
+
 §4.10.1–.5 pin the message plane (spawn / send / receive / drain). This
 subsection pins the **lifecycle plane**: how an actor is killed, how its
 liveness is observed, what a send to a dead actor does, and the epoch-stamped

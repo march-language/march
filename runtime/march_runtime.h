@@ -288,8 +288,15 @@ void    march_revoke_cap(int64_t pid_index, int64_t epoch);
  * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
 int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch);
 /* Capability-checked send: validates liveness, epoch, and revocation before
- * enqueuing msg.  No-op if the capability is invalid. */
-void    march_send_checked(void *cap, void *msg);
+ * enqueuing msg.  Returns the :ok atom (interned i64) on success, :error
+ * otherwise (message dropped) — mirrors eval.ml's send_checked. */
+int64_t march_send_checked(void *cap, void *msg);
+/* Cap-object-taking wrappers for the March-surface builtins: unpack
+ * (pid_index, epoch) from the cap heap object (words[3], words[4]).
+ * revoke_cap returns the :ok atom always (idempotent); is_cap_valid
+ * returns 1/0. */
+int64_t march_revoke_cap_v(void *cap);
+int64_t march_is_cap_valid_v(void *cap);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
