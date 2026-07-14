@@ -611,6 +611,11 @@ void *march_io_read_line(void) {
     return march_string_lit(buf, (int64_t)len);
 }
 
+/* Reads directly off fd 0 via read(2), bypassing stdio's buffer -- unlike
+ * march_io_read_line above, which reads through fgets/stdin's own buffer.
+ * Do not interleave read_byte and read_line in the same compiled program:
+ * fgets may have already buffered bytes past the last line it returned,
+ * and those bytes are invisible to this function's direct read(0, ...). */
 int64_t march_io_read_byte(void) {
     unsigned char c;
     ssize_t n = read(0, &c, 1);

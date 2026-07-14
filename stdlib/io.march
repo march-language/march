@@ -43,6 +43,11 @@ mod IO do
   Read a single raw byte from stdin (blocking, unbuffered) and return it
   as an Int in 0..255. Returns -1 on EOF.
 
+  Do not mix with `IO.read_line()`/`IO.gets()` in a compiled program: those
+  read through stdio's own buffer, while `read_byte` reads directly off the
+  file descriptor, so bytes already buffered by a prior line read are
+  invisible to it.
+
       let b = IO.read_byte()
   """
   fn read_byte() : Int do
