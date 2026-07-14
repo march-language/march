@@ -273,6 +273,12 @@ let fmt_fn_param = function
   | FPNamed p -> fmt_param p
   | FPDefault (p, _default_e) -> fmt_param p ^ " \\\\ _"
 
+(** Render a lambda's parameter list, e.g. [x], [(a, b)], [()]. *)
+let fmt_lam_params = function
+  | []  -> "()"
+  | [p] when p.param_ty = None -> p.param_name.txt
+  | ps  -> Printf.sprintf "(%s)" (String.concat ", " (List.map fmt_param ps))
+
 (* ------------------------------------------------------------------ *)
 (* Infix operator handling                                            *)
 (* ------------------------------------------------------------------ *)
@@ -403,12 +409,7 @@ let rec expr_inline = function
   | ECon ({ txt; _ }, args, _)  ->
     Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args))
   | ELam (params, body, _)      ->
-    let ps = match params with
-      | []  -> "()"
-      | [p] when p.param_ty = None -> p.param_name.txt
-      | ps  -> Printf.sprintf "(%s)" (String.concat ", " (List.map fmt_param ps))
-    in
-    Printf.sprintf "fn %s -> %s" ps (expr_inline body)
+    Printf.sprintf "fn %s -> %s" (fmt_lam_params params) (expr_inline body)
   | EBlock ([], _)              -> ""
   | EBlock ([e], _)             -> expr_inline e
   | EBlock _                    -> "..."
@@ -474,10 +475,23 @@ let sigil_is_multiline content =
       List.exists (fun (_, s) -> String.contains s '\n') parts
     | None -> false
 
-let is_multiline = function
+(** True when the last argument, followed through any chain of wrapper
+    calls/constructors in tail position (e.g. [Thunk(fn _ -> ...)] passed
+    as the last arg of [GenTree(...)]), bottoms out in a lambda whose body
+    needs multi-line rendering — the "trailing block" call shape, e.g.
+    [List.map(xs, fn x -> <multi-statement body> )]. *)
+let rec is_multiline = function
   | EMatch _ | ELetFn _ | ELetQ _ -> true
   | EBlock (_ :: _ :: _, _) -> true
   | ESigil (_, content, _) -> sigil_is_multiline content
+  | ELam (_, body, _) -> is_multiline body
+  | EApp (_, args, _) | ECon (_, args, _) -> trailing_multiline args
+  | _ -> false
+
+and trailing_multiline args =
+  match List.rev args with
+  | ELam (_, body, _) :: _ -> is_multiline body
+  | (EApp (_, a, _) | ECon (_, a, _)) :: _ -> trailing_multiline a
   | _ -> false
 
 (** Returns true if we should break this expression across lines,
@@ -535,8 +549,57 @@ let rec emit_stmt ctx e =
   | ESigil (name, content, _) when sigil_is_multiline content ->
     emit_sigil_multiline ctx name content
 
+  | ELam (params, body, _) when is_multiline body ->
+    line ctx (Printf.sprintf "fn %s ->" (fmt_lam_params params));
+    indented ctx (fun () -> emit_body ctx body)
+
+  | EApp (f, args, _) when trailing_multiline args ->
+    emit_call_multiline ctx ~prefix:"" ~head:(expr_inline f) args
+
+  | ECon (n, args, _) when trailing_multiline args ->
+    emit_call_multiline ctx ~prefix:"" ~head:n.txt args
+
   | _ ->
     line ctx (expr_inline e)
+
+(** Emit a call whose last argument, possibly through a chain of wrapper
+    calls/constructors in tail position (e.g. [Thunk(fn _ -> ...)] as the
+    last arg of [GenTree(...)]), bottoms out in a lambda needing a
+    multi-line body:
+      [Head(arg1, ..., Wrapper(fn params ->]
+        <indented body>
+      [))]
+    [prefix] is prepended to the head line (e.g. ["|> "] inside a pipe
+    chain); [head] is the already-rendered outermost callee. *)
+and emit_call_multiline ctx ~prefix ~head args =
+  let buf = Buffer.create 64 in
+  Buffer.add_string buf prefix;
+  let rec walk head args =
+    let init_args, last = match List.rev args with
+      | last :: rest -> (List.rev rest, last)
+      | [] -> assert false
+    in
+    let sep = if init_args = [] then "" else ", " in
+    let args_s = String.concat ", " (List.map expr_inline init_args) in
+    match last with
+    | ELam (params, body, _) ->
+      Buffer.add_string buf
+        (Printf.sprintf "%s(%s%sfn %s ->" head args_s sep (fmt_lam_params params));
+      (body, 1)
+    | EApp (f, nested_args, _) ->
+      Buffer.add_string buf (Printf.sprintf "%s(%s%s" head args_s sep);
+      let (body, depth) = walk (expr_inline f) nested_args in
+      (body, depth + 1)
+    | ECon (n, nested_args, _) ->
+      Buffer.add_string buf (Printf.sprintf "%s(%s%s" head args_s sep);
+      let (body, depth) = walk n.txt nested_args in
+      (body, depth + 1)
+    | _ -> assert false
+  in
+  let (body, depth) = walk head args in
+  line ctx (Buffer.contents buf);
+  indented ctx (fun () -> emit_body ctx body);
+  line ctx (String.make depth ')')
 
 (** Emit the body of a fn / match arm — unwraps a single EBlock. *)
 and emit_body ctx body =
@@ -662,17 +725,30 @@ and emit_pipe_chain ctx expr =
     | e -> (e, acc)
   in
   let (head, stages) = collect [] expr in
+  let any_multiline = is_multiline head || List.exists is_multiline stages in
   let head_s   = expr_inline head in
   let stage_ss = List.map expr_inline stages in
   let inline   =
     head_s ^ String.concat "" (List.map (fun s -> " |> " ^ s) stage_ss)
   in
-  if ctx.indent * 2 + String.length inline <= 80 then
+  if not any_multiline && ctx.indent * 2 + String.length inline <= 80 then
     line ctx inline
   else begin
-    line ctx head_s;
+    (match head with
+     | EApp (f, args, _) when trailing_multiline args ->
+       emit_call_multiline ctx ~prefix:"" ~head:(expr_inline f) args
+     | ECon (n, args, _) when trailing_multiline args ->
+       emit_call_multiline ctx ~prefix:"" ~head:n.txt args
+     | _ -> line ctx head_s);
     indented ctx (fun () ->
-      List.iter (fun s -> line ctx ("|> " ^ s)) stage_ss)
+      List.iter (fun stage ->
+        match stage with
+        | EApp (f, args, _) when trailing_multiline args ->
+          emit_call_multiline ctx ~prefix:"|> " ~head:(expr_inline f) args
+        | ECon (n, args, _) when trailing_multiline args ->
+          emit_call_multiline ctx ~prefix:"|> " ~head:n.txt args
+        | _ -> line ctx ("|> " ^ expr_inline stage)
+      ) stages)
   end
 
 (* ------------------------------------------------------------------ *)

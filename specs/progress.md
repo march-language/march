@@ -832,6 +832,52 @@ Full suite green: **451 compiler / 231 eval / 396 codegen / 807 stdlib** (the
 pre-existing full-suite baseline failures unchanged); all 11 js goldens (9
 positive + 2 negative) pass.
 
+## Current State (as of 2026-07-13, `march --fmt` multi-line lambda body corruption fixed)
+
+`march --fmt` (`lib/format/format.ml`) previously collapsed any lambda whose
+body needed multi-line rendering (multi-statement `let`-chain body) to a
+literal `...` placeholder — invalid syntax that failed to re-parse. Root
+cause: the block (multi-line) renderer's statement-emission fallback always
+routed through the single-line `expr_inline` pretty-printer for `ELam`/`EApp`/
+`ECon` nodes, and `expr_inline`'s `EBlock` case (used for a lambda's body)
+literally returns the string `"..."` for any block with more than one
+statement — a stub meant only for terse `EMatch`/`ELetFn`/etc. summaries used
+in *other* diagnostic contexts, never meant to reach formatter output. This
+hit any lambda with a multi-statement body: bound directly (`let f = fn x ->
+...`), passed as a trailing call argument (`List.map(xs, fn x -> ...)`, the
+dominant real-world shape — ~167 occurrences across `stdlib/`), inside a pipe
+stage (`xs |> List.map(fn x -> ...)`), or nested through wrapper
+constructors in tail position (`GenTree(w, Thunk(fn _ -> ...))`, as seen in
+`stdlib/gen.march`).
+
+Fix: `is_multiline` now recognizes `ELam` (via its body) and `EApp`/`ECon`
+whose argument list ends — possibly through a chain of wrapper calls/
+constructors in tail position — in such a lambda (`trailing_multiline`,
+`lib/format/format.ml`). The block renderer gained matching emission: a new
+`emit_stmt` case for standalone multi-line lambdas, and
+`emit_call_multiline` for the "trailing block" call shape, which walks the
+same wrapper chain and closes all opened parens together on one line
+(`GenTree(w, Thunk(fn _ ->` ... body ... `))`), matching existing idiomatic
+stdlib style. `emit_pipe_chain` was updated to use the same renderer per
+pipe stage instead of always calling `expr_inline`.
+
+Verified via targeted repros (let-bound, call-arg, pipe-stage, nested-ctor
+lambdas) plus a full `--fmt` sweep of every `stdlib/*.march` file — zero
+remaining `-> ...` artifacts and no new parse failures (post-fix corpus
+compared against a corruption-free baseline; a prior sweep had been
+self-contaminated by testing with the old buggy binary in place). 4 new
+regression tests in `test/test_fmt.exe` (idempotence + no-ellipsis-
+placeholder checks). Two **pre-existing, unrelated** `--fmt` round-trip bugs
+were discovered incidentally and are tracked separately (not fixed here):
+float literals reformatted into scientific notation the parser rejects
+(`0.0000009537` → `9.537e-07` → parse error), and record literals that fail
+to re-parse after formatting.
+
+**Test counts:** 450 compiler / 231 eval / 396 codegen / 779 stdlib (all `-q`,
+all exit 0) — no suite composition change, `test/test_fmt.exe` is a separate
+formatter-only suite (28 cases, 1 pre-existing unrelated failure —
+`record literal`).
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type
