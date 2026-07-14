@@ -103,6 +103,22 @@ void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
  * RC free path can run the destructor. Layout: [rc][tag][pad][native_ptr@16]
  * [dtor@24][type_id@32] (40 bytes). See runtime/march_ffi.c. */
 #define MARCH_RESOURCE_TAG ((int32_t)-2)
+/* Boxed Float. The stage-2 target of the float-boxing design
+ * (specs/plans/2026-07-13-float-boxing-design.md): a Float that flows through
+ * a type-ERASED (ptr) slot is heap-boxed so it is discriminable from a tagged
+ * int (odd) and a heap object (ADT tag >= 0), instead of the current raw-bits
+ * bitcast that IS_HEAP_PTR accidentally accepts (→ RC-on-raw-bits SIGSEGV and
+ * generic-compare-on-raw-bits silent wrong answers). Reserved negative tag,
+ * joining the string/resource sentinels. Layout: [rc][tag][pad][val@16] (24
+ * bytes). Concrete `double` fields and REPL/static Float slots stay unboxed;
+ * only erased slots box. Introduced additive (nothing emits it yet) — the
+ * codegen flip that populates erased slots with these is stage 2. */
+#define MARCH_FLOAT_TAG ((int32_t)-3)
+typedef struct { int64_t rc; int32_t tag; int32_t pad; double val; } march_float_box;
+/* Allocate a boxed Float (rc=1, tag=MARCH_FLOAT_TAG). */
+void   *march_alloc_float(double v);
+/* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
+double  march_unbox_float(void *p);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 /* Allocate an uninitialised-data march_string of byte length [len], with the
  * header (rc=1, tag=MARCH_STRING_TAG, pad=0, len) filled in.  Callers fill
@@ -116,6 +132,15 @@ void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
 int64_t march_poly_eq(void *a, void *b);
+/* Ordered compare (-1/0/1) for two values in type-ERASED (ptr) slots, when
+ * the static type gives no strategy. Dispatches on runtime shape: tagged
+ * ints, boxed floats (MARCH_FLOAT_TAG), and strings each compare by value;
+ * other heap values fall back to 0 (a full structural order needs static
+ * type info unavailable here). The generic-compare half of the float-boxing
+ * design — must be wired at the codegen fallback_cmp site in the same stage
+ * that boxes floats, else box-only turns wrong-int-compare into
+ * wrong-pointer-compare. */
+int64_t march_poly_compare(void *a, void *b);
 /* Extended string builtins used by the compiled stdlib. */
 int64_t march_string_byte_length(void *s);
 int64_t march_string_is_empty(void *s);
