@@ -7077,6 +7077,67 @@ let test_compiled_let_shadowing_parity () =
     ~expected:"30"
     ()
 
+(** Entry-module self-qualification: a hand-written call that spells out the
+    entry file's OWN top-level module name (`Foo.wrapped(x)` inside `mod Foo`,
+    or `Outer.Inner.wrapped(x)` inside entry `mod Outer`) must resolve. TIR
+    unwraps the entry module — its members are emitted WITHOUT the entry
+    mod-name prefix — but a dotted source reference kept its `Foo.` /
+    `Outer.` segment (it never matched desugar's bare `make_qualifier`), so
+    reference and definition never converged: "unbound variable: Foo.wrapped"
+    (interp) / "Undefined symbols: _Foo.wrapped" (compiled), on BOTH backends.
+    The desugar strip pass removes only the single leading entry-own segment,
+    so `Outer.Inner.wrapped -> Inner.wrapped` survives to match the nested
+    definition. `wrapped(5)` = 6 via `Foo.bar` / `Outer.Inner.helper`. *)
+let test_compiled_entry_self_qual_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual"
+    ~src:"mod Foo do\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do Foo.bar(x) end\n\
+         \  fn main() do println(int_to_string(Foo.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Nested variant of {!test_compiled_entry_self_qual_parity}: the entry file's
+    sole top-level mod is `Outer`, so `Outer.Inner.wrapped(5)` must strip only
+    the leading `Outer.` down to `Inner.wrapped` (the nested `Inner.` stays,
+    matching the still-qualified nested definition). *)
+let test_compiled_entry_self_qual_nested_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_nested"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn main() do println(int_to_string(Outer.Inner.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Over-stripping guard for {!test_compiled_entry_self_qual_parity}: bare
+    intra-module calls (`wrapped(5)`) and single-level nested-module
+    references that do NOT lead with the entry name (`Inner.wrapped(5)`) must
+    STILL resolve after the strip pass. Prints 6 twice. *)
+let test_compiled_entry_self_qual_no_overstrip_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_no_overstrip"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do bar(x) end\n\
+         \  fn main() do\n\
+         \    println(int_to_string(wrapped(5)))\n\
+         \    println(int_to_string(Inner.wrapped(5)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"6\n6"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -8773,6 +8834,12 @@ let codegen_suites =
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
+            test_compiled_entry_self_qual_parity;
+          Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick
+            test_compiled_entry_self_qual_nested_parity;
+          Alcotest.test_case "compiled entry-module self-qual no-overstrip parity" `Quick
+            test_compiled_entry_self_qual_no_overstrip_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
