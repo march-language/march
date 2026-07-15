@@ -4734,6 +4734,17 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   | Ast.ELam (params, body, lsp), _ ->
     let rec peel ps ty env =
       match ps, repr ty with
+      | [], TArrow (param_ty, ret_ty)
+        when (match repr param_ty with TTuple [] -> true | _ -> false) ->
+        (* A 0-arg lambda `fn -> body` (or the equivalent `fn () -> body`,
+           which parses identically to [ELam ([], ...)]) checked against a
+           declared `Unit -> T` is accepted as a unit-consuming thunk: there is
+           no surface parameter to bind (the unit domain is implicit), so we
+           simply check the body against the arrow's result type.  This lets
+           `fn -> body` satisfy a `Unit -> Unit` callback param — the natural
+           spelling — without forcing the `fn _ -> body` (1-arg discard) idiom.
+           The symmetric call side (`cb()`) is handled in [infer_app]. *)
+        check_expr env body ret_ty ~reason
       | [], body_ty ->
         check_expr env body body_ty ~reason
       | p :: rest, TArrow (arg_ty, ret_ty) ->
@@ -4809,7 +4820,21 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =
   match args, repr f_ty with
-  | [], t -> t
+  | [], t ->
+    (* A call written with empty parens — `f()`, i.e. zero surface arguments
+       at [idx = 0] — against a `Unit -> T` value applies the implicit unit
+       argument and yields `T`.  This mirrors March's 0-arg convention: a
+       0-arg function is typed as its return type, and a 0-arg lambda
+       `fn -> body` checks against `Unit -> T` (see the [ELam] arm in
+       [check_expr]).  The [idx = 0] guard keeps a partial application that
+       merely leaves a trailing `Unit -> T` (e.g. `g(x)` with
+       `g : Int -> Unit -> T`) returning the arrow — only the literal
+       empty-parens call form applies the implicit unit. *)
+    (match idx, t with
+     | 0, TArrow (param_ty, ret_ty)
+       when (match repr param_ty with TTuple [] -> true | _ -> false) ->
+       ret_ty
+     | _ -> t)
   | arg :: rest, TArrow (param_ty, ret_ty) ->
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));

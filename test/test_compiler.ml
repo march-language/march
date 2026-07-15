@@ -1711,6 +1711,47 @@ let test_let_annot_poly_instance_accepts () =
   end|} in
   Alcotest.(check bool) "let : (Int)->Int = fn n -> n accepted" false (has_errors ctx)
 
+(* ── Zero-arg lambda satisfies a `Unit -> Unit` callback param ───────────
+   A 0-arg lambda `fn -> body` types to its body's result (a thunk), so it
+   used to be un-passable to a declared `Unit -> Unit` parameter ("expected
+   () but got () -> ()"); and calling such a callback with `cb()` yielded the
+   arrow type rather than the result.  Both boundaries are now reconciled: a
+   `Unit -> T` arrow behaves like a 0-arg callable at both construction
+   (checking `fn -> body` against it) and call (`cb()`). *)
+let test_zero_arg_lambda_unit_callback_accepts () =
+  let ctx = typecheck {|mod Main do
+    fn call_it(cb : Unit -> Unit) : Unit do cb() end
+    fn once() : Unit do println("ran") end
+    fn main() do call_it(fn -> once()) end
+  end|} in
+  Alcotest.(check bool) "call_it(fn -> once()) : Unit -> Unit accepted"
+    false (has_errors ctx)
+
+(* A `Unit -> T` value called with empty parens `f()` yields `T`, not the
+   arrow — the symmetric call-site half of the fix above. *)
+let test_zero_arg_unit_call_returns_result () =
+  let ctx = typecheck {|mod Main do
+    fn main() do
+      let n = int_max_value()
+      println(int_to_string(n))
+    end
+  end|} in
+  Alcotest.(check bool) "int_max_value() : Unit -> Int yields Int"
+    false (has_errors ctx)
+
+(* GREEN-STAYS-GREEN guard: the pre-existing thunk idiom `fn _ -> body`
+   (a 1-arg discard, the shape task_spawn's callback expects) is unaffected. *)
+let test_discard_arg_thunk_still_accepts () =
+  let ctx = typecheck {|mod Main do
+    needs IO.Spawn
+    fn main() do
+      let _t = task_spawn(fn _ -> 42)
+      println("spawned")
+    end
+  end|} in
+  Alcotest.(check bool) "task_spawn(fn _ -> 42) still accepted"
+    false (has_errors ctx)
+
 (* ── Finding 13: ELetFn return-annotation mismatch reported ONCE ────────── *)
 
 (* A local recursive fn whose return annotation conflicts with its
@@ -8163,6 +8204,11 @@ let compiler_suites =
           Alcotest.test_case "finding 16: let : Int = String rejected"       `Quick test_let_annot_mismatch_rejects;
           Alcotest.test_case "finding 16: let : Int = 5 accepted"            `Quick test_let_annot_correct_accepts;
           Alcotest.test_case "finding 16: let : (Int)->Int = fn n->n accept" `Quick test_let_annot_poly_instance_accepts;
+        ] );
+      ( "zero_arg_unit_callback", [
+          Alcotest.test_case "fn -> body satisfies Unit -> Unit param"       `Quick test_zero_arg_lambda_unit_callback_accepts;
+          Alcotest.test_case "Unit -> T value called with f() yields T"      `Quick test_zero_arg_unit_call_returns_result;
+          Alcotest.test_case "fn _ -> body (discard thunk) still accepted"   `Quick test_discard_arg_thunk_still_accepts;
         ] );
       ( "letfn_ret_annot", [
           Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;

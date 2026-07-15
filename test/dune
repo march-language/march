@@ -1074,6 +1074,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/zero_arg_closure_default.expected native_zero_arg_closure_default.out)))
 
+; ── Regression: a 0-arg lambda `fn -> body` satisfies a declared `Unit -> Unit`
+; callback param, and `cb()` runs it. Native output must match the interpreter.
+(rule
+ (targets native_unit_callback_zero_arg native_unit_callback_zero_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/unit_callback_zero_arg.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_unit_callback_zero_arg
+        native/unit_callback_zero_arg.march)
+   (with-stdout-to native_unit_callback_zero_arg.out
+        (system "./native_unit_callback_zero_arg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unit_callback_zero_arg.expected native_unit_callback_zero_arg.out)))
+
 ; ── Regression: type-qualified constructor patterns on non-first variants ──
 ; `match t do T.B(n) -> ...` lowered the arm with the full dotted tag "T.B",
 ; but codegen discriminates on the bare ctor name ("B"), so the arm fell back
