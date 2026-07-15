@@ -7249,6 +7249,34 @@ let test_compiled_mpst_relay_distinct_parity () =
     ~expected:"c2s\ns2l\nl2c"
     ()
 
+(** Guarded-match IR-bloat fix: a 3-arm guarded match with a wildcard
+    catch-all ([n > 0 -> "pos"], [n < 0 -> "neg"], [_ -> "zero"]) used to
+    re-lower a FRESH fallback join point per guard check, duplicating the
+    tail body (panic/"zero") per arm.  The fix threads ONE shared 0-arg join
+    point per arm (see lib/tir/lower_match.ml's guard path + the reduced
+    test/snapshots/perceus/guard_match.expected).  This parity test guards
+    the *behaviour*: all three guard outcomes must still print identically on
+    the interpreter and the compiled backend after the shared-JP refactor. *)
+let test_compiled_guarded_match_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_guarded_match"
+    ~src:"mod GuardedMatchParity do\n\
+         \  fn classify(x : Int) : String do\n\
+         \    match x do\n\
+         \      n when n > 0 -> \"pos\"\n\
+         \      n when n < 0 -> \"neg\"\n\
+         \      _ -> \"zero\"\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(classify(5))\n\
+         \    println(classify(-3))\n\
+         \    println(classify(0))\n\
+         \  end\n\
+          end\n"
+    ~expected:"pos\nneg\nzero"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -8907,6 +8935,8 @@ let codegen_suites =
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
             test_guard_exhaustion_panics_compiled;
+          Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
+            test_compiled_guarded_match_parity;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
