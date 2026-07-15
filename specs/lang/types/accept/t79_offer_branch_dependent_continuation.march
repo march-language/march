@@ -1,0 +1,50 @@
+mod Main do
+  -- Session-types F5 fix (2026-07-15): PATH-DEPENDENT `Chan.offer` continuation.
+  -- `Chan.offer` (typecheck.ml, the `SOffer` arm) used to return the channel at
+  -- the FIRST branch's continuation REGARDLESS of which label the peer chose --
+  -- the "conservative approximation" (see t43's header). That made this program
+  -- WRONGLY REJECTED: the `:err` branch's continuation is `Recv(String, End)`,
+  -- but the offer handed back a channel at `:ok`'s `Recv(Int, End)`, so the
+  -- `:err` arm's `println(s)` saw `s : Int` and failed with "expected String".
+  --
+  -- The fix registers each offer's session ref against its full label->cont map
+  -- (`env.offer_conts`) and links the returned label variable to it in the
+  -- destructuring `let` (`env.offer_labels`); `match <label>` then transiently
+  -- refines the SHARED channel ref to `branches[L]` while checking the `:L` arm.
+  -- So inside `:ok` the channel is at `Recv(Int, End)` and inside `:err` it is
+  -- at `Recv(String, End)` -- each arm drives the branch the peer ACTUALLY chose.
+  --
+  -- The channel `sc2` is a linear endpoint consumed once IN EACH arm; because
+  -- match arms are mutually-exclusive execution paths (`iter_arms_linear`) that
+  -- is exactly one use on any single path, not a double-use. Sending/receiving
+  -- the WRONG branch's payload still fails to typecheck (reject/t74).
+  needs IO.Console
+  type Client = Client
+  type Server = Server
+
+  protocol Decision do
+    choose by Client:
+      ok  -> Client -> Server : Int
+      err -> Client -> Server : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Decision)
+    let cc2 = Chan.choose(cc, :err)
+    let cc3 = Chan.send(cc2, "boom")
+    Chan.close(cc3)
+    let (lbl, sc2) = Chan.offer(sc)
+    match lbl do
+      :ok ->
+        let (n, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(int_to_string(n))
+      :err ->
+        let (s, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(s)
+      _ -> println("other")
+    end
+  end
+end
