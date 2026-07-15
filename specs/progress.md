@@ -283,7 +283,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-07-15, open-items master plan — Phase 0 + Wave A Phase 1: four P0 compiled crashes/link-failures fixed)
+## Current State (as of 2026-07-15, open-items master plan — Phase 0 + Wave A: four P0 crashes + three hardening fixes)
 
 **Executed the first waves of `specs/plans/2026-07-15-open-items-master-plan.md`
 (rebased onto `origin/main`; the plan's `file:line` anchors were re-verified
@@ -320,9 +320,29 @@ passes post-fix.
   Gated the bare qualified-ctor prebind registration on `Public` at both prebind
   sites, closing the visibility bypass.
 
+- **4.1 — flaky `--check` capability HINT nondeterminism:** the `--check` CAS
+  result cache stored "clean" artifacts even for runs that emitted hints, so
+  cache hits exited before the diagnostic-print pass (hint vanished on repeat,
+  reappeared when the shared CAS was cleared). Now cache only diagnostic-free
+  runs; plus `stable_sort` + sorted cap-closure folds. Byte-identical repeats.
+
+- **4.3 — `MARCH_LIB_PATH` builds unreachable modules:** a broken UNRELATED
+  library module failed an entry that never referenced it. The resolver now
+  prunes auto-discovered modules the entry can't reach (transitively), seeded
+  from entry + imported sources with an over-approximating name scan; modules
+  with global effect (impl/interface/protocol/deriving/extern) and provided
+  type/ctor names are never pruned. Transitive deps verified preserved.
+
+- **4.4 — guarded-match join-point bloat:** guarded arms re-hoisted a fresh
+  fallback join point per guard check (7 closure types / 9 fns for 3 arms). Now
+  one shared 0-arg join point across arms; `guard_match` snapshot 35→10 IR refs,
+  output unchanged.
+
 - **Not redone:** 1.5 (`show` on Pid link failure) was verified already fixed on
   `origin/main` — skipped. Phase 0 items 0.1 (sort-RC crash — still LIVE here),
   0.2, 0.3 were found not-actionable-as-written on this base and left as-is.
+  Phase 4 items 4.2 (mono dangling-TVar guard — latent, no live trigger) and 4.5
+  (hot-reload entry-mod naming — low priority) deferred.
 
 ## Current State (as of 2026-07-11, finding C1 FIXED — `strip_scrut_decrc` scrutinee-dec ordering bug)
 
