@@ -566,22 +566,39 @@
            (run %{exe:../bin/main.exe} test
                 imports/lib_path_ill_typed/lp_entry.march)))))
 
-; ── Regression: relative MARCH_LIB_PATH diagnostics must not be dropped ──
-; user_files held only canonicalised (realpath'd) paths while diagnostic
-; spans carry the as-parsed path, so with a RELATIVE lib path every
-; lib-module diagnostic failed the exact-string is_user_file match and was
-; tolerated as "stdlib-internal" — ill-typed TIR reached codegen and died
-; in clang with undefined pattern-binder symbols.  The entry deliberately
-; does not import the ill-typed module: auto-discovery alone must surface
-; the error and exit 1.
+; ── Regression: an UNREFERENCED ill-typed lib module must NOT fail the build ──
+; MARCH_LIB_PATH auto-discovery used to parse+typecheck EVERY .march file on
+; the path regardless of reachability, so a single broken UNRELATED module
+; failed an entry that never references it.  The resolver now prunes any
+; auto-discovered module the entry cannot reach (transitively, by name) unless
+; it carries a global-effect decl (impl/interface/protocol/extern/...).  The
+; pruned module is dropped from the program entirely — so its ill-typed TIR
+; never reaches codegen (the original harm) — and the entry builds clean.
+; [libpath_entry.march] deliberately does not reference LibpathIllTyped, so
+; --check must now exit 0.  (The referenced-module control lives in the
+; imports/lib_path_ill_typed rule above, which still exits 1.)
 (rule
  (alias runtest)
  (deps (file %{exe:../bin/main.exe})
        (file libpath_entry.march)
        (glob_files libpath_ill_typed/*.march))
  (action (setenv MARCH_LIB_PATH libpath_ill_typed
-          (with-accepted-exit-codes 1
+          (with-accepted-exit-codes 0
            (run %{exe:../bin/main.exe} --check libpath_entry.march)))))
+
+; ── Control: an entry that DOES reference the ill-typed lib module still errors ──
+; Same broken lib dir as above, but this entry references LibpathIllTyped by
+; name, so reachability keeps it in the build and its type error must surface
+; (exit 1).  Guards against the pruning fix over-reaching and swallowing a
+; genuinely-reachable module's diagnostics.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file libpath_entry_ref.march)
+       (glob_files libpath_ill_typed/*.march))
+ (action (setenv MARCH_LIB_PATH libpath_ill_typed
+          (with-accepted-exit-codes 1
+           (run %{exe:../bin/main.exe} --check libpath_entry_ref.march)))))
 
 ; ── Regression: early-CAS hash must cover source-dir sibling modules ──
 ; The --check/--compile early-exit cache hashed the entry source, the stdlib
