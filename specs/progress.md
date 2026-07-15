@@ -283,6 +283,43 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
+
+**Second wave of `specs/plans/2026-07-15-open-items-master-plan.md`, on top of the
+merged Wave A. Every task re-verified live; full six-runner suite green (809 +
+all drivers, exit 0); `check_types.sh` 155/155; doc-lint passes.**
+
+- **3.1 (F5) — path-dependent `Chan.offer`:** the offer arm now registers its
+  session ref + label→continuation map; `match`ing the returned label refines the
+  shared session ref to `branches[L]` per arm, so a program that drives each
+  branch's continuation correctly is no longer spuriously rejected. Reject
+  witnesses for the wrong-branch drive.
+- **3.2 — zero-arg lambda `fn ->` vs `Unit -> Unit`:** typechecker accepts a 0-arg
+  lambda against a `Unit -> Unit` param (unit-consuming thunk) and applies an
+  implicit unit at `f()` call sites on `Unit -> T` values (also fixes `Unit -> T`
+  builtins like `int_max_value()`). Reverted the `stdlib/dom.march` `Int -> Unit`
+  workaround back to `Unit -> Unit`.
+- **3.3 (F7) — session-channel linearity holes:** dropping an unclosed `SEnd`
+  channel is rejected (must-close), and reusing a linear parameter endpoint is
+  caught via affine tracking of `TLin` channel params. Reject witnesses added.
+- **6.1 — standing ASAN gate:** `specs/lang/golden/sanitize.sh` compiles all 46
+  goldens under `MARCH_SANITIZE=1` (all clean); wired Linux-only into CI.
+- **6.3 — conformance-sweep corpus:** +15 curated deterministic `test/native`
+  fixtures (sweep 62→77 MATCH) + fixed-checksum anchors; the sort-bench family is
+  pinned KNOWN_DIVERGENCE (confirmed still crashing compiled 138/139 on this base
+  — the deferred sort-RC/float-boxing work).
+- **6.4 — property-test stdlib gap:** `pipeline_up_to_typecheck` now typechecks
+  generated programs against a stdlib-loaded seed env, so
+  `prop_generated_programs_are_well_typed` no longer falsely reddens on
+  `println([0])`.
+- **6.2 — oracle `--no-opt` axis:** plumbing (`oracle_check ~tir_opt`) landed but
+  the axis is DISABLED — enabling it hangs the property suite (a `--no-opt`
+  compiled binary's scheduler threads hold `run_capture`'s pipe open past the
+  run-timeout). Re-enable needs `run_capture` file-redirect hardening.
+- **Deferred:** 4.2 (mono dangling-TVar guard, latent) and 4.5 (hot-reload
+  naming, low-priority) remain; Phase 2 (float-boxing), Phase 5 (caps), Phase 7
+  (features) not started.
+
 ## Current State (as of 2026-07-15, differential-oracle corpus extension — curated test/native subset + fixed-checksum anchors)
 
 **Extended the interpreter-vs-compiled conformance sweep (`test/test_oracle.ml`,
