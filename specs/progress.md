@@ -283,6 +283,40 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, differential-oracle corpus extension — curated test/native subset + fixed-checksum anchors)
+
+**Extended the interpreter-vs-compiled conformance sweep (`test/test_oracle.ml`,
+additive test-infra only).** Two extensions, both landed and verified with a
+full sweep (`PASS: 77 matched, 10 known-divergence, 0 un-triaged failures`,
+exit 0; up from 62 MATCH):
+
+- **Curated `test/native/` subset** — 15 named deterministic, self-contained,
+  terminating fixtures (`test_native_allowlist`: `atom_ctor_field`,
+  `closure_bool_field`, `default_args_nested`, `lazy_niche`, `let_shadow_rebind`,
+  `let_tuple_destructure`, `march_prefixed_local`, `nested_mod_qualcall`,
+  `newtype_counter`, `niche_reuse_closure`, `option_niche`,
+  `qualified_ctor_pattern`, `shadow_selfref_let`, `tuple_scalar_fields`,
+  `zero_arg_closure_default`) are now swept in the native lane, exercising
+  closure/niche/tuple+newtype-layout/let-shadowing/default-arg/qualified+nested-
+  module codegen paths that `bench/`+`examples/` under-cover. Each verified MATCH
+  interp==compiled (byte-stable across 3 compiled runs). `test/` is still NOT
+  swept wholesale — FFI (`.c` shims), `--target js`, and actor/PID/hash/network/
+  scheduler-timing fixtures were deliberately excluded as non-comparable.
+
+- **Fixed expected-stdout anchors** (`expected_stdout`, new `ExpectedMismatch`
+  verdict) — pin the interpreter ground truth for checksum-style programs so a
+  backend-SYMMETRIC regression (interpreter and compiler drifting together,
+  invisible to the interp-vs-compiled diff — the same blind spot as the bench/
+  `Tree`-collision episode) reddens the sweep as a hard failure never masked by
+  `known_divergence`. Wired the sort-bench family:
+  `mergesort`/`heapsort`/`timsort`/`alphadev_sort` → `1423`,
+  `sort_nearly_sorted` → `0\n0`. These still CRASH COMPILED on this base
+  (re-verified live: exit 138 SIGBUS / 139 SIGSEGV — the sort RC-underflow
+  family, `known_divergence`; the 2026-07-10 "unkillable UE wedge" mode did NOT
+  reproduce this run, they crash cleanly), so each stays a triaged
+  KNOWN_DIVERGENCE and the anchor guards its interpreter checksum. The stdlib
+  `march>`-doctest extractor (todos §Phase-4 part b) remains the open follow-up.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 0 + Wave A: four P0 crashes + three hardening fixes)
 
 **Executed the first waves of `specs/plans/2026-07-15-open-items-master-plan.md`

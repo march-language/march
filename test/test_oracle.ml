@@ -14,15 +14,29 @@
     print-driven programs whose stdout is a meaningful ground truth to diff.
     (`specs/lang/golden/` is the Core March language-spec golden corpus,
     `specs/lang/core-march.md` §5 — same criteria, so it rides the same
-    sweep and its spec anchor runs in CI.) It deliberately does NOT
-    walk `test/` (189+ files there are compiler-internal fixtures: single-
-    feature snippets, deliberately-erroring negative cases, and partial
-    fragments never meant to run standalone — sweeping them would drown
-    the signal in triage noise, not raise it) and does NOT extract stdlib
+    sweep and its spec anchor runs in CI.) It additionally pulls in a
+    CURATED, EXPLICITLY-NAMED subset of `test/native/`'s standalone programs
+    (see [test_native_allowlist]) — it deliberately does NOT walk `test/`
+    wholesale (189+ files there are compiler-internal fixtures: single-
+    feature snippets, deliberately-erroring negative cases, FFI programs
+    needing `.c` shims, `--target js` programs, and actor/PID/hash/network/
+    scheduler-timing programs never byte-stable across runs — sweeping them
+    all would drown the signal in triage noise, not raise it). Only named,
+    deterministic, self-contained, terminating fixtures verified to MATCH
+    interp==compiled are added individually. It still does NOT extract stdlib
     doctests (the `march>` REPL-transcript comments embedded in stdlib
     modules need a dedicated extractor, since they are not whole `.march`
-    programs). See `specs/todos.md` for the tracked follow-up to extend
-    the corpus to a triaged `test/` subset plus a doctest extractor.
+    programs). See `specs/todos.md` for the tracked follow-up on the
+    remaining doctest extractor.
+
+    A handful of checksum-style programs additionally carry a FIXED
+    expected-stdout anchor ([expected_stdout]) so a backend-SYMMETRIC
+    regression — interpreter and compiler drifting TOGETHER, invisible to
+    the interp-vs-compiled diff — still reddens the sweep. The sort-bench
+    family (`mergesort`/`heapsort`/`timsort`/`alphadev_sort` -> "1423",
+    `sort_nearly_sorted` -> "0\n0") is the canonical case: it crashes
+    COMPILED today (sort RC family, see [known_divergence]), so the anchor
+    guards the interpreter's checksum ground truth from silent drift.
 
     --- Divergence classification (the core contract) -------------------
     A DIVERGENCE is any of: Mismatch, RunFail(signal-crash), or
@@ -176,18 +190,22 @@ let known_divergence =
        family in the Sort module's merge/heap internals. Pre-existing,
        independent of every wave that has re-checked it.
        specs/progress.md: "heapsort RC underflow".
-       MODE CHANGE (2026-07-10): the family now manifests as an UNKILLABLE
-       kernel wedge instead of a crash — the compiled binary pins at
-       march_incrc inside a lambda apply, enters macOS `UE` (uninterruptible,
-       exiting) state, and ignores SIGKILL, so the sweep verdict is
-       RUN_TIMEOUT rather than RUN_FAIL(crashed). Same underlying RC bug
-       (garbage pointer reaching an RC op); the wedge escalation is filed in
-       specs/todos.md. These entries stay until the RC bug is fixed. *)
-    "alphadev_sort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "heapsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "mergesort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "sort_nearly_sorted", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
-    "timsort", "sort RC-underflow family; now an unkillable UE wedge at march_incrc (specs/todos.md 2026-07-10)";
+       MODE HISTORY: on 2026-07-10 the family manifested as an UNKILLABLE
+       kernel wedge (compiled binary pinned at march_incrc inside a lambda
+       apply, macOS `UE` uninterruptible state, ignoring SIGKILL → verdict
+       RUN_TIMEOUT). RE-VERIFIED 2026-07-15 on this base: the family now
+       CRASHES CLEANLY at run time — mergesort/timsort/alphadev_sort exit 138
+       (SIGBUS), heapsort/sort_nearly_sorted exit 139 (SIGSEGV) — the
+       runtime's fatal-fault handler _exit(128+signo)s, so the verdict is
+       RUN_FAIL(crashed) again, not a wedge. Same underlying RC bug (garbage
+       pointer reaching an RC op); the interpreter is the ground truth (each
+       prints its deterministic checksum — pinned in [expected_stdout]).
+       These entries stay until the RC bug is fixed. *)
+    "alphadev_sort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
+    "heapsort", "sort RC-underflow family: compiled crash (exit 139/SIGSEGV), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
+    "mergesort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
+    "sort_nearly_sorted", "sort RC-underflow family: compiled crash (exit 139/SIGSEGV), interp clean checksum 0\\n0 (specs/todos.md; re-verified 2026-07-15)";
+    "timsort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
 
     (* DataFrame groupby+agg: a DISTINCT compiled-only RC-misclassification
        crash (EXC_BAD_ACCESS in march_incrc, called from Stats.mean via
@@ -231,6 +249,69 @@ let oracle_cross_mode = Sys.getenv_opt "MARCH_ORACLE_CROSS" <> None
 let known_divergence_reason path =
   let base = Filename.basename (Filename.remove_extension path) in
   Hashtbl.find_opt known_divergence_tbl base
+
+(* ------------------------------------------------------------------ *)
+(* Curated test/native subset (corpus extension, 2026-07-15)           *)
+(*                                                                     *)
+(* test/ is NOT swept wholesale (see the header: 189+ compiler-internal *)
+(* fixtures, negative cases, FFI/.c-shim programs, --target js programs, *)
+(* and actor/PID/hash/network/scheduler-timing programs that are never  *)
+(* byte-stable across runs). Instead these NAMED, deterministic, self-  *)
+(* contained, terminating programs from test/native/ are pulled in      *)
+(* individually. Each was confirmed to MATCH interp==compiled at add    *)
+(* time (both-ways run, output byte-identical across 3 compiled runs).  *)
+(* They exercise language-feature codegen paths (closures, niches,      *)
+(* tuple/newtype layout, let-shadowing, default args, qualified/nested  *)
+(* module calls) that bench/+examples/ under-cover.                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_native_allowlist =
+  [ "atom_ctor_field"; "closure_bool_field"; "default_args_nested";
+    "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
+    "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
+    "niche_reuse_closure"; "option_niche"; "qualified_ctor_pattern";
+    "shadow_selfref_let"; "tuple_scalar_fields"; "zero_arg_closure_default" ]
+
+let curated_test_files root =
+  let dir = Filename.concat root "test/native" in
+  List.filter_map (fun base ->
+    let p = Filename.concat dir (base ^ ".march") in
+    if Sys.file_exists p then Some p else None)
+    test_native_allowlist
+
+(* ------------------------------------------------------------------ *)
+(* Fixed expected-stdout anchors (corpus extension, 2026-07-15)        *)
+(*                                                                     *)
+(* A backend-SYMMETRIC regression — interpreter AND compiler drifting   *)
+(* TOGETHER — is invisible to the interp-vs-compiled diff (the same     *)
+(* blind spot as the bench/ Tree-collision episode in the header). For  *)
+(* a handful of checksum-style programs we therefore pin the EXACT      *)
+(* expected stdout as an independent ground-truth anchor: the           *)
+(* interpreter's output is asserted byte-equal to the literal below     *)
+(* (verdict ExpectedMismatch, a hard failure never masked by            *)
+(* known_divergence). The sort-bench family is the canonical case —     *)
+(* it crashes COMPILED today (sort RC family, known_divergence), so the *)
+(* compiled side is already a triaged KNOWN_DIVERGENCE; this anchor     *)
+(* guards the interpreter checksum so a future regression that changes  *)
+(* the sort RESULT (rather than crashing) surfaces immediately.        *)
+(* Values verified 2026-07-15 by running each interpreted.             *)
+(* ------------------------------------------------------------------ *)
+
+let expected_stdout =
+  [ "mergesort", "1423\n";
+    "heapsort", "1423\n";
+    "timsort", "1423\n";
+    "alphadev_sort", "1423\n";
+    "sort_nearly_sorted", "0\n0\n" ]
+
+let expected_stdout_tbl =
+  let tbl = Hashtbl.create 8 in
+  List.iter (fun (k, v) -> Hashtbl.replace tbl k v) expected_stdout;
+  tbl
+
+let expected_stdout_for path =
+  let base = Filename.basename (Filename.remove_extension path) in
+  Hashtbl.find_opt expected_stdout_tbl base
 
 (* ------------------------------------------------------------------ *)
 (* Subprocess runner with timeout                                      *)
@@ -313,6 +394,7 @@ let run_shell_capture ?(timeout_s = 10.0) shell_cmd =
 type run_result =
   | Match        of string          (** both outputs identical *)
   | Mismatch     of string * string (** interp, compiled differ *)
+  | ExpectedMismatch of string * string (** expected-anchor, actual interp: ground-truth drift *)
   | InterpFail   of int             (** interpreter exited non-zero *)
   | InterpTimeout
   | CompileFail  of int             (** clang/lowering failed *)
@@ -334,6 +416,15 @@ let run_oracle src_path =
     match interp_result with
     | `Timeout        -> InterpTimeout
     | `Error code     -> InterpFail code
+    | `Ok interp_out when
+        (match expected_stdout_for src_path with
+         | Some exp -> exp <> interp_out | None -> false) ->
+      (* Fixed-anchor ground-truth drift: the interpreter ran clean but its
+         output no longer matches the pinned checksum (see [expected_stdout]).
+         Short-circuit before compiling — the ground truth itself is wrong, so
+         an interp-vs-compiled diff would be meaningless. Hard failure. *)
+      let exp = match expected_stdout_for src_path with Some e -> e | None -> "" in
+      ExpectedMismatch (exp, interp_out)
     | `Ok interp_out  ->
       (* --- compile + run ---
          Use a deterministic output path derived from the source name so the
@@ -435,6 +526,7 @@ let truncate_output s =
 let verdict_label = function
   | Match _          -> "MATCH"
   | Mismatch _       -> "MISMATCH"
+  | ExpectedMismatch _ -> "EXPECTED_MISMATCH"
   | InterpFail code  -> Printf.sprintf "INTERP_FAIL(%d)" code
   | InterpTimeout    -> "INTERP_TIMEOUT"
   | CompileFail code -> Printf.sprintf "COMPILE_FAIL(%d)" code
@@ -495,9 +587,16 @@ let is_divergence = function
     non-failure: the fib-shaped bench programs legitimately exceed the
     interpreter budget. *)
 let is_failure (path, verdict) =
-  (is_divergence verdict
-   || (match verdict with InterpFail _ -> true | _ -> false))
-  && known_divergence_reason path = None
+  match verdict with
+  (* A fixed-anchor ground-truth drift is a HARD failure regardless of
+     known_divergence: known_divergence masks a COMPILED-side divergence
+     (e.g. the sort family's crash), never a drift of the interpreter's
+     pinned checksum, which is the independent ground truth. *)
+  | ExpectedMismatch _ -> true
+  | _ ->
+    (is_divergence verdict
+     || (match verdict with InterpFail _ -> true | _ -> false))
+    && known_divergence_reason path = None
 
 (* ------------------------------------------------------------------ *)
 (* Main                                                               *)
@@ -533,8 +632,15 @@ let () =
          the Core March golden corpus are deterministic and print-driven. *)
       find_march_files examples_dir @ find_march_files golden_dir
     | None ->
+      (* Native lane: bench/ + examples/ + Core golden + the curated
+         test/native/ subset. The curated subset is native-only for now
+         (deterministic and cross-safe in principle, but the cross lane is
+         deliberately scoped to examples/+golden — the docker round-trip is
+         slow and these fixtures add no cross-arch codegen signal the
+         examples don't already carry). *)
       find_march_files bench_dir @ find_march_files examples_dir
       @ find_march_files golden_dir
+      @ curated_test_files project_root
   in
 
   if files = [] then begin
@@ -575,7 +681,9 @@ let () =
         match known with
         | Some _ -> verdict_label v ^ "  [KNOWN_DIVERGENCE]"
         | None   -> verdict_label v ^ "  <-- UN-TRIAGED FAILURE"
-      else verdict_label v
+      else match v with
+        | ExpectedMismatch _ -> verdict_label v ^ "  <-- FIXED-ANCHOR DRIFT (ground truth)"
+        | _ -> verdict_label v
     in
     Printf.printf "%-50s  %s\n" name label;
     (match known, is_divergence v with
@@ -588,6 +696,9 @@ let () =
          | None   -> "interp  ", "compiled" in
        Printf.printf "  %s : %s\n" l_ref (truncate_output ref_out);
        Printf.printf "  %s : %s\n" l_got (truncate_output got_out)
+     | ExpectedMismatch (exp, got) ->
+       Printf.printf "  expected: %s\n" (truncate_output exp);
+       Printf.printf "  interp  : %s\n" (truncate_output got)
      | _ -> ())
   ) results;
 
@@ -634,12 +745,14 @@ let () =
   let n_cfail      = count (function CompileFail n when n <> 3 -> true | CompileTimeout -> true | _ -> false) in
   let n_itimeout   = count (function InterpTimeout -> true | _ -> false) in
   let n_ifail      = count (function InterpFail _ -> true | _ -> false) in
+  let n_anchor     = count (function ExpectedMismatch _ -> true | _ -> false) in
   let n_skip       = count (function Skipped _ -> true | _ -> false) in
 
   Printf.printf "\n=== RESULTS MATRIX ===\n";
   Printf.printf "  MATCH             : %d   interpreter == compiled\n" n_match;
   Printf.printf "  KNOWN_DIVERGENCE  : %d   open compiler bug, triaged (see known_divergence list) — not a failure\n" n_known_div;
-  Printf.printf "  UN-TRIAGED FAILURE: %d   <-- oracle failures (divergence not in known_divergence)\n" n_failure;
+  Printf.printf "  UN-TRIAGED FAILURE: %d   <-- oracle failures (un-triaged divergence, clean InterpFail, or fixed-anchor drift)\n" n_failure;
+  Printf.printf "  ANCHOR_DRIFT      : %d   (subset of above) interpreter ground truth != pinned expected_stdout\n" n_anchor;
   Printf.printf "  SKIPPED           : %d   nondeterministic_allowlist (network/actor/server/interactive)\n" n_skip;
   Printf.printf "  INTERP_TIMEOUT    : %d   too slow for tree-walking interpreter (no ground truth)\n" n_itimeout;
   Printf.printf "  INTERP_FAIL       : %d   interpreter error (no ground truth)\n" n_ifail;
@@ -660,8 +773,9 @@ let () =
   Printf.printf "\nNote: march currently emits typecheck warnings to stdout rather than stderr.\n";
   Printf.printf "      This may cause MISMATCH for programs with warnings.\n\n";
 
-  Printf.printf "Corpus scope: bench/ + examples/ + specs/lang/golden/ top-level .march files.\n";
-  Printf.printf "              test/ fixtures and stdlib doctests are NOT swept (see file header).\n\n";
+  Printf.printf "Corpus scope: bench/ + examples/ + specs/lang/golden/ top-level .march files\n";
+  Printf.printf "              + a curated test/native/ subset (test_native_allowlist).\n";
+  Printf.printf "              test/ is NOT swept wholesale; stdlib doctests are NOT swept (see file header).\n\n";
 
   if n_failure > 0 then begin
     Printf.printf "FAIL: %d un-triaged divergence(s) between interpreter and compiler.\n" n_failure;
