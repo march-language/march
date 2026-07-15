@@ -1968,6 +1968,14 @@ let compile filename =
           tir
       else tir
     in
+    (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
+       when the optimizer is disabled.  Reachability pruning is a linkability
+       requirement (not an optimization): the injected prelude/http stack
+       references not-always-linked externs like [_http_fetch], so an
+       unreachable prelude function reaching the linker produces "undefined
+       symbols".  When opt IS enabled the DCE pass already pruned inside
+       Opt.run, so this is an idempotent no-op there. *)
+    let tir = March_tir.Dce.prune_unreachable tir in
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
     stamp "opt";

@@ -7038,6 +7038,33 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** `--compile --no-opt` must still prune unreachable top-level functions.
+    Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
+    not an optimization: the injected prelude/http stack references
+    not-always-linked externs (e.g. `_http_fetch`).  Before the fix DCE ran only
+    inside Opt.run, so `--no-opt` left the whole prelude reachable and a trivial
+    program failed to link with "Undefined symbols: _http_fetch".  This test
+    compiles a trivial `println("hi")` with `--no-opt` and asserts the binary
+    links, runs, prints `hi`, and exits 0. It fails (link error) pre-fix. *)
+let test_compiled_no_opt_prunes_unreachable () =
+  let src =
+    "mod Main do\n  fn main() do println(\"hi\") end\nend\n" in
+  let (project_root, main_exe, src_path, tmp) =
+    write_march_source ~name:"no_opt_prune" src in
+  let bin = Filename.concat tmp "no_opt_prune_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~extra_args:"--no-opt"
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
+      (Filename.quote bin)) in
+    Alcotest.(check bool)
+      ("--no-opt compile links, runs, prints hi, exits 0 (got: " ^ run_out ^ ")")
+      true
+      (run_out = "hi\nEXIT:0")
+
 (** int_div_euclid: native codegen must route through march_checked_ediv and
     match the interpreter's Euclidean quotient across all four sign quadrants.
     Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
@@ -8830,6 +8857,8 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled --no-opt prunes unreachable fns (links, prints hi)" `Quick
+            test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
