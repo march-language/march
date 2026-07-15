@@ -75,6 +75,14 @@ jobs:
           eval $(opam env)
           dune build @grammar-check
 
+      - name: Golden corpus AddressSanitizer gate (Linux only; RC/UAF guard)
+        if: runner.os == 'Linux'
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            ./specs/lang/golden/sanitize.sh
+
       - name: Check doc notebooks (.scrollmd) compile
         run: |
           eval $(opam env)
