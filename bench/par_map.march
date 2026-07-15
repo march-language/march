@@ -72,14 +72,14 @@ pfn par_map_inner(xs : List(Int), chunk_size : Int,
       task_await_unwrap(t) end
     end
   Cons(h, tl) ->
-    if chunk_left == 0 do do
+    if chunk_left == 0 do
       -- Chunk full — spawn task, continue with next chunk
       let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
       let rest_sum = par_map_inner(tl, chunk_size, Cons(h, Nil), chunk_size - 1)
       let chunk_sum = task_await_unwrap(t)
-      chunk_sum + rest_sum end
-    end
+      chunk_sum + rest_sum
     else par_map_inner(tl, chunk_size, Cons(h, chunk_acc), chunk_left - 1)
+    end
   end
 end
 

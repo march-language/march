@@ -283,6 +283,67 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 0 + Wave A: four P0 crashes + three hardening fixes)
+
+**Executed the first waves of `specs/plans/2026-07-15-open-items-master-plan.md`
+(rebased onto `origin/main`; the plan's `file:line` anchors were re-verified
+live rather than trusted).** Full six-runner suite green (809 stdlib + all
+drivers, exit 0). Each Wave-A fix ships a regression test that fails pre-fix and
+passes post-fix.
+
+- **Phase 0 fixtures/docs** — repaired `bench/par_map.march` (a doubled `do do`
+  that closed the `if` before its `else`) and `examples/read_file.march`
+  (`List.fold_left` arg order); added non-reproducibility doc warnings to
+  `stdlib/parallel.march`'s `psum_float`/`preduce` (float merges are not
+  bit-identical across backends — chunk count varies by CPU/domain count).
+
+- **1.1 — MPST compiled segfault (F3):** `march_mpst_new` now returns a flat
+  N-tuple (was a linked list, mismatching the typechecker's tuple layout →
+  SIGSEGV) and pre-registers role names in sorted/tuple-position order (via a new
+  lower-side protocol-roles registry threaded as a CSV arg) so name→index routing
+  lines up. The first MPST tests that RUN the compiled binary. ASAN-clean.
+
+- **1.2 — `--compile --no-opt` link failure:** unreachable-function pruning was
+  only done inside the optimizer (`Dce.run`), so `--no-opt` left the whole
+  prelude/http stack referencing not-always-linked externs → "Undefined symbols".
+  Extracted a standalone `Dce.prune_unreachable` and call it before LLVM emit
+  unconditionally (reachability is a linkability requirement, not an optimization).
+  Unblocks the oracle `--no-opt` axis (todos §6.2).
+
+- **1.3 — entry file self-qualifying its own mod name:** `Foo.wrapped(x)` inside
+  entry `mod Foo` produced undefined-symbol (compiled) / unbound-variable
+  (interp). Desugar now strips the leading `<entry_mod>.` self-segment before
+  qualification, fixing both backends uniformly.
+
+- **1.4 — `opaque type` ctor-hiding bypass:** a sibling module could construct a
+  private opaque ctor by qualified name (`OqToken.Token(..)`) and typecheck clean.
+  Gated the bare qualified-ctor prebind registration on `Public` at both prebind
+  sites, closing the visibility bypass.
+
+- **4.1 — flaky `--check` capability HINT nondeterminism:** the `--check` CAS
+  result cache stored "clean" artifacts even for runs that emitted hints, so
+  cache hits exited before the diagnostic-print pass (hint vanished on repeat,
+  reappeared when the shared CAS was cleared). Now cache only diagnostic-free
+  runs; plus `stable_sort` + sorted cap-closure folds. Byte-identical repeats.
+
+- **4.3 — `MARCH_LIB_PATH` builds unreachable modules:** a broken UNRELATED
+  library module failed an entry that never referenced it. The resolver now
+  prunes auto-discovered modules the entry can't reach (transitively), seeded
+  from entry + imported sources with an over-approximating name scan; modules
+  with global effect (impl/interface/protocol/deriving/extern) and provided
+  type/ctor names are never pruned. Transitive deps verified preserved.
+
+- **4.4 — guarded-match join-point bloat:** guarded arms re-hoisted a fresh
+  fallback join point per guard check (7 closure types / 9 fns for 3 arms). Now
+  one shared 0-arg join point across arms; `guard_match` snapshot 35→10 IR refs,
+  output unchanged.
+
+- **Not redone:** 1.5 (`show` on Pid link failure) was verified already fixed on
+  `origin/main` — skipped. Phase 0 items 0.1 (sort-RC crash — still LIVE here),
+  0.2, 0.3 were found not-actionable-as-written on this base and left as-is.
+  Phase 4 items 4.2 (mono dangling-TVar guard — latent, no live trigger) and 4.5
+  (hot-reload entry-mod naming — low priority) deferred.
+
 ## Current State (as of 2026-07-11, finding C1 FIXED — `strip_scrut_decrc` scrutinee-dec ordering bug)
 
 **The compiled memory-safety bug filed as finding C1 (slice 10) is fixed.**

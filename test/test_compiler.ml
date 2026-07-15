@@ -3621,6 +3621,170 @@ let test_large_multi_file_check_is_not_quadratic () =
       (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
       true (elapsed < 30.0)))
 
+(* ── opaque-type constructor visibility across compilation units ────────── *)
+
+(* An `opaque type`'s constructor is Private (the parser forces `var_vis =
+   Private` while keeping the type Public).  A sibling module discovered via
+   MARCH_LIB_PATH must NOT be able to construct it under its qualified name
+   (`Mod.Ctor(..)`): doing so bypasses the opacity boundary.  The Pass-1
+   forward-reference pass (`prebind_mod_members`) used to seed the bare
+   qualified ctor key unconditionally, so `OqToken.Token("x")` from unrelated
+   code typechecked clean.  This test builds the two-file scenario in a temp
+   MARCH_LIB_PATH and checks the entry via the same resolve+check pipeline the
+   compiler uses. *)
+let check_entry_with_lib_dir files entry_src =
+  let dir = Filename.temp_file "march_opaque_vis_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ())
+    (fun () ->
+      List.iter (fun (name, contents) ->
+          let oc = open_out (Filename.concat dir name) in
+          output_string oc contents;
+          close_out oc)
+        files;
+      Unix.putenv "MARCH_LIB_PATH" dir;
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+        let m = parse_and_desugar entry_src in
+        let (resolve_errors, extra_decls, _user_files) =
+          March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+        Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+        let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+        let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+        has_errors errors))
+
+let oq_token_src = {|mod OqToken do
+  opaque type Token = Token(String)
+  fn make(raw : String) : Token do Token(raw) end
+  fn value(t : Token) : String do
+    match t do Token(s) -> s end
+  end
+end
+|}
+
+let test_opaque_ctor_qualified_bypass_rejected () =
+  (* Sibling module constructs the private opaque ctor by qualified name. *)
+  let bypass_src = {|mod OqBypass do
+  fn main() do
+    let t = OqToken.Token("direct-bypass")
+    println(OqToken.value(t))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("oq_token.march", oq_token_src)] bypass_src in
+  Alcotest.(check bool)
+    "qualified private opaque ctor from a sibling module must be rejected"
+    true errored
+
+let test_opaque_type_annotation_still_accepts () =
+  (* Control: qualified name used only as a TYPE annotation plus the public
+     make/value accessors must still typecheck clean. *)
+  let entry_src = {|mod OqEntry do
+  fn use_it(t : OqToken.Token) : String do
+    OqToken.value(t)
+  end
+
+  fn round_trip() : String do
+    use_it(OqToken.make("hi"))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("oq_token.march", oq_token_src)] entry_src in
+  Alcotest.(check bool)
+    "opaque type used as annotation + public accessors still accepts"
+    false errored
+
+let test_public_ctor_qualified_still_resolves () =
+  (* A PUBLIC variant's `Mod.Ctor(..)` must still resolve cross-module. *)
+  let color_src = {|mod PubColor do
+  type Color = Red | Green | Blue
+  fn name(c : Color) : String do
+    match c do
+      Red -> "red"
+      Green -> "green"
+      Blue -> "blue"
+    end
+  end
+end
+|} in
+  let entry_src = {|mod PubUse do
+  fn main() do
+    let c = PubColor.Red
+    println(PubColor.name(c))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("pubcolor.march", color_src)] entry_src in
+  Alcotest.(check bool)
+    "public qualified ctor still resolves cross-module"
+    false errored
+
+(** Regression: MARCH_LIB_PATH auto-discovery used to parse+typecheck EVERY
+    .march file on the search path regardless of reachability, so ONE broken,
+    UNRELATED library module failed an entry that never references it.  The
+    resolver now prunes any auto-discovered module the entry cannot reach
+    (transitively, by textual module-name reference) unless it carries a
+    global-effect decl.  Asserts (1) an entry that references only GoodLib
+    typechecks clean — the broken module is pruned, not merely tolerated; and
+    (2) an entry that DOES reference BrokenUnrelated still errors (control). *)
+let read_file_contents path =
+  let ic = open_in_bin path in
+  let n = in_channel_length ic in
+  let s = really_input_string ic n in
+  close_in ic; s
+
+let test_unrelated_broken_lib_module_is_pruned () =
+  let dir = Filename.temp_file "march_lib_reachability_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in output_string oc contents; close_out oc in
+  write_file (Filename.concat dir "good.march")
+    "mod GoodLib do\n  fn helper(x : Int) : Int do x * 2 end\nend\n";
+  write_file (Filename.concat dir "broken.march")
+    "mod BrokenUnrelated do\n  fn oops(x : Int) : String do x + nonexistent_thing end\nend\n";
+  Unix.putenv "MARCH_LIB_PATH" dir;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let contains_broken decls =
+      List.exists (function
+        | March_ast.Ast.DMod ({March_ast.Ast.txt = "BrokenUnrelated"; _}, _, _, _) -> true
+        | _ -> false) decls
+    in
+    (* (1) Entry references only GoodLib: BrokenUnrelated must be pruned. *)
+    let entry_ok = Filename.concat dir "entry_ok.march" in
+    write_file entry_ok
+      "mod EntryOk do\n  fn main() do println(int_to_string(GoodLib.helper(21))) end\nend\n";
+    let m = parse_and_desugar (read_file_contents entry_ok) in
+    let (resolve_errors, extra_decls, _uf) =
+      March_resolver.Resolver.resolve_imports ~source_file:entry_ok m in
+    Alcotest.(check bool) "no resolve errors for GoodLib-only entry"
+      true (resolve_errors = []);
+    Alcotest.(check bool) "unreferenced broken module is pruned from the assembly"
+      false (contains_broken extra_decls);
+    let assembled =
+      { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+    let (errors, _tm) = March_typecheck.Typecheck.check_module assembled in
+    Alcotest.(check bool) "GoodLib-only entry typechecks clean" false (has_errors errors);
+    (* (2) Control: entry references the broken module -> kept and still errors. *)
+    let entry_ref = Filename.concat dir "entry_ref.march" in
+    write_file entry_ref
+      "mod EntryRef do\n  fn main() do println(BrokenUnrelated.oops(21)) end\nend\n";
+    let m2 = parse_and_desugar (read_file_contents entry_ref) in
+    let (_re2, extra2, _uf2) =
+      March_resolver.Resolver.resolve_imports ~source_file:entry_ref m2 in
+    Alcotest.(check bool) "referenced broken module is kept in the assembly"
+      true (contains_broken extra2);
+    let assembled2 =
+      { m2 with March_ast.Ast.mod_decls = extra2 @ m2.March_ast.Ast.mod_decls } in
+    let (errors2, _tm2) = March_typecheck.Typecheck.check_module assembled2 in
+    Alcotest.(check bool) "entry referencing broken module still errors"
+      true (has_errors errors2)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -7407,6 +7571,18 @@ let compiler_suites =
           Alcotest.test_case
             "large multi-file MARCH_LIB_PATH check is not quadratic (record_use import_tracker)"
             `Slow test_large_multi_file_check_is_not_quadratic;
+          Alcotest.test_case
+            "unrelated broken lib module is pruned; referenced one still errors"
+            `Quick test_unrelated_broken_lib_module_is_pruned;
+          Alcotest.test_case
+            "qualified private opaque ctor from a sibling module is rejected"
+            `Quick test_opaque_ctor_qualified_bypass_rejected;
+          Alcotest.test_case
+            "opaque type annotation + public accessors still accept cross-module"
+            `Quick test_opaque_type_annotation_still_accepts;
+          Alcotest.test_case
+            "public qualified ctor still resolves cross-module"
+            `Quick test_public_ctor_qualified_still_resolves;
         ] );
       ( "diagnostic dedup",
         [

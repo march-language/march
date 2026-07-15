@@ -1587,25 +1587,47 @@ static void *mpst_make_endpoint(march_mpst_session *session, int64_t role, int64
 #define MPST_SESSION(ep) ((march_mpst_session *)(intptr_t)(((int64_t *)((char *)(ep) + 16))[0]))
 #define MPST_ROLE(ep)    (((int64_t *)((char *)(ep) + 16))[1])
 
-/* MPST.new(proto_name, n_roles) → list of endpoints (as March linked list)
- * For N roles, returns a list [ep_0, ep_1, ..., ep_{N-1}]. */
-void *march_mpst_new(void *proto_name, int64_t n_roles) {
+/* Pre-register role names into session->role_names[i] in the given order.
+ * [roles_csv] is a March string of comma-separated role names in the SAME
+ * (role-name-sorted) order as the endpoint tuple positions, e.g.
+ * "Client,Logger,Server".  This makes mpst_resolve_role(name) return the
+ * fixed positional index that matches each endpoint's role index, instead of
+ * the fragile first-encounter order.  A NULL / empty string leaves the table
+ * all-NULL and falls back to lazy first-encounter registration. */
+static void mpst_register_roles(march_mpst_session *s, void *roles_csv) {
+    if (!roles_csv) return;
+    march_string *ms = (march_string *)roles_csv;
+    if (ms->len <= 0) return;
+    const char *p = ms->data;
+    const char *end = ms->data + ms->len;
+    int64_t idx = 0;
+    while (p < end && idx < s->n_roles) {
+        const char *start = p;
+        while (p < end && *p != ',') p++;
+        int64_t len = (int64_t)(p - start);
+        s->role_names[idx] = (char *)malloc((size_t)(len + 1));
+        memcpy(s->role_names[idx], start, (size_t)len);
+        s->role_names[idx][len] = '\0';
+        idx++;
+        if (p < end) p++;  /* skip the comma */
+    }
+}
+
+/* MPST.new(proto_name, n_roles, roles_csv) → flat N-tuple of endpoints.
+ * For N roles, returns a tuple (ep_0, ep_1, ..., ep_{N-1}) whose positions
+ * match the role-name-sorted order of [roles_csv].  Endpoint i carries role
+ * index i, and role_names[i] is pre-registered from [roles_csv] so that
+ * name-based routing in send/recv lines up with the tuple positions. */
+void *march_mpst_new(void *proto_name, int64_t n_roles, void *roles_csv) {
     (void)proto_name;
     march_mpst_session *session = mpst_session_new(n_roles);
-    /* Build endpoints as a March linked list (Cons = tag 1, Nil = tag 0).
-     * List is built in reverse to get [0, 1, ..., N-1] order. */
-    void *list = march_alloc(16);  /* Nil: tag=0, rc=1 */
-    for (int64_t i = n_roles - 1; i >= 0; i--) {
-        void *ep = mpst_make_endpoint(session, i, 0);
-        void *cons = march_alloc(16 + 2 * 8);
-        march_hdr *hdr = (march_hdr *)cons;
-        hdr->tag = 1;  /* Cons tag */
-        int64_t *fields = (int64_t *)((char *)cons + 16);
-        fields[0] = (int64_t)(intptr_t)ep;
-        fields[1] = (int64_t)(intptr_t)list;
-        list = cons;
-    }
-    return list;
+    mpst_register_roles(session, roles_csv);
+    /* Build a flat N-tuple: hdr(16) + n_roles fields (tag 0, like march_chan_new). */
+    void *tup = march_alloc(16 + n_roles * 8);
+    int64_t *fields = (int64_t *)((char *)tup + 16);
+    for (int64_t i = 0; i < n_roles; i++)
+        fields[i] = (int64_t)(intptr_t)mpst_make_endpoint(session, i, 0);
+    return tup;
 }
 
 /* MPST.send(endpoint, target_role_name_string, value) → new_endpoint */

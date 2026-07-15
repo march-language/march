@@ -669,7 +669,7 @@ let builtins : builtin list = [
   { march_name = "chan_offer"; c_name = Some "march_chan_offer"; ret_ty = Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_chan_offer(ptr %ep)" };
   { march_name = "mpst_new"; c_name = Some "march_mpst_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
-    in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)" };
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles, ptr %roles_csv)" };
   { march_name = "mpst_send"; c_name = Some "march_mpst_send"; ret_ty = Some (Tir.TCon ("Chan", []));
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)" };
   { march_name = "mpst_recv"; c_name = Some "march_mpst_recv"; ret_ty = Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);

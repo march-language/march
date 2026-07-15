@@ -1670,11 +1670,27 @@ let compile filename =
      compile modes. *)
   else if !do_check then begin
     (* Cache successful check result so the next identical-source invocation
-       exits immediately without re-running the typecheck pipeline. *)
+       exits immediately without re-running the typecheck pipeline (the early
+       CAS hit at the top of this function does `exit 0` printing nothing).
+
+       DETERMINISM: only cache when this run printed NO user-facing diagnostics.
+       A cache hit short-circuits BEFORE the diagnostic-printing pass, so if we
+       cached a run that emitted warnings/hints, the next identical --check would
+       exit silently and those diagnostics would vanish — making --check output
+       nondeterministic (shown on the caching run, absent on cached runs, and
+       reappearing whenever the shared project-root CAS store is cleared). By
+       caching only diagnostic-free runs, a hit provably corresponds to "clean,
+       nothing to print", so the silent exit is byte-identical to a fresh run.
+       Files that do emit warnings/hints are simply re-checked each time and
+       print the same diagnostics every run. This does not change WHICH
+       diagnostics are emitted — only whether the cache may suppress them. *)
+    let printed_user_diag =
+      List.exists is_user_file diags
+    in
     (match source_cas_state with
-     | Some (src_store, src_ch) ->
+     | Some (src_store, src_ch) when not printed_user_diag ->
        March_cas.Cas.store_artifact src_store src_ch filename
-     | None -> ());
+     | Some _ | None -> ());
     exit 0
   end
   else if !check_migration then begin
@@ -1968,6 +1984,14 @@ let compile filename =
           tir
       else tir
     in
+    (* Prune functions unreachable from the entry points BEFORE LLVM emit, even
+       when the optimizer is disabled.  Reachability pruning is a linkability
+       requirement (not an optimization): the injected prelude/http stack
+       references not-always-linked externs like [_http_fetch], so an
+       unreachable prelude function reaching the linker produces "undefined
+       symbols".  When opt IS enabled the DCE pass already pruned inside
+       Opt.run, so this is an idempotent no-op there. *)
+    let tir = March_tir.Dce.prune_unreachable tir in
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
     stamp "opt";

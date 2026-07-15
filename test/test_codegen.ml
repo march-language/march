@@ -6612,6 +6612,58 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── `--check` diagnostic-display determinism ───────────────────────────
+   Repeated `march --check` of the SAME source file must produce
+   byte-identical stderr every run. Regression for a display-nondeterminism
+   bug: `--check` cached a "clean check" CAS artifact after ANY successful
+   check (bin/main.ml), then a later identical-source invocation hit that
+   cache and `exit 0`ed BEFORE the diagnostic-printing pass — so a module
+   that emits a warning/hint (here: the Check-3 `Cap(IO)`-narrowing HINT)
+   printed it on the first (cache-miss) run and stayed SILENT on every
+   subsequent (cache-hit) run. Because the CAS store lives at the shared
+   project-root `.march/cas` and is cleared intermittently (concurrent
+   sessions, `dune cache trim`), the hint reappeared ~1-in-N — real, if
+   display-only (the exit code is invariant 0). Fix: only cache a `--check`
+   run that emitted NO user-facing diagnostics, so a cache hit provably
+   means "nothing to print" and its silent exit is byte-identical to a fresh
+   run.
+
+   A fresh unique temp path guarantees a cache MISS on the first run, so
+   pre-fix this test is reliably RED (run 1 prints the hint, run 2 is
+   silent); post-fix all runs print identically. *)
+let test_check_diagnostic_display_deterministic () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_capcheck_determinism"
+      "mod CapCheckDet do\n\
+      \  needs IO\n\
+      \  fn run(io : Cap(IO)) do io end\n\
+       end\n"
+  in
+  let check_cmd = Printf.sprintf
+    "cd %s && %s --check %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)
+  in
+  let iterations = 12 in
+  let first = read_cmd_output check_cmd in
+  (* The narrowing HINT must actually appear (otherwise the test is vacuous —
+     it would pass trivially if `--check` printed nothing at all). *)
+  Alcotest.(check bool)
+    "the Cap(IO)-narrowing HINT is present in --check output"
+    true
+    (ir_contains first "narrowing" || ir_contains first "HINT");
+  let all_identical = ref true in
+  for _ = 2 to iterations do
+    let out = read_cmd_output check_cmd in
+    if out <> first then all_identical := false
+  done;
+  Alcotest.(check bool)
+    (Printf.sprintf
+       "repeated --check produces byte-identical stderr across %d runs \
+        (no cache-driven diagnostic suppression)" iterations)
+    true
+    !all_identical
+
 (* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
    A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
    boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
@@ -7038,6 +7090,33 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** `--compile --no-opt` must still prune unreachable top-level functions.
+    Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
+    not an optimization: the injected prelude/http stack references
+    not-always-linked externs (e.g. `_http_fetch`).  Before the fix DCE ran only
+    inside Opt.run, so `--no-opt` left the whole prelude reachable and a trivial
+    program failed to link with "Undefined symbols: _http_fetch".  This test
+    compiles a trivial `println("hi")` with `--no-opt` and asserts the binary
+    links, runs, prints `hi`, and exits 0. It fails (link error) pre-fix. *)
+let test_compiled_no_opt_prunes_unreachable () =
+  let src =
+    "mod Main do\n  fn main() do println(\"hi\") end\nend\n" in
+  let (project_root, main_exe, src_path, tmp) =
+    write_march_source ~name:"no_opt_prune" src in
+  let bin = Filename.concat tmp "no_opt_prune_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~extra_args:"--no-opt"
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
+      (Filename.quote bin)) in
+    Alcotest.(check bool)
+      ("--no-opt compile links, runs, prints hi, exits 0 (got: " ^ run_out ^ ")")
+      true
+      (run_out = "hi\nEXIT:0")
+
 (** int_div_euclid: native codegen must route through march_checked_ediv and
     match the interpreter's Euclidean quotient across all four sign quadrants.
     Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
@@ -7075,6 +7154,179 @@ let test_compiled_let_shadowing_parity () =
          \  end\n\
           end\n"
     ~expected:"30"
+    ()
+
+(** Entry-module self-qualification: a hand-written call that spells out the
+    entry file's OWN top-level module name (`Foo.wrapped(x)` inside `mod Foo`,
+    or `Outer.Inner.wrapped(x)` inside entry `mod Outer`) must resolve. TIR
+    unwraps the entry module — its members are emitted WITHOUT the entry
+    mod-name prefix — but a dotted source reference kept its `Foo.` /
+    `Outer.` segment (it never matched desugar's bare `make_qualifier`), so
+    reference and definition never converged: "unbound variable: Foo.wrapped"
+    (interp) / "Undefined symbols: _Foo.wrapped" (compiled), on BOTH backends.
+    The desugar strip pass removes only the single leading entry-own segment,
+    so `Outer.Inner.wrapped -> Inner.wrapped` survives to match the nested
+    definition. `wrapped(5)` = 6 via `Foo.bar` / `Outer.Inner.helper`. *)
+let test_compiled_entry_self_qual_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual"
+    ~src:"mod Foo do\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do Foo.bar(x) end\n\
+         \  fn main() do println(int_to_string(Foo.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Nested variant of {!test_compiled_entry_self_qual_parity}: the entry file's
+    sole top-level mod is `Outer`, so `Outer.Inner.wrapped(5)` must strip only
+    the leading `Outer.` down to `Inner.wrapped` (the nested `Inner.` stays,
+    matching the still-qualified nested definition). *)
+let test_compiled_entry_self_qual_nested_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_nested"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn main() do println(int_to_string(Outer.Inner.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Over-stripping guard for {!test_compiled_entry_self_qual_parity}: bare
+    intra-module calls (`wrapped(5)`) and single-level nested-module
+    references that do NOT lead with the entry name (`Inner.wrapped(5)`) must
+    STILL resolve after the strip pass. Prints 6 twice. *)
+let test_compiled_entry_self_qual_no_overstrip_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_no_overstrip"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do bar(x) end\n\
+         \  fn main() do\n\
+         \    println(int_to_string(wrapped(5)))\n\
+         \    println(int_to_string(Inner.wrapped(5)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"6\n6"
+    ()
+
+(** MPST (multiparty session types), 3-role Relay — the FIRST MPST test that
+    RUNS the compiled binary (the [test_session_compile_*] tests only grep IR,
+    so they never caught this).
+
+    Two independent compiled-only bugs are pinned here:
+    (1) Layout: [march_mpst_new] used to return a March linked list (Cons
+        cells), while the typechecker types [MPST.new(P)] as a flat N-tuple and
+        the compiled destructure reads tuple field offsets 16/24/32.  Reading
+        past a 32-byte Cons cell yielded a garbage endpoint pointer → SIGSEGV
+        (exit 139, zero stderr) on EVERY compiled MPST program.  Fixed by
+        returning a flat N-tuple (mirroring [march_chan_new]).
+    (2) Role name/index skew: endpoints carry positional role indices 0..N-1
+        (tuple-position = role-name-SORTED order), but send/recv route by role
+        NAME via [mpst_resolve_role], which used to assign names to slots in
+        first-encounter order → indices didn't line up → empty-queue abort even
+        after the layout fix.  Fixed by threading the sorted role names to the
+        runtime so [role_names[i]] is pre-registered in tuple-position order.
+
+    The tuple destructure `(cc, lc, sc)` is role-name-SORTED
+    (Client, Logger, Server), NOT declaration order — so this also exercises
+    the sorted-order contract between the typechecker and the runtime. *)
+let test_compiled_mpst_relay_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay"
+    ~src:"mod MpstRelayParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"req\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, m1)\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, m2)\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"req"
+    ()
+
+(** MPST Relay with DISTINCT payloads on each of the three hops.  Where the
+    forwarding variant above could mask a name→index misroute (every hop
+    carries the same "req"), this one sends a unique literal per hop and prints
+    all three received values.  Any skew between the tuple-position role index
+    and the name-resolved routing index would deliver the wrong string or hit
+    an empty queue (abort) — so this specifically exercises fix (2), the
+    sorted role-name pre-registration, not just the tuple-layout fix. *)
+let test_compiled_mpst_relay_distinct_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay_distinct"
+    ~src:"mod MpstRelayDistinctParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"c2s\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, \"s2l\")\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, \"l2c\")\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m1)\n\
+         \    println(m2)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"c2s\ns2l\nl2c"
+    ()
+
+(** Guarded-match IR-bloat fix: a 3-arm guarded match with a wildcard
+    catch-all ([n > 0 -> "pos"], [n < 0 -> "neg"], [_ -> "zero"]) used to
+    re-lower a FRESH fallback join point per guard check, duplicating the
+    tail body (panic/"zero") per arm.  The fix threads ONE shared 0-arg join
+    point per arm (see lib/tir/lower_match.ml's guard path + the reduced
+    test/snapshots/perceus/guard_match.expected).  This parity test guards
+    the *behaviour*: all three guard outcomes must still print identically on
+    the interpreter and the compiled backend after the shared-JP refactor. *)
+let test_compiled_guarded_match_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_guarded_match"
+    ~src:"mod GuardedMatchParity do\n\
+         \  fn classify(x : Int) : String do\n\
+         \    match x do\n\
+         \      n when n > 0 -> \"pos\"\n\
+         \      n when n < 0 -> \"neg\"\n\
+         \      _ -> \"zero\"\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(classify(5))\n\
+         \    println(classify(-3))\n\
+         \    println(classify(0))\n\
+         \  end\n\
+          end\n"
+    ~expected:"pos\nneg\nzero"
     ()
 
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
@@ -8024,7 +8276,7 @@ declare i64  @march_chan_close(ptr %ep)
 declare ptr  @march_chan_choose(ptr %ep, ptr %label)
 declare ptr  @march_chan_offer(ptr %ep)
 ; Multi-party session type (MPST) builtins
-declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles, ptr %roles_csv)
 declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
 declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
 declare i64  @march_mpst_close(ptr %ep)
@@ -8735,6 +8987,12 @@ let codegen_suites =
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
             test_guard_exhaustion_panics_compiled;
+          Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
+            test_compiled_guarded_match_parity;
+        ] );
+      ( "check_diagnostic_determinism", [
+          Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick
+            test_check_diagnostic_display_deterministic;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
@@ -8769,10 +9027,22 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled --no-opt prunes unreachable fns (links, prints hi)" `Quick
+            test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
+            test_compiled_entry_self_qual_parity;
+          Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick
+            test_compiled_entry_self_qual_nested_parity;
+          Alcotest.test_case "compiled entry-module self-qual no-overstrip parity" `Quick
+            test_compiled_entry_self_qual_no_overstrip_parity;
+          Alcotest.test_case "compiled MPST 3-role Relay parity (runs binary; layout+role-index fix)" `Quick
+            test_compiled_mpst_relay_parity;
+          Alcotest.test_case "compiled MPST Relay distinct-payload parity (runs binary; role name->index)" `Quick
+            test_compiled_mpst_relay_distinct_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick

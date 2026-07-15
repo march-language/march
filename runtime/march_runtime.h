@@ -337,7 +337,7 @@ void   *march_chan_choose(void *ep, void *label);
 void   *march_chan_offer(void *ep);
 
 /* Multi-party session type (MPST) builtins. */
-void   *march_mpst_new(void *proto_name, int64_t n_roles);
+void   *march_mpst_new(void *proto_name, int64_t n_roles, void *roles_csv);
 void   *march_mpst_send(void *ep, void *target_role_str, void *val);
 void   *march_mpst_recv(void *ep, void *source_role_str);
 int64_t march_mpst_close(void *ep);
