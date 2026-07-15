@@ -8984,7 +8984,20 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                 let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
+                 (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
+                    for PUBLIC constructors.  A private constructor — notably an
+                    `opaque type`'s, whose variants the parser marks Private
+                    while keeping the type Public — must stay unreferenceable
+                    from a sibling module, or `Mod.Ctor(...)` from outside would
+                    typecheck clean and bypass the opacity boundary.  The
+                    disambiguated `Mod.Type.Ctor` key below is already gated the
+                    same way; the Pass-2 DMod export step also keeps only public
+                    ctors, but it StrMap.unions over this Pass-1 entry, so an
+                    ungated bare key here would survive and defeat that filter. *)
+                 let acc =
+                   if v.var_vis = Ast.Public
+                   then { acc with ctors = add_ctor qctor ci acc.ctors }
+                   else acc in
                  (* Also register the disambiguated module.type.ctor form
                     ("Md.Inline.Text").  A wrapped sibling gets this key from the
                     DMod export step, but the ENTRY module is unwrapped (top
@@ -9273,7 +9286,20 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                 let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
+                 (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
+                    for PUBLIC constructors.  A private constructor — notably an
+                    `opaque type`'s, whose variants the parser marks Private
+                    while keeping the type Public — must stay unreferenceable
+                    from a sibling module, or `Mod.Ctor(...)` from outside would
+                    typecheck clean and bypass the opacity boundary.  The
+                    disambiguated `Mod.Type.Ctor` key below is already gated the
+                    same way; the Pass-2 DMod export step also keeps only public
+                    ctors, but it StrMap.unions over this Pass-1 entry, so an
+                    ungated bare key here would survive and defeat that filter. *)
+                 let acc =
+                   if v.var_vis = Ast.Public
+                   then { acc with ctors = add_ctor qctor ci acc.ctors }
+                   else acc in
                  (* Also register the disambiguated module.type.ctor form
                     ("Md.Inline.Text").  A wrapped sibling gets this key from the
                     DMod export step, but the ENTRY module is unwrapped (top

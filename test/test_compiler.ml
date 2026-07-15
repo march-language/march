@@ -3621,6 +3621,106 @@ let test_large_multi_file_check_is_not_quadratic () =
       (Printf.sprintf "multi-file check completes well under 30s (took %.2fs)" elapsed)
       true (elapsed < 30.0)))
 
+(* ── opaque-type constructor visibility across compilation units ────────── *)
+
+(* An `opaque type`'s constructor is Private (the parser forces `var_vis =
+   Private` while keeping the type Public).  A sibling module discovered via
+   MARCH_LIB_PATH must NOT be able to construct it under its qualified name
+   (`Mod.Ctor(..)`): doing so bypasses the opacity boundary.  The Pass-1
+   forward-reference pass (`prebind_mod_members`) used to seed the bare
+   qualified ctor key unconditionally, so `OqToken.Token("x")` from unrelated
+   code typechecked clean.  This test builds the two-file scenario in a temp
+   MARCH_LIB_PATH and checks the entry via the same resolve+check pipeline the
+   compiler uses. *)
+let check_entry_with_lib_dir files entry_src =
+  let dir = Filename.temp_file "march_opaque_vis_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ())
+    (fun () ->
+      List.iter (fun (name, contents) ->
+          let oc = open_out (Filename.concat dir name) in
+          output_string oc contents;
+          close_out oc)
+        files;
+      Unix.putenv "MARCH_LIB_PATH" dir;
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+        let m = parse_and_desugar entry_src in
+        let (resolve_errors, extra_decls, _user_files) =
+          March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+        Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+        let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+        let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+        has_errors errors))
+
+let oq_token_src = {|mod OqToken do
+  opaque type Token = Token(String)
+  fn make(raw : String) : Token do Token(raw) end
+  fn value(t : Token) : String do
+    match t do Token(s) -> s end
+  end
+end
+|}
+
+let test_opaque_ctor_qualified_bypass_rejected () =
+  (* Sibling module constructs the private opaque ctor by qualified name. *)
+  let bypass_src = {|mod OqBypass do
+  fn main() do
+    let t = OqToken.Token("direct-bypass")
+    println(OqToken.value(t))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("oq_token.march", oq_token_src)] bypass_src in
+  Alcotest.(check bool)
+    "qualified private opaque ctor from a sibling module must be rejected"
+    true errored
+
+let test_opaque_type_annotation_still_accepts () =
+  (* Control: qualified name used only as a TYPE annotation plus the public
+     make/value accessors must still typecheck clean. *)
+  let entry_src = {|mod OqEntry do
+  fn use_it(t : OqToken.Token) : String do
+    OqToken.value(t)
+  end
+
+  fn round_trip() : String do
+    use_it(OqToken.make("hi"))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("oq_token.march", oq_token_src)] entry_src in
+  Alcotest.(check bool)
+    "opaque type used as annotation + public accessors still accepts"
+    false errored
+
+let test_public_ctor_qualified_still_resolves () =
+  (* A PUBLIC variant's `Mod.Ctor(..)` must still resolve cross-module. *)
+  let color_src = {|mod PubColor do
+  type Color = Red | Green | Blue
+  fn name(c : Color) : String do
+    match c do
+      Red -> "red"
+      Green -> "green"
+      Blue -> "blue"
+    end
+  end
+end
+|} in
+  let entry_src = {|mod PubUse do
+  fn main() do
+    let c = PubColor.Red
+    println(PubColor.name(c))
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("pubcolor.march", color_src)] entry_src in
+  Alcotest.(check bool)
+    "public qualified ctor still resolves cross-module"
+    false errored
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -7407,6 +7507,15 @@ let compiler_suites =
           Alcotest.test_case
             "large multi-file MARCH_LIB_PATH check is not quadratic (record_use import_tracker)"
             `Slow test_large_multi_file_check_is_not_quadratic;
+          Alcotest.test_case
+            "qualified private opaque ctor from a sibling module is rejected"
+            `Quick test_opaque_ctor_qualified_bypass_rejected;
+          Alcotest.test_case
+            "opaque type annotation + public accessors still accept cross-module"
+            `Quick test_opaque_type_annotation_still_accepts;
+          Alcotest.test_case
+            "public qualified ctor still resolves cross-module"
+            `Quick test_public_ctor_qualified_still_resolves;
         ] );
       ( "diagnostic dedup",
         [
