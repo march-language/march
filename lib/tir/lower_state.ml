@@ -175,6 +175,13 @@ let ty_of_expr (env : env) (e : Ast.expr) : Tir.ty =
     documented per the plan's "accumulator/table-build semantics" rule. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
+(** Protocol name → sorted, deduplicated role-name list.  Populated from
+    [DProtocol] declarations during lowering (mirrors [protocol_roles_tbl] in
+    the interpreter).  Consulted by the [MPST.new] lowering to pass the roles
+    in tuple-position (role-name-sorted) order to the runtime, so name-based
+    routing in send/recv lines up with the endpoint tuple positions. *)
+let _protocol_roles : (string, string list) Hashtbl.t = Hashtbl.create 8
+
 (** Module-alias prefix table: maps a `alias Long.Path as Short` declaration's
     short name to its full module path (e.g. "PubSub" -> "Bastion.PubSub").
     Consulted as an ORDER-INDEPENDENT fallback in [resolve_use_alias]: a

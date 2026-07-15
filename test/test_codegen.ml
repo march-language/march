@@ -7165,6 +7165,90 @@ let test_compiled_entry_self_qual_no_overstrip_parity () =
     ~expected:"6\n6"
     ()
 
+(** MPST (multiparty session types), 3-role Relay — the FIRST MPST test that
+    RUNS the compiled binary (the [test_session_compile_*] tests only grep IR,
+    so they never caught this).
+
+    Two independent compiled-only bugs are pinned here:
+    (1) Layout: [march_mpst_new] used to return a March linked list (Cons
+        cells), while the typechecker types [MPST.new(P)] as a flat N-tuple and
+        the compiled destructure reads tuple field offsets 16/24/32.  Reading
+        past a 32-byte Cons cell yielded a garbage endpoint pointer → SIGSEGV
+        (exit 139, zero stderr) on EVERY compiled MPST program.  Fixed by
+        returning a flat N-tuple (mirroring [march_chan_new]).
+    (2) Role name/index skew: endpoints carry positional role indices 0..N-1
+        (tuple-position = role-name-SORTED order), but send/recv route by role
+        NAME via [mpst_resolve_role], which used to assign names to slots in
+        first-encounter order → indices didn't line up → empty-queue abort even
+        after the layout fix.  Fixed by threading the sorted role names to the
+        runtime so [role_names[i]] is pre-registered in tuple-position order.
+
+    The tuple destructure `(cc, lc, sc)` is role-name-SORTED
+    (Client, Logger, Server), NOT declaration order — so this also exercises
+    the sorted-order contract between the typechecker and the runtime. *)
+let test_compiled_mpst_relay_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay"
+    ~src:"mod MpstRelayParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"req\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, m1)\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, m2)\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"req"
+    ()
+
+(** MPST Relay with DISTINCT payloads on each of the three hops.  Where the
+    forwarding variant above could mask a name→index misroute (every hop
+    carries the same "req"), this one sends a unique literal per hop and prints
+    all three received values.  Any skew between the tuple-position role index
+    and the name-resolved routing index would deliver the wrong string or hit
+    an empty queue (abort) — so this specifically exercises fix (2), the
+    sorted role-name pre-registration, not just the tuple-layout fix. *)
+let test_compiled_mpst_relay_distinct_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay_distinct"
+    ~src:"mod MpstRelayDistinctParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"c2s\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, \"s2l\")\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, \"l2c\")\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m1)\n\
+         \    println(m2)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"c2s\ns2l\nl2c"
+    ()
+
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
     erased-int tag (2n+1) got passed as a fresh Show$List.show's list
     argument and the match-scrutinee tag load faulted. *)
@@ -8112,7 +8196,7 @@ declare i64  @march_chan_close(ptr %ep)
 declare ptr  @march_chan_choose(ptr %ep, ptr %label)
 declare ptr  @march_chan_offer(ptr %ep)
 ; Multi-party session type (MPST) builtins
-declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles, ptr %roles_csv)
 declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
 declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
 declare i64  @march_mpst_close(ptr %ep)
@@ -8869,6 +8953,10 @@ let codegen_suites =
             test_compiled_entry_self_qual_nested_parity;
           Alcotest.test_case "compiled entry-module self-qual no-overstrip parity" `Quick
             test_compiled_entry_self_qual_no_overstrip_parity;
+          Alcotest.test_case "compiled MPST 3-role Relay parity (runs binary; layout+role-index fix)" `Quick
+            test_compiled_mpst_relay_parity;
+          Alcotest.test_case "compiled MPST Relay distinct-payload parity (runs binary; role name->index)" `Quick
+            test_compiled_mpst_relay_distinct_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick

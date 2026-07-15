@@ -64,6 +64,7 @@ let fresh_var = Lower_state.fresh_var
 let nonexhaustive_panic = Lower_state.nonexhaustive_panic
 let _fn_param_types = Lower_state._fn_param_types
 let _use_aliases = Lower_state._use_aliases
+let _protocol_roles = Lower_state._protocol_roles
 let _module_aliases = Lower_state._module_aliases
 let _module_alias_snapshots = Lower_state._module_alias_snapshots
 let _current_module_fns = Lower_state._current_module_fns
@@ -403,12 +404,26 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       | Tir.TTuple ts -> List.length ts
       | _ -> 3  (* fallback — shouldn't happen for well-typed code *)
     in
+    (* Resolve the protocol's sorted role list so the runtime can register
+       role_names[] in tuple-position order (name-based routing must line up
+       with the endpoint tuple positions).  Empty string ⇒ runtime falls back
+       to lazy first-encounter registration. *)
+    let proto_name = match proto_arg with
+      | Ast.ECon (n, [], _) | Ast.EVar n -> n.txt
+      | _ -> ""
+    in
+    let roles_csv =
+      match Hashtbl.find_opt _protocol_roles proto_name with
+      | Some roles -> String.concat "," roles
+      | None -> ""
+    in
     lower_to_atom_k env proto_arg (fun proto' ->
       let n_atom = Tir.ALit (March_ast.Ast.LitInt n_roles) in
+      let roles_atom = Tir.ALit (March_ast.Ast.LitString roles_csv) in
       let fn_var : Tir.var = {
-        v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TPtr Tir.TUnit);
+        v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt; Tir.TString], Tir.TPtr Tir.TUnit);
         v_lin = Tir.Unr } in
-      Tir.EApp (fn_var, [proto'; n_atom]))
+      Tir.EApp (fn_var, [proto'; n_atom; roles_atom]))
 
   | Ast.EApp (Ast.EVar { txt = "MPST.send"; _ }, [ch_arg; role_arg; val_arg], _) ->
     (* Lower role name to a string for the runtime's name→index lookup. *)
@@ -831,6 +846,29 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     | [] -> ()
   in
   preregister_mods m.mod_decls;
+  (* Collect protocol → sorted-role-list mappings (mirrors the interpreter's
+     [protocol_roles_tbl]) so the [MPST.new] lowering can pass role names to
+     the runtime in tuple-position (role-name-sorted) order. *)
+  Hashtbl.reset _protocol_roles;
+  let rec collect_roles acc = function
+    | [] -> acc
+    | Ast.ProtoMsg (s, r, _) :: rest -> collect_roles (s.txt :: r.txt :: acc) rest
+    | Ast.ProtoLoop steps :: rest -> collect_roles (collect_roles acc steps) rest
+    | Ast.ProtoChoice (ch, branches) :: rest ->
+      let branch_roles =
+        List.concat_map (fun (_, steps) -> collect_roles [] steps) branches in
+      collect_roles (ch.txt :: branch_roles @ acc) rest
+  in
+  let rec register_protocols decls =
+    List.iter (fun d -> match d with
+      | Ast.DProtocol (name, pdef, _) ->
+        let roles = List.sort_uniq String.compare
+            (collect_roles [] pdef.Ast.proto_steps) in
+        Hashtbl.replace _protocol_roles name.Ast.txt roles
+      | Ast.DMod (_, _, inner, _) -> register_protocols inner
+      | _ -> ()) decls
+  in
+  register_protocols m.mod_decls;
   let fns = ref [] in
   let types = ref [] in
   _fns_ref := fns;
