@@ -6400,7 +6400,11 @@ let check_mint_cap_sites (env : env) : unit =
     [March_caps.Cap_lattice.normalize]. Order is unspecified (backed by a hashtable).
     Consumed by the (future) hot-deploy capability manifest. *)
 let fn_capability_closures (env : env) : (string * string list) list =
+  (* Sort by key: [Hashtbl.fold] iteration order is unspecified, so sorting
+     gives downstream consumers (and any diagnostics derived from this list)
+     a deterministic, run-to-run-stable order. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.cap_closures []
+  |> List.sort (fun (a, _) (b, _) -> compare a b)
 
 (** [fn_own_capability_closures env] returns each function's OWN inferred
     IO-capability closure — [(fully_qualified_fn_name, normalized_cap_paths)]
@@ -6412,7 +6416,9 @@ let fn_capability_closures (env : env) : (string * string list) list =
     migrate_state, which would falsely fail such a check. Order is
     unspecified (backed by a hashtable). *)
 let fn_own_capability_closures (env : env) : (string * string list) list =
+  (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []
+  |> List.sort (fun (a, _) (b, _) -> compare a b)
 
 (* =================================================================
    §16a  Session type projection and duality

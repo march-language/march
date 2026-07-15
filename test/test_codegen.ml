@@ -6612,6 +6612,58 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── `--check` diagnostic-display determinism ───────────────────────────
+   Repeated `march --check` of the SAME source file must produce
+   byte-identical stderr every run. Regression for a display-nondeterminism
+   bug: `--check` cached a "clean check" CAS artifact after ANY successful
+   check (bin/main.ml), then a later identical-source invocation hit that
+   cache and `exit 0`ed BEFORE the diagnostic-printing pass — so a module
+   that emits a warning/hint (here: the Check-3 `Cap(IO)`-narrowing HINT)
+   printed it on the first (cache-miss) run and stayed SILENT on every
+   subsequent (cache-hit) run. Because the CAS store lives at the shared
+   project-root `.march/cas` and is cleared intermittently (concurrent
+   sessions, `dune cache trim`), the hint reappeared ~1-in-N — real, if
+   display-only (the exit code is invariant 0). Fix: only cache a `--check`
+   run that emitted NO user-facing diagnostics, so a cache hit provably
+   means "nothing to print" and its silent exit is byte-identical to a fresh
+   run.
+
+   A fresh unique temp path guarantees a cache MISS on the first run, so
+   pre-fix this test is reliably RED (run 1 prints the hint, run 2 is
+   silent); post-fix all runs print identically. *)
+let test_check_diagnostic_display_deterministic () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_capcheck_determinism"
+      "mod CapCheckDet do\n\
+      \  needs IO\n\
+      \  fn run(io : Cap(IO)) do io end\n\
+       end\n"
+  in
+  let check_cmd = Printf.sprintf
+    "cd %s && %s --check %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)
+  in
+  let iterations = 12 in
+  let first = read_cmd_output check_cmd in
+  (* The narrowing HINT must actually appear (otherwise the test is vacuous —
+     it would pass trivially if `--check` printed nothing at all). *)
+  Alcotest.(check bool)
+    "the Cap(IO)-narrowing HINT is present in --check output"
+    true
+    (ir_contains first "narrowing" || ir_contains first "HINT");
+  let all_identical = ref true in
+  for _ = 2 to iterations do
+    let out = read_cmd_output check_cmd in
+    if out <> first then all_identical := false
+  done;
+  Alcotest.(check bool)
+    (Printf.sprintf
+       "repeated --check produces byte-identical stderr across %d runs \
+        (no cache-driven diagnostic suppression)" iterations)
+    true
+    !all_identical
+
 (* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
    A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
    boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
@@ -8937,6 +8989,10 @@ let codegen_suites =
             test_guard_exhaustion_panics_compiled;
           Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
             test_compiled_guarded_match_parity;
+        ] );
+      ( "check_diagnostic_determinism", [
+          Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick
+            test_check_diagnostic_display_deterministic;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
