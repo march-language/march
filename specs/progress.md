@@ -283,6 +283,77 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
+
+**Second wave of `specs/plans/2026-07-15-open-items-master-plan.md`, on top of the
+merged Wave A. Every task re-verified live; full six-runner suite green (809 +
+all drivers, exit 0); `check_types.sh` 155/155; doc-lint passes.**
+
+- **3.1 (F5) — path-dependent `Chan.offer`:** the offer arm now registers its
+  session ref + label→continuation map; `match`ing the returned label refines the
+  shared session ref to `branches[L]` per arm, so a program that drives each
+  branch's continuation correctly is no longer spuriously rejected. Reject
+  witnesses for the wrong-branch drive.
+- **3.2 — zero-arg lambda `fn ->` vs `Unit -> Unit`:** typechecker accepts a 0-arg
+  lambda against a `Unit -> Unit` param (unit-consuming thunk) and applies an
+  implicit unit at `f()` call sites on `Unit -> T` values (also fixes `Unit -> T`
+  builtins like `int_max_value()`). Reverted the `stdlib/dom.march` `Int -> Unit`
+  workaround back to `Unit -> Unit`.
+- **3.3 (F7) — session-channel linearity holes:** dropping an unclosed `SEnd`
+  channel is rejected (must-close), and reusing a linear parameter endpoint is
+  caught via affine tracking of `TLin` channel params. Reject witnesses added.
+- **6.1 — standing ASAN gate:** `specs/lang/golden/sanitize.sh` compiles all 46
+  goldens under `MARCH_SANITIZE=1` (all clean); wired Linux-only into CI.
+- **6.3 — conformance-sweep corpus:** +15 curated deterministic `test/native`
+  fixtures (sweep 62→77 MATCH) + fixed-checksum anchors; the sort-bench family is
+  pinned KNOWN_DIVERGENCE (confirmed still crashing compiled 138/139 on this base
+  — the deferred sort-RC/float-boxing work).
+- **6.4 — property-test stdlib gap:** `pipeline_up_to_typecheck` now typechecks
+  generated programs against a stdlib-loaded seed env, so
+  `prop_generated_programs_are_well_typed` no longer falsely reddens on
+  `println([0])`.
+- **6.2 — oracle `--no-opt` axis:** plumbing (`oracle_check ~tir_opt`) landed but
+  the axis is DISABLED — enabling it hangs the property suite (a `--no-opt`
+  compiled binary's scheduler threads hold `run_capture`'s pipe open past the
+  run-timeout). Re-enable needs `run_capture` file-redirect hardening.
+- **Deferred:** 4.2 (mono dangling-TVar guard, latent) and 4.5 (hot-reload
+  naming, low-priority) remain; Phase 2 (float-boxing), Phase 5 (caps), Phase 7
+  (features) not started.
+
+## Current State (as of 2026-07-15, differential-oracle corpus extension — curated test/native subset + fixed-checksum anchors)
+
+**Extended the interpreter-vs-compiled conformance sweep (`test/test_oracle.ml`,
+additive test-infra only).** Two extensions, both landed and verified with a
+full sweep (`PASS: 77 matched, 10 known-divergence, 0 un-triaged failures`,
+exit 0; up from 62 MATCH):
+
+- **Curated `test/native/` subset** — 15 named deterministic, self-contained,
+  terminating fixtures (`test_native_allowlist`: `atom_ctor_field`,
+  `closure_bool_field`, `default_args_nested`, `lazy_niche`, `let_shadow_rebind`,
+  `let_tuple_destructure`, `march_prefixed_local`, `nested_mod_qualcall`,
+  `newtype_counter`, `niche_reuse_closure`, `option_niche`,
+  `qualified_ctor_pattern`, `shadow_selfref_let`, `tuple_scalar_fields`,
+  `zero_arg_closure_default`) are now swept in the native lane, exercising
+  closure/niche/tuple+newtype-layout/let-shadowing/default-arg/qualified+nested-
+  module codegen paths that `bench/`+`examples/` under-cover. Each verified MATCH
+  interp==compiled (byte-stable across 3 compiled runs). `test/` is still NOT
+  swept wholesale — FFI (`.c` shims), `--target js`, and actor/PID/hash/network/
+  scheduler-timing fixtures were deliberately excluded as non-comparable.
+
+- **Fixed expected-stdout anchors** (`expected_stdout`, new `ExpectedMismatch`
+  verdict) — pin the interpreter ground truth for checksum-style programs so a
+  backend-SYMMETRIC regression (interpreter and compiler drifting together,
+  invisible to the interp-vs-compiled diff — the same blind spot as the bench/
+  `Tree`-collision episode) reddens the sweep as a hard failure never masked by
+  `known_divergence`. Wired the sort-bench family:
+  `mergesort`/`heapsort`/`timsort`/`alphadev_sort` → `1423`,
+  `sort_nearly_sorted` → `0\n0`. These still CRASH COMPILED on this base
+  (re-verified live: exit 138 SIGBUS / 139 SIGSEGV — the sort RC-underflow
+  family, `known_divergence`; the 2026-07-10 "unkillable UE wedge" mode did NOT
+  reproduce this run, they crash cleanly), so each stays a triaged
+  KNOWN_DIVERGENCE and the anchor guards its interpreter checksum. The stdlib
+  `march>`-doctest extractor (todos §Phase-4 part b) remains the open follow-up.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 0 + Wave A: four P0 crashes + three hardening fixes)
 
 **Executed the first waves of `specs/plans/2026-07-15-open-items-master-plan.md`
@@ -3559,6 +3630,7 @@ Regression tests: compiled Slow guards in `test/test_stdlib_suite.ml` ("dual-pos
 - **Borrow inference and elision (P7)** — `lib/tir/borrow.ml`: pre-Perceus optimistic fixpoint analysis. Infers which TCon/TString/TPtr function parameters are "borrowed" (only read via pattern match or field access, never stored/returned/passed to owning positions). Inter-procedural: params passed only to other borrowed positions remain borrowed. Integrated into `lib/tir/perceus.ml`: (a) call sites skip EIncRC for live borrowed args; (b) borrowed params added to the callee's `~borrowed` live-at-exit set, suppressing scrutinee EDecRC; (c) borrowed last-use args trigger caller-side EDecRC after the call instead of callee-side dec. HTTP Conn middleware pattern (multiple read-only middleware functions) generates zero RC ops for the Conn value. 10 new tests in `borrow_inference` group.
 - **cprop RC-target corruption fix** — `lib/tir/cprop.ml`: constant propagation now guards against substituting into `EDecRC`, `EIncRC`, `EFree`, `EAtomicIncRC`, `EAtomicDecRC` target expressions. Previously, cprop could replace a `EDecRC(x, …)` variable reference with a literal if `x` was bound to a literal in scope — producing an `EDecRC(42, …)` that is semantically nonsense and can double-free or corrupt the heap. Fix: all five RC/Free node forms are passed through unchanged. 3 new regression tests in `cprop` group (`cprop_no_subst_into_decrc`, `cprop_no_subst_into_incrc`, `cprop_no_subst_into_free`). 1189 total tests.
 
+- **Session-type soundness: path-dependent `Chan.offer` + channel-endpoint linearity (F5 + F7, 2026-07-15)** — `lib/typecheck/typecheck.ml`. **F5 (over-rejection fixed):** `Chan.offer` no longer always returns the FIRST branch's continuation. The `SOffer` arm registers its returned session ref + label→continuation map (`env.offer_conts`); the destructuring `let (lbl, ch) = Chan.offer(...)` links the label variable to that ref (`env.offer_labels`); a subsequent `match lbl` transiently refines the SHARED session ref to `branches[L]` per arm (`with_offer_refinement`, applied in both `infer_match` and the `check_expr` EMatch path), so each arm types the channel at the branch the peer actually chose. A companion `iter_arms_linear` treats match arms as mutually-exclusive paths, so a linear channel consumed once per arm is not a false double-use. **F7 (two missing rejections fixed):** (a) a let-bound channel that reaches `SEnd` and is dropped is now rejected by a narrow must-close check in `infer_block` (mid-protocol create-and-drop stays legal — the out-of-scope F6 direction); (b) a session-channel PARAMETER endpoint's `TLin` wrapper is now tracked (as affine, in both `bind_lam_param` and `check_fn`'s param loop) so re-use is caught while a never-driven param stays legal. Conformance: `specs/lang/types/accept/t79`, `reject/t74`–`t76`; `check_types.sh` 155/155. Out of scope (untouched): F6 recv-before-send deadlock, F8 undeclared-participant hint.
 - **Session type TIR lowering + native compilation** — `Chan.*` and `MPST.*` calls wired through the full TIR pipeline (lower → mono → defun → perceus → llvm_emit). `lib/tir/lower.ml`: pattern-matched `Chan.new/send/recv/close/choose/offer` and `MPST.new/send/recv/close` lowered as `EApp(chan_*/mpst_*, args)`. `lib/tir/llvm_emit.ml`: `builtin_ret_ty`, `mangle_extern`, and LLVM `declare` entries. `lib/tir/defun.ml`: channel builtins registered. `runtime/march_extras.c`: C runtime with mutex-protected queue pairs (binary) and N×N queue matrices (MPST); `march_chan_pair` shared struct with atomic refcounting for endpoint lifecycle. 3 new tests in `session_compile` group. Session types now compile to native binaries — no longer interpreter-only.
 - **Optimization catalog + constant propagation** — `specs/optimizations.md`: comprehensive catalog of 12 implemented optimizations (fold, simplify, inline, DCE, escape analysis, stream fusion, TCO, Perceus, monomorphization, defun, unboxed LLVM types) and 4 planned (let-floating/join points, known-call, mutual TCO, representation polymorphism). `lib/tir/cprop.ml`: constant propagation pass substituting literal-bound variables at use sites, enabling cascading folds (e.g., `let x=3 in let y=x+4 in y` → `7` through CProp+Fold+DCE). Wired into `opt.ml` coordinator between Inline and Fold; `dune` updated. 6 new tests in `cprop` group.
 

@@ -626,6 +626,26 @@ type env = {
       for a module that plainly exists in this file.  This lets that path
       recognize the member is merely private and emit the accurate
       "Function `secret` is private to module `A`." instead. *)
+  offer_conts : (session_ty ref * (string * session_ty) list) list ref;
+  (** Session-type OFFER continuation registry (F5 path-dependent refinement).
+      Every [Chan.offer(ch)] registers the (physical) session ref it hands back
+      alongside that offer's full label→continuation map.  Because the returned
+      channel and the returned label atom come from the SAME offer, a later
+      `match <label> do :L -> ... end` can refine the channel — whose session
+      ref is registered here — to [branches[L]] for the duration of the `:L`
+      arm, instead of always typing it at the FIRST branch's continuation (the
+      old conservative-but-unsound-for-multi-branch approximation).  A shared
+      mutable ref (like [nonexhaustive_match_spans]) so the registration made
+      deep inside [infer_expr]'s [Chan.offer] arm is visible to [infer_block]'s
+      let-destructuring, which builds the label→ref linkage in [offer_labels]. *)
+  offer_labels : (string * (session_ty ref * (string * session_ty) list)) list;
+  (** Label-variable → (offer channel's session ref, branches) linkage.
+      Populated by [infer_block] when a `let (lbl, ch) = Chan.offer(...)`
+      destructures an offer result: [ch]'s session ref is looked up in
+      [offer_conts] and bound here under [lbl]'s name.  Read by the `match`
+      typing ([infer_match] / the [check_expr] EMatch arm): when the scrutinee
+      is such a [lbl] and an arm matches label `:L`, the shared ref is
+      transiently set to [branches[L]] while that arm body is checked. *)
 }
 
 let make_env errors type_map = {
@@ -655,6 +675,8 @@ let make_env errors type_map = {
   cap_closures = Hashtbl.create 64;
   own_cap_closures = Hashtbl.create 64;
   local_mods = StrMap.empty;
+  offer_conts = ref [];
+  offer_labels = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -4001,11 +4023,20 @@ let rec infer_expr env (e : Ast.expr) : ty =
        | TChan r ->
          (match unfold_srec !r with
           | SOffer branches ->
-            let cont_ty = match branches with
-              | (_, sty) :: _ -> TLin (Ast.Linear, TChan (ref sty))
-              | []             -> TError
-            in
-            TTuple [t_atom; cont_ty]
+            (match branches with
+             | (_, sty) :: _ ->
+               (* Hand back a channel at the FIRST branch's continuation as the
+                  default (keeps the previously-accepted programs that offer then
+                  drive without matching the label — the approximation is exact
+                  when the peer chose the first branch).  But ALSO register this
+                  fresh session ref against the full branch map so that a later
+                  `match <label>` can refine it PER ARM to the branch actually
+                  taken (F5 path-dependent refinement). *)
+               let cont_ref = ref sty in
+               env.offer_conts := (cont_ref, branches) :: !(env.offer_conts);
+               TTuple [t_atom; TLin (Ast.Linear, TChan cont_ref)]
+             | [] ->
+               TTuple [t_atom; TError])
           | SError -> TError
           | other ->
             Err.error env.errors ~span:sp
@@ -4734,6 +4765,17 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   | Ast.ELam (params, body, lsp), _ ->
     let rec peel ps ty env =
       match ps, repr ty with
+      | [], TArrow (param_ty, ret_ty)
+        when (match repr param_ty with TTuple [] -> true | _ -> false) ->
+        (* A 0-arg lambda `fn -> body` (or the equivalent `fn () -> body`,
+           which parses identically to [ELam ([], ...)]) checked against a
+           declared `Unit -> T` is accepted as a unit-consuming thunk: there is
+           no surface parameter to bind (the unit domain is implicit), so we
+           simply check the body against the arrow's result type.  This lets
+           `fn -> body` satisfy a `Unit -> Unit` callback param — the natural
+           spelling — without forcing the `fn _ -> body` (1-arg discard) idiom.
+           The symmetric call side (`cb()`) is handled in [infer_app]. *)
+        check_expr env body ret_ty ~reason
       | [], body_ty ->
         check_expr env body body_ty ~reason
       | p :: rest, TArrow (arg_ty, ret_ty) ->
@@ -4748,7 +4790,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
     let scrut_ty = infer_expr env scrut in
-    List.iter (fun (br : Ast.branch) ->
+    iter_arms_linear env branches (fun (br : Ast.branch) ->
         let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
         unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
@@ -4758,8 +4800,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            check_expr env' g t_bool
              ~reason:(Some (RBuiltin "Match guards must be Bool."))
          | None -> ());
-        check_expr env' br.branch_body expected ~reason
-      ) branches;
+        with_offer_refinement env scrut br (fun () ->
+          check_expr env' br.branch_body expected ~reason)
+      );
     check_exhaustiveness env msp scrut_ty branches
 
   (* Constructor in check mode: when the bare constructor name is ambiguous
@@ -4809,7 +4852,21 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app env span f_ty args idx =
   match args, repr f_ty with
-  | [], t -> t
+  | [], t ->
+    (* A call written with empty parens — `f()`, i.e. zero surface arguments
+       at [idx = 0] — against a `Unit -> T` value applies the implicit unit
+       argument and yields `T`.  This mirrors March's 0-arg convention: a
+       0-arg function is typed as its return type, and a 0-arg lambda
+       `fn -> body` checks against `Unit -> T` (see the [ELam] arm in
+       [check_expr]).  The [idx = 0] guard keeps a partial application that
+       merely leaves a trailing `Unit -> T` (e.g. `g(x)` with
+       `g : Int -> Unit -> T`) returning the arrow — only the literal
+       empty-parens call form applies the implicit unit. *)
+    (match idx, t with
+     | 0, TArrow (param_ty, ret_ty)
+       when (match repr param_ty with TTuple [] -> true | _ -> false) ->
+       ret_ty
+     | _ -> t)
   | arg :: rest, TArrow (param_ty, ret_ty) ->
     check_expr env arg param_ty
       ~reason:(Some (RFnArg (span, idx)));
@@ -4847,10 +4904,62 @@ and infer_app env span f_ty args idx =
     List.iter (fun a -> ignore (infer_expr env a)) args;
     TError
 
+(** Extract the branch label an atom arm selects (nullary `:L`), if any. *)
+and offer_arm_label (br : Ast.branch) =
+  match br.branch_pat with
+  | Ast.PatAtom (l, [], _)          -> Some l
+  | Ast.PatLit (Ast.LitAtom l, _)   -> Some l
+  | _                               -> None
+
+(** Run [f] with the offer channel's session ref transiently refined to the
+    branch [br] selects (F5).  When [scrut] is an offer label variable (linked
+    in [env.offer_labels]) and [br]'s pattern names a known branch label, point
+    the shared session ref at that branch's continuation for the duration of
+    [f], then restore it — so the channel bound alongside the label types at the
+    branch the peer ACTUALLY chose inside each arm, not always the first. *)
+and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
+  let applied =
+    match scrut with
+    | Ast.EVar name ->
+      (match List.assoc_opt name.txt env.offer_labels, offer_arm_label br with
+       | Some (r, branches), Some lbl ->
+         (match List.assoc_opt lbl branches with
+          | Some cont -> let saved = !r in r := cont; Some (r, saved)
+          | None -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  match applied with
+  | Some (r, saved) -> Fun.protect ~finally:(fun () -> r := saved) f
+  | None            -> f ()
+
+(** Check each match arm as a mutually-exclusive path with respect to
+    linear-value use.  Because at most one arm runs on any execution path, a
+    linear value bound OUTSIDE the match may be consumed once in EACH arm
+    without violating "use exactly once".  Snapshot the outer linear-use flags,
+    reset them before every arm, and union afterwards (a var used in any arm is
+    marked consumed) — eliminating the spurious "used more than once" a shared
+    mutable flag would otherwise raise across arms, while still catching a
+    genuine double-use WITHIN a single arm. *)
+and iter_arms_linear env (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
+  (* For each outer linear entry track (entry, pre-match flag, union accumulator). *)
+  let snapshot =
+    List.map (fun le -> (le, !(le.le_used), ref !(le.le_used))) env.lin
+  in
+  List.iter (fun br ->
+      (* Reset each entry to its pre-match state so this arm sees a fresh path. *)
+      List.iter (fun (le, was, _acc) -> le.le_used := was) snapshot;
+      f br;
+      (* Fold whatever this arm consumed into the union accumulator. *)
+      List.iter (fun (le, _was, acc) -> if !(le.le_used) then acc := true) snapshot
+    ) branches;
+  (* Final: consumed iff consumed before the match OR in some arm. *)
+  List.iter (fun (le, _was, acc) -> le.le_used := !acc) snapshot
+
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =
   let result_ty = fresh_var env.level in
-  List.iter (fun (br : Ast.branch) ->
+  iter_arms_linear env branches (fun (br : Ast.branch) ->
       let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
       unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
@@ -4860,9 +4969,10 @@ and infer_match env span scrut scrut_ty branches =
          check_expr env' g t_bool
            ~reason:(Some (RBuiltin "Match guards must be Bool."))
        | None -> ());
-      check_expr env' br.branch_body result_ty
-        ~reason:(Some (RMatchArm span))
-    ) branches;
+      with_offer_refinement env scrut br (fun () ->
+        check_expr env' br.branch_body result_ty
+          ~reason:(Some (RMatchArm span)))
+    );
   check_exhaustiveness env span scrut_ty branches;
   check_redundant_arms env scrut_ty branches;
   result_ty
@@ -4971,6 +5081,26 @@ and infer_block env exprs =
             bind_linear bname lin t acc_env
           ) env bindings'
     in
+    (* F5 path-dependent OFFER refinement: if this let destructures a
+       `Chan.offer` result — a 2-tuple whose 2nd component is a channel whose
+       session ref was registered in [offer_conts] — link the label variable
+       (1st tuple component) to that channel's ref + branch map, so a later
+       `match <label>` can refine the channel per arm.  Detected purely from
+       the (repr'd) RHS type + the tuple-of-vars pattern shape, so it fires for
+       both the `Chan.offer(x)` and `Mod.offer`-normalized call spellings. *)
+    let env' =
+      match b.bind_pat, repr rhs_ty with
+      | Ast.PatTuple ([Ast.PatVar lbl; Ast.PatVar _chan], _),
+        TTuple [_; chan_ty] ->
+        (match repr chan_ty with
+         | TLin (_, TChan r) | TChan r ->
+           (match List.find_opt (fun (r', _) -> r' == r) !(env.offer_conts) with
+            | Some (r', branches) ->
+              { env' with offer_labels = (lbl.txt, (r', branches)) :: env'.offer_labels }
+            | None -> env')
+         | _ -> env')
+      | _ -> env'
+    in
     let result_ty = infer_block env' rest in
     (* After the rest of the block has run, verify that any linear let
        bindings introduced here were consumed (used exactly once). *)
@@ -4979,6 +5109,33 @@ and infer_block env exprs =
      | _lin ->
        let linear_names = List.map fst bindings' in
        check_linear_all_consumed env' ~scope_span:sp linear_names);
+    (* Session-specific must-close accounting (F7 hole a): a channel binding
+       whose session state is `End` MUST be closed — dropping it leaks the
+       endpoint.  This is NARROWER than full linear consumption on purpose: a
+       freshly-created channel still at a Send/Recv/Choose/Offer state that is
+       never driven stays legal (the accept corpus deliberately creates-and-
+       drops such endpoints, e.g. t42/t44), matching the documented scope
+       (mid-protocol drop is the out-of-scope F6, only `End`-drop is caught).
+       A channel that reaches `End` and IS passed to `Chan.close` counts as
+       used (its EVar fires [record_use]); only a dropped `End` channel — never
+       referenced after the binding — is flagged. *)
+    List.iter (fun (n, sch) ->
+        let bty = match sch with Mono t -> t | Poly (_, _, t) -> t in
+        let at_end = match repr bty with
+          | TLin (_, TChan r) | TChan r ->
+            (match unfold_srec !r with SEnd -> true | _ -> false)
+          | _ -> false
+        in
+        if at_end then
+          match List.find_opt (fun le -> le.le_name = n) env'.lin with
+          | Some le when not !(le.le_used) ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Session channel `%s` reached `End` but was never closed.\n\
+                  A channel at `End` must be passed to `Chan.close` — dropping \
+                  it leaks the endpoint." n)
+          | _ -> ()
+      ) bindings';
     result_ty
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
@@ -5053,14 +5210,26 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | Ast.Unrestricted ->
       (match repr t with
        | TCon (name, _) when List.mem name env.always_linear_types -> Ast.Linear
+       (* A parameter whose resolved type is a linear/affine wrapper — e.g. a
+          session channel `ch : Chan(Client, Echo)` resolving to
+          `TLin(Linear, TChan …)` — is tracked as AFFINE so a re-read of the
+          endpoint is caught (F7 hole b) while a never-driven endpoint stays
+          legal (create-and-drop leniency; see the matching note in [check_fn]'s
+          parameter loop).  The old code only recognized `always_linear` [TCon]s
+          here, so such a parameter slipped past the use-tracker entirely; a
+          let-bound channel was already tracked via [bind_pattern_bindings]. *)
+       | TLin (lin, _) when lin <> Ast.Unrestricted -> Ast.Affine
        | _ -> Ast.Unrestricted)
     | lin -> lin
   in
+  (* Track the linear parameter at its INNER (unwrapped) type, matching how
+     [bind_pattern_bindings] registers linear let-bindings. *)
+  let bind_ty = match repr t with TLin (_, inner) -> inner | _ -> t in
   match effective_lin with
   | Ast.Unrestricted ->
     let env1 = bind_var p.param_name.txt (Mono t) env in
     bind_linear_field_sentinels p.param_name.txt t env1
-  | lin -> bind_linear p.param_name.txt lin t env
+  | lin -> bind_linear p.param_name.txt lin bind_ty env
 
 (* =================================================================
    §15  Declaration checking
@@ -5279,12 +5448,25 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Ast.Unrestricted ->
                   (match repr t with
                    | TCon (tname, _) when List.mem tname env'.always_linear_types -> Ast.Linear
+                   (* A session-channel parameter (`ch : Chan(Role, Proto)`)
+                      resolves to a [TLin] wrapper.  Track it as AFFINE so a
+                      RE-READ of the endpoint inside the body is caught (F7 hole
+                      b) while a channel parameter merely declared and never
+                      driven stays legal — the create-and-drop leniency the
+                      session corpus already relies on for endpoints (a param at
+                      a mid-protocol state is not required to be consumed; only
+                      the `End`-drop of a LET-bound channel is an error, handled
+                      in [infer_block]).  Full linear consumption of endpoints is
+                      the stricter F6 direction, deliberately out of scope. *)
+                   | TLin (lin, _) when lin <> Ast.Unrestricted -> Ast.Affine
                    | _ -> Ast.Unrestricted)
                 | lin -> lin
               in
+              (* Track the linear param at its inner (unwrapped) type. *)
+              let bind_ty = match repr t with TLin (_, inner) -> inner | _ -> t in
               let env' = match effective_lin with
                 | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
-                | lin              -> bind_linear p.param_name.txt lin t env
+                | lin              -> bind_linear p.param_name.txt lin bind_ty env
               in
               (t :: tys, env')
             | Ast.FPPat (Ast.PatVar name) ->

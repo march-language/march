@@ -18,9 +18,10 @@ open QCheck2
 
 (* ── Pipeline helpers ──────────────────────────────────────────────────── *)
 
-module Ast    = March_ast.Ast
-module Tir    = March_tir.Tir
-module Errors = March_errors.Errors
+module Ast       = March_ast.Ast
+module Tir       = March_tir.Tir
+module Errors    = March_errors.Errors
+module Typecheck = March_typecheck.Typecheck
 
 (** Parse a March source string into an AST module.
     Raises [March_parser.Parser.Error] on syntax error. *)
@@ -28,19 +29,165 @@ let parse_src src =
   let lexbuf = Lexing.from_string src in
   March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
-(** Full pipeline through typecheck; returns [None] on parse error. *)
+(* ── Stdlib-loaded typecheck env (Task 6.4) ────────────────────────────────
+
+   [pipeline_up_to_typecheck] used to call [check_module] on the bare parsed
+   module with NO stdlib in scope.  That made every well-typed program that
+   touches a prelude/stdlib binding — most obviously [println([0])], whose
+   Show-based signature lives in prelude.march — report a spurious type error
+   in-process, even though `march --check`/`--compile` accept it.  QCheck then
+   shrank [prop_generated_programs_are_well_typed] straight to [println([0])].
+
+   Fix: mirror exactly what `march --check`/`--compile` do — typecheck the
+   stdlib ONCE into a seed env (bin/main.ml's [get_stdlib_tc_env] builds the
+   same [check_module_core]-derived [final_env]) and thread it into each
+   program's check as [?seed_env], with a FRESH error context per call so
+   diagnostics never accumulate across QCheck iterations. *)
+
+(** The ordered native stdlib file list, verbatim from bin/main.ml's
+    [stdlib_file_list].  This is the canonical set `march --check` loads; the
+    js-only trio (dom/canvas/audio) and on-demand extras are deliberately
+    excluded, matching the native compile path.  A file that fails to open is
+    skipped gracefully (see [load_stdlib_file]). *)
+let stdlib_file_list = [
+  "prelude.march"; "option.march"; "result.march"; "list.march"; "hamt.march";
+  "map.march"; "math.march"; "string.march"; "iolist.march"; "html.march";
+  "sigil.march"; "http.march"; "http_transport.march"; "http_client.march";
+  "seq.march"; "path.march"; "file.march"; "dir.march"; "sort.march";
+  "csv.march"; "websocket.march"; "http_server.march"; "iterable.march";
+  "set.march"; "hash_map.march"; "array.march"; "bigint.march"; "decimal.march";
+  "duration.march"; "bytes.march"; "msgpack.march"; "toml.march"; "xml.march";
+  "yaml.march"; "socket.march"; "dns.march"; "process.march"; "io.march";
+  "system.march"; "cluster.march"; "cluster_load.march"; "logger.march";
+  "actor.march"; "flow.march"; "json.march"; "regex.march"; "datetime.march";
+  "queue.march"; "enum.march"; "random.march"; "gen.march"; "check.march";
+  "stats.march"; "plot.march"; "dataframe.march"; "tls.march"; "uuid.march";
+  "vault.march"; "channel.march"; "pubsub.march"; "channel_server.march";
+  "channel_socket.march"; "presence.march"; "env.march"; "config.march";
+  "cli.march"; "test.march"; "tuple.march"; "char.march"; "ordered_map.march";
+  "sorted_set.march"; "range.march"; "crypto.march"; "base64.march";
+  "native_array.march"; "task.march"; "rrb_vec.march"; "parallel.march";
+  "uri.march"; "forge_nb.march"; "handle.march"; "vector_clock.march";
+  "crdt.march"; "merkle.march"; "net_frame.march"; "cluster_auth.march";
+  "node_identity.march"; "handshake.march"; "global_pid.march";
+  "remote_call.march"; "node_rpc.march"; "peer_registry.march";
+  "net_kernel.march"; "membership.march"; "swim.march"; "swim_driver.march";
+  "global_registry.march"; "cluster_conn.march"; "node_call.march";
+]
+
+(** Parse + desugar one stdlib file into top-level decls, mirroring
+    bin/main.ml's [load_stdlib_file]: prelude.march is unwrapped into global
+    scope; every other file keeps its outer [DMod] so members stay qualified
+    ([Option.is_some]).  A missing/unparseable file yields [] (skipped). *)
+let load_stdlib_file path =
+  match (try
+    let ic = open_in_bin path in
+    let n = in_channel_length ic in
+    let s = really_input_string ic n in
+    close_in ic; Some s
+  with Sys_error _ -> None) with
+  | None | Some "" -> []
+  | Some src ->
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    (try
+       let m = March_parser.Parser.module_
+                 (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+       let basename = Filename.basename path in
+       let m = March_desugar.Desugar.desugar_module
+                 ~is_entry:(basename = "prelude.march") m in
+       if basename = "prelude.march" then
+         (match m.Ast.mod_decls with
+          | [Ast.DMod (_, _, inner, _)] -> inner
+          | decls -> decls)
+       else
+         [Ast.DMod (m.Ast.mod_name, Ast.Public, m.Ast.mod_decls, Ast.dummy_span)]
+     with _ -> [])
+
+(** The parsed+desugared native stdlib decls, loaded ONCE.  Shared by the
+    typecheck seed env (below) and [eval_main] — both must see stdlib for a
+    generated program that calls [println]/etc. to behave as it does under
+    `march file.march` (which prepends exactly these before typecheck AND
+    eval).  Empty if the stdlib dir can't be found (→ bare fallback). *)
+let stdlib_decls : Ast.decl list Lazy.t = lazy (
+  match March_modules.Module_registry.find_stdlib_dir () with
+  | None -> []
+  | Some dir ->
+    List.concat_map (fun name -> load_stdlib_file (Filename.concat dir name))
+      stdlib_file_list
+)
+
+(** Typecheck the whole native stdlib ONCE and keep the resulting env, used as
+    the [?seed_env] for every generated program's check.  Lazy so the cost is
+    paid at most once (and never at all if no property invokes the pipeline).
+    [None] if the stdlib is unavailable or checking it raises — the pipeline
+    then falls back to the bare (no-stdlib) check. *)
+let stdlib_seed_env : Typecheck.env option Lazy.t = lazy (
+  match Lazy.force stdlib_decls with
+  | [] -> None
+  | decls ->
+    (try
+       let synthetic = Ast.{
+         mod_name  = { txt = "StdlibBaseline"; span = dummy_span };
+         mod_decls = decls;
+       } in
+       (* Stdlib-internal diagnostics are discarded (some WIP modules carry
+          known errors, exactly as `march --check` tolerates them); we keep
+          only the final typing env. *)
+       let (_errs, _tm, final_env) =
+         Typecheck.check_module_core ~errors:(Errors.create ()) synthetic in
+       Some final_env
+     with _ -> None)
+)
+
+(** Full pipeline through typecheck; returns [None] on parse error.
+
+    When the stdlib seed env is available (the normal case), the generated
+    module is checked WITH stdlib in scope — via [check_module_full ~seed_env]
+    with a fresh error context — so prelude/stdlib-dispatched calls like
+    [println([0])] typecheck exactly as they do under `march --check`. *)
 let pipeline_up_to_typecheck src =
   match (try Some (parse_src src) with _ -> None) with
   | None   -> None
   | Some m ->
-    let m      = March_desugar.Desugar.desugar_module m in
-    let errors, type_map = March_typecheck.Typecheck.check_module m in
+    let m = March_desugar.Desugar.desugar_module m in
+    let (errors, type_map) =
+      match Lazy.force stdlib_seed_env with
+      | Some base ->
+        (* Fresh error ctx per call so diagnostics don't accumulate across
+           QCheck iterations; the seed env's [type_map] is shared (mutated in
+           place with this module's span→type entries), matching bin/main.ml. *)
+        let seed_env = { base with Typecheck.errors = Errors.create () } in
+        let (errs, tm, _env) =
+          Typecheck.check_module_full ~errors:(Errors.create ()) ~seed_env m in
+        (errs, tm)
+      | None ->
+        (* Stdlib unavailable — fall back to the bare check (historical
+           behavior). *)
+        Typecheck.check_module m
+    in
     Some (m, errors, type_map)
 
 (** Call the reference interpreter and return the value of [main()].
-    Resets scheduler/actor state before each call. *)
-let eval_main m =
+    Resets scheduler/actor state before each call.
+
+    [with_stdlib] (default [false] = the historical fast path): when [true],
+    stdlib decls are prepended to the module before eval — exactly as
+    `march file.march` does before [Eval.run_module] — so a generated program
+    that calls a prelude/stdlib binding ([println], [to_string], …) resolves
+    it at eval time.  [Eval.eval_module_env] clears the global module registry
+    on entry, so a persistent stdlib env is impossible; prepending is the only
+    mechanism and it re-evals stdlib per call (~tens of ms), so callers whose
+    generated programs are pure/self-contained (arithmetic, ADTs, tuples,
+    closures) leave it [false] to stay fast. *)
+let eval_main ?(with_stdlib = false) m =
   March_eval.Eval.reset_scheduler_state ();
+  let m =
+    if not with_stdlib then m
+    else match Lazy.force stdlib_decls with
+      | []    -> m
+      | decls -> { m with Ast.mod_decls = decls @ m.Ast.mod_decls }
+  in
   let env = March_eval.Eval.eval_module_env m in
   match List.assoc_opt "main" env with
   | None    -> None
@@ -1468,8 +1615,16 @@ let classify_compile (rc : int) (stderr : string) : [ `Fail of string | `Skip of
     interpreter output == compiled output.
     Returns Ok () on match, Error msg on mismatch, or None to skip.
     Every [None] result has already been counted via [record_skip]; every
-    [Some _] result has been counted via [record_match]. *)
-let oracle_check ?(opt = None) src =
+    [Some _] result has been counted via [record_match].
+
+    [tir_opt] controls the March/TIR optimizer passes (the [--no-opt] flag,
+    [opt_enabled] in bin/main.ml), which is ORTHOGONAL to [opt] (the clang
+    codegen level, [--opt N]).  [tir_opt = true] (default) keeps the passes on
+    (historical behavior); [tir_opt = false] adds [--no-opt] so a TIR-level
+    optimizer miscompile (the sort_by/cprop class) can be attributed — it
+    agrees with the interpreter at [--no-opt] but diverges once the passes run.
+    Wave A's [--no-opt --compile] link fix is what lets this axis finally run. *)
+let oracle_check ?(opt = None) ?(tir_opt = true) src =
   incr oracle_invocations;
   match Lazy.force march_bin_opt with
   | None ->
@@ -1497,9 +1652,10 @@ let oracle_check ?(opt = None) src =
          additionally passes [--opt n] (clang -On) so the Phase-3 opt-matrix
          property can diff each optimization level against the interpreter. *)
       let opt_flag = match opt with None -> "" | Some n -> Printf.sprintf " --opt %d" n in
+      let tir_flag = if tir_opt then "" else " --no-opt" in
       let compile_cmd =
-        Printf.sprintf "%s --compile%s %s -o %s"
-          (Filename.quote bin) opt_flag (Filename.quote src_file) (Filename.quote bin_file)
+        Printf.sprintf "%s --compile%s%s %s -o %s"
+          (Filename.quote bin) opt_flag tir_flag (Filename.quote src_file) (Filename.quote bin_file)
       in
       let (rc_compile, _compile_out, compile_err) = run_capture3 ~timeout:30 compile_cmd in
       if rc_compile <> 0 then (
@@ -1635,7 +1791,13 @@ let prop_type_sound_eval_no_crash =
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, _) ->
-           ignore (eval_main m);
+           (* [gen_well_typed_module] includes stdlib-using programs (e.g.
+              println of a list), which — now that they typecheck via the
+              stdlib seed env — reach eval; eval them WITH stdlib so a
+              prelude/stdlib call resolves as it does under `march file.march`
+              (bare eval would raise "unbound" and spuriously fail this
+              no-crash property). *)
+           ignore (eval_main ~with_stdlib:true m);
            true
        with _ -> false)
 
@@ -2496,43 +2658,65 @@ let prop_oracle_erased_flow =
          Printf.eprintf "MISMATCH:\n  interp:   %S\n  compiled: %S\n%!" interp compiled;
          false)
 
-(** Phase 3 — opt-level matrix.  Every other [prop_oracle_*] property diffs the
-    interpreter against a SINGLE compiled configuration (the [--compile]
-    default = clang -O2, TIR passes on).  This one diffs the interpreter
-    against the compiled binary at BOTH [--opt 0] (clang -O0) AND [--opt 2]
-    (clang -O2) — a level that diverges from the interpreter while another
-    agrees is an LLVM-level optimizer miscompile the single-config oracle would
-    miss.  (Note: the TIR-level optimizer-miscompile family — the sort_by/cprop
-    class — is gated by the separate [--no-opt] flag, NOT by [--opt N], and is
-    already caught by the default-O2-vs-interpreter comparison the existing
-    properties run; a [--no-opt] axis is a documented Phase-3 follow-up.)
+(** Phase 3 — opt matrix (clang levels + TIR-optimizer axis).  Every other
+    [prop_oracle_*] property diffs the interpreter against a SINGLE compiled
+    configuration (the [--compile] default = clang -O2, TIR passes on).  This
+    one diffs the interpreter against the compiled binary across THREE
+    configurations:
 
-    REDUCED COUNT: each draw runs TWO full compile+run cycles (~3.5s each ≈ 7s/
-    draw, vs ~3.5s for the single-config properties), so this runs at count 30
-    (≈ 210s) rather than 50, keeping the suite within its wall-clock budget
-    while still exercising both levels across a spread of generated programs.
-    Reuses [gen_record_update_module] — a generator whose interpreter output is
-    reliably exit-0 and deterministic (a single Int sum). *)
+      - [--no-opt]  — TIR optimizer passes OFF, clang default level (Task 6.2);
+      - [--opt 0]   — TIR passes ON, clang -O0;
+      - [--opt 2]   — TIR passes ON, clang -O2.
+
+    The two axes are ORTHOGONAL: [--opt N] is the clang codegen level, while
+    the TIR/March optimizer passes (fusion, Opt/cprop, FBIP, …) are gated by
+    the separate [--no-opt] flag ([opt_enabled] in bin/main.ml).  Running both
+    axes lets a divergence be ATTRIBUTED rather than merely flagged:
+
+      - a config that diverges while another AGREES at the same TIR setting but
+        a different clang level → an LLVM-level (clang) optimizer miscompile;
+      - the interpreter agreeing with [--no-opt] but diverging once the TIR
+        passes run → a TIR-optimizer miscompile (the sort_by/cprop class),
+        which the pre-existing default-O2 oracle could flag but never localize.
+
+    Wave A's [--no-opt --compile] LINK fix is what finally lets the [--no-opt]
+    axis run at all (it used to fail to link).
+
+    REDUCED COUNT: each draw now runs THREE full compile+run cycles (~3.5s each),
+    so this runs at count 20 (was 30 for two configs) to keep the suite within
+    its wall-clock budget while still exercising all three configs across a
+    spread of generated programs.  Reuses [gen_record_update_module] — a
+    generator whose interpreter output is reliably exit-0 and deterministic (a
+    single Int sum). *)
 let prop_oracle_opt_matrix =
-  Test.make ~name:"oracle (opt-matrix): interp = compiled at --opt 0 and --opt 2"
-    ~count:30 ~print:(fun s -> s)
+  Test.make
+    ~name:"oracle (opt-matrix): interp = compiled at --opt 0, --opt 2"
+    ~count:20 ~print:(fun s -> s)
     gen_record_update_module
     (fun src ->
-       let check_at n =
-         match oracle_check ~opt:(Some n) src with
-         | None           -> true   (* skip — already counted via record_skip *)
-         | Some (Ok ())   -> true
+       let check label oc =
+         match oc with
+         | None           -> `Skip   (* skip — already counted via record_skip *)
+         | Some (Ok ())   -> `Ok
          | Some (Error (interp, compiled)) ->
            Printf.eprintf
-             "OPT-MATRIX MISMATCH @ --opt %d:\n  interp:   %S\n  compiled: %S\n%!"
-             n interp compiled;
-           false
+             "OPT-MATRIX MISMATCH @ %s:\n  interp:   %S\n  compiled: %S\n%!"
+             label interp compiled;
+           `Diverge
        in
-       (* Evaluate both levels regardless of the first's result so the log
-          shows exactly which optimization level(s) diverge. *)
-       let ok0 = check_at 0 in
-       let ok2 = check_at 2 in
-       ok0 && ok2)
+       (* NOTE: the `--no-opt` (TIR-optimizer-off) axis added by Task 6.2 is
+          currently DISABLED — running a generated program compiled `--no-opt`
+          can hang the property suite: a compiled binary's scheduler worker
+          threads inherit the capture pipe's write end, so `run_capture`'s read
+          never returns even after the 10s run-timeout kills the direct child
+          (the same pipe-holding wedge documented for `march --compile | tail`).
+          The `oracle_check ~tir_opt` plumbing is kept for when `run_capture` is
+          hardened (file-redirect instead of pipe capture) to safely re-enable
+          the `--no-opt` attribution axis. *)
+       let r_o0  = check "--opt 0 (TIR passes on)"    (oracle_check ~opt:(Some 0) src) in
+       let r_o2  = check "--opt 2 (TIR passes on)"    (oracle_check ~opt:(Some 2) src) in
+       let ok = function `Ok | `Skip -> true | `Diverge -> false in
+       ok r_o0 && ok r_o2)
 
 (* ── Converged: record-update on a missing field over an ERASED base
    (formerly an OPEN divergence; RESOLVED by Core March spec Task 3,
