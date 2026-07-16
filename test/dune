@@ -829,6 +829,64 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/task_burst_await.expected native_task_burst_await.out)))
 
+; ── Phase 7.2: Signal.watch deferred dispatch (compiled) ──────────────
+; A watched USR2 delivered by a self-raise must run its handler exactly once,
+; from the scheduler drain, on a normal stack.  Dispatch is deferred, so the
+; handler line prints after main's body; a final drain in march_sched_run makes
+; the raise-then-exit ordering deterministic.  (source_tree ../stdlib) makes the
+; whole stdlib — including signal.march — resolvable inside the sandbox.
+(rule
+ (targets native_signal_watch native_signal_watch.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/signal_watch.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_signal_watch
+        native/signal_watch.march)
+   (with-stdout-to native_signal_watch.out
+        (system "./native_signal_watch")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/signal_watch.expected native_signal_watch.out)))
+
+; A WATCHED SIGTERM must NOT terminate the process (default graceful-shutdown is
+; suppressed on the first delivery): the program runs its handler and survives to
+; exit 0.  An unwatched SIGTERM still kills the process (that half is verified
+; manually); this pins the suppression contract.
+(rule
+ (targets native_signal_term_suppress native_signal_term_suppress.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/signal_term_suppress.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_signal_term_suppress
+        native/signal_term_suppress.march)
+   (with-stdout-to native_signal_term_suppress.out
+        (system "./native_signal_term_suppress")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
+
 ; ── Regression: bare sibling call 2 levels deep in a stdlib file must
 ; qualify with the file's OWN top-level mod name, not just the immediate
 ; enclosing submodule (desugar's qualify_module_refs; see

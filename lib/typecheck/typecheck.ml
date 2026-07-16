@@ -1336,6 +1336,7 @@ let builtin_cap_table : (string * string) list = [
   (* IO.Signal *)
   ("signal_watch",          "IO.Signal");
   ("signal_unwatch",        "IO.Signal");
+  ("signal_raise_self",     "IO.Signal");
   (* IO.Spawn *)
   ("task_spawn",            "IO.Spawn");
   ("task_spawn_link",       "IO.Spawn");
@@ -1594,6 +1595,7 @@ let builtin_bindings : (string * scheme) list =
        signal; signal_unwatch(code) removes it. See stdlib/signal.march. *)
     ("signal_watch",   Mono (TArrow (t_int, TArrow (TArrow (t_unit, t_unit), t_unit))));
     ("signal_unwatch", Mono (TArrow (t_int, t_unit)));
+    ("signal_raise_self", Mono (TArrow (t_int, t_unit)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
     (* List helpers: ∀a. ... *)
     ("head",   poly1 (fun a -> TArrow (t_list a, a)));

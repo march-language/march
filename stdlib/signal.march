@@ -60,7 +60,11 @@ mod Signal do
   the first delivery (a second delivery forces it).
   """
   fn watch(s : Sig, handler : () -> ()) : () do
-    signal_watch(code_of(s), handler)
+    -- Wrap in a 1-arg discard thunk so both backends see a uniform closure
+    -- arity: the compiled runtime invokes the watcher via the same 1-arg
+    -- closure ABI as task_spawn (call_closure_1 with a dummy argument), and
+    -- the interpreter's scheduler drain applies it the same way.
+    signal_watch(code_of(s), fn _ -> handler())
   end
 
   doc """
@@ -72,5 +76,18 @@ mod Signal do
   """
   fn unwatch(s : Sig) : () do
     signal_unwatch(code_of(s))
+  end
+
+  doc """
+  Send `sig` to the current process — the symmetric trigger for `watch`.
+
+      Signal.raise(Signal.Usr2)
+
+  Useful for self-scheduled work and for exercising watchers in tests.  The
+  delivery is asynchronous: a registered watcher runs from the next scheduler
+  drain, not synchronously at the call site.
+  """
+  fn raise(s : Sig) : () do
+    signal_raise_self(code_of(s))
   end
 end

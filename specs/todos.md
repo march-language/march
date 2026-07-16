@@ -377,12 +377,26 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Runtime / stdlib
 
-- [ ] **Signal-handler API (`Signal.watch`) — spec'd 2026-07-02, not implemented.** User-facing
-  SIGTERM/SIGINT/HUP/USR1/USR2 watchers with deferred green-thread dispatch (never in signal
-  context), composing with the existing internal handlers (`g_http_shutdown` in march_http.c,
-  `shutdown_requested` in eval.ml) via suppress-default + second-delivery escape hatch. Blocks
-  graceful drain in Bastion apps (forgepm's operations spec parks it on exactly this). Full
-  design incl. per-layer implementation plan and test plan: `specs/2026-07-02-signal-handler-api.md`.
+- ✅ **Signal-handler API (`Signal.watch`) — IMPLEMENTED (2026-07-16, Phase 7.2, both backends).**
+  New `stdlib/signal.march`: `mod Signal do type Sig = Term|Int|Hup|Usr1|Usr2; watch(sig, handler : () -> ())`,
+  `unwatch(sig)`, `raise(sig)` — `needs IO.Signal`.  Deferred green-thread dispatch: the OS handler
+  only flips atomic pending flags (async-signal-safe), and a drain point runs the March closure on a
+  normal stack (interpreter: `run_scheduler`; compiled: `sched_loop` body + a final drain in
+  `march_sched_run`).  Term/Int suppress the default graceful shutdown on the first delivery and escape
+  to shutdown (`g_http_shutdown`) on the second; Hup/Usr2 have no default action while watched.
+  **Compiled caveat:** SIGUSR1 is reserved by the scheduler's green-thread preemption
+  (`march_scheduler.c`), so watching `Usr1` in a compiled program is refused with a one-line stderr
+  note (it works in the interpreter, which has no preemption).  New `IO.Signal` capability
+  (`cap_lattice.ml` + typecheck cap table/`builtin_types`); `signal_watch`/`signal_unwatch`/
+  `signal_raise_self` builtins wired through purity, defun `builtin_names`, and codegen
+  (`llvm_emit.ml` extern calls + preamble declares); the watcher closure is passed OWNED so the
+  runtime keeps its reference across drains.  `g_http_shutdown` moved to a weak def in
+  `march_runtime.c` (strong in `march_http.c`) so the REPL/JIT runtime-only build links.  Tests:
+  `test/test_eval.ml` (drain/coalesce/unwatch via a USR1 self-raise) + native goldens
+  `test/native/signal_watch.march` (USR2 drain) and `signal_term_suppress.march` (watched TERM
+  survives).  ASAN-clean; existing HTTP-shutdown paths unaffected (unwatched TERM still exits 143).
+  Design: `specs/2026-07-02-signal-handler-api.md`; execution sub-plan:
+  `specs/plans/2026-07-16-signal-watch-execution-subplan.md`.
 
 ### Web Framework: Islands Library
 

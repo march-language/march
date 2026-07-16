@@ -8170,6 +8170,12 @@ let task_builtins : env =
         VUnit
       | [VInt _] -> eval_error "signal_unwatch: signal code out of range (0-4)"
       | _ -> eval_error "signal_unwatch: expected (Int)"))
+  ; ("signal_raise_self", VBuiltin ("signal_raise_self", function
+      | [VInt code] when code >= 0 && code < 5 ->
+        Unix.kill (Unix.getpid ()) (signal_os_of_code code);
+        VUnit
+      | [VInt _] -> eval_error "signal_raise_self: signal code out of range (0-4)"
+      | _ -> eval_error "signal_raise_self: expected (Int)"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)

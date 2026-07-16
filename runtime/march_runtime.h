@@ -211,6 +211,13 @@ void   *march_send(void *actor, void *msg);
 void    march_run_scheduler(void);
 /* Spawn a no-arg C function as a green thread (for the main entrypoint). */
 void    march_spawn_main(void (*fn)(void));
+/* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
+ * watcher (closure passed OWNED), send a signal to self, and drain pending
+ * watchers from a scheduler / event-loop body (never from signal context). */
+void    march_signal_watch(int64_t code, void *clo);
+void    march_signal_unwatch(int64_t code);
+void    march_signal_raise_self(int64_t code);
+void    march_signal_drain(void);
 /* Spawn a March thunk closure (fn () -> T) as an async green thread.
  * Returns a boxed Task handle (32 bytes: header + proc ptr + result ptr). */
 void   *march_task_spawn_thunk(void *clo_ptr);

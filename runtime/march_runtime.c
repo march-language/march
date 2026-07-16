@@ -3865,6 +3865,132 @@ static inline void *call_closure_2(void *clo, void *a, void *b) {
     return fn(clo, a, b);
 }
 
+/* ── Signal.watch: deferred signal dispatch (compiled runtime) ──────────
+ * One watcher closure per stable signal code 0-4 (Term Int Hup Usr1 Usr2 —
+ * see stdlib/signal.march, which translates the `Sig` enum to these codes and
+ * wraps the handler in a 1-arg discard thunk, so the watcher is a standard
+ * 1-arg closure invoked via call_closure_1 with a dummy argument).
+ *
+ * The OS handler `march_signal_dispatch` runs in async-signal context and does
+ * ONLY atomic flag stores — no allocation, no March code.  A drain point in
+ * the scheduler / HTTP loops calls `march_signal_drain`, which runs the March
+ * closure inline on a normal stack (never a guard-paged green-thread stack:
+ * we install plain handlers, mirroring http_signal_handler, and the drain runs
+ * from the loop body, not the signal handler).
+ *
+ * Code 3 (Usr1) is RESERVED for the scheduler's green-thread preemption
+ * (SIGUSR1, march_scheduler.c) and therefore cannot be watched in compiled
+ * programs — march_signal_watch refuses it.  Term/Int (0/1) suppress the
+ * default graceful shutdown on the first delivery while watched, and escape to
+ * shutdown (g_http_shutdown) on the second. */
+static void *_Atomic g_signal_handlers[5] = { NULL, NULL, NULL, NULL, NULL };
+static _Atomic int   g_signal_pending[5]  = { 0, 0, 0, 0, 0 };
+static _Atomic int   g_signal_seen[5]     = { 0, 0, 0, 0, 0 };
+
+/* Graceful-shutdown flag.  The strong definition lives in march_http.c; this
+ * WEAK definition provides the symbol for the REPL/JIT runtime-only build, where
+ * march_http.c is absent (the JIT compiles march_runtime.c standalone, and the
+ * signal dispatcher below references this flag).  When both TUs are linked (the
+ * normal full build), march_http.c's strong definition overrides this one — no
+ * duplicate symbol.  Set by the unwatched Term/Int path and by the
+ * watched-signal second-delivery escape hatch. */
+__attribute__((weak)) _Atomic int g_http_shutdown = 0;
+
+static int march_signal_os_of_code(int code) {
+    switch (code) {
+        case 0: return SIGTERM; case 1: return SIGINT; case 2: return SIGHUP;
+        case 3: return SIGUSR1; case 4: return SIGUSR2; default: return -1;
+    }
+}
+static int march_signal_code_of_os(int sig) {
+    switch (sig) {
+        case SIGTERM: return 0; case SIGINT: return 1; case SIGHUP: return 2;
+        case SIGUSR1: return 3; case SIGUSR2: return 4; default: return -1;
+    }
+}
+
+/* Async-signal-safe: only atomic stores; no alloc, no March code. */
+static void march_signal_dispatch(int sig) {
+    int code = march_signal_code_of_os(sig);
+    if (code < 0) return;
+    if (atomic_load_explicit(&g_signal_handlers[code], memory_order_acquire)) {
+        /* Watched: defer to the drain.  Term/Int escape to graceful shutdown
+         * only on a second delivery (the Ctrl-C-twice escape hatch). */
+        if ((code == 0 || code == 1)
+                && atomic_load_explicit(&g_signal_seen[code], memory_order_relaxed))
+            atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+        atomic_store_explicit(&g_signal_pending[code], 1, memory_order_relaxed);
+        atomic_store_explicit(&g_signal_seen[code], 1, memory_order_relaxed);
+    } else if (code == 0 || code == 1) {
+        /* Unwatched Term/Int → graceful shutdown (matches http_signal_handler). */
+        atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+    }
+}
+
+/* Run all pending watchers on the current (normal) stack.  Called from the
+ * scheduler loop and the HTTP event loops — NEVER from signal context.  The
+ * atomic exchange coalesces repeated pre-drain deliveries into one call. */
+void march_signal_drain(void) {
+    for (int code = 0; code < 5; code++) {
+        if (atomic_exchange_explicit(&g_signal_pending[code], 0,
+                                     memory_order_acq_rel)) {
+            void *clo = atomic_load_explicit(&g_signal_handlers[code],
+                                             memory_order_acquire);
+            if (clo) {
+                /* March closure ABI (see march_thunk_trampoline): the apply fn
+                 * ptr lives at byte offset +16 and takes (closure, int64 arg).
+                 * The watcher is a 1-arg discard thunk, so the arg is a dummy.
+                 * Calling does not consume the closure — the watcher stays
+                 * registered for the next delivery. */
+                typedef void *(*apply_fn_t)(void *, int64_t);
+                apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
+                apply(clo, (int64_t)0);
+            }
+        }
+    }
+}
+
+/* Register a watcher.  The closure is passed OWNED (Perceus: the borrow pass
+ * marks this call site as consuming), so we keep its reference in the table
+ * and release it on replace / unwatch. */
+void march_signal_watch(int64_t code, void *clo) {
+    if (code < 0 || code > 4) { if (clo) march_decrc(clo); return; }
+    if (code == 3) {
+        fprintf(stderr,
+            "march: Signal.watch(Usr1) is unsupported in compiled programs — "
+            "SIGUSR1 is reserved for the scheduler's green-thread preemption; "
+            "the watcher is ignored.\n");
+        if (clo) march_decrc(clo);
+        return;
+    }
+    void *old = atomic_exchange_explicit(&g_signal_handlers[code], clo,
+                                         memory_order_acq_rel);
+    if (old) march_decrc(old);
+    atomic_store_explicit(&g_signal_seen[code], 0, memory_order_relaxed);
+    atomic_store_explicit(&g_signal_pending[code], 0, memory_order_relaxed);
+    /* Install a plain handler (no SA_ONSTACK), mirroring http_signal_handler;
+     * overrides any prior Term/Int shutdown handler with the watcher-aware one. */
+    signal(march_signal_os_of_code((int)code), march_signal_dispatch);
+}
+
+/* Remove a watcher, restoring the signal's default disposition. */
+void march_signal_unwatch(int64_t code) {
+    if (code < 0 || code > 4 || code == 3) return;
+    void *old = atomic_exchange_explicit(&g_signal_handlers[code], NULL,
+                                         memory_order_acq_rel);
+    if (old) march_decrc(old);
+    atomic_store_explicit(&g_signal_pending[code], 0, memory_order_relaxed);
+    atomic_store_explicit(&g_signal_seen[code], 0, memory_order_relaxed);
+    signal(march_signal_os_of_code((int)code), SIG_DFL);
+}
+
+/* Send a signal to our own process (Signal.raise) — the symmetric trigger,
+ * useful for self-scheduled work and for testing watchers. */
+void march_signal_raise_self(int64_t code) {
+    int os = march_signal_os_of_code((int)code);
+    if (os >= 0) kill(getpid(), os);
+}
+
 void *march_typed_array_from_list(void *list) {
     /* Count list length first */
     int64_t n = 0;

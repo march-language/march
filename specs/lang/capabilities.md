@@ -89,6 +89,7 @@ IO
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock, monotonic time
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
+├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
@@ -124,6 +125,7 @@ Use the **narrowest capability that accurately describes what the code actually 
 | Spawn green tasks | `needs IO.Spawn` |
 | Wall clock or sleep | `needs IO.Clock` |
 | Random number generation | `needs IO.Random` |
+| Watch OS signals (`Signal.watch`) | `needs IO.Signal` |
 | Environment variables, child processes | `needs IO.Process` |
 | Calling C via `extern` | `needs IO.Foreign` |
 | Blocking C calls (OS threads) | `needs IO.Foreign` + `needs IO.Foreign.Blocking` |

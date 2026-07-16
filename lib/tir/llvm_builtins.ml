@@ -821,6 +821,9 @@ let runtime_only_declares : (string * string) list = [
   ("march_task_spawn_with_cancel_thunk", "declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)");
   ("march_task_cancel_by_id", "declare void @march_task_cancel_by_id(ptr %task)");
   ("march_yield_from_compiled", "declare void @march_yield_from_compiled()");
+  ("march_signal_watch", "declare void @march_signal_watch(i64 %code, ptr %clo)");
+  ("march_signal_unwatch", "declare void @march_signal_unwatch(i64 %code)");
+  ("march_signal_raise_self", "declare void @march_signal_raise_self(i64 %code)");
 ]
 
 (** Look up the exact historical `declare ...` text for C symbol [c_name],
@@ -1097,6 +1100,9 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_cancel_token_is_cancelled";
   PDeclare "march_task_spawn_with_cancel_thunk";
   PDeclare "march_task_cancel_by_id";
+  PDeclare "march_signal_watch";
+  PDeclare "march_signal_unwatch";
+  PDeclare "march_signal_raise_self";
 ]
 
 let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/CSV/session-types *)
@@ -1256,6 +1262,9 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_cancel_token_is_cancelled";
   PDeclare "march_task_spawn_with_cancel_thunk";
   PDeclare "march_task_cancel_by_id";
+  PDeclare "march_signal_watch";
+  PDeclare "march_signal_unwatch";
+  PDeclare "march_signal_raise_self";
 ]
 
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime

@@ -8139,6 +8139,9 @@ declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)
 declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
 declare void @march_task_cancel_by_id(ptr %task)
+declare void @march_signal_watch(i64 %code, ptr %clo)
+declare void @march_signal_unwatch(i64 %code)
+declare void @march_signal_raise_self(i64 %code)
 |}
 
 let golden_preamble_native_net_io : string = {|
@@ -8296,6 +8299,9 @@ declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)
 declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
 declare void @march_task_cancel_by_id(ptr %task)
+declare void @march_signal_watch(i64 %code, ptr %clo)
+declare void @march_signal_unwatch(i64 %code)
+declare void @march_signal_raise_self(i64 %code)
 |}
 
 (** Reassemble the historical preamble text for a given (is_wasm, repl)

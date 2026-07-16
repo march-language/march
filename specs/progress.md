@@ -283,6 +283,46 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-16, open-items master plan — Phase 7.2: `Signal.watch` OS-signal watchers, both backends)
+
+**Phase 7 feature track.** March programs can now register deferred handlers for
+OS signals via the new `Signal` stdlib module (111 stdlib modules total):
+
+```march
+Signal.watch(Signal.Term, fn -> drain_connections())
+Signal.watch(Signal.Usr2, fn -> reload_config())
+Signal.raise(Signal.Usr2)        -- symmetric self-trigger
+Signal.unwatch(Signal.Term)
+```
+
+- **Deferred green-thread dispatch.** The OS signal handler is async-signal-safe
+  — it only flips atomic `pending`/`seen` flags, never allocates or runs March
+  code. A drain point runs the watcher closure on a normal stack: the
+  interpreter drains from `run_scheduler` (`lib/eval/eval.ml`); the compiled
+  runtime drains from the `sched_loop` body plus a final drain in
+  `march_sched_run` (`runtime/march_scheduler.c`) so a raise-then-exit program
+  is deterministic. Pre-drain repeats coalesce to one handler call.
+- **Term/Int shutdown interplay.** While a watcher is registered, the first
+  SIGTERM/SIGINT runs the handler and suppresses the default graceful shutdown;
+  a second delivery escapes to shutdown (`g_http_shutdown`). Unwatched Term/Int
+  keep their prior behavior (graceful HTTP shutdown / default terminate).
+- **New `IO.Signal` capability** (`lib/caps/cap_lattice.ml` + typecheck cap
+  table and `builtin_types`), subsumed by `needs IO`. The `signal_watch` /
+  `signal_unwatch` / `signal_raise_self` builtins are wired through the purity
+  oracle, defun `builtin_names`, and codegen (`lib/tir/llvm_emit.ml` extern
+  calls + preamble declares); the watcher closure is passed OWNED so the runtime
+  retains it across drains.
+- **Compiled caveat:** SIGUSR1 is reserved by the scheduler's green-thread
+  preemption, so watching `Usr1` in a compiled program is refused with a stderr
+  note (it works in the interpreter, which has no preemption). Handlers run on
+  the drain thread and must not block/await.
+- **Tests:** `test/test_eval.ml` (drain / coalesce / unwatch via a USR1
+  self-raise) and native goldens `test/native/signal_watch.march` (USR2 drain)
+  + `signal_term_suppress.march` (watched TERM survives). ASAN-clean.
+
+Design `specs/2026-07-02-signal-handler-api.md`; execution sub-plan
+`specs/plans/2026-07-16-signal-watch-execution-subplan.md`.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 7.1: top-level default-arg functions callable by name from source)
 
 **Phase 7 feature track. A top-level default-arg function is now callable by

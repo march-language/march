@@ -748,6 +748,10 @@ static int wake_idle_daemons(void) {
     return woken;
 }
 
+/* Deferred Signal.watch drain (defined in march_runtime.c).  Called from the
+ * scheduler loop body — a normal C stack, never signal context. */
+void march_signal_drain(void);
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -783,6 +787,10 @@ static void sched_loop(march_scheduler *sched) {
     int last_yielded = 0;
 
     while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
+        /* Run any pending Signal.watch handlers on this normal stack before
+         * dispatching green threads.  Cheap when idle (five atomic loads). */
+        march_signal_drain();
+
         /* Check the global run queue FIRST, every iteration.  It is the only
          * path cross-thread enqueues (wakes, external spawns) arrive on, and
          * a scheduler whose local deque never drains — e.g. a wait_idle/
@@ -990,6 +998,11 @@ void march_sched_run(void) {
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
         sched_loop(&g_scheds[0]);
+        /* Final drain: a Signal.watch delivery that landed just before shutdown
+         * (e.g. a synchronous self-raise right before main returns) may have set
+         * its pending flag after the loop's last top-of-iteration drain but
+         * before g_all_done was observed.  Run it now, on this normal stack. */
+        march_signal_drain();
         return;
     }
 
@@ -1010,6 +1023,11 @@ void march_sched_run(void) {
     for (int i = 1; i < g_num_scheds; i++) {
         pthread_join(g_scheds[i].thread, NULL);
     }
+
+    /* Final drain (see the single-scheduler path above): catch any Signal.watch
+     * delivery that raced shutdown, now that all worker threads have joined and
+     * this is the only thread running. */
+    march_signal_drain();
 
     march_sched_preempt_stop();
 }

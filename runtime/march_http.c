@@ -1727,7 +1727,11 @@ typedef struct {
 } http_pool_t;
 
 static http_pool_t g_pool;
-_Atomic int g_http_shutdown = 0;  /* set by signal handler — also used by march_http_evloop.c */
+/* Strong definition of the graceful-shutdown flag (also used by
+ * march_http_evloop.c and, via a weak fallback, march_runtime.c — which needs
+ * the symbol in the REPL/JIT runtime-only build where march_http.c is absent).
+ * This strong def overrides that weak one whenever both are linked. */
+_Atomic int g_http_shutdown = 0;  /* set by signal handlers to request shutdown */
 
 static void http_signal_handler(int sig) {
     (void)sig;

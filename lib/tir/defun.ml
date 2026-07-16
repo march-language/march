@@ -29,6 +29,8 @@ let builtin_names : StringSet.t =
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";
       "get_work_pool";
+      (* Signal.watch builtins — keep as EApp for dedicated codegen *)
+      "signal_watch"; "signal_unwatch"; "signal_raise_self";
       (* Float builtins *)
       "float_abs"; "float_ceil"; "float_floor"; "float_round";
       "float_truncate"; "int_to_float";

@@ -1191,6 +1191,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 result clo_ptr);
     ("ptr", result)
 
+  (* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
+     watcher, or raise a signal to self.  The `code` is an Int (untag to raw
+     i64); the watcher closure is passed OWNED (borrow.ml marks the arg
+     consuming) so the runtime keeps its reference across drains. *)
+  | Tir.EApp (f, [code_atom; clo_atom]) when f.Tir.v_name = "signal_watch" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    let (clo_ty, clo_v) = emit_atom ctx clo_atom in
+    let clo_ptr = coerce ctx clo_ty clo_v "ptr" in
+    emit ctx (Printf.sprintf "call void @march_signal_watch(i64 %s, ptr %s)"
+                code_i64 clo_ptr);
+    ("ptr", "null")
+  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_unwatch" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    emit ctx (Printf.sprintf "call void @march_signal_unwatch(i64 %s)" code_i64);
+    ("ptr", "null")
+  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_raise_self" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    emit ctx (Printf.sprintf "call void @march_signal_raise_self(i64 %s)" code_i64);
+    ("ptr", "null")
+
   (* task_await_unwrap(task_ptr) → spin-wait then untag result directly *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
     let (_, task_ptr) = emit_atom ctx a in
