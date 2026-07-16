@@ -6006,6 +6006,38 @@ let test_cap_body_tls_parent_ok () =
   Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no warning" false
     (has_warning_with ctx "IO.NetConnect.TLS")
 
+(* ── IO.WebSocket: least-privilege sub-cap of IO.NetConnect ──────────────── *)
+
+let test_cap_body_missing_ws () =
+  let ctx = typecheck {|mod Ws do
+    fn go(fd) do ws_recv(fd) end
+  end|} in
+  Alcotest.(check bool) "ws_recv without needs: body-scan warning" true
+    (has_warning_with ctx "IO.WebSocket")
+
+let test_cap_body_ws_ok () =
+  let ctx = typecheck {|mod Ws do
+    needs IO.WebSocket
+    fn go(fd) do ws_recv(fd) end
+  end|} in
+  Alcotest.(check bool) "ws_recv with needs IO.WebSocket: no warning" false
+    (has_warning_with ctx "IO.WebSocket")
+
+let test_cap_body_ws_parent_ok () =
+  let ctx = typecheck {|mod Ws do
+    needs IO.NetConnect
+    fn go(fd) do ws_recv(fd) end
+  end|} in
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers ws_recv: no warning" false
+    (has_warning_with ctx "IO.WebSocket")
+
+let test_cap_ws_arg_ok () =
+  let ctx = typecheck {|mod Ws do
+    needs IO.WebSocket
+    fn f(_c : Cap(IO.WebSocket)) : Int do 0 end
+  end|} in
+  Alcotest.(check bool) "Cap(IO.WebSocket) arg with needs: no error" false (has_errors ctx)
+
 (* ── IO.Telemetry: declaration-only cap; needs parses without error ──────── *)
 
 let test_cap_body_telemetry_decl_ok () =
@@ -8138,6 +8170,10 @@ let compiler_suites =
           Alcotest.test_case "tls_connect missing needs: warn TLS"         `Quick test_cap_body_missing_tls;
           Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
+          Alcotest.test_case "ws_recv missing needs: warn WebSocket"       `Quick test_cap_body_missing_ws;
+          Alcotest.test_case "ws_recv with needs IO.WebSocket"             `Quick test_cap_body_ws_ok;
+          Alcotest.test_case "needs IO.NetConnect umbrella covers WS"      `Quick test_cap_body_ws_parent_ok;
+          Alcotest.test_case "Cap(IO.WebSocket) arg: no error"             `Quick test_cap_ws_arg_ok;
           Alcotest.test_case "needs IO.Telemetry: valid declaration"       `Quick test_cap_body_telemetry_decl_ok;
           Alcotest.test_case "extern block missing IO.Foreign: warn"       `Quick test_cap_body_missing_foreign;
           Alcotest.test_case "extern block with needs IO.Foreign: no warn" `Quick test_cap_body_foreign_ok;
