@@ -283,6 +283,19 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.3: retire the broken `style/no-redundant-else` lint)
+
+**Phase 7 feature track.** The `style/no-redundant-else` lint rule advised (with
+an auto-fix) removing the `else` after a `Never`-typed branch — but March `if`
+is an EXPRESSION whose `else` is MANDATORY, so the suggestion produced code that
+does not parse (its own doc "Good" example failed). Of the plan's three options
+(retire / grow an else-less statement-position `if` / make the auto-fix valid),
+the latter two are impossible or a language RFC, so the rule was **retired**:
+removed from `lib/lint/lint.ml` (registration + `EIf`-arm logic) and
+`docs/coding-standards.md` (section + config default). No LSP action exposed it.
+`forge lint` on the former trigger no longer emits the hint; build + doc-lint
+clean.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
 
 **Second wave of `specs/plans/2026-07-15-open-items-master-plan.md`, on top of the
