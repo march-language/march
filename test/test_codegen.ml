@@ -8499,6 +8499,28 @@ let test_cross_tls_gzip_linux_amd64_elf () =
           true (ir_contains needed so))
       ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"]
 
+(** Phase 7.1: a default-arg function must be callable BY NAME from March source
+    at every arity — desugar emits only mangled `greet$N` decls, so before the
+    typecheck default-arg call-resolution fix a source-level `greet("Bob")` died
+    with "I cannot find `greet`. Did you mean `greet$1`?" under --check/--compile
+    AND interpretation. Exercises reduced (1-arg, one default), partial (2-arg,
+    one default), and full (3-arg) arities; parity asserts interp == compiled. *)
+let test_compiled_default_args_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_default_args_source_call"
+    ~src:"mod M do\n\
+         \  fn greet(name, greeting \\\\ \"Hi\", punct \\\\ \"!\") do\n\
+         \    greeting ++ \", \" ++ name ++ punct\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(greet(\"Bob\"))\n\
+         \    println(greet(\"Al\", \"Yo\"))\n\
+         \    println(greet(\"Cy\", \"Hey\", \"?\"))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Hi, Bob!\nYo, Al!\nHey, Cy?"
+    ()
+
 let codegen_suites =
   [
       ( "cross_compile", [
@@ -9027,6 +9049,8 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled default-arg call at every arity (source-level resolution)" `Quick
+            test_compiled_default_args_parity;
           Alcotest.test_case "compiled --no-opt prunes unreachable fns (links, prints hi)" `Quick
             test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick

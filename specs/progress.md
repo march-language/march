@@ -283,6 +283,28 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.1: top-level default-arg functions callable by name from source)
+
+**Phase 7 feature track. A top-level default-arg function is now callable by
+name from March source at every arity, on both backends** — previously
+`greet("Bob")` (the documented example) failed typecheck with "I cannot find
+`greet`. Did you mean `greet$1`?" because desugar emits only mangled `greet$N`
+decls (the interpreter and TIR reconstruct the base-name dispatch downstream,
+but the typechecker runs in between and saw only the mangled names).
+
+- **Fix** (`lib/typecheck/typecheck.ml`, general `EApp` arm): a call of an
+  unbound bare/qualified name `foo(args)` is redirected to its `foo$<n_args>`
+  arity variant when in scope (typing-only; codegen/eval lower the original call
+  independently). Regression test asserts interp == compiled at all 3 arities.
+- **Still open (documented):** nested-module default-arg fns remain broken — they
+  drop defaults (desugar `expand_defaults_decl` doesn't recurse into `DMod`) and
+  the interpreter's `foo$N`→base `VMultiarity` reconstruction doesn't handle
+  qualified `Mod.foo$N`. A nested-expand attempt made compiled work but diverged
+  interp, so it was reverted to keep both backends consistent — nested needs the
+  desugar + eval fixes together.
+
+Full suite green.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
 
 **Second wave of `specs/plans/2026-07-15-open-items-master-plan.md`, on top of the

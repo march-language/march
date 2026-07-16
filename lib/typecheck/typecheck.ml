@@ -4273,6 +4273,25 @@ let rec infer_expr env (e : Ast.expr) : ty =
       rty
 
     | Ast.EApp (f, args, sp) ->
+      (* Default-arg call resolution.  [expand_defaults_decl] emits a default-arg
+         fn as mangled `foo$R`..`foo$N` decls (one per supplied arity) with NO
+         bare `foo` decl; the interpreter (VMultiarity) and TIR
+         (_default_dispatch) reconstruct the base-name dispatch downstream, but
+         the typechecker runs BETWEEN desugar and both consumers and binds only
+         the mangled names — so a source-level call `foo(args)` to a default-arg
+         fn otherwise fails with "I cannot find `foo`".  Redirect a call of an
+         UNBOUND bare/qualified name to its `name$<n_args>` arity variant when
+         that variant is in scope (the codegen/eval paths lower the ORIGINAL
+         `foo(args)` independently, so this rewrite is typing-only). *)
+      let f =
+        match f with
+        | Ast.EVar name when lookup_var name.txt env = None ->
+          let mangled = Printf.sprintf "%s$%d" name.txt (List.length args) in
+          (match lookup_var mangled env with
+           | Some _ -> Ast.EVar { name with txt = mangled }
+           | None -> f)
+        | _ -> f
+      in
       let f_ty = infer_expr env f in
       (* Reject wrong-arity calls of known (module-defined) functions.  March
          has no partial application: under-application panics at runtime (and
