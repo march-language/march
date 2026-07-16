@@ -283,6 +283,20 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.5: `forge outdated`)
+
+**Phase 7 feature track.** New `forge outdated` subcommand: reads `forge.lock`,
+queries the registry (`FORGE_REGISTRY`/forgepm.org) for each dependency's
+available versions, and reports which REGISTRY deps have a newer non-retired
+release; git/path deps (no semver) are listed with their short commit but never
+flagged. New `forge/lib/registry_query.ml` (self-contained compile-client +
+fetch + version-array parse, reusable to later dedupe `forge deps`) +
+`forge/lib/cmd_outdated.ml` (unit-testable `pick_latest`/`classify_registry`
+pure core + the table printer), wired into `forge/bin/main.ml`. Verified live
+against forgepm.org (bastion 0.2.1 → OUTDATED → 0.2.3; 0.2.3 → up to date; git
+conduit → not-version-tracked); 6 unit tests for the pure core in
+`forge/test/test_resolver.ml`.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
 
 **Second wave of `specs/plans/2026-07-15-open-items-master-plan.md`, on top of the

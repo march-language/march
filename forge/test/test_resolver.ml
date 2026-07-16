@@ -460,6 +460,45 @@ let test_lockfile_drift_detection () =
          true (Resolver_lockfile.has_drifted lock_path modified))
 
 (* ===================================================================== *)
+(*  forge outdated — pure version-comparison core                        *)
+(* ===================================================================== *)
+
+let rv version ?(retired=false) checksum : Registry_query.reg_version =
+  { rv_version = version; rv_checksum = checksum; rv_retired = retired }
+
+let test_pick_latest_newest () =
+  Alcotest.(check (option string)) "newest by semver, not lexical"
+    (Some "0.10.0")
+    (Cmd_outdated.pick_latest [ rv "0.2.3" "a"; rv "0.10.0" "b"; rv "0.9.9" "c" ])
+
+let test_pick_latest_skips_retired () =
+  Alcotest.(check (option string)) "a retired newest version is skipped"
+    (Some "0.2.2")
+    (Cmd_outdated.pick_latest [ rv "0.2.1" "a"; rv "0.2.2" "b"; rv "0.2.3" ~retired:true "c" ])
+
+let test_pick_latest_empty () =
+  Alcotest.(check (option string)) "no versions" None (Cmd_outdated.pick_latest [])
+
+let test_classify_outdated () =
+  match Cmd_outdated.classify_registry ~current:"0.2.1"
+          [ rv "0.2.1" "a"; rv "0.2.3" "b" ] with
+  | Cmd_outdated.Outdated "0.2.3" -> ()
+  | _ -> Alcotest.fail "expected Outdated 0.2.3"
+
+let test_classify_up_to_date () =
+  match Cmd_outdated.classify_registry ~current:"0.2.3"
+          [ rv "0.2.1" "a"; rv "0.2.3" "b" ] with
+  | Cmd_outdated.Up_to_date -> ()
+  | _ -> Alcotest.fail "expected Up_to_date"
+
+let test_classify_ignores_retired_newest () =
+  (* locked 0.2.2 is the newest NON-retired, so up to date even though 0.2.3 exists retired *)
+  match Cmd_outdated.classify_registry ~current:"0.2.2"
+          [ rv "0.2.2" "a"; rv "0.2.3" ~retired:true "b" ] with
+  | Cmd_outdated.Up_to_date -> ()
+  | _ -> Alcotest.fail "expected Up_to_date (retired newest ignored)"
+
+(* ===================================================================== *)
 (*  Suite                                                                 *)
 (* ===================================================================== *)
 
@@ -511,5 +550,13 @@ let () =
       Alcotest.test_case "write and read back"        `Quick test_lockfile_write_and_read_back;
       Alcotest.test_case "manifest hash deterministic" `Quick test_lockfile_manifest_hash;
       Alcotest.test_case "drift detection"            `Quick test_lockfile_drift_detection;
+    ];
+    "outdated", [
+      Alcotest.test_case "pick_latest newest by semver" `Quick test_pick_latest_newest;
+      Alcotest.test_case "pick_latest skips retired"    `Quick test_pick_latest_skips_retired;
+      Alcotest.test_case "pick_latest empty"            `Quick test_pick_latest_empty;
+      Alcotest.test_case "classify outdated"            `Quick test_classify_outdated;
+      Alcotest.test_case "classify up to date"          `Quick test_classify_up_to_date;
+      Alcotest.test_case "classify ignores retired newest" `Quick test_classify_ignores_retired_newest;
     ];
   ]
