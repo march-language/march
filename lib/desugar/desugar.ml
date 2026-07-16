@@ -1893,7 +1893,7 @@ let maybe_inject_island_bridges
     The TIR lowering detects and skips the dispatcher DFns, rewriting call sites
     based on arity using the [greet$N] mangled names instead.
 *)
-let expand_defaults_decl (d : decl) : decl list =
+let rec expand_defaults_decl (d : decl) : decl list =
   match d with
   | DFn (def, sp) ->
     (match def.fn_clauses with
@@ -1954,6 +1954,16 @@ let expand_defaults_decl (d : decl) : decl list =
             The TIR pipeline rewrites call sites via _default_dispatch table. *)
          mangled_decls @ [full_decl]
        end)
+  | DMod (name, vis, inner, sp) ->
+    (* Recurse so a default-arg fn defined inside a NESTED module also gets its
+       `foo$N` arity variants.  Without this the nested fn's `FPDefault` params
+       reach [desugar_fn_def]'s strip-fast-path (added for the tuple-UAF fix)
+       and lose their default VALUES entirely, so a reduced-arity call
+       `Inner.foo(x)` fails.  Expansion runs before [desugar_decl], so the
+       fast-path never sees the (now-expanded) fn.  Paired with the
+       eval nested `foo$N`→base VMultiarity reconstruction so both backends
+       agree. *)
+    [DMod (name, vis, List.concat_map expand_defaults_decl inner, sp)]
   | _ -> [d]
 
 (* ---- Intra-module qualification pass ---- *)

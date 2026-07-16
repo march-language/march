@@ -8521,6 +8521,26 @@ let test_compiled_default_args_parity () =
     ~expected:"Hi, Bob!\nYo, Al!\nHey, Cy?"
     ()
 
+(** Phase 7.1 (nested): a default-arg fn defined inside a NESTED module is also
+    callable by name at reduced arity, on both backends — needs the desugar
+    `expand_defaults_decl` DMod recursion AND the eval nested `foo$N`→base
+    VMultiarity reconstruction/exposure (compiled worked via TIR alone, interp
+    did not, before those). *)
+let test_compiled_nested_default_args_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_default_args"
+    ~src:"mod A do\n\
+         \  mod B do\n\
+         \    fn f(x, y \\\\ 100) do x + y end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(int_to_string(B.f(1)))\n\
+         \    println(int_to_string(B.f(2, 20)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"101\n22"
+    ()
+
 let codegen_suites =
   [
       ( "cross_compile", [
@@ -9051,6 +9071,8 @@ let codegen_suites =
       ( "iface_impl_mono_codegen", [
           Alcotest.test_case "compiled default-arg call at every arity (source-level resolution)" `Quick
             test_compiled_default_args_parity;
+          Alcotest.test_case "compiled nested-module default-arg call (both backends)" `Quick
+            test_compiled_nested_default_args_parity;
           Alcotest.test_case "compiled --no-opt prunes unreachable fns (links, prints hi)" `Quick
             test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick

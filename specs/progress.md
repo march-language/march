@@ -296,14 +296,15 @@ but the typechecker runs in between and saw only the mangled names).
   unbound bare/qualified name `foo(args)` is redirected to its `foo$<n_args>`
   arity variant when in scope (typing-only; codegen/eval lower the original call
   independently). Regression test asserts interp == compiled at all 3 arities.
-- **Still open (documented):** nested-module default-arg fns remain broken — they
-  drop defaults (desugar `expand_defaults_decl` doesn't recurse into `DMod`) and
-  the interpreter's `foo$N`→base `VMultiarity` reconstruction doesn't handle
-  qualified `Mod.foo$N`. A nested-expand attempt made compiled work but diverged
-  interp, so it was reverted to keep both backends consistent — nested needs the
-  desugar + eval fixes together.
+- **Nested-module default-arg fns also fixed** (three coordinated changes): the
+  desugar `expand_defaults_decl` now recurses into `DMod` (part 2); `eval.ml`'s
+  nested `eval_mod_decls` gains the same `foo$N`→base `VMultiarity`
+  reconstruction the top-level builder has (part 3a); and the module-member
+  exposure (`declared_names`) also exports the base name of a mangled `foo$N`
+  decl so the reconstructed `Inner.foo` is prefixed (part 3b). Verified
+  `Inner.f(1)`/`Inner.f(2,20)` on both backends at 2- and 3-deep nesting.
 
-Full suite green.
+Full suite green. 7.1 is fully resolved (top-level + nested, both backends).
 
 ## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
 
