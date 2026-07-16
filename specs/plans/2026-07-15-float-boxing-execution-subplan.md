@@ -37,15 +37,20 @@ against the current trunk and records the gaps. **Open-items plan Phase 2.**
 | **Perceus float suppressions** | `refine_occurrence_ty` / `resolve_case_field_ty` | **NOT FOUND BY NAME on trunk — refactored. MUST re-discover the current suppression sites before Stage 2.** |
 | MR gate (Stage 3) | `typecheck.ml:5028-5058` | **Unclear on trunk** — no `t79_let_poly_unannotated_mr` in the corpus; verify whether the MR gate exists here at all before planning Stage 3 |
 
-## Stage 1 — runtime box API (ADDITIVE, non-breaking) — IN PROGRESS
+## Stage 1 — runtime box API (ADDITIVE, non-breaking) — ✅ DONE (2026-07-15)
 
-Dispatched to a focused agent. Deliverables: `MARCH_FLOAT_TAG=-3` +
+Ported the reference implementation (`b7140673`, originally on
+`docs/core-march-types-skeleton`) onto the trunk — it cherry-picked clean
+(additive; 6 files, +231). Delivered: `MARCH_FLOAT_TAG=-3` +
 `march_float_box {hdr; double val}` (24 B); `march_alloc_float`/
 `march_unbox_float`; `march_poly_eq` float-box arm; new `march_poly_compare`
-(odd→int / float-box→double / string→string-compare); `march_value_to_string`
-float-box arm; `copy_value` float-box arm; `test/test_float_box.c` proving the
-**negative-float ordering `-9.0 < -1.25`** a hardened guard can't fix. **Gate:
-builds; full suite byte-identically unchanged (nothing emits the tag yet).**
+(odd→int / float-box→`march_compare_float` / string→`march_compare_string`);
+`march_value_to_string` float-box arm; `march_message.c` `copy_value` copies the
+box opaquely; `test/test_float_box.c` (linked against the core runtime set).
+**Gate PASSED:** `main.exe` builds; `test_float_box_runner` "all checks passed"
+(round-trip + eq + the negative-float ordering `-9.0 < -1.25`); full suite
+UNCHANGED (809 + all drivers, exit 0 — nothing emits the tag yet). Landed as
+commit `ec899b1e`.
 
 ## Stage 2 — the atomic compiler flip (ONE commit) — GATED, NEEDS SIGN-OFF
 
