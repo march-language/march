@@ -283,6 +283,32 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 5 capabilities: IO.WebSocket leaf; crypto/timer/db found N-A or blocked)
+
+**Phase 5 of the plan, on the merged trunk. Its actionable surface turned out
+much smaller than the plan implied** — several sub-tasks are blocked or N-A on
+the trunk (documented in `specs/todos.md`):
+
+- **5.3 (done) — `IO.WebSocket` least-privilege leaf:** added under `IO.NetConnect`
+  (`cap_lattice.ml` + `builtin_types`); remapped `ws_recv`/`ws_send`/`ws_select`
+  from `IO.NetConnect` to `IO.WebSocket`; annotated `stdlib/websocket.march`. A
+  WebSocket-only module can declare `needs IO.WebSocket` instead of the broader
+  `IO.NetConnect` (which still subsumes it), like `IO.NetConnect.TLS`. 4 tests.
+  (`ws_connect`/`close`/`upgrade`/`ping` don't exist on the trunk — only the 3
+  real builtins are wired.)
+- **5.4 (N-A) — `IO.Crypto`:** crypto is pure March (`sha256`/`sha512`/`hmac`
+  in-language, no builtins), so an IO capability doesn't apply — closed
+  won't-implement.
+- **5.2 (won't-fix) — `println`/`print` body-scan exemption:** confirmed
+  `IO.Console`-specific and kept deliberately — warning on every debug print
+  would flood all code; `cap pure` still bans `println`, so purity is unaffected.
+- **5.5/5.6 (blocked):** no `timer_*`/`db_*` builtins on the trunk (IPC has no
+  runtime); left open.
+- **5.1 (deferred):** promoting the body-scan cap check warning→error is a policy
+  decision (would break stdlib without a staged migration) — left for a decision.
+
+Full suite green; `run_compiler` +4 WebSocket cap tests.
+
 ## Current State (as of 2026-07-15, open-items master plan — Phase 7.3: retire the broken `style/no-redundant-else` lint)
 
 **Phase 7 feature track.** The `style/no-redundant-else` lint rule advised (with
