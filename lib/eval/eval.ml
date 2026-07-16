@@ -412,6 +412,51 @@ let revocation_table : (int * int, unit) Hashtbl.t = Hashtbl.create 4
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
 
+(* ---- Signal.watch interpreter state ─────────────────────────────────
+   One deferred watcher per signal, indexed by a stable code 0-4
+   (Term, Int, Hup, Usr1, Usr2 — see stdlib/signal.march, which translates
+   the [Sig] enum to these codes before calling [signal_watch]).  The OS
+   handler [handle_os_signal] runs at OCaml's safe points and only flips the
+   [signal_pending] flag; the scheduler drain (see [run_scheduler]) applies
+   the March closure on a normal green-thread stack.  A watcher on Term/Int
+   suppresses the default graceful-shutdown for the first delivery; a second
+   delivery escapes to shutdown (the escape hatch). *)
+let signal_watchers : value option array = Array.make 5 None
+let signal_pending  : bool array          = Array.make 5 false
+let signal_seen     : bool array          = Array.make 5 false
+
+(** Map a stable signal code (0-4) to its OCaml OS signal number. *)
+let signal_os_of_code = function
+  | 0 -> Sys.sigterm | 1 -> Sys.sigint | 2 -> Sys.sighup
+  | 3 -> Sys.sigusr1 | 4 -> Sys.sigusr2
+  | _ -> invalid_arg "signal_os_of_code"
+
+(** Map an incoming OS signal number to our stable code, or [-1] if unknown. *)
+let signal_code_of_os n =
+  if n = Sys.sigterm then 0 else if n = Sys.sigint then 1
+  else if n = Sys.sighup then 2 else if n = Sys.sigusr1 then 3
+  else if n = Sys.sigusr2 then 4 else -1
+
+(** OS signal handler.  Async-context-safe: only writes flag arrays (OCaml
+    defers delivery to safe points, so no true async re-entrancy).  Never
+    allocates or runs March code here — the drain does that. *)
+let handle_os_signal (osnum : int) : unit =
+  let code = signal_code_of_os osnum in
+  if code >= 0 then
+    match signal_watchers.(code) with
+    | Some _ ->
+      (* Watched: defer to the scheduler drain.  Term/Int escape to shutdown
+         only on a second delivery. *)
+      if signal_seen.(code) && (code = 0 || code = 1) then
+        shutdown_requested := true;
+      signal_pending.(code) <- true;
+      signal_seen.(code)    <- true
+    | None ->
+      (* Unwatched: Term/Int fall back to graceful shutdown.  Hup/Usr1/Usr2
+         handlers are only installed while watched (removed on unwatch), so
+         this branch runs for Term/Int in practice. *)
+      if code = 0 || code = 1 then shutdown_requested := true
+
 (* ---- Logger global state ───────────────────────────────────────────
    Logger v2 keeps richer field values (Int, Float, Bool, Atom, String,
    Null) so structured formatters (JSON, logfmt) can preserve types
@@ -7863,6 +7908,26 @@ let run_scheduler () =
   let changed = ref true in
   while !changed && not !shutdown_requested do
     changed := false;
+    (* Drain deferred OS-signal watchers (Signal.watch): apply each pending
+       handler on a normal green-thread stack, coalescing repeats to one call.
+       The handler is typed [() -> ()] but may be spelled [fn -> body] (0-arg)
+       or [fn _ -> body] (1-arg unit discard) — apply with the matching arity. *)
+    for code = 0 to 4 do
+      if signal_pending.(code) then begin
+        signal_pending.(code) <- false;
+        match signal_watchers.(code) with
+        | Some handler ->
+          (try
+             ignore (match handler with
+               | VClosure (_, [], _) -> apply handler []
+               | _                   -> apply handler [VUnit])
+           with exn ->
+             Printf.eprintf "signal watcher (code %d) raised: %s\n%!"
+               code (Printexc.to_string exn));
+          changed := true
+        | None -> ()
+      end
+    done;
     (* Snapshot current pids to avoid issues with new actors spawned mid-pass *)
     let pids = Hashtbl.fold (fun pid _ acc -> pid :: acc) actor_registry [] in
     List.iter (fun pid ->
@@ -8077,6 +8142,34 @@ let task_builtins : env =
   ; ("mint_cap", VBuiltin ("mint_cap", function
     | [_cap] -> VUnit
     | _ -> eval_error "mint_cap: expected 1 argument"))
+
+  (* Signal.watch — register/remove a deferred OS-signal watcher.  [code] is
+     the stable 0-4 signal code produced by stdlib/signal.march.  The handler
+     runs later, from the scheduler drain (see [run_scheduler]); here we only
+     record it and (lazily) install the OS handler.  Term/Int (0/1) already
+     carry the shutdown handler from [run_module], so we only install/restore
+     Hup/Usr1/Usr2 (>= 2) on watch/unwatch to leave their default disposition
+     intact when unwatched. *)
+  ; ("signal_watch", VBuiltin ("signal_watch", function
+      | [VInt code; handler] when code >= 0 && code < 5 ->
+        signal_watchers.(code) <- Some handler;
+        signal_pending.(code)  <- false;
+        signal_seen.(code)     <- false;
+        if code >= 2 then
+          Sys.set_signal (signal_os_of_code code) (Sys.Signal_handle handle_os_signal);
+        VUnit
+      | [VInt _; _] -> eval_error "signal_watch: signal code out of range (0-4)"
+      | _ -> eval_error "signal_watch: expected (Int, handler)"))
+  ; ("signal_unwatch", VBuiltin ("signal_unwatch", function
+      | [VInt code] when code >= 0 && code < 5 ->
+        signal_watchers.(code) <- None;
+        signal_pending.(code)  <- false;
+        signal_seen.(code)     <- false;
+        if code >= 2 then
+          Sys.set_signal (signal_os_of_code code) Sys.Signal_default;
+        VUnit
+      | [VInt _] -> eval_error "signal_unwatch: signal code out of range (0-4)"
+      | _ -> eval_error "signal_unwatch: expected (Int)"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
@@ -9168,11 +9261,16 @@ let run_module (m : module_) : unit =
   (* Reset global app state for fresh run *)
   app_spawn_order   := [];
   shutdown_requested := false;
+  (* Reset Signal.watch state for a fresh run. *)
+  Array.fill signal_watchers 0 5 None;
+  Array.fill signal_pending  0 5 false;
+  Array.fill signal_seen     0 5 false;
   let env = eval_module_env m in
-  (* Install SIGTERM/SIGINT handlers for graceful shutdown *)
-  let handle_signal (_ : int) = shutdown_requested := true in
-  Sys.set_signal Sys.sigterm (Sys.Signal_handle handle_signal);
-  Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_signal);
+  (* Install SIGTERM/SIGINT handlers: graceful shutdown by default, or (once a
+     Signal.watch watcher is registered) deferred dispatch with a
+     second-delivery shutdown escape hatch. *)
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle handle_os_signal);
+  Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_os_signal);
   match List.assoc_opt "__app_init__" env with
   | Some init_fn ->
     (* App entry point: evaluate app body to get { spec, on_start, on_stop } *)

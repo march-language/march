@@ -24,6 +24,7 @@ let hierarchy : (string * string option) list = [
   ("IO.Process",    Some "IO");
   ("IO.Clock",      Some "IO");
   ("IO.Random",     Some "IO");
+  ("IO.Signal",     Some "IO");
   ("IO.Database",   Some "IO.NetConnect");
   ("IO.Spawn",      Some "IO");
   ("IO.Mut",        Some "IO");

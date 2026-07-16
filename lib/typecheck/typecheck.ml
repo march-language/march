@@ -1333,6 +1333,9 @@ let builtin_cap_table : (string * string) list = [
   ("random_bytes",          "IO.Random");
   ("stdlib_random_bytes",   "IO.Random");
   ("uuid_v4",               "IO.Random");
+  (* IO.Signal *)
+  ("signal_watch",          "IO.Signal");
+  ("signal_unwatch",        "IO.Signal");
   (* IO.Spawn *)
   ("task_spawn",            "IO.Spawn");
   ("task_spawn_link",       "IO.Spawn");
@@ -1587,6 +1590,10 @@ let builtin_bindings : (string * scheme) list =
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("read_byte",      Mono (TArrow (t_unit,   t_int)));
+    (* Signal.watch(code, handler): register a deferred handler for an OS
+       signal; signal_unwatch(code) removes it. See stdlib/signal.march. *)
+    ("signal_watch",   Mono (TArrow (t_int, TArrow (TArrow (t_unit, t_unit), t_unit))));
+    ("signal_unwatch", Mono (TArrow (t_int, t_unit)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
     (* List helpers: ∀a. ... *)
     ("head",   poly1 (fun a -> TArrow (t_list a, a)));
@@ -2140,6 +2147,7 @@ let builtin_types : (string * int) list =
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
     ("IO.Clock",      0); ("IO.Random",     0); ("IO.Database",   0);
+    ("IO.Signal",     0);
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
     ("IO.WebSocket",  0);

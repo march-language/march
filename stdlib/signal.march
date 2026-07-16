@@ -1,0 +1,76 @@
+-- Signal module: register deferred handlers for OS signals.
+--
+-- A watcher is a zero-argument function `() -> ()` invoked *after* the signal
+-- is delivered, on a normal green-thread stack (deferred green-thread
+-- dispatch) — never in async-signal context, so the handler may allocate, log,
+-- spawn tasks, and touch shared state freely.  There is at most ONE watcher
+-- per signal; registering a second replaces the first.
+--
+-- Delivery latency is best-effort (up to ~1s): the runtime flips an atomic
+-- pending flag in signal context and drains it from the scheduler / event
+-- loop.  Repeated deliveries before a drain coalesce into a single handler
+-- call.
+--
+-- Term / Int (SIGTERM / SIGINT) special case: while a watcher is registered
+-- the *first* delivery runs the handler and suppresses the default graceful
+-- shutdown, giving the program a chance to clean up on its own terms.  A
+-- *second* delivery escapes the watcher and forces graceful shutdown (the
+-- Ctrl-C-twice escape hatch).  Hup / Usr1 / Usr2 have no default action while
+-- watched, and their default OS disposition is restored on `unwatch`.
+--
+-- Example:
+--
+--     Signal.watch(Signal.Term, fn ->
+--       Log.info("shutting down gracefully")
+--       drain_connections()
+--     end)
+--
+-- (Post-7.1 the short `fn -> body` zero-arg spelling works; `fn () -> body`
+-- and `fn _ -> body` are also accepted.)
+
+mod Signal do
+  needs IO.Signal
+
+  -- The signals a program may watch.  Only non-fatal, portable signals are
+  -- exposed so the runtime's scheduler/sanitizer signal-stack arrangement is
+  -- never disturbed.
+  type Sig = Term | Int | Hup | Usr1 | Usr2
+
+  -- Translate a `Sig` to the runtime's stable numeric code (0-4).  Kept in
+  -- lockstep with `signal_os_of_code` in the interpreter (lib/eval/eval.ml)
+  -- and `march_signal_watch` in the runtime (runtime/march_runtime.c).
+  pfn code_of(s : Sig) : Int do
+    match s do
+    Term -> 0
+    Int  -> 1
+    Hup  -> 2
+    Usr1 -> 3
+    Usr2 -> 4
+    end
+  end
+
+  doc """
+  Register `handler` to run when `sig` is delivered.
+
+      Signal.watch(Signal.Usr1, fn -> reload_config() end)
+
+  The handler runs later, from the scheduler drain, on a normal stack.  At
+  most one watcher exists per signal; a second `watch` replaces the first.
+  For `Term`/`Int`, registering a watcher suppresses the default shutdown on
+  the first delivery (a second delivery forces it).
+  """
+  fn watch(s : Sig, handler : () -> ()) : () do
+    signal_watch(code_of(s), handler)
+  end
+
+  doc """
+  Remove the watcher for `sig`, restoring the signal's default disposition.
+
+      Signal.unwatch(Signal.Usr1)
+
+  Safe to call when no watcher is registered.
+  """
+  fn unwatch(s : Sig) : () do
+    signal_unwatch(code_of(s))
+  end
+end

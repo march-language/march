@@ -4199,8 +4199,56 @@ let test_h_sigil_get_form_not_injected_with_conn () =
   Alcotest.(check string) "GET form: no injection"
     {|<form method="get">x</form>|} (vstr result)
 
+(* Signal.watch (7.2, Stage A): deferred green-thread dispatch of an OS-signal
+   watcher.  Drive the drain directly — register an OCaml handler on the Usr1
+   slot (code 3), raise SIGUSR1 to ourselves, pump [run_scheduler], and assert
+   the handler ran exactly once per drain, with pre-drain repeats coalesced. *)
+let signal_wait_pending code =
+  (* Spin so OCaml delivers the deferred signal at a safe point (the [ref]
+     allocation gives the runtime a chance to run the handler). *)
+  let spins = ref 0 in
+  while not March_eval.Eval.signal_pending.(code) && !spins < 20_000_000 do
+    incr spins; ignore (Sys.opaque_identity (ref !spins))
+  done
+
+let test_signal_watch_deferred () =
+  let count = ref 0 in
+  let handler = March_eval.Eval.VBuiltin
+      ("test_sig_handler", fun _ -> incr count; March_eval.Eval.VUnit) in
+  March_eval.Eval.signal_watchers.(3) <- Some handler;
+  March_eval.Eval.signal_pending.(3)  <- false;
+  March_eval.Eval.signal_seen.(3)     <- false;
+  Sys.set_signal Sys.sigusr1 (Sys.Signal_handle March_eval.Eval.handle_os_signal);
+  (* Two deliveries before any drain must coalesce to a single handler call. *)
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  signal_wait_pending 3;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "USR1 watcher ran exactly once" 1 !count;
+  (* A later delivery + drain runs it again. *)
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  signal_wait_pending 3;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "USR1 watcher ran again after redelivery" 2 !count;
+  (* unwatch clears the slot: a delivery afterwards must NOT set pending nor run
+     the handler (handle_os_signal no-ops for an unwatched Usr1).  We can't wait
+     on a flag that will never be set, so just give the runtime a bounded window
+     of safe points to (not) deliver, then drain. *)
+  March_eval.Eval.signal_watchers.(3) <- None;
+  March_eval.Eval.signal_pending.(3)  <- false;
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  for i = 0 to 100_000 do ignore (Sys.opaque_identity (ref i)) done;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "unwatched USR1 does not run the handler" 2 !count;
+  March_eval.Eval.signal_pending.(3) <- false;
+  Sys.set_signal Sys.sigusr1 Sys.Signal_default
+
 let eval_suites =
   [
+      ( "signal_watch", [
+          Alcotest.test_case "deferred USR1 drain + coalesce + unwatch" `Quick
+            test_signal_watch_deferred;
+        ] );
       ( "browser http",
         [
           Alcotest.test_case "fetch unavailable by default" `Quick test_http_fetch_unavailable_by_default;
