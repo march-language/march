@@ -8564,8 +8564,31 @@ let rec eval_decl (env : env) (d : decl) : env =
         in
         let e' = (def.fn_name.txt, combined)
                    :: List.remove_assoc def.fn_name.txt e in
-        inner_ref := e';
-        eval_mod_decls rest e'
+        (* Default-arg base-name reconstruction for a NESTED-module member:
+           a mangled `foo$N` also registers under the base name `foo` as a
+           VMultiarity so a reduced-arity call `Inner.foo(x)` dispatches by
+           arity — mirrors the same reconstruction [make_recursive_env] does
+           for top-level default-arg fns. Without this, nested default-arg fns
+           are callable compiled (TIR _default_dispatch) but not interpreted. *)
+        let e'' =
+          match String.rindex_opt def.fn_name.txt '$' with
+          | Some dollar_pos when dollar_pos > 0 ->
+            let base = String.sub def.fn_name.txt 0 dollar_pos in
+            let suffix = String.sub def.fn_name.txt (dollar_pos + 1)
+                           (String.length def.fn_name.txt - dollar_pos - 1) in
+            (match int_of_string_opt suffix with
+             | Some _ ->
+               let existing = match List.assoc_opt base e' with
+                 | Some (VMultiarity vs) -> vs
+                 | _ -> [] in
+               let base_v = VMultiarity
+                 ((arity, rec_closure) :: List.remove_assoc arity existing) in
+               (base, base_v) :: List.remove_assoc base e'
+             | None -> e')
+          | _ -> e'
+        in
+        inner_ref := e'';
+        eval_mod_decls rest e''
       | d :: rest ->
         let e' = eval_decl e d in
         inner_ref := e';
@@ -8578,7 +8601,22 @@ let rec eval_decl (env : env) (d : decl) : env =
        these under the qualified prefix, not inherited outer bindings. *)
     let rec declared_names acc = function
       | [] -> acc
-      | DFn (def, _) :: rest -> declared_names (def.fn_name.txt :: acc) rest
+      | DFn (def, _) :: rest ->
+        let nm = def.fn_name.txt in
+        let acc = nm :: acc in
+        (* A mangled default-arg decl `foo$N` also exposes its base name `foo`
+           so the reconstructed `Inner.foo` VMultiarity (bound in the module
+           env above) is prefixed/exported for a reduced-arity call. *)
+        let acc =
+          match String.rindex_opt nm '$' with
+          | Some i when i > 0 &&
+                        (match int_of_string_opt
+                                 (String.sub nm (i + 1) (String.length nm - i - 1))
+                         with Some _ -> true | None -> false) ->
+            String.sub nm 0 i :: acc
+          | _ -> acc
+        in
+        declared_names acc rest
       | DLet (_, b, _) :: rest ->
         let rec pat_names a = function
           | PatVar n -> n.txt :: a

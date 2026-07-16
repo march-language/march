@@ -1875,15 +1875,18 @@ let test_defun_erased_closure_in_tuple_becomes_ecallptr () =
   Alcotest.(check bool) "erased closure call in run is ECallPtr" true
     (has_callptr run_fn.March_tir.Tir.fn_body)
 
-(* Regression: a default-arg function defined inside a NESTED module must keep
-   its real parameter list, not be routed through the general desugar path that
-   boxes every parameter into a synthesised tuple
-   (`let $t = (a, ...) in case $t of Tuple(...)`).  [expand_defaults_decl] only
-   runs on top-level decls, so before the fix a nested default-arg fn kept its
-   [FPDefault] params, [clause_is_trivial] returned false, and [desugar_fn_def]
-   produced the tuple adapter.  When such a fn also takes a type-erased closure
-   parameter, that adapter mismanaged the closure's refcount and freed it before
-   its call — a use-after-free (bastion Form.Wrapper.render via CSRF.tag). *)
+(* Regression: a default-arg function defined inside a NESTED module must not be
+   routed through the general desugar path that boxes every parameter into a
+   synthesised tuple (`let $t = (a, ...) in case $t of Tuple(...)`), which — for
+   a fn also taking a type-erased closure parameter — mismanaged the closure's
+   refcount and freed it before its call (use-after-free; bastion
+   Form.Wrapper.render via CSRF.tag).  As of the Phase 7.1 nested default-arg
+   fix, [expand_defaults_decl] now recurses into [DMod], so a nested default-arg
+   fn is EXPANDED into mangled `render$N` variants (each a normal fn with real
+   FPNamed params) rather than kept as a single strip-fast-path fn — the same
+   no-param-tuple guarantee, reached by expansion instead of the fast-path.
+   Assert the full-arity mangled decl (`render$4`, all 4 params) has real params
+   and no tuple-match body. *)
 let test_desugar_nested_default_arg_no_param_tuple () =
   let m = parse_and_desugar {|mod Outer do
     mod Inner do
@@ -1900,14 +1903,14 @@ let test_desugar_nested_default_arg_no_param_tuple () =
       | None ->
         (match d with
          | March_ast.Ast.DFn (def, _)
-           when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "render" -> Some def
+           when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "render$4" -> Some def
          | March_ast.Ast.DMod (_, _, inner, _) -> find_render inner
          | _ -> None)
     ) None decls
   in
   let render = match find_render m.March_ast.Ast.mod_decls with
     | Some d -> d
-    | None -> Alcotest.fail "nested render fn not found after desugar"
+    | None -> Alcotest.fail "nested render$4 (full-arity mangled) fn not found after desugar"
   in
   let clause = List.hd render.March_ast.Ast.fn_clauses in
   (* The body must NOT be a match over a synthesised param tuple. *)

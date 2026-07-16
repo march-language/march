@@ -283,6 +283,28 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.1: top-level default-arg functions callable by name from source)
+
+**Phase 7 feature track. A top-level default-arg function is now callable by
+name from March source at every arity, on both backends** — previously
+`greet("Bob")` (the documented example) failed typecheck with "I cannot find
+`greet`. Did you mean `greet$1`?" because desugar emits only mangled `greet$N`
+decls (the interpreter and TIR reconstruct the base-name dispatch downstream,
+but the typechecker runs in between and saw only the mangled names).
+
+- **Fix** (`lib/typecheck/typecheck.ml`, general `EApp` arm): a call of an
+  unbound bare/qualified name `foo(args)` is redirected to its `foo$<n_args>`
+  arity variant when in scope (typing-only; codegen/eval lower the original call
+  independently). Regression test asserts interp == compiled at all 3 arities.
+- **Nested-module default-arg fns also fixed** (three coordinated changes): the
+  desugar `expand_defaults_decl` now recurses into `DMod` (part 2); `eval.ml`'s
+  nested `eval_mod_decls` gains the same `foo$N`→base `VMultiarity`
+  reconstruction the top-level builder has (part 3a); and the module-member
+  exposure (`declared_names`) also exports the base name of a mangled `foo$N`
+  decl so the reconstructed `Inner.foo` is prefixed (part 3b). Verified
+  `Inner.f(1)`/`Inner.f(2,20)` on both backends at 2- and 3-deep nesting.
+
+Full suite green. 7.1 is fully resolved (top-level + nested, both backends).
 ## Current State (as of 2026-07-15, open-items master plan — Phase 5 capabilities: IO.WebSocket leaf; crypto/timer/db found N-A or blocked)
 
 **Phase 5 of the plan, on the merged trunk. Its actionable surface turned out
