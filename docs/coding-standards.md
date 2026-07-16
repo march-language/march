@@ -258,37 +258,6 @@ if ready do ...
 
 ---
 
-### `style/no-redundant-else`
-
-**Severity:** hint  
-**Auto-fix:** yes (removes `else`, dedents body)
-
-When the `if` branch always diverges — its return type is `Never` (e.g. `panic`,
-`exit`, an infinite loop) — the `else` keyword is redundant. Remove it and let the
-consequent code fall through. This is the guard-clause pattern.
-
-**Why:** Unnecessary `else` after a diverge adds indentation and implies false symmetry
-between a guard and the main path.
-
-```march
--- Bad
-fn divide(a : Int, b : Int) : Int do
-  if b == 0 do
-    panic("division by zero")
-  else
-    a / b
-  end
-end
-
--- Good
-fn divide(a : Int, b : Int) : Int do
-  if b == 0 do panic("division by zero") end
-  a / b
-end
-```
-
----
-
 ### `style/de-morgan`
 
 **Severity:** hint  
@@ -704,7 +673,6 @@ Each rule can be set to `"error"`, `"warning"`, `"hint"`, or `"off"`.
 "style/extract-arm-branches"          = "hint"
 "style/prefer-pipe"                   = "hint"
 "style/no-boolean-literal-compare"    = "warning"
-"style/no-redundant-else"             = "hint"
 "style/de-morgan"                     = "hint"
 "style/doc-comment-public-fn"         = "hint"
 "style/annotate-public-fns"           = "hint"

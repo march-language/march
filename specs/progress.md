@@ -305,6 +305,57 @@ but the typechecker runs in between and saw only the mangled names).
   `Inner.f(1)`/`Inner.f(2,20)` on both backends at 2- and 3-deep nesting.
 
 Full suite green. 7.1 is fully resolved (top-level + nested, both backends).
+## Current State (as of 2026-07-15, open-items master plan — Phase 5 capabilities: IO.WebSocket leaf; crypto/timer/db found N-A or blocked)
+
+**Phase 5 of the plan, on the merged trunk. Its actionable surface turned out
+much smaller than the plan implied** — several sub-tasks are blocked or N-A on
+the trunk (documented in `specs/todos.md`):
+
+- **5.3 (done) — `IO.WebSocket` least-privilege leaf:** added under `IO.NetConnect`
+  (`cap_lattice.ml` + `builtin_types`); remapped `ws_recv`/`ws_send`/`ws_select`
+  from `IO.NetConnect` to `IO.WebSocket`; annotated `stdlib/websocket.march`. A
+  WebSocket-only module can declare `needs IO.WebSocket` instead of the broader
+  `IO.NetConnect` (which still subsumes it), like `IO.NetConnect.TLS`. 4 tests.
+  (`ws_connect`/`close`/`upgrade`/`ping` don't exist on the trunk — only the 3
+  real builtins are wired.)
+- **5.4 (N-A) — `IO.Crypto`:** crypto is pure March (`sha256`/`sha512`/`hmac`
+  in-language, no builtins), so an IO capability doesn't apply — closed
+  won't-implement.
+- **5.2 (won't-fix) — `println`/`print` body-scan exemption:** confirmed
+  `IO.Console`-specific and kept deliberately — warning on every debug print
+  would flood all code; `cap pure` still bans `println`, so purity is unaffected.
+- **5.5/5.6 (blocked):** no `timer_*`/`db_*` builtins on the trunk (IPC has no
+  runtime); left open.
+- **5.1 (deferred):** promoting the body-scan cap check warning→error is a policy
+  decision (would break stdlib without a staged migration) — left for a decision.
+
+Full suite green; `run_compiler` +4 WebSocket cap tests.
+
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.3: retire the broken `style/no-redundant-else` lint)
+
+**Phase 7 feature track.** The `style/no-redundant-else` lint rule advised (with
+an auto-fix) removing the `else` after a `Never`-typed branch — but March `if`
+is an EXPRESSION whose `else` is MANDATORY, so the suggestion produced code that
+does not parse (its own doc "Good" example failed). Of the plan's three options
+(retire / grow an else-less statement-position `if` / make the auto-fix valid),
+the latter two are impossible or a language RFC, so the rule was **retired**:
+removed from `lib/lint/lint.ml` (registration + `EIf`-arm logic) and
+`docs/coding-standards.md` (section + config default). No LSP action exposed it.
+`forge lint` on the former trigger no longer emits the hint; build + doc-lint
+clean.
+## Current State (as of 2026-07-15, open-items master plan — Phase 7.5: `forge outdated`)
+
+**Phase 7 feature track.** New `forge outdated` subcommand: reads `forge.lock`,
+queries the registry (`FORGE_REGISTRY`/forgepm.org) for each dependency's
+available versions, and reports which REGISTRY deps have a newer non-retired
+release; git/path deps (no semver) are listed with their short commit but never
+flagged. New `forge/lib/registry_query.ml` (self-contained compile-client +
+fetch + version-array parse, reusable to later dedupe `forge deps`) +
+`forge/lib/cmd_outdated.ml` (unit-testable `pick_latest`/`classify_registry`
+pure core + the table printer), wired into `forge/bin/main.ml`. Verified live
+against forgepm.org (bastion 0.2.1 → OUTDATED → 0.2.3; 0.2.3 → up to date; git
+conduit → not-version-tracked); 6 unit tests for the pure core in
+`forge/test/test_resolver.ml`.
 
 ## Current State (as of 2026-07-15, open-items master plan — Phase 3 (type-system soundness) + Phase 6 (test-infra gates))
 

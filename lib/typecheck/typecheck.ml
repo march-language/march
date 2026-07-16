@@ -1297,9 +1297,12 @@ let builtin_cap_table : (string * string) list = [
   ("tcp_recv_http_headers", "IO.NetConnect");
   ("tcp_recv_chunk",        "IO.NetConnect");
   ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("ws_recv",               "IO.NetConnect");
-  ("ws_send",               "IO.NetConnect");
-  ("ws_select",             "IO.NetConnect");
+  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
+     only speaks WebSocket can declare `needs IO.WebSocket` instead of the
+     broader `needs IO.NetConnect`, mirroring IO.NetConnect.TLS. *)
+  ("ws_recv",               "IO.WebSocket");
+  ("ws_send",               "IO.WebSocket");
+  ("ws_select",             "IO.WebSocket");
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
@@ -2139,6 +2142,7 @@ let builtin_types : (string * int) list =
     ("IO.Clock",      0); ("IO.Random",     0); ("IO.Database",   0);
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
+    ("IO.WebSocket",  0);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
     ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
