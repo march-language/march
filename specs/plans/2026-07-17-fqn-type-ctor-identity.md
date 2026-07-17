@@ -263,6 +263,85 @@ independently green and the risky behavior change is isolated.
   function of (declarations in scope), not load order; test with the forge
   per-file harness.
 
+## Stage-1 build-attempt findings (2026-07-17) — the carry is deeper than the stage list conveys
+
+A bounded build attempt (read-through + recon subagent, no code change to the
+carry) verified the exact surface and surfaced constraints the stage list
+understates. Recording so the eventual carry does not re-discover them.
+
+**Feasibility confirmed.** There IS a genuine pass-1 prebind
+(`check_module_core:9173`, `pre_env` fold `:9328`, nested via
+`prebind_mod_members:9183`) that registers EVERY type name+arity into
+`env.types` — bare and qualified — across all modules BEFORE any body is
+checked in pass 2. So a "multiply-declared bare name" collision set is soundly
+computable after pass 1, which is the precondition for collision-conditional
+canonical spelling.
+
+**The bare name is keyed on FIVE surfaces that must move together (verified,
+line-anchored):**
+1. registration — `env.types`/`env.ctors`, bare add with SILENT overwrite and
+   **zero** collision detection (`typecheck.ml:7746`, `:9352`; the only dup
+   checks are within a single decl).
+2. `mangle_ty` (`mono.ml:117-118`) — bare `TCon` name verbatim → LLVM symbol.
+3. `lower_types` (`lower_types.ml:44`,`:76`) — name carried verbatim to TIR,
+   never re-derived, so typecheck's bare name reaches `mangle_ty` unchanged.
+4. exhaustiveness `ctors_for_type` (`typecheck.ml:3287`) — folds the WHOLE
+   `env.ctors`, keeps every ctor whose `ci.ci_type` STRING-EQUALS the bare
+   scrutinee name. This is the L4 ctor cross-talk: a user `Handle`(ctor `H`) and
+   stdlib `Handle`(ctor `Handle`) both carry `ci_type="Handle"`, so both ctor
+   sets merge → spurious `missing case: Handle(_)`.
+5. eval dispatch — `impl_tbl` `(iface,type)` and `ctor_type_tbl` keyed on the
+   bare type name (`eval.ml:8769`,`:8583`,`:948`); two same-named types collide
+   on one slot (last-registered wins), the runtime analogue of the same bug.
+
+**Four hard invariants a prior engineer ALREADY established under bare identity
+— the carry must re-derive each (this is the real cost, not mangling churn):**
+- **Ctor-tag stability across build modes.** `unqualified_module_deps` +
+  `dependency_order_dmod_run` (`typecheck.ml:7040-7050`,`:7144-7151`) fix module
+  CHECK ORDER specifically so a constructor's resolved type is identical to the
+  single-entry (forge per-file) build — the comment states this is to NOT
+  "perturb the constructor tags assigned during lowering." A qualified-identity
+  change that shifts resolution can shift ctor tags → silent miscompile.
+- **A qualified-ctor experiment was already TRIED and REVERTED.**
+  `prebind_mod_members` (`:9233-9243`) documents that setting `ci_type` to the
+  qualified `qname` made a cross-module `Mod.Telemetry.JobEnqueued` resolve to
+  `TCon("...ConduitTelemetryEvent")` that would NOT unify with the bare
+  `ConduitTelemetryEvent` every signature uses ("expected X but got Mod.X").
+  Conclusion in-tree: "the type side already canonicalizes qualified->bare (see
+  canon_name); the constructor side must agree by carrying the bare type." The
+  FQN carry must overturn this deliberately and re-prove cross-module unification
+  for BOTH type and ctor identity at once.
+- **Cyclic-module order-independence.** Bare names are prebound (`:9214-9227`) so
+  a referrer checked before its definer in a cyclic module graph still resolves —
+  resolution must stay a function of declarations-in-scope, not order.
+- **Opaque-ctor hiding.** `sub_opaque`/`sig`-driven suppression (`:9190-9196`)
+  keeps a signature-opaque type's ctors unreferenceable cross-module; the new
+  resolver must preserve this visibility gate.
+
+**Ctor identity is COUPLED into the type carry for colliding names, not optional
+(Stage 4).** `ctor_info` carries NO declaring-module field (`ci_type` bare only,
+`:410-414`), so nothing — not exhaustiveness, not eval dispatch — can tell two
+same-named types' ctors apart today. Of the 11 type collisions, several
+(`Value`/`JsonValue` sharing `Str`/`Null`/`Bool`/`Array`) also collide on ctor
+NAMES, and those ctors carry tags. So distinguishing the colliding TYPES forces
+distinguishing their CTORS (a `ci_module`/qualified-`ci_type` change that touches
+tag assignment) — Stage 4 folds into Stage 1 for the colliding set. Adding a
+purely-additive `ci_module` (≈18 construction sites: prelude `:2187-2192`,
+source paths `:7767`/`:9357`/`:9647`, registry `:981`) is the minimal metadata
+that lets the DIAGNOSTIC-only exhaustiveness fix (byte-identical, no codegen)
+land independently — it is the natural first committable slice of the carry.
+
+**Revised sizing.** Collision-conditional mangling keeps every single-declaration
+type byte-identical (the 11 collisions are stdlib-internal and absent from the
+golden corpus), so the golden gate stays strong. But the carry is atomic across
+the 5 surfaces AND must re-establish the 4 invariants above — genuinely a
+multi-session flag-day, not a single sweep. Recommended cut order: (a) additive
+`ci_module` + exhaustiveness disambiguation (diagnostic-only, byte-identical,
+closes L4's ctor half); (b) collision-set + collision-conditional canonical
+spelling in `canon_name` gated on byte-identical goldens; (c) thread FQN through
+`mangle_ty`/eval dispatch for the colliding set with a CAS bump; (d) the rule-3
+ambiguous-error + migration sweep.
+
 ## Alternatives considered
 
 - **(A) Full FQN identity (this spec).** Root fix; unblocks all four items;
