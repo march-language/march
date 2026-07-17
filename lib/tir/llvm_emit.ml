@@ -1792,7 +1792,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Emit each arg once, collecting both type and value strings. *)
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
     let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
-    let args_str  = String.concat ", " arg_strs in
     (* Resolve unqualified cross-module references: lower.ml may emit a
        function reference without its module prefix (e.g. "base64_encode"
        for "Crypto.base64_encode").  Look up the qualified name first.
@@ -1804,6 +1803,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | Some q -> q
         | None -> f.Tir.v_name
     in
+    (* Boundary B: a direct call to an apply fn (known_call rewrote a
+       non-escaping ECallPtr into EApp(apply_fn, ...)) must pass every scalar
+       arg through the uniform ptr closure ABI — tag Int/Bool via (n<<1)|1,
+       box Float via march_alloc_float — because the apply fn's params are now
+       `ptr` (Task 4).  Ordinary top-level direct calls keep their concrete
+       ABI, so guard the remap on is_apply_fn. *)
+    let arg_strs =
+      if is_apply_fn resolved_name then
+        List.map (fun (ty, v) ->
+          if ty = "i64" || ty = "double" then
+            let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
+          else ty ^ " " ^ v) arg_pairs
+      else arg_strs in
+    let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
       | None -> mangle_extern resolved_name in
@@ -2284,7 +2297,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        matching coerce's ("double","ptr") arm.  clo_wrap unboxes on the far side
        for named-fn targets; lambda apply bodies unbox lazily via coerce. *)
     let orig_param_llvm_tys =
-      List.map (fun t -> if t = "double" then "ptr" else t) orig_param_llvm_tys in
+      List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) orig_param_llvm_tys in
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
         (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
     let orig_arg_strs = List.map2 (fun pty a ->
