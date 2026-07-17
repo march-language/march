@@ -5095,6 +5095,15 @@ and infer_block env exprs =
       | Ast.Unrestricted ->
         let rty = repr rhs_ty in
         (match rty with
+         (* L8: a `linear`/`affine` RHS type — e.g. a call to
+            `fn mk() : linear Res` — propagates its linearity to the plain
+            `let h = mk()` binding, so the return-position qualifier is not
+            merely decorative.  EXCLUDE channels: a `TLin`-wrapped `TChan`
+            (session endpoint) has its own tracking (offer_conts / affine param
+            / End-drop create-and-drop leniency) and was Unrestricted here
+            before — promoting it to strict-linear would regress that. *)
+         | TLin (lin, inner) when lin <> Ast.Unrestricted
+             && (match repr inner with TChan _ -> false | _ -> true) -> lin
          | TCon (name, _) ->
            if List.mem name env.always_linear_types then Ast.Linear else Ast.Unrestricted
          | _ -> Ast.Unrestricted)
@@ -5498,7 +5507,15 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               (* Track the linear param at its inner (unwrapped) type. *)
               let bind_ty = match repr t with TLin (_, inner) -> inner | _ -> t in
               let env' = match effective_lin with
-                | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
+                | Ast.Unrestricted ->
+                  (* Register per-field linear sentinels for a record-typed param
+                     with `linear`/`affine` fields (L3): mirrors [bind_lam_param]
+                     so a top-level `fn f(p : Rec)` tracks `p.field` double-use as
+                     an ERROR, not a warning — previously only let-bound and lambda
+                     params registered these, so fn-param field linearity was
+                     silently warning-only. *)
+                  let env1 = bind_var p.param_name.txt (Mono t) env in
+                  bind_linear_field_sentinels p.param_name.txt t env1
                 | lin              -> bind_linear p.param_name.txt lin bind_ty env
               in
               (t :: tys, env')

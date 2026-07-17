@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t79 accept, t01–t76 reject)
+# Typing corpus index (t01–t80 accept, t01–t78 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 155/155 — 79 accept, 76
+Exit 0 iff every program behaves as declared (currently 158/158 — 80 accept, 78
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -461,7 +461,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t75_drop_unclosed_end_channel` | **(F7 linearity hole a, 2026-07-15)** — `cc2` advances to session state `End` via `Chan.send` but is dropped (never `Chan.close`d). A channel at `End` must be closed; the new must-close check (narrower than full linear consumption — mid-protocol drop stays legal, F6) rejects the leak | `reached \`End\` but was never closed` |
 | `t76_reuse_linear_param_endpoint` | **(F7 linearity hole b, 2026-07-15)** — re-sending on a session-channel PARAMETER `ch : Chan(Client, Echo)` (tracked affine so drop stays legal but reuse is caught); parameter-endpoint tracking previously missed the `TLin` wrapper entirely | `is used more than once here` |
 
-**Result: 155 / 155 (79 accept, 76 reject).**
+**Result: 158 / 158 (80 accept, 78 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
