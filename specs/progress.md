@@ -283,6 +283,43 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-17, sort-RC crash fixed — uniform ptr closure scalar ABI)
+
+**The long-standing sort-RC-underflow crash (compiled `heapsort`/`mergesort`/…
+over `List(Int)` → SIGSEGV) is fixed.** Root cause: an **untagged even Int in a
+`ptr`-typed closure slot** was reference-counted as a heap pointer. A generic-Int
+comparator's apply wrapper takes `ptr` params (the erased ABI, shared across all
+instantiations), but the call site passed the element as a raw `i64`; an even raw
+Int passes `IS_HEAP_PTR` (even + canonical range), so `needs_rc(TVar)=true` emits
+`march_incrc` on it → deref of a garbage address. This is the exact Int analog of
+the float register-mismatch fixed by the float-boxing flip.
+
+The fix makes the compiled **closure-dispatch scalar ABI uniformly `ptr`** — an
+Int/Bool crosses as a tagged immediate `(n<<1)|1`, a Float as a `march_float_box`
+— at every boundary:
+- **(A) `ECallPtr`** (indirect dispatch) and **(B) direct `EApp`→apply-fn** call
+  sites coerce each scalar arg to `ptr` (`lib/tir/llvm_emit.ml`). Boundary B was
+  the linchpin two earlier debug attempts missed: defun rewrites non-escaping
+  `ECallPtr`→`EApp`, so apply fns are reached by BOTH paths — tagging only one
+  left a raw odd value for the entry decode to `ashr`-corrupt.
+- **(C)** apply-fn scalar params are declared `ptr` and untagged/unboxed at entry
+  (`lib/tir/llvm_toplevel.ml`); a `TVar`-typed param is already `ptr` and the body
+  untags it lazily via `coerce`, so only concrete-scalar-typed params get an
+  entry decode.
+- **(D)** `clo_wrap` (named-fn trampoline) decodes `ptr` scalar params before
+  forwarding to the concrete fn (`lib/tir/llvm_calls.ml`).
+
+The existing `IS_HEAP_PTR` guard already makes tagged (odd) values RC-inert, so
+tagging is sufficient — no runtime change was needed (only a regression golden).
+
+**Verified:** all 6 sort benches interp==compiled (incl. `introsort`); full suite
+green — **eval 233 / compiler 514 / codegen 421 / stdlib 809 / snapshots 29, 0
+failures**; native goldens `test/native/closure_scalar_abi.march` (the
+failure-mode matrix: named-fn HOF, lambda HOF, filter, curried `adder` via direct
+calls, generic-Int sort, generic-String sort, Float-closure guard) and
+`tagged_int_rc.march`; float/FFI/signal goldens intact; `list_ops`/`binary_trees`
+benches unchanged. Design + plan: `specs/plans/2026-07-17-closure-scalar-abi-uniform-ptr.md`.
+
 ## Current State (as of 2026-07-16, open-items master plan — Phase 2: float-boxing at erasure boundaries, Stage 2 atomic flip)
 
 **Erased Floats are now heap-BOXED, fixing the compiled generic-Float crash /
