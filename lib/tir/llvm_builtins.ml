@@ -824,6 +824,9 @@ let runtime_only_declares : (string * string) list = [
   ("march_signal_watch", "declare void @march_signal_watch(i64 %code, ptr %clo)");
   ("march_signal_unwatch", "declare void @march_signal_unwatch(i64 %code)");
   ("march_signal_raise_self", "declare void @march_signal_raise_self(i64 %code)");
+  ("march_alloc_float", "declare ptr  @march_alloc_float(double %v)");
+  ("march_unbox_float", "declare double @march_unbox_float(ptr %p)");
+  ("march_poly_compare", "declare i64  @march_poly_compare(ptr %a, ptr %b)");
 ]
 
 (** Look up the exact historical `declare ...` text for C symbol [c_name],
@@ -1103,6 +1106,9 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_signal_watch";
   PDeclare "march_signal_unwatch";
   PDeclare "march_signal_raise_self";
+  PDeclare "march_alloc_float";
+  PDeclare "march_unbox_float";
+  PDeclare "march_poly_compare";
 ]
 
 let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/CSV/session-types *)
@@ -1265,6 +1271,9 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_signal_watch";
   PDeclare "march_signal_unwatch";
   PDeclare "march_signal_raise_self";
+  PDeclare "march_alloc_float";
+  PDeclare "march_unbox_float";
+  PDeclare "march_poly_compare";
 ]
 
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime

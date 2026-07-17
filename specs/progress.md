@@ -283,6 +283,52 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-16, open-items master plan — Phase 2: float-boxing at erasure boundaries, Stage 2 atomic flip)
+
+**Erased Floats are now heap-BOXED, fixing the compiled generic-Float crash /
+mis-sort class.** A `Float` crossing a type-erasure boundary (a generic `TVar`
+slot: a polymorphic comparator, `Stats.median`, a dynamic-record field, a
+`List(a)` element) was stored as raw IEEE-754 bits bitcast into the `ptr` slot —
+even and usually in canonical user-space range, so it passed every `IS_HEAP_PTR`
+guard. Generic code then either RC'd the raw bits (`march_incrc` on `*(3.5)` →
+SIGSEGV) or integer-compared them (negative floats order in reverse). Both are
+now closed: an erased Float is a `march_float_box` (tag `-3`), so RC is sound and
+generic compare/eq dispatch on the box tag.
+
+- **What actually changed (the closure-arg ABI, not the design's "~6 bypass
+  sites"):** RC was already sound (`needs_rc (TVar _) = true`, no lingering float
+  suppression — see the Phase 7.2-era recon), so the flip was purely
+  encode/decode + compare. The subtle core: an erased Float must cross the
+  closure boundary BOXED, so the uniform-ptr apply ABI was extended to Float
+  params — a mono-specialized Float apply fn used to declare a `double` param,
+  which lands in an FP register while the boxed-ptr call site uses a GP register
+  (integer scalars coincide across the classes; floats do not).
+  - `coerce` `("ptr","double")`/`("double","ptr")` → `march_unbox_float` /
+    `march_alloc_float` (`lib/tir/llvm_ctx.ml`).
+  - Closure dispatch (ECallPtr) forces Float args to boxed ptr; the lambda
+    apply-fn signature declares Float params as ptr + unboxes at entry
+    (`lib/tir/llvm_emit.ml`, `lib/tir/llvm_toplevel.ml`); `clo_wrap` (named-fn
+    wrapper) takes ptr Float params + unboxes, boxes Float returns
+    (`lib/tir/llvm_calls.ml`).
+  - Ordering compare hook: `fallback_cmp` erased-ptr branch →
+    `march_poly_compare` (`-1/0/1`, tag-dispatched); EQ already routed through
+    `march_poly_eq`. Preamble declares for the three box/compare runtime fns.
+- **Verified:** the P0 (`Sort.mergesort_by` erased-Float comparator) → `-9.`
+  compiled == interp (was SIGSEGV 139); `Stats.median`, `Ok(Float)`/`let?`,
+  map-with-named-Float-fn, int/string generic sorts all interp==compiled. Full
+  suite green — **eval 233 / compiler 514 / stdlib 809 (incl. compiled float
+  sorts + adversarial regressions) / codegen 421 / snapshots 29, 0 failures**;
+  native golden `test/native/float_boxing.march`. CAS cache-key bump is automatic
+  (the key digests the compiler executable).
+- **Out of scope / still open:** the `Int` sort-RC bench crashes
+  (`heapsort`/`mergesort`/… over `List(Int)`, 10k elements) are a SEPARATE,
+  pre-existing RC-underflow bug — NOT the erased-Float path, unchanged by this
+  flip. Stage 3 (lift the monomorphism restriction) was found already satisfied
+  on trunk; Stage 4 (perf pass / FBIP box-reuse) deferred.
+
+Design `specs/plans/2026-07-13-float-boxing-design.md`; execution + recon
+`specs/plans/2026-07-15-float-boxing-execution-subplan.md`.
+
 ## Current State (as of 2026-07-16, open-items master plan — Phase 7.2: `Signal.watch` OS-signal watchers, both backends)
 
 **Phase 7 feature track.** March programs can now register deferred handlers for

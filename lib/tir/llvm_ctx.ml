@@ -474,18 +474,21 @@ let coerce ctx from_ty v to_ty =
   if from_ty = to_ty then v
   else match (from_ty, to_ty) with
   | ("ptr", "double") ->
-    (* ptr → i64 → double (LLVM can't ptrtoint to double directly) *)
-    let i = fresh ctx "cv" in
+    (* Erased slot → Float: UNBOX the heap float cell (float-boxing, Stage 2).
+       A Float crossing an erasure boundary is stored as a `march_float_box`
+       (tag -3), never raw bits — so RC ops on the erased ptr are sound and
+       generic compare/eq dispatch on the box tag.  Concrete Float↔Float never
+       hits this arm (both sides are `double`); the raw-bits REPL-slot path is
+       the separate `("i64","double")` arm below. *)
     let r = fresh ctx "cv" in
-    emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
-    emit ctx (Printf.sprintf "%s = bitcast i64 %s to double" r i);
+    emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" r v);
     r
   | ("double", "ptr") ->
-    (* double → i64 → ptr *)
-    let i = fresh ctx "cv" in
+    (* Float → erased slot: BOX into a heap float cell (float-boxing, Stage 2).
+       Pairs with the unbox arm above; must stay in lockstep with every other
+       erased-Float encode site (clo_wrap double-return, Ok-Float wrapper). *)
     let r = fresh ctx "cv" in
-    emit ctx (Printf.sprintf "%s = bitcast double %s to i64" i v);
-    emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r i);
+    emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double %s)" r v);
     r
   | ("ptr", "i64") ->
     (* Untag a low-bit-tagged integer — CONDITIONALLY.  Producers store

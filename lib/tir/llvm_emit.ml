@@ -382,16 +382,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ret_tir in
-      (* Use concrete param types so the wrapper signature matches ECallPtr's
-         call-site type annotation (which uses llvm_ty for each param). *)
+      let _ = nparams in
+      (* clo_wrap_define builds the wrapper's uniform-ptr ABI signature and the
+         concrete forwarding call (boxing/unboxing Float params + return). *)
       let param_tys = List.map llvm_ty ps_tirs in
-      let all_params = "ptr" :: param_tys in  (* clo + original params *)
-      let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-      let all_arg_decls = "%_clo" :: arg_names in
-      let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
-      let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+        (clo_wrap_define wrap_name param_tys target_ret fn_name)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in
@@ -502,17 +498,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        let wrap_name = fn_name ^ "$clo_wrap" in
        if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
          Hashtbl.add ctx.emitted_wraps wrap_name ();
-         let nparams     = List.length ps in
          let ret_tir     = fn_ret_tir v.Tir.v_ty in
          let target_ret  = llvm_ret_ty ret_tir in
          let param_tys   = List.map llvm_ty ps in
-         let all_params  = "ptr" :: param_tys in
-         let arg_names   = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-         let all_decls   = "%_clo" :: arg_names in
-         let decl_str    = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_decls) in
-         let call_args   = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
          Buffer.add_string ctx.extra_fns
-           (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+           (clo_wrap_define wrap_name param_tys target_ret fn_name)
        end;
        let hp  = fresh ctx "cwrap" in
        emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -1037,8 +1027,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           let va_f = coerce ctx ty_a va "double" in
           let vb_f = coerce ctx ty_b vb "double" in
           emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
+        end else if ty_a = "ptr" || ty_b = "ptr" then begin
+          (* Erased operand(s): the static type is TVar, so the runtime value may
+             be a tagged int, a boxed Float (tag -3), or a string.  A raw
+             ptr→i64 + icmp mis-orders boxed floats (float-boxing, Stage 2 —
+             and, pre-boxing, negative-float bits: mechanism 2).  Dispatch on the
+             runtime tag via march_poly_compare (returns -1/0/1) and apply the
+             requested ordering vs 0.  A concrete i64 operand coerces to a tagged
+             immediate ptr, which march_poly_compare's odd→int arm handles. *)
+          let va_p = coerce ctx ty_a va "ptr" in
+          let vb_p = coerce ctx ty_b vb "ptr" in
+          let c = fresh ctx "pcmp" in
+          emit ctx (Printf.sprintf "%s = call i64 @march_poly_compare(ptr %s, ptr %s)" c va_p vb_p);
+          emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c)
         end else begin
-          (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
+          (* Both concrete i64: fast integer compare. *)
           let va' = coerce ctx ty_a va "i64" in
           let vb' = coerce ctx ty_b vb "i64" in
           emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
@@ -2273,6 +2276,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | _ -> List.map (fun _ -> "ptr") args)
       | _ -> List.map (fun _ -> "ptr") args
     in
+    (* Closure dispatch uses a uniform ptr ABI (the apply wrapper always takes
+       ptr params — see is_apply_fn / clo_wrap).  A `double` param type would
+       compile the arg into an FP register while the wrapper reads a GP register
+       (integer scalars coincide across the two classes, floats do NOT) — so a
+       Float closure argument must cross as a BOXED ptr (float-boxing, Stage 2),
+       matching coerce's ("double","ptr") arm.  clo_wrap unboxes on the far side
+       for named-fn targets; lambda apply bodies unbox lazily via coerce. *)
+    let orig_param_llvm_tys =
+      List.map (fun t -> if t = "double" then "ptr" else t) orig_param_llvm_tys in
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
         (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
     let orig_arg_strs = List.map2 (fun pty a ->

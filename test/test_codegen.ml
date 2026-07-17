@@ -8142,6 +8142,9 @@ declare void @march_task_cancel_by_id(ptr %task)
 declare void @march_signal_watch(i64 %code, ptr %clo)
 declare void @march_signal_unwatch(i64 %code)
 declare void @march_signal_raise_self(i64 %code)
+declare ptr  @march_alloc_float(double %v)
+declare double @march_unbox_float(ptr %p)
+declare i64  @march_poly_compare(ptr %a, ptr %b)
 |}
 
 let golden_preamble_native_net_io : string = {|
@@ -8302,6 +8305,9 @@ declare void @march_task_cancel_by_id(ptr %task)
 declare void @march_signal_watch(i64 %code, ptr %clo)
 declare void @march_signal_unwatch(i64 %code)
 declare void @march_signal_raise_self(i64 %code)
+declare ptr  @march_alloc_float(double %v)
+declare double @march_unbox_float(ptr %p)
+declare i64  @march_poly_compare(ptr %a, ptr %b)
 |}
 
 (** Reassemble the historical preamble text for a given (is_wasm, repl)

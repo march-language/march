@@ -887,6 +887,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
 
+; ── Phase 2: float-boxing Stage 2 (erased Floats are heap-boxed) ──────
+; A Float crossing a type-erasure boundary is boxed (march_float_box, tag -3),
+; so RC on the erased slot is sound and generic compare dispatches on the box
+; tag.  Exercises List.map+named-fn (clo_wrap ptr ABI), Ok(Float) round-trip,
+; and the erased-Float lambda comparator through mergesort_by (the original P0
+; that SIGSEGV'd / mis-sorted compiled).  (source_tree ../stdlib) for Sort/List.
+(rule
+ (targets native_float_boxing native_float_boxing.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/float_boxing.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_float_boxing
+        native/float_boxing.march)
+   (with-stdout-to native_float_boxing.out
+        (system "./native_float_boxing")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/float_boxing.expected native_float_boxing.out)))
+
 ; ── Regression: bare sibling call 2 levels deep in a stdlib file must
 ; qualify with the file's OWN top-level mod name, not just the immediate
 ; enclosing submodule (desugar's qualify_module_refs; see

@@ -52,7 +52,35 @@ box opaquely; `test/test_float_box.c` (linked against the core runtime set).
 UNCHANGED (809 + all drivers, exit 0 — nothing emits the tag yet). Landed as
 commit `ec899b1e`.
 
-## Stage 2 — the atomic compiler flip (ONE commit) — GATED, NEEDS SIGN-OFF
+## Stage 2 — the atomic compiler flip — ✅ DONE (2026-07-16)
+
+Landed as one atomic codegen flip (RC was already sound — see Finding 1). The
+work turned out to be **the closure-arg ABI**, not the ~6 "bypass encode sites"
+the design listed: an erased Float must cross the closure boundary BOXED, so the
+uniform-ptr apply ABI had to be extended to Float params (previously a
+mono-specialized Float apply fn declared a `double` param → FP/GP register-class
+mismatch against the boxed-ptr call site; integer scalars coincide across the
+classes, floats do not). Sites changed:
+- `coerce` ("ptr","double")/("double","ptr") → `march_unbox_float`/`march_alloc_float` (`lib/tir/llvm_ctx.ml`).
+- Closure dispatch call site forces Float args to boxed ptr (`llvm_emit.ml` ECallPtr arm).
+- `clo_wrap` (named-fn wrapper) takes ptr Float params + unboxes; boxes Float returns (`lib/tir/llvm_calls.ml`, refactored to take param types).
+- Lambda **apply-fn** signature declares Float params as ptr + unboxes at entry (`lib/tir/llvm_toplevel.ml` `emit_fn`).
+- Ordering compare hook: `fallback_cmp` erased-ptr branch → `march_poly_compare` (`llvm_emit.ml`); EQ already routed through `march_poly_eq`.
+- Preamble declares for `march_alloc_float`/`march_unbox_float`/`march_poly_compare` (+ golden).
+- The Ok-Float raises-wrapper (`march_make_float`) was left AS-IS — verified self-consistent (raw bits in the Result cell, `let?` round-trip matches interp).
+
+**Gate PASSED:** the P0 (`Sort.mergesort_by` erased-Float comparator) → `-9.`
+compiled == interp (was SIGSEGV 139); `Stats.median`, `Ok(Float)`/`let?`,
+map-with-named-Float-fn, int/string sorts all interp==compiled; **full suite
+green — eval 233 / compiler 514 / stdlib 809 (incl. compiled float sorts +
+adversarial regressions) / codegen 421 / snapshots 29, 0 failures**; native
+golden `test/native/float_boxing.march`. The CAS/JIT cache-key "bump" is
+automatic — the CAS key already digests the compiler executable (`cas.ml`), so
+recompiling invalidates all cached artifacts. **The `Int` sort-RC bench crashes
+(`heapsort`/`mergesort`/… on `List(Int)`) are a SEPARATE, pre-existing RC bug
+(todos item a), NOT the erased-Float path — unchanged by this flip.**
+
+### (historical) Stage 2 — the atomic compiler flip (ONE commit) — GATED, NEEDS SIGN-OFF
 
 **Do NOT start until (a) Stage 1 is green and (b) the human decision gate is
 passed.** This is the flag-day; encode + decode + RC + compare MUST move

@@ -172,9 +172,18 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     && not (Llvm_builtins.is_builtin_fn fn.Tir.fn_name)
   in
 
+  (* Apply wrappers use the uniform ptr ABI for params too (not just the return
+     above): a Float param crosses BOXED as a ptr (float-boxing, Stage 2), so an
+     apply fn that mono specialized to a concrete Float param must still DECLARE
+     it as ptr — otherwise the ECallPtr call site (which passes a boxed ptr) and
+     this definition disagree on register class (FP vs GP) for the float.  The
+     entry prologue below unboxes such params back to double for the body. *)
+  let is_apply_wrapper = Tir_names.is_apply_fn fn.Tir.fn_name in
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty in
+      let pty = if is_apply_wrapper && base = "double" then "ptr" else base in
+      pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
   (* In --compile-so mode, give every non-exported function hidden ELF
@@ -223,8 +232,16 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let param_slots = List.map (fun (v : Tir.var) ->
     let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
     let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+    let vn = Llvm_ctx.llvm_name v.Tir.v_name in
     Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
-    Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (Llvm_ctx.llvm_name v.Tir.v_name) slot);
+    if is_apply_wrapper && ty = "double" then begin
+      (* Float apply-fn param arrives BOXED (uniform ptr ABI, matching the
+         ptr-typed signature above); unbox to double for the body's slot. *)
+      let d = Llvm_ctx.fresh ctx "cv" in
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %%%s.arg)" d vn);
+      Llvm_ctx.emit ctx (Printf.sprintf "store double %s, ptr %%%s.addr" d slot)
+    end else
+      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot);
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
