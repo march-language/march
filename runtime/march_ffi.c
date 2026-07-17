@@ -33,15 +33,18 @@ int64_t     march_get_int(march_value v)  { return v >> 1; }
 march_value march_make_bool(int b)        { return ((march_value)(b ? 1 : 0) << 1) | 1; }
 int         march_get_bool(march_value v) { return (int)(v >> 1) != 0; }
 
+/* Float-boxing (Stage 2): a Float carried in a march_value (erased) slot — an
+ * Option/Result payload, a generic record/variant field — is now a heap
+ * march_float_box (tag -3), NOT raw bitcast bits.  march_make_float BOXES and
+ * march_get_float UNBOXES so a Float that the C side stuffs into a generic slot
+ * matches how compiled March reads it back (coerce ("ptr","double") =
+ * march_unbox_float).  Direct primitive Float args/returns still pass as a bare
+ * `double` and never touch these. */
 march_value march_make_float(double f) {
-    march_value w;
-    memcpy(&w, &f, sizeof w);
-    return w;
+    return march_from_ptr(march_alloc_float(f));
 }
 double march_get_float(march_value v) {
-    double f;
-    memcpy(&f, &v, sizeof f);
-    return f;
+    return march_unbox_float(march_as_ptr(v));
 }
 
 /* String/Bytes share the march_string layout {rc;tag;pad;len;data[]}. */

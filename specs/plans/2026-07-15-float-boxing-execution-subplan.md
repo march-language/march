@@ -67,7 +67,16 @@ classes, floats do not). Sites changed:
 - Lambda **apply-fn** signature declares Float params as ptr + unboxes at entry (`lib/tir/llvm_toplevel.ml` `emit_fn`).
 - Ordering compare hook: `fallback_cmp` erased-ptr branch → `march_poly_compare` (`llvm_emit.ml`); EQ already routed through `march_poly_eq`.
 - Preamble declares for `march_alloc_float`/`march_unbox_float`/`march_poly_compare` (+ golden).
-- The Ok-Float raises-wrapper (`march_make_float`) was left AS-IS — verified self-consistent (raw bits in the Result cell, `let?` round-trip matches interp).
+- **FFI contract (resolved by BOXING, not keeping raw):** `march_make_float`
+  now allocates a `march_float_box` and `march_get_float` unboxes
+  (`runtime/march_ffi.c`) — its consumers (Result-Ok / Option-Some Float
+  payloads, incl. the compiler's Ok-Float raises-wrapper) are all ERASED slots,
+  which compiled March now decodes via `march_unbox_float`; leaving it as raw
+  bits SIGSEGV'd `test/native/ffi_float` (unbox deref of `0x400c…0010` = the bits
+  of `3.5`). Record/variant Float FIELDS stay raw (the C gen-c codec writes bits
+  at the slot; Rust `f64::to_march`/`from_march` decoupled to raw bits — erased
+  Option<f64> payloads still box via the helpers). All C FFI goldens +
+  `scripts/verify-rust-ffi.sh` pass.
 
 **Gate PASSED:** the P0 (`Sort.mergesort_by` erased-Float comparator) → `-9.`
 compiled == interp (was SIGSEGV 139); `Stats.median`, `Ok(Float)`/`let?`,
