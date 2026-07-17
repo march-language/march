@@ -486,7 +486,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            (match args with
             | first_arg :: _
               when not (Hashtbl.mem !_current_module_fns name) ->
-              (match resolve_iface_method env name (Typecheck.span_of_expr first_arg) with
+              (* `to_string` is a universal formatter that is SEMANTICALLY
+                 identical to `show` on any type with a Show impl (verified: the
+                 interpreter's `to_string` and `show` produce byte-identical
+                 output, and for primitives Show$T.show delegates to the very
+                 same *_to_string C helper).  But compiled `to_string` was a
+                 codegen builtin that fell through to the generic
+                 `march_value_to_string` for non-primitives → `#<tag:N>` garbage.
+                 Route it through the Show dispatch so a container/ADT gets its
+                 real `Show$T.show`, exactly as `println` already does.  If no
+                 Show impl resolves (a Show-less type), fall through to the old
+                 `to_string` builtin — no regression. *)
+              let dispatch_name = if name = "to_string" then "show" else name in
+              (match resolve_iface_method env dispatch_name (Typecheck.span_of_expr first_arg) with
                | Some mangled_name -> Ast.EVar { txt = mangled_name; span = fn_span }
                | None -> f_expr)
             | _ -> f_expr))

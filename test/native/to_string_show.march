@@ -1,0 +1,21 @@
+-- Regression: compiled `to_string` on a non-primitive must match the
+-- interpreter (was `#<tag:N>` garbage). `to_string` is a universal formatter
+-- semantically identical to `show`; the codegen builtin fell through to the
+-- generic `march_value_to_string` for containers/ADTs. Fixed by routing a
+-- `to_string(x)` call through the same Show dispatch `println` uses (lower.ml),
+-- with the perceus borrowed-field-String RC rule taught the rewritten name.
+-- Covers containers, ADTs, primitives (unchanged fast path), and string
+-- interpolation (which desugars to `to_string`). specs/todos.md item 347.
+mod Main do
+  fn main() : () do
+    let r : Result(Int, String) = Ok(7)
+    println(to_string([1, 2, 3]))
+    println(to_string(Some(9)))
+    println(to_string(r))
+    println(to_string(5))
+    println(to_string(4.0))
+    println(to_string(true))
+    println(to_string("hi"))
+    println("nums=${[4, 5]}")
+  end
+end
