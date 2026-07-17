@@ -342,6 +342,67 @@ spelling in `canon_name` gated on byte-identical goldens; (c) thread FQN through
 `mangle_ty`/eval dispatch for the colliding set with a CAS bump; (d) the rule-3
 ambiguous-error + migration sweep.
 
+## Cut (a) — LANDED (2026-07-17, commit 10b53ec0)
+
+`ci_module` added to `ctor_info` and threaded through all ~19 construction sites
+(both checking paths, both `prebind_mod_members` variants, both entry folds, the
+registry-load path, prelude, REPL); `ctors_for_type` disambiguates the
+exhaustiveness universe by current-module shadow. **L4 fully closed** (both
+halves: `accept/t81` linearity + `accept/t82` ctor). Byte-identical backend
+(codegen 421 goldens unchanged); full suite green. `ci_module` is NOT in
+`add_ctor`'s dedup key, so it survives pass-1/pass-2 re-registration.
+
+## Cut (b) — ATTEMPTED, REVERTED (2026-07-17); mechanism proven, third-subsystem blocker found
+
+Implemented the full collision-conditional identity in typecheck and ran the
+suite; **reverted** because it needs a third subsystem the plan hadn't named.
+What was built (and worked): a per-compilation `multiply_declared_types :
+StringSet.t ref` on `env` (bare type names declared by ≥2 modules, computed from
+`ci_module` grouped over `env.ctors` + an entry-decl scan, seeded ONCE before
+Pass 1); a shared `canonical_type_name env ~decl_module ~bare` that spells a
+colliding name module-qualified and a singly-declared name BARE; wired into BOTH
+`surface_ty`'s `canon_name` (type annotations, with local-shadows→qualified→
+leave-bare resolution) AND `instantiate_ctor` (`:2922`, ctor result types) so a
+declaration and its references agree; `ctors_for_type` taught to bare-ify the
+(now possibly FQN) scrutinee name and filter by the module prefix.
+
+**Result: the mechanism is sound for the common path.** L4 stayed fixed; `run_eval`
+(233), `run_compiler` (514), `run_snapshots` (29), and `run_stdlib` (809) all
+green; `run_codegen` **418/421** — only THREE fixtures failed, all with the
+predicted `expected X but got Mod.X` unification split.
+
+**The blocker (precisely): canonicalization happens in THREE subsystems that do
+not share the collision set.** (1) Pass-1 `prebind_fn_scheme`, (2) Pass-2 body
+checking, (3) — the one the plan missed — the **module-registry loader**
+(`load_module_into_env` / `ensure_loaded`), which converts a stdlib/lib module's
+exported signatures to types when that module is pulled in on demand, using its
+OWN env, NOT the user compilation's `multiply_declared_types` ref. So a
+registry-loaded `Msgpack` fn signature keeps a BARE `Value`, while the user
+program's `instantiate_ctor` produces `Msgpack.Value` → `expected Value but got
+Msgpack.Value`. Seeding the collision set before Pass 1 fixes paths (1)+(2) but
+cannot reach (3): the registry loader ran in a different env. Failing fixtures:
+`node_call_loopback`, `rpc_auto_enroll` (registry-loaded `Msgpack.Value`),
+`zero_arg_closure_default` (its own `type Conn` flat-shared with a
+during-compilation-loaded lib `Conn`).
+
+**Fix direction for the next attempt (pick one, then re-run cut b):**
+- **(pref) Late canonicalization pass.** Leave all three subsystems producing
+  BARE `TCon`s as today; add ONE post-typecheck rewrite that, given the final
+  collision set, renames every colliding `TCon(bare)` to its module-qualified
+  FQN uniformly (types + ctor result types + registry-loaded signatures at
+  once). One place, one collision set, no per-subsystem threading — sidesteps
+  the reverted-experiment's unification split by construction because it runs
+  after all three subsystems agree on bare.
+- **(alt) Thread the shared collision-set ref through the registry loader** so
+  `load_module_into_env` canonicalizes with the same set. Smaller surface but
+  the registry loader is called from many sites and caches modules across
+  compilations — the set is per-compilation, so cache invalidation gets subtle.
+
+The reverted patch (collision set + `canonical_type_name` + `canon_name` +
+`instantiate_ctor` + `ctors_for_type`) is a clean starting point for the
+late-pass approach — most of it (the collision set, the shared speller) is
+reusable; only the wiring moves from inline-at-`canon_name` to a post-pass.
+
 ## Alternatives considered
 
 - **(A) Full FQN identity (this spec).** Root fix; unblocks all four items;
