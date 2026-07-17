@@ -412,6 +412,19 @@ type ctor_info = {
   ci_params  : string list;      (** Type param names in declaration order *)
   ci_arg_tys : Ast.ty list;      (** Surface arg types of this constructor *)
   ci_vis     : Ast.visibility;   (** Constructor visibility (Public/Private) *)
+  ci_module  : string;
+  (** Declaring module of this constructor's parent type (empty at top level /
+      prelude).  Additive metadata: [ci_type] is the BARE parent-type name and
+      is deliberately kept bare for cross-module unification (see
+      [prebind_mod_members]'s reverted qualified-ci_type experiment), so two
+      same-named types' constructors are indistinguishable by [ci_type] alone.
+      [ci_module] disambiguates them for DIAGNOSTIC purposes only — currently
+      [ctors_for_type]'s exhaustiveness universe, which otherwise merges a user
+      `Handle`'s ctors with stdlib's same-named `Handle` (linear-L4 ctor
+      cross-talk). It feeds NO codegen/mangling/dispatch, so it is byte-identical
+      at the backend, and it is NOT part of [add_ctor]'s structural dedup key.
+      First metadata slice of the module-qualified ctor identity in
+      specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4). *)
 }
 
 (** One entry in the import tracker — records an imported name or alias and
@@ -981,6 +994,7 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
           ci_type = mod_name ^ "." ^ parent_type;
           ci_params = param_names;
           ci_arg_tys = arg_tys;
+          ci_module = mod_name;
           ci_vis = if entry.ex_public then Ast.Public else Ast.Private;
         } in
         { env with ctors = add_ctor qname ci env.ctors }
@@ -2184,13 +2198,13 @@ let builtin_types : (string * int) list =
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
-  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
-  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
-  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
-  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_vis = Ast.Public } in
-  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
+  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
+  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
+  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
+  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_module = ""; ci_vis = Ast.Public } in
+  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
   let cons_ci  = { ci_type = "List";   ci_params = ["a"];
-                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_vis = Ast.Public } in
+                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public } in
   [ ("Some",        some_ci);  ("Option.Some", some_ci);
     ("None",        none_ci);  ("Option.None", none_ci);
     ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
@@ -3285,13 +3299,39 @@ let rec norm_pat (p : Ast.pattern) : spat =
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
     analysis only sees each constructor once under its bare name. *)
 let ctors_for_type (env : env) type_name =
-  StrMap.fold (fun k cis acc ->
-    if String.contains k '.' then acc
-    else
-      match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
-      | Some ci -> (k, List.length ci.ci_arg_tys) :: acc
-      | None -> acc
-  ) env.ctors []
+  (* Gather (ctor_key, ci) for every bare-keyed constructor whose parent type's
+     BARE name is [type_name].  Because [ci_type] is bare (kept so for
+     cross-module unification), two same-named types from DIFFERENT modules both
+     match here — the linear-L4 ctor cross-talk, where a user `type Handle =
+     H(Int)` and stdlib's `type Handle = Handle(Int)` merge into one expected
+     universe so `match … H(n)` spuriously reports `missing case: Handle(_)`.
+     Disambiguate with [ci_module]: if the CURRENT module declares its OWN type
+     of this name (a matched ctor carries ci_module = current_module) AND a
+     foreign same-named type is also present, the local declaration shadows the
+     import, so restrict the universe to the current module's own constructors.
+     A single declaration (no cross-module clash) is left exactly as before, so
+     this is behavior-preserving except on the collision it fixes; and it feeds
+     only this exhaustiveness diagnostic, never codegen. *)
+  let matches =
+    StrMap.fold (fun k cis acc ->
+      if String.contains k '.' then acc
+      else
+        match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+        | Some ci -> (k, ci) :: acc
+        | None -> acc
+    ) env.ctors []
+  in
+  let local_shadow =
+    env.current_module <> ""
+    && List.exists (fun (_, ci) -> ci.ci_module = env.current_module) matches
+    && List.exists (fun (_, ci) -> ci.ci_module <> env.current_module) matches
+  in
+  let matches =
+    if local_shadow
+    then List.filter (fun (_, ci) -> ci.ci_module = env.current_module) matches
+    else matches
+  in
+  List.map (fun (k, (ci : ctor_info)) -> (k, List.length ci.ci_arg_tys)) matches
 
 (** Instantiate a surface type with a substitution from param names to internal
     types.  Used to reconstruct constructor argument types. *)
@@ -7767,6 +7807,7 @@ let rec check_decl env (d : Ast.decl) : env =
            let ci = { ci_type    = name.txt
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
+                    ; ci_module  = env.current_module
                     ; ci_vis     = v.var_vis } in
            (* Register both bare "CtorName" and qualified "TypeName.CtorName"
               so users can write either form for disambiguation. *)
@@ -7831,7 +7872,7 @@ let rec check_decl env (d : Ast.decl) : env =
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
-      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public }
         env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -7844,7 +7885,7 @@ let rec check_decl env (d : Ast.decl) : env =
                           span = p.param_name.span }
           ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type *)
@@ -9242,7 +9283,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -9269,7 +9310,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -9357,6 +9398,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
+                        ; ci_module  = m.Ast.mod_name.txt
                         ; ci_vis     = v.var_vis } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
@@ -9378,7 +9420,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -9389,7 +9431,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
@@ -9544,7 +9586,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -9571,7 +9613,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -9647,6 +9689,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
+                        ; ci_module  = m.Ast.mod_name.txt
                         ; ci_vis     = v.var_vis } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
@@ -9665,7 +9708,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -9676,7 +9719,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->

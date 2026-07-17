@@ -4279,7 +4279,7 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 
 - **L1** — `affine` param-keyword is a parse error (§2.9.1).
 - **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
-- **L4** — PARTIALLY FIXED 2026-07-17 (linearity half). The linearity
+- **L4** — FIXED 2026-07-17 (both halves). The linearity
   infection is closed: `always_linear`-promotion no longer keys on the BARE
   type name globally. It routes through `resolves_always_linear`
   (`typecheck.ml`), which — when the current module declares its own
@@ -4290,13 +4290,18 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
   `type Handle = H(Int)` no longer inherits linearity from stdlib's
   `always_linear type Handle` (`stdlib/handle.march`); `accept/t81` witnesses
   it, and a `let h = Handle(1)` with NO local shadow still resolves to the
-  stdlib linear `Handle` and correctly errors (`reject/t65`). **Still open:**
-  the *constructor*-namespace half — matching on the user's own `H(n)` still
-  spuriously warns `missing case: Handle(_)`, because the flat CTOR namespace
-  merges stdlib's `Handle` ctor into the user type's variant set. That is the
-  ctor-identity half of the module-qualified overhaul
-  (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`), which subsumes it;
-  until then, avoid stdlib-colliding type names when you also `match` on them.
+  stdlib linear `Handle` and correctly errors (`reject/t65`). The
+  *constructor*-namespace half is ALSO closed now: constructors carry a
+  `ci_module` (declaring module) and `ctors_for_type` restricts the
+  exhaustiveness universe to the current module's own ctors when it declares its
+  own same-named type, so `match h do H(n) -> .. end` on the user's `Handle` no
+  longer warns `missing case: Handle(_)` (`accept/t82`). `ci_module` is additive
+  metadata — it feeds ONLY this diagnostic, not codegen/mangling/dispatch (the
+  `.ll` goldens are byte-identical), and it is the first metadata slice of the
+  module-qualified constructor identity
+  (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`, Stage 4). A genuine
+  cross-module ctor clash where NEITHER type is local still merges (conservative,
+  pending the full resolver).
 - **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
   (Newtype/Niche) allocs, so any non-escaping local construction consumed by
   a direct `match` read garbage compiled (the annotation in the original

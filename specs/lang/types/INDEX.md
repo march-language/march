@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t81 accept, t01–t78 reject)
+# Typing corpus index (t01–t82 accept, t01–t78 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 159/159 — 81 accept, 78
+Exit 0 iff every program behaves as declared (currently 160/160 — 82 accept, 78
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -378,6 +378,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t77_refine_hof_bypass_limitation` | **the "direct calls only" scope boundary (slice 12, §2.14)** — `apply(take_n, -3)` calls `take_n` INDIRECTLY through a HOF parameter; `refine_check` never associates `-3` with `take_n`'s precondition through the indirection, so `--check` accepts even though the identical literal at a direct call (`t71`) is rejected. Honest limitation, not unsoundness — no runtime check is promised either | `--check` exit 0 |
 | `t78_refine_divsafety_approved` | **`cap no_panic` division-safety: refined divisor approved (slice 12, §2.14)** — a second, specialized `Refine.discharge` consumer (`lib/refinecheck/division_safety.ml`); `{Int \| _ != 0}` matches the fast syntactic path directly. Reject companion `t73` | `--check` exit 0 |
 | `t79_offer_branch_dependent_continuation` | **(F5 FIX) path-dependent `Chan.offer` continuation (§2.7.9, fixed 2026-07-15)** — a two-branch `Decision` protocol whose `:ok`/`:err` continuations DIFFER (`Recv(Int,End)` vs `Recv(String,End)`); the chooser picks `:err`, then a `match` on the offer's returned label drives the branch the peer chose. The channel and label come from one `Chan.offer`, so the destructuring `let` links the label var to the channel's session ref (`env.offer_conts`/`offer_labels`) and `match` refines the SHARED ref to `branches[L]` per arm — so `:ok` types the channel at `Recv(Int)` and `:err` at `Recv(String)`. IMPOSSIBLE to accept pre-fix (the first-branch approximation forced `:err`'s payload to `Int`). Reject twin `reject/t74` (wrong-branch drive). `sc2` is consumed once IN EACH arm — legal because arms are mutually-exclusive paths (`iter_arms_linear`) | `--check` exit 0 |
+| `t82_local_type_exhaustive_shadows_stdlib_ctor` | **(L4 FIX, ctor half) local type matches exhaustively despite an `always_linear` stdlib name-clash (§2.9.5, 2026-07-17)** — `type Handle = H(Int)` matched on `H(n)` alone. Pre-fix `ctors_for_type` (`typecheck.ml`) gathered every ctor whose BARE `ci_type` string-equalled `Handle`, merging stdlib's same-named `Handle`'s constructor into the expected universe → spurious `Non-exhaustive pattern match — missing case: Handle(_)`. Ctors now carry `ci_module`; when the current module declares its own same-named type the exhaustiveness universe is restricted to that module's own ctors (a genuine cross-module clash stays merged — conservative). Diagnostic-only: `ci_module` feeds NO codegen (codegen goldens byte-identical). Paired with the linearity half `t81`; first slice of module-qualified ctor identity (`specs/plans/2026-07-17-fqn-type-ctor-identity.md` Stage 4) | `--check` exit 0 |
 | `t81_local_type_shadows_stdlib_always_linear` | **(L4 FIX) local plain type shadows an `always_linear` stdlib name (§2.9.1, 2026-07-17)** — a module declaring its OWN `type Handle = Handle(Int)` must NOT inherit the linearity of the unrelated stdlib `always_linear type Handle`. Pre-fix, `always_linear`-promotion matched the BARE type name globally (`typecheck.ml` `resolves_always_linear`, formerly a flat `List.mem name always_linear_types`), so this local `Handle` was silently promoted linear and dropping `h` false-errored "was never used". Promotion now keys on the resolved type: when the current module declares its own same-named type, its own declaration's linearity wins (both bare and qualified names are registered by `DAlwaysLinearType`, so the qualified membership check disambiguates). A `let h = Handle(1)` WITHOUT a local shadow still resolves to the stdlib linear `Handle` and correctly errors (`reject/t65`). Stopgap ahead of full module-qualified type identity (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`) | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
@@ -462,7 +463,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t75_drop_unclosed_end_channel` | **(F7 linearity hole a, 2026-07-15)** — `cc2` advances to session state `End` via `Chan.send` but is dropped (never `Chan.close`d). A channel at `End` must be closed; the new must-close check (narrower than full linear consumption — mid-protocol drop stays legal, F6) rejects the leak | `reached \`End\` but was never closed` |
 | `t76_reuse_linear_param_endpoint` | **(F7 linearity hole b, 2026-07-15)** — re-sending on a session-channel PARAMETER `ch : Chan(Client, Echo)` (tracked affine so drop stays legal but reuse is caught); parameter-endpoint tracking previously missed the `TLin` wrapper entirely | `is used more than once here` |
 
-**Result: 159 / 159 (81 accept, 78 reject).**
+**Result: 160 / 160 (82 accept, 78 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 
