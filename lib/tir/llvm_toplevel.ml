@@ -182,7 +182,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
       let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty in
-      let pty = if is_apply_wrapper && base = "double" then "ptr" else base in
+      let pty = if is_apply_wrapper && (base = "double" || base = "i64") then "ptr" else base in
       pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
@@ -240,6 +240,12 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
       let d = Llvm_ctx.fresh ctx "cv" in
       Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %%%s.arg)" d vn);
       Llvm_ctx.emit ctx (Printf.sprintf "store double %s, ptr %%%s.addr" d slot)
+    end else if is_apply_wrapper && ty = "i64" then begin
+      (* Int/Bool apply-fn param arrives TAGGED as a ptr (uniform ptr ABI —
+         every call path tags scalars, boundaries A+B); conditionally untag
+         (ashr iff odd) back to the raw i64 the body reads. *)
+      let u = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) "i64" in
+      Llvm_ctx.emit ctx (Printf.sprintf "store i64 %s, ptr %%%s.addr" u slot)
     end else
       Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot);
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
