@@ -403,6 +403,37 @@ The reverted patch (collision set + `canonical_type_name` + `canon_name` +
 late-pass approach — most of it (the collision set, the shared speller) is
 reusable; only the wiring moves from inline-at-`canon_name` to a post-pass.
 
+### Correction (2026-07-17, on closer analysis): a late pass can't disambiguate type REFERENCES
+
+The "rewrite every colliding `TCon` to FQN after typecheck" framing above has a
+hole. Once typecheck **unifies** two colliding types to one bare `TCon("Value")`,
+the module identity is GONE — a `TCon("Value")` in the IR carries no record of
+which module's `Value` it was, so a post-typecheck pass has no more information
+than typecheck did and cannot split them. Module identity survives ONLY at
+**constructor** sites (via `ci_module`, cut (a)). So a working "late pass" must
+key on CONSTRUCTORS, not type-references — i.e. it is really "module-qualify
+constructor identity in lowering/mangle" (Stage 4), not a TIR-wide `TCon`
+rewrite.
+
+**And there is no active codegen bug forcing it.** At the cut-(a) checkpoint,
+`run_codegen` is 421/421 GREEN — the 3 failures in the cut-(b) attempt were
+INTRODUCED by the FQN change, not pre-existing. The 11 collisions are contained
+today by ctor-keyed lowering (a `match`/construction keys on the NAMED ctors,
+which carry `ci_module`, not the bare type) plus the disambiguation heuristics.
+So Stage 4 would REPLACE fragile heuristics with principled identity (real
+robustness value, and it consolidates the "pile of heuristics") but fixes no
+live miscompile.
+
+**Net triage after cut (a):** L4 (the actual user-facing bug) is fully closed;
+codegen is sound; the two remaining FQN goals are (1) type SOUNDNESS — rejecting
+cross-type confusion, which needs consistent FQN across ALL THREE
+canonicalization subsystems DURING typecheck (the registry-loader problem; a
+late/lowering pass does NOT deliver it), and (2) heuristic consolidation
+(Stage 4, `ci_module`-keyed ctor identity in lowering; codegen-affecting, CAS
+bump, no active bug). Neither is forced by a live bug, so the full carry is a
+deliberate multi-session architectural investment to schedule on its own, not a
+fix that must land now.
+
 ## Alternatives considered
 
 - **(A) Full FQN identity (this spec).** Root fix; unblocks all four items;
