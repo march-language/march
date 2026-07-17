@@ -146,7 +146,7 @@ let clo_wrap_define wrap_name (param_ltys : string list) target_ret fn_name =
      before forwarding to the concrete target; likewise a Float return is BOXED
      before entering the erased ptr ABI. *)
   let wrapper_tys =
-    List.map (fun t -> if t = "double" then "ptr" else t) param_ltys in
+    List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) param_ltys in
   let decl_str =
     String.concat ", "
       ("ptr %_clo" :: List.map2 (fun t n -> t ^ " " ^ n) wrapper_tys arg_names) in
@@ -158,6 +158,18 @@ let clo_wrap_define wrap_name (param_ltys : string list) target_ret fn_name =
           Buffer.add_string prologue
             (Printf.sprintf "  %s = call double @march_unbox_float(ptr %s)\n" d name);
           "double " ^ d
+        end else if target_ty = "i64" then begin
+          (* Int/Bool param arrives TAGGED (uniform ptr ABI, boundaries A+B) —
+             conditionally untag (ashr iff odd) to the raw i64 the concrete
+             target expects. *)
+          let i = name ^ "i" and a = name ^ "a" and c = name ^ "c"
+          and s = name ^ "s" and u = name ^ "u" in
+          Buffer.add_string prologue (Printf.sprintf
+            "  %s = ptrtoint ptr %s to i64\n  %s = and i64 %s, 1\n  \
+             %s = icmp ne i64 %s, 0\n  %s = ashr i64 %s, 1\n  \
+             %s = select i1 %s, i64 %s, i64 %s\n"
+            i name a i c a s i u c s i);
+          "i64 " ^ u
         end else target_ty ^ " " ^ name)
       param_ltys arg_names in
   let call_args = String.concat ", " call_arg_strs in
