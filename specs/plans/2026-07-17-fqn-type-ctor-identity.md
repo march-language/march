@@ -203,6 +203,13 @@ independently green and the risky behavior change is isolated.
   changes behavior yet.
 - Unification: two `TCon`s equal iff same FQN. Prove no regression by keeping the
   bare→FQN shim total for the current single-declaration case.
+- **The shim MUST be total — confirmed empirically (2026-07-17).** A naive
+  shortcut that qualifies only *locally-declared* types (so `Main`'s `type Foo`
+  becomes `TCon("Main.Foo")`) while leaving cross-module bare refs collapsing to
+  `TCon("Foo")` BREAKS unification: the declaration and its cross-module
+  references no longer share a name. Stage 1 is therefore atomic — resolution
+  must produce the SAME canonical FQN at every site at once — not an incremental
+  per-site rollout. (Learned while shipping the L4 linearity stopgap below.)
 - Gate: full suite + oracle green, byte-identical golden/codegen output (the FQN
   must mangle to the SAME symbol as the bare name did for single-declaration
   types — verify with the preamble/golden diff, or accept a deliberate mangle
@@ -219,8 +226,10 @@ independently green and the risky behavior change is isolated.
 
 ### Stage 3 — Flip the downstream consumers (the payoff)
 - `always_linear_types`: key by FQN; auto-promotion checks the resolved TCon's
-  FQN → **L4 fixed** (drop the bare-name entry safely now that identity is
-  qualified). Re-enable the L4 witness.
+  FQN → **L4 (linearity half) already fixed as a stopgap (2026-07-17,
+  `resolves_always_linear`, `accept/t81`)**; Stage 3 replaces that
+  current-module-declaration heuristic with the clean FQN key and can drop the
+  bare-name entry safely once identity is qualified.
 - impl coherence: the orphan rule (interface-or-type-module) becomes expressible;
   the coherence key becomes `(iface-FQN, type-FQN)` → the coherence spec's
   DECIDE-3 unblocks.
