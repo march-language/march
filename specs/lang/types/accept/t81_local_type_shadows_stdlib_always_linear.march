@@ -1,0 +1,23 @@
+mod Main do
+  -- Linearity (T-LinMark), local-shadow of an `always_linear` stdlib name
+  -- (L4 fix, 2026-07-17): a module declaring its OWN plain `type Handle`
+  -- must NOT inherit the linearity of the unrelated stdlib `always_linear
+  -- type Handle`. Before the fix, `always_linear`-promotion matched the BARE
+  -- type name globally, so this local `Handle` was silently treated linear
+  -- and dropping `h` produced a false "was never used" error. Promotion now
+  -- keys on the resolved type: when the current module declares its own
+  -- same-named type, its own (non-linear) declaration wins. A `let h =
+  -- Handle(1)` WITHOUT a local shadow still resolves to the stdlib linear
+  -- `Handle` and correctly errors (see reject/t65). Stopgap ahead of full
+  -- module-qualified type identity; see core-march-types.md §2.9.1 and
+  -- specs/plans/2026-07-17-fqn-type-ctor-identity.md.
+  type Handle = Handle(Int)
+
+  fn drop_it(h : Handle) : Int do
+    0
+  end
+
+  fn main() : () do
+    println(int_to_string(drop_it(Handle(7))))
+  end
+end

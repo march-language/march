@@ -782,6 +782,27 @@ let ty_has_tagged_cap_producer (env : env) (ty : ty) : bool =
 
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
+
+(** True iff the bare type name [name] resolves to an `always_linear` type *here*
+    — i.e. it is registered always_linear AND the current module does NOT declare
+    its OWN same-named type (which shadows the imported/stdlib one).  Bridges the
+    L4 gap (a user `type Handle` was silently infected by stdlib's `always_linear
+    Handle` because promotion matched the bare name globally) using the current
+    module's declaration as the shadow signal — the same current-module
+    preference [lookup_ctor_in_type]/the ctor system already use.  This is a
+    stopgap: the principled fix is module-qualified type identity
+    (specs/plans/2026-07-17-fqn-type-ctor-identity.md), which subsumes it. *)
+let resolves_always_linear name env =
+  (* If the current module declares its OWN same-named type, that declaration
+     shadows any imported one, so promotion follows *its* linearity: promote iff
+     the current module's own qualified type is always_linear (both bare and
+     qualified names are registered by DAlwaysLinearType).  Otherwise there is no
+     local shadow and the bare/imported linearity applies. *)
+  if env.current_module <> ""
+     && StrMap.mem (env.current_module ^ "." ^ name) env.types
+  then List.mem (env.current_module ^ "." ^ name) env.always_linear_types
+  else List.mem name env.always_linear_types
+
 let lookup_ctor name env =
   match StrMap.find_opt name env.ctors with
   | Some (ci :: _) -> Some ci
@@ -5105,7 +5126,7 @@ and infer_block env exprs =
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
          | TCon (name, _) ->
-           if List.mem name env.always_linear_types then Ast.Linear else Ast.Unrestricted
+           if resolves_always_linear name env then Ast.Linear else Ast.Unrestricted
          | _ -> Ast.Unrestricted)
       | lin -> lin
     in
@@ -5251,7 +5272,7 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   let effective_lin = match p.param_lin with
     | Ast.Unrestricted ->
       (match repr t with
-       | TCon (name, _) when List.mem name env.always_linear_types -> Ast.Linear
+       | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
        (* A parameter whose resolved type is a linear/affine wrapper — e.g. a
           session channel `ch : Chan(Client, Echo)` resolving to
           `TLin(Linear, TChan …)` — is tracked as AFFINE so a re-read of the
@@ -5489,7 +5510,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               let effective_lin = match p.param_lin with
                 | Ast.Unrestricted ->
                   (match repr t with
-                   | TCon (tname, _) when List.mem tname env'.always_linear_types -> Ast.Linear
+                   | TCon (tname, _) when resolves_always_linear tname env' -> Ast.Linear
                    (* A session-channel parameter (`ch : Chan(Role, Proto)`)
                       resolves to a [TLin] wrapper.  Track it as AFFINE so a
                       RE-READ of the endpoint inside the body is caught (F7 hole
