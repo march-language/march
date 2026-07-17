@@ -2741,3 +2741,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/shadow_selfref_let.expected native_shadow_selfref_let.out)))
+
+; Runtime defense-in-depth: march_incrc/march_decrc must be no-ops on a tagged
+; immediate reaching a ptr slot (e.g. a generic-Int closure arg passed through
+; a HOF). This exercises the erased-Int RC path through apply_twice's captured
+; closure; IS_HEAP_PTR's low-bit test already guards this, but this pins the
+; contract as a regression guard for the closure-dispatch ABI work.
+(rule
+ (targets native_tagged_int_rc native_tagged_int_rc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/tagged_int_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tagged_int_rc
+        native/tagged_int_rc.march)
+   (with-stdout-to native_tagged_int_rc.out
+        (system "./native_tagged_int_rc")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tagged_int_rc.expected native_tagged_int_rc.out)))
