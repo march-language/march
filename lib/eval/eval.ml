@@ -3141,7 +3141,7 @@ let mpst_close me =
 (** Call the Show impl for [v] if one is registered, else fall back to
     value_to_string.  Used by to_string and println builtins so they
     respect user-defined impl Show even when the prelude is not loaded. *)
-let show_dispatch (v : value) : string =
+let rec show_dispatch (v : value) : string =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
@@ -3150,6 +3150,16 @@ let show_dispatch (v : value) : string =
   | VBool b   -> string_of_bool b
   | VString s -> s
   | VAtom a   -> ":" ^ a
+  | VTuple vs ->
+    (* Tuples format through [show] recursively — a nested string is DISPLAYED
+       (unquoted), matching each element's own `show` and the compiled tuple
+       Show impls (`Show$Tuple<N>`, prelude).  Without this, tuples fell to the
+       repr-form [value_to_string], which QUOTES nested strings, diverging from
+       compiled output — the interpreter was internally inconsistent too
+       (Option/List go through their unquoted Show impls, only tuples quoted).
+       [value_to_string] itself is unchanged (it is the repr form, pinned by
+       test_value_to_string). *)
+    "(" ^ String.concat ", " (List.map show_dispatch vs) ^ ")"
   | _ ->
     (match type_name_of_value v with
      | Some tname ->

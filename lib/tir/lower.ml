@@ -1049,7 +1049,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | Ast.DImpl (idef, _) ->
           let type_name = match idef.impl_ty with
             | Ast.TyCon ({ txt = name; _ }, _) -> name
-            | Ast.TyTuple _  -> "$Tuple"
+            (* Tuples dispatch by ARITY ("$Tuple2", "$Tuple3", …) so a distinct
+               `impl Show((a,b))` vs `impl Show((a,b,c))` each resolve to their
+               own method — arity-agnostic "$Tuple" collapsed them onto one slot.
+               Mirrors the arity-keyed tuple pattern tags (`Tir_names.tuple_tag`)
+               and the matching lookup in [Lower_state.resolve_iface_method]. *)
+            | Ast.TyTuple tys -> Printf.sprintf "$Tuple%d" (List.length tys)
             | Ast.TyRecord _ -> "$Record"
             | _ -> "$Unknown"
           in

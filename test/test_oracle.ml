@@ -271,7 +271,7 @@ let test_native_allowlist =
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
     "niche_reuse_closure"; "option_niche"; "qualified_ctor_pattern";
     "shadow_selfref_let"; "to_string_show"; "tuple_scalar_fields";
-    "zero_arg_closure_default" ]
+    "tuple_show"; "zero_arg_closure_default" ]
 
 let curated_test_files root =
   let dir = Filename.concat root "test/native" in
@@ -304,7 +304,8 @@ let expected_stdout =
     "timsort", "1423\n";
     "alphadev_sort", "1423\n";
     "sort_nearly_sorted", "0\n0\n";
-    "to_string_show", "[1, 2, 3]\nSome(9)\nOk(7)\n5\n4.\ntrue\nhi\nnums=[4, 5]\n" ]
+    "to_string_show", "[1, 2, 3]\nSome(9)\nOk(7)\n5\n4.\ntrue\nhi\nnums=[4, 5]\n";
+    "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =
   let tbl = Hashtbl.create 8 in

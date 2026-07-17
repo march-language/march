@@ -381,6 +381,7 @@ let rec rewrite_calls
         | Tir.TInt    -> Some "Int"
         | Tir.TFloat  -> Some "Float"
         | Tir.TBool   -> Some "Bool"
+        | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
         | _ -> None
       in
       (match type_name with
@@ -457,6 +458,7 @@ let rec rewrite_calls
                | Tir.TInt    -> Some "Int"
                | Tir.TFloat  -> Some "Float"
                | Tir.TBool   -> Some "Bool"
+               | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
                | _ -> None
              in
              (* Fallback: if the concrete type could not be determined (type was
