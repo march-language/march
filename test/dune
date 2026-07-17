@@ -2770,3 +2770,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tagged_int_rc.expected native_tagged_int_rc.out)))
+
+(rule
+ (targets native_closure_scalar_abi native_closure_scalar_abi.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/closure_scalar_abi.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_closure_scalar_abi
+        native/closure_scalar_abi.march)
+   (with-stdout-to native_closure_scalar_abi.out
+        (system "./native_closure_scalar_abi")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_scalar_abi.expected native_closure_scalar_abi.out)))
