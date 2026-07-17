@@ -106,6 +106,78 @@ These are what the flat design quietly buys today — the spike must preserve ea
   to their prelude FQN with no import — a well-defined special scope, not a
   new exception.
 
+## Stage 0 findings (spike run 2026-07-17)
+
+**Collision census (measured by parsing `type`/ctor declarations).**
+- **11 type-name collisions in stdlib** — the same bare type name declared in ≥2
+  modules as *different* types: `State` (dist_supervisor / swim / swim_driver),
+  `Value` (msgpack / dataframe), `Level` (compress / logger), `HEntry`
+  (hash_map / hamt / map), `TransportError`, `ProcessResult`, `Tree`, `Upgrade`,
+  `Conn`, `Header`, + 1. (An earlier line-anchored `bash` census reported 0 — it
+  was wrong; the parse-based count is authoritative.)
+- **9 ctor-name collisions across different parent types** (of 383 ctors):
+  `Str`/`Null`/`Bool`/`Array` shared by `JsonValue`+`Value` (the exact
+  Msgpack/Json case a prior compiled-only miscompile was fixed for),
+  `HLeaf` (HEntry/Heap), `Row` (CsvRow/Row), `NotFound` (DnsError/FileError),
+  `Text` (Mode/XmlNode), `Int` (Sig/Value).
+- **0 collisions** between `examples/`+`test/native/` types and stdlib types.
+
+**How the collisions coexist today (and why it's fragile).** `env.types` stores
+only ARITY (`int StrMap.t`) so a bare-name type collision is harmless there *iff
+arities match*; the real type identity is recovered downstream. Constructors are
+disambiguated by an **accumulated pile of heuristics**, each born from a real
+bug:
+- `lookup_ctor` (`:785`) returns the HEAD of the per-name candidate list
+  (most-recently-registered — order-dependent).
+- `lookup_ctor_in_type` (`:796`) picks the candidate whose `ci_type` matches a
+  KNOWN scrutinee/expected type — the actual disambiguator when type context
+  exists.
+- `add_ctor` (`:821`) runs a Pass-1 cross-module prebind (`d95fe942`) + a
+  Pass-2 move-to-front so a module resolves its OWN ctors — its doc comment
+  documents a sibling-ctor **shadowing regression** this fixed.
+- the current-module-preference fix (`project_ambiguous_ctor_current_module`)
+  patched a compiled-only miscompile where `Msgpack.Value.Array` (tag 5) vs
+  `Json.JsonValue.Array` (tag 4) resolved to the wrong tag.
+
+**Types have NONE of these heuristics** — `lookup_type` is a bare arity lookup
+with no module preference — which is exactly why linear-L4 (and the exhaustiveness
+cross-talk) bite on the type side while ctors mostly survive. So the flat
+namespace has ALREADY caused ≥2 shipped bugs; this is not a hypothetical future
+cost.
+
+**Reframing:** the FQN overhaul is therefore not *new* machinery bolted on — it
+**consolidates** `canon_name` + the four ctor heuristics + the current-module
+preference into ONE principled resolver, and extends the identity types never
+got. Net long-term complexity goes DOWN.
+
+**Code inventory (every site that keys on a bare type/ctor name).**
+| Site | File:line | Keys on | Change |
+|---|---|---|---|
+| `canon_name` (resolution) | `typecheck.ml:2672` | collapses qualified→BARE | invert to FQN |
+| `lookup_type` | `typecheck.ml:784` | bare name → arity | resolve bare→FQN |
+| `lookup_ctor` / `_in_type` | `typecheck.ml:785`/`796` | bare name, ci_type list | key by FQN parent |
+| `add_ctor` prebind/move-to-front | `typecheck.ml:821` | bare name list | subsumed by FQN |
+| `always_linear_types` | `typecheck.ml:518`,`5108`,`5254`,`5492` | bare name list | key by FQN |
+| `env.impls` key | `typecheck.ml:490`,`5789` | bare iface name | (iface-FQN,type-FQN) |
+| `impl_tbl` (interp) | `eval.ml:262`,`969`,`984` | `(iface,type)` bare Hashtbl | key by FQN |
+| `type_name_of_value` | `eval.ml:943` | bare type name | resolve to FQN |
+| `lower_types` TCon | `lower_types.ml:44`,`76` | carries bare name → TIR | carry FQN |
+| `mangle_ty` | `mono.ml:118` | bare name → LLVM symbol | **CAS/golden pivot** |
+| `resolve_impl_by_type` | `mono.ml:21` | bare type_name | FQN |
+
+The canonical name flows `source → canon_name → TCon(bare) → TIR → mangle_ty →
+symbol / impl_tbl key`. `mangle_ty` (`mono.ml:118`) is the point where a
+canonical-name change becomes a mangled-symbol change — the CAS-invalidation +
+`.ll`-golden re-baseline pivot the plan flags.
+
+**Go/no-go: GO, staged.** The behavior-change blast radius is small and bounded:
+rule 1 (local-shadows) is zero-risk on the 11 collisions (each module already
+uses its OWN type); rule 3 (ambiguous-bare-error) can only fire if a THIRD
+module references one of the 11 colliding names BARE while declaring neither —
+Stage 1's resolver surfaces those exactly (expected: near-zero, since stdlib
+cross-module refs already use qualified paths). The dominant cost is the
+`mangle_ty` re-baseline (a flag-day, not a design risk).
+
 ## Staged plan
 
 Big and hot-path (unification, mangling, cross-backend). Stage so each step is
