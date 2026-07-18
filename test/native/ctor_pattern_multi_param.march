@@ -1,0 +1,24 @@
+-- Regression: a function with 2+ parameters that are each a destructuring
+-- constructor pattern (`fn f(N(a), N(b))`) must compile.  Multi-arg desugaring
+-- bundles the params into a synthesised match scrutinee `ETuple(__arg0, __arg1)`
+-- that reuses the function span; lowering then typed that tuple var from the
+-- colliding span (the fn's RETURN type) instead of the tuple type, so codegen
+-- saw a non-pointer scrutinee destructured as `$TupleN` and raised an ICE
+-- ("constructor pattern $TupleN(...) destructures a non-pointer scrutinee").
+-- Single-arg ctor-pattern params were unaffected; the fix types the scrutinee
+-- tuple from its per-element spans.  Covers plain fns, 3-ary, and mixed
+-- ctor/plain params.
+mod Main do
+  type N = N(Int)
+
+  fn eq2(N(a), N(b)) do a == b end
+  fn add3(N(a), N(b), N(c)) do a + b + c end
+  fn mix(N(a), b) do a + b end
+
+  fn main() : () do
+    println(bool_to_string(eq2(N(1), N(2))))
+    println(bool_to_string(eq2(N(3), N(3))))
+    println(int_to_string(add3(N(1), N(2), N(3))))
+    println(int_to_string(mix(N(10), 5)))
+  end
+end

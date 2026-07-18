@@ -119,6 +119,25 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
       | None -> ty
     in
     k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
+  | Ast.ETuple (es, _) ->
+    (* Bind a tuple to a fresh var typed from its ELEMENTS when the tuple's
+       own span does not record a tuple type.  Desugar synthesises the
+       multi-arg-fn match scrutinee as an [ETuple] sharing the function/match
+       span (fn_span); [ty_of_expr] on that tuple therefore returns the MATCH
+       RESULT type (the fn's return type), not the tuple type — which then
+       reaches codegen as a non-pointer scrutinee destructured as $TupleN and
+       ICEs ("constructor pattern $TupleN(...) destructures a non-pointer
+       scrutinee").  Each [__argN] element has its own correctly-typed
+       synthetic span, so deriving [TTuple] from the per-element types sidesteps
+       the collision.  A tuple whose own span correctly records a [TTuple] keeps
+       that precise type unchanged. *)
+    lower_atoms_k env es (fun atoms ->
+      let ty = match ty_of_expr env e with
+        | Tir.TTuple _ as t -> t
+        | _ -> Tir.TTuple (List.map (ty_of_expr env) es)
+      in
+      let v = fresh_var ty in
+      Tir.ELet (v, Tir.ETuple atoms, k (Tir.AVar v)))
   | _ ->
     let rhs = lower_expr env e in
     let v = fresh_var (ty_of_expr env e) in
