@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t85 accept, t01–t80 reject)
+# Typing corpus index (t01–t86 accept, t01–t80 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 165/165 — 85 accept, 80
+Exit 0 iff every program behaves as declared (currently 166/166 — 86 accept, 80
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -382,6 +382,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t83_impl_distinct_types` | **(impl coherence, accept) `impl Speak(Dog)` + `impl Speak(Cat)` (§2.3, 2026-07-17)** — distinct `(interface, type)` pairs do NOT overlap, so both register. Companion accept to `reject/t79`; the coherence check (`register_impl_shape`, `canonical_impl_key`) keys on the alpha-normalized head, so different heads have different keys | `--check` exit 0 |
 | `t84_impl_distinct_ifaces` | **(impl coherence, accept) `impl Speak(Dog)` + `impl Walk(Dog)` (§2.3, 2026-07-17)** — same type, DIFFERENT interfaces: coherence is per `(interface, type)` pair, so no overlap. Guards that the coherence key includes the interface name | `--check` exit 0 |
 | `t85_impl_parametric_distinct` | **(impl coherence Stage 2, accept) `impl Descr(Box(a))` + `impl Descr(Bag(a))` (§2.3, 2026-07-17)** — different head constructors (`Box` vs `Bag`) do NOT unify, so no overlap. Guards that `types_overlap` requires the head ctor to match (reject twin `t80`) | `--check` exit 0 |
+| `t86_bare_none_unpinned` | **(items 347/465) bare unpinned `None` compiles + links (§ mono, 2026-07-18)** — a `None` whose element type is never pinned used to fail to LINK compiled (`Show$Option.show$Option_V__<n>` unresolvable — mono minted a distinct `$V_<n>` specialization per dangling type-var id). mono now defaults a residual dangling `TVar` to `String` (heap-ptr repr + IS_HEAP_PTR-guarded RC — safe for either a real pointer or a tagged immediate; `Int`/`Unit` corrupted RC / crashed the niche path). Runtime witness `test/native/bare_none_print.march` (interp == compiled) | `--check` exit 0 |
 | `t81_local_type_shadows_stdlib_always_linear` | **(L4 FIX) local plain type shadows an `always_linear` stdlib name (§2.9.1, 2026-07-17)** — a module declaring its OWN `type Handle = Handle(Int)` must NOT inherit the linearity of the unrelated stdlib `always_linear type Handle`. Pre-fix, `always_linear`-promotion matched the BARE type name globally (`typecheck.ml` `resolves_always_linear`, formerly a flat `List.mem name always_linear_types`), so this local `Handle` was silently promoted linear and dropping `h` false-errored "was never used". Promotion now keys on the resolved type: when the current module declares its own same-named type, its own declaration's linearity wins (both bare and qualified names are registered by `DAlwaysLinearType`, so the qualified membership check disambiguates). A `let h = Handle(1)` WITHOUT a local shadow still resolves to the stdlib linear `Handle` and correctly errors (`reject/t65`). Stopgap ahead of full module-qualified type identity (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`) | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
@@ -468,7 +469,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t79_impl_coherence_duplicate` | **(impl coherence, T-ImplCoherent) two `impl Speak(Dog)` (§2.3, 2026-07-17)** — a type may implement an interface at most once. Both blocks previously typechecked (`--check` exit 0) and the backends ran DIFFERENT method bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order). `register_impl_shape` now does a lookup-before-insert via `types_overlap` (unifiability), distinguishing a genuine duplicate (different decl span) from Pass-1 re-registration (same span). Accept companions `t83`/`t84` | `Overlapping implementation` |
 | `t80_impl_parametric_overlap` | **(impl coherence Stage 2, T-ImplCoherent) `impl Descr(Box(a))` + `impl Descr(Box(Int))` (§2.3, 2026-07-17)** — parametric overlap: the general `Box(a)` head UNIFIES with the specific `Box(Int)` (`a ↦ Int`), so both could match `Box(1)` and the backends would disagree. Caught by `types_overlap` (unify-based), which the Stage-1 exact-key form did not. Accept twin `t85` | `Overlapping implementation` |
 
-**Result: 165 / 165 (85 accept, 80 reject).**
+**Result: 166 / 166 (86 accept, 80 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

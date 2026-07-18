@@ -108,6 +108,22 @@ let subst_atoms ~changed env avar atoms =
 let subst_fields ~changed env avar fields =
   List.map (fun (k, a) -> (k, subst_atom ~changed env avar a)) fields
 
+(** True iff the LEADING bare-DecRC run of [body] contains an
+    [EDecRC]/[EAtomicDecRC] of the variable named [name].
+
+    Mirrors [llvm_case.ml]'s [strip_scrut_decrc] scan: that pass transfers
+    ownership of the fields a [case] arm extracts from its scrutinee by matching
+    the arm's leading `dec_rc <scrutinee>` BY NAME (so that freeing the scrutinee
+    box IncRC's the still-live extracted fields).  cprop must therefore not
+    copy-propagate a [case] scrutinee out of sync with that dec: see the ECase
+    case below. *)
+let rec branch_leads_with_dec (name : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest) ->
+    String.equal v.Tir.v_name name || branch_leads_with_dec name rest
+  | _ -> false
+
 (** Propagate literals, variable aliases, and record-field knowledge.
     [env]  maps variable names to their literal values.
     [avar] maps variable names to their aliased variables (P12).
@@ -193,7 +209,27 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
     Tir.ELetRec (fns', cprop_expr ~changed env avar fenv body)
 
   | Tir.ECase (a, branches, default) ->
-    let a' = subst_atom ~changed env avar a in
+    (* Do NOT copy-propagate the scrutinee atom out of sync with an arm's
+       leading `dec_rc <scrutinee>`.  [llvm_case.ml]'s [strip_scrut_decrc]
+       matches that dec BY NAME to transfer ownership of the fields the arm
+       extracts (freeing the scrutinee box IncRC's the still-live fields).
+       Since cprop by design never rewrites EDecRC operands (see the RC-operand
+       cases below), substituting `case X` -> `case Y` while an arm keeps
+       `dec_rc X` desyncs the two: strip_scrut_decrc no longer recognises the
+       dec, skips the compensating field-IncRC, and the freed scrutinee
+       deep-frees a still-live extracted field -> RC underflow (the nested
+       `Cons(Ctor(heap_field), rest)` bug, surfaced once Beta_adt collapses the
+       outer Cons into a direct owned-local scrutinee whose alias cprop would
+       otherwise propagate).  Keep the scrutinee un-substituted whenever an arm
+       decrements the original scrutinee var. *)
+    let protect_scrut =
+      match a with
+      | Tir.AVar x ->
+        List.exists (fun b -> branch_leads_with_dec x.Tir.v_name b.Tir.br_body)
+          branches
+      | _ -> false
+    in
+    let a' = if protect_scrut then a else subst_atom ~changed env avar a in
     (* Branch bound variables shadow any outer literal/alias/field binding. *)
     let branches' = List.map (fun b ->
       let bound_names =

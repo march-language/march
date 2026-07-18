@@ -906,9 +906,24 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
            else match m.md_default with
              | None -> None
              | Some default_expr ->
-               (* Synthesise a fn_def for the default: fn method_name = default_expr
-                  The default body is a value of the method type (often a lambda),
-                  so wrap it in a zero-param clause. *)
+               (* Synthesise a fn_def for the default method.  The default body
+                  has the method's FULL arrow type (`a -> a -> Bool`), so it is
+                  almost always a lambda `fn x y -> ...`.  FLATTEN that lambda's
+                  parameters into the synthesised fn's OWN parameters, rather
+                  than wrapping it in a zero-param clause that merely RETURNS the
+                  lambda.  Otherwise the call `neqx(a, b)` compiles to a 2-arg
+                  call of a 0-param function: the args are dropped, the returned
+                  closure is never applied, and its pointer is used as the result
+                  — so the method always yields the same answer regardless of its
+                  arguments (item 283; the interpreter applied the closure and
+                  so was correct).  A non-lambda default (a bare value method)
+                  keeps the zero-param clause. *)
+               let desugared = desugar_expr default_expr in
+               let clause_params, clause_body =
+                 match desugared with
+                 | ELam (ps, body, _) -> List.map (fun p -> FPNamed p) ps, body
+                 | other -> [], other
+               in
                let fn_def : fn_def = {
                  fn_name = m.md_name;
                  fn_vis = Private;
@@ -916,9 +931,9 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                  fn_attrs = [];
                  fn_ret_ty = None;
                  fn_clauses = [{
-                   fc_params = [];
+                   fc_params = clause_params;
                    fc_guard = None;
-                   fc_body = desugar_expr default_expr;
+                   fc_body = clause_body;
                    fc_span = m.md_name.span;
                  }];
                  fn_bounds = [];
