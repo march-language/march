@@ -4189,7 +4189,7 @@ Linear | Affine`, `ast.ml:20-24`) through exactly these surfaces:
 | `linear let x = e` | `parser.mly:1001` (+ lambda-body variant `:1117`) | binding registered Linear at the let arm |
 | `linear T` / `affine T` type modifier | `parser.mly:938-939` (`TyLinear (Linear\|Affine, t)`, a `ty_atom` prefix) | the TYPE carries a `TLin` wrapper; a binding whose (post-unification) type reprs to `TLin` is registered with that linearity (`bind_pattern_bindings`, `typecheck.ml:2858`) |
 | `type R = { linear f : T, ... }` | `parser.mly:978` (`fld_lin = Linear`) | field access tracked via sentinels (§2.9.3) |
-| `always_linear type H = ...` | `parser.mly:461-468` (`DAlwaysLinearType`) | **(T-AlwaysLin)** the type NAME (bare AND module-qualified) is added to `env.always_linear_types` (`typecheck.ml:7985-7997`); every binding whose type is `TCon(name,_)` with `name` in that list is AUTO-PROMOTED to Linear at let (`:4841`), fn-param (`:4940`), and lambda-param (`:5166`) sites |
+| `always_linear type H = ...` | `parser.mly:461-468` (`DAlwaysLinearType`) | **(T-AlwaysLin)** the type NAME (bare AND module-qualified) is added to `env.always_linear_types` (`DAlwaysLinearType` arm); every binding whose type is `TCon(name,_)` for which `resolves_always_linear name env` holds is AUTO-PROMOTED to Linear at the let (auto_lin), fn-param, and lambda-param (`bind_lam_param`) sites. `resolves_always_linear` is NOT a flat `List.mem` — when the current module declares its own same-named type it defers to that type's own linearity (the L4 local-shadow fix, 2026-07-17), so a plain local `type Handle` is not infected by stdlib's `always_linear Handle` |
 
 There is deliberately **no `affine let`** production and **no `affine`
 param-keyword** — `affine` exists ONLY as the type modifier. Writing
@@ -4279,12 +4279,29 @@ tutorial's former claim that linear values cannot be sent — finding **L6**.)
 
 - **L1** — `affine` param-keyword is a parse error (§2.9.1).
 - **L3** — param-bound linear-field tracking is warning-only (§2.9.3).
-- **L4** — `always_linear_types` is NAME-keyed and GLOBAL: a user
-  `type Handle = H(Int)` silently inherits linearity from stdlib's
-  `always_linear type Handle` (`stdlib/handle.march`) — a program with zero
-  `linear` keywords gets hard (T-LinDrop) errors — and the constructor
-  namespace cross-talk corrupts exhaustiveness (`missing case: Handle(_)`
-  against the user's own `H`). Avoid stdlib-colliding type names.
+- **L4** — FIXED 2026-07-17 (both halves). The linearity
+  infection is closed: `always_linear`-promotion no longer keys on the BARE
+  type name globally. It routes through `resolves_always_linear`
+  (`typecheck.ml`), which — when the current module declares its own
+  same-named type — promotes iff *that* module's own qualified type is
+  `always_linear` (both bare and qualified names are registered by
+  `DAlwaysLinearType`, so the qualified membership check disambiguates a plain
+  local shadow from a genuinely-linear local type). So a user
+  `type Handle = H(Int)` no longer inherits linearity from stdlib's
+  `always_linear type Handle` (`stdlib/handle.march`); `accept/t81` witnesses
+  it, and a `let h = Handle(1)` with NO local shadow still resolves to the
+  stdlib linear `Handle` and correctly errors (`reject/t65`). The
+  *constructor*-namespace half is ALSO closed now: constructors carry a
+  `ci_module` (declaring module) and `ctors_for_type` restricts the
+  exhaustiveness universe to the current module's own ctors when it declares its
+  own same-named type, so `match h do H(n) -> .. end` on the user's `Handle` no
+  longer warns `missing case: Handle(_)` (`accept/t82`). `ci_module` is additive
+  metadata — it feeds ONLY this diagnostic, not codegen/mangling/dispatch (the
+  `.ll` goldens are byte-identical), and it is the first metadata slice of the
+  module-qualified constructor identity
+  (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`, Stage 4). A genuine
+  cross-module ctor clash where NEITHER type is local still merges (conservative,
+  pending the full resolver).
 - **L7** — FIXED 2026-07-10: escape analysis stack-promoted erased-repr
   (Newtype/Niche) allocs, so any non-escaping local construction consumed by
   a direct `match` read garbage compiled (the annotation in the original

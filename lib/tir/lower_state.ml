@@ -471,7 +471,10 @@ let resolve_iface_method (env : env) (method_name : string) (arg_span : Ast.span
         (* Extract the concrete type name from the typechecker type *)
         let type_name = match tc_ty with
           | Typecheck.TCon (name, _) -> Some name
-          | Typecheck.TTuple _       -> Some "$Tuple"
+          (* Tuples resolve by ARITY so a 2-tuple finds `Show$Tuple2` and a
+             3-tuple finds `Show$Tuple3` (registration side: [Lower.type_name]
+             for `Ast.TyTuple`). Arity-agnostic "$Tuple" collapsed all arities. *)
+          | Typecheck.TTuple ts      -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
           | Typecheck.TRecord _      -> Some "$Record"
           | _ -> None
         in

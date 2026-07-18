@@ -283,6 +283,27 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-17, compiled `to_string` on containers/ADTs fixed — routed through Show dispatch)
+
+**Compiled `to_string` on a non-primitive no longer prints `#<tag:N>` garbage.**
+`to_string` is a universal formatter semantically identical to `show` (verified
+byte-identical interpreted; for primitives `Show$T.show` delegates to the same
+`*_to_string` C helper). The compiled path was a codegen builtin whose
+non-primitive fallthrough called the generic `march_value_to_string`, which
+cannot format heap objects. Now a `to_string(x)` call is routed through the SAME
+Show dispatch `println` uses (`lib/tir/lower.ml`, `resolve_iface_method "show"`):
+a Show-having type gets its real `Show$T.show`, a Show-less type falls through to
+the old builtin (no regression). The perceus borrowed-field-String RC rule was
+taught the rewritten `Show$String.show` name to avoid an RC underflow. Also fixes
+string interpolation of containers (`"${[1,2,3]}"` desugars to `to_string`).
+Regression: `test/native/to_string_show.march` (oracle allowlist + pinned-stdout
+anchor). Also this window: **linear-L4 fully closed** (both linearity and ctor
+halves — `ci_module` metadata + `resolves_always_linear`; witnesses `accept/t81`,
+`accept/t82`); the **FQN flat-namespace overhaul** cut (a) landed and cut (b) was
+attempted, mechanism-proven, and reverted on a documented third-subsystem blocker
+(`specs/plans/2026-07-17-fqn-type-ctor-identity.md`). Suite: eval 233 / compiler
+514 / snapshots 29 / codegen 421 / stdlib 809 / oracle 0 un-triaged / types 160.
+
 ## Current State (as of 2026-07-17, sort-RC crash fixed — uniform ptr closure scalar ABI)
 
 **The long-standing sort-RC-underflow crash (compiled `heapsort`/`mergesort`/…

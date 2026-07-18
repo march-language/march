@@ -412,6 +412,19 @@ type ctor_info = {
   ci_params  : string list;      (** Type param names in declaration order *)
   ci_arg_tys : Ast.ty list;      (** Surface arg types of this constructor *)
   ci_vis     : Ast.visibility;   (** Constructor visibility (Public/Private) *)
+  ci_module  : string;
+  (** Declaring module of this constructor's parent type (empty at top level /
+      prelude).  Additive metadata: [ci_type] is the BARE parent-type name and
+      is deliberately kept bare for cross-module unification (see
+      [prebind_mod_members]'s reverted qualified-ci_type experiment), so two
+      same-named types' constructors are indistinguishable by [ci_type] alone.
+      [ci_module] disambiguates them for DIAGNOSTIC purposes only — currently
+      [ctors_for_type]'s exhaustiveness universe, which otherwise merges a user
+      `Handle`'s ctors with stdlib's same-named `Handle` (linear-L4 ctor
+      cross-talk). It feeds NO codegen/mangling/dispatch, so it is byte-identical
+      at the backend, and it is NOT part of [add_ctor]'s structural dedup key.
+      First metadata slice of the module-qualified ctor identity in
+      specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4). *)
 }
 
 (** One entry in the import tracker — records an imported name or alias and
@@ -487,7 +500,11 @@ type env = {
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
-  impls      : ty list StrMap.t; (** Registered interface implementations: iface_name → impl types *)
+  impls      : (ty * Ast.span) list StrMap.t;
+  (** Registered interface implementations: iface_name → (impl head type, decl
+      span). The span lets the coherence check ((T-ImplCoherent)) cite the FIRST
+      impl when rejecting a duplicate, and distinguishes a genuine duplicate
+      (different span) from the same impl re-registered across passes. *)
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
@@ -782,6 +799,27 @@ let ty_has_tagged_cap_producer (env : env) (ty : ty) : bool =
 
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
+
+(** True iff the bare type name [name] resolves to an `always_linear` type *here*
+    — i.e. it is registered always_linear AND the current module does NOT declare
+    its OWN same-named type (which shadows the imported/stdlib one).  Bridges the
+    L4 gap (a user `type Handle` was silently infected by stdlib's `always_linear
+    Handle` because promotion matched the bare name globally) using the current
+    module's declaration as the shadow signal — the same current-module
+    preference [lookup_ctor_in_type]/the ctor system already use.  This is a
+    stopgap: the principled fix is module-qualified type identity
+    (specs/plans/2026-07-17-fqn-type-ctor-identity.md), which subsumes it. *)
+let resolves_always_linear name env =
+  (* If the current module declares its OWN same-named type, that declaration
+     shadows any imported one, so promotion follows *its* linearity: promote iff
+     the current module's own qualified type is always_linear (both bare and
+     qualified names are registered by DAlwaysLinearType).  Otherwise there is no
+     local shadow and the bare/imported linearity applies. *)
+  if env.current_module <> ""
+     && StrMap.mem (env.current_module ^ "." ^ name) env.types
+  then List.mem (env.current_module ^ "." ^ name) env.always_linear_types
+  else List.mem name env.always_linear_types
+
 let lookup_ctor name env =
   match StrMap.find_opt name env.ctors with
   | Some (ci :: _) -> Some ci
@@ -960,6 +998,7 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
           ci_type = mod_name ^ "." ^ parent_type;
           ci_params = param_names;
           ci_arg_tys = arg_tys;
+          ci_module = mod_name;
           ci_vis = if entry.ex_public then Ast.Public else Ast.Private;
         } in
         { env with ctors = add_ctor qname ci env.ctors }
@@ -2163,13 +2202,13 @@ let builtin_types : (string * int) list =
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
-  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
-  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
-  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
-  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_vis = Ast.Public } in
-  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
+  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
+  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
+  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_module = ""; ci_vis = Ast.Public } in
+  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_module = ""; ci_vis = Ast.Public } in
+  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_module = ""; ci_vis = Ast.Public } in
   let cons_ci  = { ci_type = "List";   ci_params = ["a"];
-                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_vis = Ast.Public } in
+                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_module = ""; ci_vis = Ast.Public } in
   [ ("Some",        some_ci);  ("Option.Some", some_ci);
     ("None",        none_ci);  ("Option.None", none_ci);
     ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
@@ -2188,7 +2227,9 @@ let base_env errors type_map =
     interfaces = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_interfaces;
     impls      = List.fold_left (fun m (k, v) ->
                    let lst = Option.value ~default:[] (StrMap.find_opt k m) in
-                   StrMap.add k (v :: lst) m) StrMap.empty builtin_impls;
+                   (* Built-ins carry [dummy_span]; the coherence check reads it
+                      to phrase a user-impl-over-builtin conflict specially. *)
+                   StrMap.add k ((v, Ast.dummy_span) :: lst) m) StrMap.empty builtin_impls;
   }
 
 (* =================================================================
@@ -3264,13 +3305,39 @@ let rec norm_pat (p : Ast.pattern) : spat =
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
     analysis only sees each constructor once under its bare name. *)
 let ctors_for_type (env : env) type_name =
-  StrMap.fold (fun k cis acc ->
-    if String.contains k '.' then acc
-    else
-      match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
-      | Some ci -> (k, List.length ci.ci_arg_tys) :: acc
-      | None -> acc
-  ) env.ctors []
+  (* Gather (ctor_key, ci) for every bare-keyed constructor whose parent type's
+     BARE name is [type_name].  Because [ci_type] is bare (kept so for
+     cross-module unification), two same-named types from DIFFERENT modules both
+     match here — the linear-L4 ctor cross-talk, where a user `type Handle =
+     H(Int)` and stdlib's `type Handle = Handle(Int)` merge into one expected
+     universe so `match … H(n)` spuriously reports `missing case: Handle(_)`.
+     Disambiguate with [ci_module]: if the CURRENT module declares its OWN type
+     of this name (a matched ctor carries ci_module = current_module) AND a
+     foreign same-named type is also present, the local declaration shadows the
+     import, so restrict the universe to the current module's own constructors.
+     A single declaration (no cross-module clash) is left exactly as before, so
+     this is behavior-preserving except on the collision it fixes; and it feeds
+     only this exhaustiveness diagnostic, never codegen. *)
+  let matches =
+    StrMap.fold (fun k cis acc ->
+      if String.contains k '.' then acc
+      else
+        match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+        | Some ci -> (k, ci) :: acc
+        | None -> acc
+    ) env.ctors []
+  in
+  let local_shadow =
+    env.current_module <> ""
+    && List.exists (fun (_, ci) -> ci.ci_module = env.current_module) matches
+    && List.exists (fun (_, ci) -> ci.ci_module <> env.current_module) matches
+  in
+  let matches =
+    if local_shadow
+    then List.filter (fun (_, ci) -> ci.ci_module = env.current_module) matches
+    else matches
+  in
+  List.map (fun (k, (ci : ctor_info)) -> (k, List.length ci.ci_arg_tys)) matches
 
 (** Instantiate a surface type with a substitution from param names to internal
     types.  Used to reconstruct constructor argument types. *)
@@ -5105,7 +5172,7 @@ and infer_block env exprs =
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
          | TCon (name, _) ->
-           if List.mem name env.always_linear_types then Ast.Linear else Ast.Unrestricted
+           if resolves_always_linear name env then Ast.Linear else Ast.Unrestricted
          | _ -> Ast.Unrestricted)
       | lin -> lin
     in
@@ -5251,7 +5318,7 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
   let effective_lin = match p.param_lin with
     | Ast.Unrestricted ->
       (match repr t with
-       | TCon (name, _) when List.mem name env.always_linear_types -> Ast.Linear
+       | TCon (name, _) when resolves_always_linear name env -> Ast.Linear
        (* A parameter whose resolved type is a linear/affine wrapper — e.g. a
           session channel `ch : Chan(Client, Echo)` resolving to
           `TLin(Linear, TChan …)` — is tracked as AFFINE so a re-read of the
@@ -5489,7 +5556,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               let effective_lin = match p.param_lin with
                 | Ast.Unrestricted ->
                   (match repr t with
-                   | TCon (tname, _) when List.mem tname env'.always_linear_types -> Ast.Linear
+                   | TCon (tname, _) when resolves_always_linear tname env' -> Ast.Linear
                    (* A session-channel parameter (`ch : Chan(Role, Proto)`)
                       resolves to a [TLin] wrapper.  Track it as AFFINE so a
                       RE-READ of the endpoint inside the body is caught (F7 hole
@@ -5742,6 +5809,54 @@ let rec impl_matches_ty impl_ty target_ty =
     against the (still incomplete) pass-1 environment.  The full registration
     with properly instantiated types still happens in check_decl's DImpl
     case; duplicates are harmless because discharge uses List.exists. *)
+(* Do two impl HEAD types OVERLAP — i.e. is there a substitution of their free
+   type variables making them equal?  This is the coherence-overlap test
+   (T-ImplCoherent), covering BOTH Stage 1 (exact / alpha-equal heads: two
+   `impl Speak(Dog)`, or `impl Show(List(a))` × 2) AND Stage 2 (parametric:
+   `impl Show(List(a))` vs `impl Show(List(Int))` overlap with `a ↦ Int`).
+   Non-overlapping: `Dog`/`Cat`, `List(a)`/`Option(a)` (different head ctor),
+   `Pair(a,a)`/`Pair(Int,Bool)` (`a` can't be both).
+
+   PURE and non-mutating: it never touches the stored heads' [TVar] refs — a
+   local id-keyed substitution stands in for unification, so a var bound once
+   must match consistently on every later occurrence (that is what rejects the
+   `Pair(a,a)` row).  Both heads carry DISTINCT fresh var ids (from
+   [lenient_ty]/[surface_ty]), so their bindings never collide. *)
+let types_overlap (a0 : ty) (b0 : ty) : bool =
+  let subst : (int, ty) Hashtbl.t = Hashtbl.create 8 in
+  let rec go t1 t2 =
+    let t1 = repr t1 and t2 = repr t2 in
+    match t1, t2 with
+    | TVar r1, _ ->
+      (match !r1 with
+       | Unbound (id, _) ->
+         (match Hashtbl.find_opt subst id with
+          | Some bound -> go bound t2
+          | None -> Hashtbl.replace subst id t2; true)
+       | Link _ -> go t1 t2)
+    | _, TVar r2 ->
+      (match !r2 with
+       | Unbound (id, _) ->
+         (match Hashtbl.find_opt subst id with
+          | Some bound -> go t1 bound
+          | None -> Hashtbl.replace subst id t1; true)
+       | Link _ -> go t1 t2)
+    | TCon (n1, a1), TCon (n2, a2) ->
+      n1 = n2 && List.length a1 = List.length a2 && List.for_all2 go a1 a2
+    | TTuple l1, TTuple l2 ->
+      List.length l1 = List.length l2 && List.for_all2 go l1 l2
+    | TRecord f1, TRecord f2 ->
+      List.length f1 = List.length f2
+      && List.for_all2 (fun (n1, x1) (n2, x2) -> n1 = n2 && go x1 x2) f1 f2
+    | TArrow (p1, r1), TArrow (p2, r2) -> go p1 p2 && go r1 r2
+    | TLin (_, x1), TLin (_, x2) -> go x1 x2
+    | TLin (_, x1), _ -> go x1 t2
+    | _, TLin (_, x2) -> go t1 x2
+    | TNat n1, TNat n2 -> n1 = n2
+    | TError, _ | _, TError -> false
+    | _ -> t1 = t2
+  in go a0 b0
+
 let register_impl_shape env (idef : Ast.impl_def) =
   let module M = Map.Make (String) in
   let tvars = ref M.empty in
@@ -5785,10 +5900,45 @@ let register_impl_shape env (idef : Ast.impl_def) =
     | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
   let inst_ty = lenient_ty idef.impl_ty in
-  { env with impls =
-    (let key = idef.impl_iface.txt in
-     let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
-     StrMap.add key (inst_ty :: lst) env.impls) }
+  let key = idef.impl_iface.txt in
+  let sp  = idef.impl_iface.span in
+  let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+  (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
+     (interface, type-head).  A second impl whose head is alpha-equal to an
+     already-registered one is a compile error — this is what makes the two
+     backends agree by construction (interp's last-write-wins `impl_tbl` vs the
+     monomorphizer's list order would otherwise run DIFFERENT method bodies).
+     [register_impl_shape] runs per-impl across the Pass-1 folds and may see the
+     SAME impl twice (nested/entry re-registration), so distinguish by SPAN:
+     same span = re-registration (no-op); different span = genuine duplicate. *)
+  (* A DIFFERENT-span USER entry whose head OVERLAPS this one is a coherence
+     violation (exact duplicate OR parametric overlap); our own entry (same
+     span, from a Pass-1 re-registration) is not.  Built-in impls live in
+     [env.impls] too (seeded with [dummy_span] by [base_env]) but are SKIPPED
+     here: a user impl on a primitive (`impl Eq(Int)`) coexisting with the
+     built-in is the pre-existing behavior and is heavily used by the interface-
+     machinery test fixtures — rejecting it (DECIDE-1) is deferred as a follow-on
+     so this ships without that disruptive change. *)
+  match List.find_opt
+          (fun (t, s) -> s <> sp && s <> Ast.dummy_span && types_overlap t inst_ty)
+          lst with
+  | Some (_, prev_sp) ->
+    Err.error env.errors ~span:sp
+      (Printf.sprintf
+         "Overlapping implementation: `impl %s(%s)` conflicts with the \
+          implementation at %s:%d:%d — their heads overlap.\n\
+          A type may implement an interface at most once (coherence). If you \
+          meant a different behavior, wrap the type in a newtype and implement \
+          the interface on that."
+         key (pp_ty inst_ty)
+         prev_sp.Ast.file prev_sp.Ast.start_line prev_sp.Ast.start_col);
+    env   (* keep the first impl — deterministic *)
+  | None ->
+    (* No conflict. Register (unless our own same-span entry is already present
+       from a Pass-1 re-registration, in which case this is a no-op). *)
+    if List.exists (fun (t, s) -> s = sp && types_overlap t inst_ty) lst
+    then env
+    else { env with impls = StrMap.add key ((inst_ty, sp) :: lst) env.impls }
 
 (** Pre-register a forward-reference interface declared in [prefix]: its name
     (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
@@ -5898,7 +6048,7 @@ let discharge_constraints env span =
          | _ ->
            let satisfied = match StrMap.find_opt iface_name env.impls with
              | None -> false
-             | Some impl_tys -> List.exists (fun impl_ty ->
+             | Some impl_tys -> List.exists (fun (impl_ty, _) ->
                  impl_matches_ty (repr impl_ty) ty) impl_tys
            in
            if not satisfied then begin
@@ -7746,6 +7896,7 @@ let rec check_decl env (d : Ast.decl) : env =
            let ci = { ci_type    = name.txt
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
+                    ; ci_module  = env.current_module
                     ; ci_vis     = v.var_vis } in
            (* Register both bare "CtorName" and qualified "TypeName.CtorName"
               so users can write either form for disambiguation. *)
@@ -7810,7 +7961,7 @@ let rec check_decl env (d : Ast.decl) : env =
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
-      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = env.current_module; ci_vis = Ast.Public }
         env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -7823,7 +7974,7 @@ let rec check_decl env (d : Ast.decl) : env =
                           span = p.param_name.span }
           ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                   ci_arg_tys = arg_tys; ci_module = env.current_module; ci_vis = Ast.Public } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type *)
@@ -8171,7 +8322,9 @@ let rec check_decl env (d : Ast.decl) : env =
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
        let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
-       StrMap.add key (inst_ty :: lst) env.impls) } in
+       (* Pass-2 re-registration for constraint discharge; coherence is enforced
+          in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
+       StrMap.add key ((inst_ty, idef.impl_iface.span) :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
         match List.map (surface_ty env ~tvars) ctys with
@@ -8182,7 +8335,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ ->
              if not (match StrMap.find_opt cname.txt env.impls with
                  | None -> false
-                 | Some tys -> List.exists (fun impl_ty ->
+                 | Some tys -> List.exists (fun (impl_ty, _) ->
                      impl_matches_ty (repr impl_ty) cty) tys) then
                Err.error env.errors ~span:cname.span
                  (Printf.sprintf
@@ -8218,7 +8371,7 @@ let rec check_decl env (d : Ast.decl) : env =
                | _ ->
                  if not (match StrMap.find_opt sc_name.txt env.impls with
                      | None -> false
-                     | Some tys -> List.exists (fun impl_ty ->
+                     | Some tys -> List.exists (fun (impl_ty, _) ->
                          impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
                    Err.error env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
@@ -9221,7 +9374,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -9248,7 +9401,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -9336,6 +9489,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
+                        ; ci_module  = m.Ast.mod_name.txt
                         ; ci_vis     = v.var_vis } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
@@ -9357,7 +9511,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -9368,7 +9522,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
@@ -9523,7 +9677,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
                  let ci = { ci_type = name.txt; ci_params = param_names;
-                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                            ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
                     for PUBLIC constructors.  A private constructor — notably an
                     `opaque type`'s, whose variants the parser marks Private
@@ -9550,7 +9704,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
                    let type_ci = { ci_type = name.txt; ci_params = param_names;
-                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                                   ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
                    (* A type exported opaquely by a sibling `sig` keeps its
                       constructors hidden: don't seed the short (bare / bare-type)
@@ -9626,6 +9780,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
+                        ; ci_module  = m.Ast.mod_name.txt
                         ; ci_vis     = v.var_vis } in
                (* Register the type-qualified key ("TypeName.CtorName") in this
                   forward-reference pass, not just in check_decl: sibling DMods
@@ -9644,7 +9799,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
         let env1 = { env with ctors =
-          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public }
             env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -9655,7 +9810,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+                       ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public } in
             { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
