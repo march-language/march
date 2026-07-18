@@ -262,3 +262,27 @@ user newtype). The high-value user-vs-user case ships without it.
 (the divergence is now closed for the user-vs-user case), the oracle-graduation
 of any impl-overlap `known_divergence`, DECIDE-1, DECIDE-3 (orphan rule, blocked
 on the flat namespace), and Stage 2 (parametric unifiability overlap).
+
+## Stage 2 — LANDED (2026-07-17)
+
+Task 5 (corpus gate) + Task 6 (unifiability check) shipped. The exact-key
+`canonical_impl_key` was replaced by `types_overlap` — a PURE, non-mutating
+two-sided unification check (id-keyed local substitution; never touches the
+stored heads' `TVar` refs), so `impl Show(List(a))` vs `impl Show(List(Int))`
+now overlaps (`a ↦ Int`) while `Box(a)` vs `Bag(a)` (different head ctor) and
+`Pair(a,a)` vs `Pair(Int,Bool)` (`a` can't be both) do not. This subsumes
+Stage 1 (alpha-equal heads overlap trivially).
+
+**Task 5 corpus gate result:** the whole corpus (stdlib + examples + test) has
+ZERO parametric-overlap pairs — every impl head is on a distinct type, no
+`F(a)` + `F(Concrete)` twin, no blanket `impl I(a)`. So enabling unifiability
+overlap is safe; the full suite confirmed zero new rejections.
+
+Witnesses: `reject/t85_impl_parametric_overlap`, `accept/t86_impl_parametric_distinct`.
+Suite: eval 233 / compiler 514 / snapshots 29 / stdlib 809 / codegen 421 / types
+165 / oracle 0 un-triaged.
+
+**Remaining:** DECIDE-1 (builtin override + fixture migration), DECIDE-3 (orphan
+rule, blocked on the flat namespace), and the `core-march.md` §4.4.3 / §2.3
+doc-retitle (the divergence is now closed for both exact and parametric
+user-vs-user overlap).

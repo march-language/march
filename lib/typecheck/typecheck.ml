@@ -5809,36 +5809,53 @@ let rec impl_matches_ty impl_ty target_ty =
     against the (still incomplete) pass-1 environment.  The full registration
     with properly instantiated types still happens in check_decl's DImpl
     case; duplicates are harmless because discharge uses List.exists. *)
-(* Alpha-normalized structural key for an impl HEAD type, used for coherence
-   (Stage 1: exact overlap).  Two impl heads that are structurally equal modulo
-   consistent renaming of their free type variables — `impl Show(List(a))` and
-   `impl Show(List(b))`, or two `impl Speak(Dog)` — produce the SAME key.
-   Distinct heads (`Dog` vs `Cat`, `List(a)` vs `Option(a)`) produce different
-   keys.  (Stage 2 — `List(a)` vs `List(Int)` unifiability overlap — is a
-   separate future check; this exact-key form cannot false-positive.) *)
-let canonical_impl_key (t : ty) : string =
-  let counter = ref 0 in
-  let ids : (int, int) Hashtbl.t = Hashtbl.create 8 in
-  let canon id =
-    match Hashtbl.find_opt ids id with
-    | Some i -> i
-    | None -> let i = !counter in incr counter; Hashtbl.add ids id i; i
-  in
-  let rec go t =
-    match repr t with
-    | TVar r -> (match !r with Unbound (id, _) -> Printf.sprintf "V%d" (canon id) | Link _ -> "V?")
-    | TCon (n, [])   -> n
-    | TCon (n, args) -> n ^ "(" ^ String.concat "," (List.map go args) ^ ")"
-    | TArrow (a, b)  -> "(" ^ go a ^ "->" ^ go b ^ ")"
-    | TTuple ts      -> "(" ^ String.concat "," (List.map go ts) ^ ")"
-    | TRecord fs     -> "{" ^ String.concat "," (List.map (fun (n, ft) -> n ^ ":" ^ go ft) fs) ^ "}"
-    | TLin (_, t')   -> go t'   (* linearity is not part of an impl's identity *)
-    | TNat n         -> "N" ^ string_of_int n
-    | TNatOp _       -> "Nop"
-    | TChan _        -> "Chan"
-    | TError         -> "Err"
-    | TRefine (b, _, _) -> go b
-  in go t
+(* Do two impl HEAD types OVERLAP — i.e. is there a substitution of their free
+   type variables making them equal?  This is the coherence-overlap test
+   (T-ImplCoherent), covering BOTH Stage 1 (exact / alpha-equal heads: two
+   `impl Speak(Dog)`, or `impl Show(List(a))` × 2) AND Stage 2 (parametric:
+   `impl Show(List(a))` vs `impl Show(List(Int))` overlap with `a ↦ Int`).
+   Non-overlapping: `Dog`/`Cat`, `List(a)`/`Option(a)` (different head ctor),
+   `Pair(a,a)`/`Pair(Int,Bool)` (`a` can't be both).
+
+   PURE and non-mutating: it never touches the stored heads' [TVar] refs — a
+   local id-keyed substitution stands in for unification, so a var bound once
+   must match consistently on every later occurrence (that is what rejects the
+   `Pair(a,a)` row).  Both heads carry DISTINCT fresh var ids (from
+   [lenient_ty]/[surface_ty]), so their bindings never collide. *)
+let types_overlap (a0 : ty) (b0 : ty) : bool =
+  let subst : (int, ty) Hashtbl.t = Hashtbl.create 8 in
+  let rec go t1 t2 =
+    let t1 = repr t1 and t2 = repr t2 in
+    match t1, t2 with
+    | TVar r1, _ ->
+      (match !r1 with
+       | Unbound (id, _) ->
+         (match Hashtbl.find_opt subst id with
+          | Some bound -> go bound t2
+          | None -> Hashtbl.replace subst id t2; true)
+       | Link _ -> go t1 t2)
+    | _, TVar r2 ->
+      (match !r2 with
+       | Unbound (id, _) ->
+         (match Hashtbl.find_opt subst id with
+          | Some bound -> go t1 bound
+          | None -> Hashtbl.replace subst id t1; true)
+       | Link _ -> go t1 t2)
+    | TCon (n1, a1), TCon (n2, a2) ->
+      n1 = n2 && List.length a1 = List.length a2 && List.for_all2 go a1 a2
+    | TTuple l1, TTuple l2 ->
+      List.length l1 = List.length l2 && List.for_all2 go l1 l2
+    | TRecord f1, TRecord f2 ->
+      List.length f1 = List.length f2
+      && List.for_all2 (fun (n1, x1) (n2, x2) -> n1 = n2 && go x1 x2) f1 f2
+    | TArrow (p1, r1), TArrow (p2, r2) -> go p1 p2 && go r1 r2
+    | TLin (_, x1), TLin (_, x2) -> go x1 x2
+    | TLin (_, x1), _ -> go x1 t2
+    | _, TLin (_, x2) -> go t1 x2
+    | TNat n1, TNat n2 -> n1 = n2
+    | TError, _ | _, TError -> false
+    | _ -> t1 = t2
+  in go a0 b0
 
 let register_impl_shape env (idef : Ast.impl_def) =
   let module M = Map.Make (String) in
@@ -5894,23 +5911,22 @@ let register_impl_shape env (idef : Ast.impl_def) =
      [register_impl_shape] runs per-impl across the Pass-1 folds and may see the
      SAME impl twice (nested/entry re-registration), so distinguish by SPAN:
      same span = re-registration (no-op); different span = genuine duplicate. *)
-  let canon = canonical_impl_key inst_ty in
-  (* A DIFFERENT-span USER entry with the same head is a genuine duplicate; our
-     own entry (same span, from a Pass-1 re-registration) is not.  Built-in
-     impls live in [env.impls] too (seeded with [dummy_span] by [base_env]) but
-     are SKIPPED here: a user impl on a primitive (`impl Eq(Int)`) coexisting
-     with the built-in is the pre-existing behavior and is heavily used by the
-     interface-machinery test fixtures — rejecting it (DECIDE-1) is deferred as
-     a follow-on so Stage 1 ships the high-value user-vs-user duplicate check
-     without that disruptive change. *)
+  (* A DIFFERENT-span USER entry whose head OVERLAPS this one is a coherence
+     violation (exact duplicate OR parametric overlap); our own entry (same
+     span, from a Pass-1 re-registration) is not.  Built-in impls live in
+     [env.impls] too (seeded with [dummy_span] by [base_env]) but are SKIPPED
+     here: a user impl on a primitive (`impl Eq(Int)`) coexisting with the
+     built-in is the pre-existing behavior and is heavily used by the interface-
+     machinery test fixtures — rejecting it (DECIDE-1) is deferred as a follow-on
+     so this ships without that disruptive change. *)
   match List.find_opt
-          (fun (t, s) -> s <> sp && s <> Ast.dummy_span && canonical_impl_key t = canon)
+          (fun (t, s) -> s <> sp && s <> Ast.dummy_span && types_overlap t inst_ty)
           lst with
   | Some (_, prev_sp) ->
     Err.error env.errors ~span:sp
       (Printf.sprintf
-         "Duplicate implementation: `impl %s(%s)` conflicts with the \
-          implementation at %s:%d:%d.\n\
+         "Overlapping implementation: `impl %s(%s)` conflicts with the \
+          implementation at %s:%d:%d — their heads overlap.\n\
           A type may implement an interface at most once (coherence). If you \
           meant a different behavior, wrap the type in a newtype and implement \
           the interface on that."
@@ -5918,9 +5934,9 @@ let register_impl_shape env (idef : Ast.impl_def) =
          prev_sp.Ast.file prev_sp.Ast.start_line prev_sp.Ast.start_col);
     env   (* keep the first impl — deterministic *)
   | None ->
-    (* Not a duplicate. Register (unless our own same-span entry is already
-       present from a Pass-1 re-registration, in which case this is a no-op). *)
-    if List.exists (fun (t, s) -> s = sp && canonical_impl_key t = canon) lst
+    (* No conflict. Register (unless our own same-span entry is already present
+       from a Pass-1 re-registration, in which case this is a no-op). *)
+    if List.exists (fun (t, s) -> s = sp && types_overlap t inst_ty) lst
     then env
     else { env with impls = StrMap.add key ((inst_ty, sp) :: lst) env.impls }
 

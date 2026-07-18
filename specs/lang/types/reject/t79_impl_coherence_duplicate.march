@@ -1,4 +1,4 @@
--- EXPECT-ERROR: Duplicate implementation
+-- EXPECT-ERROR: Overlapping implementation
 -- Coherence (T-ImplCoherent), Stage 1 exact overlap: a type may implement an
 -- interface at most once. Two `impl Speak(Dog)` blocks previously BOTH
 -- typechecked (--check exit 0), and the backends then ran DIFFERENT method
