@@ -58,6 +58,37 @@ let rec subst_ty (s : ty_subst) : Tir.ty -> Tir.ty = function
   | Tir.TPtr t         -> Tir.TPtr (subst_ty s t)
   | t                  -> t
 
+(** Replace any residual (non-placeholder) [TVar] with [TUnit].  A type variable
+    still present when a specialization is finalized is DANGLING — no concrete
+    value ever flows through it (e.g. the element type of a bare unpinned
+    `None`), so it is unobserved and safe to concretize.  Without this,
+    [mangle_ty] emits a distinct `$V_<n>` name per fresh var id — the bare-`None`
+    link failure (`Show$Option.show$Option_V__<n>` unresolvable).  Defaulting to
+    [String] collapses them into ONE deterministic specialization whose inner
+    interface-method references resolve.  Why [String] and not [Int]/[Unit]:
+    a residual TVar can still be the type of a REAL erased value (a boxed heap
+    pointer in the uniform ptr repr) whose type merely wasn't concretized.
+    [Int]'s tagged-immediate repr makes RC treat that pointer as a tagged int
+    (`incrc` on an even Int ≥ 4096 SIGSEGVs — the erased-int hazard), and
+    [Unit]'s zero/niche repr SIGSEGV'd the `Option(Unit)` decode.  [String] uses
+    the same heap-ptr representation the erased value already has, with
+    IS_HEAP_PTR-guarded dup/drop, so RC stays correct whether the value is a real
+    pointer or a tagged immediate — AND it has the standard Show/Eq/Ord/Hash
+    impls the dead interface-method branch needs to resolve.  The lowering
+    placeholder [TVar "_"] is left alone (handled specially upstream). *)
+let rec default_residual_tvars : Tir.ty -> Tir.ty = function
+  | Tir.TVar "_" as t  -> t
+  | Tir.TVar _         -> Tir.TString
+  | Tir.TTuple ts      -> Tir.TTuple (List.map default_residual_tvars ts)
+  | Tir.TRecord fs     -> Tir.TRecord (List.map (fun (n, t) -> (n, default_residual_tvars t)) fs)
+  | Tir.TCon (n, args) -> Tir.TCon (n, List.map default_residual_tvars args)
+  | Tir.TFn (ps, ret)  -> Tir.TFn (List.map default_residual_tvars ps, default_residual_tvars ret)
+  | Tir.TPtr t         -> Tir.TPtr (default_residual_tvars t)
+  | t                  -> t
+
+let default_residual_in_subst (s : ty_subst) : ty_subst =
+  List.map (fun (n, t) -> (n, default_residual_tvars t)) s
+
 let subst_var (s : ty_subst) (v : Tir.var) : Tir.var =
   { v with Tir.v_ty = subst_ty s v.Tir.v_ty }
 
@@ -340,7 +371,9 @@ let rec rewrite_calls
     | None -> mangled_name  (* not in fn_table (e.g. a builtin-backed impl) *)
     | Some orig_impl ->
       let arg_tys = List.map atom_ty args in
-      let subst = build_subst orig_impl arg_tys in
+      (* Default dangling TVars so e.g. a bare unpinned `None` specializes
+         `Show$Option` at `Unit` instead of a link-failing `$V_<n>`. *)
+      let subst = default_residual_in_subst (build_subst orig_impl arg_tys) in
       if subst = [] then begin
         if not (Hashtbl.mem done_set mangled_name) then
           Queue.add (mangled_name, orig_impl, []) worklist;
@@ -381,6 +414,7 @@ let rec rewrite_calls
         | Tir.TInt    -> Some "Int"
         | Tir.TFloat  -> Some "Float"
         | Tir.TBool   -> Some "Bool"
+        | Tir.TUnit   -> Some "Unit"
         | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
         | _ -> None
       in
@@ -458,6 +492,7 @@ let rec rewrite_calls
                | Tir.TInt    -> Some "Int"
                | Tir.TFloat  -> Some "Float"
                | Tir.TBool   -> Some "Bool"
+               | Tir.TUnit   -> Some "Unit"
                | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
                | _ -> None
              in
@@ -537,7 +572,11 @@ let rec rewrite_calls
            | Tir.ADefRef _ -> Tir.TPtr Tir.TUnit  (* global ref, treat as opaque ptr *)
            | Tir.ALit l -> lit_ty l
          ) args in
-       let subst = build_subst orig_fn arg_tys in
+       (* Default dangling TVars in the specialization: a residual fresh var
+          would otherwise mint a DISTINCT `$V_<n>` variant per call site — the
+          bare-`None` link failure and the 512-specialization mono-limit blowup
+          (each dangling id counts as a new specialization of the same fn). *)
+       let subst = default_residual_in_subst (build_subst orig_fn arg_tys) in
        if subst = [] then begin
          (* No specialization needed (monomorphic or unresolved TVar args) —
             but still enqueue to ensure the function is emitted.  Matches the
@@ -600,6 +639,7 @@ let rec rewrite_calls
                   | Tir.TInt    -> Some "Int"
                   | Tir.TFloat  -> Some "Float"
                   | Tir.TBool   -> Some "Bool"
+                  | Tir.TUnit   -> Some "Unit"
                   | _ -> None
                 in
                 (* Single-impl fallback for type-erased args (TVar or opaque
