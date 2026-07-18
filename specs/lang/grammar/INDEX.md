@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p25 parse, r01–r14 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25)
+# Grammar corpus index (p01–p26 parse, r01–r14 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 39/39 — 25 parse, 14
+Exit 0 iff every program behaves as declared (currently 40/40 — 26 parse, 14
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -84,6 +84,7 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p23_iife_lambda_call.march`](parse/p23_iife_lambda_call.march) | §7.3 — the guard must NOT fire on an IIFE `(fn x -> …)(n)` | `(fn x -> x + 1)(5)` — here the `)` closes a parenthesized EXPRESSION/lambda (a `Group`, not a call's arg list), so the paren-kind stack records `Group` and the curried-call guard passes it through. `--check` exit 0 — the critical constraint that a naive "reject all `)(`" would break. |
 | [`parse/p24_two_line_call_juxtaposition.march`](parse/p24_two_line_call_juxtaposition.march) | §7.3 — a newline between `)` and `(` means two statements, not a curried call | `f(1)⏎(g(2))` on two lines — the guard is newline-sensitive (`saw_nl_since_significant`), so the trailing `(g(2))` parses as its own `block_expr` exactly as before. `--check` exit 0, even though the same text on one line (`f(1)(g(2))`) is now rejected. |
 | [`parse/p25_letq_block_fold.march`](parse/p25_letq_block_fold.march) | §5.4 `let?` position — a well-formed multi-`let?` block parses and the `block_body` fold threads each `let?`'s continuation right-associatively | Two `let?` bindings each followed by more of the block get non-empty continuations; prints `70` (5→6→7, ×10). Positive companion to `reject/r05` (a trailing `let?`, a TYPE-stage rejection). |
+| [`parse/p26_cond_arm_ge_le.march`](parse/p26_cond_arm_ge_le.march) | §3.3/§3.4 arm-boundary lookahead — the `->`-scan across a TWO-CHAR comparison operator (item 110 regression) | An ECond (scrutinee-less `match do cond -> body end` chain) whose arm conditions use `>=` (two arms) and `<=` (one arm). Previously the token filter's arm-boundary `->`-scan got stuck on the two-char `>=`/`<=` before reaching the next arm's `->`, so `s >= 90 -> ...` was a parse error while `s > 89 -> ...` parsed (the reason `golden/g31` uses `>` as a workaround). Now parses; value-witness prints `A`/`B`/`Z`/`F` (interp == compiled). |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -104,7 +105,7 @@ p18–p22/r11–r13: `actor`+`supervise`, `app`/`on_start`/`Supervisor.spec`,
 A later fix (2026-07-06) resolving the §7.3 `f(1)(2)` silent-mis-split
 finding added r14/p23/p24: the curried-call-juxtaposition reject and the
 IIFE + two-line witnesses the newline-sensitive guard must still accept —
-39 programs total (25 `parse/`, 14 `reject/`). See
+40 programs total (26 `parse/`, 14 `reject/`). See
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan
