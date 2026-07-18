@@ -214,7 +214,7 @@ let known_divergence =
        pointer) but a different call site; newly filed by this sweep.
        specs/todos.md P0: "DataFrame.group_by + Stats.mean: compiled-only
        RC-misclassification SIGSEGV". *)
-    "dataframe_bench", "DataFrame group_by/Stats.mean RC-misclassification SIGSEGV (specs/todos.md, filed by this sweep)";
+    "dataframe_bench", "DataFrame group_by/inner_join return empty compiled (interp correct) — the item-45 float SIGSEGV is FIXED (filter/sort now match), unmasking a distinct pre-existing group_by/join wrong-answer; float-free repro confirms (specs/todos.md)";
     (* Same DataFrame RC-misclassification family as dataframe_bench: the
        COMPILED binary crashes (exit 139) in the DataFrame internals while the
        interpreter runs clean.  Surfaced 2026-07-10 once the InterpFail gate
@@ -222,7 +222,7 @@ let known_divergence =
        truth) AND is_divergence began treating the 128+signo crash exit as a
        divergence — before both, its compiled crash was invisible. Not a new
        bug; the same open DataFrame RC issue as dataframe_bench. *)
-    "dataframe_basic", "DataFrame RC-misclassification family: compiled crash (139), interp clean (same bug as dataframe_bench; specs/todos.md)";
+    "dataframe_basic", "DataFrame group_by/inner_join/summarize return empty compiled (interp correct) — the item-45 float SIGSEGV is FIXED (no longer crashes), unmasking the same pre-existing group_by/join wrong-answer as dataframe_bench (specs/todos.md)";
 
     (* Monomorphization-limit ICE: compiling hits mono.ml's polymorphic-
        recursion specialization-count guard on a shape that is not
@@ -267,7 +267,7 @@ let known_divergence_reason path =
 
 let test_native_allowlist =
   [ "atom_ctor_field"; "closure_bool_field"; "default_args_nested";
-    "default_method_args"; "ctor_pattern_multi_param";
+    "default_method_args"; "ctor_pattern_multi_param"; "float_arr_list_boxing";
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
@@ -312,6 +312,7 @@ let expected_stdout =
     "task_race_cancel", "race=1\nany=10\ncancelled=true\n";
     "default_method_args", "true\nfalse\ntrue\n";
     "ctor_pattern_multi_param", "false\ntrue\n6\n15\n";
+    "float_arr_list_boxing", "1\n0\n7.\n[1.5, 2.5, 3.]\n";
     "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =

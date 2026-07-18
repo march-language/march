@@ -4241,7 +4241,11 @@ void *native_float_arr_from_list(void *lst) {
     void *arr = native_arr_alloc(n);
     void *cur = lst;
     for (int64_t i = 0; i < n; i++) {
-        double v; memcpy(&v, (char *)cur + 16, 8);
+        /* List(Float) elements are BOXED (see native_float_arr_to_list): the
+         * Cons element slot holds a march_alloc_float pointer, so unbox it
+         * rather than reading the slot as a raw double. */
+        void *boxed = *(void **)((char *)cur + 16);
+        double v = march_unbox_float(boxed);
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &v, 8);
         cur = *(void **)((char *)cur + 24);
     }
@@ -4252,9 +4256,19 @@ void *native_float_arr_to_list(void *arr) {
     int64_t len = native_float_arr_length(arr);
     void *lst = make_nil();
     for (int64_t i = len - 1; i >= 0; i--) {
+        /* List(Float) elements are BOXED in compiled code — the Cons element
+         * slot (offset 16) is a uniform pointer-width word, and a raw IEEE-754
+         * double stored there would later be dereferenced by march_unbox_float
+         * as a heap-float pointer (SIGSEGV at the float's bit pattern + 16).
+         * Box each element with march_alloc_float so the produced list matches
+         * the compiler's representation. Mirrors native_int_arr_to_list's
+         * tagged-immediate storage — floats can't be tagged, so they box. */
+        double v;
+        memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        void *boxed = march_alloc_float(v);
         void *cons = march_alloc(32);
         *(int32_t *)((char *)cons + 8) = 1;
-        memcpy((char *)cons + 16, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        *(void **)((char *)cons + 16) = boxed;
         *(void **)((char *)cons + 24) = lst;
         lst = cons;
     }
