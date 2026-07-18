@@ -1137,8 +1137,28 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
       ) acc cis
   ) env.ctors []
 
+(* Binding a value name SHADOWS any same-named module fn for the direct-call
+   arity check ([fn_arities], consulted at the EApp rule): a param/let/pattern
+   binding named e.g. `f` must not have calls `f(x, y)` checked against a
+   TOP-LEVEL `fn f`'s declared arity.  [fn_arities] is name-keyed and
+   accumulates across modules, so without this removal a stdlib param like
+   fold_left's `f : b -> a -> b` collides with ANY user/other-module `fn f`
+   of a different arity — the false arity error is reported at the STDLIB
+   span (silently filtered by bin/main.ml's is_user_file), the call is
+   "recovered" as a PARTIAL application (peel), the enclosing fn's recursive
+   call then hits an occurs failure (acc := elem -> acc), the type var is
+   linked to TError, and the poisoned type_map lowers fold_left with a
+   function-typed accumulator temp — the runaway "Monomorphization limit
+   reached: List.fold_left > 512 specializations" ICE, plus TError-typed
+   ('_err) stdlib values misclassified by codegen.  The env is functional,
+   so the removal scopes exactly like the shadowing binding itself.  The few
+   TOP-LEVEL fn (re)binding sites re-add the entry immediately after
+   (module prebinds, check_decl's DFn rebind, check_fn's self-bind).
+   Regression note: this fix (commit c6599af9) was lost in the PR #27/#38
+   merge-conflict resolution and restored here. *)
 let bind_var name sch env =
-  { env with vars = StrMap.add name sch env.vars }
+  { env with vars = StrMap.add name sch env.vars;
+             fn_arities = StrMap.remove name env.fn_arities }
 
 let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
@@ -1148,6 +1168,7 @@ let bind_linear name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
+    fn_arities = StrMap.remove name env.fn_arities;
     lin  = le :: env.lin }
 
 (* =================================================================
@@ -5489,6 +5510,15 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let sv = fresh_var env'.level in
       (sv, bind_var def.fn_name.txt (Mono sv) env', None)
   in
+  (* The self-bind above cleared any fn_arities entry for this name (shadow
+     semantics — correct when a NESTED fn shadows a top-level fn of different
+     arity).  Re-register the CURRENT def's own arity so recursive calls in the
+     body are still arity-checked, against the right arity either way. *)
+  let env_rec =
+    let arity = match def.fn_clauses with
+      | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
+    { env_rec with fn_arities =
+        StrMap.add def.fn_name.txt (arity, def.fn_name.span) env_rec.fn_arities } in
 
   let sch = match def.fn_clauses with
     | [] ->
@@ -7800,6 +7830,13 @@ let rec check_decl env (d : Ast.decl) : env =
     let sch = check_fn env def sp in
     discharge_constraints env sp;
     let env = bind_var def.fn_name.txt sch env in
+    (* bind_var cleared this fn's own fn_arities entry (shadow semantics);
+       restore it so later same-module calls keep the direct-call arity check. *)
+    let env =
+      let arity = match def.fn_clauses with
+        | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
+      { env with fn_arities =
+          StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities } in
     (* Reconcile the QUALIFIED prebind (`Mod.fn`) with the fn's REAL body-checked
        scheme.  desugar's [qualify_module_refs] (lib/desugar/desugar.ml) rewrites
        every intra-nested-module reference to the qualified form (e.g. `App.id`),
@@ -8023,9 +8060,12 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DFn (def, _) ->
           let arity = match def.fn_clauses with
             | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
-          let e = { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
-                           fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities } in
-          bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
+          (* bind_var FIRST (it clears any shadowed fn_arities entry), then
+             register this fn's own arity so the entry survives — see the
+             fn_arities shadow-semantics comment on bind_var. *)
+          let e = bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e in
+          { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
+                   fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities }
         | _ -> e
       ) { env with local_fns = StrMap.empty; current_module = name.txt;
           cap_qual_prefix =
@@ -9464,11 +9504,14 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
            its binding (local definitions shadow imports — see env.local_fns). *)
         let arity = match def.fn_clauses with
           | c :: _ -> List.length c.Ast.fc_params | [] -> 0 in
-        let env = { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns;
-                             fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities } in
-        (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
-        if StrMap.mem def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
+        (* Don't shadow existing bindings (e.g., builtins) with mono forward refs.
+           bind_var FIRST (it clears any shadowed fn_arities entry), then register
+           this fn's own arity so the entry survives — see bind_var's comment. *)
+        let env =
+          if StrMap.mem def.fn_name.txt env.vars then env
+          else bind_var def.fn_name.txt (Mono (fresh_var 1)) env in
+        { env with local_fns = StrMap.add def.fn_name.txt () env.local_fns;
+                   fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) env.fn_arities }
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)

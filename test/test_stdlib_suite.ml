@@ -10139,16 +10139,19 @@ let test_compiled_recursive_closure_capture () =
   match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
           ~main_exe ~bin ~src () with
   | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
-  | `Failed (_, output)
+  | `Failed (_rc, output)
     when ir_contains output "Monomorphization limit reached" ->
-    (* KNOWN PRODUCT BUG (W2 Task2 Step 3 exposure, NOT fixed here — this is
-       a harness-only task; see specs/todos.md "Monomorphization limit
-       reached compiling a self-recursive nested closure (2026-07-02)").
-       This test used to pass vacuously: the old `if compile_rc <> 0 then
-       ()` guard silently swallowed this exact crash for years. Loud,
-       documented skip — never a silent no-op — until lib/tir/mono.ml is
-       fixed in a follow-up session. *)
-    Alcotest.skip ()
+    (* REGRESSION GUARD: this used to be a documented skip while the
+       "Monomorphization limit reached: List.fold_left > 512 specializations"
+       ICE was open.  Root cause was a typechecker bug — the scope-blind
+       [fn_arities] arity check false-flagging a stdlib HOF's own local param
+       (e.g. fold_left's `f`) against a same-named top-level user `fn f`,
+       poisoning the stdlib type_map with TError (commit c6599af9, LOST in the
+       PR #27/#38 merge-conflict resolution and restored).  Now a HARD failure
+       so any reintroduction is caught. *)
+    Alcotest.failf
+      "compile_march: the Monomorphization-limit ICE (fn_arities scope-blind \
+       arity poisoning) has REGRESSED for %s:\n%s" src output
   | `Failed (rc, output) ->
     Alcotest.failf
       "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
