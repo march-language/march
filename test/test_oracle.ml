@@ -223,13 +223,6 @@ let known_divergence =
        divergence — before both, its compiled crash was invisible. Not a new
        bug; the same open DataFrame RC issue as dataframe_bench. *)
     "dataframe_basic", "DataFrame group_by/inner_join/summarize return empty compiled (interp correct) — the item-45 float SIGSEGV is FIXED (no longer crashes), unmasking the same pre-existing group_by/join wrong-answer as dataframe_bench (specs/todos.md)";
-
-    (* Monomorphization-limit ICE: compiling hits mono.ml's polymorphic-
-       recursion specialization-count guard on a shape that is not
-       actually polymorphic-recursive in the source.
-       specs/todos.md P0: "Monomorphization limit reached compiling a
-       self-recursive nested closure". *)
-    "stats_basic", "Monomorphization limit reached ICE, exit 3 (specs/todos.md: \"Monomorphization limit reached compiling a self-recursive nested closure\"; stats_basic is a newly-confirmed trigger of the same P0)";
   ]
 
 let known_divergence_tbl =
@@ -268,7 +261,7 @@ let known_divergence_reason path =
 let test_native_allowlist =
   [ "atom_ctor_field"; "closure_bool_field"; "default_args_nested";
     "default_method_args"; "ctor_pattern_multi_param"; "float_arr_list_boxing";
-    "nested_cons_ctor_heap";
+    "nested_cons_ctor_heap"; "fn_arities_shadow_poisoning";
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
@@ -315,6 +308,7 @@ let expected_stdout =
     "ctor_pattern_multi_param", "false\ntrue\n6\n15\n";
     "float_arr_list_boxing", "1\n0\n7.\n[1.5, 2.5, 3.]\n";
     "nested_cons_ctor_heap", "2\n1\n";
+    "fn_arities_shadow_poisoning", "11\n6\n3\n";
     "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =
