@@ -28,6 +28,16 @@ let builtin_names : StringSet.t =
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";
+      (* Cancellation/race builtins — each has a dedicated codegen arm in
+         llvm_emit (task_cancel_by_id/task_cancel/task_is_cancelled/
+         task_cancel_token_new/task_spawn_with_cancel).  Without a builtin_names
+         entry, defun treats a reference to one (e.g. `List.each(rest, fn t ->
+         task_cancel_by_id(t))` in Task.race/any) as a first-class function and
+         emits a `@task_cancel_by_id$clo_wrap` trampoline whose body calls the
+         non-existent `@task_cancel_by_id` (only the C symbol
+         `@march_task_cancel_by_id` exists) → `use of undefined value`. *)
+      "task_cancel_by_id"; "task_cancel"; "task_is_cancelled";
+      "task_cancel_token_new"; "task_spawn_with_cancel";
       "get_work_pool";
       (* Signal.watch builtins — keep as EApp for dedicated codegen *)
       "signal_watch"; "signal_unwatch"; "signal_raise_self";
