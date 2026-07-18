@@ -268,6 +268,7 @@ let known_divergence_reason path =
 let test_native_allowlist =
   [ "atom_ctor_field"; "closure_bool_field"; "default_args_nested";
     "default_method_args"; "ctor_pattern_multi_param"; "float_arr_list_boxing";
+    "nested_cons_ctor_heap";
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
@@ -313,6 +314,7 @@ let expected_stdout =
     "default_method_args", "true\nfalse\ntrue\n";
     "ctor_pattern_multi_param", "false\ntrue\n6\n15\n";
     "float_arr_list_boxing", "1\n0\n7.\n[1.5, 2.5, 3.]\n";
+    "nested_cons_ctor_heap", "2\n1\n";
     "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =
