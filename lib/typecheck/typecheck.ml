@@ -500,7 +500,11 @@ type env = {
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
-  impls      : ty list StrMap.t; (** Registered interface implementations: iface_name → impl types *)
+  impls      : (ty * Ast.span) list StrMap.t;
+  (** Registered interface implementations: iface_name → (impl head type, decl
+      span). The span lets the coherence check ((T-ImplCoherent)) cite the FIRST
+      impl when rejecting a duplicate, and distinguishes a genuine duplicate
+      (different span) from the same impl re-registered across passes. *)
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
@@ -2223,7 +2227,9 @@ let base_env errors type_map =
     interfaces = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_interfaces;
     impls      = List.fold_left (fun m (k, v) ->
                    let lst = Option.value ~default:[] (StrMap.find_opt k m) in
-                   StrMap.add k (v :: lst) m) StrMap.empty builtin_impls;
+                   (* Built-ins carry [dummy_span]; the coherence check reads it
+                      to phrase a user-impl-over-builtin conflict specially. *)
+                   StrMap.add k ((v, Ast.dummy_span) :: lst) m) StrMap.empty builtin_impls;
   }
 
 (* =================================================================
@@ -5803,6 +5809,37 @@ let rec impl_matches_ty impl_ty target_ty =
     against the (still incomplete) pass-1 environment.  The full registration
     with properly instantiated types still happens in check_decl's DImpl
     case; duplicates are harmless because discharge uses List.exists. *)
+(* Alpha-normalized structural key for an impl HEAD type, used for coherence
+   (Stage 1: exact overlap).  Two impl heads that are structurally equal modulo
+   consistent renaming of their free type variables — `impl Show(List(a))` and
+   `impl Show(List(b))`, or two `impl Speak(Dog)` — produce the SAME key.
+   Distinct heads (`Dog` vs `Cat`, `List(a)` vs `Option(a)`) produce different
+   keys.  (Stage 2 — `List(a)` vs `List(Int)` unifiability overlap — is a
+   separate future check; this exact-key form cannot false-positive.) *)
+let canonical_impl_key (t : ty) : string =
+  let counter = ref 0 in
+  let ids : (int, int) Hashtbl.t = Hashtbl.create 8 in
+  let canon id =
+    match Hashtbl.find_opt ids id with
+    | Some i -> i
+    | None -> let i = !counter in incr counter; Hashtbl.add ids id i; i
+  in
+  let rec go t =
+    match repr t with
+    | TVar r -> (match !r with Unbound (id, _) -> Printf.sprintf "V%d" (canon id) | Link _ -> "V?")
+    | TCon (n, [])   -> n
+    | TCon (n, args) -> n ^ "(" ^ String.concat "," (List.map go args) ^ ")"
+    | TArrow (a, b)  -> "(" ^ go a ^ "->" ^ go b ^ ")"
+    | TTuple ts      -> "(" ^ String.concat "," (List.map go ts) ^ ")"
+    | TRecord fs     -> "{" ^ String.concat "," (List.map (fun (n, ft) -> n ^ ":" ^ go ft) fs) ^ "}"
+    | TLin (_, t')   -> go t'   (* linearity is not part of an impl's identity *)
+    | TNat n         -> "N" ^ string_of_int n
+    | TNatOp _       -> "Nop"
+    | TChan _        -> "Chan"
+    | TError         -> "Err"
+    | TRefine (b, _, _) -> go b
+  in go t
+
 let register_impl_shape env (idef : Ast.impl_def) =
   let module M = Map.Make (String) in
   let tvars = ref M.empty in
@@ -5846,10 +5883,46 @@ let register_impl_shape env (idef : Ast.impl_def) =
     | Ast.TyRefine (base, _, _) -> lenient_ty base
   in
   let inst_ty = lenient_ty idef.impl_ty in
-  { env with impls =
-    (let key = idef.impl_iface.txt in
-     let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
-     StrMap.add key (inst_ty :: lst) env.impls) }
+  let key = idef.impl_iface.txt in
+  let sp  = idef.impl_iface.span in
+  let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+  (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
+     (interface, type-head).  A second impl whose head is alpha-equal to an
+     already-registered one is a compile error — this is what makes the two
+     backends agree by construction (interp's last-write-wins `impl_tbl` vs the
+     monomorphizer's list order would otherwise run DIFFERENT method bodies).
+     [register_impl_shape] runs per-impl across the Pass-1 folds and may see the
+     SAME impl twice (nested/entry re-registration), so distinguish by SPAN:
+     same span = re-registration (no-op); different span = genuine duplicate. *)
+  let canon = canonical_impl_key inst_ty in
+  (* A DIFFERENT-span USER entry with the same head is a genuine duplicate; our
+     own entry (same span, from a Pass-1 re-registration) is not.  Built-in
+     impls live in [env.impls] too (seeded with [dummy_span] by [base_env]) but
+     are SKIPPED here: a user impl on a primitive (`impl Eq(Int)`) coexisting
+     with the built-in is the pre-existing behavior and is heavily used by the
+     interface-machinery test fixtures — rejecting it (DECIDE-1) is deferred as
+     a follow-on so Stage 1 ships the high-value user-vs-user duplicate check
+     without that disruptive change. *)
+  match List.find_opt
+          (fun (t, s) -> s <> sp && s <> Ast.dummy_span && canonical_impl_key t = canon)
+          lst with
+  | Some (_, prev_sp) ->
+    Err.error env.errors ~span:sp
+      (Printf.sprintf
+         "Duplicate implementation: `impl %s(%s)` conflicts with the \
+          implementation at %s:%d:%d.\n\
+          A type may implement an interface at most once (coherence). If you \
+          meant a different behavior, wrap the type in a newtype and implement \
+          the interface on that."
+         key (pp_ty inst_ty)
+         prev_sp.Ast.file prev_sp.Ast.start_line prev_sp.Ast.start_col);
+    env   (* keep the first impl — deterministic *)
+  | None ->
+    (* Not a duplicate. Register (unless our own same-span entry is already
+       present from a Pass-1 re-registration, in which case this is a no-op). *)
+    if List.exists (fun (t, s) -> s = sp && canonical_impl_key t = canon) lst
+    then env
+    else { env with impls = StrMap.add key ((inst_ty, sp) :: lst) env.impls }
 
 (** Pre-register a forward-reference interface declared in [prefix]: its name
     (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
@@ -5959,7 +6032,7 @@ let discharge_constraints env span =
          | _ ->
            let satisfied = match StrMap.find_opt iface_name env.impls with
              | None -> false
-             | Some impl_tys -> List.exists (fun impl_ty ->
+             | Some impl_tys -> List.exists (fun (impl_ty, _) ->
                  impl_matches_ty (repr impl_ty) ty) impl_tys
            in
            if not satisfied then begin
@@ -8233,7 +8306,9 @@ let rec check_decl env (d : Ast.decl) : env =
     let env_with_impl = { env with impls =
       (let key = idef.impl_iface.txt in
        let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
-       StrMap.add key (inst_ty :: lst) env.impls) } in
+       (* Pass-2 re-registration for constraint discharge; coherence is enforced
+          in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
+       StrMap.add key ((inst_ty, idef.impl_iface.span) :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
         match List.map (surface_ty env ~tvars) ctys with
@@ -8244,7 +8319,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ ->
              if not (match StrMap.find_opt cname.txt env.impls with
                  | None -> false
-                 | Some tys -> List.exists (fun impl_ty ->
+                 | Some tys -> List.exists (fun (impl_ty, _) ->
                      impl_matches_ty (repr impl_ty) cty) tys) then
                Err.error env.errors ~span:cname.span
                  (Printf.sprintf
@@ -8280,7 +8355,7 @@ let rec check_decl env (d : Ast.decl) : env =
                | _ ->
                  if not (match StrMap.find_opt sc_name.txt env.impls with
                      | None -> false
-                     | Some tys -> List.exists (fun impl_ty ->
+                     | Some tys -> List.exists (fun (impl_ty, _) ->
                          impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
                    Err.error env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf

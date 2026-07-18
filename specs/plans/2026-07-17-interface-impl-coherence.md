@@ -237,3 +237,28 @@ behind that.
 - **Stage 2 legitimate-overlap escape (Task 5):** parametric overlap is only
   safe to forbid if nothing legitimately relies on specificity. The gate is
   mandatory before Task 6.
+
+## Stage 1 — LANDED (2026-07-17)
+
+Tasks 1–3 shipped; Task 4 partially (docs). The user-vs-user duplicate check is
+live: `register_impl_shape` does a lookup-before-insert on `canonical_impl_key`
+(alpha-normalized head), `env.impls` now carries the decl span so
+Pass-1/Pass-2 re-registration (same span) is not mistaken for a duplicate
+(different span). Witnesses `reject/t79`, `accept/t83`, `accept/t84`. Suite green
+(eval 233 / compiler 514 / snapshots 29 / stdlib 809 / types 163).
+
+**DECIDE-1 (builtin override) DEFERRED — empirically forced.** Rejecting a user
+impl that overlaps a built-in (`impl Eq(Int)`) was implemented, but the
+blast-radius sweep (running the full suite) found **6 interface-machinery test
+fixtures** (test_eval declarations 15/17, test_compiler typecheck 18/20/48/50)
+that legitimately re-implement built-ins on primitives (`impl Eq(Int)` /
+`impl Ord(Int)`) to exercise constraint discharge and default methods. Enabling
+the builtin-overlap error breaks all six. So built-ins are seeded into
+`env.impls` with `dummy_span` and SKIPPED by the coherence check; turning
+DECIDE-1 on is its own change + a test-migration pass (move those fixtures to a
+user newtype). The high-value user-vs-user case ships without it.
+
+**Still open:** Task 4's doc retitle of `core-march.md` §4.4.3 / §2.3 `(T-Impl)`
+(the divergence is now closed for the user-vs-user case), the oracle-graduation
+of any impl-overlap `known_divergence`, DECIDE-1, DECIDE-3 (orphan rule, blocked
+on the flat namespace), and Stage 2 (parametric unifiability overlap).

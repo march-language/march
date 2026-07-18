@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: Duplicate implementation
+-- Coherence (T-ImplCoherent), Stage 1 exact overlap: a type may implement an
+-- interface at most once. Two `impl Speak(Dog)` blocks previously BOTH
+-- typechecked (--check exit 0), and the backends then ran DIFFERENT method
+-- bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order)
+-- — a silent cross-backend divergence. Now rejected at declaration.
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  type Dog = Dog
+  impl Speak(Dog) do
+    fn speak(_self) do "woof" end
+  end
+  impl Speak(Dog) do
+    fn speak(_self) do "bark" end
+  end
+  fn main() do
+    println(speak(Dog))
+  end
+end

@@ -1,0 +1,21 @@
+-- Coherence accept: `impl Speak(Dog)` + `impl Walk(Dog)` are the SAME type but
+-- DIFFERENT interfaces — no overlap (coherence is per (interface, type) pair).
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  interface Walk(a) do
+    fn walk : a -> String
+  end
+  type Dog = Dog
+  impl Speak(Dog) do
+    fn speak(_self) do "woof" end
+  end
+  impl Walk(Dog) do
+    fn walk(_self) do "trot" end
+  end
+  fn main() do
+    println(speak(Dog))
+    println(walk(Dog))
+  end
+end
