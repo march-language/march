@@ -1,0 +1,15 @@
+-- Regression (item 109): a NESTED tuple destructured in a block `let` used to
+-- emit invalid LLVM (`use of undefined value '@a'` — the ELet/EBlock pattern
+-- lowering referenced an inner sub-pattern variable without binding it, unlike
+-- the EMatch lowering which recursed correctly). Verified fixed; this pins the
+-- 2-deep, 3-deep, and mixed-type shapes (interp == compiled).
+mod Main do
+  fn main() : () do
+    let ((a, b), (c, d)) = ((1, 2), (3, 4))
+    println(int_to_string(a + b + c + d))
+    let (x, (y, (z, w))) = (10, (20, (30, 40)))
+    println(int_to_string(x + y + z + w))
+    let ((s1, n1), f1) = (("hi", 5), 2.5)
+    println(s1 ++ " " ++ int_to_string(n1) ++ " " ++ float_to_string(f1))
+  end
+end
