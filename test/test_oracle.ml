@@ -135,6 +135,14 @@ let nondeterministic_allowlist =
     "actors";
     (* Parallel benchmarks (scheduler-dependent, non-deterministic order) *)
     "par_fib"; "par_map"; "par_worksteal"; "parallel";
+    (* Wall-clock timing lines in output ("Filter: 49 ms") — never byte-stable
+       between the tree-walking interpreter and the compiled binary.  Formerly
+       masked under known_divergence while the group_by/join empty-result bug
+       was open (FIXED 2026-07-18: emit_case niche-recovery ctor ambiguity);
+       its correctness is pinned timing-free by examples/dataframe_basic.march
+       (full-sweep MATCH) + test/native/{niche_ctor_ambiguity,
+       dataframe_groupby_count}.march. *)
+    "dataframe_bench";
     (* Interactive or needs real files *)
     "debugger"; "read_file";
     (* Supervision trees (start actors / servers; scheduler-order-dependent) *)
@@ -207,22 +215,15 @@ let known_divergence =
     "sort_nearly_sorted", "sort RC-underflow family: compiled crash (exit 139/SIGSEGV), interp clean checksum 0\\n0 (specs/todos.md; re-verified 2026-07-15)";
     "timsort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
 
-    (* DataFrame groupby+agg: a DISTINCT compiled-only RC-misclassification
-       crash (EXC_BAD_ACCESS in march_incrc, called from Stats.mean via
-       DataFrame.eval_agg/apply_group_by) — same bug CLASS as the sort
-       family (a corrupted/tagged-immediate value dereferenced as a heap
-       pointer) but a different call site; newly filed by this sweep.
-       specs/todos.md P0: "DataFrame.group_by + Stats.mean: compiled-only
-       RC-misclassification SIGSEGV". *)
-    "dataframe_bench", "DataFrame group_by/inner_join return empty compiled (interp correct) — the item-45 float SIGSEGV is FIXED (filter/sort now match), unmasking a distinct pre-existing group_by/join wrong-answer; float-free repro confirms (specs/todos.md)";
-    (* Same DataFrame RC-misclassification family as dataframe_bench: the
-       COMPILED binary crashes (exit 139) in the DataFrame internals while the
-       interpreter runs clean.  Surfaced 2026-07-10 once the InterpFail gate
-       drove the fix of its stale API-drift (it now interprets, giving ground
-       truth) AND is_divergence began treating the 128+signo crash exit as a
-       divergence — before both, its compiled crash was invisible. Not a new
-       bug; the same open DataFrame RC issue as dataframe_bench. *)
-    "dataframe_basic", "DataFrame group_by/inner_join/summarize return empty compiled (interp correct) — the item-45 float SIGSEGV is FIXED (no longer crashes), unmasking the same pre-existing group_by/join wrong-answer as dataframe_bench (specs/todos.md)";
+    (* dataframe_bench / dataframe_basic: FIXED and pruned 2026-07-18.  Their
+       history spanned three stacked bugs: (1) the item-45 float SIGSEGV
+       (native_float_arr <-> List(Float) boxing, runtime fix), which unmasked
+       (2) group_by/inner_join/summarize returning EMPTY compiled — root-caused
+       to emit_case's TVar-erased niche recovery committing on the FIRST
+       niche-shaped ctor-name owner (Csv's `Row` hijacked boxed DataFrame.Row's
+       decode; llvm_case.ml all-owners fix).  Both programs now MATCH end to
+       end; regression fixtures niche_ctor_ambiguity + dataframe_groupby_count
+       pin the mechanism and the user-facing path. *)
   ]
 
 let known_divergence_tbl =
@@ -262,6 +263,7 @@ let test_native_allowlist =
   [ "atom_ctor_field"; "closure_bool_field"; "default_args_nested";
     "default_method_args"; "ctor_pattern_multi_param"; "float_arr_list_boxing";
     "nested_cons_ctor_heap"; "fn_arities_shadow_poisoning";
+    "niche_ctor_ambiguity"; "dataframe_groupby_count";
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
@@ -309,6 +311,8 @@ let expected_stdout =
     "float_arr_list_boxing", "1\n0\n7.\n[1.5, 2.5, 3.]\n";
     "nested_cons_ctor_heap", "2\n1\n";
     "fn_arities_shadow_poisoning", "11\n6\n3\n";
+    "niche_ctor_ambiguity", "len=2\n";
+    "dataframe_groupby_count", "Groups: 2\n";
     "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =

@@ -41,12 +41,29 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some t else None
     ) branches in
     ctor_tags <> [] &&
-    List.exists (function
-      | Tir.TDVariant (tname, variants) ->
-        Repr.is_niche_shaped ctx.Llvm_ctx.type_defs tname
-        && (let ctor_names = List.map fst variants in
-            List.for_all (fun t -> List.mem t ctor_names) ctor_tags)
-      | _ -> false) ctx.Llvm_ctx.type_defs
+    (* Candidate owners: EVERY variant typedef whose ctor set contains all the
+       branch ctor tags — with the scrutinee type erased, any of them could be
+       its true type.  Commit to the niche decode only when they ALL classify
+       niche-shaped (mirrors [newtype_recovery_payload]'s all-owners ambiguity
+       discipline below; any ambiguity keeps Boxed, the status quo).  The
+       previous [List.exists] committed on the FIRST niche-shaped owner: a
+       single-ctor branch set like ["Row"] matched Csv's niche-shaped
+       `CsvRow = CsvEof | Row(List(String))` even when the value was really a
+       BOXED `DataFrame.Row = Row(List((String, Value)))` — the niche identity
+       decode then bound the box pointer itself as the payload, whose header
+       read as an empty list (tag 0 = Nil): DataFrame group_by/inner_join/
+       summarize silently returned 0 rows compiled.  Matches that list a
+       DISTINGUISHING ctor set (e.g. both CsvEof and Row) are unaffected:
+       their only owner is the genuine niche type. *)
+    (let owners = List.filter_map (function
+       | Tir.TDVariant (tname, variants)
+         when (let ctor_names = List.map fst variants in
+               List.for_all (fun t -> List.mem t ctor_names) ctor_tags) ->
+         Some tname
+       | _ -> None) ctx.Llvm_ctx.type_defs in
+     owners <> [] &&
+     List.for_all (fun tname ->
+       Repr.is_niche_shaped ctx.Llvm_ctx.type_defs tname) owners)
   in
   (* Newtype analogue of the niche recovery: [lower_match] mints destructured
      sub-pattern variables with [unknown_ty], so a nested match on one (e.g.
