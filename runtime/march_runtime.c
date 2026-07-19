@@ -2239,8 +2239,14 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * base 0x0100_0000 + declaration index, unique across actors), so
      * translate index → global tag via the base stamped at alloc time.
      * Without this every call message falls to the dispatch default arm
-     * and is silently dropped — the caller blocks forever (or times out). */
-    if (meta->call_tag_base) msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
+     * and is silently dropped — the caller blocks forever (or times out).
+     *
+     * Only rebase a tag BELOW the F19 global floor: a caller may also pass
+     * the actor's OWN _Msg constructor (e.g. actor_call(pool, Checkout(0)))
+     * whose tag is ALREADY global — rebasing it again would double-add the
+     * base and misroute (the erased_option_niche_fbip_codegen regression). */
+    if (meta->call_tag_base && msg_tag < 0x01000000)
+        msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
 
     /* Build the augmented call message: same tag, field 0 = caller proc ptr.
      * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
