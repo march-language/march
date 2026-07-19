@@ -264,6 +264,7 @@ let test_native_allowlist =
     "default_method_args"; "ctor_pattern_multi_param"; "float_arr_list_boxing";
     "nested_cons_ctor_heap"; "fn_arities_shadow_poisoning";
     "niche_ctor_ambiguity"; "dataframe_groupby_count"; "cap_epoch_plane";
+    "actor_call_canonical"; "actor_call_timeout";
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
@@ -314,6 +315,8 @@ let expected_stdout =
     "niche_ctor_ambiguity", "len=2\n";
     "dataframe_groupby_count", "Groups: 2\n";
     "cap_epoch_plane", "valid: true\nsend_checked live: :ok\nvalid after revoke: false\nsend_checked revoked: :error\nsend dead: None\nget_cap dead: None\nstale cap valid: false\nsend_checked stale: :error\n";
+    "actor_call_canonical", "count = 2\n";
+    "actor_call_timeout", "timeout_ok\n";
     "tuple_show", "(1, 2)\n(1, a, true)\n(1.5, 2)\n[(1, 2), (3, 4)]\n((1, 2), 3)\n(1, 2, 3, 4)\n" ]
 
 let expected_stdout_tbl =

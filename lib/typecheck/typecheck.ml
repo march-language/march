@@ -1818,7 +1818,12 @@ let builtin_bindings : (string * scheme) list =
     ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
     (* Phase 3: Epoch-based capability builtins *)
     ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
-    ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    (* Cap's parameter is the actor's STATE type (it flows from
+       get_cap : Pid(a) -> Option(Cap(a)) and, since spawn returns Pid[state],
+       is the concrete state record); the MESSAGE argument is an unrelated
+       constructor type — a distinct variable.  Tying both to `a` only ever
+       typechecked while spawn yielded Pid[<fresh>]. *)
+    ("send_checked", poly2 (fun a b -> TArrow (TCon ("Cap", [a]), TArrow (b, t_atom))));
     ("revoke_cap",   poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_atom)));
     ("is_cap_valid", poly1 (fun a -> TArrow (TCon ("Cap", [a]), t_bool)));
     (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
@@ -4803,7 +4808,27 @@ let rec infer_expr env (e : Ast.expr) : ty =
             A computed actor expression (from an `if`, `match`, or function \
             call) isn't supported: March resolves which actor to spawn at \
             compile time from its name.");
-      TCon ("Pid", [fresh_var env.level])
+      (* Return Pid[state] rather than Pid[fresh]: [DActor] binds the actor
+         NAME to `Pid[state_ty]` in [env.vars], but the nullary-constructor
+         registration (needed so `spawn(Counter)` parses/checks as a name)
+         shadows that binding at every ECon occurrence — so the state type
+         never reached an observable Pid and every spawn site got an
+         unconstrained variable that unified opportunistically (finding 18,
+         core-march-types.md §2.6.3).  Reach the vars binding directly by
+         name here.  Unknown names (error recovery) keep the fresh var. *)
+      let actor_name = match actor with
+        | Ast.ECon (n, [], _) -> Some n.txt
+        | Ast.EVar n          -> Some n.txt
+        | _ -> None in
+      (match actor_name with
+       | Some n ->
+         (match StrMap.find_opt n env.vars with
+          | Some sch ->
+            (match instantiate env.level env sch with
+             | TCon ("Pid", _) as pid_ty -> pid_ty
+             | _ -> TCon ("Pid", [fresh_var env.level]))
+          | None -> TCon ("Pid", [fresh_var env.level]))
+       | None -> TCon ("Pid", [fresh_var env.level]))
 
     (* ── REPL result reference ─────────────────────────────────────── *)
     | Ast.EResultRef _ ->

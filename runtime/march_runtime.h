@@ -183,6 +183,12 @@ typedef struct {
  * the actor's _dispatch function.  No-op if actor has no meta entry. */
 void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
 
+/* Register the global tag of the actor's FIRST message constructor (its
+ * "call tag base").  Emitted by codegen right after the actor record's
+ * alloc; march_actor_call adds the sentinel's ctor index to this base to
+ * address the handler positionally under F19's globally-unique msg tags. */
+void march_actor_set_call_base(void *actor, int64_t base);
+
 /* Walk all live actors whose dispatch_name_id equals [dispatch_name_id] and
  * inject a MARCH_MIGRATE_TAG message so each actor migrates its state on
  * the next turn.  migrate_fn may be NULL (skip state transform). */

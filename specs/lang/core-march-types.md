@@ -2182,20 +2182,21 @@ first line of the message).
 
 #### 2.6.3 The `Pid` type parameter — the truthful account (a finding)
 
-The natural expectation — and the wording carried into this task — is that
 `spawn(Counter)` yields `Pid[state]`, i.e. a `Pid` parameterized by the actor's
-STATE type. **Live probing shows this is false at the surface.** What is true:
+STATE type — **as of 2026-07-18** (finding 18, FIXED). What is true today:
 
-- **`spawn` returns `Pid[<fresh unification variable>]`, not `Pid[state]`.** The
-  `ESpawn` arm's result is `TCon ("Pid", [fresh_var env.level])`
-  (`typecheck.ml:4203`; `t_pid a = TCon ("Pid", [a])`, `:983`) — a *fresh,
-  unconstrained* variable, computed with no reference to the state type. Probe:
-  `let p = if true do spawn(Counter) else spawn(Named) end`, where `Counter`'s
-  state is `{ count : Int }` and `Named`'s is `{ name : String }`, **typechecks
-  clean** — the two `if`-branches unify only because each `spawn` produced an
-  independent free var. Were the parameter the state type, the branches would be
-  `Pid({count:Int})` vs `Pid({name:String})` and the `if` would be rejected by
-  T-If. It is not.
+- **`spawn` returns `Pid[state]`.** The `ESpawn` arm resolves the plain actor
+  name against `env.vars` directly — reaching the `Pid[state_ty]` binding the
+  `DActor` arm makes for the actor name (which is shadowed at ordinary `ECon`
+  occurrences by the nullary-constructor registration) — and returns its
+  instantiation; only an unknown name (error recovery) still yields a fresh
+  var. Probe: `let p = if true do spawn(Counter) else spawn(Named) end`, where
+  `Counter`'s state is `{ count : Int }` and `Named`'s is `{ name : String }`,
+  is now **rejected** by T-If (`Pid({count:Int})` vs `Pid({name:String})`) —
+  witnessed by `types/reject/t81` (cross-actor pid list) with the accept-side
+  propagation witness `types/accept/t87`. Historically the result was
+  `TCon ("Pid", [fresh_var env.level])` — a fresh, unconstrained variable that
+  let any two spawns unify opportunistically.
 
 - **The `Pid[state_ty]` binding at `:6821` exists but is effectively
   unobservable.** After checking the handlers, `DActor` does `bind_var name.txt
@@ -2273,11 +2274,12 @@ actor's message set (finding 19).** Because step 1 discards `τ_cap` and step 3
 only denylists `RingBuf`, **nothing checks that the target actor actually handles
 the message you send it.** Sending a message that a *different* actor declares —
 `send(counter, Log("stray"))` where `Log` is a `Logger` handler, not a `Counter`
-one — `--check`s clean (exit 0). The `Pid` carries no type constraint that could
-gate this even in principle: per §2.6.3 / finding 18, `spawn` yields
-`Pid[<fresh var>]`, so the Pid does not statically encode its accepted-message
-set. This is distinct from finding 18: finding 18 is "the Pid is unparameterized
-after spawn / a `Pid(T)` annotation is impossible"; **this** finding is "`send`
+one — `--check`s clean (exit 0). The `Pid`'s parameter cannot gate this even in
+principle: per §2.6.3, `spawn` yields `Pid[state]` (finding 18, fixed
+2026-07-18), and the STATE record type says nothing about the actor's
+accepted-MESSAGE set. This is distinct from finding 18: finding 18 was "the Pid
+is unparameterized after spawn / a `Pid(T)` annotation is impossible" (the
+former half now fixed); **this** finding is "`send`
 does not gate the message by the target actor" — rooted at `:4178` (target type
 discarded) and `:3331`/`:3335` (`check_sendable` is a `RingBuf` denylist, not an
 acceptance check), and it would remain true even if the Pid *did* carry a state

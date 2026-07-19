@@ -6058,16 +6058,24 @@ let test_actor_cast_basic () =
 let test_actor_call_get () =
   with_reset (fun () ->
     let decl = actor_decl () in
+    (* CANONICAL Actor.call protocol (specs/lang/actors.md "Synchronous
+       Request-Reply"): a zero-arg sentinel (type GetReq = GetReq) whose tag
+       routes to the actor's handler at that index (index 0 = first handler),
+       which receives the caller as its single argument and answers via
+       Actor.reply.  This form works in BOTH backends; the previous
+       interp-only `on Call(ref, msg)` form was retired when the interpreter
+       was reconciled to the compiled protocol. *)
     let env = eval_with_stdlib [decl] {|mod Test do
+      type GetReq = GetReq
       actor Counter do
         state { count : Int }
         init { count: 0 }
+        on GetCount(reply_to) do
+          Actor.reply(reply_to, state.count)
+          state
+        end
         on Inc() do
           { count: state.count + 1 }
-        end
-        on Call(ref, msg) do
-          Actor.reply(ref, state.count)
-          state
         end
       end
       fn f() do
@@ -6075,7 +6083,7 @@ let test_actor_call_get () =
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
-        let result = Actor.call(pid, Inc(), 1000)
+        let result = Actor.call(pid, GetReq, 1000)
         match result do
         Ok(n) -> n
         Err(_) -> -1

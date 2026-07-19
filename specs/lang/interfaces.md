@@ -266,7 +266,15 @@ After `derive Eq for Point`, you can use `eq` on `Point` values.
 - **`Eq`** — structural equality, comparing all fields/constructors
 - **`Ord`** — lexicographic ordering by fields, constructor order for variants
 - **`Show`** — pretty-printed representation
-- **`Hash`** — consistent hash based on structure
+- **`Hash`** — consistent hash based on structure. **Caveat (records only):**
+  the hash VALUE is backend-specific — derived record `Hash` calls the
+  polymorphic `hash()` builtin per field, and the interpreter (OCaml
+  `Hashtbl.hash`) and compiled runtime (splitmix-style `march_hash_*`) are
+  independent algorithms that never agree cross-backend. Hashes are consistent
+  *within* one backend (safe for in-process maps/sets) but must not be
+  persisted, sent over the wire, or compared interpreted-vs-compiled. Derived
+  `Hash` on a *variant* type is exempt: its hash is the bare constructor index,
+  portable by construction.
 
 ```march
 type User = { name : String, age : Int, role : String }
