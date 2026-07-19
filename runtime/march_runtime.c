@@ -2182,8 +2182,6 @@ void *march_send(void *actor, void *msg) {
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
 void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
-    (void)timeout_ms;  /* timeout not yet enforced; accepted for API compat */
-
     int64_t *a = (int64_t *)actor;
     if (!a[3]) {
         march_decrc(inner_msg);
@@ -2216,11 +2214,40 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 
     march_sched_send(meta->green_thread, call_msg);
 
-    /* Block until the actor calls actor_reply. */
-    void *result = march_sched_recv();
-    if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
-
-    return mk_ok(result);
+    /* Block until the actor calls actor_reply, bounded by timeout_ms.
+     *
+     * The scheduler has no timer wheel, so a finite timeout is enforced as a
+     * cooperative yield-poll loop against a CLOCK_MONOTONIC deadline: the
+     * caller stays runnable (yielding its quantum each round) instead of
+     * parking, which is bounded and correct at the cost of some idle
+     * spinning while waiting — acceptable for a synchronous call, whose
+     * reply is normally immediate.  timeout_ms <= 0 preserves the previous
+     * indefinite parked wait.  The timeout Err payload matches the
+     * interpreter's no-reply message so both backends surface the same
+     * value ("no reply (timeout or unhandled Call)"). */
+    if (timeout_ms <= 0) {
+        void *result = march_sched_recv();
+        if (result == MARCH_RECV_NO_MSG)
+            return mk_err_cstr("no reply (timeout or unhandled Call)");
+        return mk_ok(result);
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t deadline_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec
+                        + timeout_ms * 1000000LL;
+    for (;;) {
+        void *result = march_sched_try_recv();
+        if (result) {
+            if (result == MARCH_RECV_NO_MSG)
+                return mk_err_cstr("no reply (timeout or unhandled Call)");
+            return mk_ok(result);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        if (now_ns >= deadline_ns)
+            return mk_err_cstr("no reply (timeout or unhandled Call)");
+        march_sched_yield();
+    }
 }
 
 /*

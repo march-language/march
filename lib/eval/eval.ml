@@ -6837,16 +6837,29 @@ let base_env : env =
               | _ -> eval_error "actor_cast: message must be a constructor, got %s"
                        (value_to_string msg)))
         | _ -> eval_error "actor_cast: expected (Pid, message)"))
-  (* actor_call: synchronous call — sends Call(ref, msg) and waits for a reply.
-     The target handler must call actor_reply(ref, result) to unblock the caller.
+  (* actor_call: synchronous call, CANONICAL (compiled) protocol — the message
+     is a zero-arg sentinel constructor whose TAG selects the receiving
+     handler, and the runtime injects the caller (here: the reply ref) as
+     that handler's single argument.  The handler answers with
+     actor_reply(reply_to, result) / Actor.reply.  Mirrors the compiled
+     runtime's march_actor_call exactly (specs/lang/actors.md "Synchronous
+     Request-Reply"; the maintainer decision documents the compiled form as
+     canonical — the interpreter previously wrapped the call as a 2-arg
+     Call(ref, msg) needing an `on Call(ref, msg)` handler, so NO single
+     example worked in both backends).  Routing:
+       1. A handler NAMED like the sentinel wins (same-name sentinel types).
+       2. Otherwise the sentinel's constructor INDEX within its own declared
+          type selects the actor's handler at that index — the compiled
+          tag-routing.  With the documented `type GetReq = GetReq` single-ctor
+          sentinel this is index 0 = the actor's FIRST handler.
      Returns Ok(result) or Err(reason). *)
   ; ("actor_call", VBuiltin ("actor_call", function
         | [VPid pid; msg; VInt _timeout_ms] ->
           let ref_id = !next_call_ref in
           next_call_ref := ref_id + 1;
-          let call_msg = match msg with
-            | VCon (tag, args) -> VCon ("Call", [VInt ref_id; VCon (tag, args)])
-            | VAtom tag        -> VCon ("Call", [VInt ref_id; VAtom tag])
+          let sentinel_tag = match msg with
+            | VCon (tag, _) -> tag
+            | VAtom tag     -> tag
             | _ -> eval_error "actor_call: message must be a constructor, got %s"
                      (value_to_string msg)
           in
@@ -6855,14 +6868,44 @@ let base_env : env =
            | Some inst when not inst.ai_alive ->
              VCon ("Err", [VString "actor not alive"])
            | Some inst ->
-             Queue.push call_msg inst.ai_mailbox;
-             !run_scheduler_hook ();
-             (match Hashtbl.find_opt pending_replies ref_id with
-              | Some result ->
-                Hashtbl.remove pending_replies ref_id;
-                VCon ("Ok", [result])
+             let handlers = inst.ai_def.actor_handlers in
+             let handler_name =
+               if List.exists (fun h -> h.ah_msg.txt = sentinel_tag) handlers
+               then Some sentinel_tag
+               else
+                 (* Tag-index routing: the sentinel's ctor index within its own
+                    declared type picks the handler at that index. *)
+                 (match Hashtbl.find_opt ctor_type_tbl sentinel_tag with
+                  | Some tyname ->
+                    (match Hashtbl.find_opt ffi_type_decl_tbl tyname with
+                     | Some (March_ast.Ast.TDVariant variants) ->
+                       let rec idx i = function
+                         | [] -> None
+                         | (v : March_ast.Ast.variant) :: rest ->
+                           if v.var_name.txt = sentinel_tag then Some i
+                           else idx (i + 1) rest
+                       in
+                       (match idx 0 variants with
+                        | Some i ->
+                          (match List.nth_opt handlers i with
+                           | Some h -> Some h.ah_msg.txt
+                           | None -> None)
+                        | None -> None)
+                     | _ -> None)
+                  | None -> None)
+             in
+             (match handler_name with
               | None ->
-                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])))
+                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])
+              | Some hname ->
+                Queue.push (VCon (hname, [VInt ref_id])) inst.ai_mailbox;
+                !run_scheduler_hook ();
+                (match Hashtbl.find_opt pending_replies ref_id with
+                 | Some result ->
+                   Hashtbl.remove pending_replies ref_id;
+                   VCon ("Ok", [result])
+                 | None ->
+                   VCon ("Err", [VString "no reply (timeout or unhandled Call)"]))))
         | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
   (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
   ; ("actor_reply", VBuiltin ("actor_reply", function
