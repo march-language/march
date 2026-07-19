@@ -1010,8 +1010,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               within the branch, e.g. the else side of an if inside the branch).
 
          Case 2 was previously unhandled, causing br_vars to be passed to owning
-         positions without IncRC — the root cause of the sort_by RC underflow
-         (commit 9930ce5).
+         positions without IncRC — an RC-underflow when a branch var extracted
+         from a borrowed scrutinee is passed to an owning position on a sub-path
+         where the scrutinee is still live (commit 9930ce5).  See
+         specs/perceus-invariants.md §6 for the governing account.
 
          KNOWN LIMITATION — conservative approximation (memory-safe, minor leak):
          [name_free_in] returns true if the scrutinee appears on ANY path in the
@@ -1021,11 +1023,16 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          scrutinee is NOT used — a bounded memory leak.
 
          Using a path-sensitive "name_free_on_every_path" check instead would
-         cause the sort_by underflow to recur: in List.sort_by's merge loop the
-         outer scrutinee (xs) appears in the Cons arm but not the Nil arm, so
+         reintroduce a use-after-free for the genuine single-sub-path case: when a
+         borrowed scrutinee appears in one arm/sub-path but not another (e.g. the
+         Cons arm but not the Nil arm of a list fold's inner match),
          name_free_on_every_path returns false, scrutinee_borrowed becomes false,
-         br_vars are freed, and the subsequent pass-to-owning-position reads freed
-         memory.
+         br_vars are freed, and a subsequent pass-to-owning-position on the path
+         where the scrutinee IS used reads freed memory.  (Historically this was
+         mis-attributed to List.sort_by; sort_by was later exonerated —
+         .superpowers/sdd/sortby-diagnosis.md, real bug fixed in ffe6fba8 — but
+         the path-insensitive-conservatism invariant it motivated is correct and
+         independent of any one caller.)
 
          The correct fix requires path-sensitive analysis within the branch body —
          adding br_vars to la only on the sub-paths where the scrutinee actually
