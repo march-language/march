@@ -74,6 +74,13 @@ let is_niche_shaped (type_defs : Tir.type_def list) (name : string) : bool =
 let rec niche_payload_ok (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TFloat | Tir.TUnit | Tir.TVar _ -> false
+  (* The empty tuple IS unit (the typechecker's t_unit = TTuple []), and its
+     value representation is i64 0 — raw 0 in a ptr slot collides with the
+     niche None.  Without this case Option(()) — e.g. `send`'s Option(Unit)
+     result — classified Niche while the runtime returns BOXED Option cells:
+     the boxed None (non-null) decoded as Some, so `send(dead_pid, M)`
+     appeared delivered compiled while the interpreter said None. *)
+  | Tir.TTuple [] -> false
   | Tir.TCon _ ->
     (match repr_of_ty type_defs ty with
      | Niche _  -> false  (* nested niche: Some(None)=0=None *)

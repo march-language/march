@@ -4772,9 +4772,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
       ignore (infer_expr env cap);
       let msg_ty = infer_expr env msg in
       check_sendable env.errors sp msg_ty;
-      (* send() returns the handler's result — unconstrained so callers can
-         match on Option(a) (drop semantics) or access record fields (state). *)
-      fresh_var env.level
+      (* send() returns Option(Unit): Some(()) when the message was enqueued,
+         None when the target actor is dead/unknown (fire-and-forget drop).
+         This is the ACTUAL contract of both backends — the interpreter's ESend
+         only ever produces `Some(VUnit)` / `None` (sends are async; the
+         handler result never flows back), and the compiled runtime's
+         march_send returns the equivalent boxed Option(Unit).  The previous
+         `fresh_var` typing ("returns the handler's result — unconstrained")
+         was stale AND actively harmful compiled: the erased Option('a) at a
+         `match send(...)` scrutinee made emit_case's abstract-arg niche
+         recovery guess the NICHE decode for march_send's BOXED values, so
+         `send(dead_pid, M)` decoded as Some while the interpreter said None. *)
+      TCon ("Option", [t_unit])
 
     | Ast.ESpawn (actor, _) ->
       ignore (infer_expr env actor);

@@ -306,17 +306,19 @@ void   *march_csv_close(void *handle);
 /* Resource ownership. */
 void    march_own(void *pid, void *value);
 
-/* Capability revocation (Phase 3). */
-/* Explicitly revoke a capability identified by (pid_index, epoch).
- * After this call, march_send_checked and march_is_cap_valid reject the cap.
- * Idempotent — safe to call more than once for the same cap. */
-void    march_revoke_cap(int64_t pid_index, int64_t epoch);
-/* Check whether (pid_index, epoch) is still a valid capability:
+/* Capability revocation (Phase 3).  All three take the March-level Cap heap
+ * object (words: hdr, hdr, actor ptr, pid_index, epoch — built by
+ * march_get_cap), matching the interpreter's Cap(a)-typed builtins. */
+/* Explicitly revoke a capability.  After this call, march_send_checked and
+ * march_is_cap_valid reject the cap.  Idempotent.  Returns the :ok atom
+ * (:error for a null/non-heap cap such as the root_cap sentinel). */
+int64_t march_revoke_cap(void *cap);
+/* Check whether cap is still valid:
  * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
-int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch);
+int64_t march_is_cap_valid(void *cap);
 /* Capability-checked send: validates liveness, epoch, and revocation before
- * enqueuing msg.  No-op if the capability is invalid. */
-void    march_send_checked(void *cap, void *msg);
+ * enqueuing msg.  Returns the :ok atom on delivery, :error otherwise. */
+int64_t march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
