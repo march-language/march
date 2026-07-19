@@ -486,18 +486,29 @@ int64_t march_compare_string(void *a, void *b) {
 
 /* ── Hash ────────────────────────────────────────────────────────────────── */
 
+/* All hashes are masked to 62 bits (non-negative, <= 2^62-1). The
+ * tree-walking interpreter's Int is a 63-bit OCaml native int, so a full
+ * uint64 hash cannot be represented there identically; masking to 62 bits
+ * lands the value in a range BOTH backends represent exactly, giving
+ * cross-backend hash() equality (the interpreter reimplements these same
+ * algorithms + mask in lib/eval/eval.ml). Hash values are never persisted
+ * or wire-serialized (in-memory hashtable use only) and stdlib masks
+ * further to 30 bits, so narrowing the range is harmless. */
+#define MARCH_HASH_MASK UINT64_C(0x3FFFFFFFFFFFFFFF)
+
 int64_t march_hash_int(int64_t x) {
     /* Finalizer from splitmix64 */
     uint64_t v = (uint64_t)x;
     v ^= v >> 30; v *= UINT64_C(0xbf58476d1ce4e5b9);
     v ^= v >> 27; v *= UINT64_C(0x94d049bb133111eb);
     v ^= v >> 31;
-    return (int64_t)v;
+    return (int64_t)(v & MARCH_HASH_MASK);
 }
 
 int64_t march_hash_float(double x) {
     uint64_t bits;
     memcpy(&bits, &x, sizeof(bits));
+    /* march_hash_int already masks. */
     return march_hash_int((int64_t)bits);
 }
 
@@ -509,7 +520,7 @@ int64_t march_hash_string(void *s) {
         h ^= (uint8_t)ms->data[i];
         h *= UINT64_C(1099511628211);
     }
-    return (int64_t)h;
+    return (int64_t)(h & MARCH_HASH_MASK);
 }
 
 int64_t march_hash_bool(int64_t b) { return b; }

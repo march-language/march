@@ -919,18 +919,19 @@ let gen_derived_method_enum_module : string Gen.t =
 (** (e) Record — derived Ord for records DOES look at payload (field-by-
     field, unlike variants), so `compare` here is genuinely payload-
     sensitive; still deterministic interp-vs-compiled since it's pure Int
-    field comparison. `hash` is deliberately NOT printed here: the derived
-    Hash body calls the polymorphic `hash()` builtin per field, and the
-    INTERPRETER's `hash` builtin is OCaml's `Hashtbl.hash` while the
-    COMPILED backend uses a distinct custom hash (`march_hash_int` et al,
-    runtime/march_runtime.c) — the two are intentionally different
-    algorithms with no cross-backend value equality contract (confirmed by
-    hand: `hash({x:1,y:2})` prints 28043382405 interpreted vs
-    6305855436935449413 compiled — expected, not a bug). Comparing hash
-    VALUES across backends would be a spurious, permanent divergence
-    unrelated to the Newtype-derive fix this generator guards; comparing
-    `eq`/`compare`/`==` (this generator's actual job) never touches hash's
-    backend-specific bits. *)
+    field comparison. `hash` is still NOT printed here, but the reason
+    changed (2026-07-13): the primitive `hash()` forms are now cross-backend
+    identical (the interpreter reimplements the compiled runtime's
+    splitmix64/FNV-1a algorithms bit-for-bit, both masked to 62 bits —
+    golden `g51_hash_cross_backend`). What remains non-portable for a RECORD
+    is the derived-Hash COMBINE (`hash(field)*prime + …`, generated March
+    AST): it can OVERFLOW 63-bit signed, and the interpreter's Int is 63-bit
+    while the compiled backend's is 64-bit — the general interpreter-int-
+    width limitation, orthogonal to the hash algorithm. This generator's
+    fields are unbounded, so the combine could land in the overflow tail;
+    printing record `hash` would reintroduce a divergence unrelated to the
+    Newtype-derive fix this generator guards. `eq`/`compare`/`==` (its
+    actual job) never touch hash. *)
 let gen_derived_method_record_module : string Gen.t =
   Gen.map3
     (fun p1 p2 same ->
