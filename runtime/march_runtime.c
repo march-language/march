@@ -3626,13 +3626,49 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
     march_incrc(cleanup);  /* Keep closure alive */
 }
 
+/* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)
+ * name, with bit63 forced equal to bit62 so the value survives generic-slot
+ * tag round-trips.  MUST match the compiler's Llvm_ctx.atom_hash exactly —
+ * runtime-produced atoms (:ok / :error from the capability plane) compare
+ * equal to the same atom literals in March source only through this hash. */
+static int64_t march_atom_of_name(const char *name) {
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (const char *p = name; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= UINT64_C(1099511628211);
+    }
+    uint64_t bit62 = (h >> 62) & 1;
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    return (int64_t)h;
+}
+
 /* get_cap: get the capability associated with an actor pid.
-   Returns None (tag=0) — capability enforcement is compile-time only. */
+ *
+ * Option(Cap) is NICHE-encoded (Cap is a heap pointer type): None = NULL,
+ * Some(cap) = the cap pointer itself.  The previous stub returned a boxed
+ * 16-byte tag-0 cell, which the niche decode read as Some(garbage-cap) for
+ * EVERY pid, live or dead — making the whole compiled epoch-Cap plane
+ * non-functional (send_checked validated that empty cell's zeroed
+ * pid_index/epoch against real metas, failed, and silently dropped).
+ *
+ * Cap object layout (see march_send_checked below):
+ *   word[0..1] = march_hdr (rc/tag, filled by march_alloc)
+ *   word[2]    = actor ptr
+ *   word[3]    = pid_index
+ *   word[4]    = epoch
+ */
 void *march_get_cap(void *pid) {
-    (void)pid;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
+    if (!pid || !IS_HEAP_PTR(pid)) return NULL;       /* no actor -> None */
+    int64_t *a = (int64_t *)pid;
+    if (!a[3]) return NULL;                            /* dead actor -> None */
+    march_actor_meta *meta = find_or_create_meta(pid);
+    if (!meta) return NULL;
+    void *cap = march_alloc(40);
+    int64_t *w = (int64_t *)cap;
+    w[2] = (int64_t)(uintptr_t)pid;
+    w[3] = meta->pid_index;
+    w[4] = meta->epoch;
+    return cap;
 }
 
 /* ── Capability revocation table ──────────────────────────────────────── */
@@ -3665,9 +3701,8 @@ static int revoc_contains(int64_t pid_index, int64_t epoch) {
     return 0;
 }
 
-/* revoke_cap(pid_index, epoch): add (pid_index, epoch) to the revocation table.
- * Idempotent — does nothing if already revoked. */
-void march_revoke_cap(int64_t pid_index, int64_t epoch) {
+/* Add (pid_index, epoch) to the revocation table.  Idempotent. */
+static void revoc_add(int64_t pid_index, int64_t epoch) {
     if (revoc_contains(pid_index, epoch)) return;
     march_revoc_entry *e = malloc(sizeof(march_revoc_entry));
     if (!e) return;
@@ -3679,11 +3714,26 @@ void march_revoke_cap(int64_t pid_index, int64_t epoch) {
     pthread_mutex_unlock(&g_revoc_mu);
 }
 
+/* revoke_cap(cap): revoke the capability.  Takes the March-level Cap object
+ * (layout documented at march_get_cap) and returns the :ok atom, matching the
+ * interpreter's `revoke_cap : Cap(a) -> Atom`.  A null/non-heap cap (e.g. the
+ * root_cap null sentinel) is a no-op returning :error. */
+int64_t march_revoke_cap(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return march_atom_of_name("error");
+    int64_t *w = (int64_t *)cap;
+    revoc_add(w[3], w[4]);
+    return march_atom_of_name("ok");
+}
 
-/* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
+/* is_cap_valid(cap): return 1 if the capability is valid, 0 otherwise.
  * A capability is invalid if it is in the revocation table, the actor is dead,
- * or the actor's current epoch differs. */
-int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
+ * or the actor's current epoch differs.  Takes the March-level Cap object,
+ * matching the interpreter's `is_cap_valid : Cap(a) -> Bool`. */
+int64_t march_is_cap_valid(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return 0;
+    int64_t *w = (int64_t *)cap;
+    int64_t pid_index = w[3];
+    int64_t epoch     = w[4];
     if (revoc_contains(pid_index, epoch)) return 0;
     march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
@@ -3703,10 +3753,14 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
  *
  * If cap is not a heap pointer (e.g. None/null), silently drop the message.
  */
-void march_send_checked(void *cap, void *msg) {
+int64_t march_send_checked(void *cap, void *msg) {
+    /* Returns the :ok atom on delivery, :error on any validation failure —
+     * matching the interpreter's `send_checked : Cap(a) -> a -> Atom`
+     * (previously returned void; the call site then read garbage as the
+     * atom, so the result compared equal to neither :ok nor :error). */
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     void    *actor     = (void *)(uintptr_t)cap_words[2];
@@ -3714,15 +3768,17 @@ void march_send_checked(void *cap, void *msg) {
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
+    if (!meta || meta->pid_index != pidx || meta->epoch != epoch
+        || !march_is_alive(actor)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     void *result = march_send(actor, msg);
     march_decrc(result);
+    return march_atom_of_name("ok");
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's

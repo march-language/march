@@ -368,6 +368,15 @@ let emit_atom_show_table ctx =
     buffer_contains ctx.Llvm_ctx.extra_fns "define ptr @march_atom_to_string"
   in
   if referenced && not already_defined then begin
+    (* Pre-seed the atoms the RUNTIME itself produces (the capability plane's
+       :ok/:error from march_send_checked/march_revoke_cap) so they render as
+       ":ok"/":error" even when the program never writes those literals —
+       without this they fall through to the ":<atom>" fallback below. *)
+    List.iter (fun name ->
+        let h = Llvm_ctx.atom_hash name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.atom_names h) then
+          Hashtbl.replace ctx.Llvm_ctx.atom_names h name)
+      ["ok"; "error"];
     (* Sort by hash for deterministic IR (Hashtbl.fold order is unspecified),
        keeping the CAS content hash stable across identical inputs. *)
     let atoms =
