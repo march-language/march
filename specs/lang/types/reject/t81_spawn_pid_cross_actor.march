@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: expected `{ x : Int }` but got `{ s : String }`
+mod Main do
+  -- REJECT: two DIFFERENT actors' pids cannot share one list -- `spawn(A)` is
+  -- `Pid[{x: Int}]` and `spawn(B)` is `Pid[{s: String}]`, so the Cons cell's
+  -- element type fails to unify.  Before the 2026-07-18 fix (finding 18,
+  -- core-march-types.md §2.6.3) BOTH spawns yielded `Pid[<fresh var>]` and
+  -- this program typechecked clean, silently conflating the two actors'
+  -- state types; the accept-side witness of the new typing is accept/t87.
+  actor A do
+    state { x : Int }
+    init  { x: 0 }
+    on Bump() do { x: state.x + 1 } end
+  end
+
+  actor B do
+    state { s : String }
+    init  { s: "" }
+    on Tag() do { s: state.s } end
+  end
+
+  fn main() : Unit do
+    let pa = spawn(A)
+    let pb = spawn(B)
+    let _bad = Cons(pa, Cons(pb, Nil))
+    ()
+  end
+end
