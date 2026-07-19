@@ -283,6 +283,34 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-18, compiled-only correctness sweep + backend-divergence cluster + merge-loss audit)
+
+**A large correctness pass, then a merge-loss audit that explained a chunk of it.**
+Fixed compiled-only bugs across the pipeline: mono dangling-TVar → bare `None`
+link failure (default residual TVar → `String`); `inject_defaults` flattened so
+interface default methods keep their args; multi-arg constructor-pattern params
+(`fn f(N(a), N(b))`) no longer hit a non-pointer `$TupleN` scrutinee ICE (typed
+from element spans); `NativeFloatArr↔List(Float)` runtime bridges box/unbox
+floats (item 45 SIGSEGV); cprop no longer desyncs a case scrutinee from its
+arm's ownership `dec_rc` (nested `Cons(Ctor(heap), rest)` RC underflow). The
+**backend divergence/soundness cluster** is fully closed: compiled epoch-`Cap`
+plane (`get_cap`/`send_checked`/`revoke_cap`/`is_cap_valid` + dead-`send` → all
+byte-identical), `Actor.call` reconciled to ONE canonical protocol working on
+both backends (interp tag-index routing + F19 tag-base translation compiled) with
+enforced `timeout_ms`, and `spawn(Actor)` now types as `Pid[state]` (cross-actor
+pid confusion is a type error). A **`fn_arities` scope-blind arity check** was
+poisoning stdlib types with `TError` whenever a program defined a top-level `fn f`
+(the "List.fold_left > 512 specializations" mono-limit ICE — really a typecheck
+bug). **Merge-loss audit:** the PR #27/#38 merge-conflict resolution silently
+dropped three fix commits — `c6599af9` (fn_arities), `4b4c70b3` (Actor.call), and
+`c30161d7` (cross-backend `hash()` equality) — all restored; everything else on
+that line is present via PR #38 or correctly superseded (mono-restriction lifted
+by the uniform apply-ABI; L4 rejection superseded by `resolves_always_linear`).
+DataFrame `group_by`/`inner_join` now match both backends; the oracle
+`known_divergence` list is **empty** (every swept bench+examples program matches
+interpreted-vs-compiled). Suite: **eval 233 / compiler 514 / snapshots 31 /
+codegen 421 / stdlib 810 / oracle 0 divergences / types 168 / doc-lint passed.**
+
 ## Current State (as of 2026-07-17, compiled `to_string` on containers/ADTs fixed — routed through Show dispatch)
 
 **Compiled `to_string` on a non-primitive no longer prints `#<tag:N>` garbage.**
