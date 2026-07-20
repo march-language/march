@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p26 parse, r01–r14 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26)
+# Grammar corpus index (p01–p26 parse, r01–r15 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 40/40 — 26 parse, 14
+Exit 0 iff every program behaves as declared (currently 41/41 — 26 parse, 15
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -105,7 +105,7 @@ p18–p22/r11–r13: `actor`+`supervise`, `app`/`on_start`/`Supervisor.spec`,
 A later fix (2026-07-06) resolving the §7.3 `f(1)(2)` silent-mis-split
 finding added r14/p23/p24: the curried-call-juxtaposition reject and the
 IIFE + two-line witnesses the newline-sensitive guard must still accept —
-40 programs total (26 `parse/`, 14 `reject/`). See
+41 programs total (26 `parse/`, 15 `reject/`). See
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan
