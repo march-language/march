@@ -631,7 +631,7 @@ let ensure_runtime_so () =
        Identical inputs across worktrees share one artifact; any divergence
        gets its own filename instead of overwriting a shared one. *)
     let flags_sig = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
+      "clang -shared -O2 -fno-strict-aliasing -fwrapv -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s%s"
       evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags blake3_flags in
     let key_buf = Buffer.create 256 in
     Buffer.add_string key_buf flags_sig;
@@ -756,7 +756,7 @@ let setup_interpreter_ffi () =
           else ""
       in
       let cmd = Printf.sprintf
-        "cc -shared -O2 -fPIC%s%s %s -o %s %s 2>&1"
+        "cc -shared -O2 -fno-strict-aliasing -fwrapv -fPIC%s%s %s -o %s %s 2>&1"
         platform_flags inc_flag src_files tmp link_flags in
       let rc = Sys.command cmd in
       if rc <> 0 then
@@ -2533,8 +2533,16 @@ let compile filename =
                 |> List.filter (fun p ->
                      p = "" || not (List.mem (Filename.basename p) dropped))
                 |> String.concat " " in
+            (* -fno-strict-aliasing -fwrapv: the C runtime pervasively type-puns
+               (tagged pointers, reading a march_value cell's fields as different
+               types, int<->ptr casts), which is strict-aliasing UB. Without these
+               flags an aggressive -O2 optimizer (notably stock Linux clang, unlike
+               Apple/zig clang) miscompiles the FFI Result/Option decoders and reads
+               a neighboring constant — e.g. an Err("nan") payload surfaced as
+               "bad int". The test-runner C rules already pass these; the production
+               --compile path must too. *)
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
+              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
               cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
