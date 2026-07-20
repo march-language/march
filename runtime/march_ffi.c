@@ -410,9 +410,13 @@ march_value ffi_maybe_half(double x) {
     return march_some_boxed(march_make_float(x / 2.0));
 }
 
-/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche. */
+/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche, so
+ * BOTH arms must be boxed (like ffi_maybe_half): the compiler represents
+ * Option(Unit) as a heap cell (None=tag 0, Some=tag 1) and its match reads the
+ * cell tag, so a raw niche None (0) would be dereferenced as a null cell and
+ * segfault. Pair march_some_boxed with march_none_boxed, never march_none. */
 march_value ffi_maybe_unit(int64_t flag) {
-    return flag ? march_some_boxed(0) : march_none();  /* Unit Option matches by null-check */
+    return flag ? march_some_boxed(0) : march_none_boxed();
 }
 
 /* Upcall: apply a March closure f : (Int) -> Int to x, return f(x).
