@@ -9,21 +9,6 @@ mod AeEntry do
 import AeLib
 import AeLib2
 
--- Discharge the typechecker's Eq constraint for ADT operands; the native
--- emitter still routes == through generated structural eq functions, so these
--- bodies are never actually run in this (native) fixture.  One impl per
--- concrete ADT: a blanket `impl Eq(a)` would overlap every specific stdlib Eq
--- impl (e.g. Msgpack.Value) and violate coherence.  AeDir's short name is also
--- defined by AeLib2, but the flat type namespace lets a single `impl Eq(AeDir)`
--- discharge both — see the FQN-coherence follow-up for making them distinct.
-impl Eq(AeShape) do
-  fn eq(x, y) do eq(x, y) end
-end
-
-impl Eq(AeDir) do
-  fn eq(x, y) do eq(x, y) end
-end
-
 fn check(name, cond) do
   if cond do
     println("ok " ++ name)
