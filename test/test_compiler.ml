@@ -575,6 +575,39 @@ let test_interface_constraint_missing_impl () =
   end|} in
   Alcotest.(check bool) "interface method without impl: error" true (has_errors ctx)
 
+let test_impl_coherence_distinct_modules_ok () =
+  (* Two DISTINCT same-short-name types in sibling nested modules may each
+     implement the same interface — no false overlap. *)
+  let ctx = typecheck {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod NA do
+      type Thing = TA
+      impl Speak(Thing) do fn speak(_x) do "a" end end
+    end
+    mod NB do
+      type Thing = TB
+      impl Speak(Thing) do fn speak(_x) do "b" end end
+    end
+  end|} in
+  Alcotest.(check bool) "distinct-module same-name impls: no error"
+    false (has_errors ctx)
+
+let test_impl_coherence_same_module_duplicate_err () =
+  (* Two impls of the SAME interface for the SAME type in one module still
+     overlap and are rejected (coherence unchanged). *)
+  let ctx = typecheck {|mod M do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    type Dog = Dog
+    impl Speak(Dog) do fn speak(_x) do "woof" end end
+    impl Speak(Dog) do fn speak(_x) do "bark" end end
+  end|} in
+  Alcotest.(check bool) "same-module duplicate impl: error"
+    true (has_errors ctx)
+
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
   let ctx = typecheck {|mod Test do
@@ -7851,6 +7884,8 @@ let compiler_suites =
           (* Fix 1: Interface constraint discharge *)
           Alcotest.test_case "iface constraint satisfied"   `Quick test_interface_constraint_satisfied;
           Alcotest.test_case "iface constraint missing impl" `Quick test_interface_constraint_missing_impl;
+          Alcotest.test_case "impl coherence: distinct modules ok" `Quick test_impl_coherence_distinct_modules_ok;
+          Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;

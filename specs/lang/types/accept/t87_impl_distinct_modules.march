@@ -1,0 +1,24 @@
+-- Coherence accept: two DISTINCT types that share the short name `Thing`,
+-- declared in different (nested) modules, may each implement the same
+-- interface — they are different types, so their heads do NOT overlap.
+-- Regression for the bare-name coherence key (AeLib.AeDir vs AeLib2.AeDir).
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+    fn mk() do TA end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+    fn mk() do TB end
+  end
+  fn main() do 0 end
+end
