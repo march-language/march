@@ -1603,6 +1603,70 @@ let test_actor_handler_body_io_with_needs_no_warning () =
     "actor handler body IO with needs declared: no missing-needs warning"
     false has_warning
 
+(* ── Cap(IO.NetListen) body-scan enforcement (item 1380) ─────────────────
+   tcp_listen / tcp_accept / http_server_listen are classified IO.NetListen in
+   builtin_cap_table (typecheck.ml).  A module whose body calls one without
+   declaring `needs IO.NetListen` warns; declaring it silences the warning; and
+   the DISTINCT NetConnect cap must not satisfy a NetListen requirement. *)
+let netlisten_body_warns name =
+  let m =
+    (try ignore (Str.search_forward (Str.regexp_string "IO.NetListen") name 0); true
+     with Not_found -> false)
+    && (try ignore (Str.search_forward (Str.regexp_string "needs") name 0); true
+        with Not_found -> false)
+  in m
+
+let test_netlisten_body_missing_needs_warns () =
+  let ctx = typecheck {|mod Srv do
+    fn serve() do
+      tcp_listen(8080)
+    end
+  end|} in
+  Alcotest.(check bool) "no needs: no hard error" false (has_errors ctx);
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && netlisten_body_warns d.March_errors.Errors.message)
+      (March_errors.Errors.sorted ctx)
+  in
+  Alcotest.(check bool)
+    "tcp_listen with no needs: warns to declare needs IO.NetListen" true has_warning
+
+let test_netlisten_body_with_needs_no_warning () =
+  let ctx = typecheck {|mod Srv do
+    needs IO.NetListen
+    fn serve() do
+      tcp_listen(8080)
+    end
+  end|} in
+  Alcotest.(check bool) "needs declared: no hard error" false (has_errors ctx);
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && netlisten_body_warns d.March_errors.Errors.message)
+      (March_errors.Errors.sorted ctx)
+  in
+  Alcotest.(check bool)
+    "tcp_listen with needs IO.NetListen: no missing-needs warning" false has_warning
+
+let test_netlisten_not_satisfied_by_netconnect () =
+  (* NetConnect (client) is a sibling leaf, NOT a super-cap of NetListen; it must
+     not satisfy a NetListen body requirement. *)
+  let ctx = typecheck {|mod Srv do
+    needs IO.NetConnect
+    fn serve() do
+      tcp_listen(8080)
+    end
+  end|} in
+  let has_warning =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && netlisten_body_warns d.March_errors.Errors.message)
+      (March_errors.Errors.sorted ctx)
+  in
+  Alcotest.(check bool)
+    "NetConnect does not satisfy a NetListen requirement: still warns" true has_warning
+
 (* ── spawn requires a plain actor name, not a computed expression ─────────
    Regression: a well-typed `spawn(<computed expr>)` — e.g. an `if` that
    evaluates to an actor name — passed `--check` (exit 0) but crashed
@@ -7901,6 +7965,10 @@ let compiler_suites =
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
           Alcotest.test_case "actor handler body IO, needs declared: no warning" `Quick test_actor_handler_body_io_with_needs_no_warning;
+          (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
+          Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
+          Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;
+          Alcotest.test_case "tcp_listen body, NetConnect does not satisfy" `Quick test_netlisten_not_satisfied_by_netconnect;
           (* spawn argument must be a plain actor name (not a computed expr) *)
           Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
           Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;

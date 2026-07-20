@@ -1011,6 +1011,13 @@ block_expr:
             mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | LET; QUESTION; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
+    { let _ = ty in
+      error_raise
+        "A `let?` binding can't have a type annotation — its type is inferred \
+         from the `Ok` payload of the `Result` on the right."
+        (Some "let? name = result_expr")
+        $startpos(ty) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"

@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: A `let?` binding can't have a type annotation
+mod R11LetqTypeAnnotation do
+  fn get() : Result(Int, String) do Ok(1) end
+  fn f() : Result(Int, String) do
+    -- `let?` infers its type from the Result's Ok payload; an explicit
+    -- annotation is rejected with a dedicated diagnostic rather than the
+    -- generic "expecting `=`" recovery.
+    let? x : Int = get()
+    Ok(x + 1)
+  end
+
+  fn main() do
+    match f() do
+      Ok(n)  -> println(int_to_string(n))
+      Err(e) -> println(e)
+    end
+  end
+end
