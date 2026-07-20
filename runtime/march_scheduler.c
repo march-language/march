@@ -748,9 +748,15 @@ static int wake_idle_daemons(void) {
     return woken;
 }
 
-/* Deferred Signal.watch drain (defined in march_runtime.c).  Called from the
+/* Deferred Signal.watch drain.  The REAL implementation lives in
+ * march_runtime.c (it runs pending March signal handlers) and is a STRONG
+ * symbol, so it overrides this WEAK no-op whenever the full runtime is linked.
+ * The weak fallback exists so the standalone scheduler unit tests
+ * (test/test_scheduler{,_mt}.c, which link ONLY march_scheduler.c, not the rest
+ * of the runtime) resolve the symbol instead of failing at link time — the same
+ * weak-symbol discipline as g_http_shutdown in march_runtime.c.  Called from the
  * scheduler loop body — a normal C stack, never signal context. */
-void march_signal_drain(void);
+__attribute__((weak)) void march_signal_drain(void) { }
 
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
