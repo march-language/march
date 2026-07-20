@@ -3490,8 +3490,11 @@ let analyse ~filename ~src : t =
                      match cis with ci :: _ -> (name, ci.Tc.ci_type) :: acc | [] -> acc)
                      final_env.Tc.ctors [];
       interfaces = Tc.StrMap.bindings final_env.Tc.interfaces;
+      (* [Tc.impls] values are now [(ty * span)] (the impl-coherence feature
+         records each impl's declaration site for overlap diagnostics); the LSP
+         model keeps just the type, so drop the span. *)
       impls      = Tc.StrMap.fold (fun k vs acc ->
-                     List.fold_left (fun a v -> (k, v) :: a) acc vs)
+                     List.fold_left (fun a (ty, _sp) -> (k, ty) :: a) acc vs)
                      final_env.Tc.impls [];
       impl_sites = collect_impl_sites user_decls;
       actors;
