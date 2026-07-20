@@ -159,7 +159,7 @@
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
                ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
                ../runtime/march_remote_registry.c
-               -lpthread -lz)))
+               -lpthread -lz -lm)))
 
 (rule
  (alias   runtest)
