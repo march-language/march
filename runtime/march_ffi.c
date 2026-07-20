@@ -420,18 +420,22 @@ march_value ffi_maybe_unit(int64_t flag) {
 }
 
 /* Upcall: apply a March closure f : (Int) -> Int to x, return f(x).
- * Args are in NATIVE slot rep (Int = raw machine int, NOT march_make_int); the
- * result is the GENERIC tagged word (read Int with march_get_int). */
+ * Args must be TAGGED march_values (build with march_make_int), per march_call's
+ * contract: a compiled closure's apply-fn untags/unboxes its scalar params at
+ * entry (the uniform closure scalar ABI), so a raw machine int would be
+ * untagged as (x >> 1) and compute the wrong result. The generic tagged result
+ * is read back with march_get_int. */
 int64_t ffi_apply1(march_value f, int64_t x) {
-    march_value arg = (march_value)x;                 /* raw Int slot */
+    march_value arg = march_make_int(x);              /* tagged Int slot */
     return march_get_int(march_call(f, 1, &arg));     /* tagged Int result */
 }
 
-/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool. */
+/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool.
+ * Args are tagged (march_make_int) for the same reason as ffi_apply1. */
 int64_t ffi_count_matching(march_value pred, int64_t n) {
     int64_t count = 0;
     for (int64_t i = 1; i <= n; i++) {
-        march_value arg = (march_value)i;             /* raw Int slot */
+        march_value arg = march_make_int(i);          /* tagged Int slot */
         if (march_get_bool(march_call(pred, 1, &arg))) count++;
     }
     return count;
