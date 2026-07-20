@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <setjmp.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <netdb.h>
@@ -665,8 +666,19 @@ void march_print(void *s) {
 
 void march_println(void *s) {
     march_string *ms = (march_string *)s;
-    write(1, ms->data, (size_t)ms->len);
-    write(1, "\n", 1);
+    /* Emit the payload AND its trailing newline in a single writev(2) syscall so
+     * the whole line is atomic against concurrent green threads. Two separate
+     * write() calls let another thread's println interleave between the data and
+     * the '\n', tearing lines together (and stranding a lone newline) — visible
+     * in multi-node/multi-actor programs run with >1 OS scheduler thread. A
+     * single vectored write to a regular file/pipe is atomic (POSIX). */
+    struct iovec iov[2];
+    iov[0].iov_base = ms->data;
+    iov[0].iov_len  = (size_t)ms->len;
+    iov[1].iov_base = (void *)"\n";
+    iov[1].iov_len  = 1;
+    ssize_t rc = writev(1, iov, 2);
+    (void)rc;
 }
 
 void march_print_stderr(void *s) {
