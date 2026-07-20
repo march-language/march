@@ -6594,9 +6594,18 @@ let code_actions_at (a : t) ~line ~character
         ) a.src;
       Some (Position.create ~line:!e_line ~character:!e_col)
   in
+  (* A match expression's AST span starts at the SCRUTINEE, not the `match`
+     keyword (e.g. `match d do … end` spans from `d`), so a cursor sitting on
+     the `match` keyword is NOT column-contained by ms_span.  For a whole-match
+     quickfix, accept the cursor anywhere on the match statement's LINE range
+     rather than requiring exact column containment. *)
+  let cursor_on_match (ms : match_site) =
+    let sl = ms.ms_span.Ast.start_line - 1 and el = ms.ms_span.Ast.end_line - 1 in
+    line >= sl && line <= el
+  in
   let exhaustion_actions =
     List.concat_map (fun (ms : match_site) ->
-        if not (Pos.span_contains ms.ms_span ~line ~character) then []
+        if not (cursor_on_match ms) then []
         else begin
           match insert_pos_for_match_site ms with
           | None -> []
