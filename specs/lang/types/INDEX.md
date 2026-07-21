@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t87 accept, t01–t81 reject)
+# Typing corpus index (t01–t88 accept, t01–t82 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 168/168 — 87 accept, 81
+Exit 0 iff every program behaves as declared (currently 170/170 — 88 accept, 82
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -384,6 +384,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t85_impl_parametric_distinct` | **(impl coherence Stage 2, accept) `impl Descr(Box(a))` + `impl Descr(Bag(a))` (§2.3, 2026-07-17)** — different head constructors (`Box` vs `Bag`) do NOT unify, so no overlap. Guards that `types_overlap` requires the head ctor to match (reject twin `t80`) | `--check` exit 0 |
 | `t86_bare_none_unpinned` | **(items 347/465) bare unpinned `None` compiles + links (§ mono, 2026-07-18)** — a `None` whose element type is never pinned used to fail to LINK compiled (`Show$Option.show$Option_V__<n>` unresolvable — mono minted a distinct `$V_<n>` specialization per dangling type-var id). mono now defaults a residual dangling `TVar` to `String` (heap-ptr repr + IS_HEAP_PTR-guarded RC — safe for either a real pointer or a tagged immediate; `Int`/`Unit` corrupted RC / crashed the niche path). Runtime witness `test/native/bare_none_print.march` (interp == compiled) | `--check` exit 0 |
 | `t87_spawn_pid_state` | **(finding 18 FIXED) `spawn` yields `Pid[state]` (§2.6.3, 2026-07-18)** — the ESpawn arm reaches the actor's `Pid[state_ty]` vars binding (shadowed at ECon occurrences by the nullary-ctor registration) directly by name, so the state record type propagates to the observable Pid: two same-actor pids share ONE concrete Pid type (list + `is_alive`/`kill` instantiate at the state record). Reject twin `t81` | `--check` exit 0 |
+| `t88_impl_distinct_modules` | **(impl coherence, FQN dispatch Stage 1, accept) two same-short-name types from different modules each `impl` a TYPE-DISPATCHED BUILTIN (§2.3, 2026-07-20)** — `NA.Thing` and `NB.Thing` (nested modules) each declare `impl Eq(Thing)`; coherence keys on the DECLARING MODULE, so the distinct types do NOT overlap. Sound compiled because Eq/Ord/Show/Hash dispatch via generated ctor-qualified structural fns. Reject twin for a GENERAL interface: `t82`. Design `specs/plans/2026-07-20-fqn-impl-dispatch-identity.md` | `--check` exit 0 |
 | `t81_local_type_shadows_stdlib_always_linear` | **(L4 FIX) local plain type shadows an `always_linear` stdlib name (§2.9.1, 2026-07-17)** — a module declaring its OWN `type Handle = Handle(Int)` must NOT inherit the linearity of the unrelated stdlib `always_linear type Handle`. Pre-fix, `always_linear`-promotion matched the BARE type name globally (`typecheck.ml` `resolves_always_linear`, formerly a flat `List.mem name always_linear_types`), so this local `Handle` was silently promoted linear and dropping `h` false-errored "was never used". Promotion now keys on the resolved type: when the current module declares its own same-named type, its own declaration's linearity wins (both bare and qualified names are registered by `DAlwaysLinearType`, so the qualified membership check disambiguates). A `let h = Handle(1)` WITHOUT a local shadow still resolves to the stdlib linear `Handle` and correctly errors (`reject/t65`). Stopgap ahead of full module-qualified type identity (`specs/plans/2026-07-17-fqn-type-ctor-identity.md`) | `--check` exit 0 |
 
 ## `reject/` — must be rejected (exit 1 + pinned substring)
@@ -470,8 +471,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t79_impl_coherence_duplicate` | **(impl coherence, T-ImplCoherent) two `impl Speak(Dog)` (§2.3, 2026-07-17)** — a type may implement an interface at most once. Both blocks previously typechecked (`--check` exit 0) and the backends ran DIFFERENT method bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order). `register_impl_shape` now does a lookup-before-insert via `types_overlap` (unifiability), distinguishing a genuine duplicate (different decl span) from Pass-1 re-registration (same span). Accept companions `t83`/`t84` | `Overlapping implementation` |
 | `t80_impl_parametric_overlap` | **(impl coherence Stage 2, T-ImplCoherent) `impl Descr(Box(a))` + `impl Descr(Box(Int))` (§2.3, 2026-07-17)** — parametric overlap: the general `Box(a)` head UNIFIES with the specific `Box(Int)` (`a ↦ Int`), so both could match `Box(1)` and the backends would disagree. Caught by `types_overlap` (unify-based), which the Stage-1 exact-key form did not. Accept twin `t85` | `Overlapping implementation` |
 | `t81_spawn_pid_cross_actor` | **(finding 18 FIXED) cross-actor pid list rejected (§2.6.3, 2026-07-18)** — `spawn(A) : Pid[{x: Int}]` and `spawn(B) : Pid[{s: String}]` no longer unify (both used to be `Pid[<fresh var>]`, silently conflating distinct actors' pids). Accept twin `t87` | ``expected `{ x : Int }` but got `{ s : String }`` |
+| `t82_impl_general_iface_collision` | **(impl coherence, FQN dispatch Stage 1) two distinct same-short-name types each `impl` a GENERAL user interface (§2.3, 2026-07-20)** — unlike the type-dispatched builtins (accept `t88`), a general interface dispatches on the BARE type name in both backends and mangles both impls to ONE symbol (silent wrong body compiled: `from-A`/`from-A`), so the declaring-module relaxation is scoped to Eq/Ord/Show/Hash; the general case is deferred to Stage 3 (runtime ctor-tag dispatch). Accept twin `t88` | `Overlapping implementation` |
 
-**Result: 168 / 168 (87 accept, 81 reject).**
+**Result: 170 / 170 (88 accept, 82 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

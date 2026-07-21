@@ -1,10 +1,9 @@
--- EXPECT-ERROR: expecting `=` in the let? binding
+-- EXPECT-ERROR: can't have a type annotation
 -- `let?` slice 8, §2.10: a `let?` binding takes NO type annotation -- the bound
--- type is read off the Result. `let? x : Int = e` is a parse error. NOTE: the
--- parser has no dedicated type-annotation production, so the COLON is caught by
--- the generic missing-`=` error recovery (finding: the tutorial's promised
--- "cannot have a type annotation" message was never implemented; the reject
--- still fires correctly).
+-- type is read off the Result. `let? x : Int = e` is a parse error. The parser
+-- has a dedicated type-annotation production (item 700) that emits the tutorial's
+-- promised "a `let?` binding can't have a type annotation" message rather than
+-- the generic missing-`=` recovery.
 mod Main do
   fn f() : Result(Int, String) do Ok(1) end
   fn bad() : Result(Int, String) do

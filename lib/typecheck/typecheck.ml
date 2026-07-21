@@ -500,11 +500,11 @@ type env = {
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
   protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
-  impls      : (ty * Ast.span) list StrMap.t;
-  (** Registered interface implementations: iface_name → (impl head type, decl
-      span). The span lets the coherence check ((T-ImplCoherent)) cite the FIRST
-      impl when rejecting a duplicate, and distinguishes a genuine duplicate
-      (different span) from the same impl re-registered across passes. *)
+  impls      : (ty * Ast.span * string option) list StrMap.t;
+  (** iface_name → (bare impl head type, decl span, resolved declaring-module of
+      the head type — None when unresolved). Head type stays BARE so
+      [discharge_constraints] is unaffected; the module is used ONLY by the
+      coherence overlap test. *)
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
@@ -2255,7 +2255,7 @@ let base_env errors type_map =
                    let lst = Option.value ~default:[] (StrMap.find_opt k m) in
                    (* Built-ins carry [dummy_span]; the coherence check reads it
                       to phrase a user-impl-over-builtin conflict specially. *)
-                   StrMap.add k ((v, Ast.dummy_span) :: lst) m) StrMap.empty builtin_impls;
+                   StrMap.add k ((v, Ast.dummy_span, None) :: lst) m) StrMap.empty builtin_impls;
   }
 
 (* =================================================================
@@ -5921,7 +5921,7 @@ let types_overlap (a0 : ty) (b0 : ty) : bool =
     | _ -> t1 = t2
   in go a0 b0
 
-let register_impl_shape env (idef : Ast.impl_def) =
+let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   let module M = Map.Make (String) in
   let tvars = ref M.empty in
   let rec lenient_ty (t : Ast.ty) : ty =
@@ -5967,6 +5967,41 @@ let register_impl_shape env (idef : Ast.impl_def) =
   let key = idef.impl_iface.txt in
   let sp  = idef.impl_iface.span in
   let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+  (* Resolve the head type's DECLARING MODULE (verified 2026-07-20):
+     - qualified head "Mod.T" → the "Mod" prefix (the type's real module,
+       regardless of where the impl is written — keeps orphan impls colliding);
+     - bare head "T" declared locally by the impl's own module → decl_module
+       ([decl_module ^ ".T"] is registered in env.types by the pass-1 prebind);
+     - otherwise None → conservative (treated as overlapping, no false negative,
+       e.g. two modules both implementing the SAME imported type). *)
+  let head_type_module =
+    match idef.impl_ty with
+    | Ast.TyCon (n, _) ->
+      let name = n.txt in
+      (match String.rindex_opt name '.' with
+       | Some i -> Some (String.sub name 0 i)
+       | None ->
+         if decl_module <> ""
+            && StrMap.mem (decl_module ^ "." ^ name) env.types
+         then Some decl_module
+         else None)
+    | _ -> None
+  in
+  let modules_distinct m1 m2 =
+    match m1, m2 with Some a, Some b -> a <> b | _ -> false in
+  (* The declaring-module relaxation below (allow two same-short-name types from
+     DIFFERENT modules to each implement the interface) is SOUND only for
+     interfaces whose native dispatch keys on CONSTRUCTOR identity — the
+     type-dispatched built-ins Eq/Ord/Show/Hash, which the backend routes through
+     generated structural functions (ensure_adt_eq_fn &c.), ctor-qualified and
+     correct. A GENERAL user interface dispatches on the BARE type name in BOTH
+     backends (interp impl_tbl, mono resolve_impl_by_type) and mangles two
+     same-short-name impls to ONE symbol, so allowing them would SILENTLY run the
+     wrong method body compiled (verified: `from-A`/`from-A`). Those stay rejected
+     here until Stage 3 adds runtime ctor-tag dispatch. See
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
+  let iface_native_type_dispatched name =
+    match name with "Eq" | "Ord" | "Show" | "Hash" -> true | _ -> false in
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
      already-registered one is a compile error — this is what makes the two
@@ -5984,9 +6019,13 @@ let register_impl_shape env (idef : Ast.impl_def) =
      machinery test fixtures — rejecting it (DECIDE-1) is deferred as a follow-on
      so this ships without that disruptive change. *)
   match List.find_opt
-          (fun (t, s) -> s <> sp && s <> Ast.dummy_span && types_overlap t inst_ty)
+          (fun (t, s, m_old) ->
+             s <> sp && s <> Ast.dummy_span
+             && types_overlap t inst_ty
+             && not (iface_native_type_dispatched key
+                     && modules_distinct m_old head_type_module))
           lst with
-  | Some (_, prev_sp) ->
+  | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp
       (Printf.sprintf
          "Overlapping implementation: `impl %s(%s)` conflicts with the \
@@ -6000,9 +6039,10 @@ let register_impl_shape env (idef : Ast.impl_def) =
   | None ->
     (* No conflict. Register (unless our own same-span entry is already present
        from a Pass-1 re-registration, in which case this is a no-op). *)
-    if List.exists (fun (t, s) -> s = sp && types_overlap t inst_ty) lst
+    if List.exists (fun (t, s, _) -> s = sp && types_overlap t inst_ty) lst
     then env
-    else { env with impls = StrMap.add key ((inst_ty, sp) :: lst) env.impls }
+    else { env with impls =
+             StrMap.add key ((inst_ty, sp, head_type_module) :: lst) env.impls }
 
 (** Pre-register a forward-reference interface declared in [prefix]: its name
     (qualified `Mod.Iface` AND bare `Iface`) plus each method (qualified and
@@ -6112,7 +6152,7 @@ let discharge_constraints env span =
          | _ ->
            let satisfied = match StrMap.find_opt iface_name env.impls with
              | None -> false
-             | Some impl_tys -> List.exists (fun (impl_ty, _) ->
+             | Some impl_tys -> List.exists (fun (impl_ty, _, _) ->
                  impl_matches_ty (repr impl_ty) ty) impl_tys
            in
            if not satisfied then begin
@@ -8398,7 +8438,7 @@ let rec check_decl env (d : Ast.decl) : env =
        let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
        (* Pass-2 re-registration for constraint discharge; coherence is enforced
           in [register_impl_shape] (Pass 1). Carry the span for the new shape. *)
-       StrMap.add key ((inst_ty, idef.impl_iface.span) :: lst) env.impls) } in
+       StrMap.add key ((inst_ty, idef.impl_iface.span, None) :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
         match List.map (surface_ty env ~tvars) ctys with
@@ -8409,7 +8449,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ ->
              if not (match StrMap.find_opt cname.txt env.impls with
                  | None -> false
-                 | Some tys -> List.exists (fun (impl_ty, _) ->
+                 | Some tys -> List.exists (fun (impl_ty, _, _) ->
                      impl_matches_ty (repr impl_ty) cty) tys) then
                Err.error env.errors ~span:cname.span
                  (Printf.sprintf
@@ -8445,7 +8485,7 @@ let rec check_decl env (d : Ast.decl) : env =
                | _ ->
                  if not (match StrMap.find_opt sc_name.txt env.impls with
                      | None -> false
-                     | Some tys -> List.exists (fun (impl_ty, _) ->
+                     | Some tys -> List.exists (fun (impl_ty, _, _) ->
                          impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
                    Err.error env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
@@ -9553,7 +9593,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
             (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
         let env = prebind_mod_members ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
-            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.Ast.txt
             | _ -> e
           ) env inner_decls
       | Ast.DType (_, name, params, typedef, _)
@@ -9607,15 +9647,15 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | Ast.DInterface (idef, _) ->
         { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces }
       | Ast.DImpl (idef, _) ->
-        register_impl_shape env idef
-      | Ast.DMod (_, _, inner_decls, _) ->
+        register_impl_shape env idef ~decl_module:m.Ast.mod_name.txt
+      | Ast.DMod (mname, _, inner_decls, _) ->
         (* Interface implementations declared in sibling modules must be
            visible unit-wide regardless of the order modules are checked in:
            CInterface constraints discharge at declaration boundaries, so an
            impl that is only registered when its defining module is reached
            cannot satisfy constraints from modules checked earlier. *)
         List.fold_left (fun e d -> match d with
-            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.Ast.txt
             | _ -> e
           ) env inner_decls
       | _ -> env
@@ -9844,7 +9884,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
             (StrMap.find_opt mname.Ast.txt top_sub_opaque) in
         let env = prebind_mod_members_inc ~opaque:child_opaque mname.txt env inner_decls in
         List.fold_left (fun e d -> match d with
-            | Ast.DImpl (idef, _) -> register_impl_shape e idef
+            | Ast.DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.Ast.txt
             | _ -> e
           ) env inner_decls
       | Ast.DType (_, name, params, typedef, _)

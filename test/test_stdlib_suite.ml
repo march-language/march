@@ -11044,8 +11044,14 @@ let test_compiled_sanitize_clean_exit () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let out_file = Filename.concat tmp "out.txt" in
+    (* detect_leaks=0 matches specs/lang/golden/sanitize.sh: the March runtime
+       intentionally leaks a handful of process-lifetime globals (scheduler, GC
+       arenas) that are never freed, and Linux ASAN runs LeakSanitizer at exit by
+       default (macOS does not). This test guards the teardown ABORT (the macOS
+       arm64 altstack munmap), NOT leaks, so leak detection would spuriously fail
+       it on Linux. *)
     let run_rc = Sys.command (Printf.sprintf
-      "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+      "ASAN_OPTIONS=detect_leaks=0 %s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
     Alcotest.(check int)
       "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
       0 run_rc;

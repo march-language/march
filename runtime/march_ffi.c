@@ -410,24 +410,32 @@ march_value ffi_maybe_half(double x) {
     return march_some_boxed(march_make_float(x / 2.0));
 }
 
-/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche. */
+/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche, so
+ * BOTH arms must be boxed (like ffi_maybe_half): the compiler represents
+ * Option(Unit) as a heap cell (None=tag 0, Some=tag 1) and its match reads the
+ * cell tag, so a raw niche None (0) would be dereferenced as a null cell and
+ * segfault. Pair march_some_boxed with march_none_boxed, never march_none. */
 march_value ffi_maybe_unit(int64_t flag) {
-    return flag ? march_some_boxed(0) : march_none();  /* Unit Option matches by null-check */
+    return flag ? march_some_boxed(0) : march_none_boxed();
 }
 
 /* Upcall: apply a March closure f : (Int) -> Int to x, return f(x).
- * Args are in NATIVE slot rep (Int = raw machine int, NOT march_make_int); the
- * result is the GENERIC tagged word (read Int with march_get_int). */
+ * Args must be TAGGED march_values (build with march_make_int), per march_call's
+ * contract: a compiled closure's apply-fn untags/unboxes its scalar params at
+ * entry (the uniform closure scalar ABI), so a raw machine int would be
+ * untagged as (x >> 1) and compute the wrong result. The generic tagged result
+ * is read back with march_get_int. */
 int64_t ffi_apply1(march_value f, int64_t x) {
-    march_value arg = (march_value)x;                 /* raw Int slot */
+    march_value arg = march_make_int(x);              /* tagged Int slot */
     return march_get_int(march_call(f, 1, &arg));     /* tagged Int result */
 }
 
-/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool. */
+/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool.
+ * Args are tagged (march_make_int) for the same reason as ffi_apply1. */
 int64_t ffi_count_matching(march_value pred, int64_t n) {
     int64_t count = 0;
     for (int64_t i = 1; i <= n; i++) {
-        march_value arg = (march_value)i;             /* raw Int slot */
+        march_value arg = march_make_int(i);          /* tagged Int slot */
         if (march_get_bool(march_call(pred, 1, &arg))) count++;
     }
     return count;

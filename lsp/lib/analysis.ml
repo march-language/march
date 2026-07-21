@@ -3490,11 +3490,12 @@ let analyse ~filename ~src : t =
                      match cis with ci :: _ -> (name, ci.Tc.ci_type) :: acc | [] -> acc)
                      final_env.Tc.ctors [];
       interfaces = Tc.StrMap.bindings final_env.Tc.interfaces;
-      (* [Tc.impls] values are now [(ty * span)] (the impl-coherence feature
-         records each impl's declaration site for overlap diagnostics); the LSP
-         model keeps just the type, so drop the span. *)
+      (* [Tc.impls] values are now [(ty * span * string option)] (the
+         impl-coherence feature records each impl's declaration site and
+         resolved declaring-module for overlap diagnostics); the LSP model
+         keeps just the type, so drop the span and module. *)
       impls      = Tc.StrMap.fold (fun k vs acc ->
-                     List.fold_left (fun a (ty, _sp) -> (k, ty) :: a) acc vs)
+                     List.fold_left (fun a (ty, _sp, _m) -> (k, ty) :: a) acc vs)
                      final_env.Tc.impls [];
       impl_sites = collect_impl_sites user_decls;
       actors;
@@ -6594,9 +6595,18 @@ let code_actions_at (a : t) ~line ~character
         ) a.src;
       Some (Position.create ~line:!e_line ~character:!e_col)
   in
+  (* A match expression's AST span starts at the SCRUTINEE, not the `match`
+     keyword (e.g. `match d do … end` spans from `d`), so a cursor sitting on
+     the `match` keyword is NOT column-contained by ms_span.  For a whole-match
+     quickfix, accept the cursor anywhere on the match statement's LINE range
+     rather than requiring exact column containment. *)
+  let cursor_on_match (ms : match_site) =
+    let sl = ms.ms_span.Ast.start_line - 1 and el = ms.ms_span.Ast.end_line - 1 in
+    line >= sl && line <= el
+  in
   let exhaustion_actions =
     List.concat_map (fun (ms : match_site) ->
-        if not (Pos.span_contains ms.ms_span ~line ~character) then []
+        if not (cursor_on_match ms) then []
         else begin
           match insert_pos_for_match_site ms with
           | None -> []
