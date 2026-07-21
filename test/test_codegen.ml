@@ -4724,6 +4724,167 @@ end
     (let re = Str.regexp_string "DcB" in
      try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
 
+(* ── lower_match.ml: collision-conditional module-qualified PATTERN tag
+   (Task 4, docs/superpowers/plans/2026-07-21-ctor-module-identity.md — the
+   "native pattern-match" task) ───────────────────────────────────────────
+
+   Mirrors the ctor-CONSTRUCTION tests directly above, but for the pattern
+   side: a bare `Shared` pattern arm inside a colliding type's own match must
+   lower to a br_tag qualified by the pattern's LEXICAL enclosing module
+   (e.g. "DcA.Thing.Shared"), not the bare "Shared"/"Thing.Shared" that would
+   ambiguously match either colliding type's constructor at codegen time
+   (llvm_case.ml's [qualified_br_key], for a BARE incoming tag, qualifies
+   using only the scrutinee's — necessarily bare, per this whole plan's
+   "TCon stays bare" invariant — static type name, so both DcA's and DcB's
+   `Shared` arm would produce the SAME "Thing.Shared" key without this fix).
+
+   Two shapes, per the brief's explicit instruction to cover both from the
+   start (learned from this same plan's Task 3, whose first round missed the
+   impl-method-body construction site): a pattern match inside a plain
+   module-level function, and — the more common, canonical shape — a pattern
+   match inside an interface impl method's own body. *)
+
+(** Shape 1: a bare `Shared`/`OnlyA` match inside a plain module-level
+    function (no `impl`, so no MARCH_DEV_RELAX_CTOR_COHERENCE bypass is
+    needed — the coherence gate only fires on `impl` overlap registration,
+    which this fixture never touches). *)
+let test_colliding_pattern_match_module_level_fn_gets_qualified_tag () =
+  let src = {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn describe(t: Thing) do
+      match t do
+        Shared -> "from-A-shared"
+        OnlyA -> "from-A-only"
+      end
+    end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    fn describe(t: Thing) do
+      match t do
+        Shared -> "from-B-shared"
+        OnlyB -> "from-B-only"
+      end
+    end
+  end
+  fn main() do
+    println(DcA.describe(DcA.Shared))
+    println(DcB.describe(DcB.Shared))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  (* Each `describe` body lowers straight to an ECase (the match IS the whole
+     fn body); find the "Shared" arm's br_tag (order-preserving: Shared is
+     always the first source arm, so branches' head is the Shared branch —
+     but search by content, not position, to stay robust to compile_matrix's
+     internal grouping order). *)
+  let shared_tag_of (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branches, _) ->
+      let br = List.find (fun (b : March_tir.Tir.branch) ->
+          (* bare "Shared" or a qualified "....Shared" — never "OnlyA"/"OnlyB" *)
+          let t = b.March_tir.Tir.br_tag in
+          (t = "Shared"
+           || (String.length t >= 7
+               && String.sub t (String.length t - 7) 7 = ".Shared")))
+        branches in
+      br.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail (Printf.sprintf "expected ECase body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_tag = shared_tag_of (find_fn "DcA.describe") in
+  let b_tag = shared_tag_of (find_fn "DcB.describe") in
+  Alcotest.(check bool) "DcA's and DcB's Shared pattern arms get distinct qualified tags"
+    true (a_tag <> b_tag);
+  Alcotest.(check bool) "DcA's tag mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_tag 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's tag mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_tag 0); true with Not_found -> false)
+
+(** Shape 2 (the canonical, more common shape per the task brief): a bare
+    `Shared` match arm written directly inside an interface impl method's
+    own body — `impl Speak(Thing) do fn speak(self) do match self do
+    Shared -> ... end end end`. Requires MARCH_DEV_RELAX_CTOR_COHERENCE=1
+    (same double-collision-impl bypass as the construction-side impl-method
+    test above), since two colliding `Thing` types both implementing
+    `Speak` still goes through the coherence gate. *)
+let test_colliding_pattern_match_impl_method_gets_qualified_tag () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
+  let tir =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         March_tir.Lower.lower_module ~type_map m)
+  in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let shared_tag_of (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branches, _) ->
+      let br = List.find (fun (b : March_tir.Tir.branch) ->
+          let t = b.March_tir.Tir.br_tag in
+          (t = "Shared"
+           || (String.length t >= 7
+               && String.sub t (String.length t - 7) 7 = ".Shared")))
+        branches in
+      br.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail (Printf.sprintf "expected ECase body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_tag = shared_tag_of (find_fn "Speak$DcA.Thing.speak") in
+  let b_tag = shared_tag_of (find_fn "Speak$DcB.Thing.speak") in
+  Alcotest.(check bool) "DcA's and DcB's impl-method Shared pattern arms get distinct qualified tags"
+    true (a_tag <> b_tag);
+  Alcotest.(check bool) "DcA's impl-method tag mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_tag 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's impl-method tag mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_tag 0); true with Not_found -> false)
+
 (** Task 4: two same-short-name colliding types implementing one GENERAL
     interface must, at a call site whose static (bare) argument type is
     ambiguous, dispatch on the value's RUNTIME constructor tag — not
@@ -9525,6 +9686,12 @@ let codegen_suites =
           test_noncolliding_ctor_construction_stays_bare;
         Alcotest.test_case "colliding ctor construction inside impl method body gets qualified key" `Quick
           test_colliding_ctor_construction_inside_impl_method_gets_qualified_key;
+      ]);
+      ("lower_match: collision-conditional pattern tag qualification", [
+        Alcotest.test_case "colliding pattern match in module-level fn gets qualified tag" `Quick
+          test_colliding_pattern_match_module_level_fn_gets_qualified_tag;
+        Alcotest.test_case "colliding pattern match inside impl method body gets qualified tag" `Quick
+          test_colliding_pattern_match_impl_method_gets_qualified_tag;
       ]);
       ("dispatch: colliding general-iface runtime tag switch", [
         Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick
