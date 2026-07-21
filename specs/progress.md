@@ -283,6 +283,29 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, `Option.or_else`/`unwrap_or_else` zero-arg callback crash fix)
+
+**`Option.or_else` and `Option.unwrap_or_else` no longer crash when called
+with a genuine zero-arg callback.** Found auditing `docs/stdlib.md`:
+`Option.or_else(None, fn -> Some(0))` — the natural, documented spelling for
+a `() -> a` parameter — crashed with `arity mismatch: expected 0 args, got
+1`, both interpreted and compiled. Root cause: both functions
+(`stdlib/option.march`) invoked their callback as `f(())`, passing the
+literal `Unit` value as an explicit argument, instead of `f()`. A callback
+written `fn -> ...` compiles to a genuine 0-parameter closure; `f(())` is a
+1-argument call, so it only matched the `fn _ -> ...` 1-arg-discard
+workaround, not the natural spelling. `lib/eval/eval.ml`'s `apply_inner`
+enforces exact closure arity with no auto-unit-insertion, so the mismatch
+crashed rather than silently coercing. Fix: both call sites now use `f()`.
+`test/stdlib/test_option.march`'s four existing tests were switched from the
+`fn _u -> ...` workaround to the natural `fn -> ...` spelling (now the only
+form that works, post-fix), plus two new regression tests pinning a true
+0-arg callback explicitly. Verified interpreted (171/171 passing) and
+compiled (`--compile --opt 2`). No other stdlib module has this pattern —
+confirmed via `grep -n "(())" stdlib/*.march`; every other `() -> a`-typed
+callback param already calls with empty parens. Details: `specs/todos.md`
+"P0 — Blocking / Active".
+
 ## Current State (as of 2026-07-21, `Html.raw`/`~H` sigil compiled-only content-loss fix)
 
 **`Html.raw(...)` content no longer silently disappears when interpolated
