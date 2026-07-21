@@ -261,6 +261,15 @@ let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
     Reset per module eval via [reset_scheduler_state]. *)
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
+(** General-interface method dispatch table — maps (iface_name, method_name,
+    type_name) to the concrete method value, so a call to a general (non
+    type-dispatched-builtin) interface method routes by the FIRST argument's
+    runtime type instead of the last-bound name. Keyed by method too (unlike
+    [impl_tbl]'s single (iface,type) slot) so a MULTI-method interface's methods
+    don't overwrite each other. [type_name] is the declaring-module-qualified
+    identity for a colliding short name, else the bare name (see DImpl eval). *)
+let iface_method_tbl : (string * string * string, value) Hashtbl.t = Hashtbl.create 8
+
 (** Interface methods that are dispatched by the argument's type through a
     type-directed builtin ([show], [eq], [compare], [hash]) rather than by name.
 
@@ -7951,6 +7960,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
+  Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
@@ -8895,6 +8905,13 @@ let rec eval_decl (env : env) (d : decl) : env =
                the wrong method and recurses forever (neq → eq → neq). *)
             if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
               Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* General (non-builtin, non-Json) interface methods also go in the
+               per-method dispatch table so a call routes by the first arg's
+               runtime type, not the last-bound name (fixes multi-impl dispatch,
+               e.g. Speak(Dog) + Speak(Cat)). *)
+            if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
+              Hashtbl.replace iface_method_tbl
+                (idef.impl_iface.txt, mname.txt, type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
             Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
@@ -8906,7 +8923,38 @@ let rec eval_decl (env : env) (d : decl) : env =
            dispatches through impl_tbl, so binding the bare name in the env
            would shadow the builtin and break dispatch when 2+ impls exist. *)
         if (is_json_iface && mname.txt = "to_json") || is_dispatched then env
-        else new_env
+        else if is_json_iface then new_env  (* from_json &c.: name-bound (dispatch is on return type) *)
+        else if is_type_dispatched_iface idef.impl_iface.txt then new_env
+          (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
+             of a builtin-named interface: bind the concrete method by name. *)
+        else begin
+          (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
+             runtime type via iface_method_tbl) instead of the concrete method,
+             so 2+ impls dispatch by type rather than last-binding-wins. Bound
+             once per method name (idempotent across sibling impls). *)
+          let iface = idef.impl_iface.txt in
+          let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
+          let already = match List.assoc_opt mname.txt env with
+            | Some (VBuiltin (n, _)) -> n = disp_tag
+            | _ -> false in
+          if already then env
+          else
+            let disp = VBuiltin (disp_tag, fun args ->
+              match args with
+              | arg0 :: _ ->
+                (match type_name_of_value arg0 with
+                 | Some tname ->
+                   (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
+                    | Some m -> !iface_dispatch_hook m args
+                    | None -> eval_error
+                        "no implementation of interface `%s` for type `%s`" iface tname)
+                 | None -> eval_error
+                     "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
+              | [] -> eval_error
+                  "interface method `%s` called with no arguments" mname.txt)
+            in
+            (mname.txt, disp) :: env
+        end
       ) env idef.impl_methods
 
   | DProtocol (name, pdef, _sp) ->
@@ -9052,6 +9100,7 @@ let eval_module_env (m : module_) : env =
   dyn_sup_next_vpid := (-1);
   (* Pre-register builtin constructor → type mappings so Show/impl dispatch works *)
   Hashtbl.reset impl_tbl;
+  Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
@@ -9216,6 +9265,12 @@ let eval_module_env (m : module_) : env =
                  the wrong method and recurses forever (neq → eq → neq). *)
               if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
                 Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+              (* General (non-builtin, non-Json) interface methods also go in the
+                 per-method dispatch table so a call routes by the first arg's
+                 runtime type, not the last-bound name. *)
+              if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
+                Hashtbl.replace iface_method_tbl
+                  (idef.impl_iface.txt, mname.txt, type_name) fn_val;
               let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
               Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()
@@ -9226,7 +9281,38 @@ let eval_module_env (m : module_) : env =
              above, don't rebind the bare name globally — it would shadow the
              builtin and break dispatch when 2+ impls of the iface exist. *)
           if is_json_iface || is_dispatched then acc_env
-          else new_acc
+          else if is_type_dispatched_iface idef.impl_iface.txt then new_acc
+            (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
+               of a builtin-named interface: bind the concrete method by name, as
+               before — it's not in iface_method_tbl and is called directly. *)
+          else begin
+            (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
+               runtime type via iface_method_tbl) instead of the concrete method,
+               so 2+ impls dispatch by type rather than last-binding-wins.
+               Idempotent across sibling impls. *)
+            let iface = idef.impl_iface.txt in
+            let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
+            let already = match List.assoc_opt mname.txt acc_env with
+              | Some (VBuiltin (n, _)) -> n = disp_tag
+              | _ -> false in
+            if already then acc_env
+            else
+              let disp = VBuiltin (disp_tag, fun args ->
+                match args with
+                | arg0 :: _ ->
+                  (match type_name_of_value arg0 with
+                   | Some tname ->
+                     (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
+                      | Some m -> !iface_dispatch_hook m args
+                      | None -> eval_error
+                          "no implementation of interface `%s` for type `%s`" iface tname)
+                   | None -> eval_error
+                       "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
+                | [] -> eval_error
+                    "interface method `%s` called with no arguments" mname.txt)
+              in
+              (mname.txt, disp) :: acc_env
+          end
         ) env idef.impl_methods in
       env_ref := env';
       make_recursive_env rest env'

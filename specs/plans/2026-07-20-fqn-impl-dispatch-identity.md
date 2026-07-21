@@ -215,6 +215,58 @@ first** (release-relevant, byte-identical goldens); 2–3 complete A-full.
 - Note the residual: `TCon` type-references remain bare (no type-reference
   qualification); that full carry stays the deferred umbrella-doc flag-day.
 
+## Stages 2+3 combined — refined approach (2026-07-20, general-interface case)
+
+Building the FULL general-user-interface same-short-name case (chosen: land
+interp + native + typecheck-relax together). Two empirical findings reshape the
+plan beyond the clean stage split above:
+
+**Finding A — the interpreter's general-interface dispatch is ALREADY broken for
+multiple impls, by NAME not type.** `eval.ml`'s `DImpl` arm binds each general
+interface method under its BARE method name in `env` (`:8877`
+`(mname.txt, clo) :: env`); a second `impl Speak(_)` shadows the first, so
+`speak(x)` resolves to the last-bound method regardless of `x`. Verified:
+`impl Speak(Dog)` + `impl Speak(Cat)` (DISTINCT short names) prints `meow`/`meow`
+interpreted (should be `woof`/`meow`) while native is correct — a pre-existing,
+uncovered interp-vs-native divergence (the `accept/t83` Dog/Cat witness is
+`--check`-only, never run). Only the type-dispatched builtins (Eq/Ord/Show/Hash)
+dispatch by value type today, via `impl_tbl[(iface, type_name_of_value)]`.
+→ **Layer 1 (interp):** generalize that mechanism — bind every interface method
+to a first-arg **type dispatcher** that looks up `impl_tbl[(iface,
+type_name_of_value arg0)]`, instead of name-binding the concrete method.
+`impl_tbl` is already populated for general interfaces (`:8897`). Methods that
+can't dispatch on arg0 (e.g. `from_json : JsonValue -> a`) keep today's
+name-binding (already special-cased). Same-short-name types then need
+`impl_tbl` keys + `type_name_of_value` qualified by declaring module
+(collision-conditional, from `module_stack`) so `NA.Thing` vs `NB.Thing` don't
+collide — the original Stage-2 work.
+
+**Finding B — regular ADT ctor tags are PER-TYPE 0-based, so a runtime tag
+switch cannot identify the module.** `llvm_toplevel.ml:488` assigns
+`ce_tag = tag_idx` (0,1,2… within each type), so `NA.Thing.TA` and `NB.Thing.TB`
+BOTH get tag 0. The design's "runtime ctor-tag → declaring-module" step assumed
+tags identify the module; they do not. Actor-msg ctors already get
+globally-unique tags (`:437` `actor_msg_tag` base `0x0100_0000`) — the model.
+→ **Layer 2 (native):** collision-conditionally give a colliding type's ctors
+**globally-unique tags** (reuse the actor-msg scheme) AND key `ctor_info` by a
+**module-qualified** ctor identity (`ci_module`, threaded into lowering — the
+umbrella doc's Stage 4), so `EAlloc`/`match`/dispatch all resolve the same tag.
+Qualify the generated impl symbol by declaring module (`lower.ml:1081`). Then a
+call `speak(x)` whose static type is a colliding short name emits a switch on
+`x`'s (now module-unique) tag → the right impl symbol. Single-declaration types
+keep per-type tags + bare identity → CAS keys + goldens byte-identical.
+
+**Layer 3 (typecheck):** once both backends dispatch correctly for colliding
+general interfaces, drop the `iface_native_type_dispatched` gate in
+`register_impl_shape` so the relaxation covers ALL interfaces, and flip
+`reject/t82` → an accept + a compiled + interp cross-backend runtime witness
+(`from-A`/`from-B`).
+
+**Sequencing:** build Layer 1 (interp, most tractable, fixes the Dog/Cat
+divergence), then Layer 2 (native, the flag-day), then Layer 3 (relax) — all on
+`claude/fqn-impl-coherence-stage2-636503`, landed together. Gate at each layer;
+final oracle + full-suite + snapshot review; CAS value-reveal check for Layer 2.
+
 ## Test & validation strategy
 - Reuse the `specs/lang/types/{accept,reject}/` witness harness (t79/t80/t83/t85
   already exist; add t86-style two-module accept + an interp/native runtime

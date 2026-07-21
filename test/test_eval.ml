@@ -1490,6 +1490,30 @@ let test_default_method_eval () =
   Alcotest.(check bool) "neq default returns true for 1 neq 2" true
     (vbool result)
 
+let test_general_iface_multi_impl_dispatch () =
+  (* Two impls of ONE general interface for DISTINCT types must each dispatch to
+     their own body by the argument's runtime type, not the last-bound name.
+     Regression: the interp used to name-bind general-interface methods (last
+     impl wins), so speak(Dog) wrongly ran Cat's body (meow/meow). Now routed
+     through iface_method_tbl by type. *)
+  let src = {|mod Test do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    type Dog = Dog
+    type Cat = Cat
+    impl Speak(Dog) do fn speak(_x) do "woof" end end
+    impl Speak(Cat) do fn speak(_x) do "meow" end end
+    fn say_dog() do speak(Dog) end
+    fn say_cat() do speak(Cat) end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "speak(Dog) dispatches to Dog's body"
+    "woof" (vstr (call_fn env "say_dog" []));
+  Alcotest.(check string) "speak(Cat) dispatches to Cat's body"
+    "meow" (vstr (call_fn env "say_cat" []))
+
 let test_default_method_user_type () =
   (* Regression: a user-declared `interface Eq(a)` (name collides with the
      built-in Eq) with a default `neq` calling `eq`, implemented for a USER
@@ -4391,6 +4415,7 @@ let eval_suites =
           Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "general iface multi-impl dispatch" `Quick test_general_iface_multi_impl_dispatch;
           Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
