@@ -27,6 +27,11 @@ git log is authoritative for exact commits.
   native code stored the parsed value in a representation the rest of the
   compiler didn't expect. Affects any compiled program parsing floats from
   strings, including `stdlib/toml.march`'s float handling.
+- `Html.raw(...)` content silently disappeared when interpolated into a `~H`
+  sigil in compiled programs — e.g. `~H"<button>${Html.raw("hi")}</button>"`
+  rendered `<button></button>`. Fine in the interpreter. Affects the
+  documented layout/partial-nesting pattern
+  (`~H"<body>${Html.raw(IOList.to_string(body))}</body>"`) as well.
 
 ### Fixed
 
