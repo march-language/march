@@ -93,19 +93,28 @@ git log is authoritative for exact commits.
   (wildcard-matched) field of a list cell never got the special-casing a
   *named* field already had, so the compiler treated it as reference-counted
   even when the concrete element type (`Float`) doesn't need that — freeing
-  memory that was never actually heap-allocated. Also fixes the same class of
-  bug in `Array.get`/`RRB.get`: reading back a pushed `Float` previously
-  returned a silently wrong value (e.g. `0.` instead of `1.5`) rather than the
-  correct one. Verified with a 100-element round trip (push then read back
-  every index) at both optimization levels, no mismatches.
+  memory that was never actually heap-allocated. (Reading a pushed `Float`
+  back out — `Array.get`/`RRB.get` — had a separate, sibling bug; see below.)
 - `task_spawn`/`Task.async` with a `Float`-returning callback, followed by
   `task_await_unwrap`/`Task.await_unwrap`/`Task.await`, failed to compile
   with an internal LLVM type error. Affects `Parallel.preduce`/`psum_float`,
-  which spawn one task per worker chunk. Note: fixing this did **not** make
-  `Parallel.psum_float` usable end-to-end — a separate, pre-existing bug in
-  tail-recursive functions that combine a `Float` accumulator with a
-  heap-value parameter (which `RRB.fold`'s internal loop does) still returns
-  wrong answers or crashes compiled; tracked separately.
+  which spawn one task per worker chunk.
+- A tail-recursive function combining a `Float` accumulator with a
+  heap-value parameter (e.g. an `Array`/`List`) — the shape `RRB.fold`'s
+  internal loop uses — returned a wrong answer or crashed
+  (`RC underflow (rc was 0)`) in compiled programs, blocking
+  `Parallel.preduce`/`psum_float`'s worked example
+  (`docs/cookbook/parallel-data.md`) end-to-end even after the task-boundary
+  fix above. Two independent causes: a constructor field discarded via a
+  wildcard pattern (`Cons(_, t)`) kept an internal type placeholder that
+  made the compiler treat an unboxed `Float` as a heap pointer needing
+  reference counting, corrupting memory; and a value read out of a generic
+  container field was passed to some function calls without converting it
+  to that function's expected native representation, so the callee silently
+  read `0.0` instead of the real value. Both fixed. Affects any compiled
+  program building or reading a `List`/`Array` of `Float` through a generic
+  helper (`Array.from_list`, `Array.get`, and therefore `RRB`'s `Float`
+  operations) or wildcard-discarding an element of a `Float` container.
 
 ### Fixed
 
