@@ -5989,6 +5989,19 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   in
   let modules_distinct m1 m2 =
     match m1, m2 with Some a, Some b -> a <> b | _ -> false in
+  (* The declaring-module relaxation below (allow two same-short-name types from
+     DIFFERENT modules to each implement the interface) is SOUND only for
+     interfaces whose native dispatch keys on CONSTRUCTOR identity — the
+     type-dispatched built-ins Eq/Ord/Show/Hash, which the backend routes through
+     generated structural functions (ensure_adt_eq_fn &c.), ctor-qualified and
+     correct. A GENERAL user interface dispatches on the BARE type name in BOTH
+     backends (interp impl_tbl, mono resolve_impl_by_type) and mangles two
+     same-short-name impls to ONE symbol, so allowing them would SILENTLY run the
+     wrong method body compiled (verified: `from-A`/`from-A`). Those stay rejected
+     here until Stage 3 adds runtime ctor-tag dispatch. See
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
+  let iface_native_type_dispatched name =
+    match name with "Eq" | "Ord" | "Show" | "Hash" -> true | _ -> false in
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
      already-registered one is a compile error — this is what makes the two
@@ -6009,7 +6022,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (modules_distinct m_old head_type_module))
+             && not (iface_native_type_dispatched key
+                     && modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp

@@ -1,24 +1,23 @@
--- Coherence accept: two DISTINCT types that share the short name `Thing`,
--- declared in different (nested) modules, may each implement the same
--- interface — they are different types, so their heads do NOT overlap.
--- Regression for the bare-name coherence key (AeLib.AeDir vs AeLib2.AeDir).
+-- Coherence accept (FQN dispatch Stage 1): two DISTINCT types that share the
+-- short name `Thing`, declared in different (nested) modules, may each implement
+-- a TYPE-DISPATCHED BUILTIN interface (Eq) — coherence keys on the DECLARING
+-- MODULE, so the distinct types do NOT overlap. This is sound compiled because
+-- Eq/Ord/Show/Hash dispatch natively through generated ctor-qualified structural
+-- functions (ensure_adt_eq_fn), not the bare-type-name mangling that a general
+-- user interface uses. Regression for the bare-name coherence key
+-- (AeLib.AeDir vs AeLib2.AeDir). Reject twin for a GENERAL interface: reject/t82.
 mod Top do
-  interface Speak(a) do
-    fn speak : a -> String
-  end
   mod NA do
     type Thing = TA
-    impl Speak(Thing) do
-      fn speak(_self) do "from-A" end
+    impl Eq(Thing) do
+      fn eq(x, y) do eq(x, y) end
     end
-    fn mk() do TA end
   end
   mod NB do
     type Thing = TB
-    impl Speak(Thing) do
-      fn speak(_self) do "from-B" end
+    impl Eq(Thing) do
+      fn eq(x, y) do eq(x, y) end
     end
-    fn mk() do TB end
   end
   fn main() do 0 end
 end

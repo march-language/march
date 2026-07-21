@@ -294,17 +294,24 @@ both lowered to `TCon("AeDir")` and the coherence check over-fired.
 module and resolves each head to a declaring-module identity (qualified `Mod.T` →
 prefix; bare `T` → the module iff it declares `T`; else conservative); `env.impls`
 entries carry that identity as a third tuple element and two heads overlap only
-when they resolve to two DISTINCT concrete modules. The stored head type stays
-BARE, so constraint discharge is untouched. **No codegen/mangling change — TIR
-snapshots + codegen goldens byte-identical.** `test/imports/adt_eq_native` drops
-its blanket `impl Eq(a)` workaround for per-module `impl Eq(AeDir)` (compiles +
-runs end-to-end). This is Stage 1 of the FQN dispatch-identity slice
+when they resolve to two DISTINCT concrete modules. **The relaxation is SCOPED to
+the type-dispatched builtin interfaces (Eq/Ord/Show/Hash)**, whose native dispatch
+routes through generated ctor-qualified structural functions (`ensure_adt_eq_fn`)
+and so is correct compiled. A GENERAL user interface dispatches on the bare type
+name in both backends and would mangle two same-short-name impls to one symbol
+(silent wrong body compiled — verified `from-A`/`from-A`), so those collisions are
+still **REJECTED at declaration** (`reject/t82`) until Stage 3 adds runtime
+ctor-tag dispatch. The stored head type stays BARE, so constraint discharge is
+untouched. **No codegen/mangling change — TIR snapshots + codegen goldens
+byte-identical.** `test/imports/adt_eq_native` drops its blanket `impl Eq(a)`
+workaround for per-module `impl Eq(AeDir)` (compiles + runs end-to-end). This is
+Stage 1 of the FQN dispatch-identity slice
 (`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`); Stages 2–3 (interpreter
-`impl_tbl` + native runtime ctor-tag dispatch for the GENERAL user-interface
-colliding case) remain open — that case is still correctly rejected natively until
-Stage 3. Suite: **compiler 519 / stdlib 810 / snapshots 31 / types 169 / oracle 0
-divergences** (pre-existing, unrelated `native_ffi_result` golden failure —
-`nan` vs `bad int`, FFI error-string, no `impl`s involved — filed separately).
+`impl_tbl` + native runtime ctor-tag dispatch for the general case) remain open.
+Suite: **compiler 520 / stdlib 810 / snapshots 31 / types 170 (88 accept + 82
+reject) / oracle 0 divergences** (pre-existing, unrelated `native_ffi_result`
+golden failure — `nan` vs `bad int`, FFI error-string, no `impl`s involved —
+filed separately).
 
 ## Current State (as of 2026-07-18, compiled-only correctness sweep + backend-divergence cluster + merge-loss audit)
 

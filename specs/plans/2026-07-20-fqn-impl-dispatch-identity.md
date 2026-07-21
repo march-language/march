@@ -158,13 +158,21 @@ first** (release-relevant, byte-identical goldens); 2–3 complete A-full.
   declaring-module)`, derived from `current_module` for the canonical
   (impl-in-type's-module) case, using the `ctors_for_type` shadow pattern.
 - Change the overlap test so two heads with the **same bare name but different
-  declaring modules do NOT overlap**; keep `inst_ty` bare in `env.impls`.
-- Effect: two `impl Eq(AeDir)` (distinct modules) accepted; genuine same-module
-  duplicate (t79) still rejected; parametric overlap (t80) unchanged. **Native
-  type-dispatched builtins are already correct** (generated ctor-keyed structural
-  fns), so `adt_eq_native` can drop its blanket `impl Eq(a)` in this stage.
-- Witnesses: accept `t86`-style two-module distinct-same-name impls; keep
-  reject/t79, reject/t80, accept/t83, accept/t85.
+  declaring modules do NOT overlap** — **but SCOPE this relaxation to the
+  type-dispatched builtin interfaces (`Eq`/`Ord`/`Show`/`Hash`)**, whose native
+  dispatch routes through generated ctor-qualified structural functions
+  (`ensure_adt_eq_fn`) and is therefore correct compiled. A GENERAL user
+  interface dispatches on the bare type name in BOTH backends and mangles two
+  same-short-name impls to ONE symbol, so relaxing it there would SILENTLY run
+  the wrong body compiled (verified `from-A`/`from-A`) — those collisions MUST
+  stay rejected until Stage 3. Keep `inst_ty` bare in `env.impls`.
+- Effect: two `impl Eq(AeDir)` (distinct modules) accepted (`adt_eq_native` drops
+  its blanket `impl Eq(a)`); two distinct-module `impl Speak(Thing)` (general
+  interface) still rejected; genuine same-module duplicate (t79) still rejected;
+  parametric overlap (t80) unchanged.
+- Witnesses: accept `t88_impl_distinct_modules` (builtin `Eq`), reject
+  `t82_impl_general_iface_collision` (general `Speak`); keep reject/t79,
+  reject/t80, accept/t83, accept/t85.
 - Gate: full suite + oracle green; goldens byte-identical (no mangling change).
 
 ### Stage 2 — Interpreter dispatch qualification
