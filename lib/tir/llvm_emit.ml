@@ -1156,7 +1156,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      where the runtime expects a tagged ptr; the runtime then treats `42` as a
      heap address and segfaults.  Coerce the argument to a tagged `ptr` first
      (i64→ptr applies the `(n<<1)|1` immediate tag) so the runtime's int path
-     fires correctly. *)
+     fires correctly.
+
+     Html.Safe special case: `Html.Safe(s)` (from `Html.raw`) is a single-ctor
+     ADT with one field, so `Repr.repr_of_ty` puts it on the Boxed path (its
+     lone ctor's tag is 0). IOList's `Empty` ctor is ALSO tag 0 — every Boxed
+     ADT's constructor tags are numbered independently starting at 0, so the
+     runtime has no way to tell a bare tag-0 heap cell apart from the other.
+     `march_html_auto_escape`'s fallback ("Constructor with tag >= 0: treat as
+     IOList") reads a `Safe("...")` value as an empty IOList and silently
+     drops the wrapped string instead of inserting it verbatim. Resolve this
+     here, while the argument's static TIR type is still known (mono has
+     already run): for a statically-known `Html.Safe` atom (and only when
+     "Safe" is not a same-short-name collision with some other module's type
+     — that ambiguous case must fall through to the generic runtime path
+     below), load the wrapped String directly out of the Boxed cell's field 0
+     (offset +16, the standard Boxed-ADT single-field layout) and pass it
+     through unescaped — verbatim insertion is exactly `Html.Safe`'s
+     contract, so no runtime call is needed at all. *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape"
+                            && (match atom_tir_ty a with
+                                | Tir.TCon ("Safe", _) ->
+                                  not (Collision_set.is_colliding ctx.collision_set "Safe")
+                                | _ -> false) ->
+    let vp = emit_atom_as ctx "ptr" a in
+    let fp = fresh ctx "safe_fp" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp vp);
+    let r = fresh ctx "safe_s" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
+    ("ptr", r)
+
   | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
     let v = emit_atom_as ctx "ptr" a in
     let r = fresh ctx "hae" in
