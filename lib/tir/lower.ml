@@ -1036,6 +1036,33 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       reg_method "hash" ty_name mangled
     ) hash_specs;
   end; (* end of builtin iface injection *)
+  (* Collision-conditional impl-symbol qualification (Task 3 of
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the
+     collision set BEFORE [collect_iface_impls] (Pass 1, directly below)
+     runs, but the [types] ref above is populated only by Pass 2 (the
+     DType arms further down in this function) — Pass 1 runs to completion
+     first, so [types] is still empty here.  Walk the AST directly instead,
+     mirroring exactly how Pass 2 will qualify a nested-module type's TIR
+     name (prefix ^ tname.txt, where prefix is built by appending
+     "sub_name.txt ^ \".\"" at each DMod level — see the DType arms under
+     DMod further below) so the names fed to [Collision_set.compute] agree
+     with the eventual [tm_types] names.  Only the short/qualified NAME
+     matters to [Collision_set.compute] (it ignores ctors), so a
+     placeholder empty-ctor [TDVariant] stands in for each declared type. *)
+  let rec collect_type_names ~prefix acc decls =
+    List.fold_left (fun acc d -> match d with
+        | Ast.DType (_, name, _, _, _)
+        | Ast.DAlwaysLinearType (_, name, _, _, _) ->
+          Tir.TDVariant (prefix ^ name.txt, []) :: acc
+        | Ast.DMod (sub_name, _, inner_decls, _) ->
+          collect_type_names ~prefix:(prefix ^ sub_name.txt ^ ".") acc inner_decls
+        | _ -> acc
+      ) acc decls
+  in
+  let collision_set =
+    Collision_set.compute
+      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
+  in
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies.
      Recursively processes DMod contents so that impls declared inside
@@ -1077,15 +1104,41 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | Ast.TyRecord _ -> "$Record"
             | _ -> "$Unknown"
           in
+          (* Collision-conditional: a colliding short type name gets a symbol
+             qualified by THIS impl's declaring module (mod_prefix, already
+             threaded for rename_tir_vars) so two same-short-name impls of a
+             GENERAL interface no longer mangle onto one symbol (last-write-wins
+             miscompile — see reject/t82's doc comment). Single-declaration
+             types are untouched: mangled/qualified_key/dispatch-table entries
+             stay byte-identical. Not gated on interface name: Eq/Ord/Show/Hash
+             impls for colliding types (accept/t88) are unaffected either way
+             because those dispatch natively through ctor-qualified structural
+             functions (ensure_adt_eq_fn &c.), never consulting this mangled
+             symbol table — qualifying their entries too is harmless. *)
+          let declaring_qualified_type_name =
+            if mod_prefix <> "" && Collision_set.is_colliding collision_set type_name then
+              (* mod_prefix already ends in "." (see the DMod recursion below) *)
+              String.sub mod_prefix 0 (String.length mod_prefix - 1) ^ "." ^ type_name
+            else type_name
+          in
           List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
               let mangled = Printf.sprintf "%s$%s.%s"
-                idef.impl_iface.txt type_name mname.txt in
+                idef.impl_iface.txt declaring_qualified_type_name mname.txt in
               let qualified_key = idef.impl_iface.txt ^ "." ^ mname.txt in
               (* Only lower the function body once per mangled name
                  (avoids double-lowering when DMod recursion re-encounters a
-                 top-level impl that was already processed). *)
+                 top-level impl that was already processed).  Keyed on the
+                 (possibly module-qualified) MANGLED name rather than the bare
+                 type_name: a colliding bare type_name now legitimately maps to
+                 MULTIPLE (type_name, mangled) pairs (one per declaring
+                 module's impl) under the same qualified_key, so guarding on
+                 type_name alone would wrongly treat the second impl as
+                 already-registered (the exact first-wins bug this task
+                 fixes). For a non-colliding type, declaring_qualified_type_name
+                 = type_name always, so mangled is identical across
+                 re-encounters and this check behaves exactly as before. *)
               let already = match Hashtbl.find_opt !_iface_methods qualified_key with
-                | Some l -> List.mem_assoc type_name l
+                | Some l -> List.mem_assoc mangled (List.map (fun (a, b) -> (b, a)) l)
                 | None   -> false
               in
               if not already then begin

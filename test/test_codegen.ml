@@ -4476,6 +4476,81 @@ let test_repr_noncolliding_niche_shaped_type_unaffected () =
   Alcotest.(check bool) "Option stays niche"
     true (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "Option")
 
+(* ── lower.ml: collision-conditional module-qualified impl symbols
+   (Task 3, specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) ────────── *)
+
+(** Two DISTINCT same-short-name types (declared in different modules), each
+    implementing the same GENERAL user interface, must lower to TWO DISTINCT
+    mangled fn_defs — not collapse onto one via [collect_iface_impls]'s
+    first-wins `already` guard (pre-fix: only "Speak$Thing.speak" survived,
+    silently dropping NB's "from-B" impl body entirely — the miscompile
+    reject/t82 exists to prevent reaching codegen with, until Stage 3 lands
+    runtime ctor-tag dispatch). This fixture is Stage-1-rejected by the
+    typechecker's coherence gate, so MARCH_DEV_RELAX_COHERENCE bypasses that
+    gate to exercise lower.ml directly. Task 3 only proves both impl BODIES
+    survive lowering as independently-addressable symbols — correct dispatch
+    at call sites is a later task (mono/codegen, not covered here). *)
+let test_colliding_impls_get_distinct_symbols () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
+  let tir_module =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         March_tir.Lower.lower_module ~type_map m)
+  in
+  let fn_names = List.map (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name)
+      tir_module.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "two distinct Speak impl symbols" true
+    (List.mem "Speak$NA.Thing.speak" fn_names && List.mem "Speak$NB.Thing.speak" fn_names)
+
+(** Non-colliding types (the common case: a single declaring module per
+    short name) must be completely unaffected — mangled symbols stay bare,
+    exactly like before this task. Highest-risk byte-identity guarantee the
+    plan calls out. *)
+let test_noncolliding_impl_symbol_stays_bare () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
+  let fn_names = List.map (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name)
+      tir_module.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
+    (List.mem "Speak$Thing.speak" fn_names)
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -8878,6 +8953,12 @@ let codegen_suites =
           test_repr_colliding_niche_shaped_type_forced_boxed;
         Alcotest.test_case "noncolliding_niche_shaped_unaffected" `Quick
           test_repr_noncolliding_niche_shaped_type_unaffected;
+      ]);
+      ("lower: collision-conditional impl symbols", [
+        Alcotest.test_case "colliding general-iface impls get distinct symbols" `Quick
+          test_colliding_impls_get_distinct_symbols;
+        Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
+          test_noncolliding_impl_symbol_stays_bare;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
