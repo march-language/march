@@ -1253,7 +1253,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      with dummy arg 0, boxes result into a Task heap object.
      task_await_unwrap unboxes field 0 from the Task. *)
 
-  (* task_spawn(thunk_closure) → spawn as async green thread via runtime *)
+  (* task_spawn(thunk_closure) → spawn as async green thread via runtime.
+     A Float-returning thunk's apply fn already boxes its result through the
+     generic "double"->"ptr" coerce (march_alloc_float — float-boxing stage
+     2), so the closure hands the trampoline a genuine heap pointer here; no
+     dedicated spawn variant is needed. See task_await_unwrap's "double"
+     branch for the matching unbox. *)
   | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
@@ -1312,7 +1317,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       p
     end else if inner_ty = "i64" then
       emit_untag_scalar ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"r" r_i64
-    else r_i64 in
+    else if inner_ty = "double" then begin
+      (* r_i64 is a march_float_box pointer: the closure's apply fn already
+         boxed its double result via the generic "double"->"ptr" coerce
+         (march_alloc_float, float-boxing stage 2) before returning it to the
+         trampoline, so — like the "ptr" case above — the tag/untag round
+         trip through task[3] is over a genuine heap pointer and lossless.
+         Recover the pointer the same way, then unbox with the paired
+         march_unbox_float (mirrors coerce's "ptr"->"double" arm). *)
+      let p = fresh ctx "r" in
+      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
+      let d = fresh ctx "tfv" in
+      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d p);
+      d
+    end else r_i64 in
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime.
@@ -1331,10 +1349,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      In BOTH cases the correct field value is apply_ret == task[3] >> 1, and
      task[3] is always odd (trampoline sets the low bit), so a single
      unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse.  Keyed on the statically-known Task inner type:
-     "double" (Float — ABI-broken through the void*-returning trampoline,
-     separate follow-up) and any other repr are left byte-identical.  The i64
-     half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
+     16) is the exact inverse.  Keyed on the statically-known Task inner type;
+     "double" (Float) additionally unboxes: the closure's apply fn already
+     boxed its double result via the generic "double"->"ptr" coerce
+     (march_alloc_float, float-boxing stage 2) before returning it to the
+     trampoline, so apply_ret here is a march_float_box pointer, not the
+     value itself (see task_spawn / task_await_unwrap's "double" branch).
+     The i64 half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
      (f89b8711); the ptr half fixes the heap-payload crash f89b8711's comment
      wrongly assumed was already correct. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
@@ -1356,6 +1377,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let v2 = fresh ctx "tawv" in
       emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
       emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp)
+    end else if inner_ty = "double" then begin
+      let fp = fresh ctx "tawf" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
+      let v  = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
+      let v2 = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
+      let bp = fresh ctx "tawbp" in
+      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
+      let d  = fresh ctx "tawd" in
+      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d bp);
+      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" d fp)
     end;
     ("ptr", r)
 

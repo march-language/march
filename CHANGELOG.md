@@ -65,6 +65,14 @@ git log is authoritative for exact commits.
   missing diagnostic. Now correctly rejected at `--check` and `--compile`
   with the same "is private to module" error other privacy violations
   already produced.
+- `task_spawn`/`Task.async` with a `Float`-returning callback, followed by
+  `task_await_unwrap`/`Task.await_unwrap`/`Task.await`, failed to compile
+  with an internal LLVM type error. Affects `Parallel.preduce`/`psum_float`,
+  which spawn one task per worker chunk. Note: fixing this did **not** make
+  `Parallel.psum_float` usable end-to-end — a separate, pre-existing bug in
+  tail-recursive functions that combine a `Float` accumulator with a
+  heap-value parameter (which `RRB.fold`'s internal loop does) still returns
+  wrong answers or crashes compiled; tracked separately.
 
 ### Fixed
 

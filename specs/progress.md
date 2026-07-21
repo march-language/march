@@ -325,6 +325,49 @@ compiled while the interpreter got `9000` right, no crash or error.
   `scripts/run-tests.sh -q` (779 tests) and a full `dune build @runtest`
   (native golden corpus, including the two new tests) both green.
 
+## Current State (as of 2026-07-21, `Parallel` Float-accumulator task-boundary fix)
+
+`Parallel.preduce`/`preduce_n` (and the `psum_float` convenience wrapper) now
+compile with a `Float` accumulator — previously an LLVM type mismatch
+(`'%cvN' defined with type 'i64' but expected 'double'`, or, post-rebase onto
+the float-boxing stage-2 work below, the same mismatch surfacing one call
+site later at `march_alloc_float`) at `--compile` time, isolated to `Float`;
+`Int` accumulators (`preduce`, `psum`, `pcount`, `pany`, `pall`) always
+worked. Root cause: `task_await_unwrap`/`task_await`'s codegen (`lib/tir/
+llvm_emit.ml`) had no `"double"` case at all for a `Task(Float)`'s inner
+type — it fell into the generic fallback branch, mislabeling a raw i64-typed
+SSA value as `"double"` without converting it, so whatever downstream code
+consumed the mislabeled value as an actual `double` hit an LLVM type error.
+Fix: both builtins gained a `"double"` branch that recovers the task
+result's heap pointer exactly like the existing `"ptr"` case (the spawning
+closure's apply fn already boxes a `Float` return value via the generic
+`"double"->"ptr"` coerce — `march_alloc_float`, float-boxing stage 2, see
+that work's own progress entry — before handing it to the trampoline, so the
+pointer is genuine and the tag/untag round trip through `task[3]` is already
+lossless; no new runtime entry point needed) and then unboxes it with the
+paired `march_unbox_float`. `task_await`'s big comment block had already
+flagged `"double"` as "ABI-broken through the void*-returning trampoline,
+separate follow-up" when the sibling i64/ptr bugs were fixed — this closes
+that follow-up. Verified: the reported repro
+(`Parallel.psum_float(RRB.from_list([1.5, 2.5, 3.0]))`) compiles cleanly; a
+raw `task_spawn`/`task_await_unwrap` round trip over values that would trip
+the pre-float-boxing lossy bit-shift (`2.75`, `100000000.25`) prints and sums
+correctly. (An earlier version of this fix, written before rebasing onto the
+float-boxing stage-2 work, added its own dedicated
+`march_task_spawn_thunk_float`/`march_float_task_box` boxing mechanism — that
+turned out to duplicate the now-canonical `march_alloc_float`/
+`march_unbox_float`/`MARCH_FLOAT_TAG` machinery already merged to `main`, so
+it was dropped in favor of reusing it.) Separately verified:
+`RRB.push`/`Array.push` on `Float` elements — which crashed compiled on the
+second push while this fix was being developed — is *also* already fixed by
+the same float-boxing stage-2 work. **`Parallel.psum_float`'s actual repro and
+`docs/cookbook/parallel-data.md`'s example are still broken compiled,
+however:** verifying end-to-end surfaced a third, pre-existing, more severe
+bug (independent of this fix and of the two above — reproduces on unmodified
+`main`) in `RRB.fold`'s own TCO'd loop, where a tail-recursive function with
+a `Float` accumulator that also carries a heap-pointer parameter either
+returns a wrong value or aborts with an RC underflow compiled. See
+`specs/todos.md`'s P0 section for the two repros and a root-cause hypothesis.
 
 ## Current State (as of 2026-07-21, `Option.or_else`/`unwrap_or_else` zero-arg callback crash fix)
 
