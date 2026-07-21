@@ -19,6 +19,17 @@ compiler-source pointers (e.g. a path that moved) and stale stdlib module counts
 count, say so in words ("no longer exists", "removed") or add a `doc-lint:ignore-count` /
 `doc-lint:ignore-file` marker — don't silently let the pointer rot.
 
+## Maintaining the changelog
+
+`CHANGELOG.md` (repo root, [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format)
+is the user-facing digest of what shipped — a different audience than `specs/progress.md`
+(implementer-level detail, append-only, every fix). When a user-visible fix, feature, or
+behavior change lands, add a bullet under `## [Unreleased]` in the same commit (`### Added`
+/ `### Fixed` / `### Changed` / `### Documentation` as appropriate — see existing entries).
+Skip purely internal refactors with no observable effect. When a release is tagged, rename
+`[Unreleased]` to the new version + date and start a fresh empty `[Unreleased]` above it;
+don't backfill history for versions that predate the file.
+
 ## Build & test
 
 The opam switch is `march`. `opam` and `dune` are available directly in PATH — no wrapper needed.
