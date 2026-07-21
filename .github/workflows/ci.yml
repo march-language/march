@@ -30,12 +30,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
+        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
+        # entry for macos-15 (our minimum macOS target); the older @v3 the tag
+        # resolved to failed with "no matching opam release", and forcing a
+        # prerelease opam fails GPG verification. Pin the fixed version.
+        uses: ocaml/setup-ocaml@v3.7.0
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
-          # macos-15 is our minimum macOS target; stable opam has no matching
-          # binary release for it yet, so allow the 2.4 prereleases that do.
-          allow-prerelease-opam: true
 
       - name: Install system dependencies
         run: |
@@ -132,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@v3.7.0
         with:
           ocaml-compiler: 5.3.0
 

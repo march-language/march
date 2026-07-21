@@ -88,14 +88,13 @@ jobs:
 
       - name: Set up OCaml (native)
         if: "!matrix.cross"
-        uses: ocaml/setup-ocaml@v3
+        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
+        # entry for macos-15 (our minimum macOS target). The older @v3 failed
+        # with "no matching opam release" on darwin-arm64; forcing a prerelease
+        # opam fails GPG verification. Pin the fixed version.
+        uses: ocaml/setup-ocaml@v3.7.0
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
-          # macos-15 (our minimum macOS target) has no matching STABLE opam
-          # binary release yet; the 2.4 prereleases do support it. Without this,
-          # setup-ocaml fails with "Failed to find any opam release that matches
-          # the specified version constraint" on the darwin-arm64 release build.
-          allow-prerelease-opam: true
 
       - name: Install system dependencies (native)
         if: "!matrix.cross"
