@@ -196,6 +196,30 @@ let test_parse_lambda_multi_param_block () =
   | March_ast.Ast.ELam ([_; _], March_ast.Ast.EBlock ([_; _], _), _) -> ()
   | _ -> Alcotest.fail "expected 2-param ELam with EBlock body"
 
+let test_parse_lambda_bare_stmt_before_if () =
+  (* Regression: an inline lambda call-argument whose body has a `let`
+     binding, then a bare (non-let) call statement, then a final
+     if/else/end used to swallow the bare call as the lambda's final
+     expression and leave `if ... end` as unparsed trailing tokens
+     ("I got stuck here" at `if`). *)
+  let src = "f(fn x -> let a = 1 println(\"hi\") if a > 0 do 1 else 2 end)" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock (stmts, _), _)], _) ->
+    Alcotest.(check int) "3 stmts in lambda body" 3 (List.length stmts)
+  | _ -> Alcotest.fail "expected EApp with ELam argument containing 3-stmt EBlock body"
+
+let test_parse_lambda_consecutive_bare_stmts () =
+  (* Regression: two consecutive bare (non-let) statements in an inline
+     lambda call-argument body used to fail on the second statement. *)
+  let src = "f(fn x -> println(\"hi\") println(\"bye\"))" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock ([_; _], _), _)], _) -> ()
+  | _ -> Alcotest.fail "expected EApp with ELam argument containing 2-stmt EBlock body"
+
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -7920,6 +7944,8 @@ let compiler_suites =
           Alcotest.test_case "lambda no-let unchanged" `Quick test_parse_lambda_no_let_unchanged;
           Alcotest.test_case "lambda zero-arg block" `Quick test_parse_lambda_zero_arg_block;
           Alcotest.test_case "lambda multi-param block" `Quick test_parse_lambda_multi_param_block;
+          Alcotest.test_case "lambda bare stmt before if (inline arg)" `Quick test_parse_lambda_bare_stmt_before_if;
+          Alcotest.test_case "lambda consecutive bare stmts (inline arg)" `Quick test_parse_lambda_consecutive_bare_stmts;
           Alcotest.test_case "application" `Quick test_parse_expr_app;
           Alcotest.test_case "refinement node present" `Quick test_parse_refinement_node_present;
           Alcotest.test_case "refined param typechecks as base" `Quick test_refined_param_typechecks_as_base;
