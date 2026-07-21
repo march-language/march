@@ -492,6 +492,19 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  scheme_witnesses : (int list, constraint_ list * ty) Hashtbl.t;
+  (** A1 (--emit-core-ast v2): every HM scheme instantiated during checking,
+      deduped by its quantified-id list -> (constraints, body). Populated at
+      the single [instantiate] chokepoint (Poly branch) so user, builtin, and
+      stdlib schemes are all uniformly captured. Read by the emitter to
+      serialize which schemes were generalized. *)
+  inst_witnesses : (Ast.span, int list * ty list) Hashtbl.t;
+  (** A1 (--emit-core-ast v2): for every polymorphic use site that supplied a
+      [~use_span] to [instantiate] (EVar/EField inference), the scheme's
+      quantified-id list paired positionally with the freshly-substituted
+      (post-solve, [repr]-resolvable) type-argument vector. Keyed by the
+      use-site span so the emitter can look up "how did THIS occurrence
+      instantiate its scheme." *)
   interfaces : Ast.interface_def StrMap.t; (** Registered interfaces *)
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
@@ -669,6 +682,8 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
+  scheme_witnesses = Hashtbl.create 64;
+  inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
@@ -1243,7 +1258,7 @@ let generalize level ty =
     with a fresh unification variable at [level].  Any class constraints
     carried by [sch] are instantiated and appended to [env.pending_constraints]
     so they can be discharged at the enclosing declaration boundary. *)
-let instantiate level env = function
+let instantiate ?use_span level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
@@ -1290,6 +1305,15 @@ let instantiate level env = function
         | CTNatBound t -> CTNatBound (inst t)) cs
     in
     env.pending_constraints := inst_cs @ !(env.pending_constraints);
+    (* A1 witnesses: record the scheme (deduped by ids) and, if this call
+       site supplied a span, the instantiation's type-argument vector. The
+       fresh vars in `subst` are ordinary unification vars; they resolve
+       through repr after the module solves, so store them as-is and let the
+       emitter deep-repr them at serialization time. *)
+    Hashtbl.replace env.scheme_witnesses ids (cs, ty);
+    (match use_span with
+     | Some sp -> Hashtbl.replace env.inst_witnesses sp (ids, List.map snd subst)
+     | None -> ());
     inst ty
 
 (* =================================================================
@@ -3873,11 +3897,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EVar name ->
       record_use name.txt name.span env;
       (match lookup_var name.txt env with
-       | Some sch -> instantiate env.level env sch
+       | Some sch -> instantiate ~use_span:name.span env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
-         | _, Some sch -> instantiate env.level env sch
+         | _, Some sch -> instantiate ~use_span:name.span env.level env sch
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -3893,7 +3917,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | None -> try_suffix rest)
            in
            (match try_suffix name.txt with
-            | Some sch -> instantiate env.level env sch
+            | Some sch -> instantiate ~use_span:name.span env.level env sch
             | None ->
               let msg =
                 if String.contains name.txt '.' then
@@ -4634,7 +4658,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some prefix ->
           let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
-           | Some sch -> Some (instantiate env.level env sch)
+           | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
            | None ->
              (* For multi-component paths like Conduit.Storage.workflow_load,
                 the interface method may be registered as just "Storage.workflow_load"
@@ -4648,7 +4672,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                  let rest = String.sub p (i + 1) (String.length p - i - 1) in
                  let candidate = rest ^ "." ^ member in
                  (match lookup_var candidate env with
-                  | Some sch -> Some (instantiate env.level env sch)
+                  | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
                   | None -> try_suffix rest)
              in
              try_suffix prefix)

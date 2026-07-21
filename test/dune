@@ -549,6 +549,12 @@
  (modules test_ty_json)
  (libraries march_dump march_typecheck alcotest))
 
+; ── HM scheme + instantiation witness tests (emit-core-ast-v2 A1 Task 2) ──
+(test
+ (name test_witnesses)
+ (modules test_witnesses)
+ (libraries march_test_helpers march_typecheck alcotest))
+
 ; ── `--emit-core-ast` golden test (emit-core-ast-a0 Task 3) ───────────────
 ; Subprocess-based (models test_oracle.ml's idiom): invokes the REAL built
 ; `march` binary's `--emit-core-ast` CLI flag against 4 corpus files from
