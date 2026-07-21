@@ -1122,16 +1122,43 @@ let emit_module ~emit_expr
        (match main_fn_name with
         | Some name ->
           let mangled = Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern name) in
+          (* [main] may be declared 0-arity or take a single [Cap(IO)]
+             parameter (checked at desugar time by
+             [Desugar.check_main_signature]). [march_spawn_main]'s runtime
+             ABI is a bare 0-argument, void-returning function pointer
+             (runtime/march_runtime.c's [main_fn_green_thread] casts and
+             calls it with no arguments), so a 1-parameter [main] cannot be
+             passed to it directly, that mismatch is exactly what produced
+             the SIGBUS. Instead of changing the scheduler ABI, emit a thin
+             0-arg adapter that supplies the erased root capability (Cap(IO)
+             compiles to a null pointer, see specs/lang/capabilities.md,
+             section Runtime behaviour) and forwards into the real, 1-arg
+             mangled main. *)
+          let main_arity =
+            match List.find_opt (fun (fn : Tir.fn_def) -> fn.Tir.fn_name = name) m.Tir.tm_fns with
+            | Some fn -> List.length fn.Tir.fn_params
+            | None -> 0
+          in
+          let spawn_target, thunk_def =
+            if main_arity = 0 then (Printf.sprintf "@%s" mangled, "")
+            else
+              ("@march_main_entry_thunk",
+               Printf.sprintf
+                 "\ndefine private void @march_main_entry_thunk() {\nentry:\n\
+                    call void @%s(ptr null)\n\
+                    ret void\n}\n" mangled)
+          in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
              declare void @march_spawn_main(ptr %%fn)\n\
+             %s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_remote_init()\n\
              %s%s\
-               call void @march_spawn_main(ptr @%s)\n\
+               call void @march_spawn_main(ptr %s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" hr_setup stub_setup mangled)
+               ret i32 0\n}\n" thunk_def hr_setup stub_setup spawn_target)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)
