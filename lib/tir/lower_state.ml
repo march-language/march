@@ -135,6 +135,34 @@ type env = {
             — while in batch mode the process exits on the diagnostic.
             Filed in specs/todos.md (Wave 3 Task 8 amendment) with the
             full trace. *)
+  mod_prefix : string;
+      (** The LEXICAL enclosing module's qualification prefix (e.g. "" at
+          top level, "DcA." inside [mod DcA do ... end], "A.B." for a
+          doubly-nested module) — mirrors [current_module_aliases]'
+          inherit-on-enter / restore-on-exit scoping exactly (set by
+          [lower_mod_decls]'s [mod_env] at each [DMod] descent to the
+          SAME [prefix] value that function already threads as a bare
+          parameter for [rename_tir_vars]/fn-name qualification). Added
+          for Task 3 of specs/plans/2026-07-21-fqn-dispatch-identity-stages.md
+          ("native construction — qualify ECon lowering for colliding
+          types"): [collect_iface_impls] (Pass 1, impl-symbol
+          qualification) already tracked an analogous [mod_prefix] as a
+          bare recursion parameter, but that parameter is LOCAL to Pass 1
+          and never reaches [lower_expr]/[lower_to_atom_k] (defined
+          top-level in lower.ml, taking only [env]) where [ECon] is
+          lowered to [EAlloc]. Threading it through [env] instead is what
+          makes it visible at that deeper call site — the same reasoning
+          that put [current_module_aliases] in [env] rather than leaving
+          it a bare recursion parameter. *)
+  collision_set : (string, string list) Hashtbl.t;
+      (** [Collision_set.compute]'s result: short type name -> declaring
+          qualified names, for short names declared by >= 2 modules.
+          Computed ONCE per [lower_module] call (from the SAME early
+          AST walk — [collect_type_names] — that already fed Pass 1's
+          impl-symbol qualification), then read-only for the entire
+          lowering run — the same "module-scoped constant" shape as
+          [type_map]. Reused (not recomputed) by the [ECon] arm so both
+          consumers agree on exactly which short names collide. *)
 }
 
 (** The env used at the top of [lower_module], before [type_map] is known
@@ -143,6 +171,8 @@ type env = {
 let empty_env : env = {
   type_map = None;
   current_module_aliases = Hashtbl.create 0;
+  mod_prefix = "";
+  collision_set = Hashtbl.create 0;
 }
 
 (** Look up the TIR type for an expression from the env's type_map.

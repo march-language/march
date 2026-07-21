@@ -1088,13 +1088,15 @@ let test_qualified_alias_no_cross_module_hijack () =
   with_current_module_fns [] (fun () ->
     (* A module that did NOT import Bastion — empty current_module_aliases. *)
     let non_importer =
-      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+      { type_map = None; current_module_aliases = Hashtbl.create 0;
+        mod_prefix = ""; collision_set = Hashtbl.create 0 } in
     Alcotest.(check string)
       "qualified `Logger.debug` NOT hijacked by another module's global import"
       "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
     (* The importing module itself still resolves its own qualified alias. *)
     let importer =
-      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+      { type_map = None; current_module_aliases = Hashtbl.create 8;
+        mod_prefix = ""; collision_set = Hashtbl.create 0 } in
     Hashtbl.replace importer.current_module_aliases
       "Logger.debug" "Bastion.Logger.debug";
     Alcotest.(check string)
@@ -4544,6 +4546,105 @@ end
       tir_module.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
     (List.mem "Speak$Thing.speak" fn_names)
+
+(* ── lower.ml: collision-conditional module-qualified ctor CONSTRUCTION
+   (Task 3, specs/plans/2026-07-21-fqn-dispatch-identity-stages.md — the
+   "native construction" task) ───────────────────────────────────────────
+
+   Two DISTINCT same-short-name types (declared in different modules) that
+   ALSO share a constructor short name (both declare a nullary `Shared`)
+   must construct DISTINCT, module-qualified [EAlloc(TCon(key,_),_)] ctor
+   keys — not the same bare "Thing.Shared" key for both, which is the exact
+   mechanism behind the double-collision miscompile: whichever module's
+   [TDVariant] happens to register into [ctor_info] LAST silently wins for
+   BOTH constructions. Requires MARCH_DEV_RELAX_CTOR_COHERENCE=1 (Task 0's
+   dev harness) since a shared ctor short name across colliding types is
+   still rejected by the coherence gate this plan hasn't fully replaced. *)
+let test_colliding_ctor_construction_gets_qualified_key () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
+  let tir =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         March_tir.Lower.lower_module ~type_map m)
+  in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) -> k
+    | _ -> Alcotest.fail (Printf.sprintf "expected EAlloc body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_key = ctor_key_of_alloc (find_fn "DcA.mk") in
+  let b_key = ctor_key_of_alloc (find_fn "DcB.mk") in
+  Alcotest.(check bool) "DcA's and DcB's Shared construction get distinct qualified keys"
+    true (a_key <> b_key);
+  Alcotest.(check bool) "DcA's key mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_key 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's key mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
+
+(** Non-colliding types (the common case: a single declaring module per
+    short name) must construct the exact same bare ctor key as before this
+    task — highest-risk byte-identity guarantee. *)
+let test_noncolliding_ctor_construction_stays_bare () =
+  let src = {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn mk() do Shared end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let fn = find_fn "DcA.mk" in
+  (match fn.March_tir.Tir.fn_body with
+   | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) ->
+     Alcotest.(check string) "bare (unqualified) ctor key" "Thing.Shared" k
+   | _ -> Alcotest.fail "expected EAlloc body in DcA.mk")
 
 (** Task 4: two same-short-name colliding types implementing one GENERAL
     interface must, at a call site whose static (bare) argument type is
@@ -9338,6 +9439,12 @@ let codegen_suites =
           test_colliding_impls_get_distinct_symbols;
         Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
           test_noncolliding_impl_symbol_stays_bare;
+      ]);
+      ("dispatch: collision-conditional ctor construction key", [
+        Alcotest.test_case "colliding ctor construction gets qualified key" `Quick
+          test_colliding_ctor_construction_gets_qualified_key;
+        Alcotest.test_case "non-colliding ctor construction stays bare" `Quick
+          test_noncolliding_ctor_construction_stays_bare;
       ]);
       ("dispatch: colliding general-iface runtime tag switch", [
         Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick
