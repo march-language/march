@@ -1,0 +1,23 @@
+mod PidRoundtrip do
+
+  actor Echo do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Bump() do
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main() do
+    let p = spawn(Echo)
+    println(bool_to_string(is_alive(p)))
+
+    let stale = pid_of_int(999999)
+    println(bool_to_string(is_alive(stale)))
+
+    kill(stale)
+    println(bool_to_string(is_alive(stale)))
+  end
+
+end

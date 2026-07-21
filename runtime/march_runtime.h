@@ -44,6 +44,7 @@ void  march_print(void *s);
 void  march_println(void *s);
 void  march_print_stderr(void *s);
 void *march_io_read_line(void);
+int64_t march_io_read_byte(void);
 int64_t march_int_pow(int64_t base, int64_t exp);
 
 /* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
@@ -102,6 +103,22 @@ void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
  * RC free path can run the destructor. Layout: [rc][tag][pad][native_ptr@16]
  * [dtor@24][type_id@32] (40 bytes). See runtime/march_ffi.c. */
 #define MARCH_RESOURCE_TAG ((int32_t)-2)
+/* Boxed Float. The stage-2 target of the float-boxing design
+ * (specs/plans/2026-07-13-float-boxing-design.md): a Float that flows through
+ * a type-ERASED (ptr) slot is heap-boxed so it is discriminable from a tagged
+ * int (odd) and a heap object (ADT tag >= 0), instead of the current raw-bits
+ * bitcast that IS_HEAP_PTR accidentally accepts (→ RC-on-raw-bits SIGSEGV and
+ * generic-compare-on-raw-bits silent wrong answers). Reserved negative tag,
+ * joining the string/resource sentinels. Layout: [rc][tag][pad][val@16] (24
+ * bytes). Concrete `double` fields and REPL/static Float slots stay unboxed;
+ * only erased slots box. Introduced additive (nothing emits it yet) — the
+ * codegen flip that populates erased slots with these is stage 2. */
+#define MARCH_FLOAT_TAG ((int32_t)-3)
+typedef struct { int64_t rc; int32_t tag; int32_t pad; double val; } march_float_box;
+/* Allocate a boxed Float (rc=1, tag=MARCH_FLOAT_TAG). */
+void   *march_alloc_float(double v);
+/* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
+double  march_unbox_float(void *p);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
 /* Allocate an uninitialised-data march_string of byte length [len], with the
  * header (rc=1, tag=MARCH_STRING_TAG, pad=0, len) filled in.  Callers fill
@@ -115,6 +132,15 @@ void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
 int64_t march_poly_eq(void *a, void *b);
+/* Ordered compare (-1/0/1) for two values in type-ERASED (ptr) slots, when
+ * the static type gives no strategy. Dispatches on runtime shape: tagged
+ * ints, boxed floats (MARCH_FLOAT_TAG), and strings each compare by value;
+ * other heap values fall back to 0 (a full structural order needs static
+ * type info unavailable here). The generic-compare half of the float-boxing
+ * design — must be wired at the codegen fallback_cmp site in the same stage
+ * that boxes floats, else box-only turns wrong-int-compare into
+ * wrong-pointer-compare. */
+int64_t march_poly_compare(void *a, void *b);
 /* Extended string builtins used by the compiled stdlib. */
 int64_t march_string_byte_length(void *s);
 int64_t march_string_is_empty(void *s);
@@ -157,6 +183,12 @@ typedef struct {
  * the actor's _dispatch function.  No-op if actor has no meta entry. */
 void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
 
+/* Register the global tag of the actor's FIRST message constructor (its
+ * "call tag base").  Emitted by codegen right after the actor record's
+ * alloc; march_actor_call adds the sentinel's ctor index to this base to
+ * address the handler positionally under F19's globally-unique msg tags. */
+void march_actor_set_call_base(void *actor, int64_t base);
+
 /* Walk all live actors whose dispatch_name_id equals [dispatch_name_id] and
  * inject a MARCH_MIGRATE_TAG message so each actor migrates its state on
  * the next turn.  migrate_fn may be NULL (skip state transform). */
@@ -185,6 +217,13 @@ void   *march_send(void *actor, void *msg);
 void    march_run_scheduler(void);
 /* Spawn a no-arg C function as a green thread (for the main entrypoint). */
 void    march_spawn_main(void (*fn)(void));
+/* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
+ * watcher (closure passed OWNED), send a signal to self, and drain pending
+ * watchers from a scheduler / event-loop body (never from signal context). */
+void    march_signal_watch(int64_t code, void *clo);
+void    march_signal_unwatch(int64_t code);
+void    march_signal_raise_self(int64_t code);
+void    march_signal_drain(void);
 /* Spawn a March thunk closure (fn () -> T) as an async green thread.
  * Returns a boxed Task handle (32 bytes: header + proc ptr + result ptr). */
 void   *march_task_spawn_thunk(void *clo_ptr);
@@ -273,17 +312,19 @@ void   *march_csv_close(void *handle);
 /* Resource ownership. */
 void    march_own(void *pid, void *value);
 
-/* Capability revocation (Phase 3). */
-/* Explicitly revoke a capability identified by (pid_index, epoch).
- * After this call, march_send_checked and march_is_cap_valid reject the cap.
- * Idempotent — safe to call more than once for the same cap. */
-void    march_revoke_cap(int64_t pid_index, int64_t epoch);
-/* Check whether (pid_index, epoch) is still a valid capability:
+/* Capability revocation (Phase 3).  All three take the March-level Cap heap
+ * object (words: hdr, hdr, actor ptr, pid_index, epoch — built by
+ * march_get_cap), matching the interpreter's Cap(a)-typed builtins. */
+/* Explicitly revoke a capability.  After this call, march_send_checked and
+ * march_is_cap_valid reject the cap.  Idempotent.  Returns the :ok atom
+ * (:error for a null/non-heap cap such as the root_cap sentinel). */
+int64_t march_revoke_cap(void *cap);
+/* Check whether cap is still valid:
  * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
-int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch);
+int64_t march_is_cap_valid(void *cap);
 /* Capability-checked send: validates liveness, epoch, and revocation before
- * enqueuing msg.  No-op if the capability is invalid. */
-void    march_send_checked(void *cap, void *msg);
+ * enqueuing msg.  Returns the :ok atom on delivery, :error otherwise. */
+int64_t march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
@@ -336,7 +377,7 @@ void   *march_chan_choose(void *ep, void *label);
 void   *march_chan_offer(void *ep);
 
 /* Multi-party session type (MPST) builtins. */
-void   *march_mpst_new(void *proto_name, int64_t n_roles);
+void   *march_mpst_new(void *proto_name, int64_t n_roles, void *roles_csv);
 void   *march_mpst_send(void *ep, void *target_role_str, void *val);
 void   *march_mpst_recv(void *ep, void *source_role_str);
 int64_t march_mpst_close(void *ep);

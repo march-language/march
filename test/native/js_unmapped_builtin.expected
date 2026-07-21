@@ -1,0 +1,5 @@
+error: builtin `int_max_value` is not supported on the JavaScript target.
+Its value (±2^62) is not representable there: March Int is stored in
+a JS double, which is exact only within ±(2^53 - 1). Restructure the
+code to avoid full 63-bit values (e.g. stdlib Random uses a 32-bit
+core for exactly this reason), or build a native/wasm target.

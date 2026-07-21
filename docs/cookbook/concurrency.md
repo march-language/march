@@ -53,7 +53,7 @@ actor Counter do
     { value: state.value + n }
   end
 
-  on Get() do
+  on Report() do
     println(int_to_string(state.value))
     state
   end
@@ -66,7 +66,7 @@ Spawn an actor and send messages:
 let pid = spawn(Counter)
 send(pid, Increment(5))
 send(pid, Increment(3))
-send(pid, Get())
+let _ = send(pid, Report())
 ```
 
 ---

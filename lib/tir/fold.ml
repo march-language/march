@@ -86,6 +86,40 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "string_is_empty" ->
     changed := true; mk_bool (String.length s = 0)
 
+  (* Pure NUMERIC-RESULT builtins on literal args → the literal result.
+     Semantics mirror lib/eval/eval.ml exactly (verified equal to the runtime C
+     in runtime/march_runtime.c): int_abs=abs, int_to_float=float_of_int,
+     float_abs=fabs, float_{floor,ceil}=(int)(floor|ceil), float_round=(int)round
+     (half away from zero, both OCaml Float.round and C round), float_truncate=
+     (int)f (toward zero).  Deliberately NOT folding STRING-producing builtins
+     (int_to_string/float_to_string/bool_to_string) — their exact formatting
+     must stay owned by the per-backend formatters (see the 5 float→string
+     formatters, memory float_to_string_backends) rather than duplicated here. *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt a)])
+    when f.Tir.v_name = "int_abs" && a <> min_int ->
+    changed := true; mk_int (abs a)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt a)])
+    when f.Tir.v_name = "int_to_float" ->
+    changed := true; mk_float (float_of_int a)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat a)])
+    when f.Tir.v_name = "float_abs" ->
+    changed := true; mk_float (Float.abs a)
+  (* float→int: guard finite + safely in 63-bit int range so the OCaml-side
+     conversion can't overflow/UB where the C (int64_t) cast would differ. *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat a)])
+    when Float.is_finite a && Float.abs a < 4.6e18
+         && (match f.Tir.v_name with
+             | "float_floor" | "float_ceil" | "float_round" | "float_truncate" -> true
+             | _ -> false) ->
+    let r = match f.Tir.v_name with
+      | "float_floor"    -> int_of_float (floor a)
+      | "float_ceil"     -> int_of_float (ceil a)
+      | "float_round"    -> Float.to_int (Float.round a)
+      | "float_truncate" -> Float.to_int a
+      | _                -> 0
+    in
+    changed := true; mk_int r
+
   (* Boolean comparison identities — arise after inlining guard / predicate functions.
      x == true  →  x
      x == false →  not x  (new let needed for ANF; use simplified form via EApp)

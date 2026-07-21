@@ -1,0 +1,137 @@
+-- Perihelion.Nebula — pure procedural nebula field. No Dom/Canvas deps.
+--
+-- `density(x, y, stars, seed)` is the single source of truth: the shell
+-- samples it to render clouds, and (later) gameplay can sample the SAME
+-- function at the ball's position for effects (drag, obscured vision,
+-- muffled sound, ...) — deterministic and interpreter-testable like
+-- Core/Level/Combat.
+--
+-- Clouds are anchored to stars, not to an independent world grid: each star
+-- (from the same ladder Level generates) rolls, via its own position hashed
+-- with the seed, whether it gets a cloud — and if so, the cloud is centered
+-- close enough to the star that it always overlaps it, however big or small
+-- it rolls. Everything is seed-mixed (see hash3's extra `seed` param vs. the
+-- shell's plain hashf/bg_hash) so a fresh per-run seed (Game.seed) gives a
+-- different nebula layout — and, since the shell mixes the same seed into
+-- its starfield hash, a different starfield too — every run.
+mod Perihelion.Nebula do
+
+  -- ── Tuning constants ─────────────────────────────────────────────────
+  fn cloud_chance() : Float do 0.55 end
+  fn radius_min() : Float do 240.0 end
+  fn radius_max() : Float do 700.0 end
+  -- Kept well under radius_min so a spawned cloud always overlaps the star
+  -- it's anchored to, no matter which radius it rolls.
+  fn anchor_jitter() : Float do 90.0 end
+  fn in_nebula_threshold() : Float do 0.35 end
+
+  type Cloud = { x : Float, y : Float, radius : Float, strength : Float }
+
+  -- ── Randomness ───────────────────────────────────────────────────────
+  -- Deterministic hash (GLSL-style sin/frac trick), same shape as the
+  -- shell's hashf/bg_hash but with an extra `seed` term so the whole field
+  -- reshuffles per run without changing the placement ALGORITHM.
+  pfn hash3(a : Float, b : Float, seed : Float) : Float do
+    let x = Math.sin(a * 12.9898 + b * 78.233 + seed * 37.719) * 43758.5453
+    x - Math.floor(x)
+  end
+
+  pfn lerp(lo : Float, hi : Float, t : Float) : Float do
+    lo + t * (hi - lo)
+  end
+
+  -- The cloud (if any) anchored at a star's position. Jitter is small
+  -- relative to radius_min, so wherever this returns Some, the star always
+  -- falls well inside the cloud's body -- a spawned cloud always overlaps
+  -- the star it's rooted to.
+  pfn star_cloud(sx : Float, sy : Float, seed : Float) : Option(Cloud) do
+    if hash3(sx, sy, seed) > cloud_chance() do
+      None
+    else
+      let jx = (hash3(sx + 1.0, sy, seed) - 0.5) * 2.0 * anchor_jitter()
+      let jy = (hash3(sx, sy + 1.0, seed) - 0.5) * 2.0 * anchor_jitter()
+      -- Square the raw hash before lerping so sizes skew toward the small
+      -- end with a real tail of much bigger clouds, instead of a flat
+      -- uniform spread -- most clouds modest, a few genuinely huge.
+      let rt = hash3(sx + 2.0, sy, seed)
+      let r = lerp(radius_min(), radius_max(), rt * rt)
+      let strength = 0.35 + 0.65 * hash3(sx, sy + 2.0, seed)
+      Some({ x: sx + jx, y: sy + jy, radius: r, strength: strength })
+    end
+  end
+
+  -- Smooth falloff from full strength at the center to exactly 0 at the
+  -- edge (smoothstep, not a hard circle) so density is continuous — a
+  -- cloud is entered/exited gradually, never with a visible seam.
+  pfn falloff(dist : Float, radius : Float) : Float do
+    if dist >= radius do
+      0.0
+    else
+      let t = 1.0 - dist / radius
+      t * t * (3.0 - 2.0 * t)
+    end
+  end
+
+  pfn contribution(x : Float, y : Float, c : Cloud) : Float do
+    let dx = x - c.x
+    let dy = y - c.y
+    falloff(Math.sqrt(dx * dx + dy * dy), c.radius) * c.strength
+  end
+
+  -- Sum contributions from every star's cloud (stars with no cloud, or too
+  -- far to reach (x, y), contribute 0).
+  pfn density_over(x : Float, y : Float, seed : Float, stars : List(Star), acc : Float) : Float do
+    match stars do
+      Nil -> acc
+      Cons(s, rest) ->
+        let acc2 = match star_cloud(s.x, s.y, seed) do
+          None -> acc
+          Some(c) -> acc + contribution(x, y, c)
+        end
+        density_over(x, y, seed, rest, acc2)
+    end
+  end
+
+  doc "Nebula density at world position (x, y) for the given star ladder and run seed, in [0, 1]. 0 in clear space; rises smoothly toward a cloud's center, falls back to exactly 0 at its edge. Deterministic: the same (x, y, stars, seed) always gives the same value — this is the single field both the renderer and any future gameplay effect should sample."
+  fn density(x : Float, y : Float, stars : List(Star), seed : Float) : Float do
+    let raw = density_over(x, y, seed, stars, 0.0)
+    if raw > 1.0 do 1.0 else raw end
+  end
+
+  doc "True if (x, y) is meaningfully inside a nebula cloud (density above a threshold). A gameplay hook: nothing reads this yet, but future effects (drag, obscured vision, ...) can gate on it."
+  fn in_nebula(x : Float, y : Float, stars : List(Star), seed : Float) : Bool do
+    density(x, y, stars, seed) > in_nebula_threshold()
+  end
+
+  pfn collect_star_clouds(stars : List(Star), seed : Float, acc : List(Cloud)) : List(Cloud) do
+    match stars do
+      Nil -> acc
+      Cons(s, rest) ->
+        let acc2 = match star_cloud(s.x, s.y, seed) do
+          None -> acc
+          Some(c) -> Cons(c, acc)
+        end
+        collect_star_clouds(rest, seed, acc2)
+    end
+  end
+
+  pfn in_view(s : Star, cam_y : Float, view_h : Float, margin : Float) : Bool do
+    s.y >= cam_y - margin && s.y <= cam_y + view_h + margin
+  end
+
+  pfn filter_visible(stars : List(Star), cam_y : Float, view_h : Float, margin : Float, acc : List(Star)) : List(Star) do
+    match stars do
+      Nil -> acc
+      Cons(s, rest) ->
+        let acc2 = if in_view(s, cam_y, view_h, margin) do Cons(s, acc) else acc end
+        filter_visible(rest, cam_y, view_h, margin, acc2)
+    end
+  end
+
+  doc "Clouds anchored to stars whose position falls within the visible band (plus enough margin that a cloud rooted just off-screen but bulging into view is still included), for the shell to draw. Every spawned cloud overlaps the star it's anchored to."
+  fn visible_clouds(stars : List(Star), cam_y : Float, view_h : Float, seed : Float) : List(Cloud) do
+    let margin = radius_max() + anchor_jitter()
+    collect_star_clouds(filter_visible(stars, cam_y, view_h, margin, Nil), seed, Nil)
+  end
+
+end

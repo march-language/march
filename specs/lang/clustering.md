@@ -439,6 +439,48 @@ For a complete, executing example, see the cluster integration tests under the p
 
 ---
 
+## Conformance status
+
+This stack splits into two conformance planes (widening slice 10; reference
+in `core-march.md` §4.15, typing in `core-march-types.md` §2.12 — the
+distributed surface adds no new typing rules, it's ordinary ADTs).
+
+**Single-process, mechanically tested.** The CRDT / lattice core — `CRDT`
+(GCounter/PNCounter/LWWRegister/ORSet), `Membership`, `GlobalRegistry.merge`,
+`VectorClock` causality, `Merkle`, `ConsistentHash`, `RingBuf` — plus the wire
+codecs (`NetFrame`, `NodeIdentity`, `GlobalPid`, `Handshake`, `RemoteCall`,
+`SwimDriver`) and `ClusterAuth`/`RemoteCall.verify` are pure functions over
+data structures, evaluated identically on both backends. Golden
+`g44_crdt_convergence` witnesses the GCounter/PNCounter/ORSet merge laws
+(commutative, associative, idempotent) and `VectorClock.happens_before` on
+causally-ordered clocks.
+
+**Live-network layers stay prose-only.** The actual socket handshake
+(`NetKernel.handshake`, `ClusterConn`), synchronous RPC transport
+(`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds, and
+cross-node monitor firing require two real nodes and are exercised only by
+the native TCP-loopback tests under `test/native/` — never by a
+single-process golden. True multi-*machine* failure semantics (netsplit,
+node restart/incarnation, clock skew across hosts) remain undocumented in
+executable form.
+
+**A compiled memory-safety gap, FIXED (finding C1, `specs/todos.md`, 2026-07-11).**
+`VectorClock.compare` — and, transitively, `.concurrent`/`.happens_before` on
+clocks with disjoint or partial actor-id sets — used to **crash when compiled**
+(a use-after-free freeing a `String` map key, SIGSEGV) while running
+correctly interpreted. The root cause was the read-then-update idiom
+`Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)`, which both
+`VectorClock.increment` and the `CRDT` counter updates use — a compiler
+Perceus/borrow refcount defect (`lib/tir/llvm_case.ml`'s `strip_scrut_decrc`
+only recognized a match arm's own scrutinee-dying dec_rc as the literal head
+of the branch body, missing it — and silently skipping the shared-path field
+refcount protection — whenever another cross-branch-dead variable's dec_rc
+was emitted first), not a bug in this module's logic. Comparing vector
+clocks built by different actors in compiled code is now safe — `g44`
+includes the disjoint-key case unconditionally.
+
+---
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/) — `spawn` / `send` and the mailbox model the cluster layers on; `GlobalRegistry` is the distributed counterpart of registering a `Pid` under a name.

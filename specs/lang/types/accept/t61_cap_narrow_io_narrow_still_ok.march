@@ -1,0 +1,18 @@
+-- Slice 6 (proof caps), the cap_narrow REGRESSION GUARD -- the Batch-A
+-- restriction (`reject/t55`) rejects a `cap_narrow` whose result is a nominal
+-- PROOF cap, but ORDINARY IO-lattice narrowing must stay accepted. Here `boot`
+-- narrows its ambient `Cap(IO)` to `Cap(IO.Network)` via `cap_narrow` and
+-- threads it to `use_net`, whose signature demands the stricter sub-capability.
+-- `IO.Network` is an IO-permission capability, NOT in `env.proof_caps`, so the
+-- proof-cap restriction never fires; the narrow instantiates `a := IO.Network`
+-- and typechecks. Proves Part 1 of the fix (cap_narrow proof-cap restriction)
+-- did not break least-privilege IO threading -- `cap_narrow`'s narrowing role
+-- is intact, only its ability to forge proof caps is removed. See
+-- core-march-types.md §2.8.13 (and §2.8.8 for the underlying threading model).
+mod App do
+  needs IO
+
+  fn use_net(_cap : Cap(IO.Network)) : Int do 1 end
+
+  fn boot(cap : Cap(IO)) : Int do use_net(cap_narrow(cap)) end
+end

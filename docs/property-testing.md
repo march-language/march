@@ -86,9 +86,11 @@ Use `let _ = assert ...` to chain multiple assertions. The final expression must
 ```march
 test "sort invariants" do
   Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
-    let sorted = List.sort_by(xs, int_lt)
+    let sorted = List.sort_by(xs, fn (a, b) -> a < b)
     let _ = assert (List.length(sorted) == List.length(xs))
-    let _ = assert (is_sorted(sorted))
+    let _ = assert (List.all(List.zip(sorted, List.drop(sorted, 1)), fn pair ->
+      match pair do (a, b) -> a <= b end
+    ))
     true
   )
 end
@@ -225,7 +227,7 @@ Override defaults with `Check.all_with`:
 
 ```march
 test "stress test with more runs" do
-  let config = { Check.default_config() with num_runs = 500, max_size = 200 }
+  let config = { Check.default_config() with num_runs: 500, max_size: 200 }
   Check.all_with(Gen.list(Gen.int(0, 100)), fn xs ->
     List.length(xs) >= 0
   , config)

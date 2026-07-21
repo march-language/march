@@ -203,6 +203,19 @@ Dom.listen(container, "click", fn ev ->
 )
 ```
 
+`Dom.event_key` reads the key that triggered a `"keydown"`/`"keyup"` event
+(e.g. `"ArrowLeft"`, `"a"`, `" "` for space):
+
+```march
+Dom.listen(Dom.body(), "keydown", fn ev ->
+  match Dom.event_key(ev) do
+    "ArrowLeft"  -> move_left()
+    "ArrowRight" -> move_right()
+    _            -> ()
+  end
+)
+```
+
 ---
 
 ## Form inputs
@@ -239,9 +252,9 @@ Dom.set_interval(1000, fn _ ->
 fn animate(el) : Unit do
   Dom.on_frame(fn _ ->
     let cur = Dom.get_style(el, "opacity")
-    let next = float_to_string(string_to_float(cur) -. 0.02)
-    Dom.set_style(el, "opacity", next)
-    if string_to_float(next) >. 0.0 do animate(el) end
+    let next = float_to_string(Option.unwrap_or(string_to_float(cur), 1.0) -. 0.02)
+    let _ = Dom.set_style(el, "opacity", next)
+    if Option.unwrap_or(string_to_float(next), 0.0) > 0.0 do animate(el) else () end
   )
 end
 ```
@@ -272,7 +285,7 @@ mod MyApp do
     Dom.set_style(tile, "background", color)
     Dom.set_text(tile, label)
     Dom.listen(tile, "click", fn _ev ->
-      let _ = move_to_end(tile)
+      move_to_end(tile)
     )
     Dom.append(board, tile)
   end
@@ -327,18 +340,21 @@ The full runnable version lives in `demo_app/dom_demo/`.
 
 ## Tips
 
-**Don't annotate `Node` directly.** Resource types from an external module
-can't be spelled as `Dom.Node` in type annotations yet — the type checker
-sees them as the internal name `Node`. Let inference handle them:
+**`Node` can be annotated directly.** Resource types from an external module
+can be spelled as `Dom.Node` (or bare `Node`) in type annotations:
 
 ```march
--- ✓ let the type be inferred
+fn highlight(el: Dom.Node) : Unit do
+  Dom.add_class(el, "selected")
+end
+```
+
+Letting inference handle it works too, if you'd rather not annotate:
+
+```march
 fn highlight(el) do
   Dom.add_class(el, "selected")
 end
-
--- ✗ causes a type error
-fn highlight(el: Dom.Node) do ...
 ```
 
 **`main` is the entry point.** The emitted `.mjs` calls `<ModuleName>_main()`

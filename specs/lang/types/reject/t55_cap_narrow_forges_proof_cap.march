@@ -1,0 +1,28 @@
+-- EXPECT-ERROR: cap_narrow cannot produce
+-- Slice 6 (proof caps), the cap_narrow FORGE -- `cap_narrow`'s builtin type is
+-- polymorphic (`Cap(IO) -> Cap(a)`), so at a `Cap(Db.P)`-typed call site it
+-- instantiated `a := Db.P` and minted a nominal proof capability from an
+-- ordinary `Cap(IO)`, in an expression position Check 6's declared-return
+-- scan structurally cannot see (an inline call argument here). This let any
+-- holder of a plain `Cap(IO)` forge any proof cap by name -- exit 0 pre-fix,
+-- directly contradicting the "unforgeable" guarantee. The Batch-A fix
+-- restricts `cap_narrow`: its result may NEVER be a nominal proof cap in ANY
+-- position (`cap_narrow` is the only polymorphic cap producer, so this closes
+-- the forge everywhere). IO-lattice narrowing is unaffected because IO caps
+-- are not in `env.proof_caps` (see `accept/t61`). A proof cap is now minted
+-- only via the gated `mint_cap` (see `accept/t62`). IMPOSSIBLE to reject
+-- pre-fix. See core-march-types.md §2.8.13.
+mod Sys do
+  mod Db do
+    proof cap P
+  end
+
+  mod App do
+    needs IO
+    needs Db.P
+
+    fn consume(_m : Cap(Db.P)) : Int do 1 end
+
+    fn attack(cap : Cap(IO)) : Int do consume(cap_narrow(cap)) end
+  end
+end

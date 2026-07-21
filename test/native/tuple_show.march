@@ -1,0 +1,17 @@
+-- Regression: compiled `println`/`to_string` on a tuple (item 329). Tuples are
+-- structural, so the Show dispatch keys them by ARITY ("$Tuple2".."$Tuple5",
+-- both at lowering and in mono) and per-arity `impl Show` lives in the prelude.
+-- Previously `println((1,2))` failed to LINK (`_show` undefined) and
+-- `to_string((1,2))` printed `#<tag>`. A nested string is DISPLAYED unquoted,
+-- matching each element's own `show` and the interpreter (whose `show_dispatch`
+-- was taught the same, replacing the repr-form `value_to_string` that quoted).
+mod Main do
+  fn main() : () do
+    println((1, 2))
+    println((1, "a", true))
+    println(to_string((1.5, 2)))
+    println([(1, 2), (3, 4)])
+    println(((1, 2), 3))
+    println(to_string((1, 2, 3, 4)))
+  end
+end

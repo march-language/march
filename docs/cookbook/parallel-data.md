@@ -112,7 +112,7 @@ The number of workers defaults to `System.cpu_count()`. Use the `_n` variants fo
 ### Parallel.pmap — order-preserving parallel transform
 
 ```march
-let nums = RRB.range(1, 1_000_001)
+let nums = RRB.range(1, 1000001)
 
 -- double every element (parallel, same order as input)
 let doubled = Parallel.pmap(nums, fn n -> n * 2)
@@ -167,12 +167,12 @@ Parallel.pall(v, fn n -> n > 0)          -- true
 Count how often each word appears in a large corpus in parallel.
 
 ```march
-fn word_counts(words: Vec(String)): Map(String, Int) do
+fn word_counts(words) : Map(String, Int) do
   Parallel.preduce(
     words,
     Map.empty(),
     fn w -> Map.singleton(w, 1),
-    fn (a, b) -> Map.merge_with(a, b, fn (x, y) -> x + y)
+    fn (a, b) -> Map.merge_with(a, b, fn x -> fn y -> x + y, Map.str_cmp)
   )
 end
 ```
@@ -191,7 +191,7 @@ fn grayscale(p: Pixel): Pixel do
   end
 end
 
-fn parallel_grayscale(pixels: Vec(Pixel)): Vec(Pixel) do
+fn parallel_grayscale(pixels) do
   Parallel.pmap(pixels, grayscale)
 end
 ```
@@ -201,15 +201,15 @@ end
 Compute mean and variance in two parallel passes.
 
 ```march
-fn mean(v: Vec(Float)): Float do
-  let n   = Float.of_int(RRB.length(v))
+fn mean(v) : Float do
+  let n   = int_to_float(RRB.length(v))
   let sum = Parallel.psum_float(v)
   sum /. n
 end
 
-fn variance(v: Vec(Float)): Float do
+fn variance(v) : Float do
   let m  = mean(v)
-  let n  = Float.of_int(RRB.length(v))
+  let n  = int_to_float(RRB.length(v))
   let sq = Parallel.preduce(v, 0.0, fn x -> (x -. m) *. (x -. m), fn (a, b) -> a +. b)
   sq /. n
 end
@@ -220,7 +220,7 @@ end
 `Parallel` has no built-in `pfilter`. Build it from `preduce`:
 
 ```march
-fn pfilter(v: Vec(a), pred: a -> Bool): Vec(a) do
+fn pfilter(v, pred) do
   Parallel.preduce(
     v,
     RRB.empty(),

@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  -- Linearity slice 7 -- (T-AlwaysLin) + (T-LinDrop): a binding of an
+  -- `always_linear type` is AUTO-PROMOTED to Linear (no per-site annotation),
+  -- so dropping it unused is rejected exactly like a `linear let` drop.
+  -- Type deliberately named Tok, NOT Handle -- always_linear_types is
+  -- name-keyed globally and stdlib handle.march already claims Handle
+  -- (finding L4). See §2.9.1.
+  always_linear type Tok = Tok(Int)
+  fn main() : () do
+    let t = Tok(1)
+    ()
+  end
+end

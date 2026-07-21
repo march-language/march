@@ -65,6 +65,24 @@ mod NodeCallLoopback do
     NodeCall.call(fd, fref, encode_add_args(a, b), my_pid, 9999999, corr, 0)
   end
 
+  -- GitHub-hosted macOS runners (macos-15+) intermittently refuse the very
+  -- first loopback connect to a freshly-listening socket in the same
+  -- process, even though listen() has already completed — a known,
+  -- unfixed runner quirk (see actions/runner-images#10924, #11901), not a
+  -- March scheduler/runtime race. A same-process immediate retry is the
+  -- workaround reported to clear it, since no `sleep` builtin exists.
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+    match Socket.connect(host, port) do
+      Ok(fd) -> Ok(fd)
+      Err(e) ->
+        if attempts_left <= 1 do
+          Err(e)
+        else
+          connect_with_retry(host, port, attempts_left - 1)
+        end
+    end
+  end
+
   fn main() do
     let port = 29850
 
@@ -75,7 +93,7 @@ mod NodeCallLoopback do
 
     let srv = task_spawn(fn _ -> run_server(listen_fd))
 
-    let conn_fd = match Socket.connect("127.0.0.1", port) do
+    let conn_fd = match connect_with_retry("127.0.0.1", port, 5) do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end

@@ -416,6 +416,8 @@ fn_param:
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
   | LINEAR; name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
+  | AFFINE; name = soft_lower_name; COLON; t = ty
+    { FPNamed { param_name = name; param_ty = Some t; param_lin = Affine } }
   | name = soft_lower_name; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
   | name = soft_lower_name; COLON; t = ty; DSLASH; default_e = expr
@@ -976,6 +978,8 @@ field:
     { { fld_name = name; fld_ty = t; fld_lin = Unrestricted } }
   | LINEAR; name = lower_name; COLON; t = ty
     { { fld_name = name; fld_ty = t; fld_lin = Linear } }
+  | AFFINE; name = lower_name; COLON; t = ty
+    { { fld_name = name; fld_ty = t; fld_lin = Affine } }
 
 param:
   | name = soft_lower_name; COLON; t = ty
@@ -986,6 +990,8 @@ param:
     { { param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted } }
   | LINEAR; name = soft_lower_name; COLON; t = ty
     { { param_name = name; param_ty = Some t; param_lin = Linear } }
+  | AFFINE; name = soft_lower_name; COLON; t = ty
+    { { param_name = name; param_ty = Some t; param_lin = Affine } }
 
 (* ---- Expressions ---- *)
 
@@ -1000,8 +1006,18 @@ block_expr:
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = e },
             mk_span ($loc)) }
+  | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = e },
+            mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | LET; QUESTION; _p = simple_pattern; ty = type_annot; _e = preceded(EQUALS, expr)?
+    { let _ = ty in
+      error_raise
+        "A `let?` binding can't have a type annotation — its type is inferred \
+         from the `Ok` payload of the `Result` on the right."
+        (Some "let? name = result_expr")
+        $startpos(ty) }
   | LET; QUESTION; _p = simple_pattern; error
     { error_raise
         "I was expecting `=` in the let? binding here:"
@@ -1116,6 +1132,9 @@ lambda_stmts:
   | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = ev },
             mk_span ($loc)) :: rest }
+  | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = ev },
+            mk_span ($loc)) :: rest }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
 
@@ -1166,13 +1185,102 @@ expr_unary:
   | e = expr_app { e }
 
 expr_app:
-  | f = expr_field; LPAREN; args = separated_list(COMMA, expr); RPAREN
+  | f = expr_field; LPAREN; args = separated_list(COMMA, call_arg); RPAREN
     { EApp (f, args, mk_span ($loc)) }
   | con = UPPER_IDENT; LPAREN; RPAREN
     { ECon (mk_name con $loc, [], mk_span ($loc)) }
-  | con = UPPER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN
+  | con = UPPER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, call_arg); RPAREN
     { ECon (mk_name con $loc, args, mk_span ($loc)) }
   | e = expr_field %prec prec_app { e }
+
+(** A call argument. Identical to [expr] except that an inline lambda
+    literal (`fn ... -> ...`) gets a body grammar that additionally allows
+    bare (non-[let]) statements before the final expression -- like
+    [block_body], but without requiring [do...end] delimiters. This is
+    safe ONLY in call-argument position because the argument is always
+    unambiguously bounded by [,] or [)]; used as the general [expr]
+    production (e.g. a [let] RHS embedded in a larger, still-open
+    [block_body]), the same relaxation would make the parser unable to
+    tell where the lambda's body ends and the enclosing statement sequence
+    resumes. *)
+call_arg:
+  | FN; ps = lambda_params; ARROW; body = call_arg_lambda_body
+    { ELam (ps, body, mk_span ($loc)) }
+  | FN; ARROW; body = call_arg_lambda_body
+    { ELam ([], body, mk_span ($loc)) }
+  | e = expr_no_bare_lambda { e }
+
+(** [expr] minus its top-level bare-lambda alternatives (`FN ... ARROW ...`
+    with no enclosing delimiter). Used as [call_arg]'s fallback so there is
+    exactly one way to parse a bare lambda in call-argument position (via
+    [call_arg]'s own alternatives above) -- avoiding a grammar ambiguity
+    between this rule and [call_arg]'s dedicated lambda alternatives.
+    A parenthesized lambda `(fn ... -> ...)` is unaffected: it still goes
+    through [expr] via [expr_atom]'s `LPAREN expr RPAREN`. *)
+expr_no_bare_lambda:
+  | e = expr_pipe { e }
+  | ASSERT; e = expr
+    { EAssert (e, mk_span ($loc)) }
+  | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
+    { EIf (cond, t, f, mk_span ($loc)) }
+  | IF; cond = expr; THEN; t = expr; ELSE; f = expr
+    { EIf (cond, t, f, mk_span ($loc)) }
+  | IF; _c = expr; DO; _t = block_body; ELSE; _f = block_body; error
+    { error_raise
+        "I was expecting `end` to close the if expression here:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($7) }
+  | IF; _c = expr; DO; _t = block_body; error
+    { error_raise
+        "March `if` expressions always need an `else` branch:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($5) }
+  | IF; _c = expr; THEN; _t = expr; error
+    { error_raise
+        "I don't recognize `then` here -- March uses do/end blocks instead."
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($3) }
+  | IF; _c = expr; error
+    { error_raise
+        "I was expecting `do` after the condition here:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($3) }
+  | MATCH; e = expr; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, branch); END
+    { EMatch (e, bs, mk_span ($loc)) }
+  | MATCH; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, cond_branch); END
+    { ECond (bs, mk_span ($loc)) }
+  | MATCH; _e = expr; DO; option(arm_sep); _bs = separated_nonempty_list(arm_sep, branch); error
+    { error_raise
+        "I was expecting `end` to close the match here:"
+        None
+        $startpos(_bs) }
+  | MATCH; _e = expr; error
+    { error_raise
+        "I was expecting `do` after the match expression here:"
+        (Some "match expr do\n    Pattern -> result\nend")
+        $startpos($3) }
+  | WITH; bindings = separated_nonempty_list(COMMA, with_binding);
+    DO; body = block_body; END
+    { build_with bindings body [] (mk_span ($loc)) }
+  | WITH; bindings = separated_nonempty_list(COMMA, with_binding);
+    DO; body = block_body;
+    ELSE; option(arm_sep); else_arms = separated_nonempty_list(arm_sep, branch); END
+    { build_with bindings body else_arms (mk_span ($loc)) }
+
+call_arg_lambda_body:
+  | stmts = nonempty_list(call_arg_lambda_stmt)
+    { fold_letq stmts (mk_span ($loc)) }
+
+call_arg_lambda_stmt:
+  | LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = ev },
+            mk_span ($loc)) }
+  | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = ev },
+            mk_span ($loc)) }
+  | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr
+    { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
+  | e = expr { e }
 
 (** Field access: x.name — left-recursive for chained access: x.y.z
     Contextual keywords (send) are allowed as field names to support Chan.send(…). *)

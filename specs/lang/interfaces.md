@@ -266,7 +266,13 @@ After `derive Eq for Point`, you can use `eq` on `Point` values.
 - **`Eq`** — structural equality, comparing all fields/constructors
 - **`Ord`** — lexicographic ordering by fields, constructor order for variants
 - **`Show`** — pretty-printed representation
-- **`Hash`** — consistent hash based on structure
+- **`Hash`** — consistent hash based on structure. The `hash()` VALUE is
+  cross-backend equal: the interpreter reimplements the compiled runtime's
+  hash primitives bit-for-bit (splitmix64 for ints, FNV-1a for strings,
+  masked to 62 bits so the result fits the interpreter's native int), so
+  `hash(v)` agrees interpreted-vs-compiled for every value — safe to compare
+  across backends. (Hash values are still not a stable serialization format
+  across compiler versions, but within one version the two backends agree.)
 
 ```march
 type User = { name : String, age : Int, role : String }

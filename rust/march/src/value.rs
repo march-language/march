@@ -72,18 +72,23 @@ impl FromMarch for bool {
     }
 }
 
-// Float: the slot holds raw IEEE-754 bits (march_make_float is a bitcast), so
-// `to_march`/`to_march_slot` coincide. Top-level f64 args/returns are passed as
-// C `double` directly by the macro (it special-cases them); these impls cover
-// f64 record/variant fields.
+// Float: a record/variant FIELD slot holds raw IEEE-754 bits (March's native
+// per-field representation, matching the C gen-c codec) — NOT the boxed
+// erased-payload form.  Top-level f64 args/returns are passed as C `double`
+// directly by the macro (it special-cases them); these impls cover f64
+// record/variant fields.  Erased f64 PAYLOADS (Option<f64>, and — when added —
+// Result<f64,_>) box separately via march_make_float / march_get_float (see
+// encode_option_f64), which since float-boxing Stage 2 allocate a
+// march_float_box rather than bitcasting.  Do NOT route field slots through
+// those: a field is raw bits, an erased payload is a boxed ptr.
 impl ToMarch for f64 {
     fn to_march(self) -> march_value {
-        unsafe { march_make_float(self) }
+        self.to_bits() as march_value
     }
 }
 impl FromMarch for f64 {
     fn from_march(v: march_value) -> Self {
-        unsafe { march_get_float(v) }
+        f64::from_bits(v as u64)
     }
 }
 

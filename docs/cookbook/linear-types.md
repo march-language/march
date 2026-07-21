@@ -13,16 +13,16 @@ A linear value must be used exactly once — the compiler rejects code that drop
 ## Declaring a linear type
 
 ```march
-linear type FileHandle = FileHandle(Int)
+type FileHandle = FileHandle(Int)
 ```
 
-Every binding of `FileHandle` is automatically linear. Dropping it without calling a consuming function is a compile error:
+A `linear let` at the binding site makes that particular binding linear. Dropping it without calling a consuming function is a compile error:
 
 ```march
 fn main() do
-  let fh = open_file("data.txt")
+  linear let fh = open_file("data.txt")
   -- returning here without using fh would be a compile error:
-  -- "linear value `fh` is dropped without being consumed"
+  -- "The linear value `fh` was never used."
   let content = read_all(fh)   -- consumes fh
   println(content)
 end

@@ -353,6 +353,30 @@ let is_actor_struct_name (tcon_name : string) : bool =
   let nl = String.length tcon_name and sl = String.length sfx in
   nl > sl && String.sub tcon_name (nl - sl) sl = sfx
 
+(** True if [tcon_name] ends in the actor-message-variant suffix ("..._Msg")
+    — used at TCon-name granularity to identify a [<Actor>_Msg] variant type.
+
+    Finding-19 memory-safety fix: an actor's message variant type is FORCED to
+    the [Boxed] representation (heap cell with a constructor tag) rather than
+    the size-optimal Newtype/Niche encoding, and its constructor tags are made
+    GLOBALLY unique across all actors (see [Llvm_toplevel.build_ctor_info]).
+    Both moves exist so that a message meant for actor B, delivered by mistake
+    to actor A's mailbox, carries a tag A's dispatch does NOT handle — A's
+    dispatch [ECase] then drops it via its default arm (parity with the
+    interpreter's silent foreign-message drop) instead of MISROUTING its payload
+    into A's first handler slot and reinterpreting it at the wrong type
+    (memory-unsafe UB). Without the [Boxed] force, a single-handler actor's
+    message is a Newtype (raw payload, NO tag), so a foreign message is
+    indistinguishable at dispatch — there is nothing to check.
+
+    NB: a user type literally named [Foo_Msg] would also be forced Boxed. That
+    is a harmless (merely less size-optimal) classification, and the flat global
+    type namespace already makes such a name an actor-message collision risk. *)
+let is_actor_msg_name (tcon_name : string) : bool =
+  let sfx = actor_msg_suffix in
+  let nl = String.length tcon_name and sl = String.length sfx in
+  nl > sl && String.sub tcon_name (nl - sl) sl = sfx
+
 (** True if [fn_name] ends in the actor-dispatch-fn suffix ("..._dispatch").
     Mirrors the two byte-identical inline copies (llvm_emit.ml's [emit_fn]
     visibility-prefix decision and [emit_module]'s

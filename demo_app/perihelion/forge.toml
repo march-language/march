@@ -1,0 +1,5 @@
+[package]
+name = "perihelion"
+version = "0.1.0"
+type = "app"
+description = "Perihelion clone — one-tap orbit game in March, compiled to JS"

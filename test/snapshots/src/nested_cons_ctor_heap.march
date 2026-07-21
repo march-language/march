@@ -1,0 +1,25 @@
+-- Regression: nested `Cons(Ctor(heap_field), rest)` match over a STATIC list
+-- literal must not RC-underflow.  When Beta_adt (pre-Perceus) collapses the
+-- statically-known outer `Cons`, the head constructor becomes an owned-local
+-- case scrutinee bound through a copy alias (`let $f = $head`).  Perceus emits
+-- the arm's ownership `dec_rc $f` (which llvm_case's strip_scrut_decrc converts
+-- into a shallow free that IncRC's the extracted fields).  cprop then
+-- copy-propagated the scrutinee ATOM (`case $f` -> `case $head`) but — by design
+-- — left `dec_rc $f` untouched, desyncing the name strip_scrut_decrc matches on;
+-- the compensating field-IncRC was skipped, so freeing the head deep-freed the
+-- still-live extracted heap field -> `RC underflow (rc was 0)` abort.  Fix keeps
+-- cprop from propagating a case scrutinee out of sync with its arm dec.
+mod Main do
+  type Row = Row(List(Int))
+
+  fn main() : () do
+    let rows = Cons(Row(Cons(1, Cons(2, Nil))),
+               Cons(Row(Cons(3, Nil)), Nil))
+    match rows do
+      Cons(Row(fp), rest) ->
+        println(int_to_string(List.length(fp)))
+        println(int_to_string(List.length(rest)))
+      Nil -> println("empty")
+    end
+  end
+end

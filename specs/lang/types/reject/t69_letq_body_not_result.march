@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: must produce a Result with the same error type
+-- `let?` slice 8, §2.10 (E-LetQ-Body): the continuation after a `let?` must
+-- itself be a Result (with the same error type), since the whole `let?`
+-- expression yields a Result. A bare Int body is rejected.
+mod Main do
+  fn f() : Result(Int, String) do Ok(1) end
+  fn bad() : Result(Int, String) do
+    let? x = f()
+    x + 1
+  end
+end

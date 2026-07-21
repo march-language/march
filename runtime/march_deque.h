@@ -34,8 +34,18 @@ static inline int march_deque_push(march_deque *d, void *item) {
     if (b - t >= MARCH_DEQUE_CAPACITY) return -1;
     atomic_store_explicit(&d->items[b % MARCH_DEQUE_CAPACITY], item,
                           memory_order_relaxed);
-    atomic_thread_fence(memory_order_release);
-    atomic_store_explicit(&d->bottom, b + 1, memory_order_relaxed);
+    /* Release-STORE the new bottom (rather than a standalone release fence
+     * followed by a relaxed store).  Both are correct Chase-Lev formulations
+     * for C11 weak memory, but the release-store form additionally lets a
+     * stealer's acquire-load of `bottom` synchronize-with this store under
+     * ThreadSanitizer's happens-before model — TSan does not track that a
+     * standalone atomic_thread_fence(release) turns the subsequent relaxed
+     * store into a release operation, so the fence form makes every field the
+     * owner wrote before pushing (proc init in sched_spawn_common) appear to
+     * race the stealer that later dispatches the proc.  Publishing `bottom`
+     * with release semantics carries all prior stores to the acquiring
+     * stealer with no separate fence. */
+    atomic_store_explicit(&d->bottom, b + 1, memory_order_release);
     return 0;
 }
 

@@ -33,7 +33,7 @@ mod ReadFile do
     Err(e) ->
       println("Error: " ++ to_string(e))
     Ok(first3) -> do
-      let joined = List.fold_left("", first3, fn(acc, line) -> acc ++ line ++ "\n")
+      let joined = List.fold_left(first3, "", fn(acc, line) -> acc ++ line ++ "\n")
       println(joined)
     end
     end

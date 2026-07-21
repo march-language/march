@@ -6,8 +6,10 @@ mod Main do
   -- strictly-ordered send sequence, drained by ONE run_until_idle() to a fixed
   -- point — output does NOT depend on scheduler interleaving, so it is
   -- byte-identical interpreted vs compiled. Observation is via a handler that
-  -- println's (never external get_actor_field / pid_of_int, which are broken
-  -- in the compiled runtime).
+  -- println's — deliberately self-contained rather than reading state back out
+  -- via external get_actor_field / pid_of_int (those now work compiled as of the
+  -- 2026-07-08 supervision plan, but a println-observed single actor keeps this
+  -- witness minimal and interleaving-independent).
   actor Counter do
     state { count : Int }
     init  { count: 0 }

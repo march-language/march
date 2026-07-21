@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: refinement violation: argument does not satisfy precondition
+-- Refinement types (widening slice 12, §2.14). A DIRECT call to a function
+-- whose parameter carries {T | pred} has its argument checked against pred
+-- by the separate post-typecheck lib/refinecheck pass (NOT by typecheck.ml,
+-- which erases the refinement to its base type -- see accept/t75's header).
+-- `take_n(-3)` violates `_ >= 0` with a literal argument -- Z3 refutes it
+-- (no path-sensitivity needed), so `--check` rejects with the pinned
+-- "refinement violation" message. Accept companion: accept/t75 (satisfied).
+mod M do
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn main() do
+    println(int_to_string(take_n(-3)))
+  end
+end

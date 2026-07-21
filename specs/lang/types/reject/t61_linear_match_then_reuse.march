@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: is used more than once here
+mod Main do
+  -- Linearity slice 7 -- (T-LinMatch): matching on a tracked linear variable
+  -- is itself a consuming use (the scrutinee EVar passes through record_use),
+  -- so using `r` again after the match is a double use. See §2.9.3.
+  type Res = R(Int)
+  fn take(r : Res) : Int do
+    match r do
+      R(n) -> n
+    end
+  end
+  fn main() : () do
+    linear let r : Res = R(1)
+    let a = match r do
+      R(n) -> n
+    end
+    let b = take(r)
+    ()
+  end
+end

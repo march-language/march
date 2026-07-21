@@ -13,7 +13,7 @@ let impure_builtins = [
   (* Console IO *)
   "print"; "println"; "march_print"; "march_println";
   "print_int"; "print_float"; "print_char";
-  "read_line"; "io_read_line"; "process_read_line";
+  "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "process_read_line";
   (* File IO *)
   "file_read_line"; "file_open"; "file_close";
   "file_read"; "file_write"; "file_write_line";
@@ -28,6 +28,8 @@ let impure_builtins = [
   (* Actors / tasks / processes *)
   "send"; "kill"; "spawn"; "receive";
   "task_spawn"; "task_spawn_steal"; "task_spawn_link";
+  (* Signal watchers — register/remove a deferred OS-signal handler; self-raise *)
+  "signal_watch"; "signal_unwatch"; "signal_raise_self";
   "actor_cast"; "actor_call"; "actor_reply";
   (* Process control *)
   "process_exit"; "process_spawn_sync";

@@ -1,0 +1,21 @@
+-- Slice 6 (proof caps), the LEGIT MINT accept -- the sanctioned way to
+-- construct a proof cap: `Db`'s own PUBLIC (`fn`) `run_migrations` mints its
+-- own `Cap(Db.Migrated)` via `mint_cap`. `mint_cap(x) : Cap(P)` typechecks iff
+-- `P`'s declaring module == the enclosing module AND the enclosing fn is
+-- public (`fn`, not `pfn`); `Db` satisfies both, so the mint is allowed. Check
+-- 6's self-declaration exemption also lets `Db`'s public fns return their own
+-- proof cap, and a proof cap's declaring module implicitly satisfies its own
+-- `needs` (self-declaration, Check 1), so `Db` needs no `needs Db.Migrated`
+-- line. This is the accept counterpart to `reject/t56` (external mint) and
+-- `reject/t57` (pfn mint) -- the mint surface is exactly the declaring
+-- module's public fns. `mint_cap` is runtime-erased (it aliases `cap_narrow`
+-- for all downstream passes), so this has zero runtime effect. See
+-- core-march-types.md §2.8.13.
+mod Db do
+  proof cap Migrated
+  needs IO
+
+  fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+    mint_cap(cap)
+  end
+end

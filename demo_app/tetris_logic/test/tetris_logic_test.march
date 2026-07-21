@@ -1,0 +1,124 @@
+mod TetrisLogicTest do
+  use TetrisLogic
+
+  describe "piece_cells" do
+    test "I piece spans a horizontal row of 4 in a 4x4 box" do
+      let cells = TetrisLogic.piece_cells(TetrisLogic.I)
+      assert (List.length(cells) == 4)
+      assert List.member(cells, (0, 1))
+      assert List.member(cells, (1, 1))
+      assert List.member(cells, (2, 1))
+      assert List.member(cells, (3, 1))
+    end
+
+    test "O piece is a 2x2 square" do
+      let cells = TetrisLogic.piece_cells(TetrisLogic.O)
+      assert (List.length(cells) == 4)
+      assert List.member(cells, (1, 1))
+      assert List.member(cells, (2, 1))
+      assert List.member(cells, (1, 2))
+      assert List.member(cells, (2, 2))
+    end
+  end
+
+  describe "rotate_cells" do
+    test "rotating the I piece once yields a vertical column" do
+      let rotated = TetrisLogic.rotate_cells(TetrisLogic.piece_cells(TetrisLogic.I))
+      assert List.member(rotated, (2, 0))
+      assert List.member(rotated, (2, 1))
+      assert List.member(rotated, (2, 2))
+      assert List.member(rotated, (2, 3))
+    end
+
+    test "rotating any piece four times returns the original cells" do
+      let original = TetrisLogic.piece_cells(TetrisLogic.T)
+      let once = TetrisLogic.rotate_cells(original)
+      let twice = TetrisLogic.rotate_cells(once)
+      let thrice = TetrisLogic.rotate_cells(twice)
+      let full_turn = TetrisLogic.rotate_cells(thrice)
+      assert (List.sort_by(full_turn, fn (a, b) -> a < b) ==
+              List.sort_by(original, fn (a, b) -> a < b))
+    end
+  end
+
+  describe "collides" do
+    test "empty board never collides with an in-bounds piece" do
+      let board = TetrisLogic.empty_board()
+      let cells = TetrisLogic.piece_cells(TetrisLogic.O)
+      assert !TetrisLogic.collides(board, cells, 4, 0)
+    end
+
+    test "collides when a cell goes past the left wall" do
+      let board = TetrisLogic.empty_board()
+      let cells = TetrisLogic.piece_cells(TetrisLogic.I)
+      assert TetrisLogic.collides(board, cells, -1, 0)
+    end
+
+    test "collides when a cell goes past the right wall" do
+      let board = TetrisLogic.empty_board()
+      let cells = TetrisLogic.piece_cells(TetrisLogic.I)
+      assert TetrisLogic.collides(board, cells, 7, 0)
+    end
+
+    test "collides with the floor" do
+      let board = TetrisLogic.empty_board()
+      let cells = TetrisLogic.piece_cells(TetrisLogic.O)
+      assert TetrisLogic.collides(board, cells, 4, 18)
+    end
+
+    test "collides with an already-locked cell" do
+      let board = TetrisLogic.lock_piece(TetrisLogic.empty_board(),
+                                          TetrisLogic.piece_cells(TetrisLogic.O),
+                                          0, 0, 1)
+      let cells = TetrisLogic.piece_cells(TetrisLogic.O)
+      assert TetrisLogic.collides(board, cells, 0, 0)
+    end
+  end
+
+  describe "clear_lines" do
+    test "a fully filled row is cleared and scored" do
+      let filled_row_cells = List.map(List.range(0, 10), fn x -> (x, 0))
+      let board = TetrisLogic.lock_piece(TetrisLogic.empty_board(),
+                                          filled_row_cells, 0, 0, 1)
+      match TetrisLogic.clear_lines(board) do
+        (new_board, n) ->
+          assert (n == 1)
+          assert (Array.get(new_board, TetrisLogic.cell_index(0, 0)) == 0)
+      end
+    end
+
+    test "a partially filled row is not cleared" do
+      let partial_cells = List.map(List.range(0, 5), fn x -> (x, 0))
+      let board = TetrisLogic.lock_piece(TetrisLogic.empty_board(),
+                                          partial_cells, 0, 0, 1)
+      match TetrisLogic.clear_lines(board) do
+        (_new_board, n) -> assert (n == 0)
+      end
+    end
+  end
+
+  describe "score_for_lines" do
+    test "single, double, triple, tetris scoring" do
+      assert (TetrisLogic.score_for_lines(0) == 0)
+      assert (TetrisLogic.score_for_lines(1) == 100)
+      assert (TetrisLogic.score_for_lines(2) == 300)
+      assert (TetrisLogic.score_for_lines(3) == 500)
+      assert (TetrisLogic.score_for_lines(4) == 800)
+    end
+  end
+
+  describe "level_for_lines and drop_interval_ms" do
+    test "level increases every 10 lines" do
+      assert (TetrisLogic.level_for_lines(0) == 0)
+      assert (TetrisLogic.level_for_lines(9) == 0)
+      assert (TetrisLogic.level_for_lines(10) == 1)
+      assert (TetrisLogic.level_for_lines(25) == 2)
+    end
+
+    test "drop interval decreases with level, floored at 100ms" do
+      assert (TetrisLogic.drop_interval_ms(0) == 500)
+      assert (TetrisLogic.drop_interval_ms(1) == 460)
+      assert (TetrisLogic.drop_interval_ms(20) == 100)
+    end
+  end
+end

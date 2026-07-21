@@ -134,10 +134,22 @@ let has_hints ctx =
   List.exists (fun d -> d.severity = Hint) ctx.diagnostics
 
 let sorted ctx =
-  List.sort
+  (* [stable_sort] plus a total tiebreaker so diagnostics that SHARE a span
+     (e.g. a Cap-narrowing HINT emitted at the same span as another
+     diagnostic) render in a deterministic order run-to-run. Without a
+     deterministic tiebreaker a non-stable sort could reorder equal-span
+     diagnostics, producing display nondeterminism. *)
+  let sev_rank = function Error -> 0 | Warning -> 1 | Hint -> 2 in
+  List.stable_sort
     (fun a b ->
       let c = compare a.span.start_line b.span.start_line in
-      if c <> 0 then c else compare a.span.start_col b.span.start_col)
+      if c <> 0 then c
+      else
+        let c = compare a.span.start_col b.span.start_col in
+        if c <> 0 then c
+        else
+          let c = compare (sev_rank a.severity) (sev_rank b.severity) in
+          if c <> 0 then c else compare a.message b.message)
     ctx.diagnostics
 
 (** Render a diagnostic with source context.

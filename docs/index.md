@@ -33,13 +33,27 @@ actor Counter do
   on Increment(n : Int) do
     { state with count: state.count + n }
   end
-
-  on Get() -> reply state.count
 end
 
-supervisor WorkerSup do
-  strategy OneForOne
-  children [Counter, Logger]
+actor Logger do
+  state { entries : Int }
+  init  { entries: 0 }
+
+  on Log(msg : String) do
+    { state with entries: state.entries + 1 }
+  end
+end
+
+actor WorkerSup do
+  state { counter : Int, logger : Int }
+  init  { counter: 0, logger: 0 }
+
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 60
+    Counter counter
+    Logger  logger
+  end
 end
 ```
 
@@ -91,10 +105,12 @@ March wins not because C is slow, but because FBIP eliminates 200M allocator cal
 March tracks ownership at the type level. Mark a type as `linear` and the compiler guarantees it is used exactly once — no leaks, no double-frees, no "I thought this was already closed" bugs. File handles, socket connections, and database transactions get static guarantees without a runtime cost.
 
 ```march
-linear type FileHandle = FileHandle(Int)
+always_linear type FileHandle = FileHandle(Int)
 
 fn write_and_close(f : FileHandle, content : String) : Unit do
-  File.write(f, content)  -- consumes f
+  match f do
+    FileHandle(fd) -> write_to_fd(fd, content)  -- consumes f
+  end
   -- f cannot be used again; the compiler enforces this
 end
 ```
@@ -120,14 +136,12 @@ forge interactive      # launch the REPL
 ```march
 mod Chat do
 
-type Message = Join(String) | Leave(String) | Say(String, String)
-
 actor Room do
   state { members : List(String) }
   init  { members: [] }
 
-  on Join(name) do
-    { state with members: [name | state.members] }
+  on Enter(name) do
+    { state with members: Cons(name, state.members) }
   end
 
   on Say(from, text) do
@@ -137,14 +151,14 @@ actor Room do
   end
 
   on Leave(name) do
-    { state with members: List.filter(fn m -> m != name, state.members) }
+    { state with members: List.filter(state.members, fn m -> m != name) }
   end
 end
 
 fn main() do
   let room = spawn(Room)
-  send(room, Join("alice"))
-  send(room, Join("bob"))
+  send(room, Enter("alice"))
+  send(room, Enter("bob"))
   send(room, Say("alice", "hello!"))
   send(room, Leave("bob"))
 end
