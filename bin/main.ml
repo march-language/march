@@ -798,8 +798,17 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
    silently shadow the requested codegen. (MARCH_DEBUG_RUNTIME is deliberately
    absent: it only affects the interpreter/JIT runtime .so, which is keyed by
    its own flags_sig content key.) *)
+(* Version of the C-runtime compilation FLAGS (as opposed to its source, which
+   compiler_identity/runtime_identity already digest).  compilation_hash mixes in
+   the compiler executable's bytes, but a released/cached toolchain can serve a
+   binary built with a DIFFERENT set of runtime cflags (e.g. before/after adding
+   -fno-strict-aliasing -fwrapv) whenever the exe digest happens to match — the
+   flags themselves are not otherwise in the key.  Bump this whenever the runtime
+   clang/cc invocation flags change so no stale artifact can shadow the new ABI.
+   v2 = runtime now built with -fno-strict-aliasing -fwrapv. *)
 let codegen_cas_tags () =
-  (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  "rtcflags2"
+  :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
