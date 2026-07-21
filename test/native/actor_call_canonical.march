@@ -1,0 +1,24 @@
+mod Main do
+  type GetReq = GetReq
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on GetCount(reply_to) do
+      Actor.reply(reply_to, state.count)
+      state
+    end
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+  fn main() do
+    let pid = spawn(Counter)
+    Actor.cast(pid, Inc())
+    Actor.cast(pid, Inc())
+    run_until_idle()
+    match Actor.call(pid, GetReq, 1000) do
+      Ok(n)  -> println("count = " ++ to_string(n))
+      Err(e) -> println("error: " ++ e)
+    end
+  end
+end

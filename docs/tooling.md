@@ -46,7 +46,7 @@ Scaffolded layout:
 ```
 my_app/
 ├── forge.toml          # project manifest
-├── src/
+├── lib/
 │   └── my_app.march    # entry point (mod MyApp do ... end)
 └── test/
     └── my_app_test.march
@@ -58,7 +58,7 @@ my_app/
 name = "my_app"
 version = "0.1.0"
 
-[dependencies]
+[deps]
 # add deps here
 ```
 
@@ -128,7 +128,7 @@ mod Counter do
       None    -> ()
       Some(el) ->
         Dom.set_text(el, "0")
-        Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
+        Dom.listen(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
     end
   end
 end
@@ -387,7 +387,7 @@ forge search --type "Option(a) -> a -> a"
 # Finds: Option.unwrap_or
 
 forge search --type "String -> Int"
-# Finds: String.length, String.to_int (partial)
+# Finds: String.byte_size, String.to_int (partial)
 ```
 
 ### Search by Documentation Keyword
@@ -404,7 +404,7 @@ forge search --doc "hash"
 ```sh
 forge search "map" --limit 5      # cap results (default: 20)
 forge search "map" --json         # JSON output
-forge search "map" --pretty       # colored, aligned table
+forge search "map" --plain        # plain text, no colors (for piping or LLM use)
 ```
 
 ### Rebuilding the Search Index
@@ -550,7 +550,7 @@ forge add depot --git https://github.com/march-language/depot --tag v1.3.0 --for
 Or edit `forge.toml` directly:
 
 ```toml
-[dependencies]
+[deps]
 depot = { git = "https://github.com/march-language/depot", tag = "v1.2.0" }
 ```
 
@@ -896,7 +896,7 @@ Place a `dbg()` breakpoint anywhere in your code:
 fn process(items : List(Int)) : Int do
   let filtered = List.filter(items, fn x -> x > 0)
   dbg()    -- breakpoint: REPL opens here
-  let result = List.fold_left(0, filtered, fn acc x -> acc + x)
+  let result = List.fold_left(filtered, 0, fn (acc, x) -> acc + x)
   result
 end
 ```

@@ -179,6 +179,18 @@ Whether to parallelize is a judgment call that depends on data size and per-elem
 - Compiled and interpreted runs produce the **same output**; only wall-clock time differs.
 - Below `pmap_threshold()`, every parallel function is exactly its sequential equivalent.
 
+**Conformance status (widening slice 9):** this guarantee is a mechanically
+tested part of the language reference — `core-march.md` §4.14 and
+`core-march-types.md` §2.11 (data parallelism adds no new typing rules).
+Golden `g43_parallel_determinism` witnesses `List.pmap == List.map` plus the
+RRB `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` byte-identical
+interpreted and compiled (stress-verified 0/15 crashes) — the first compiled
+witness for the `Parallel` module. One documented exception: **`psum_float`
+is not backend-portable** — IEEE-754 `+.` is not associative, and the two
+backends pick different worker/chunk counts, so results can differ in the
+last bit (finding P1, `specs/todos.md`). Prefer `psum`/integer accumulation,
+or pin `psum_float` inputs that are exact in binary, when portability matters.
+
 ---
 
 ## Bulk parallel work: RRB.Vec and Parallel

@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             ocaml-compiler: 5.3.0
           - os: ubuntu-24.04
             ocaml-compiler: 5.3.0
@@ -30,16 +30,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
+        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
+        # entry for macos-15 (our minimum macOS target); the older @v3 the tag
+        # resolved to failed with "no matching opam release", and forcing a
+        # prerelease opam fails GPG verification. Pin the fixed version.
+        uses: ocaml/setup-ocaml@v3.7.0
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
       - name: Install system dependencies
         run: |
+          # z3: the refinement-type conformance corpus (@types-check) discharges
+          # pre/postcondition + division-safety VCs via the `z3` binary on PATH
+          # (lib/refine/solver.ml). Without it, refinement checks silently no-op
+          # and the reject/t71-t73 witnesses stop being rejected. Install it on
+          # both runners so the corpus is deterministic (macOS previously relied
+          # on the runner image's pre-installed z3).
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 brotli zstd llvm
+            brew install blake3 brotli zstd llvm z3
           else
-            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
             # libblake3-dev is not available in Ubuntu 24.04; build from source
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             cd /tmp/blake3/c
@@ -65,6 +75,22 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      # Diagnostic for the intermittent, GH-Actions-only `ffi_result` flake
+      # (parse("zz") occasionally prints "bad int" instead of "nan").  The
+      # runtest byte-exact diff is quarantined (test/dune @ffi_result_diff_manual),
+      # so this probe stress-compiles the case ~40x with the CAS + dune caches
+      # cleared each time and reports whether the produced BINARIES differ
+      # (codegen/link non-determinism) or are identical (execution-time UB), plus
+      # a full disassembly of the adjacent shims on any wrong output.  Linux-only
+      # (the flake has never reproduced on macOS) and non-blocking (the evidence
+      # is the point; a red X here must not fail the pipeline).
+      - name: FFI Result flake probe (Linux-only diagnostic; non-blocking)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          eval $(opam env)
+          scripts/ffi_result_flake_probe.sh 40
+
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         run: |
           eval $(opam env)
@@ -74,6 +100,14 @@ jobs:
         run: |
           eval $(opam env)
           dune build @grammar-check
+
+      - name: Golden corpus AddressSanitizer gate (Linux only; RC/UAF guard)
+        if: runner.os == 'Linux'
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            ./specs/lang/golden/sanitize.sh
 
       - name: Check doc notebooks (.scrollmd) compile
         run: |
@@ -99,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@v3.7.0
         with:
           ocaml-compiler: 5.3.0
 

@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings, generated from source — lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 109 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 111 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement — use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -92,7 +92,7 @@ List.is_empty([])                    -- true
 List.length([1, 2, 3])               -- 3
 List.any([1, 2, 3], fn x -> x > 2)  -- true
 List.all([2, 4, 6], fn x -> x % 2 == 0)  -- true
-List.member(2, [1, 2, 3])           -- true
+List.member([1, 2, 3], 2)           -- true
 
 -- Transformation
 List.map([1, 2, 3], fn x -> x * 2)          -- [2, 4, 6]
@@ -121,7 +121,6 @@ List.sort_by([3, 1, 2], fn (a, b) -> a < b)   -- [1, 2, 3]
 -- Zipping
 List.zip([1, 2, 3], ["a", "b", "c"])  -- [(1, "a"), (2, "b"), (3, "c")]
 List.unzip([(1, "a"), (2, "b")])       -- ([1, 2], ["a", "b"])
-List.with_index([10, 20, 30])          -- [(0, 10), (1, 20), (2, 30)]
 
 -- Grouping
 List.intersperse([1, 2, 3], 0)         -- [1, 0, 2, 0, 3]
@@ -169,25 +168,24 @@ editor-driven detection.
 `string.march` — String operations.
 
 ```march
-String.length("hello")              -- 5
-String.concat(["a", "b", "c"])      -- "abc"
+string_length("hello")              -- 5  (bare builtin, not under the String module)
+String.join(["a", "b", "c"], "")    -- "abc"
 String.join(["a", "b", "c"], ", ")  -- "a, b, c"
 String.split("a,b,c", ",")          -- ["a", "b", "c"]
 String.trim("  hello  ")            -- "hello"
-String.trim_left("  hi")            -- "hi"
-String.trim_right("hi  ")           -- "hi"
-String.upcase("hello")              -- "HELLO"
-String.downcase("HELLO")            -- "hello"
+String.trim_start("  hi")           -- "hi"
+String.trim_end("hi  ")             -- "hi"
+String.to_uppercase("hello")        -- "HELLO"
+String.to_lowercase("HELLO")        -- "hello"
 String.starts_with("hello", "he")   -- true
 String.ends_with("hello", "lo")     -- true
 String.contains("hello world", "world")  -- true
-String.replace("hello", "l", "r")   -- "herro"
-String.slice("hello", 1, 3)         -- "el"
-String.to_int("42")                 -- Some(42)
-String.to_float("3.14")             -- Some(3.14)
+String.replace_all("hello", "l", "r")   -- "herro"  (replace() only replaces the first match)
+String.slice("hello", 1, 3)         -- "ell"  (start, length — not start, end)
+String.to_int("42")                 -- Ok(42)
+String.to_float("3.14")             -- Ok(3.14)
 String.repeat("ab", 3)              -- "ababab"
 String.reverse("hello")             -- "olleh"
-String.chars("hi")                  -- ["h", "i"]
 ```
 
 ---
@@ -332,8 +330,7 @@ Set.fold(s, 0, fn (acc, x) -> acc + x)  -- 15
 ```march
 Option.map(Some(5), fn x -> x + 1)     -- Some(6)
 Option.map(None, fn x -> x + 1)        -- None
-Option.and_then(Some(5), fn x -> if x > 3 do Some(x) else None end)
-Option.or(None, Some(42))              -- Some(42)
+Option.flat_map(Some(5), fn x -> if x > 3 do Some(x) else None end)
 Option.or_else(None, fn () -> Some(0)) -- Some(0)
 Option.unwrap_or(None, 0)              -- 0
 Option.unwrap_or_else(None, fn () -> compute())
@@ -354,9 +351,9 @@ Option.filter(Some(2), fn x -> x > 3)  -- None
 ```march
 Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
 Result.map(Err("oops"), fn x -> x + 1) -- Err("oops")
-Result.map_err(Err("x"), String.upcase) -- Err("X")
-Result.and_then(Ok(5), fn x -> Ok(x * 2))   -- Ok(10)
-Result.or(Err("x"), Ok(0))            -- Ok(0)
+Result.map_err(Err("x"), String.to_uppercase) -- Err("X")
+Result.flat_map(Ok(5), fn x -> Ok(x * 2))   -- Ok(10)
+Result.or_else(Err("x"), fn e -> Ok(0))  -- Ok(0)
 Result.unwrap(Ok(42))                 -- 42  (panics on Err)
 Result.unwrap_or(Err("e"), 0)         -- 0
 Result.is_ok(Ok(1))                   -- true
@@ -365,15 +362,15 @@ Result.to_option(Ok(42))              -- Some(42)
 Result.to_option(Err("e"))            -- None
 ```
 
-For lightweight error propagation in chains, use the `let?` binding instead of `Result.and_then`:
+For lightweight error propagation in chains, use the `let?` binding instead of `Result.flat_map`:
 
 ```march
--- with Result.and_then
-Result.and_then(parse_int(s), fn n -> Result.and_then(fetch(n), fn v -> Ok(v + 1)))
+-- with Result.flat_map
+Result.flat_map(String.to_int(s), fn n -> Result.flat_map(fetch(n), fn v -> Ok(v + 1)))
 
 -- with let?
 fn run(s : String) : Result(Int, String) do
-  let? n = parse_int(s)
+  let? n = String.to_int(s)
   let? v = fetch(n)
   Ok(v + 1)
 end
@@ -391,7 +388,7 @@ IO.write("no newline")           -- print without newline
 IO.warn("warning message")       -- print to stderr
 IO.read_line()                   -- read a line from stdin -> String
 IO.gets("> ")                    -- print prompt, read line
-IO.inspect(any_value)            -- pretty-print any value with type info
+IO.inspect(any_value)            -- pretty-prints and returns any_value unchanged (for piping)
 ```
 
 The `println` and `print` builtins are also always available.
@@ -403,26 +400,26 @@ The `println` and `print` builtins are also always available.
 `math.march` — Mathematical functions.
 
 ```march
-Math.abs(-5)          -- 5
-Math.abs_f(-3.14)     -- 3.14
-Math.min(3, 5)        -- 3
-Math.max(3, 5)        -- 5
-Math.clamp(15, 0, 10) -- 10
-Math.sqrt(16.0)       -- 4.0
-Math.pow(2.0, 10.0)   -- 1024.0
-Math.exp(1.0)         -- 2.718...
-Math.log(Math.e)      -- 1.0
-Math.log2(8.0)        -- 3.0
-Math.log10(1000.0)    -- 3.0
-Math.floor(3.7)       -- 3.0
-Math.ceil(3.2)        -- 4.0
-Math.round(3.5)       -- 4.0
-Math.sin(Math.pi /. 2.0)   -- 1.0
-Math.cos(0.0)              -- 1.0
-Math.pi                    -- 3.14159...
-Math.e                     -- 2.71828...
-Math.infinity              -- Float infinity
-Math.is_nan(0.0 /. 0.0)   -- true
+int_abs(-5)                  -- 5  (Int abs is a bare builtin, not under Math)
+Math.abs(-3.14)              -- 3.14  (Math.abs is Float-only)
+Math.min_int(3, 5)           -- 3
+Math.max_int(3, 5)           -- 5
+Math.clamp_int(15, 0, 10)    -- 10
+Math.sqrt(16.0)              -- 4.0
+Math.pow(2.0, 10.0)          -- 1024.0
+Math.exp(1.0)                -- 2.718...
+Math.log(Math.e())           -- 1.0
+Math.log2(8.0)                -- 3.0
+Math.log10(1000.0)           -- 3.0
+Math.floor(3.7)               -- 3.0
+Math.ceil(3.2)                -- 4.0
+Math.round(3.5)               -- 4.0
+Math.sin(Math.pi() /. 2.0)   -- 1.0
+Math.cos(0.0)                -- 1.0
+Math.pi()                    -- 3.14159...  (pi/e/tau are 0-arg functions — call with `()`)
+Math.e()                     -- 2.71828...
+float_infinity()             -- Float infinity  (bare builtin, not under Math)
+float_is_nan(float_nan())    -- true  (bare builtins; `0.0 /. 0.0` panics with "division by zero" rather than yielding NaN)
 ```
 
 ---
@@ -462,13 +459,13 @@ Crypto.secure_compare(a, b)         -- Bool
 `uuid.march` — UUID generation and parsing.
 
 ```march
-UUID.v4()                     -- generate a random UUID string
-UUID.v5(namespace, name)      -- deterministic UUID from namespace+name
-UUID.parse("550e8400-...")    -- Option(UUID)
+UUID.v4()                     -- generate a random UUID (a `UUID` value, not a bare String)
+UUID.v5(namespace, name)      -- deterministic UUID from a UUID namespace + name
+UUID.parse("550e8400-...")    -- Result(UUID, Atom): Ok(UUID(...)) or Err(:invalid)
 UUID.to_string(uuid)          -- "550e8400-e29b-41d4-a716-446655440000"
 UUID.version(uuid)            -- 4
 UUID.is_valid("550e8400-...") -- true
-UUID.nil()                    -- "00000000-0000-0000-0000-000000000000"
+UUID.to_string(UUID.nil())    -- "00000000-0000-0000-0000-000000000000"
 ```
 
 ---
@@ -479,19 +476,23 @@ UUID.nil()                    -- "00000000-0000-0000-0000-000000000000"
 
 ```march
 type JsonValue =
-  | JNull
-  | JBool(Bool)
-  | JInt(Int)
-  | JFloat(Float)
-  | JString(String)
-  | JArray(List(JsonValue))
-  | JObject(List((String, JsonValue)))
+    Null
+  | Bool(Bool)
+  | Number(Float)         -- both ints and floats decode to Number(Float)
+  | Str(String)
+  | Array(List(JsonValue))
+  | Object(List((String, JsonValue)))
 
-JSON.parse("{\"key\": 42}")          -- Result(JsonValue, String)
-JSON.encode(JObject([("x", JInt(1))]))  -- "{\"x\":1}"
-JSON.encode_pretty(val)               -- pretty-printed JSON
-JSON.get(obj, "key")                  -- Option(JsonValue)
+Json.parse("{\"key\": 42}")               -- Result(JsonValue, String)
+Json.to_string(Object([("x", Number(1.0))]))  -- "{\"x\":1}"
+Json.get(obj, "key")                      -- Option(JsonValue)
 ```
+
+The module is `Json` (not `JSON`), and there is no `encode`/`encode_pretty` —
+`to_string` renders a `JsonValue` back to JSON text. `encode_null`/`encode_bool`/
+`encode_number`/`encode_int`/`encode_string`/`encode_array`/`encode_object` are
+constructor helpers for building a `JsonValue` from a primitive, not string
+serializers.
 
 ---
 
@@ -499,22 +500,27 @@ JSON.get(obj, "key")                  -- Option(JsonValue)
 
 `http_client.march` — Make HTTP requests.
 
+`Http.get`/`Http.post`/etc are pure — they just parse a URL into a `Request`
+(`Result(Request(b), UrlError)`), no network I/O. Actually performing a
+request goes through an `HttpClient` client value:
+
 ```march
-let resp = Http.get("https://api.example.com/data")
-let resp = Http.post("https://api.example.com/data", body)
-let resp = Http.request({
-  method:  "PUT",
-  url:     "https://api.example.com/items/1",
-  headers: [("Content-Type", "application/json")],
-  body:    Some(json_body)
-})
+let client = HttpClient.new_client()
+
+let resp = HttpClient.get(client, "https://api.example.com/data")
+let resp = HttpClient.post(client, "https://api.example.com/data", body)
+
+-- A custom method/headers request: build with Http, run with HttpClient.
+let req  = Result.unwrap(Http.put("https://api.example.com/items/1", json_body))
+let req2 = Http.set_header(req, "Content-Type", "application/json")
+let resp = HttpClient.run(client, req2)
 
 match resp do
   Ok(r) ->
-    println("status: " ++ int_to_string(r.status))
-    println("body: " ++ r.body)
+    println("status: " ++ int_to_string(Http.response_status_code(r)))
+    println("body: "   ++ Http.response_body(r))
   Err(e) ->
-    println("error: " ++ e)
+    println("error")
 end
 ```
 
@@ -535,15 +541,15 @@ File.copy("src.txt", "dst.txt")    -- Result((), String)
 
 -- Directory
 Dir.list("./src")                  -- Result(List(String), String)
-Dir.create("./output")             -- Result((), String)
+Dir.mkdir("./output")              -- Result((), String)
 Dir.exists("./data")               -- Bool
 
 -- Path manipulation (pure, no I/O)
 Path.join("src", "main.march")     -- "src/main.march"
 Path.dirname("src/lib/foo.march")  -- "src/lib"
 Path.basename("src/lib/foo.march") -- "foo.march"
-Path.extension("foo.march")        -- ".march"
-Path.stem("foo.march")             -- "foo"
+Path.extension("foo.march")        -- "march"  (no leading dot)
+Path.strip_extension("foo.march")  -- "foo"
 Path.is_absolute("/usr/bin")       -- true
 ```
 
@@ -564,7 +570,8 @@ System.argv()              -- List(String)
 System.cwd()               -- String
 System.pid()               -- Int (OS process ID)
 System.exit(0)             -- terminate with exit code
-System.cmd("ls", ["-la"])  -- Result(String, String)
+System.cmd("ls", ["-la"])  -- Result(ProcessResult, String)
+                            -- unpack with System.stdout/stderr/exit_code/ok
 ```
 
 ---
@@ -592,12 +599,14 @@ Logger.with_context(fn () ->
 `vault.march` — Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
 
 ```march
-Vault.put("counter", 0)
-Vault.get("counter")          -- Option(a)
-Vault.update("counter", fn n -> n + 1)
-Vault.delete("counter")
-Vault.keys("counter_")        -- List(String) with prefix
-Vault.all()                   -- List((String, a))
+let t = Vault.new("counter_table")    -- or Vault.open(name), idempotent
+
+Vault.put(t, "counter", 0)
+Vault.get(t, "counter")          -- Option(a)
+Vault.update(t, "counter", fn n -> n + 1)
+Vault.delete(t, "counter")
+Vault.keys(t)                    -- List(String) — all live keys (no prefix filter)
+Vault.all(t)                     -- List((String, a))
 ```
 
 ---
@@ -642,24 +651,27 @@ Duration.add(d, h)
 Duration.subtract(h, d)
 Duration.multiply(d, 3)
 Duration.compare(d, h)     -- Int: negative, 0, positive
-Duration.format(d)         -- "30s"
-Duration.milliseconds(d)   -- 30000
+Duration.format(d)         -- "30 seconds"
+Duration.to_milliseconds(d)  -- 30000  (Duration.milliseconds(n) is a *constructor*, not this accessor)
 ```
 
 ---
 
 ## URI
 
-`uri.march` — URI parsing and construction.
+`uri.march` — URI parsing and construction. The module is `Uri` (not `URI`).
 
 ```march
-URI.parse("https://example.com/path?k=v")
--- Result({ scheme, host, port, path, query, fragment })
+let u = Uri.parse("https://example.com/path?k=v")
+-- URI(scheme, host, port, path, query, fragment) — a plain ADT value, not a Result
 
-URI.build({ scheme: "https", host: "example.com", path: "/api", ... })
-URI.encode("hello world")     -- "hello%20world"
-URI.decode("hello%20world")   -- "hello world"
-URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
+Uri.scheme(u)                 -- "https"
+Uri.host(u)                   -- "example.com"
+Uri.path(u)                   -- "/path"
+Uri.query(u)                  -- "k=v"
+Uri.encode("hello world")     -- "hello%20world"
+Uri.decode("hello%20world")   -- "hello world"
+Uri.decode_query("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 ```
 
 ---
@@ -671,20 +683,19 @@ URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 ```march
 -- Query
 Dom.find("my-id")              -- Option(Dom.Node)
-Dom.query("#nav")              -- Option(Dom.Node)
-Dom.query_all(".item")         -- List(Dom.Node)
+Dom.select("#nav")             -- Option(Dom.Node)
+Dom.select_all(".item")        -- List(Dom.Node)
 Dom.body()                     -- Dom.Node
 
 -- Construction
 Dom.create("div")              -- Dom.Node
-Dom.text("hello")              -- Dom.Node
-Dom.clone(el)                  -- Dom.Node
+Dom.text_node("hello")         -- Dom.Node
 
 -- Tree
 Dom.append(parent, child)
 Dom.prepend(parent, child)
 Dom.remove(el)
-Dom.replace(old, new)
+Dom.remove_child(parent, child)
 
 -- Content
 Dom.set_text(el, "hello")
@@ -701,12 +712,18 @@ Dom.remove_class(el, "active")
 Dom.toggle_class(el, "open")
 Dom.set_style(el, "color", "red")
 
--- Events
-Dom.on(el, "click", fn ev -> ...)
-Dom.on_keydown(el, fn ev -> ...)
-Dom.dispatch(el, "custom-event")
+-- Events (Dom.listen, not Dom.on — there is no on_keydown/dispatch wrapper;
+-- listen for "keydown" directly)
+Dom.listen(el, "click", fn ev -> ...)
+Dom.listen(el, "keydown", fn ev -> ...)
 Dom.prevent_default(ev)
 Dom.stop_propagation(ev)
+Dom.taps(el)                   -- List((Int, Int)) — drain buffered taps (poll per frame)
+Dom.key_presses()              -- List(String) — drain buffered keydown keys (poll per frame)
+Dom.store_get("save")          -- Option(String) — localStorage read
+Dom.store_set("save", data)    -- localStorage write
+Dom.pointer_pos(el)            -- (Int, Int) — live cursor position over el
+Dom.window_size()              -- (Int, Int) — window.innerWidth/innerHeight
 ```
 
 `Dom` requires `needs Ffi` because DOM calls are implemented as JS externs. It is only valid in `--target js` builds.
@@ -763,6 +780,23 @@ Canvas.draw_image_scaled(ctx, img, 0.0, 0.0, 64.0, 64.0)
 ```
 
 `Canvas` requires `needs Ffi` because drawing calls are implemented as JS externs. It is only valid in `--target js` builds. Pair with `Dom.event_x`/`Dom.event_y` for canvas-relative pointer coordinates from a `"pointerdown"`/`"click"` listener.
+
+---
+
+## Audio (JS only)
+
+`audio.march` — procedural sound-effect synthesis for `--target js` builds, wrapping the browser's Web Audio API. Sounds are synthesized on the fly (tones, sweeps, filtered noise) rather than loaded from files — no assets, no licensing. Auto-loaded; no import needed.
+
+```march
+Audio.create()                                 -- Ctx
+Audio.resume(actx)                             -- unlock output; call from a user-gesture handler
+Audio.beep(actx, 440.0, 0.1, "sine")            -- flat tone: "sine"/"square"/"sawtooth"/"triangle"
+Audio.sweep(actx, 200.0, 800.0, 0.2, "square")  -- frequency ramp (chirps, risers, fall-offs)
+Audio.noise_burst(actx, 0.15, 600.0)            -- filtered white noise (impacts, explosions)
+Audio.set_volume(actx, 0.5)                     -- master gain 0.0 (mute) to 1.0
+```
+
+`Audio` requires `needs Ffi` and is only valid in `--target js` builds. Browsers block audio output until a user gesture occurs on the page — call `resume` from inside your first tap/click handler (game loops that already gate their first frame on a tap, like a "tap to start" screen, get this for free).
 
 ---
 

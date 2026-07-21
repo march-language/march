@@ -6,6 +6,8 @@
 
 mod WebSocket do
 
+  needs IO.WebSocket
+
   type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
 
   type WsSocket = WsSocket(Int)

@@ -1,0 +1,26 @@
+mod GetActorFieldDirect do
+
+  actor Holder do
+    state { wa : Int, wb : Int }
+    init  { wa: 11, wb: 22 }
+
+    on Noop() do
+      state
+    end
+  end
+
+  fn field_int(h, field) do
+    match get_actor_field(h, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main() do
+    let h = spawn(Holder)
+    println(int_to_string(field_int(h, "wa")))
+    println(int_to_string(field_int(h, "wb")))
+    println(int_to_string(field_int(h, "nope")))
+  end
+
+end

@@ -2424,9 +2424,10 @@ with NO `get_actor_field`/`pid_of_int` — **diverges** (interp fires the child
 `init`s, compiled runs none). A directly-spawned actor's printing `init` *does*
 run byte-identically on both backends (that path is not supervisor-mediated), so
 the divergence is specifically the supervisor-child-spawn plane, not `init`
-bodies in general. Both the `get_actor_field`/`pid_of_int` compiled crash and
-the `Actor.call` timeout gap encountered nearby are filed as open findings in
-`specs/todos.md`. Consequently the supervision restart semantics are documented
+bodies in general. The `get_actor_field`/`pid_of_int` compiled crash is filed as an open finding
+in `specs/todos.md` (the `Actor.call` timeout gap encountered nearby was fixed
+2026-07-13 — the compiled runtime now enforces `timeout_ms`, see
+`specs/lang/actors.md`). Consequently the supervision restart semantics are documented
 here in prose + `eval.ml` citations, and **no `one_for_one` restart golden was
 added** — the same class of "the observation surface diverges/crashes compiled,
 so it cannot be a `MATCH`" as the §4.10.6 capability/dead-`send` plane and the
@@ -2623,9 +2624,317 @@ comparison. Declaring protocol roles as their own nullary types (as `g38`/
 `g39` do, `type Client = Client`) silences it, but that is optional hygiene,
 not a golden requirement.
 
+### 4.12 Linearity at runtime (operational: there is none)
+
+Linearity (`core-march-types.md` §2.9) is **compile-time-erased**. Neither
+backend performs any use-accounting at runtime; a linearity-correct program
+behaves identically to the same program with every `linear`/`affine`
+annotation deleted. Golden witness: `g41_linear_annotations_erased` (all
+three keyword surfaces — `linear` param, `linear let`, `affine`
+type-modifier binding — prints `42` / `done`, byte-identical, MATCH).
+
+What each layer actually does (all line numbers drift; re-grep):
+
+- **Interpreter** (`eval.ml`): no tracking. `DAlwaysLinearType` is handled
+  identically to `DType` (`eval.ml:~8412`); `chan_send` passes the endpoint
+  through with the comment "the type system ensures linearity; here we just
+  pass it through" (`:~2686`). The only linear-labeled machinery is actor
+  **Drop-on-crash cleanup** — `ai_linear_values` (value, drop-fn pairs,
+  `:~119`), registered by the `own(pid, value)` builtin (`:~3088`) and run in
+  reverse acquisition order at actor death (`:~1827`) — which is resource
+  management, not enforcement.
+- **Compiled backend** (TIR): the surface linearity is lowered onto TIR vars
+  as `v_lin : Lin | Aff | Unr` (`tir.ml:17`, via `lower_types.ml:58-61`) and
+  used ONLY for optimization, never checks: a `send` of a `v_lin = Lin`
+  message emits `march_send_linear` (zero-copy move instead of copy,
+  `llvm_emit.ml:~1576`), and the implicit `$actor` param is marked `Lin` so
+  Perceus elides incrc on field loads (FBIP in-place mutation,
+  `lower_actor.ml:~92`). The *type*-level `TLin` wrapper is stripped at both
+  lowering entries (`lower_types.ml:51` surface, `:92` typecheck-ty).
+- **Consequence**: any program the static tracker fails to reject (the L3/L4
+  param-field and F7 session-parameter gaps, `specs/todos.md`) runs with NO
+  runtime backstop — same posture as the capability system (§2.8's
+  runtime-erased `Cap(X)`).
+
+**Finding L7 (FIXED 2026-07-10 — was: direct `match` on a local
+Newtype-repr construction printed garbage compiled):** g41's first-ever run
+caught escape analysis stack-promoting a non-escaping ERASED-repr alloc
+(`let c = R(22)` — annotation irrelevant, the plain form was equally broken)
+into a boxed stack cell that the match then decoded under the erased
+convention (untagging the raw stack address). Erased-repr (Newtype/Niche)
+allocs are no longer stack-promotion candidates
+(`lib/tir/escape.ml` `alloc_emits_heap_cell` — they emit immediates, so
+promotion was also a strict pessimization), and `llvm_emit.ml`'s
+`EStackAlloc` arm fails loudly if one ever slips through. `g41` now consumes
+its affine binding via a DIRECT match — the exact shape that was broken —
+as the permanent regression witness. Full writeup in `specs/todos.md`
+(Linearity section, L7 ✅).
+
+### 4.13 `let?` — Result-propagation (operational)
+
+`let? p = result; body` (typed by `core-march-types.md` §2.10) evaluates
+natively in the interpreter — `ELetQ` in `eval.ml` (`:7644`; re-grep) — with
+no desugaring to `match`. Two rules, and both backends agree byte-for-byte
+(golden `g42`):
+
+```
+        result ⇓ Ok(v)      body[p ↦ v] ⇓ w
+  (E-LetQ-Ok)  ──────────────────────────────────
+                  (let? p = result; body) ⇓ w
+
+        result ⇓ Err(w)
+  (E-LetQ-Err)  ─────────────────────────────────────
+                  (let? p = result; body) ⇓ Err(w)      -- body NOT evaluated
+```
+
+- **(E-LetQ-Ok)** — `result` reduces to `Ok(v)`; `p` is bound to `v` (the bind
+  cannot fail — `p` is an irrefutable `simple_pattern`, §2.10.1) and the
+  continuation runs.
+- **(E-LetQ-Err)** — `result` reduces to `Err(w)`; the whole `let?` returns
+  `Err(w)` **verbatim** and the continuation is never evaluated. This is the
+  short-circuit — `let?` always propagates the first `Err` upward with the
+  same error value. (A non-`Result` scrutinee is impossible in a well-typed
+  program, §2.10; the interpreter has a defensive `eval_error` for it.)
+
+Unlike a bare `with … do … end` (which desugars to an `Err`-arm-less `match`
+and `Match_failure`-panics on `Err`), `let?` is exhaustive by construction:
+the `Err` short-circuit is the rule itself, so `let?` can never crash on an
+`Err`. Golden `g42` witnesses both paths — `chain(5)` succeeds through two
+steps (`ok 70`), `chain(-1)` fails the first step so the second `let?` never
+runs (`err neg`) — identical interpreted and compiled.
+
+### 4.14 Data parallelism: the determinism guarantee (operational)
+
+March's data-parallel combinators — `List.pmap`/`pfilter`/`preduce` (list-based,
+`stdlib/list.march`) and the RRB-`Vec` `Parallel` module (`pmap`/`pmap_n`/
+`preduce`/`preduce_n` plus `psum`/`pcount`/`pany`/`pall`) — are **not new core
+constructs**. They are ordinary polymorphic stdlib functions built on
+`task_spawn`/`task_await_unwrap` (§4.10). Their conformance content is a single
+*operational guarantee*: **a data-parallel operation produces exactly the same
+result — same values, same order — as its sequential counterpart, and that
+result is byte-identical interpreted and compiled**, even though the interpreter
+runs the task thunks eagerly and sequentially while the compiled backend runs
+them on the real multi-core work-stealing scheduler.
+
+```
+  map f xs ⇓ ys
+  ─────────────────────────  (E-PMap)   pmap preserves order
+  pmap f xs ⇓ ys
+
+  merge associative,  z identity of merge,  fold_left (merge ∘ f) z xs ⇓ w
+  ────────────────────────────────────────────────────────────────────────  (E-PReduce)
+  preduce z f merge xs ⇓ w
+```
+
+- **(E-PMap)** — the gather reads task results in **spawn order** via a
+  per-handle `await` (not completion order), so the output vector's order equals
+  the input's regardless of how many workers ran or how the scheduler
+  interleaved them. `pmap`/`pmap_n` are therefore order-preserving
+  *unconditionally*.
+- **(E-PReduce)** — `preduce` splits the input into contiguous chunks, folds
+  each chunk, then merges the partials left-to-right. When `merge` is
+  **associative** and `z` is its **identity** (the documented contract), the
+  result is independent of the chunk boundaries — and the chunk count differs
+  between backends (the interpreter's worker count comes from
+  `Domain.recommended_domain_count`, the compiled runtime's from the physical
+  CPU count), so associativity is exactly what makes the two backends agree.
+  `psum`/`pcount` (integer `+`), `pany`/`pall` (`||`/`&&`, no short-circuit) all
+  satisfy this and are deterministic.
+
+**The honest exclusion (finding P1).** `Parallel.psum_float` is **not**
+backend-portable: IEEE-754 `+.` is not associative, so the differing chunk
+counts can reorder the additions and change the last bit. It is deliberately
+absent from the golden. The same caveat applies to any `preduce` with a
+non-associative `merge` (subtraction, average): the result becomes worker-count-
+dependent, hence backend-dependent, and is outside the guarantee. Programs whose
+`f`/`pred` performs observable **side effects** also fall outside it — the
+*returned value* stays deterministic, but under compiled execution the effects
+run concurrently on up to N OS threads, so their ordering is not.
+
+Golden `g43_parallel_determinism` witnesses the guarantee: `List.pmap == List.map`
+on 199 elements, and `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` over the
+same data — all byte-identical interpreted and compiled, stress-verified 0/15
+crashes. It is the first compiled conformance witness for the RRB `Parallel`
+module (the suite's `test_compiled_pmap_matches_map` covers only `List.pmap`/
+`pfilter`).
+
+### 4.15 Distributed CRDTs: convergence laws, and the single-process boundary (operational)
+
+The distributed/OTP stack (`stdlib/crdt.march`, `vector_clock.march`,
+`membership.march`, `global_registry.march`, `merkle.march`,
+`consistent_hash.march`, and the RPC/identity layer) splits cleanly into a
+**pure, single-process-testable core** and a **live-network shell**. Only the
+core is a conformance subject here; the shell is a documented scope boundary.
+
+**Conformance-testable in one process (the CRDT / lattice laws).** These are
+pure functions over data structures and run byte-identically on both backends:
+
+```
+  merge commutative:   merge a b  =  merge b a
+  merge associative:   merge (merge a b) c  =  merge a (merge b c)     -- join-semilattice
+  merge idempotent:    merge a a  =  a
+  ──────────────────────────────────────────────────────────────────  (CRDT-Converge)
+  replicas that have seen the same set of updates hold equal state,
+  independent of the order in which updates and merges were applied
+```
+
+This covers `GCounter`/`PNCounter`/`LWWRegister`/`ORSet.merge`, `Membership` and
+`GlobalRegistry.merge` (incarnation-/vector-clock-ordered CRDT views),
+`VectorClock` causality (`happens_before` is the partial order induced by
+component-wise `≤`; `compare` classifies Before/After/Concurrent/Equal),
+`Merkle.root_hash`/`diff`, `ConsistentHash` ring placement, and `RingBuf`
+FIFO/overwrite invariants — plus the wire codecs (`NetFrame`, `NodeIdentity`,
+`GlobalPid`, `Handshake`, `RemoteCall`, `SwimDriver`) whose `decode ∘ encode = id`,
+`ClusterAuth`'s HMAC challenge/response, and `RemoteCall.verify`'s content-
+addressed admission (TypeMismatch/VersionSkew/NoTarget). Golden
+`g44_crdt_convergence` witnesses the GCounter/PNCounter/ORSet merge laws and
+VectorClock causality on causally-ordered clocks.
+
+**Prose-only scope boundary (needs a live multi-node harness).** The following
+are **not** single-process conformance subjects and are exercised only by the
+native TCP-loopback tests under `test/native/` (two logical nodes over
+`127.0.0.1`, golden `.expected` diffs) — never by the eval harness or the oracle:
+the net-kernel handshake (`NetKernel.handshake`, `ClusterConn`), synchronous RPC
+transport (`NodeCall.call`/`serve_loop`), SWIM gossip *dispatch* to peer fds
+(`SwimDriver.dispatch*`), the compiler-emitted `__rpc_stub` → C-registry
+dispatch (a no-op under the interpreter, `eval.ml` `remote_check`→0), and
+cross-node monitor firing (`march_monitor_registry.c` writes to fds). True
+multi-*machine* semantics (netsplit, node restart/incarnation, cross-host clock
+skew) remain prose-only.
+
+**Finding C1 — FIXED (2026-07-11).** `VectorClock.compare` — and any code
+that folds a map's own keys and looks each one up in that map, after the map was
+built by the read-then-update idiom `Map.insert(m, k, f(Map.get_or(m, k, …)), cmp)`
+— used to **crash compiled** (use-after-free of a String key in `march_hash_string`,
+SIGSEGV or hang) while running correctly interpreted. Root cause: `lib/tir/
+llvm_case.ml`'s `strip_scrut_decrc` recognized a match arm's scrutinee-dying
+`EDecRC` only as the LITERAL head of the branch body — but Perceus's
+`add_cross_decrcs` can prepend OTHER cross-branch-dead variables' `EDecRC`s in
+front of it (e.g. `Map.node_insert`'s `HLeaf` arm emits `dec_rc eq; dec_rc node;
+…`, an unrelated comparator param dec'd before the scrutinee). When that
+literal-head match failed, the shared-path field-protection (an `IncRC` on
+each extracted heap field when the scrutinee's refcount is >1, keeping a
+field's count correct when the scrutinee survives) never fired — silently
+under-counting an extracted String key's refcount whenever the map argument
+was shared, which the read-then-update idiom on a function parameter used at
+both a borrowed (`get_or`) and owned (`insert`) position routinely produces.
+Fixed by generalizing `strip_scrut_decrc` to scan through a leading run of
+bare `dec_rc` ops for the scrutinee's own, preserving the others in place.
+`g44` now includes the disjoint-key `VectorClock.compare`/`.concurrent` case
+that used to be excluded — the full CRDT/lattice core is unconditionally
+byte-identical and crash-free (stress-verified 0/20), not scoped around a bug.
+
+### 4.16 Perceus reference counting: the compiled backend's own operational discipline (widening slice 11, 2026-07-11)
+
+**Why this section looks different from every other one in §4.** Every prior
+slice states its rules as big-step reductions on the *core AST*, with
+`eval.ml` as the reference implementation and a golden program's job to prove
+the compiled backend agrees with it. Perceus RC insertion has no such anchor:
+`eval.ml` uses OCaml's own GC and performs **no explicit refcounting at
+all** — there is nothing in the interpreter to compare the compiled
+backend's RC behavior against. This section therefore states RC discipline
+as invariants over **TIR** (the compiled backend's own post-Perceus
+intermediate form), verified two ways that together substitute for the
+interp-vs-compiled diff every other section relies on: (1) byte-for-byte
+pinning of the emitted TIR against a committed snapshot
+(`test/snapshots/perceus/*.expected`, `test/test_snapshots.ml`), which
+catches any drift in *where* `dup`/`drop`/`reuse` land; and (2) running the
+compiled binary under `MARCH_SANITIZE=1` (ASan+UBSan), which catches
+whether that placement is actually *correct* (no leak, no use-after-free) —
+something a snapshot alone cannot prove. Full governing detail lives in
+`specs/perceus-invariants.md`; this section states the two invariants that
+already have both forms of pinning, in the same premise/conclusion style as
+the rest of §4.
+
+**RC applicability (`lib/tir/rc_types.ml`).** Two predicates over `Tir.ty`,
+`needs_rc` (must Perceus emit `EIncRC`/`EDecRC` for this type?) and
+`borrow_eligible` (may a parameter of this type be borrow-inferred?),
+deliberately **disagree** on two constructor families:
+
+```
+  needs_rc(TFn _) = true       borrow_eligible(TFn _) = false     -- closures: Perceus-only
+  needs_rc(TTuple/TRecord) = false   borrow_eligible(TTuple/TRecord) = true  -- fields reconciled individually
+```
+
+Closures are always heap-allocated post-defun (`llvm_ty (TFn _) = "ptr"`), so
+Perceus must track their lifetime — but letting the borrow fixpoint
+reclassify a closure parameter as borrowed would leave capture-site
+accounting and call-site accounting disagreeing about who owns the closure
+and its captured free variables. Tuples/records get the opposite treatment:
+Perceus never emits an *aggregate*-level `dup`/`drop` for a tuple or record
+cell (ownership is reconciled per-field via `borrowed_field_vars`), but the
+aggregate parameter itself must still be borrow-*eligible* so the fixpoint
+can infer a function that only reads fields as fully borrowed.
+
+**The owned/borrowed call-boundary contract and the dual-position invariant
+(B1).** `lib/tir/borrow.ml`'s fixpoint classifies each function parameter
+**owned** or **borrowed** (borrowed iff every use is read-only — matched,
+field-accessed, or passed to another borrowed position — never stored,
+returned, or passed to an owning position of an unknown callee). The
+contract at a call boundary:
+
+```
+        param p classified borrowed by Borrow's fixpoint
+  (E-Call-Borrowed-Callee)  ─────────────────────────────────────
+        callee emits NO `EDecRC` for p at its last use
+
+        arg a passed at p (borrowed), a still live after the call
+  (E-Call-Borrowed-Caller-Live)  ─────────────────────────────────
+        caller emits NO `EIncRC` for a
+
+        arg a passed at p (borrowed), a is the caller's last use of a
+  (E-Call-Borrowed-Caller-Dead)  ─────────────────────────────────
+        caller emits `EDecRC(a)` AFTER the call
+        (the callee will never dec it — someone still must)
+```
+
+The dual-position invariant closes the one case these three rules alone get
+wrong: **a variable passed at BOTH an owned and a borrowed position of the
+same call, dead afterward, must be dup'd exactly once.**
+
+```
+        call C(..., a:owned, ..., a:borrowed, ...);  a dead after C
+  (E-Call-Dual-Position)  ─────────────────────────────────────────
+        exactly one `EIncRC(a)` emitted before C, one `EDecRC(a)` after
+```
+
+Naively, the owned-position accounting (`find_inc_vars`) and the borrowed-
+position accounting (`post_dec_vars`) are computed independently — the
+owned side sees only one occurrence of `a` and emits zero dups (it thinks
+the single owned reference transfers), while the borrowed side
+independently schedules its own post-call dec. Both fire: net two
+consumptions against one owned reference — RC underflow, a use-after-free
+the moment the callee returns a value built from `a`. The fix
+(`lib/tir/perceus.ml`'s `EApp` case, mirrored for `ECallPtr`-extern)
+partitions the post-dec set into `dual_pos_vars` (also owned-positioned in
+the *same* call) and emits one balancing `EIncRC` for exactly those,
+keeping the value alive across the whole call regardless of which
+occurrence the callee consumes first.
+
+**Golden `g45_dual_position_borrow`** witnesses `both(a: owned, b:
+borrowed, n: owned)` called as `both(s, s, 1)` — the exact shape that
+underflowed pre-fix. It is verified three ways: interp==compiled
+byte-identical output (this corpus's usual check); the post-Perceus TIR
+matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly
+(one `inc_rc s` before the call, one `dec_rc` after); and the compiled
+binary runs clean under `MARCH_SANITIZE=1` — exit 0, no ASan/UBSan report
+(live-verified 2026-07-11; not yet a standing CI gate — no broad sanitizer
+sweep exists over the corpus, a documented gap, not built in this
+docs-only slice).
+
+**What this section deliberately excludes.** FBIP/reuse (`lib/tir/
+perceus_fbip.ml`) needs an "reuse preserves semantics" theorem to state as a
+real rule, not just an arity-compatibility check — excluded pending that
+metatheory. Atomic RC mode-selection (`specs/atomic-rc-design.md`) is an
+undesigned draft — no code implements it today. Escape-analysis stack
+promotion (`lib/tir/escape.ml`) is an orthogonal optimization with no
+correctness content of its own to formalize (its one correctness
+obligation — never stack-promote an erased-repr alloc — was already the L7
+finding fixed in slice 7, §4.12).
+
 ## 5. Golden conformance corpus
 
-Thirty-nine programs in `specs/lang/golden/`, each exercising a slice of the
+Forty-six programs in `specs/lang/golden/`, each exercising a slice of the
 fragment, each verified to produce **identical output interpreted and
 compiled** (`march f.march` vs `march --compile f.march -o b && b`). This is
 the executable anchor for §4. `g01`–`g08` are the walking-skeleton's original
@@ -2669,7 +2978,22 @@ SIGSEGVs compiled; `g37` is the actor-lifecycle addition, covering the
 `spawn → kill → is_alive` liveness slice of §4.10.6 (a pure registry-bool
 observation, the only lifecycle plane byte-identical compiled — the capability /
 dead-`send` plane diverges and is documented as a finding in §4.10.6, not as a
-golden program):
+golden program). `g38`–`g42` are the session-channel (§4.11), actor-foreign-drop
+(§4.10), linearity-erasure (§4.12), and `let?` (§4.13) additions, each
+documented in its own section above. `g43` is the parallelism addition (§4.14),
+witnessing the data-parallel determinism guarantee — `List.pmap == List.map`
+plus the RRB `Parallel` integer/bool reductions, the first compiled witness for
+that module. `g44` is the distributed-CRDT addition (§4.15), witnessing the
+convergence laws of the single-process-testable CRDT core (GCounter/PNCounter/
+ORSet merge, VectorClock causality including the disjoint-key `compare`/
+`.concurrent` case that used to crash compiled — finding C1, fixed
+2026-07-11). `g45` is the Perceus RC
+addition (§4.16), witnessing the dual-position dup/drop invariant (B1) —
+verified interp==compiled, against a committed TIR snapshot, AND clean under
+`MARCH_SANITIZE=1`. `g46` is the refinement-types addition
+(`core-march-types.md` §2.14), witnessing that a program whose refinement
+obligations are all provably discharged at `--check` time runs
+byte-identically, since neither backend inserts any runtime predicate check:
 
 | Program | Fragment feature | Output (interp = compiled) |
 |---|---|---|
@@ -2713,7 +3037,10 @@ golden program):
 | `g38_chan_int_echo.march` | session-typed channel runtime slice (§4.11): binary `Chan.new`/`send`/`recv`/`close` round-trip (`chan_new`/`chan_send`/`chan_recv`/`chan_close`, `eval.ml:2632/2645/2655/2666`) carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the payload class the concurrent F1/F2 codegen fix (payload tagging at the send site) made byte-identical compiled; every `send` precedes its matching `recv` in program order (§4.11.6/F6) | `43` |
 | `g39_chan_choose_offer.march` | session-typed channel runtime slice (§4.11): `Chan.choose`/`Chan.offer` branch selection (`eval.ml:5581/5588` — literally `chan_send`/`chan_recv` of the label atom) over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule-into-binary-duality pitfall); the chooser picks `:ok` and sends an odd `Int` (`43`) after the label | `:ok` / `43` |
 
-**Result: 39 / 39 matched, 0 divergences in the committed corpus** (These print via `println` /
+**Result: 46 / 46 matched, 0 divergences in the committed corpus** (the table
+above enumerates `g01`–`g39`; `g40`–`g46` are documented in their respective §4
+sections (or, for `g46`, `core-march-types.md` §2.14).
+These print via `println` /
 `int_to_string` / `float_to_string` / `bool_to_string` — *observation
 primitives* used to make the result observable; they are outside the pure
 reduction fragment and are treated here only as opaque output functions, not

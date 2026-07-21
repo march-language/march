@@ -87,8 +87,8 @@ end
 
 ```march
 fn parse_and_add(a : String, b : String) : Result(Int, String) do
-  let? x = parse_int(a)   -- returns Err(msg) if parse_int fails
-  let? y = parse_int(b)   -- only reached when x succeeded
+  let? x = String.to_int(a)   -- returns Err(msg) if String.to_int fails
+  let? y = String.to_int(b)   -- only reached when x succeeded
   Ok(x + y)
 end
 ```
@@ -97,10 +97,10 @@ The equivalent without `let?` is:
 
 ```march
 fn parse_and_add(a : String, b : String) : Result(Int, String) do
-  match parse_int(a) do
+  match String.to_int(a) do
     Err(e) -> Err(e)
     Ok(x)  ->
-      match parse_int(b) do
+      match String.to_int(b) do
         Err(e) -> Err(e)
         Ok(y)  -> Ok(x + y)
       end
@@ -470,7 +470,7 @@ A `?` anywhere in an expression is a typed hole. The compiler reports what type 
 ```march
 fn mystery(xs : List(Int)) : Int do
   List.fold_left(xs, ?, fn (acc, x) -> acc + x)
-  -- error: hole of type Int
+  -- hint: Typed hole ? has type `u2`
 end
 ```
 

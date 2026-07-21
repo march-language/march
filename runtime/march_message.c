@@ -27,6 +27,13 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
 /* Tag value used to mark string objects (must match march_runtime.h).
  * Strings use tag = -1 (0xFFFFFFFF as int32_t) as a sentinel. */
 #define MARCH_STRING_TAG  (-1)
+/* Boxed-Float sentinel (must match march_runtime.h MARCH_FLOAT_TAG). A float
+ * box is [rc][tag][pad][double val@16] = 24 bytes; its payload word is raw
+ * IEEE-754 bits, NOT a pointer, so copy_value must copy it opaquely rather
+ * than sniffing the field with IS_HEAP_PTR. Kept in sync manually (same
+ * circular-include avoidance as MARCH_STRING_TAG above). */
+#define MARCH_FLOAT_TAG   (-3)
+#define MARCH_FLOAT_BOX_SIZE  24u
 
 /* Values below one OS page are unboxed scalars (inttoptr-encoded integers). */
 #define IS_HEAP_PTR(p)  ((uintptr_t)(p) >= 4096u)
@@ -150,6 +157,18 @@ static void *copy_value(march_heap_t *dst_heap, void *value, fwd_table *fwd) {
         void *ns = copy_string(dst_heap, value);
         fwd_insert(fwd, value, ns);
         return ns;
+    }
+
+    /* Boxed float (float-boxing design): the payload at offset 16 is raw
+     * IEEE-754 bits, NOT a pointer — the generic field loop below would sniff
+     * it with IS_HEAP_PTR and try to recurse into *(3.5). Copy the 24-byte
+     * cell opaquely, like the string arm. */
+    if (h->tag == MARCH_FLOAT_TAG) {
+        void *nf = march_process_alloc(dst_heap, MARCH_FLOAT_BOX_SIZE);
+        memcpy(nf, value, MARCH_FLOAT_BOX_SIZE);
+        ((msg_hdr *)nf)->rc = 1;
+        fwd_insert(fwd, value, nf);
+        return nf;
     }
 
     /* Recover field count from alloc_meta. */

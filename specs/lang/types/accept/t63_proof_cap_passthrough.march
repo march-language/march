@@ -1,0 +1,22 @@
+-- Slice 6 (proof caps), the PASS-THROUGH accept -- external code cannot MINT a
+-- proof cap, but it CAN receive one as a parameter and pass it through
+-- unchanged. Here `App` (a non-declaring module) declares
+-- `relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end`: the returned cap
+-- is the exact one received as a parameter, so Check 6's declared-return-type
+-- rule is satisfied (`Cap(Db.Migrated)` IS in the parameter caps). `App`
+-- declares `needs Db.Migrated` because it uses `Cap(Db.Migrated)` in a
+-- signature outside the declaring module (Check 1). This is the intended way a
+-- proof cap flows through a system -- receive-and-pass-through -- and together
+-- with the declaring module's `mint_cap` (see `accept/t62`) is one of the only
+-- two ways to obtain a `Cap(P)`. See core-march-types.md §2.8.13.
+mod Top do
+  mod Db do
+    proof cap Migrated
+  end
+
+  mod App do
+    needs Db.Migrated
+
+    fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
+  end
+end

@@ -99,6 +99,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_io_read_line()" };
   { march_name = "read_line"; c_name = Some "march_io_read_line"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_io_read_line()" };
+  { march_name = "io_read_byte"; c_name = Some "march_io_read_byte"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_io_read_byte()" };
+  { march_name = "read_byte"; c_name = Some "march_io_read_byte"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_io_read_byte()" };
   { march_name = "html_auto_escape"; c_name = Some "march_html_auto_escape"; ret_ty = Some Tir.TString;
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_html_auto_escape(ptr %v)" };
   { march_name = "record_keys"; c_name = Some "march_record_keys"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
@@ -617,6 +621,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_cap_narrow(ptr %cap)" };
+  (* mint_cap — gated proof-cap mint; runtime-erased alias of cap_narrow. Reuses
+     the march_cap_narrow C symbol (declare emitted by the cap_narrow entry
+     above), so no new PDeclare/runtime symbol is needed. *)
+  { march_name = "mint_cap"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = None };
   { march_name = "demonitor"; c_name = Some "march_demonitor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_demonitor(i64 %ref)" };
   { march_name = "monitor"; c_name = Some "march_monitor"; ret_ty = Some Tir.TInt;
@@ -629,8 +638,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)" };
   { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("Cap", [Tir.TVar "a"])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_cap(ptr %pid)" };
-  { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = true; declare_sig = Some "declare void @march_send_checked(ptr %cap, ptr %msg)" };
+  { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some (Tir.TCon ("Atom", []));
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_send_checked(ptr %cap, ptr %msg)" };
+  { march_name = "revoke_cap"; c_name = Some "march_revoke_cap"; ret_ty = Some (Tir.TCon ("Atom", []));
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_revoke_cap(ptr %cap)" };
+  { march_name = "is_cap_valid"; c_name = Some "march_is_cap_valid"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_is_cap_valid(ptr %cap)" };
   { march_name = "pid_of_int"; c_name = Some "march_pid_of_int"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
   { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
@@ -641,6 +654,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_unlink(ptr %actor_a, ptr %actor_b)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)" };
+  { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx)" };
+  { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
@@ -656,7 +673,7 @@ let builtins : builtin list = [
   { march_name = "chan_offer"; c_name = Some "march_chan_offer"; ret_ty = Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_chan_offer(ptr %ep)" };
   { march_name = "mpst_new"; c_name = Some "march_mpst_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
-    in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)" };
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles, ptr %roles_csv)" };
   { march_name = "mpst_send"; c_name = Some "march_mpst_send"; ret_ty = Some (Tir.TCon ("Chan", []));
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)" };
   { march_name = "mpst_recv"; c_name = Some "march_mpst_recv"; ret_ty = Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
@@ -759,6 +776,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
   ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
+  ("march_actor_set_call_base", "declare void @march_actor_set_call_base(ptr %actor, i64 %base)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare ptr  @march_alloc(i64 %sz)");
   ("march_incrc", "declare void @march_incrc(ptr %p)");
@@ -808,6 +826,12 @@ let runtime_only_declares : (string * string) list = [
   ("march_task_spawn_with_cancel_thunk", "declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)");
   ("march_task_cancel_by_id", "declare void @march_task_cancel_by_id(ptr %task)");
   ("march_yield_from_compiled", "declare void @march_yield_from_compiled()");
+  ("march_signal_watch", "declare void @march_signal_watch(i64 %code, ptr %clo)");
+  ("march_signal_unwatch", "declare void @march_signal_unwatch(i64 %code)");
+  ("march_signal_raise_self", "declare void @march_signal_raise_self(i64 %code)");
+  ("march_alloc_float", "declare ptr  @march_alloc_float(double %v)");
+  ("march_unbox_float", "declare double @march_unbox_float(ptr %p)");
+  ("march_poly_compare", "declare i64  @march_poly_compare(ptr %a, ptr %b)");
 ]
 
 (** Look up the exact historical `declare ...` text for C symbol [c_name],
@@ -856,6 +880,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_register_name";
   PDeclare "march_reload_server_start";
   PDeclare "march_actor_set_dispatch_id";
+  PDeclare "march_actor_set_call_base";
   PDeclare "getenv";
   PDeclare "march_alloc";
   PDeclare "march_incrc";
@@ -875,6 +900,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_println";
   PDeclare "march_print_stderr";
   PDeclare "march_io_read_line";
+  PDeclare "march_io_read_byte";
   PDeclare "march_string_lit";
   PDeclare "march_html_auto_escape";
   PDeclare "march_record_shape_intern";
@@ -1083,6 +1109,12 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_cancel_token_is_cancelled";
   PDeclare "march_task_spawn_with_cancel_thunk";
   PDeclare "march_task_cancel_by_id";
+  PDeclare "march_signal_watch";
+  PDeclare "march_signal_unwatch";
+  PDeclare "march_signal_raise_self";
+  PDeclare "march_alloc_float";
+  PDeclare "march_unbox_float";
+  PDeclare "march_poly_compare";
 ]
 
 let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/CSV/session-types *)
@@ -1205,11 +1237,15 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_register_resource";
   PDeclare "march_get_cap";
   PDeclare "march_send_checked";
+  PDeclare "march_revoke_cap";
+  PDeclare "march_is_cap_valid";
   PDeclare "march_pid_of_int";
   PDeclare "march_get_actor_field";
   PDeclare "march_link";
   PDeclare "march_unlink";
   PDeclare "march_register_supervisor";
+  PDeclare "march_actor_register_child";
+  PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
   PComment "; Session-typed channel builtins (binary)";
   PDeclare "march_chan_new";
@@ -1240,6 +1276,12 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_cancel_token_is_cancelled";
   PDeclare "march_task_spawn_with_cancel_thunk";
   PDeclare "march_task_cancel_by_id";
+  PDeclare "march_signal_watch";
+  PDeclare "march_signal_unwatch";
+  PDeclare "march_signal_raise_self";
+  PDeclare "march_alloc_float";
+  PDeclare "march_unbox_float";
+  PDeclare "march_poly_compare";
 ]
 
 (** Emit the LLVM preamble (`declare`d externs for every builtin/runtime

@@ -330,13 +330,36 @@ static void *make_none(void) { return (void *)0; }
  * cases (Float 0.0 and raw-0 Unit read as None) — the same trade the
  * compiled convention already makes; consistency wins. */
 
+/* Float is the one record kind that is NOT niche-safe: 0.0's bits are 0, which
+ * collides with the None niche, and a nonzero float's bits are not a valid heap
+ * pointer.  llvm_emit decodes a *concrete* Option(Float) as BOXED
+ * (Repr.niche_payload_ok TFloat = false): None = tag-0 heap cell, Some(f) =
+ * tag-1 cell with the double at offset 16 (see EAlloc alloc-none-boxed /
+ * alloc-some-boxed).  So for an 'f' *call site* we must return that boxed shape;
+ * the uniform niche return would read stored 0.0 back as None and make the boxed
+ * decoder dereference raw float bits as a pointer → SIGSEGV.
+ *
+ * Keyed on the CALL-SITE expected_kind, never the stored kind: an erased ('g')
+ * read still gets the niche encoding both sides expect, so this does not
+ * reintroduce the boxed-cell-misread-by-niche-decoder regression (the "74 depot
+ * failures" that motivated niche-for-erased). */
+static void *rec_box_none_float(void) {
+    return march_alloc(16);                     /* tag=0 (None), no fields */
+}
+static void *rec_box_some_float(int64_t bits) {
+    void *r = march_alloc(16 + 8);
+    *(int32_t *)((char *)r + 8)  = 1;           /* tag = 1 = Some */
+    *(int64_t *)((char *)r + 16) = bits;        /* raw IEEE-754 double bits */
+    return r;
+}
+
 static void *rec_some_k(int64_t bits, char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_some_float(bits);
     return (void *)(uintptr_t)bits;
 }
 
 static void *rec_none_k(char kind) {
-    (void)kind;
+    if (kind == 'f') return rec_box_none_float();
     return (void *)0;
 }
 
@@ -1579,25 +1602,47 @@ static void *mpst_make_endpoint(march_mpst_session *session, int64_t role, int64
 #define MPST_SESSION(ep) ((march_mpst_session *)(intptr_t)(((int64_t *)((char *)(ep) + 16))[0]))
 #define MPST_ROLE(ep)    (((int64_t *)((char *)(ep) + 16))[1])
 
-/* MPST.new(proto_name, n_roles) → list of endpoints (as March linked list)
- * For N roles, returns a list [ep_0, ep_1, ..., ep_{N-1}]. */
-void *march_mpst_new(void *proto_name, int64_t n_roles) {
+/* Pre-register role names into session->role_names[i] in the given order.
+ * [roles_csv] is a March string of comma-separated role names in the SAME
+ * (role-name-sorted) order as the endpoint tuple positions, e.g.
+ * "Client,Logger,Server".  This makes mpst_resolve_role(name) return the
+ * fixed positional index that matches each endpoint's role index, instead of
+ * the fragile first-encounter order.  A NULL / empty string leaves the table
+ * all-NULL and falls back to lazy first-encounter registration. */
+static void mpst_register_roles(march_mpst_session *s, void *roles_csv) {
+    if (!roles_csv) return;
+    march_string *ms = (march_string *)roles_csv;
+    if (ms->len <= 0) return;
+    const char *p = ms->data;
+    const char *end = ms->data + ms->len;
+    int64_t idx = 0;
+    while (p < end && idx < s->n_roles) {
+        const char *start = p;
+        while (p < end && *p != ',') p++;
+        int64_t len = (int64_t)(p - start);
+        s->role_names[idx] = (char *)malloc((size_t)(len + 1));
+        memcpy(s->role_names[idx], start, (size_t)len);
+        s->role_names[idx][len] = '\0';
+        idx++;
+        if (p < end) p++;  /* skip the comma */
+    }
+}
+
+/* MPST.new(proto_name, n_roles, roles_csv) → flat N-tuple of endpoints.
+ * For N roles, returns a tuple (ep_0, ep_1, ..., ep_{N-1}) whose positions
+ * match the role-name-sorted order of [roles_csv].  Endpoint i carries role
+ * index i, and role_names[i] is pre-registered from [roles_csv] so that
+ * name-based routing in send/recv lines up with the tuple positions. */
+void *march_mpst_new(void *proto_name, int64_t n_roles, void *roles_csv) {
     (void)proto_name;
     march_mpst_session *session = mpst_session_new(n_roles);
-    /* Build endpoints as a March linked list (Cons = tag 1, Nil = tag 0).
-     * List is built in reverse to get [0, 1, ..., N-1] order. */
-    void *list = march_alloc(16);  /* Nil: tag=0, rc=1 */
-    for (int64_t i = n_roles - 1; i >= 0; i--) {
-        void *ep = mpst_make_endpoint(session, i, 0);
-        void *cons = march_alloc(16 + 2 * 8);
-        march_hdr *hdr = (march_hdr *)cons;
-        hdr->tag = 1;  /* Cons tag */
-        int64_t *fields = (int64_t *)((char *)cons + 16);
-        fields[0] = (int64_t)(intptr_t)ep;
-        fields[1] = (int64_t)(intptr_t)list;
-        list = cons;
-    }
-    return list;
+    mpst_register_roles(session, roles_csv);
+    /* Build a flat N-tuple: hdr(16) + n_roles fields (tag 0, like march_chan_new). */
+    void *tup = march_alloc(16 + n_roles * 8);
+    int64_t *fields = (int64_t *)((char *)tup + 16);
+    for (int64_t i = 0; i < n_roles; i++)
+        fields[i] = (int64_t)(intptr_t)mpst_make_endpoint(session, i, 0);
+    return tup;
 }
 
 /* MPST.send(endpoint, target_role_name_string, value) → new_endpoint */
@@ -2007,7 +2052,9 @@ void *march_record_get(void *rec, void *key, int64_t expected_kind) {
     march_string *ks = (march_string *)key;
     int32_t i = rec_find_field(s, ks->data, ks->len);
     if (i < 0) return rec_none_k((char)expected_kind);
-    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), s->kinds[i]);
+    /* Representation must match the call-site decoder (expected_kind), which for
+     * a concrete Option(Float) is BOXED — not the stored kind. */
+    return rec_some_k(rec_field_out_adt(rec, i, s->kinds[i]), (char)expected_kind);
 }
 
 /* record_has_key(rec, key) -> Bool (i64 0/1). */
@@ -2201,6 +2248,32 @@ void *march_record_field_dyn(void *rec, const char *name, int64_t len) {
         rec_panic(buf);
     }
     int64_t raw = rec_field_raw(rec, i);
+    if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
+    return (void *)(intptr_t)raw;
+}
+
+/* get_actor_field(pid, field): a PARTIAL lookup, unlike march_record_field_dyn
+ * above (a total EField read that panics on a missing name) — March code,
+ * most often through a small generic helper (e.g. supervision_strategies
+ * .march's child_int), reads a named actor state field without statically
+ * knowing whether it exists, and expects Option(b): None if absent. Reuses
+ * the SAME runtime shape registry march_record_field_dyn consults — a shape
+ * id stamped into the actor struct header's pad word at spawn time (the
+ * EAlloc actor-struct branch in llvm_emit.ml, guarded by
+ * Tir_names.is_actor_struct_name) — so this works regardless of whether the
+ * caller's static Pid(a) type is concrete or still an unresolved type
+ * variable (the realistic case: nothing in get_actor_field's own signature
+ * forces monomorphization on `a` through an indirecting helper function).
+ * Returns a niche-tagged Option: NULL = None, (n<<1)|1 = Some(n) for an 'i'
+ * (Int/Bool/Unit/Atom) field, the raw pointer verbatim for anything else —
+ * matching march_record_field_dyn's found-value convention exactly. */
+void *march_get_actor_field(void *pid, void *name) {
+    march_string *ns = (march_string *)name;
+    march_record_shape *s = rec_shape_of(pid);
+    if (!s) return NULL;
+    int32_t i = rec_find_field(s, ns->data, ns->len);
+    if (i < 0) return NULL;
+    int64_t raw = rec_field_raw(pid, i);
     if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
     return (void *)(intptr_t)raw;
 }

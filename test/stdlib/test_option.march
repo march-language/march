@@ -59,11 +59,18 @@ end
 
 describe "unwrap_or_else" do
   test "unwrap_or_else returns value when Some" do
-    assert (Option.unwrap_or_else(Some(7), fn _u -> 99) == 7)
+    assert (Option.unwrap_or_else(Some(7), fn -> 99) == 7)
   end
 
   test "unwrap_or_else calls function when None" do
-    assert (Option.unwrap_or_else(None, fn _u -> 10) == 10)
+    assert (Option.unwrap_or_else(None, fn -> 10) == 10)
+  end
+
+  test "unwrap_or_else calls a true 0-arg thunk (regression, f(()) vs f())" do
+    -- fn -> body has zero surface params (distinct from the 1-arg-discard
+    -- `fn _ -> body` idiom); this pins the callback down to that exact
+    -- shape so a regression back to `f(())` fails with an arity mismatch.
+    assert (Option.unwrap_or_else(None, fn -> 42) == 42)
   end
 end
 
@@ -111,11 +118,15 @@ end
 
 describe "or_else" do
   test "or_else returns original Some" do
-    assert (Option.unwrap(Option.or_else(Some(5), fn _u -> Some(99))) == 5)
+    assert (Option.unwrap(Option.or_else(Some(5), fn -> Some(99))) == 5)
   end
 
   test "or_else calls function for None" do
-    assert (Option.unwrap(Option.or_else(None, fn _u -> Some(7))) == 7)
+    assert (Option.unwrap(Option.or_else(None, fn -> Some(7))) == 7)
+  end
+
+  test "or_else calls a true 0-arg thunk (regression, f(()) vs f())" do
+    assert (Option.unwrap(Option.or_else(None, fn -> Some(0))) == 0)
   end
 end
 

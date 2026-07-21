@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: refinement does not rule out zero
+-- Refinement types (widening slice 12, §2.14). `cap no_panic`'s division-
+-- safety check (lib/refinecheck/division_safety.ml) is a SECOND, specialized
+-- consumer of the same Refine.discharge machinery: a division `a / d` inside
+-- a `cap no_panic` module is approved only when `d`'s refinement provably
+-- excludes zero. `{Int | _ >= 0}` does NOT exclude zero (0 satisfies it), so
+-- the conservative check rejects -- the predicate is real but insufficient,
+-- not merely absent. Accept companion: accept/t78 (`{Int | _ != 0}`, which
+-- does exclude zero, is approved). Reference: core-march-types.md §2.8.11
+-- already describes `cap no_panic`'s exhaustiveness plane; §2.14 covers this
+-- refinement-discharge plane.
+mod SafeDiv do
+  cap no_panic
+  fn safe_div(a : Int, d : {Int | _ >= 0}) : Int do a / d end
+  fn main() do
+    println(int_to_string(safe_div(10, 2)))
+  end
+end

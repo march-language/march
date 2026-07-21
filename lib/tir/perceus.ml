@@ -139,6 +139,15 @@ type env = {
       (** Module type definitions, used to query whether a matched
           scrutinee's constructor shares its heap object with the bound
           payload (newtype/niche representations).  Was [_type_defs]. *)
+  collision_set : (string, string list) Hashtbl.t;
+      (** Same-short-name type collision set (Task 2, [Collision_set.compute]),
+          derived from [type_defs] once per [perceus] run (mirrors
+          [Llvm_ctx.make_ctx]'s derivation).  Threaded into
+          [Repr.repr_of_ty]/[Repr.is_niche_shaped] so
+          [scrutinee_shares_payload_storage] agrees with codegen's
+          Boxed/Niche/Newtype classification for a colliding type — an
+          agreement gap here would double-free or leak the scrutinee's heap
+          object (see that function's doc comment). *)
   extern_names : StringSet.t;
       (** Names of user-defined extern (FFI) functions.  These are called via
           [ECallPtr] (not [EApp]) but, unlike opaque closures, their
@@ -224,6 +233,7 @@ type env = {
 let empty_env : env = {
   borrow_map = Borrow.empty;
   type_defs = [];
+  collision_set = Hashtbl.create 0;
   extern_names = StringSet.empty;
   current_fn_name = "";
   closure_fvs = StringSet.empty;
@@ -240,9 +250,29 @@ let empty_env : env = {
     double-free the object the branch variable now owns — the cause of the
     Toml get_str / nested-Option RC underflow. *)
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
-  match Repr.repr_of_ty env.type_defs ty with
+  match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
   | Repr.Newtype _ | Repr.Niche _ -> true
-  | Repr.Boxed -> false
+  | Repr.Boxed ->
+    (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
+       abstract-arg path.  [repr_of_ty] conservatively returns [Boxed] for a
+       niche-shaped type applied to abstract (TVar) arguments — e.g.
+       [TCon("Option", [TVar "_35129"])], produced when a value crosses a
+       fully-polymorphic boundary such as [actor_call]'s reply — because
+       [niche_payload_ok(TVar)] is false.  But codegen recovers [Niche] for
+       exactly this shape (the ctor layout is fixed by the type NAME), so the
+       runtime value shares storage with its payload (Some(x) ≡ x).  Perceus
+       must agree, or [add_scrutinee_free_for] would treat the value as a
+       distinct boxed cell and hand it to FBIP for whole-cell reuse — writing
+       the payload (which aliases the scrutinee) into its own reused cell: a
+       self-referential object → RC underflow / use-after-free.  See
+       docs/value-representation.md §7 (erased Option payloads stay NICHE at
+       every commitment site). *)
+    (match ty with
+     | Tir.TCon (name, args)
+       when args <> []
+            && List.exists (function Tir.TVar _ -> true | _ -> false) args
+            && Repr.is_niche_shaped ~collision_set:env.collision_set env.type_defs name -> true
+     | _ -> false)
 
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
@@ -749,7 +779,12 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     let rec result_is_borrowed_field (bfv : StringSet.t) (e : Tir.expr) : bool =
       match e with
       | Tir.EApp (f, [Tir.AVar a])
-        when f.Tir.v_name = "to_string" && a.Tir.v_ty = Tir.TString ->
+        when (f.Tir.v_name = "to_string" || f.Tir.v_name = "Show$String.show")
+             && a.Tir.v_ty = Tir.TString ->
+        (* `to_string` on a String now lowers to the identity `Show$String.show`
+           (the Show-dispatch reroute that fixes `to_string(container)`), so this
+           borrowed-field optimization must recognize BOTH names or it would treat
+           a borrowed field string as owned and drop it — an RC underflow. *)
         StringSet.mem a.Tir.v_name bfv
       | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
         when needs_rc iv.Tir.v_ty && field_src_is_borrowed src ->
@@ -949,6 +984,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            this marked encoding, so a raw declared type (whose TCon args are
            type PARAMETERS, not fields) can never be mistaken for an arity.
            The qualified "Type.Ctor" tail is kept for TIR-dump readability.
+           IMPORTANT: qualify the ctor_tag with the scrutinee's type name so it
+           matches the key format used by EAlloc (see lower.ml ECon case:
+           ctor_key = type_name ^ "." ^ tag).  Without this, the FBIP pass
+           compares e.g. "Leaf" vs "Tree.Leaf" and always returns false.
            When the scrutinee's type is unknown (TVar — typical for
            closure-internal helpers whose params are erased to TVar "_"), we
            leave the type untouched so [same_arity] returns false,
@@ -981,8 +1020,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               within the branch, e.g. the else side of an if inside the branch).
 
          Case 2 was previously unhandled, causing br_vars to be passed to owning
-         positions without IncRC — the root cause of the sort_by RC underflow
-         (commit 9930ce5).
+         positions without IncRC — an RC-underflow when a branch var extracted
+         from a borrowed scrutinee is passed to an owning position on a sub-path
+         where the scrutinee is still live (commit 9930ce5).  See
+         specs/perceus-invariants.md §6 for the governing account.
 
          KNOWN LIMITATION — conservative approximation (memory-safe, minor leak):
          [name_free_in] returns true if the scrutinee appears on ANY path in the
@@ -992,11 +1033,16 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
          scrutinee is NOT used — a bounded memory leak.
 
          Using a path-sensitive "name_free_on_every_path" check instead would
-         cause the sort_by underflow to recur: in List.sort_by's merge loop the
-         outer scrutinee (xs) appears in the Cons arm but not the Nil arm, so
+         reintroduce a use-after-free for the genuine single-sub-path case: when a
+         borrowed scrutinee appears in one arm/sub-path but not another (e.g. the
+         Cons arm but not the Nil arm of a list fold's inner match),
          name_free_on_every_path returns false, scrutinee_borrowed becomes false,
-         br_vars are freed, and the subsequent pass-to-owning-position reads freed
-         memory.
+         br_vars are freed, and a subsequent pass-to-owning-position on the path
+         where the scrutinee IS used reads freed memory.  (Historically this was
+         mis-attributed to List.sort_by; sort_by was later exonerated —
+         .superpowers/sdd/sortby-diagnosis.md, real bug fixed in ffe6fba8 — but
+         the path-insensitive-conservatism invariant it motivated is correct and
+         independent of any one caller.)
 
          The correct fix requires path-sensitive analysis within the branch body —
          adding br_vars to la only on the sub-paths where the scrutinee actually
@@ -1529,6 +1575,7 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
     { empty_env with
       borrow_map;
       type_defs = m.Tir.tm_types;
+      collision_set = Collision_set.compute m.Tir.tm_types;
       extern_names }
   in
   let repl_set =

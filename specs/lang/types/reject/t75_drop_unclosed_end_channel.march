@@ -1,0 +1,32 @@
+-- EXPECT-ERROR: reached `End` but was never closed
+mod Main do
+  -- Session-types F7 linearity hole (a), FIXED 2026-07-15: a channel that
+  -- reaches session state `End` MUST be closed. Here `cc2 = Chan.send(cc, 42)`
+  -- advances the client endpoint from `Send(Int, End)` to `End`, but `cc2` is
+  -- then DROPPED (never passed to `Chan.close`), leaking the endpoint.
+  --
+  -- Pre-fix this typechecked CLEAN: a `TLin` channel let-binding is registered
+  -- Linear by `bind_pattern_bindings` (so double-USE was caught, cf. t35), but
+  -- `infer_block`'s consumed-check ran only for the explicit `linear let` /
+  -- always-linear case, so a dropped channel was never flagged. The fix adds a
+  -- narrow session-specific must-close check: a binding whose session state is
+  -- `End` and that is never referenced afterwards is an error. It is DELIBERATELY
+  -- narrower than full linear consumption -- a channel still mid-protocol may be
+  -- created-and-dropped (accept/t42, t44); only an `End`-state drop is caught
+  -- (mid-protocol drop is the out-of-scope F6).
+  needs IO.Console
+  type Client = Client
+  type Server = Server
+
+  protocol Echo do
+    Client -> Server : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Echo)
+    let cc2 = Chan.send(cc, 42)
+    let (n, sc2) = Chan.recv(sc)
+    Chan.close(sc2)
+    println(int_to_string(n))
+  end
+end

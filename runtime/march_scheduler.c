@@ -4,15 +4,15 @@
  * Design
  * ──────
  * N OS threads each run a scheduler loop.  Each scheduler owns a Chase-Lev
- * work-stealing deque of READY processes.  The owner pushes/pops from the
+ * work-stealing deque of RUNNABLE processes.  The owner pushes/pops from the
  * bottom (LIFO for cache locality).  Idle schedulers steal from others'
  * tops (FIFO for load balance).
  *
  * Scheduling policy: per-thread LIFO with work-stealing.
- *   1. Pop the next READY process from the local deque.
+ *   1. Pop the next RUNNABLE process from the local deque.
  *   2. If empty, attempt to steal from a random other scheduler.
  *   3. If stolen or local: reset reduction budget, swapcontext into process.
- *   4. On return: if READY, push back to local deque; if DEAD, free.
+ *   4. On return: if RUNNABLE, push back to local deque; if DEAD, leak-don't-free.
  *      If WAITING, leave parked — a sender will re-enqueue via wake.
  *   5. If all deques empty and g_live_procs == 0, set g_all_done and exit.
  *
@@ -64,6 +64,43 @@
 #  pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
 
+/* ASan is otherwise unaware that swapcontext() below hops between
+ * independently-mmap'd stacks (the scheduler's own native stack and each
+ * green thread's dedicated stack) — without telling it, it cannot correctly
+ * track stack-use-after-return/stack-buffer-overflow across a switch, and
+ * may misattribute or miss corruption entirely. Every swapcontext() call
+ * site is paired with a _TO_PROC/_TO_SCHED before it and a _DONE after it,
+ * except the three "never returns" call sites (proc_trampoline's normal
+ * exit and march_sched_exit), which by design never resume this fiber. */
+#ifdef MARCH_ASAN_BUILD
+#  define MARCH_ASAN_SWITCH_TO_PROC(from_fiber, target_proc) \
+      __sanitizer_start_switch_fiber(&(from_fiber)->asan_fake_stack, \
+          (target_proc)->stack_mmap_base, (target_proc)->stack_alloc)
+#  define MARCH_ASAN_SWITCH_TO_SCHED(from_fiber) \
+      __sanitizer_start_switch_fiber(&(from_fiber)->asan_fake_stack, NULL, 0)
+#  define MARCH_ASAN_SWITCH_DONE(fiber) \
+      __sanitizer_finish_switch_fiber((fiber)->asan_fake_stack, NULL, NULL)
+#else
+#  define MARCH_ASAN_SWITCH_TO_PROC(from_fiber, target_proc) ((void)0)
+#  define MARCH_ASAN_SWITCH_TO_SCHED(from_fiber) ((void)0)
+#  define MARCH_ASAN_SWITCH_DONE(fiber) ((void)0)
+#endif
+
+/* TSan's fiber API is simpler than ASan's: one __tsan_switch_to_fiber call,
+ * naming the fiber we are ABOUT to become, immediately before the actual
+ * swapcontext() jump — no matching "done" call on the other side. Each
+ * march_proc/march_scheduler owns a persistent fiber handle (created once,
+ * at spawn / at the top of sched_loop respectively). */
+#ifdef MARCH_TSAN_BUILD
+#  define MARCH_TSAN_SWITCH_TO_PROC(target_proc) \
+      __tsan_switch_to_fiber((target_proc)->tsan_fiber, 0)
+#  define MARCH_TSAN_SWITCH_TO_SCHED(sched) \
+      __tsan_switch_to_fiber((sched)->tsan_fiber, 0)
+#else
+#  define MARCH_TSAN_SWITCH_TO_PROC(target_proc) ((void)0)
+#  define MARCH_TSAN_SWITCH_TO_SCHED(sched) ((void)0)
+#endif
+
 /* ── Global state ─────────────────────────────────────────────────────── */
 
 static march_scheduler  g_scheds[MARCH_NUM_SCHEDULERS + 1];
@@ -79,14 +116,121 @@ static _Atomic int      g_sched_shutdown = 0;
  * (recv returns MARCH_RECV_NO_MSG) and the scheduler can drain to 0. */
 static _Atomic int64_t  g_live_nondaemon = 0;
 
-/* Lock-free stack of procs enqueued from outside their target scheduler
- * thread: both foreign spawns (march_sched_spawn from a non-scheduler
- * thread) and foreign wakes (march_sched_wake called for a target whose
- * owner is not the calling thread).  Chase-Lev deques are owner-push-only,
- * so any push from another thread must go through this stack instead;
- * scheduler threads claim from it via try_claim_external(), checked every
- * sched_loop iteration.  Using march_proc::next as the intrusive link. */
-static _Atomic(march_proc *) g_ext_spawn_head = NULL;
+/* Global run queue: the single cross-thread enqueue path, holding RUNNABLE
+ * procs enqueued by a thread that is not the proc's local-deque owner.
+ * Chase-Lev deques are single-owner for push/pop — only steal is a
+ * sanctioned cross-thread operation — so EVERY cross-thread enqueue must
+ * land here instead of in another thread's deque:
+ *   - spawns from non-scheduler threads (e.g. the main OS thread), and
+ *   - wakes (WAITING→RUNNABLE), which may execute on any thread.
+ * Only same-thread enqueues (yield re-push, spawn from within a scheduler)
+ * use the local deque.
+ *
+ * Implementation: a pthread_mutex-protected FIFO linked list
+ * (march_proc::next is the intrusive link) — the same shape as Go's
+ * sched.lock-protected global runq.  An earlier design reused the
+ * pre-existing lock-free Treiber stack (then named g_ext_spawn_head), but
+ * that stack is only MPMC-safe while each proc is pushed AT MOST ONCE (its
+ * original external-spawn usage): once wakes re-push the same proc
+ * repeatedly, the classic ABA race appears — a consumer that stalls between
+ * reading `head` and CAS'ing it can find the same proc pointer re-pushed as
+ * head with a DIFFERENT ->next, splice a stale node back in as the new
+ * head, and thereby hand an already-RUNNING proc to a second scheduler
+ * (the exact double-dispatch this queue exists to prevent).  A mutex FIFO
+ * has no ABA hazard, gives FIFO wake fairness, and its critical sections
+ * are a handful of instructions.
+ *
+ * g_runq_head is _Atomic solely so schedulers can PEEK emptiness without
+ * taking the lock on every dispatch iteration; all mutations (including the
+ * head store) happen under g_runq_mu. */
+/* ── MARCH_DEBUG invariant tripwires ─────────────────────────────────── */
+/* See the field docs in march_scheduler.h (march_proc.dbg_queued /
+ * dbg_running_on).  All run-structure enqueues/dequeues and every dispatch
+ * are funneled through these; a single-membership or single-dispatcher
+ * violation aborts at the moment it happens instead of surfacing minutes
+ * later as corrupted-stack garbage. */
+#ifdef MARCH_DEBUG
+static void dbg_mark_enqueued(march_proc *p, const char *site) {
+    int prev = atomic_exchange_explicit(&p->dbg_queued, 1, memory_order_acq_rel);
+    if (prev != 0) {
+        fprintf(stderr,
+                "march_sched[BUG]: double-enqueue of pid %lld at %s "
+                "(status=%d, running_on=%d)\n",
+                (long long)p->pid, site,
+                (int)atomic_load_explicit(&p->status, memory_order_acquire),
+                atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
+        abort();
+    }
+}
+static void dbg_mark_dequeued(march_proc *p, const char *site) {
+    int prev = atomic_exchange_explicit(&p->dbg_queued, 0, memory_order_acq_rel);
+    if (prev != 1) {
+        fprintf(stderr,
+                "march_sched[BUG]: dequeue of non-queued pid %lld at %s "
+                "(status=%d, running_on=%d)\n",
+                (long long)p->pid, site,
+                (int)atomic_load_explicit(&p->status, memory_order_acquire),
+                atomic_load_explicit(&p->dbg_running_on, memory_order_acquire));
+        abort();
+    }
+}
+static void dbg_mark_dispatched(march_proc *p, int sched_id) {
+    int prev = atomic_exchange_explicit(&p->dbg_running_on, sched_id + 1,
+                                        memory_order_acq_rel);
+    if (prev != 0) {
+        fprintf(stderr,
+                "march_sched[BUG]: DOUBLE DISPATCH of pid %lld: scheduler %d "
+                "claiming while already running on scheduler %d (status=%d)\n",
+                (long long)p->pid, sched_id, prev - 1,
+                (int)atomic_load_explicit(&p->status, memory_order_acquire));
+        abort();
+    }
+}
+static void dbg_mark_undispatched(march_proc *p) {
+    atomic_store_explicit(&p->dbg_running_on, 0, memory_order_release);
+}
+#else
+#  define dbg_mark_enqueued(p, site)     ((void)0)
+#  define dbg_mark_dequeued(p, site)     ((void)0)
+#  define dbg_mark_dispatched(p, sid)    ((void)0)
+#  define dbg_mark_undispatched(p)       ((void)0)
+#endif
+
+static pthread_mutex_t       g_runq_mu   = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic(march_proc *) g_runq_head = NULL;
+static march_proc           *g_runq_tail = NULL;
+
+static void global_runq_push(march_proc *p) {
+    dbg_mark_enqueued(p, "global_runq_push");
+    p->next = NULL;
+    pthread_mutex_lock(&g_runq_mu);
+    if (g_runq_tail) {
+        g_runq_tail->next = p;
+    } else {
+        atomic_store_explicit(&g_runq_head, p, memory_order_release);
+    }
+    g_runq_tail = p;
+    pthread_mutex_unlock(&g_runq_mu);
+}
+
+static march_proc *global_runq_pop(void) {
+    /* Lock-free fast path: empty queue (the common case on a busy scheduler).
+     * A racing push that this stale load misses is picked up on the next
+     * dispatch iteration — never lost (shutdown requires g_live_procs == 0,
+     * and a queued proc still counts as live). */
+    if (atomic_load_explicit(&g_runq_head, memory_order_acquire) == NULL)
+        return NULL;
+    pthread_mutex_lock(&g_runq_mu);
+    march_proc *p = atomic_load_explicit(&g_runq_head, memory_order_relaxed);
+    if (p) {
+        atomic_store_explicit(&g_runq_head, p->next, memory_order_release);
+        if (p->next == NULL) g_runq_tail = NULL;
+        p->next = NULL;
+    }
+    pthread_mutex_unlock(&g_runq_mu);
+    if (p) dbg_mark_dequeued(p, "global_runq_pop");
+    return p;
+}
 
 static _Thread_local march_scheduler *tl_sched = NULL;
 
@@ -224,23 +368,44 @@ static void setup_alt_stack(void) {
  * process's stack reservation, we extend the accessible window with mprotect
  * and return — the CPU retries the faulting instruction and succeeds.
  *
- * If the fault is outside any known stack reservation (real bad-pointer), we
- * restore the default SIGSEGV handler and re-raise so the program terminates
- * with the usual signal.
+ * If the fault is outside any known stack reservation (a real bad pointer), we
+ * terminate the process at the `fatal:` label below with _exit(128 + signo)
+ * (see the long comment there for why re-raising the signal is unsafe from a
+ * green-thread altstack context).
  */
 static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
     (void)uctx;
 
-    /* A lazy-stack-growth fault is a protection fault on a PROT_NONE guard
-     * page.  On Linux that is delivered as SIGSEGV with si_code SEGV_ACCERR.
-     * On macOS the Mach exception EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE is
-     * translated to SIGBUS (not SIGSEGV), with a BUS_* si_code — so the old
-     * `SIGSEGV && SEGV_ACCERR` gate rejected every macOS stack-growth fault,
-     * leaving the thread to die with SIGBUS as soon as a green stack grew past
-     * the initial 4 KiB.  Accept SIGBUS regardless of si_code; the address-range
-     * check below is the real safety gate.  For SIGSEGV keep requiring
-     * SEGV_ACCERR so genuine invalid-address faults still terminate. */
-    if (sig == SIGSEGV && info->si_code != SEGV_ACCERR) goto fatal;
+    /* A lazy-stack-growth fault lands on a PROT_NONE guard page inside a
+     * green thread's reserved-but-not-yet-committed stack region.  How the
+     * kernel classifies that access is NOT portable, so we must NOT gate on
+     * si_code — the address-range check below is the real (and exact) safety
+     * gate:
+     *
+     *   - Bare-metal / faithful-KVM Linux: SIGSEGV, si_code SEGV_ACCERR
+     *     (the page exists but is PROT_NONE — an access-permission fault).
+     *   - Virtualized / emulated x86-64 (qemu-user, and some hypervisor VM
+     *     configurations — including CI runners): SIGSEGV, si_code
+     *     SEGV_MAPERR ("address not mapped").  Verified: on this exact code an
+     *     emulated x86-64 guest reports MAPERR for a PROT_NONE access while a
+     *     native aarch64 host reports ACCERR for the identical mmap+access.
+     *   - macOS: the Mach exception EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE
+     *     is translated to SIGBUS (not SIGSEGV), with a BUS_* si_code.
+     *
+     * The old `SIGSEGV && si_code != SEGV_ACCERR` gate handled only the first
+     * case, so a stack that grew past its initial 4 KiB died with an
+     * unhandled fault on any MAPERR-reporting Linux — flaky (whether a given
+     * run recurses deep enough to grow the stack is timing/data-dependent, and
+     * concurrent scheduling perturbs it) and Linux-only (macOS SIGBUS was
+     * already accepted unconditionally).  That asymmetry — "passes on macOS,
+     * intermittently SIGSEGVs on Linux" under stack-heavy parallel/distributed
+     * workloads (List.pmap, msgpack RPC) — is exactly this bug.
+     *
+     * Fix: classify a stack-growth fault purely by the address-range check
+     * below, for SIGSEGV and SIGBUS alike.  A genuine wild-pointer fault has an
+     * address outside every proc's growable region and still `goto fatal`s; a
+     * fault whose address is in range but whose backing mmap is somehow gone
+     * makes the mprotect fail and also `goto fatal`s.  No si_code gate needed. */
 
     {
         size_t page       = g_page_size;
@@ -272,16 +437,86 @@ static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
     }
 
 fatal:
-    /* Not a stack-growth fault — restore the default handler for the signal
-     * that actually fired and re-raise it so the program terminates normally. */
+#ifdef MARCH_DEBUG
+    /* Debug-build fatal-fault triage: report where the fault landed relative
+     * to every known green-thread stack, plus each involved proc's state.
+     * fprintf is not async-signal-safe, but this is a crashing debug build —
+     * the diagnostic value outweighs the formal UB. */
     {
-        struct sigaction sa;
-        sa.sa_handler = SIG_DFL;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(sig, &sa, NULL);
-        raise(sig);
+        march_scheduler *s = tl_sched;
+#if defined(__APPLE__) && defined(__aarch64__)
+        if (uctx) {
+            ucontext_t *uc = (ucontext_t *)uctx;
+            extern intptr_t _dyld_get_image_vmaddr_slide(uint32_t);
+            fprintf(stderr,
+                    "march_sched[DBG-FATAL]: pc=%p lr=%p sp=%p fp=%p slide=0x%lx\n",
+                    (void *)(uintptr_t)uc->uc_mcontext->__ss.__pc,
+                    (void *)(uintptr_t)uc->uc_mcontext->__ss.__lr,
+                    (void *)(uintptr_t)uc->uc_mcontext->__ss.__sp,
+                    (void *)(uintptr_t)uc->uc_mcontext->__ss.__fp,
+                    (unsigned long)_dyld_get_image_vmaddr_slide(0));
+        }
+#endif
+        fprintf(stderr,
+                "march_sched[DBG-FATAL]: sig=%d si_code=%d si_addr=%p sched=%d "
+                "cur_pid=%lld cur_status=%d\n",
+                sig, info->si_code, (void *)info->si_addr, s ? s->id : -1,
+                (s && s->current) ? (long long)s->current->pid : (long long)-1,
+                (s && s->current)
+                    ? (int)atomic_load_explicit(&s->current->status, memory_order_acquire)
+                    : -1);
+        int64_t hi_pid = atomic_load_explicit(&g_next_pid, memory_order_acquire);
+        if (hi_pid > MARCH_MAX_PROCS) hi_pid = MARCH_MAX_PROCS;
+        for (int64_t i = 0; i < hi_pid; i++) {
+            march_proc *q = g_proc_registry[i];
+            if (!q || !q->stack_mmap_base) continue;
+            char *lo = (char *)q->stack_mmap_base;
+            char *hi = lo + q->stack_alloc;
+            if ((char *)info->si_addr >= lo && (char *)info->si_addr < hi) {
+                fprintf(stderr,
+                        "  fault inside stack of pid %lld (status=%d "
+                        "running_on=%d queued=%d mmap_base=%p usable_bottom=%p)\n",
+                        (long long)q->pid,
+                        (int)atomic_load_explicit(&q->status, memory_order_acquire),
+                        atomic_load_explicit(&q->dbg_running_on, memory_order_acquire),
+                        atomic_load_explicit(&q->dbg_queued, memory_order_acquire),
+                        (void *)lo, (void *)q->stack_base);
+            }
+        }
+        /* NOT abort(): abort() raises SIGABRT, whose default action wedges
+         * the same way the fatal signal itself does over this alt-stack +
+         * green-thread-ucontext state (see the non-debug path below).  Use
+         * the same un-wedge-able _exit primitive so a MARCH_DEBUG crash also
+         * always terminates. */
+        _exit(128 + sig);
     }
+#endif
+    /* Not a stack-growth fault — terminate the process, un-wedge-ably.
+     *
+     * We deliberately do NOT re-raise the signal.  The obvious "reset to
+     * SIG_DFL and raise(sig)" (or abort()) does NOT reliably kill here: the
+     * interrupted context is a green thread's ucontext (swapcontext'd stack)
+     * and this handler ran on the per-thread alternate signal stack, so the
+     * kernel's default terminate-by-signal action — which walks the thread
+     * state to generate a Mach exception / core dump — wedges the thread in
+     * an UNINTERRUPTIBLE in-kernel wait (macOS `ps` state `UE`): pinned at
+     * the faulting instruction, immune even to SIGKILL, unreapable without a
+     * reboot.  Verified 2026-07-10 on the sort-RC-underflow family (a garbage
+     * pointer reaching march_incrc from a lambda apply): the handler ran
+     * (its diagnostic printed), then raise()/abort()/pthread_kill(self)
+     * every one hung the process forever instead of killing it.  Because the
+     * re-raise blocks in-kernel, any code AFTER it (an _exit backstop) never
+     * runs — so the re-raise must be dropped entirely.
+     *
+     * _exit(2) is the only primitive that always works from here: a single
+     * syscall that cannot fault, block, recurse, or be masked.  We exit with
+     * the conventional 128+signo status (139 for SIGSEGV, 138 for SIGBUS),
+     * exactly the code a shell reports for a signal death, so `$?`-based
+     * callers still see "crashed."  The one thing lost vs a true signal death
+     * is WIFSIGNALED / a core dump — an acceptable trade for a fault path
+     * that must never hang.  The oracle sweep's is_divergence treats a
+     * 128+fatal-signo exit as a crash divergence to match. */
+    _exit(128 + sig);
 }
 
 static _Atomic int g_sigsegv_installed = 0;
@@ -362,11 +597,24 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
                    | ((uintptr_t)(uint32_t)arg_lo);
     march_proc *proc = (march_proc *)(void *)addr;
 
+    /* This proc's very first execution resumes here (via makecontext), not
+     * at "the instruction after its own swapcontext-away call" like every
+     * later resume — so it must complete the handoff that sched_loop's
+     * MARCH_ASAN_SWITCH_TO_PROC started, exactly once, before it can safely
+     * start its own switch-away later (else ASan sees back-to-back
+     * start_switch_fiber calls with no finish in between and aborts with
+     * "starting fiber switch while in fiber switch"). */
+    MARCH_ASAN_SWITCH_DONE(proc);
+
     /* Run the user-supplied function. */
     proc->fn(proc->arg);
 
-    /* Function returned — mark dead and hand control back to the scheduler. */
+    /* Function returned — mark dead and hand control back to the scheduler.
+     * This proc never resumes after this switch, so there is no matching
+     * MARCH_ASAN_SWITCH_DONE call. */
     atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
+    MARCH_ASAN_SWITCH_TO_SCHED(proc);
+    MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
     swapcontext(&proc->ctx, &proc->owner_sched->sched_ctx);
     /* If we ever return here the OS context is gone — abort defensively. */
     abort();
@@ -384,7 +632,8 @@ void march_sched_init(void) {
     atomic_store_explicit(&g_live_procs,     0, memory_order_relaxed);
     atomic_store_explicit(&g_live_nondaemon, 0, memory_order_relaxed);
     atomic_store_explicit(&g_sched_shutdown, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_ext_spawn_head, (march_proc *)NULL, memory_order_relaxed);
+    atomic_store_explicit(&g_runq_head, (march_proc *)NULL, memory_order_relaxed);
+    g_runq_tail = NULL;
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
 
@@ -421,7 +670,9 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
 
     p->pid        = atomic_fetch_add_explicit(&g_next_pid, 1, memory_order_relaxed);
     p->is_daemon  = is_daemon;
-    p->status     = PROC_READY;
+    /* NEW→RUNNABLE: trivially single-winner (the proc is not yet published
+     * to any other thread); the enqueue below is the one matching enqueue. */
+    p->status     = PROC_RUNNABLE;
     p->priority   = PRIO_NORMAL;
     p->reductions = MARCH_REDUCTION_BUDGET;
     p->fn         = fn;
@@ -431,6 +682,9 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     p->mbox_count = 0;
     atomic_init(&p->mbox_lock, 0);
     p->owner_sched = NULL;
+#ifdef MARCH_TSAN_BUILD
+    p->tsan_fiber = __tsan_create_fiber(0);
+#endif
 
     /* Allocate the stack: reserve MARCH_STACK_MAX virtual memory, make only
      * the top MARCH_STACK_INITIAL bytes read/write initially.  The rest grows
@@ -464,20 +718,16 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg, int is_daem
     if (!is_daemon)
         atomic_fetch_add_explicit(&g_live_nondaemon, 1, memory_order_relaxed);
 
-    /* Push to the local deque if called from a scheduler thread.
-     * From non-scheduler threads (e.g. main thread), push to a lock-free
-     * external stack instead — pushing to a Chase-Lev deque from a thread
-     * that is not the deque's owner races with the owner's pop. */
+    /* Push to the local deque if called from a scheduler thread (owner push,
+     * Chase-Lev-legal).  From non-scheduler threads (e.g. the main OS
+     * thread), push to the global run queue instead — pushing to a Chase-Lev
+     * deque from a thread that is not the deque's owner races with the
+     * owner's pop. */
     if (tl_sched) {
+        dbg_mark_enqueued(p, "spawn_local_push");
         march_deque_push(&tl_sched->local_queue, p);
     } else {
-        march_proc *old_head;
-        do {
-            old_head = atomic_load_explicit(&g_ext_spawn_head, memory_order_relaxed);
-            p->next  = old_head;
-        } while (!atomic_compare_exchange_weak_explicit(
-                     &g_ext_spawn_head, &old_head, p,
-                     memory_order_release, memory_order_relaxed));
+        global_runq_push(p);
     }
 
     return p;
@@ -519,24 +769,15 @@ static int wake_idle_daemons(void) {
     return woken;
 }
 
-/* Claim one proc pushed by a non-scheduler thread (foreign spawn OR foreign
- * wake).  Chase-Lev deques are owner-push-only, so foreign threads enqueue
- * here and scheduler threads claim from it.  Checked every loop iteration
- * (one acquire load when empty) so foreign work is not starved while local
- * deques stay busy. */
-static march_proc *try_claim_external(void) {
-    march_proc *ext = atomic_load_explicit(&g_ext_spawn_head, memory_order_acquire);
-    while (ext) {
-        march_proc *nxt = ext->next;
-        if (atomic_compare_exchange_weak_explicit(
-                &g_ext_spawn_head, &ext, nxt,
-                memory_order_acq_rel, memory_order_acquire)) {
-            return ext;  /* claimed */
-        }
-        /* CAS failed; ext was refreshed by the failed CAS — retry. */
-    }
-    return NULL;
-}
+/* Deferred Signal.watch drain.  The REAL implementation lives in
+ * march_runtime.c (it runs pending March signal handlers) and is a STRONG
+ * symbol, so it overrides this WEAK no-op whenever the full runtime is linked.
+ * The weak fallback exists so the standalone scheduler unit tests
+ * (test/test_scheduler{,_mt}.c, which link ONLY march_scheduler.c, not the rest
+ * of the runtime) resolve the symbol instead of failing at link time — the same
+ * weak-symbol discipline as g_http_shutdown in march_runtime.c.  Called from the
+ * scheduler loop body — a normal C stack, never signal context. */
+__attribute__((weak)) void march_signal_drain(void) { }
 
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
@@ -544,10 +785,28 @@ static void sched_loop(march_scheduler *sched) {
      * so it can run even when the green thread's stack is exhausted. */
     setup_alt_stack();
 
+#ifdef MARCH_TSAN_BUILD
+    /* Capture this OS thread's own native execution as a TSan fiber, once,
+     * so every swapcontext() that resumes it can name it explicitly. */
+    sched->tsan_fiber = __tsan_get_current_fiber();
+#endif
+
+    /* Touch march_tls_reductions BEFORE publishing sched->running (which
+     * makes the preemption daemon start signalling this thread).  On Darwin,
+     * _Thread_local storage is materialized lazily on first access via
+     * tlv_get_addr -> tlv_allocate_and_initialize -> MALLOC.  The SIGUSR1
+     * preemption handler writes this TLS variable; if its first-ever access
+     * on this thread happens INSIDE the signal handler, the handler calls
+     * malloc mid-signal — async-signal-unsafe — and corrupts the allocator
+     * state of whatever this thread was interrupted in (calloc'd proc
+     * structs, mailbox nodes, March heap objects), which surfaced as wild
+     * garbage ucontexts and heap-metadata crashes under actor churn. */
+    march_tls_reductions = MARCH_REDUCTION_BUDGET;
+
     tl_sched = sched;
-    sched->running = 1;
+    atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
-    /* When the previous task cooperatively yielded (PROC_READY after running),
+    /* When the previous task cooperatively yielded (PROC_RUNNABLE after running),
      * try to steal work from another scheduler before re-running the yielded
      * task.  Without this, all workers can deadlock in a LIFO spin where each
      * pops its own yielded spin-waiter instead of running the leaf tasks that
@@ -555,32 +814,44 @@ static void sched_loop(march_scheduler *sched) {
     int last_yielded = 0;
 
     while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
-        /* Foreign spawns/wakes first: they have no other path onto a
-         * scheduler, and under load the old idle-only check starved them
-         * (a busy worker never reached the idle branch, so a foreign wake
-         * could sit on the external stack indefinitely). */
-        march_proc *p = try_claim_external();
+        /* Run any pending Signal.watch handlers on this normal stack before
+         * dispatching green threads.  Cheap when idle (five atomic loads). */
+        march_signal_drain();
+
+        /* Check the global run queue FIRST, every iteration.  It is the only
+         * path cross-thread enqueues (wakes, external spawns) arrive on, and
+         * a scheduler whose local deque never drains — e.g. a wait_idle/
+         * task_await spinner that yields and is re-pushed locally every
+         * turn — would otherwise never look at it.  At MARCH_NUM_SCHEDULERS=1
+         * that is a guaranteed livelock: main spins in its own deque forever
+         * while the actor it woke starves in the global queue.  The check is
+         * one lock-free acquire load when the queue is empty (the common
+         * case); FIFO pop order doubles as wake fairness. */
+        march_proc *p = global_runq_pop();
+        int from_global = (p != NULL);
+        (void)from_global;
 
         /* Single-scheduler: use steal (FIFO) for fairness and compatibility.
          * Multi-scheduler: use pop (LIFO) for cache locality; steal from others.
          * Exception: if the previous task yielded, try to steal first to avoid
          * the LIFO livelock described above. */
-        if (!p) {
-            if (g_num_scheds <= 1) {
-                p = (march_proc *)march_deque_steal(&sched->local_queue);
-            } else if (last_yielded) {
-                /* Yielded task goes back; steal from others to make progress. */
-                for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
-                    steal_seed = steal_seed * 1103515245 + 12345;
-                    int victim = (int)((steal_seed >> 16) % g_num_scheds);
-                    if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
-                    p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
-                    if (p) break;
-                }
-                if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
-            } else {
-                p = (march_proc *)march_deque_pop(&sched->local_queue);
+        if (p) {
+            /* run the globally-queued proc */
+        } else if (g_num_scheds <= 1) {
+            p = (march_proc *)march_deque_steal(&sched->local_queue);
+        } else if (last_yielded) {
+            /* Yielded task goes back; steal from others to make progress. */
+            p = NULL;
+            for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
+                steal_seed = steal_seed * 1103515245 + 12345;
+                int victim = (int)((steal_seed >> 16) % g_num_scheds);
+                if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
+                p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
+                if (p) break;
             }
+            if (!p) p = (march_proc *)march_deque_pop(&sched->local_queue);
+        } else {
+            p = (march_proc *)march_deque_pop(&sched->local_queue);
         }
         last_yielded = 0;
 
@@ -595,6 +866,8 @@ static void sched_loop(march_scheduler *sched) {
             }
         }
 
+        if (p && !from_global) dbg_mark_dequeued(p, "local_pop_or_steal");
+
         if (!p) {
             if (atomic_load_explicit(&g_live_procs, memory_order_acquire) <= 0
                     && atomic_load_explicit(&g_sched_shutdown, memory_order_acquire)) {
@@ -608,7 +881,8 @@ static void sched_loop(march_scheduler *sched) {
             if (atomic_load_explicit(&g_sched_shutdown, memory_order_acquire)
                     && atomic_load_explicit(&g_live_nondaemon, memory_order_acquire) <= 0
                     && wake_idle_daemons() > 0)
-                continue;  /* woken procs are in our deque — run them now */
+                continue;  /* woken procs are in the global runq — next
+                            * iteration's global_runq_pop picks them up */
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
@@ -616,17 +890,72 @@ static void sched_loop(march_scheduler *sched) {
             continue;
         }
 
-        atomic_store_explicit(&p->status, PROC_RUNNING, memory_order_release);
+        /* Claim the proc with a CAS RUNNABLE→RUNNING before executing it.
+         * Because enqueue is single-winner (every transition INTO RUNNABLE
+         * is one atomic CAS/uncontended store whose winner alone enqueues,
+         * and cross-thread pushes are gone), a dequeued proc is referenced
+         * by this thread only — so this CAS should never lose.  It is a
+         * backstop: if it ever fails with an unexpected state, the single-
+         * membership invariant was violated and (in MARCH_DEBUG builds) we
+         * abort at the moment it happens instead of corrupting a stack.
+         *
+         * One legitimate failure exists: march_task_cancel_by_id stores
+         * PROC_DEAD cross-thread into a proc that may be sitting in a run
+         * queue.  Pre-CAS dispatch ran such a proc anyway (the store was
+         * blindly overwritten with RUNNING and the thunk completed,
+         * setting the task's done flag); preserve exactly that behavior by
+         * claiming DEAD→RUNNING and running it.  Dropping it instead would
+         * strand g_live_procs above zero (shutdown hang) and leave
+         * task_await spinning on a done flag that never gets set. */
+        march_proc_status claim = PROC_RUNNABLE;
+        if (!atomic_compare_exchange_strong_explicit(
+                &p->status, &claim, PROC_RUNNING,
+                memory_order_acq_rel, memory_order_acquire)) {
+            if (claim == PROC_DEAD) {
+                if (!atomic_compare_exchange_strong_explicit(
+                        &p->status, &claim, PROC_RUNNING,
+                        memory_order_acq_rel, memory_order_acquire)) {
+                    /* DEAD moved under us — nothing else may own a dequeued
+                     * proc; drop defensively (debug builds scream). */
+#ifdef MARCH_DEBUG
+                    fprintf(stderr,
+                            "march_sched[BUG]: claim of dequeued pid %lld "
+                            "failed twice (status=%d)\n",
+                            (long long)p->pid, (int)claim);
+                    abort();
+#endif
+                    continue;
+                }
+            } else {
+#ifdef MARCH_DEBUG
+                fprintf(stderr,
+                        "march_sched[BUG]: dequeued pid %lld not RUNNABLE "
+                        "at claim (status=%d, running_on=%d) — "
+                        "single-membership violated\n",
+                        (long long)p->pid, (int)claim,
+                        atomic_load_explicit(&p->dbg_running_on,
+                                             memory_order_acquire));
+                abort();
+#endif
+                continue;   /* stale/duplicate reference: drop, never run */
+            }
+        }
         p->reductions   = MARCH_REDUCTION_BUDGET;
         p->owner_sched  = sched;
         sched->current  = p;
 
+        dbg_mark_dispatched(p, sched->id);
+        MARCH_ASAN_SWITCH_TO_PROC(sched, p);
+        MARCH_TSAN_SWITCH_TO_PROC(p);
         swapcontext(&sched->sched_ctx, &p->ctx);
+        MARCH_ASAN_SWITCH_DONE(sched);
+        dbg_mark_undispatched(p);
 
         sched->current = NULL;
 
         march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
-        if (st == PROC_READY) {
+        if (st == PROC_RUNNABLE) {
+            dbg_mark_enqueued(p, "yield_repush");
             march_deque_push(&sched->local_queue, p);
             last_yielded = 1;
         } else if (st == PROC_PARKED) {
@@ -635,7 +964,7 @@ static void sched_loop(march_scheduler *sched) {
              * swapcontext has returned here, the process's ucontext is fully
              * saved in p->ctx.  Transition to PROC_WAITING so that any
              * waker that was spin-waiting on PROC_PARKED can now safely CAS
-             * WAITING→READY and push p to a deque without risk of another
+             * WAITING→RUNNABLE and enqueue p without risk of another
              * thread resuming a process whose context isn't saved yet. */
             atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
         } else if (st == PROC_DEAD) {
@@ -643,13 +972,39 @@ static void sched_loop(march_scheduler *sched) {
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
-            munmap(p->stack_mmap_base, p->stack_alloc);
-            free(p);
+            /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
+             *
+             * march_actor_meta.green_thread (march_runtime.c) holds a
+             * march_proc* that is read from OTHER OS threads (do_actor_death,
+             * march_actor_broadcast_migrate, march_actor_call/reply) with NO
+             * synchronization against this thread's registry_remove/free —
+             * only the SEPARATE g_proc_registry array (walked by
+             * march_sched_wait_idle / wake_idle_daemons, under g_registry_mu)
+             * had that protection. A reader on another thread can therefore
+             * still be mid-dereference of `p` (or about to dereference it)
+             * at the exact moment this branch would have freed it and a
+             * later spawn's calloc reused the same address for an unrelated
+             * proc — confirmed via ThreadSanitizer as a genuine, not
+             * benign, data race causing heap corruption (intermittent
+             * SIGSEGV/SIGBUS/hangs) under supervision's kill-then-
+             * immediately-respawn pattern, and reproducible with plain
+             * kill()+spawn() with no supervision involved at all.
+             *
+             * Leaving `p` (and its stack mmap) allocated forever makes every
+             * stale reader safe: p->status still correctly reads PROC_DEAD
+             * (already-dead handling is required everywhere regardless, so
+             * this adds no new cases to handle), and the memory is never
+             * repurposed out from under a reader that hasn't yet noticed
+             * the process died. This trades an unreclaimed-memory leak
+             * (bounded by total actors ever spawned+killed over a program's
+             * lifetime) for eliminating the crash; proper reclamation
+             * (e.g. reference counting or an epoch/hazard-pointer scheme)
+             * is a separate, larger undertaking — see specs/todos.md. */
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }
 
-    sched->running = 0;
+    atomic_store_explicit(&sched->running, 0, memory_order_release);
     tl_sched = NULL;
 }
 
@@ -670,6 +1025,11 @@ void march_sched_run(void) {
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
         sched_loop(&g_scheds[0]);
+        /* Final drain: a Signal.watch delivery that landed just before shutdown
+         * (e.g. a synchronous self-raise right before main returns) may have set
+         * its pending flag after the loop's last top-of-iteration drain but
+         * before g_all_done was observed.  Run it now, on this normal stack. */
+        march_signal_drain();
         return;
     }
 
@@ -691,19 +1051,77 @@ void march_sched_run(void) {
         pthread_join(g_scheds[i].thread, NULL);
     }
 
+    /* Final drain (see the single-scheduler path above): catch any Signal.watch
+     * delivery that raced shutdown, now that all worker threads have joined and
+     * this is the only thread running. */
+    march_signal_drain();
+
     march_sched_preempt_stop();
 }
 
+/* NOINLINE — this is a green-thread MIGRATION BARRIER, and that attribute is
+ * load-bearing, not a style choice.
+ *
+ * A green thread that yields here can be re-dispatched on a DIFFERENT OS
+ * thread (work stealing / global-runq drain).  `tl_sched` is _Thread_local:
+ * the C compiler assumes a function body executes on ONE thread and freely
+ * caches the TLS slot address in a callee-saved register.  When this function
+ * was inlinable, clang -O2 inlined it into march_sched_wait_idle's loop and
+ * HOISTED the tlv_get_addr(tl_sched) out of the loop — so after the first
+ * yield migrated the green thread to another OS thread, every subsequent
+ * iteration read the ORIGINAL thread's tl_sched, grabbed the WRONG
+ * scheduler's ->current (a different, possibly running proc), forced its
+ * status to RUNNABLE mid-run, saved over its live ucontext, and resumed the
+ * wrong scheduler's sched_ctx on this thread — putting two OS threads inside
+ * one sched_loop frame.  Observed as intermittent SIGSEGV/SIGBUS with
+ * sched_loop's `sched` register reading back NULL and pc landing inside
+ * g_scheds under kill+respawn churn at MARCH_NUM_SCHEDULERS > 1 (verified by
+ * disassembly of the miscompiled wait_idle loop, and by the crash vanishing
+ * once yield calls re-derive TLS per call).
+ *
+ * noinline forces every caller through a fresh function entry, whose
+ * tlv_get_addr executes on the CURRENT OS thread.  Inside this body there is
+ * no TLS access after the swapcontext, so the body itself is
+ * migration-safe.  Rule for all future scheduler code: never touch a
+ * _Thread_local after a swapcontext that can migrate the green thread, and
+ * never let a switch-crossing function be inlined into a loop that reads
+ * thread-locals. */
+__attribute__((noinline))
 void march_sched_yield(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
-    atomic_store_explicit(&p->status, PROC_READY, memory_order_release);
+    /* Authorized RUNNING→RUNNABLE transition (single-winner enqueue rule):
+     * only the running proc itself performs it, on its own scheduler
+     * thread, and the matching enqueue is done exactly once by the owner
+     * scheduler after swapcontext returns (post-swap RUNNABLE branch).
+     * The only possible contender is march_task_cancel_by_id's cross-
+     * thread DEAD store; if it raced us, deliberately overwrite it —
+     * pre-CAS dispatch always did — so the cancelled thunk still runs to
+     * completion and sets its task's done flag (dropping it here would
+     * hang task_await and strand g_live_procs above zero). */
+    march_proc_status expect = PROC_RUNNING;
+    if (!atomic_compare_exchange_strong_explicit(
+            &p->status, &expect, PROC_RUNNABLE,
+            memory_order_acq_rel, memory_order_acquire)) {
+        atomic_store_explicit(&p->status, PROC_RUNNABLE, memory_order_release);
+    }
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
-    /* Execution resumes here after the scheduler re-schedules us. */
+    MARCH_ASAN_SWITCH_DONE(p);
+    /* Execution resumes here after the scheduler re-schedules us — possibly
+     * on a different OS thread than the one that called this function. */
 }
 
 void march_sched_wait_idle(void) {
     if (!tl_sched || !tl_sched->current) return;
+    /* `self` is a proc pointer (stable across migrations); it is captured
+     * BEFORE the first yield, on the correct thread.  Do NOT read tl_sched
+     * anywhere in the loop below: after each march_sched_yield this green
+     * thread may be running on a different OS thread, and a cached TLS
+     * address would alias the original thread's slot (see the migration-
+     * barrier comment on march_sched_yield — this loop is exactly where
+     * that miscompilation caused the multi-scheduler stack corruption). */
     march_proc *self = tl_sched->current;
     for (;;) {
         /* Give every other runnable proc a turn before checking. */
@@ -717,7 +1135,7 @@ void march_sched_wait_idle(void) {
             if (!q || q == self) continue;
             march_proc_status st =
                 atomic_load_explicit(&q->status, memory_order_acquire);
-            if (st == PROC_READY || st == PROC_RUNNING || st == PROC_PARKED) {
+            if (st == PROC_RUNNABLE || st == PROC_RUNNING || st == PROC_PARKED) {
                 busy = 1;
             } else if (st == PROC_WAITING && q->mbox_count > 0) {
                 /* Message enqueued but wake not yet delivered — transient. */
@@ -742,6 +1160,10 @@ void march_sched_exit(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
+    /* This proc never resumes after this switch, so there is no matching
+     * MARCH_ASAN_SWITCH_DONE call. */
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
     abort(); /* Should never be reached. */
 }
@@ -801,16 +1223,28 @@ int march_sched_send(march_proc *target, void *msg) {
     return 0;
 }
 
+/* NOINLINE: migration barrier, same rationale as march_sched_yield — a proc
+ * that parks here can be woken and re-dispatched on a different OS thread.
+ * The body reads tl_sched only BEFORE the swapcontext (safe); noinline
+ * guarantees no future same-TU caller can hoist those TLS reads across the
+ * switch. */
+__attribute__((noinline))
 void *march_sched_recv(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
 
-    /* Fast path: check node existence, not message value.
-     * March zero-arg constructors are valid msg=NULL (inttoptr i64 0), so we
-     * MUST NOT use "if (msg)" to detect "has message" — we use the node ptr. */
-    if (p->mailbox) return mbox_pop(p);
-
-    /* Slow path: check mailbox under lock, then park if truly empty. */
+    /* Check the mailbox under lock, then park if truly empty. There used to
+     * be an unlocked "fast path" here (`if (p->mailbox) return mbox_pop(p);`)
+     * that bypassed the mbox_lock spinlock entirely. mbox_push (called by
+     * senders, under the lock) and mbox_pop both read AND WRITE the shared
+     * mailbox/mbox_tail/mbox_count linked-list state — the unlocked fast
+     * path let a sender's locked mbox_push race against this receiver's
+     * unlocked mbox_pop, corrupting the list (confirmed via
+     * ThreadSanitizer: this was a genuine data race, not a benign one — it
+     * caused intermittent heap corruption and crashes at unrelated,
+     * seemingly-random locations under load). The lock is cheap when
+     * uncontended (the common case), so always taking it here is the
+     * correct, minimal fix. */
     mbox_lock_acquire(p);
     if (p->mailbox) {
         void *msg = mbox_pop(p);
@@ -826,7 +1260,10 @@ void *march_sched_recv(void) {
     atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
     mbox_lock_release(p);
 
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
     /* Context is now saved.  The scheduler (sched_loop) transitions us from
      * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
      * its side, making it safe for a waker to push us to a deque. */
@@ -873,51 +1310,35 @@ void march_sched_wake(march_proc *target) {
      * swapcontext.  We must wait until the scheduler transitions it to
      * PROC_WAITING before we can push it to a deque; otherwise two
      * scheduler threads would try to resume the same process simultaneously.
-     * The transition is O(1) so this spin is normally extremely short — but
-     * it is not bounded: if the OS preempts the parking thread between its
-     * PROC_PARKED store and its swapcontext call, a waker that busy-spins
-     * here without yielding can starve the parking thread of the CPU time it
-     * needs to reach swapcontext, livelocking both threads under thread
-     * oversubscription (see specs/plans/2026-07-09-foreign-thread-actor-bridge.md,
-     * "Diagnosis findings (Task 1)"). sched_yield() gives the parking thread
-     * a chance to run. */
+     * The transition is O(1) so this spin is extremely short. */
     march_proc_status cur;
-    for (;;) {
+    do {
         cur = atomic_load_explicit(&target->status, memory_order_acquire);
-        if (cur == PROC_DEAD || cur == PROC_READY || cur == PROC_RUNNING)
+        if (cur == PROC_DEAD || cur == PROC_RUNNABLE || cur == PROC_RUNNING)
             return; /* Not WAITING — no need to wake. */
-        if (cur == PROC_WAITING) break;
-        /* cur is PROC_PARKED: yield so the parking thread can get CPU time
-         * and reach swapcontext — a bare spin here livelocks under thread
-         * oversubscription. */
-        sched_yield();
-    }
+        /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
+    } while (cur == PROC_PARKED);
 
-    /* Use CAS to atomically transition WAITING→READY so that concurrent
-     * senders cannot both succeed and push the process to the deque twice. */
+    /* Use CAS to atomically transition WAITING→RUNNABLE so that concurrent
+     * senders cannot both succeed and enqueue the process twice.  Exactly one
+     * waker wins; only the winner enqueues (single-membership invariant). */
     march_proc_status expected = PROC_WAITING;
     if (!atomic_compare_exchange_strong_explicit(
-            &target->status, &expected, PROC_READY,
+            &target->status, &expected, PROC_RUNNABLE,
             memory_order_acq_rel, memory_order_acquire))
         return; /* Not WAITING (already woken by another sender). */
-    if (tl_sched) {
-        /* Called from a scheduler thread (possibly not target's owner —
-         * that's fine, any scheduler thread may push onto its OWN local
-         * deque; Chase-Lev only requires the push to come from the deque's
-         * owner, not from target's owner). */
-        march_deque_push(&tl_sched->local_queue, target);
-    } else {
-        /* Foreign thread (evloop pthread, FFI thread, main before scheduler):
-         * deques are owner-push-only, so push onto the external ready stack.
-         * Same protocol as the foreign-spawn path in sched_spawn_common. */
-        march_proc *old_head;
-        do {
-            old_head = atomic_load_explicit(&g_ext_spawn_head, memory_order_relaxed);
-            target->next = old_head;
-        } while (!atomic_compare_exchange_weak_explicit(
-                     &g_ext_spawn_head, &old_head, target,
-                     memory_order_release, memory_order_relaxed));
-    }
+
+    /* Enqueue to the GLOBAL run queue, never a deque.  Wake may execute on
+     * any thread (another scheduler, or a non-scheduler thread such as a
+     * network I/O thread); a Chase-Lev deque only tolerates push/pop from
+     * its single owner thread.  The old `march_deque_push(&g_scheds[0]...)`
+     * branch here was a cross-thread push that could corrupt scheduler 0's
+     * `bottom` against its concurrent pop, handing the same proc to both a
+     * pop and a steal — the confirmed double-dispatch stack corruption.
+     * Even when the waker IS a scheduler thread we route through the global
+     * runq ("wake always global"): it keeps the rule single-cased, and every
+     * scheduler checks the global queue each dispatch iteration. */
+    global_runq_push(target);
 }
 
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
@@ -973,7 +1394,8 @@ static void *preempt_daemon(void *arg) {
 
         /* Signal every active scheduler thread. */
         for (int i = 0; i < g_num_scheds; i++) {
-            if (g_scheds[i].running && g_scheds[i].thread) {
+            if (atomic_load_explicit(&g_scheds[i].running, memory_order_acquire)
+                    && g_scheds[i].thread) {
                 pthread_kill(g_scheds[i].thread, SIGUSR1);
             }
         }

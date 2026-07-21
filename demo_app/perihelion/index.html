@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Perihelion — March</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a0a0a;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #eee;
+      position: relative;
+    }
+    h1 {
+      position: fixed;
+      top: 0.8rem;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      color: #9a9a9a;
+      pointer-events: none;
+      z-index: 1;
+    }
+    #game-canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: pointer;
+      /* The canvas is the whole interactive surface -- without this, a
+         touch browser can spend a moment disambiguating a tap from a
+         pan/zoom gesture before (or instead of) firing pointerdown, which
+         reads as "some taps just don't register". */
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .hint {
+      position: fixed;
+      bottom: 0.6rem;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      color: #555555;
+      pointer-events: none;
+      z-index: 1;
+    }
+  </style>
+</head>
+<body>
+  <h1>PERIHELION</h1>
+  <canvas id="game-canvas"></canvas>
+  <p class="hint">tap to release · W/S to change orbit · R to reset · M to mute · Compiled from March with --target js</p>
+  <script type="module" src="perihelion.mjs"></script>
+</body>
+</html>

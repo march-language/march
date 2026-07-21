@@ -1,0 +1,247 @@
+<style>
+  /* This page wants a full-width, full-height split view instead of the
+     normal ~840px reading column .d-main caps every docs page at (see
+     docs.html's .d-main { max-width: 840px }). Rather than touch that
+     shared layout (used by every other docs page), scope the override to
+     just the .d-main that contains this page's #tp-wrap via :has() — a
+     zero-blast-radius, self-contained override that lives entirely in
+     this include. */
+  .d-main:has(#tp-wrap) { max-width: none; padding: 32px 32px 52px; }
+  @media (max-width: 900px) { .d-main:has(#tp-wrap) { padding: 24px 16px 32px; } }
+
+  .tp-wrap {
+    display: flex;
+    gap: 1.5rem;
+    align-items: stretch;
+    height: calc(100vh - 160px);
+    min-height: 560px;
+  }
+  /* Below this width the two columns can no longer both be usefully wide
+     AND tall at once — stack them, each getting its own sane height
+     instead of splitting one shared height in half. */
+  @media (max-width: 900px) {
+    .tp-wrap { flex-direction: column; height: auto; min-height: 0; }
+  }
+
+  /* min-width: 0 overrides the flex item's default content-based minimum —
+     without it a <textarea> child refuses to shrink past its intrinsic
+     size, forcing this column (and its sibling) to wrap onto its own line
+     even when flex-basis/min-width alone would fit side-by-side. */
+  .tp-editor-col {
+    flex: 1 1 50%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+  }
+  @media (max-width: 900px) {
+    .tp-editor-col { flex: none; }
+  }
+
+  .tp-heading { flex-shrink: 0; margin-bottom: 1rem; }
+  .tp-heading h1 { margin: 0 0 12px; }
+  .tp-heading p { margin: 0; }
+
+  /* Terminal chrome, matching docs/_includes/playground.html's .pg-terminal
+     so this page reads as the same family of widget as /docs/playground/. */
+  .tp-terminal {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Menlo", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+  }
+  @media (max-width: 900px) {
+    .tp-terminal { flex: none; height: 420px; }
+  }
+  .tp-titlebar {
+    background: var(--bg-sidebar, var(--bg-code));
+    border-bottom: 1px solid var(--border);
+    padding: 11px 16px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-shrink: 0;
+  }
+  .tp-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .tp-dot-red    { background: #ff5f57; }
+  .tp-dot-yellow { background: #febc2e; }
+  .tp-dot-green  { background: #28c840; }
+  .tp-title-label {
+    margin-left: 8px;
+    color: var(--text-faint);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    flex: 1;
+  }
+  .tp-run-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 3px 12px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+  }
+  .tp-run-btn:hover { border-color: var(--accent); }
+
+  /* Live syntax highlighting: a highlighted <pre> sits behind a transparent
+     <textarea> (same font metrics, perfectly overlaid) — the textarea's own
+     glyphs are invisible (color: transparent) but its caret and selection
+     still render, and it still receives all real keyboard/paste input.
+     `_hlLine` (docs/assets/tetris-playground.js) re-renders the <pre> on
+     every keystroke; scroll position is synced the same way. This mirrors
+     march-repl.js's highlighter, applied live instead of only to submitted
+     history entries. */
+  .tp-editor-wrap { position: relative; flex: 1; min-height: 0; height: 100%; }
+  /* ID selectors, not classes: this page's markdown body sits inside
+     docs.html's `.d-content` wrapper, whose `.d-content pre` rule (styling
+     for ordinary fenced code blocks) has HIGHER specificity than a plain
+     `.tp-highlight` class selector and silently overrode font-size,
+     line-height, padding, and tab-size on this <pre> — while #tp-editor
+     (a <textarea>, not a <pre>) was unaffected. That divergence meant the
+     visible highlighted text and the real (invisible) textarea text no
+     longer lined up character-for-character, so clicks landed on a
+     different character than the one visually under the pointer. ID
+     selectors trivially outrank `.d-content pre` and keep both elements
+     pixel-identical regardless of what the surrounding page's CSS does. */
+  /* Line-number gutter: a separate element, not part of the highlight/editor
+     overlay pair, so it can't disturb their mutual character-for-character
+     alignment (see the ID-selector note above — that alignment is load-
+     bearing) as long as both get the exact same left offset to make room
+     for it. Compile errors are reported as march:LINE:COL, so this is what
+     lets you actually find the line a "playground.march:46:8" error means. */
+  #tp-lineno {
+    position: absolute;
+    inset: 0;
+    width: 2.75em;
+    padding: 12px 6px 12px 0;
+    margin: 0;
+    box-sizing: border-box;
+    font: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    white-space: pre;
+    text-align: right;
+    color: var(--text-faint);
+    background: var(--bg-code);
+    border-right: 1px solid var(--border);
+    -webkit-user-select: none;
+    user-select: none;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  #tp-highlight, #tp-editor {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 2.75em;
+    margin: 0;
+    padding: 12px 12px 12px 8px;
+    border: 0;
+    box-sizing: border-box;
+    font: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    tab-size: 8;
+    white-space: pre;
+    overflow: auto;
+  }
+  #tp-highlight {
+    color: var(--text);
+    background: transparent;
+    pointer-events: none;
+    /* This backdrop is scrolled programmatically (kept in sync with the real
+       textarea on top of it — see syncHighlightScroll in tetris-playground.js),
+       never by the user directly, but overflow: auto alone still paints a
+       native scrollbar on it — a second, non-functional one right next to
+       the textarea's real one. Hide it without losing the scrollability. */
+    scrollbar-width: none;
+  }
+  #tp-highlight::-webkit-scrollbar { display: none; }
+  #tp-editor {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--text);
+    resize: none;
+  }
+  .tp-status-row { margin-top: 8px; color: var(--text-faint); font-size: 12px; flex-shrink: 0; }
+  .tp-errors {
+    white-space: pre-wrap;
+    color: #f87171;
+    font-family: monospace;
+    font-size: 12px;
+    margin-top: 8px;
+    display: none;
+    flex-shrink: 0;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+  .tp-errors.visible { display: block; }
+
+  .tp-game-col { flex: 1 1 50%; min-width: 0; display: flex; }
+  @media (max-width: 900px) {
+    .tp-game-col { flex: none; height: 480px; }
+  }
+  .tp-iframe-wrap {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-code);
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  #tp-iframe-host { width: 100%; flex: 1; border: 0; display: block; }
+</style>
+
+<div class="tp-wrap" id="tp-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
+  <div class="tp-editor-col">
+    <div class="tp-heading d-content">
+      <h1>Tetris Playground</h1>
+      <p>
+        Edit the March source on the left and hit <strong>Run</strong> to
+        recompile and replay the game on the right — a full trip through
+        the real March compiler (parse, typecheck, lower, optimize, emit
+        JS), running in your browser.
+      </p>
+    </div>
+    <div class="tp-terminal">
+      <div class="tp-titlebar">
+        <span class="tp-dot tp-dot-red"></span>
+        <span class="tp-dot tp-dot-yellow"></span>
+        <span class="tp-dot tp-dot-green"></span>
+        <span class="tp-title-label">tetris.march</span>
+        <button class="tp-run-btn" onclick="tpRun()">Run &#9654;</button>
+      </div>
+      <div class="tp-editor-wrap">
+        <pre id="tp-lineno" aria-hidden="true"></pre>
+        <pre class="tp-highlight" id="tp-highlight" aria-hidden="true"></pre>
+        <textarea class="tp-editor" id="tp-editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+      </div>
+    </div>
+    <div class="tp-status-row" id="tp-status"></div>
+    <div class="tp-errors" id="tp-errors"></div>
+  </div>
+  <div class="tp-game-col">
+    <div class="tp-iframe-wrap"><div id="tp-iframe-host"></div></div>
+  </div>
+</div>
+
+<script src="{{ site.baseurl }}/assets/tetris-playground.js?v={{ site.time | date: '%s' }}"></script>

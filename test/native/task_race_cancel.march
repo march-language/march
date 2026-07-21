@@ -1,0 +1,31 @@
+-- Regression (item 24): Task.race / Task.any / the cancel-token builtins
+-- (task_cancel_token_new / task_spawn_with_cancel / task_cancel /
+-- task_is_cancelled) failed to COMPILE — `use of undefined value
+-- '@task_cancel_by_id'`. The builtins have dedicated llvm_emit arms but were
+-- MISSING from defun's builtin_names, so `List.each(rest, fn t ->
+-- task_cancel_by_id(t))` inside Task.race/any made defun treat the builtin as a
+-- first-class function and emit a `@task_cancel_by_id$clo_wrap` calling the
+-- non-existent `@task_cancel_by_id` (only the C symbol @march_task_cancel_by_id
+-- exists). Fixed by adding all five to defun.builtin_names. Deterministic:
+-- both tasks return immediately, so the winner is the first.
+mod Main do
+  needs IO.Spawn
+  fn main() : () do
+    let a = Task.async(fn () -> 1)
+    let b = Task.async(fn () -> 2)
+    match Task.race(Cons(a, Cons(b, Nil))) do
+      Ok(v)  -> println("race=" ++ int_to_string(v))
+      Err(e) -> println("race_err=" ++ e)
+    end
+    let c = Task.async(fn () -> 10)
+    let d = Task.async(fn () -> 20)
+    match Task.any(Cons(c, Cons(d, Nil))) do
+      Ok(v)   -> println("any=" ++ int_to_string(v))
+      Err(es) -> println("any_failed=" ++ int_to_string(List.length(es)))
+    end
+    let tok = task_cancel_token_new()
+    let _t = task_spawn_with_cancel(fn _ -> 99, tok)
+    task_cancel(tok)
+    println("cancelled=" ++ bool_to_string(task_is_cancelled(tok)))
+  end
+end

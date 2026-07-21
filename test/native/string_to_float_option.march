@@ -1,0 +1,32 @@
+-- Option(Float) is a BOXED representation (0.0 aliases niche-None=0, so it
+-- can't use the raw-pointer niche encoding other Option(_) builtins use).
+-- march_string_to_float's Some(f) cell must store a POINTER to a
+-- march_alloc_float box at the payload offset — matching the generic
+-- Boxed-ADT ctor convention every Float-payload ctor field uses elsewhere
+-- (see native_float_arr_to_list's identical convention in march_runtime.c).
+-- Storing the raw double inline there instead made the decode side
+-- (march_unbox_float) dereference the float's own bit pattern as a heap
+-- pointer: SIGSEGV compiled-only (fine interpreted, since eval.ml never
+-- goes through this C representation). Exercises both the builtin
+-- directly and stdlib's String.to_float wrapper (which follows the exact
+-- same string_to_float -> match Some/None -> Ok/Err shape).
+mod Main do
+  fn main() do
+    match string_to_float("3.14") do
+      Some(f) -> println(float_to_string(f))
+      None -> println("none")
+    end
+    match string_to_float("not a float") do
+      Some(f) -> println(float_to_string(f))
+      None -> println("none")
+    end
+    match string_to_float("0.0") do
+      Some(f) -> println(float_to_string(f))
+      None -> println("none")
+    end
+    match String.to_float("-42.5") do
+      Ok(f) -> println(float_to_string(f))
+      Err(e) -> println(e)
+    end
+  end
+end

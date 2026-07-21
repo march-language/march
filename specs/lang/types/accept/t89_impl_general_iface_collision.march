@@ -1,0 +1,32 @@
+-- Coherence accept (FQN dispatch Stage 3): two DISTINCT same-short-name types,
+-- declared in different (nested) modules, may each implement the SAME GENERAL
+-- user interface (`Speak`) — coherence keys on the DECLARING MODULE, so the
+-- distinct types do NOT overlap. This mirrors accept/t88 (the type-dispatched
+-- builtin `Eq`), but now covers a GENERAL interface: Stages 1-3 taught the
+-- native backend to give each colliding type a globally-unique runtime tag,
+-- force uniform Boxed representation, mangle each impl to a module-qualified
+-- symbol, and route ambiguous call sites through a generated runtime tag-switch
+-- dispatch fn; the interpreter qualifies iface_method_tbl the same way. So
+-- `speak` dispatches correctly on the value's real type both interpreted and
+-- compiled (verified from-A/from-B — see test/imports/speak_collision_native).
+-- Prior to Stage 3 this was rejected as an `Overlapping implementation`, because
+-- a general interface used to mangle both impls to ONE symbol and dispatch on
+-- the bare type name. See specs/plans/2026-07-20-fqn-impl-dispatch-identity.md.
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do 0 end
+end

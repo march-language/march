@@ -1,0 +1,24 @@
+-- §5.4 `let?` position — a well-formed multi-`let?` block PARSES, and the
+-- `block_body` fold threads each `let?`'s continuation into its body field
+-- right-associatively (`fold_letq`). Complements the reject witness r05 (a
+-- TRAILING `let?`, caught by the typechecker not the parser). Here two `let?`
+-- bindings are each followed by more of the block, so both get a non-empty
+-- continuation; the final `Ok(...)` is the innermost body. Value-witnessed:
+-- prints `70` (5 -> 6 -> 7, then *10) — only obtainable if the fold nested the
+-- continuations correctly.
+mod Main do
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+  fn chain(x : Int) : Result(Int, String) do
+    let? a = step(x)
+    let? b = step(a)
+    Ok(b * 10)
+  end
+  fn main() do
+    match chain(5) do
+      Ok(v)  -> println(int_to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

@@ -1,0 +1,25 @@
+-- Regression: a top-level user function whose name collides with a stdlib
+-- HOF's own callback PARAMETER (here `f`, the callback of `List.fold_left`,
+-- `List.map`, `Enum.reduce`, etc.) must not trip the typechecker's scope-blind
+-- `fn_arities` direct-call arity check.  Before the fix, `fn f(m)` (arity 1)
+-- was matched against fold_left's local param `f : b -> a -> b` at fold_left's
+-- INTERNAL `f(acc, h)` call site: a false "expects 1 argument, got 2" error was
+-- reported at a stdlib span (silently filtered by bin/main.ml), the call was
+-- recovered as a partial application, the recursive call's occurs-check failure
+-- linked the type var to TError, and the poisoned type_map lowered fold_left
+-- with a function-typed accumulator — a runaway "Monomorphization limit
+-- reached: List.fold_left > 512 specializations" compile abort (interp was
+-- always correct).  Fix: `bind_var`/`bind_linear` remove the bound name from
+-- `fn_arities` so a param/let lexically shadows a same-named top-level fn.
+mod Main do
+  -- top-level `f/1` — the exact collision (arity != fold_left's callback arity)
+  fn f(m) do m + 1 end
+
+  fn main() : () do
+    -- exercise several stdlib HOFs whose callback param is `f`
+    let xs = Cons(1, Cons(2, Cons(3, Nil)))
+    println(int_to_string(f(10)))                              -- 11
+    println(int_to_string(List.fold_left(xs, 0, fn (a, x) -> a + x)))  -- 6
+    println(int_to_string(List.length(List.map(xs, fn x -> x * f(x)))))  -- 3
+  end
+end

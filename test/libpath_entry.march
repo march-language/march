@@ -1,11 +1,18 @@
--- Regression fixture entry for MARCH_LIB_PATH auto-discovery diagnostics.
--- Deliberately does NOT import LibpathIllTyped: auto-discovery loads every
--- .march file on the lib path, and a type error in any of them must fail
--- the build (exit 1) even when the entry never references the module.
+-- Regression fixture entry for MARCH_LIB_PATH reachability pruning.
+-- Deliberately does NOT reference the ill-typed lib module (see
+-- libpath_ill_typed/): auto-discovery used to parse+typecheck every .march
+-- file on the lib path regardless of reachability, so a type error in an
+-- UNRELATED module failed this build.  The resolver now prunes auto-discovered
+-- modules the entry cannot reach, so --check must exit 0 (the ill-typed module
+-- is dropped, not compiled).
+--
+-- NOTE: reachability is over-approximated from the raw source text, so this
+-- comment must NOT spell the ill-typed module's declared name, or the token
+-- scan would treat it as referenced and keep it in the build.
 mod LibpathEntry do
 
   fn main() do
-    println("unreachable: lib module is ill-typed")
+    println("ok: unrelated ill-typed lib module is pruned, not built")
   end
 
 end

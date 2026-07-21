@@ -1,0 +1,62 @@
+-- Regression: a statement-position match arm ending in a Unit-typed call
+-- must not fall through the emitted JS switch into the next case / the
+-- non-exhaustive default throw. Shape: recursive list walk whose Cons arm
+-- ends in the recursive call (js_emit emitted no break/return after
+-- emit_stmts, so after the innermost call returned, every frame fell into
+-- `default: throw "non-exhaustive pattern match"`).
+mod JsMatchStmtFallthrough do
+  fn walk(xs : List(Int), n : Int) : Unit do
+    match xs do
+      Nil -> println("nil at " ++ int_to_string(n))
+      Cons(x, rest) ->
+        println("cons " ++ int_to_string(x))
+        walk(rest, n + 1)
+    end
+  end
+
+  -- Second shape (regression 2026-07-10, perihelion draw_stars): the arm's
+  -- trailing call follows a DISCARDED if/else expression. Under some emitter
+  -- versions the `let`-shaped arm above gets a `return` on its tail call while
+  -- this shape emits a bare call — both must not fall through the switch.
+  fn walk_if(xs : List(Int)) : Unit do
+    match xs do
+      Nil -> println("nil-if")
+      Cons(x, rest) ->
+        if x > 15 do
+          println("big " ++ int_to_string(x))
+        else
+          ()
+        end
+        walk_if(rest)
+    end
+  end
+
+  -- Third shape (the one that regressed 2026-07-10, perihelion draw_stars):
+  -- the walked list holds HEAP records, so Perceus appends RC drops after the
+  -- arm's tail call — TIR is ESeq(EApp, EDecRC). emit_stmts' RC-terminal arm
+  -- emits nothing for the drops, so without an unconditional `break;` at the
+  -- end of the emitted case arm the bare call falls through the switch into
+  -- the non-exhaustive default throw. Int-list walks (above) don't carry RC
+  -- ops and CANNOT catch this.
+  type Thing = { name : String, v : Float }
+
+  fn walk_rec(xs : List(Thing)) : Unit do
+    match xs do
+      Nil -> println("nil-rec")
+      Cons(t, rest) ->
+        if t.v > 15.0 do
+          println("big " ++ t.name)
+        else
+          ()
+        end
+        walk_rec(rest)
+    end
+  end
+
+  fn main() : Unit do
+    walk(Cons(10, Cons(20, Cons(30, Nil))), 0)
+    walk_if(Cons(10, Cons(20, Cons(30, Nil))))
+    walk_rec(Cons({ name: "a", v: 10.0 }, Cons({ name: "b", v: 20.0 }, Nil)))
+    println("done")
+  end
+end

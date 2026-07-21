@@ -12,6 +12,12 @@
 --   |> HttpServer.listen()
 
 mod HttpServer do
+  -- This module's serve/serve_multi functions call the http_server_listen /
+  -- http_server_spawn_n / http_server_wait builtins, which the body-scan
+  -- classifies as Cap(IO.NetListen).  Declare the capability so the enforcement
+  -- (typecheck.ml builtin_cap_table) is satisfied here rather than warning at
+  -- every call site inside the module.
+  needs IO.NetListen
 
   -- Upgrade type for WebSocket connections
   type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)

@@ -1,0 +1,13 @@
+-- Library module A: declares `Thing` (short name shared with ScLibB.Thing) and
+-- implements the general interface `Speak` for it. `say` calls `speak` on a
+-- local `Thing` value from INSIDE this module — the interpreter dispatches a
+-- nested/imported-module interface method only when the call originates in the
+-- impl's own module (a pre-existing scoping limitation, documented in Task 5's
+-- eval test), so the cross-backend witness triggers dispatch this way.
+mod ScLibA do
+  type Thing = TA
+  impl Speak(Thing) do
+    fn speak(_self) do "from-A" end
+  end
+  fn say() do speak(TA) end
+end

@@ -58,6 +58,37 @@ let rec subst_ty (s : ty_subst) : Tir.ty -> Tir.ty = function
   | Tir.TPtr t         -> Tir.TPtr (subst_ty s t)
   | t                  -> t
 
+(** Replace any residual (non-placeholder) [TVar] with [TUnit].  A type variable
+    still present when a specialization is finalized is DANGLING — no concrete
+    value ever flows through it (e.g. the element type of a bare unpinned
+    `None`), so it is unobserved and safe to concretize.  Without this,
+    [mangle_ty] emits a distinct `$V_<n>` name per fresh var id — the bare-`None`
+    link failure (`Show$Option.show$Option_V__<n>` unresolvable).  Defaulting to
+    [String] collapses them into ONE deterministic specialization whose inner
+    interface-method references resolve.  Why [String] and not [Int]/[Unit]:
+    a residual TVar can still be the type of a REAL erased value (a boxed heap
+    pointer in the uniform ptr repr) whose type merely wasn't concretized.
+    [Int]'s tagged-immediate repr makes RC treat that pointer as a tagged int
+    (`incrc` on an even Int ≥ 4096 SIGSEGVs — the erased-int hazard), and
+    [Unit]'s zero/niche repr SIGSEGV'd the `Option(Unit)` decode.  [String] uses
+    the same heap-ptr representation the erased value already has, with
+    IS_HEAP_PTR-guarded dup/drop, so RC stays correct whether the value is a real
+    pointer or a tagged immediate — AND it has the standard Show/Eq/Ord/Hash
+    impls the dead interface-method branch needs to resolve.  The lowering
+    placeholder [TVar "_"] is left alone (handled specially upstream). *)
+let rec default_residual_tvars : Tir.ty -> Tir.ty = function
+  | Tir.TVar "_" as t  -> t
+  | Tir.TVar _         -> Tir.TString
+  | Tir.TTuple ts      -> Tir.TTuple (List.map default_residual_tvars ts)
+  | Tir.TRecord fs     -> Tir.TRecord (List.map (fun (n, t) -> (n, default_residual_tvars t)) fs)
+  | Tir.TCon (n, args) -> Tir.TCon (n, List.map default_residual_tvars args)
+  | Tir.TFn (ps, ret)  -> Tir.TFn (List.map default_residual_tvars ps, default_residual_tvars ret)
+  | Tir.TPtr t         -> Tir.TPtr (default_residual_tvars t)
+  | t                  -> t
+
+let default_residual_in_subst (s : ty_subst) : ty_subst =
+  List.map (fun (n, t) -> (n, default_residual_tvars t)) s
+
 let subst_var (s : ty_subst) (v : Tir.var) : Tir.var =
   { v with Tir.v_ty = subst_ty s v.Tir.v_ty }
 
@@ -340,7 +371,9 @@ let rec rewrite_calls
     | None -> mangled_name  (* not in fn_table (e.g. a builtin-backed impl) *)
     | Some orig_impl ->
       let arg_tys = List.map atom_ty args in
-      let subst = build_subst orig_impl arg_tys in
+      (* Default dangling TVars so e.g. a bare unpinned `None` specializes
+         `Show$Option` at `Unit` instead of a link-failing `$V_<n>`. *)
+      let subst = default_residual_in_subst (build_subst orig_impl arg_tys) in
       if subst = [] then begin
         if not (Hashtbl.mem done_set mangled_name) then
           Queue.add (mangled_name, orig_impl, []) worklist;
@@ -354,13 +387,89 @@ let rec rewrite_calls
         specialized_name
       end
   in
+  (* Collision-conditional runtime dispatch (Task 4 of
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md).  When [impls]
+     registers >=2 DISTINCT impl symbols under the same bare static type name
+     [tname], that short name is declared by >=2 modules (Collision_set) and
+     [resolve_impl_by_type]'s first-match would silently run the WRONG body
+     (the from-A/from-A hazard accept/t89 documents).  Instead, route the call
+     through a
+     generated runtime tag-switch dispatch function ([Llvm_dispatch], emitted
+     lazily at LLVM time): enqueue EVERY colliding impl (specialized under
+     this call's arg types, so we capture the exact emitted symbol including
+     its specialization suffix — a bare-name reconstruction in llvm_emit could
+     not recover that), record the (qualified_type, symbol) rows in
+     [Dispatch_registry] keyed by a sentinel callee name, and rewrite the call
+     to that sentinel.  Returns [None] for the common single-impl case, which
+     falls through to the unchanged [resolve_impl_by_type] path — so a program
+     with no collisions is byte-identical.  Detection is self-contained in the
+     dispatch-table data Task 3 produced; no separate collision set needed
+     here. *)
+  let try_collision_dispatch
+      (impls : (string * string) list) (tname : string)
+      (call_var : Tir.var) (args : Tir.atom list) : Tir.expr option =
+    (* All impls registered under [tname] (progressive module-prefix strip,
+       mirroring resolve_impl_by_type), de-duplicated by symbol. *)
+    let rec matches name =
+      match List.filter (fun (t, _) -> t = name) impls with
+      | [] ->
+        (match String.index_opt name '.' with
+         | None -> []
+         | Some i -> matches (String.sub name (i + 1) (String.length name - i - 1)))
+      | here -> here
+    in
+    let uniq =
+      List.fold_left (fun acc (t, m) ->
+          if List.exists (fun (_, m') -> m' = m) acc then acc else (t, m) :: acc)
+        [] (matches tname)
+      |> List.rev
+    in
+    if List.length uniq < 2 then None
+    else begin
+      (* Parse "<Iface>$<QualType>.<method>" — iface before '$', method after
+         the last '.', declaring qualified type in between. *)
+      let split_mangled m =
+        let iface, rest = match String.index_opt m '$' with
+          | Some i -> (String.sub m 0 i,
+                       String.sub m (i + 1) (String.length m - i - 1))
+          | None -> ("", m) in
+        let qtype, meth = match String.rindex_opt rest '.' with
+          | Some i -> (String.sub rest 0 i,
+                       String.sub rest (i + 1) (String.length rest - i - 1))
+          | None -> (rest, rest) in
+        (iface, qtype, meth)
+      in
+      let iface, _, meth = split_mangled (snd (List.hd uniq)) in
+      let short = match String.rindex_opt tname '.' with
+        | Some i -> String.sub tname (i + 1) (String.length tname - i - 1)
+        | None -> tname in
+      let sentinel =
+        Printf.sprintf "__march_ifdispatch$%s$%s$%s" iface meth short in
+      let rows =
+        List.map (fun (_, base_mangled) ->
+            let _, qtype, _ = split_mangled base_mangled in
+            (* Specialize + enqueue the impl body under this call's concrete
+               arg types; the returned name is the EXACT emitted symbol. *)
+            let sym = enqueue_specialized_impl base_mangled args in
+            (qtype, sym))
+          uniq
+      in
+      Dispatch_registry.register sentinel rows;
+      Some (Tir.EApp ({ call_var with Tir.v_name = sentinel }, args))
+    end
+  in
   (* If [name] is an interface method, resolve it to the impl for the concrete
      first-argument type.  Returns the mangled impl function name, or None.
      Mirrors the inline resolution in the [None] branch below; used to fix the
      case where a user top-level function (e.g. `show`) shares a name with an
      interface method and would otherwise hijack the dispatch inside prelude
      generics like `println`. *)
-  let iface_impl_name (name : string) (args : Tir.atom list) : string option =
+  (* Resolve an interface method [name] to its registered impls plus the
+     concrete first-argument type name — the shared front half of both
+     [iface_impl_name] (first-match resolution) and [try_collision_dispatch]
+     (colliding-type runtime routing). *)
+  let iface_target (name : string) (args : Tir.atom list)
+    : ((string * string) list * string) option =
     let rec find_iface_impls n =
       match Hashtbl.find_opt iface_methods n with
       | Some impls -> Some impls
@@ -381,11 +490,18 @@ let rec rewrite_calls
         | Tir.TInt    -> Some "Int"
         | Tir.TFloat  -> Some "Float"
         | Tir.TBool   -> Some "Bool"
+        | Tir.TUnit   -> Some "Unit"
+        | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
         | _ -> None
       in
       (match type_name with
        | None -> None
-       | Some tname -> resolve_impl_by_type impls tname)
+       | Some tname -> Some (impls, tname))
+  in
+  let iface_impl_name (name : string) (args : Tir.atom list) : string option =
+    match iface_target name args with
+    | None -> None
+    | Some (impls, tname) -> resolve_impl_by_type impls tname
   in
   match expr with
   | Tir.EApp (f_var, args) ->
@@ -457,6 +573,8 @@ let rec rewrite_calls
                | Tir.TInt    -> Some "Int"
                | Tir.TFloat  -> Some "Float"
                | Tir.TBool   -> Some "Bool"
+               | Tir.TUnit   -> Some "Unit"
+               | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
                | _ -> None
              in
              (* Fallback: if the concrete type could not be determined (type was
@@ -475,6 +593,9 @@ let rec rewrite_calls
              (match type_name_or_single with
               | None -> expr   (* Still cannot resolve — leave for linker *)
               | Some tname ->
+                (match try_collision_dispatch impls tname f_var args with
+                 | Some e -> e   (* colliding short name — runtime tag dispatch *)
+                 | None ->
                 (match resolve_impl_by_type impls tname with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
@@ -483,7 +604,7 @@ let rec rewrite_calls
                       above for why this must NOT be an empty substitution). *)
                    let final_name = enqueue_specialized_impl mangled_name args in
                    let f_var' = { f_var with Tir.v_name = final_name } in
-                   Tir.EApp (f_var', args)))))
+                   Tir.EApp (f_var', args))))))
      | Some orig_fn
        when (* Interface-method-name collision: the callee name is a user
                function, but it is ALSO an interface method, AND the user
@@ -500,6 +621,13 @@ let rec rewrite_calls
              | Some _, p :: _ ->
                mangle_ty p.Tir.v_ty <> mangle_ty (first_arg_ty args)
              | _ -> false) ->
+       (match
+          (match iface_target orig_name args with
+           | Some (impls, tname) -> try_collision_dispatch impls tname f_var args
+           | None -> None)
+        with
+        | Some e -> e   (* colliding short name — runtime tag dispatch *)
+        | None ->
        (match iface_impl_name orig_name args with
         | Some mangled_name ->
           (* Specialize under this call's concrete arg types — see
@@ -507,7 +635,7 @@ let rec rewrite_calls
              (Wave 2 Task 1: println-of-list miscompile). *)
           let final_name = enqueue_specialized_impl mangled_name args in
           Tir.EApp ({ f_var with Tir.v_name = final_name }, args)
-        | None -> expr)
+        | None -> expr))
      | Some orig_fn
        when not (List.exists (fun v ->
          has_tvar v.Tir.v_ty ||
@@ -535,7 +663,11 @@ let rec rewrite_calls
            | Tir.ADefRef _ -> Tir.TPtr Tir.TUnit  (* global ref, treat as opaque ptr *)
            | Tir.ALit l -> lit_ty l
          ) args in
-       let subst = build_subst orig_fn arg_tys in
+       (* Default dangling TVars in the specialization: a residual fresh var
+          would otherwise mint a DISTINCT `$V_<n>` variant per call site — the
+          bare-`None` link failure and the 512-specialization mono-limit blowup
+          (each dangling id counts as a new specialization of the same fn). *)
+       let subst = default_residual_in_subst (build_subst orig_fn arg_tys) in
        if subst = [] then begin
          (* No specialization needed (monomorphic or unresolved TVar args) —
             but still enqueue to ensure the function is emitted.  Matches the
@@ -598,6 +730,7 @@ let rec rewrite_calls
                   | Tir.TInt    -> Some "Int"
                   | Tir.TFloat  -> Some "Float"
                   | Tir.TBool   -> Some "Bool"
+                  | Tir.TUnit   -> Some "Unit"
                   | _ -> None
                 in
                 (* Single-impl fallback for type-erased args (TVar or opaque
@@ -612,6 +745,9 @@ let rec rewrite_calls
                 (match type_name_or_single with
                  | None -> expr
                  | Some tname ->
+                   (match try_collision_dispatch impls tname v args with
+                    | Some e -> e   (* colliding short name — runtime tag dispatch *)
+                    | None ->
                    (match resolve_impl_by_type impls tname with
                     | None -> expr
                     | Some mangled_name ->
@@ -626,7 +762,7 @@ let rec rewrite_calls
                          call path in llvm_emit rather than the closure-dispatch
                          path, which would try to load a fn_ptr from a struct. *)
                       let f_var' = { v with Tir.v_name = final_name } in
-                      Tir.EApp (f_var', args)))))
+                      Tir.EApp (f_var', args))))))
         | Some orig_fn ->
           (* If callee is polymorphic, try to build a substitution from args *)
           let lit_ty = function
@@ -856,6 +992,9 @@ let refine_field_types (body : Tir.expr) : Tir.expr =
     [iface_methods] is the dispatch table saved by [Lower.get_iface_methods ()].
     When absent (empty table), interface dispatch post-mono is skipped. *)
 let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.tir_module =
+  (* Fresh collision-dispatch state per compilation (REPL / test driver reuse
+     the process); populated by [try_collision_dispatch] during rewrite. *)
+  Dispatch_registry.reset ();
   (* Build lookup table for original fn_defs *)
   let fn_table : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 32 in
   List.iter (fun fn -> Hashtbl.replace fn_table fn.Tir.fn_name fn) m.Tir.tm_fns;
@@ -951,4 +1090,9 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
     end
   done;
 
+  (* Colliding impl bodies are called only from the LLVM-level dispatch fn
+     generated later (invisible to the TIR call graph), so they would look
+     unreachable — [Dce.reachable_fns] follows the [Dispatch_registry] rows to
+     keep them alive (tm_exports is rebuilt by later passes, so it cannot carry
+     these roots reliably). *)
   { m with Tir.tm_fns = List.rev !result }

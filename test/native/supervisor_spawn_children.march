@@ -1,0 +1,45 @@
+mod SupervisorSpawnChildren do
+
+  actor Worker do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Work() do
+      { count: state.count + 1 }
+    end
+  end
+
+  actor Sup do
+    state { wa : Int, wb : Int }
+    init  { wa: 0, wb: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Worker wa
+      Worker wb
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main() do
+    let sup = spawn(Sup)
+    let wa = child_int(sup, "wa")
+    let wb = child_int(sup, "wb")
+    println(bool_to_string(wa >= 0))
+    println(bool_to_string(wb >= 0))
+    println(bool_to_string(wa != wb))
+    println(bool_to_string(is_alive(pid_of_int(wa))))
+    println(bool_to_string(is_alive(pid_of_int(wb))))
+    send(pid_of_int(wa), Work())
+    run_until_idle()
+    println("ok")
+  end
+
+end

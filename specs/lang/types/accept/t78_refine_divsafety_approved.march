@@ -1,0 +1,17 @@
+-- Refinement types (widening slice 12, §2.14). `cap no_panic`'s division-
+-- safety check (lib/refinecheck/division_safety.ml) is a second, specialized
+-- Refine.discharge consumer alongside the general precondition/postcondition
+-- pass (accept/t75, t76). It is a hybrid: a fast syntactic matcher handles
+-- common divisor shapes (`_ != 0`, `_ > 0`, ...) without invoking Z3 at all;
+-- `{Int | _ != 0}` matches directly, so `a / d` is approved inside the
+-- `cap no_panic` module -- proving the ONE live predicate-discharge path
+-- that actually gates panic-freedom (not just exhaustiveness, which
+-- core-march-types.md §2.8.11 already covers). Reject companion: reject/t73
+-- (`{Int | _ >= 0}`, a real but insufficient predicate).
+mod SafeDiv do
+  cap no_panic
+  fn safe_div(a : Int, d : {Int | _ != 0}) : Int do a / d end
+  fn main() do
+    println(int_to_string(safe_div(10, 2)))
+  end
+end

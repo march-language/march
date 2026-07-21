@@ -36,12 +36,8 @@ functions, and local `let`-bound functions.
 lists. PascalCase names are reserved for types and modules.
 
 ```march
--- Bad
+-- Bad (camelCase — parses, flagged by the linter)
 fn myFunction(x : Int) : Int do
-  x + 1
-end
-
-fn MyFunction(x : Int) : Int do
   x + 1
 end
 
@@ -50,6 +46,11 @@ fn my_function(x : Int) : Int do
   x + 1
 end
 ```
+
+(A leading-uppercase name like `MyFunction` isn't just a style violation — the
+parser reserves uppercase-initial identifiers for types/modules/constructors,
+so `fn MyFunction(...)` is a hard parse error, not something this lint rule
+needs to catch.)
 
 ---
 
@@ -69,6 +70,11 @@ type my_result = Ok(Int) | err(String)
 -- Good
 type MyResult = Ok(Int) | Err(String)
 ```
+
+(Both the lowercase type name and the lowercase constructor `err` are actually
+parser-level errors in March — a leading-lowercase identifier can't name a
+type or constructor at all, so the "Bad" form above doesn't parse, let alone
+compile-with-a-warning.)
 
 ---
 
@@ -92,6 +98,9 @@ mod MyModule do
 end
 ```
 
+(`mod my_module do ... end` is a parser-level error, not a lint warning — a
+leading-lowercase identifier can't name a module.)
+
 ---
 
 ### `naming/pascal-case-constructors`
@@ -110,6 +119,9 @@ type Status = active | inactive | pending(String)
 -- Good
 type Status = Active | Inactive | Pending(String)
 ```
+
+(Lowercase-initial constructor names are a parser-level error in March, not a
+lint warning — the "Bad" form above doesn't parse.)
 
 ---
 
@@ -155,7 +167,7 @@ match pattern (requires type information):
 
 ```march
 -- Bad (when x : Option(Int))
-if is_some(x) do
+if Option.is_some(x) do
   unwrap(x) + 1
 else
   0
@@ -258,37 +270,6 @@ if ready do ...
 
 ---
 
-### `style/no-redundant-else`
-
-**Severity:** hint  
-**Auto-fix:** yes (removes `else`, dedents body)
-
-When the `if` branch always diverges — its return type is `Never` (e.g. `panic`,
-`exit`, an infinite loop) — the `else` keyword is redundant. Remove it and let the
-consequent code fall through. This is the guard-clause pattern.
-
-**Why:** Unnecessary `else` after a diverge adds indentation and implies false symmetry
-between a guard and the main path.
-
-```march
--- Bad
-fn divide(a : Int, b : Int) : Int do
-  if b == 0 do
-    panic("division by zero")
-  else
-    a / b
-  end
-end
-
--- Good
-fn divide(a : Int, b : Int) : Int do
-  if b == 0 do panic("division by zero") end
-  a / b
-end
-```
-
----
-
 ### `style/de-morgan`
 
 **Severity:** hint  
@@ -310,11 +291,15 @@ The auto-fix rewrites in whichever direction removes a negation level.
 -- Bad
 if !(user.active && user.verified) do
   deny()
+else
+  ()
 end
 
 -- Good
 if !user.active || !user.verified do
   deny()
+else
+  ()
 end
 ```
 
@@ -392,7 +377,7 @@ end
 **Auto-fix:** no
 
 A call that returns `Result` must not have its return value discarded. Either bind it
-with `let`, propagate it with `?` or `let?`, or explicitly handle both arms.
+with `let`, propagate it with `let?`, or explicitly handle both arms.
 
 **Why:** Silently discarding a `Result` hides errors. Every `Result`-returning call is
 a potential failure path that must be acknowledged.
@@ -401,11 +386,9 @@ a potential failure path that must be acknowledged.
 -- Bad
 write_file("out.txt", data)   -- return value dropped
 
--- Good: propagate with let?  (preferred in Result-returning functions)
+-- Good: propagate with let?  (preferred in Result-returning functions;
+-- there is no postfix `?` operator, only the `let? x = e` binding form)
 let? _ = write_file("out.txt", data)
-
--- Good: propagate with ?
-let _ = write_file("out.txt", data)?
 
 -- Good: handle explicitly
 match write_file("out.txt", data) do
@@ -429,8 +412,8 @@ checker cannot catch this at the `let` site — it must be a lint rule.
 
 ```march
 -- Bad
-let Some(user) = find_user(id)   -- panics if None
-let Ok(conn)   = connect(url)    -- panics if Err
+let (Some(user)) = find_user(id)   -- panics if None (a bare constructor pattern
+let (Ok(conn))   = connect(url)    -- panics if Err   needs parens in a `let`)
 
 -- Good
 match find_user(id) do
@@ -626,26 +609,20 @@ on Start(config) do
   { state with worker: Some(worker) }
 end
 
--- Good: spawn in init, pass the pid into state
+-- Good: use supervision config for managed child actors — spawn topology is
+-- declared once, not wired up dynamically in a handler. (There is no valid
+-- surface-syntax type for a state field holding a raw `Pid` from a manual
+-- `spawn` — `Pid(Worker)` is a type-arity error and bare `Pid` doesn't unify
+-- with what `spawn` actually returns — so `supervise` is the only working
+-- way to keep a spawned child's identity in an actor's own state.)
 actor Supervisor do
-  state { worker : Pid(Worker) }
-  init do
-    let worker = spawn(Worker)
-    { worker: worker }
-  end
-
-  on Start(config) do
-    send(state.worker, Run(config))
-    state
-  end
-end
-
--- Also good: use supervision config for managed child actors
-actor Supervisor do
+  state { worker : Int }
+  init  { worker: 0 }
   supervise do
+    strategy one_for_one
+    max_restarts 5 within 60
     Worker worker
   end
-  ...
 end
 ```
 
@@ -661,7 +638,8 @@ Actor state is long-lived, potentially serialised, and inspected by supervision
 tooling — implicit types are a maintenance hazard.
 
 ```march
--- Bad
+-- Bad (illustrative only — untyped state fields are actually a parser-level
+-- error in March, not a lint warning; every state field requires `: Type`)
 actor Cache do
   state { entries, ttl, hits }
   ...
@@ -704,7 +682,6 @@ Each rule can be set to `"error"`, `"warning"`, `"hint"`, or `"off"`.
 "style/extract-arm-branches"          = "hint"
 "style/prefer-pipe"                   = "hint"
 "style/no-boolean-literal-compare"    = "warning"
-"style/no-redundant-else"             = "hint"
 "style/de-morgan"                     = "hint"
 "style/doc-comment-public-fn"         = "hint"
 "style/annotate-public-fns"           = "hint"

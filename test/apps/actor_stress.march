@@ -164,7 +164,7 @@ mod ActorStress do
     -- Negative values
     send(c, Clear())
     send(c, Dec(7))
-    send(c, Print())        -- expect -7
+    let _ = send(c, Print())        -- expect -7
   end
 
   -- ── Test: Stack edge cases ─────────────────────────────────────────────
@@ -190,7 +190,7 @@ mod ActorStress do
     send(s, Len())          -- expect 0
     -- Repush after drain
     send(s, Push(42))
-    send(s, Top())          -- expect 42
+    let _ = send(s, Top())          -- expect 42
   end
 
   -- ── Test: Many actors, interleaved sends ──────────────────────────────
@@ -208,7 +208,7 @@ mod ActorStress do
     send(c3, Inc(30))
     send(c1, Print())       -- expect 11
     send(c2, Print())       -- expect 22
-    send(c3, Print())       -- expect 33
+    let _ = send(c3, Print())       -- expect 33
   end
 
   -- ── Test: Relay actor echo burst ──────────────────────────────────────
@@ -219,7 +219,7 @@ mod ActorStress do
     send(r, Say("hello"))
     send(r, Say("world"))
     send(r, Say("foo"))
-    send(r, Stats())        -- expect hops=3
+    let _ = send(r, Stats())        -- expect hops=3
   end
 
   -- ── Test: Collector fed from task results ─────────────────────────────
@@ -230,11 +230,11 @@ mod ActorStress do
     let squares = Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n)
     List.each(squares, fn r ->
       match r do
-        Ok(n)  -> send(col, Accum(n))
+        Ok(n)  -> let _ = send(col, Accum(n))
         Err(_) -> ()
       end
     )
-    send(col, Summary())    -- expect count=5 total=55
+    let _ = send(col, Summary())    -- expect count=5 total=55
   end
 
   -- ── Test: Task.async + Task.await ─────────────────────────────────────
@@ -304,7 +304,7 @@ mod ActorStress do
     send(s, Pop())
     send(s, Pop())
     send(s, Top())          -- expect 3
-    send(s, Len())          -- expect 3
+    let _ = send(s, Len())          -- expect 3
   end
 
   -- ── Test: receive() inside a handler ──────────────────────────────────
@@ -316,7 +316,7 @@ mod ActorStress do
     let w = spawn(Waiter)
     -- Query(3) goes first; Answer(9) is already in the mailbox when receive() is called.
     send(w, Query(3))
-    send(w, Answer(9))
+    let _ = send(w, Answer(9))
     -- expect "query+answer=12"
   end
 
@@ -336,7 +336,7 @@ mod ActorStress do
     -- List.range(0, 100) is exclusive at the top: [0..99] = 100 elements.
     let ns = List.range(0, 100)
     List.each(ns, fn _ -> send(c, Inc(1)))
-    send(c, Print())        -- expect 100
+    let _ = send(c, Print())        -- expect 100
   end
 
   -- ── Entry point ───────────────────────────────────────────────────────

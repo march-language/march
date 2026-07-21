@@ -3475,6 +3475,30 @@ let test_tc_same_module_opaque_ctor_precedence () =
   Alcotest.(check bool) "opaque module ctor outranks same-named regular type — no errors"
     false (has_errors ctx)
 
+(* Regression (2026-07-10): a module must be able to use its OWN constructor
+   when a SIBLING module declares a same-named one with a different payload.
+   d95fe942's Pass-1 bare-ctor seeding put the later sibling's `Mk` at the
+   head of the candidate list, and Pass-2's own-module re-registration was a
+   structural-dedup NO-OP — so `A.make`'s `Mk(1)` resolved against B's
+   `Mk(String)` ("expected String but got Int" pointing inside A).  add_ctor
+   now moves a re-registered entry to the FRONT, restoring the declaring
+   module's recency for its own body check while keeping the Pass-1 seeds
+   (and thus cross-module order-independence) intact.  Caught by the types
+   corpus (accept/t35 went red at merge time); witnessed by accept/t69. *)
+let test_tc_sibling_ctor_own_module_wins () =
+  let ctx = typecheck {|mod Main do
+    mod A do
+      type Foo = Mk(Int)
+      fn make() : Foo do Mk(1) end
+    end
+    mod B do
+      type Foo = Mk(String)
+      fn make() : Foo do Mk("x") end
+    end
+  end|} in
+  Alcotest.(check bool) "own-module ctor wins over same-named sibling — no errors"
+    false (has_errors ctx)
+
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
 let test_option_map_some () =
@@ -6162,16 +6186,24 @@ let test_actor_cast_basic () =
 let test_actor_call_get () =
   with_reset (fun () ->
     let decl = actor_decl () in
+    (* CANONICAL Actor.call protocol (specs/lang/actors.md "Synchronous
+       Request-Reply"): a zero-arg sentinel (type GetReq = GetReq) whose tag
+       routes to the actor's handler at that index (index 0 = first handler),
+       which receives the caller as its single argument and answers via
+       Actor.reply.  This form works in BOTH backends; the previous
+       interp-only `on Call(ref, msg)` form was retired when the interpreter
+       was reconciled to the compiled protocol. *)
     let env = eval_with_stdlib [decl] {|mod Test do
+      type GetReq = GetReq
       actor Counter do
         state { count : Int }
         init { count: 0 }
+        on GetCount(reply_to) do
+          Actor.reply(reply_to, state.count)
+          state
+        end
         on Inc() do
           { count: state.count + 1 }
-        end
-        on Call(ref, msg) do
-          Actor.reply(ref, state.count)
-          state
         end
       end
       fn f() do
@@ -6179,7 +6211,7 @@ let test_actor_call_get () =
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
         Actor.cast(pid, Inc())
-        let result = Actor.call(pid, Inc(), 1000)
+        let result = Actor.call(pid, GetReq, 1000)
         match result do
         Ok(n) -> n
         Err(_) -> -1
@@ -10243,16 +10275,19 @@ let test_compiled_recursive_closure_capture () =
   match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
           ~main_exe ~bin ~src () with
   | `Skipped -> ()  (* legitimate, counted skip: no clang on PATH *)
-  | `Failed (_, output)
+  | `Failed (_rc, output)
     when ir_contains output "Monomorphization limit reached" ->
-    (* KNOWN PRODUCT BUG (W2 Task2 Step 3 exposure, NOT fixed here — this is
-       a harness-only task; see specs/todos.md "Monomorphization limit
-       reached compiling a self-recursive nested closure (2026-07-02)").
-       This test used to pass vacuously: the old `if compile_rc <> 0 then
-       ()` guard silently swallowed this exact crash for years. Loud,
-       documented skip — never a silent no-op — until lib/tir/mono.ml is
-       fixed in a follow-up session. *)
-    Alcotest.skip ()
+    (* REGRESSION GUARD: this used to be a documented skip while the
+       "Monomorphization limit reached: List.fold_left > 512 specializations"
+       ICE was open.  Root cause was a typechecker bug — the scope-blind
+       [fn_arities] arity check false-flagging a stdlib HOF's own local param
+       (e.g. fold_left's `f`) against a same-named top-level user `fn f`,
+       poisoning the stdlib type_map with TError (commit c6599af9, LOST in the
+       PR #27/#38 merge-conflict resolution and restored).  Now a HARD failure
+       so any reintroduction is caught. *)
+    Alcotest.failf
+      "compile_march: the Monomorphization-limit ICE (fn_arities scope-blind \
+       arity poisoning) has REGRESSED for %s:\n%s" src output
   | `Failed (rc, output) ->
     Alcotest.failf
       "compile_march: `march --compile` failed (rc=%d) for %s (clang IS on \
@@ -10561,6 +10596,22 @@ let test_compiled_actor_program_exits_without_kill () =
     Alcotest.(check string)
       "compiled output matches interpreter (no-kill exit)"
       interp_out compiled_out
+
+(* Shared helper for the two P0 RC regression tests below: run [cmd], return
+   (exit_code, trimmed stdout).  A signal-killed process surfaces as 128+sig
+   through /bin/sh, so the exit-code assertion catches SIGABRT/SIGSEGV. *)
+let run_capture_rc cmd =
+  let out_f = Filename.temp_file "march_rcfix_out" ".txt" in
+  let rc = Sys.command (Printf.sprintf "%s > %s 2>/dev/null" cmd (Filename.quote out_f)) in
+  let out =
+    try
+      let ic = open_in out_f in
+      let s = In_channel.input_all ic in
+      close_in ic; s
+    with _ -> ""
+  in
+  (try Sys.remove out_f with _ -> ());
+  (rc, String.trim out)
 
 (* Regression: a TOML [section] with 4+ keys returned the WRONG value from
    Toml.get_str when COMPILED (e.g. get_str(pkg,"k1") = "k4", a sibling key's
@@ -11121,8 +11172,14 @@ let test_compiled_sanitize_clean_exit () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let out_file = Filename.concat tmp "out.txt" in
+    (* detect_leaks=0 matches specs/lang/golden/sanitize.sh: the March runtime
+       intentionally leaks a handful of process-lifetime globals (scheduler, GC
+       arenas) that are never freed, and Linux ASAN runs LeakSanitizer at exit by
+       default (macOS does not). This test guards the teardown ABORT (the macOS
+       arm64 altstack munmap), NOT leaks, so leak detection would spuriously fail
+       it on Linux. *)
     let run_rc = Sys.command (Printf.sprintf
-      "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+      "ASAN_OPTIONS=detect_leaks=0 %s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
     Alcotest.(check int)
       "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
       0 run_rc;
@@ -11134,6 +11191,46 @@ let test_compiled_sanitize_clean_exit () =
     in
     Alcotest.(check string)
       "sanitized binary prints its output" "sanitize ok" output
+
+(* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
+   Compiled end-to-end (not eval-mode) because it exercises the real
+   runtime read(0, &c, 1) syscall wrapper, not the interpreter. *)
+let test_compiled_io_read_byte () =
+  let exe_dir  = Filename.dirname Sys.executable_name in
+  let main_exe = Filename.concat exe_dir "../bin/main.exe" in
+  if not (Sys.file_exists main_exe) then ()  (* skip: no compiler binary *)
+  else begin
+    let tmp = Filename.temp_file "march_read_byte" "" in
+    Sys.remove tmp;
+    Unix.mkdir tmp 0o755;
+    let src = Filename.concat tmp "rb.march" in
+    let oc = open_out src in
+    output_string oc
+      "mod App do\n\
+      \  fn main() do\n\
+      \    let a = IO.read_byte()\n\
+      \    let b = IO.read_byte()\n\
+      \    let c = IO.read_byte()\n\
+      \    println(int_to_string(a) ++ \",\" ++ int_to_string(b) ++ \",\" ++ int_to_string(c))\n\
+      \  end\n\
+       end\n";
+    close_out oc;
+    let bin = Filename.concat tmp "rbbin" in
+    let compile_rc = Sys.command (Printf.sprintf
+      "%s --compile -o %s %s >/dev/null 2>&1"
+      (Filename.quote main_exe) (Filename.quote bin) (Filename.quote src)) in
+    (* Skip when compilation can't complete here (no clang / runtime sources) —
+       matches the other Slow compiled regression tests. *)
+    if compile_rc <> 0 then ()
+    else begin
+      let ic = Unix.open_process_in
+        (Printf.sprintf "printf 'AB' | %s" (Filename.quote bin)) in
+      let out = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      Alcotest.(check string)
+        "IO.read_byte reads 'A','B' then -1 on EOF" "65,66,-1" out
+    end
+  end
 
 (* Regression: a user top-level function whose name collides with a stdlib
    internal helper (the canonical accumulator name `go`) silently broke the
@@ -11871,6 +11968,7 @@ let stdlib_suites =
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
+        Alcotest.test_case "sibling ctor: own module wins" `Quick test_tc_sibling_ctor_own_module_wins;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
         Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
         Alcotest.test_case "expected type beats same-module" `Quick test_tc_expected_type_beats_same_module;
@@ -12540,6 +12638,8 @@ let stdlib_suites =
           test_compiled_record_field_poly_mono;
         Alcotest.test_case "HCR --hot-reload dispatch: runs, output-identical to plain, emits enter-call" `Slow
           test_compiled_hot_reload_dispatch;
+        Alcotest.test_case "IO.read_byte: reads raw stdin bytes, -1 on EOF (compiled)" `Slow
+          test_compiled_io_read_byte;
         Alcotest.test_case "HCR manifest: caps= fields are per-fn own caps, no ROOT line (Phase5C-A.3, granularity revision)" `Slow
           test_hcr_manifest_emits_caps_and_cap_root;
         Alcotest.test_case "HCR manifest: actor handler caps populated (C1 fix)" `Slow

@@ -15,7 +15,7 @@ March's `~H` sigil generates safe HTML. String interpolations inside `~H` are au
 ```march
 let name = "<script>alert(1)</script>"
 let html = ~H"<p>Hello, ${name}!</p>"
--- renders: <p>Hello, &lt;script&gt;alert(1)&lt;/script&gt;</p>
+-- renders: <p>Hello, &lt;script&gt;alert(1)&lt;/script&gt;!</p>
 ```
 
 Multi-line templates with triple quotes:
@@ -63,26 +63,6 @@ fn page() : IOList do
   layout("Home", ~H"<h1>Welcome</h1>")
 end
 ```
-
----
-
-## CSRF protection
-
-`~H` automatically injects CSRF tokens into forms with `method="post"`:
-
-```march
-fn login_form() : IOList do
-  ~H"""
-  <form method="post" action="/login">
-    <input name="email" type="email" placeholder="Email">
-    <input name="password" type="password" placeholder="Password">
-    <button>Log in</button>
-  </form>
-  """
-end
-```
-
-The hidden `_csrf_token` field is injected automatically. Validate it server-side with `CSRF.protect(conn)` middleware.
 
 ---
 

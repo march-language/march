@@ -44,7 +44,6 @@ let default_rules : (string * rule_severity) list = [
   "style/extract-arm-branches",          RSHint;
   "style/prefer-pipe",                   RSHint;
   "style/no-boolean-literal-compare",    RSWarning;
-  "style/no-redundant-else",             RSHint;
   "style/de-morgan",                     RSHint;
   "style/doc-comment-public-fn",         RSHint;
   "style/annotate-public-fns",           RSHint;
@@ -259,13 +258,14 @@ let check_naming ~config ~file ~acc decls =
 (* ------------------------------------------------------------------ *)
 
 (** Walk all expressions in decls, checking style rules.
-    [type_map] is used for [style/no-redundant-else]. *)
-let check_style ~config ~file ~acc ~type_map decls =
+    [type_map] is accepted for a uniform check-fn signature but currently
+    unused here (the former [style/no-redundant-else] rule that consumed it was
+    retired — see the EIf arm). *)
+let check_style ~config ~file ~acc ~type_map:_ decls =
   let r_match = "style/prefer-match" in
   let r_arm   = "style/extract-arm-branches" in
   let r_pipe  = "style/prefer-pipe" in
   let r_bool  = "style/no-boolean-literal-compare" in
-  let r_else  = "style/no-redundant-else" in
   let r_dm    = "style/de-morgan" in
   let r_doc   = "style/doc-comment-public-fn" in
   let r_ann   = "style/annotate-public-fns" in
@@ -305,15 +305,11 @@ let check_style ~config ~file ~acc ~type_map decls =
            emit acc file sp r_match sev
              "prefer `match` over if/else-if chain with two or more branches"
          | None -> ());
-      (* no-redundant-else: if the then-branch has type Never *)
-      (match Hashtbl.find_opt type_map (Tc.span_of_expr then_) with
-       | Some ty when is_never_ty ty ->
-         (match effective_severity config r_else with
-          | Some sev ->
-            emit acc file (Tc.span_of_expr else_) r_else sev
-              "`else` is redundant after a diverging branch; remove it and let code fall through"
-          | None -> ())
-       | _ -> ());
+      (* NOTE: the former [style/no-redundant-else] rule (flag `else` after a
+         Never-typed then-branch) was RETIRED — March `if` is an EXPRESSION
+         whose `else` is mandatory, so there is no valid else-less form to
+         suggest; the rule advised code that does not parse.  An else-less
+         statement-position `if` would be a language change (out of scope). *)
       walk_expr cond; walk_expr then_; walk_expr else_
 
     (* extract-arm-branches *)
