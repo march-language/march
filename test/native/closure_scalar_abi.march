@@ -1,0 +1,24 @@
+-- Regression golden for the uniform ptr closure scalar ABI (sort-RC crash fix).
+-- Every line exercises a distinct closure-dispatch path that the sort-RC crash
+-- and the two dead-end debug attempts each broke:
+mod Main do
+  fn dbl(x : Int) : Int do x * 2 end                -- named fn (clo_wrap), boundary D
+  fn main() do
+    -- named-fn closure through a HOF (clo_wrap + call site):
+    println(int_to_string(List.head(List.map([10, 20, 30], dbl))))
+    -- lambda closure through a HOF (apply-fn + call site):
+    println(int_to_string(List.head(List.map([5, 6, 7], fn x -> x * 2))))
+    -- filter with a Bool-returning lambda:
+    println(int_to_string(List.length(List.filter([1, 2, 3, 4, 5], fn x -> x > 2))))
+    -- curried closure with DIRECT EApp calls (boundary B) + arithmetic:
+    let adder = fn n -> fn x -> x + n
+    let add10 = adder(10)
+    println(int_to_string(add10(5)))
+    -- generic-Int sort through a curried comparator (the reported crash):
+    println(int_to_string(List.head(Sort.mergesort_by([5, 2, 8, 1, 9, 3], fn a -> fn b -> a <= b))))
+    -- generic-String sort (poly_compare string path, unaffected):
+    println(List.head(Sort.mergesort_by(["pear", "apple", "cherry"], fn a -> fn b -> a <= b)))
+    -- Float closure (regression guard for the float-boxing flip):
+    println(float_to_string(List.head(Sort.mergesort_by([3.5, -1.25, -9.0], fn a -> fn b -> a < b))))
+  end
+end

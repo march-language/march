@@ -4,6 +4,10 @@ mod AeLib2 do
 
 type AeDir = AeNorth | AeSouth
 
+impl Eq(AeDir) do
+  fn eq(x, y) do eq(x, y) end
+end
+
 fn north() do AeNorth end
 
 end

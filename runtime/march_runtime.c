@@ -12,15 +12,48 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <sys/time.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <setjmp.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <execinfo.h>
+#include <pthread.h>
+
+/* Optional OOM forensics: set MARCH_DEBUG_OOM=1 to print the requested size
+ * and a backtrace when march_alloc/march_string_alloc fail.  A failure with a
+ * huge/bogus size is the signature of a corrupted heap value's length header
+ * being read as pointer garbage rather than real memory pressure; the
+ * backtrace pinpoints which allocation call site observed the corruption.
+ * Off by default (no-op, no overhead) so this never affects production
+ * behavior unless explicitly enabled for debugging. */
+static int march_debug_oom_enabled(void) {
+    static int v = -1;
+    if (v == -1) {
+        const char *e = getenv("MARCH_DEBUG_OOM");
+        v = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return v;
+}
+static void march_debug_report_oom(const char *where, int64_t requested) {
+    if (!march_debug_oom_enabled()) return;
+    fprintf(stderr, "\n=== march DEBUG OOM in %s ===\n", where);
+    fprintf(stderr, "  requested size: %lld (0x%llx)\n",
+            (long long)requested, (unsigned long long)requested);
+    fprintf(stderr, "  pthread_self:   %p\n", (void *)pthread_self());
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    fprintf(stderr, "  backtrace (%d frames):\n", n);
+    backtrace_symbols_fd(bt, n, 2 /* stderr */);
+    fprintf(stderr, "=== end DEBUG OOM ===\n\n");
+    fflush(stderr);
+}
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -108,7 +141,10 @@ static inline void march_run_resource_dtor(void *p) {
 
 void *march_alloc(int64_t sz) {
     void *p = calloc(1, (size_t)sz);
-    if (!p) { fputs("march: out of memory\n", stderr); exit(1); }
+    if (!p) {
+        march_debug_report_oom("march_alloc", sz);
+        fputs("march: out of memory\n", stderr); exit(1);
+    }
     /* Initialize rc=1, tag=0, pad=0 */
     march_hdr *h = (march_hdr *)p;
     h->rc  = 1;
@@ -324,7 +360,10 @@ void *march_iolist_hash_fnv1a(void *iol) {
  * march_value_to_string path. */
 void *march_string_alloc(int64_t len) {
     march_string *s = malloc(sizeof(march_string) + (size_t)len + 1);
-    if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
+    if (!s) {
+        march_debug_report_oom("march_string_alloc", len);
+        fputs("march: out of memory\n", stderr); exit(1);
+    }
     s->rc  = 1;
     s->tag = MARCH_STRING_TAG;
     s->pad = 0;
@@ -417,6 +456,24 @@ int64_t march_compare_float(double x, double y) {
     return (x > y) - (x < y);
 }
 
+/* ── Boxed Float (float-boxing design, stage 1 — additive) ─────────────── */
+
+/* Heap-box a Float for storage in a type-erased (ptr) slot: a 24-byte cell
+ * tagged MARCH_FLOAT_TAG, discriminable from tagged ints (odd) and ADT/record
+ * cells (tag >= 0). Perceus treats it as an ordinary heap value. Nothing emits
+ * this yet — the codegen flip that populates erased slots with boxes is
+ * stage 2 (specs/plans/2026-07-13-float-boxing-design.md). */
+void *march_alloc_float(double v) {
+    march_float_box *b = (march_float_box *)march_alloc(sizeof(march_float_box));
+    b->tag = MARCH_FLOAT_TAG;
+    b->val = v;
+    return b;
+}
+
+double march_unbox_float(void *p) {
+    return ((march_float_box *)p)->val;
+}
+
 int64_t march_compare_string(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;
@@ -430,18 +487,29 @@ int64_t march_compare_string(void *a, void *b) {
 
 /* ── Hash ────────────────────────────────────────────────────────────────── */
 
+/* All hashes are masked to 62 bits (non-negative, <= 2^62-1). The
+ * tree-walking interpreter's Int is a 63-bit OCaml native int, so a full
+ * uint64 hash cannot be represented there identically; masking to 62 bits
+ * lands the value in a range BOTH backends represent exactly, giving
+ * cross-backend hash() equality (the interpreter reimplements these same
+ * algorithms + mask in lib/eval/eval.ml). Hash values are never persisted
+ * or wire-serialized (in-memory hashtable use only) and stdlib masks
+ * further to 30 bits, so narrowing the range is harmless. */
+#define MARCH_HASH_MASK UINT64_C(0x3FFFFFFFFFFFFFFF)
+
 int64_t march_hash_int(int64_t x) {
     /* Finalizer from splitmix64 */
     uint64_t v = (uint64_t)x;
     v ^= v >> 30; v *= UINT64_C(0xbf58476d1ce4e5b9);
     v ^= v >> 27; v *= UINT64_C(0x94d049bb133111eb);
     v ^= v >> 31;
-    return (int64_t)v;
+    return (int64_t)(v & MARCH_HASH_MASK);
 }
 
 int64_t march_hash_float(double x) {
     uint64_t bits;
     memcpy(&bits, &x, sizeof(bits));
+    /* march_hash_int already masks. */
     return march_hash_int((int64_t)bits);
 }
 
@@ -453,7 +521,7 @@ int64_t march_hash_string(void *s) {
         h ^= (uint8_t)ms->data[i];
         h *= UINT64_C(1099511628211);
     }
-    return (int64_t)h;
+    return (int64_t)(h & MARCH_HASH_MASK);
 }
 
 int64_t march_hash_bool(int64_t b) { return b; }
@@ -479,10 +547,37 @@ int64_t march_string_eq(void *a, void *b) {
 int64_t march_poly_eq(void *a, void *b) {
     if (a == b) return 1;
     if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
-    if (((march_hdr *)a)->tag == MARCH_STRING_TAG &&
-        ((march_hdr *)b)->tag == MARCH_STRING_TAG)
+    int32_t ta = ((march_hdr *)a)->tag, tb = ((march_hdr *)b)->tag;
+    if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
         return march_string_eq(a, b);
+    /* Boxed floats compare by VALUE, not box identity — two distinct boxes of
+     * 3.5 are equal (float-boxing design). Also fixes the historical hazard
+     * where two distinct raw-float-bit patterns got dereferenced here. */
+    if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
+        return march_unbox_float(a) == march_unbox_float(b) ? 1 : 0;
     return 0;
+}
+
+/* Ordered generic compare for erased-slot operands (-1/0/1). See the header
+ * doc. Nothing calls this yet — the fallback_cmp codegen wiring is stage 2. */
+int64_t march_poly_compare(void *a, void *b) {
+    if (a == b) return 0;
+    /* Tagged immediates (odd low bit) → untag and integer-compare. A raw heap
+     * ptr on one side and a tagged int on the other cannot be ordered
+     * meaningfully; the tagged-vs-tagged case is the real one. */
+    int a_imm = ((uintptr_t)a & 1u) != 0;
+    int b_imm = ((uintptr_t)b & 1u) != 0;
+    if (a_imm && b_imm) {
+        int64_t ia = (intptr_t)a >> 1, ib = (intptr_t)b >> 1;
+        return march_compare_int(ia, ib);
+    }
+    if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
+    int32_t ta = ((march_hdr *)a)->tag, tb = ((march_hdr *)b)->tag;
+    if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
+        return march_compare_float(march_unbox_float(a), march_unbox_float(b));
+    if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
+        return march_compare_string(a, b);
+    return 0;  /* structural order needs static type info unavailable here */
 }
 
 int64_t march_string_byte_length(void *s) {
@@ -571,8 +666,19 @@ void march_print(void *s) {
 
 void march_println(void *s) {
     march_string *ms = (march_string *)s;
-    write(1, ms->data, (size_t)ms->len);
-    write(1, "\n", 1);
+    /* Emit the payload AND its trailing newline in a single writev(2) syscall so
+     * the whole line is atomic against concurrent green threads. Two separate
+     * write() calls let another thread's println interleave between the data and
+     * the '\n', tearing lines together (and stranding a lone newline) — visible
+     * in multi-node/multi-actor programs run with >1 OS scheduler thread. A
+     * single vectored write to a regular file/pipe is atomic (POSIX). */
+    struct iovec iov[2];
+    iov[0].iov_base = ms->data;
+    iov[0].iov_len  = (size_t)ms->len;
+    iov[1].iov_base = (void *)"\n";
+    iov[1].iov_len  = 1;
+    ssize_t rc = writev(1, iov, 2);
+    (void)rc;
 }
 
 void march_print_stderr(void *s) {
@@ -590,6 +696,18 @@ void *march_io_read_line(void) {
     if (len > 0 && buf[len-1] == '\n') { buf[--len] = '\0'; }
     if (len > 0 && buf[len-1] == '\r') { buf[--len] = '\0'; }
     return march_string_lit(buf, (int64_t)len);
+}
+
+/* Reads directly off fd 0 via read(2), bypassing stdio's buffer -- unlike
+ * march_io_read_line above, which reads through fgets/stdin's own buffer.
+ * Do not interleave read_byte and read_line in the same compiled program:
+ * fgets may have already buffered bytes past the last line it returned,
+ * and those bytes are invisible to this function's direct read(0, ...). */
+int64_t march_io_read_byte(void) {
+    unsigned char c;
+    ssize_t n = read(0, &c, 1);
+    if (n <= 0) return -1;  /* EOF (n==0) or error (n<0) both surface as -1 */
+    return (int64_t)c;
 }
 
 /* ── Integer math helpers ────────────────────────────────────────────────── */
@@ -667,6 +785,12 @@ static void march_print_backtrace(void) {
  * which is defined just below. */
 void march_panic(void *s);
 
+/* Forward declaration: do_actor_death (defined further below, after the
+ * restart strategies) is called from actor_green_thread's crash-recovery
+ * branch (below) and from march_kill / the restart helpers, both of which
+ * are also defined earlier in the file than do_actor_death itself. */
+static void do_actor_death(void *actor);
+
 /* panic_ / todo_ / unreachable_: internal runtime primitives called by the
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
  * return NULL (unreachable, but needed to satisfy the polymorphic return type
@@ -693,6 +817,16 @@ void march_panic(void *s) {
         memcpy(march_test_fail_buf, ms->data, (size_t)len);
         march_test_fail_buf[len] = '\0';
         longjmp(march_test_jmp_buf, 1);
+    }
+    /* Compiled actor supervision: a panic inside a supervised child's
+     * message handler longjmp's back into actor_green_thread instead of
+     * exit(1)-ing the whole process (see march_proc.crash_jmp's doc
+     * comment in march_scheduler.h for why this is stored on the proc,
+     * not a _Thread_local — this scheduler is work-stealing across
+     * multiple OS threads, so the currently-running proc can migrate). */
+    march_proc *cur_proc = march_sched_current();
+    if (cur_proc && cur_proc->crash_jmp) {
+        longjmp(*cur_proc->crash_jmp, 1);
     }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
@@ -1167,6 +1301,24 @@ typedef struct march_monitor_node {
     struct march_monitor_node  *next;
 } march_monitor_node;
 
+/* One entry per child declared in a `supervise do ... end` block. Set once
+ * at initial spawn time (march_actor_register_child) and read by every
+ * restart (compiled actor supervision, Task 4/5). */
+typedef struct {
+    /* <ActorName>_spawn, referenced as a first-class value from
+     * lower_actor.ml — the compiler ALWAYS represents a bare top-level
+     * function reference this way (a heap-allocated March closure cell
+     * whose offset-16 word holds a $clo_wrap function pointer; see how
+     * $d_dispatch is stored/consumed for actors, and how do_actor_death's
+     * cleanup callbacks are invoked), never a raw C function pointer.
+     * march_respawn_child unwraps it the same way. Called fresh on every
+     * restart. */
+    void *spawn_clo;
+    int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
+                                  state fields; this child's Int-encoded pid lives at
+                                  ((int64_t*)supervisor)[4 + word_idx] */
+} march_sup_child;
+
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
@@ -1188,6 +1340,27 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* Global tag of this actor's FIRST message constructor (the F19
+     * memory-safety fix gives actor _Msg ctors globally-unique tags,
+     * base 0x0100_0000 — see lib/tir/llvm_toplevel.ml build_ctor_info).
+     * march_actor_call adds the caller's sentinel ctor INDEX to this base
+     * to address the handler positionally; 0 = unregistered (fall back to
+     * the sentinel's raw tag). Stamped at actor-record alloc via
+     * march_actor_set_call_base, so supervisor respawns (which re-run the
+     * March-level spawn closure) re-stamp it on the fresh record. */
+    int64_t                     call_tag_base;
+    /* Set on a CHILD when it is spawned by a supervisor; NULL for every
+     * other actor, including a supervisor's own meta. */
+    void                        *supervisor;
+    int                          sup_child_index;
+    /* Set on a SUPERVISOR (an actor that itself declares `supervise do ... end`);
+     * NULL/0 for every other actor, including its own children. */
+    march_sup_child             *sup_children;
+    int                          sup_num_children;
+    /* Restart-history timestamps (seconds), for max_restarts-within-window
+     * throttling; valid only when this actor IS a supervisor. */
+    double                      *sup_restart_ts;
+    int                          sup_restart_len;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1313,6 +1486,26 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     return m;
 }
 
+/* Shared by march_is_cap_valid, march_pid_of_int, and the restart-strategy
+ * code below: locate an actor's meta entry by its sequential spawn index —
+ * the value a compiled Int field uses to encode a Pid (see
+ * march_actor_register_child). Returns NULL if no actor was ever assigned
+ * this index. */
+static march_actor_meta *find_meta_by_pid_index(int64_t pid_index) {
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = NULL;
+    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
+        march_actor_meta *cur = g_actor_tbl[i];
+        while (cur) {
+            if (cur->pid_index == pid_index) { m = cur; break; }
+            cur = cur->tbl_next;
+        }
+        if (m) break;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
 /* ── Actor green thread loop ─────────────────────────────────────── */
 
 /* Each actor runs as a green thread that loops on recv→dispatch.
@@ -1322,6 +1515,47 @@ static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
     int64_t *a = (int64_t *)actor;
+
+    /* self is THIS green thread's own proc — march_sched_current() reads
+     * tl_sched->current, which correctly names "whatever proc this OS
+     * thread's scheduler is running right now" regardless of which OS
+     * thread that happens to be (see march_proc.crash_jmp's doc comment
+     * in march_scheduler.h for why the trap pointer lives on the proc,
+     * not a _Thread_local — this scheduler steals procs across OS
+     * threads, so a raw thread-local would go stale after a migration). */
+    march_proc *self = march_sched_current();
+    jmp_buf crash_jmp;
+    jmp_buf *saved_jmp = self ? self->crash_jmp : NULL;
+    /* Read meta->supervisor once, under g_tbl_mu, and cache it in a local —
+     * march_actor_register_child (called by the supervisor, on a DIFFERENT
+     * thread, right after this child's march_spawn already started this
+     * green thread running) writes meta->supervisor under the same lock.
+     * Without this, an unlocked read here races with that write (confirmed
+     * via ThreadSanitizer): reading stale NULL just misses installing the
+     * crash trap for that specific child on that specific timing window —
+     * not memory-unsafe, but silently defeats supervision for it. Caching
+     * one snapshot also avoids a TOCTOU between the two "meta->supervisor"
+     * checks below (register_child could run in between two separate reads). */
+    pthread_mutex_lock(&g_tbl_mu);
+    int has_supervisor = meta->supervisor != NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (has_supervisor && self) {
+        /* Only a supervised child gets crash-isolated — an unsupervised
+         * actor's panic keeps today's exit(1) behavior (see march_panic). */
+        self->crash_jmp = &crash_jmp;
+    }
+    if (has_supervisor && self && setjmp(crash_jmp) != 0) {
+        /* march_panic longjmp'd here instead of exit(1)-ing the process.
+         * do_actor_death mirrors what march_kill would have done, and
+         * (since this actor has a supervisor) triggers a restart — kill/
+         * crash-notify parity with the interpreter's kill = crash_actor. */
+        self->crash_jmp = saved_jmp;
+        do_actor_death(actor);
+        pthread_mutex_lock(&g_tbl_mu);
+        meta->green_thread = NULL;
+        pthread_mutex_unlock(&g_tbl_mu);
+        return;
+    }
 
     while (a[3]) {  /* while alive */
         void *msg = march_sched_recv();
@@ -1397,6 +1631,7 @@ static void actor_green_thread(void *arg) {
      * scheduler shutdown) and this proc is about to die and be freed by
      * sched_loop.  Clear the meta handle so march_kill / march_send observe
      * NULL instead of waking or enqueueing on a freed proc (use-after-free). */
+    if (self) self->crash_jmp = saved_jmp;
     pthread_mutex_lock(&g_tbl_mu);
     meta->green_thread = NULL;
     pthread_mutex_unlock(&g_tbl_mu);
@@ -1404,7 +1639,153 @@ static void actor_green_thread(void *arg) {
 
 /* ── Public actor API ────────────────────────────────────────────── */
 
-void march_kill(void *actor) {
+/* Returns 1 (and appends `now` to sup_meta's restart history) if a restart
+ * is currently permitted under its max_restarts-within-window budget;
+ * returns 0 (budget exceeded — caller must crash the supervisor itself)
+ * otherwise. Mirrors the identical window-check inlined in all three of
+ * eval.ml's one_for_one_restart / one_for_all_restart / rest_for_one_restart. */
+static int march_restart_budget_ok(march_actor_meta *sup_meta) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    double window = (double)sup_meta->supervisor_window_secs;
+    int kept = 0;
+    for (int i = 0; i < sup_meta->sup_restart_len; i++) {
+        if (now - sup_meta->sup_restart_ts[i] < window) {
+            sup_meta->sup_restart_ts[kept++] = sup_meta->sup_restart_ts[i];
+        }
+    }
+    sup_meta->sup_restart_len = kept;
+    if (kept >= sup_meta->supervisor_max_restarts) return 0;
+    sup_meta->sup_restart_ts = realloc(sup_meta->sup_restart_ts,
+                                        (size_t)(kept + 1) * sizeof(double));
+    sup_meta->sup_restart_ts[kept] = now;
+    sup_meta->sup_restart_len = kept + 1;
+    return 1;
+}
+
+/* Spawn a fresh replacement for sup_children[child_idx], link it to the
+ * supervisor in that SAME slot (never appends — march_actor_register_child
+ * is only for a child's initial spawn), inherit the crashed child's
+ * epoch+1 (matching eval.ml spawn_child_actor's stale-capability-detection
+ * inheritance), and write the new pid_index into the supervisor's state. */
+static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    march_sup_child *child = &sup_meta->sup_children[child_idx];
+    int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
+    march_actor_meta *old_meta = find_meta_by_pid_index(old_pid_index);
+    int64_t inherited_epoch = old_meta ? old_meta->epoch + 1 : 0;
+
+    /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
+     * pointer), NOT a raw C function pointer — see march_sup_child's field
+     * comment. <ActorName>_spawn is a zero-arg function, so its wrapper's
+     * only parameter is the closure cell itself (contrast the 2-arg
+     * cleanup-closure convention in do_actor_death, whose underlying
+     * function is Unit -> Unit). */
+    typedef void *(*spawn_clo_fn_t)(void *);
+    void **clo_fields = (void **)((char *)child->spawn_clo + 16);
+    spawn_clo_fn_t fn_ptr = (spawn_clo_fn_t)(*clo_fields);
+    void *raw = fn_ptr(child->spawn_clo);
+    void *new_child = march_spawn(raw);
+    march_actor_meta *new_meta = find_or_create_meta(new_child);
+    new_meta->supervisor = supervisor;
+    new_meta->sup_child_index = child_idx;
+    new_meta->epoch = inherited_epoch;
+    ((int64_t *)supervisor)[4 + child->word_idx] = new_meta->pid_index;
+    return new_child;
+}
+
+/* one_for_one: only the crashed child is respawned; siblings untouched.
+ * Mirrors eval.ml:1588-1637. */
+static void march_one_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    march_respawn_child(supervisor, sup_meta, child_idx);
+}
+
+/* one_for_all: every child is killed and respawned when any one crashes.
+ * Mirrors eval.ml:1640-1687. child_idx (which one originally crashed) is
+ * unused here — ALL children are affected identically. */
+static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    (void)child_idx;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    if (n == 0) return;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) {
+        live_children[i] = NULL;
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        /* The originally-crashed child is already dead at this point (Task 4's
+         * do_actor_death ran on it before calling march_supervisor_notify) —
+         * march_is_alive is false for it, so it's correctly skipped here and
+         * only respawned (not double-killed) in the loop below. */
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
+/* rest_for_one: the crashed child and every child declared AFTER it (in
+ * sup_children array order, which matches sc_order — Task 3's field
+ * injection walks sc.sc_fields in declaration order) are killed and
+ * respawned; earlier siblings are untouched. Mirrors eval.ml:1691-1761. */
+static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
+    if (child_idx < 0 || child_idx >= sup_meta->sup_num_children) return;
+    if (!march_restart_budget_ok(sup_meta)) {
+        do_actor_death(supervisor);
+        return;
+    }
+    int n = sup_meta->sup_num_children;
+    void *live_children[n];
+    for (int i = 0; i < n; i++) live_children[i] = NULL;
+    for (int i = child_idx + 1; i < n; i++) {
+        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        march_actor_meta *cm = find_meta_by_pid_index(stored_pid_index);
+        if (cm && march_is_alive(cm->actor)) {
+            live_children[i] = cm->actor;
+            cm->supervisor = NULL;
+        }
+    }
+    for (int i = child_idx + 1; i < n; i++) {
+        if (live_children[i]) do_actor_death(live_children[i]);
+    }
+    for (int i = child_idx; i < n; i++) {
+        march_respawn_child(supervisor, sup_meta, i);
+    }
+}
+
+static void march_supervisor_notify(void *supervisor, march_actor_meta *crashed_meta) {
+    march_actor_meta *sup_meta = find_meta(supervisor);
+    if (!sup_meta) return;
+    int child_idx = crashed_meta->sup_child_index;
+    switch (sup_meta->supervisor_strategy) {
+        case 0: march_one_for_one_restart(supervisor, sup_meta, child_idx); break;
+        case 1: march_one_for_all_restart(supervisor, sup_meta, child_idx); break;
+        case 2: march_rest_for_one_restart(supervisor, sup_meta, child_idx); break;
+        default: break;
+    }
+}
+
+/* Mark `actor` dead, run its cleanup callbacks and monitor Down-notifications,
+ * wake its green thread — and, notify its supervisor (if it has one) for a
+ * possible restart. The ONE place that does this, called both by an
+ * explicit kill() and by a panic inside a supervised actor's handler
+ * (the crash trap in actor_green_thread below) — mirrors the interpreter's
+ * kill = crash_actor unification (eval.ml:3004-3006). */
+static void do_actor_death(void *actor) {
     int64_t *fields = (int64_t *)actor;
     if (!fields[3]) return;   /* Already dead */
 
@@ -1464,6 +1845,14 @@ void march_kill(void *actor) {
     if (meta && meta->green_thread) {
         march_sched_wake(meta->green_thread);
     }
+
+    if (meta && meta->supervisor) {
+        march_supervisor_notify(meta->supervisor, meta);
+    }
+}
+
+void march_kill(void *actor) {
+    do_actor_death(actor);
 }
 
 int64_t march_is_alive(void *actor) {
@@ -1502,6 +1891,14 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
      * exists; march_spawn will find the same entry and attach the green thread. */
     march_actor_meta *meta = find_or_create_meta(actor);
     meta->dispatch_name_id = name_id;
+}
+
+void march_actor_set_call_base(void *actor, int64_t base) {
+    /* Emitted by codegen right after the actor record's alloc (same timing
+     * as march_actor_set_dispatch_id): before march_spawn, so
+     * find_or_create_meta creates the entry the spawn will reuse. */
+    march_actor_meta *meta = find_or_create_meta(actor);
+    meta->call_tag_base = base;
 }
 
 #define MARCH_MIGRATE_SNAPSHOT 2048
@@ -1683,22 +2080,27 @@ void *march_task_spawn_thunk(void *clo_ptr) {
     if (!wa) { return (void *)task; }
     wa->clo  = clo_ptr;
     wa->task = task;
-    march_proc *p = march_sched_spawn(march_thunk_trampoline, wa);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16: proc handle */
-        task[3] = (int64_t)0;              /* field 1 at offset 24: result (tagged, init 0) */
-        task[4] = (int64_t)0;              /* field 2 at offset 32: done flag (init 0) */
-    }
+    /* Publish the proc LAST.  Once march_sched_spawn returns, a work-stealing
+     * scheduler on another OS thread may already be running march_thunk_trampoline
+     * for this proc — which writes task[2] (proc handle), task[3] (result) and
+     * task[4] (done flag).  Any store to the task object here, AFTER the spawn,
+     * therefore races the trampoline with no synchronization between them and
+     * can clobber a completed result/done flag back to zero (confirmed by
+     * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
+     * nothing to write: march_alloc() zero-initialises the whole object (so
+     * result/done start at 0) and the trampoline records task[2] itself as its
+     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+    (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
 
 /* Wait for a task to complete and return Ok(result).
  *
- * Waits on the task-embedded done flag (word 4, via task_wait_done) until
- * the trampoline release-stores 1 into it.  We never dereference the proc
- * ptr (word 2) after the proc may have been freed by sched_loop — doing so
- * caused a use-after-free where calloc reuse zeroed the freed memory, making
- * p->status read as PROC_READY (0) forever. */
+ * Spins on the task-embedded done flag (word 4) until the trampoline
+ * release-stores 1 into it.  We never dereference the proc ptr (word 2)
+ * after the proc may have been freed by sched_loop — doing so caused a
+ * use-after-free where calloc reuse zeroed the freed memory, making
+ * p->status read as PROC_RUNNABLE (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
@@ -1736,12 +2138,10 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->clo  = clo_ptr;
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
-    march_proc *p = march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
-    if (task) {
-        task[2] = (int64_t)(uintptr_t)p;
-        task[3] = (int64_t)0;   /* tagged result, init 0 */
-        task[4] = (int64_t)0;   /* done flag, init 0 */
-    }
+    /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
+     * the task object after the spawn races the trampoline.  march_alloc zeroed
+     * the object and the trampoline records task[2] itself. */
+    (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
 
@@ -1873,101 +2273,14 @@ void *march_send(void *actor, void *msg) {
  *      proc pointer (the "reply channel").  The actor handler receives this as
  *      its first parameter (e.g., `on GetCount(reply_to)`).
  *   3. Send the augmented message to the actor's green thread.
- *   4. Block via march_sched_recv() until the actor calls march_actor_reply.
+ *   4. Wait for the reply: timeout_ms <= 0 blocks forever via
+ *      march_sched_recv(); a positive timeout_ms does a deadline-bounded
+ *      yield-poll and returns Err("actor_call: timeout") past the deadline.
  *   5. Return Ok(reply_value).
  *
  * RC contract: we consume one reference to inner_msg (via march_decrc after
  * reading the tag) and transfer ownership of the new call_msg to the actor.
  */
-/* Perform the call protocol from the current green thread.
- * Precondition: march_sched_current() != NULL.  timeout_ms <= 0 means wait
- * forever; otherwise the wait is a deadline-bounded yield-poll (see below). */
-static void *actor_call_green(void *actor, march_actor_meta *meta,
-                              int32_t msg_tag, int64_t timeout_ms) {
-    (void)actor;
-    march_proc *caller = march_sched_current();
-
-    void *call_msg = march_alloc(24);
-    MARCH_SET_TAG(call_msg, msg_tag);
-    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
-
-    march_sched_send(meta->green_thread, call_msg);
-
-    if (timeout_ms <= 0) {
-        /* Preserve wait-forever semantics for callers that opt out. */
-        void *result = march_sched_recv();
-        if (result == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
-        return mk_ok(result);
-    }
-
-    /* Timed wait: poll the mailbox with cooperative yields until the
-     * deadline.  A parked-with-deadline mechanism needs timer support the
-     * scheduler doesn't have; replies are normally immediate, so the yield
-     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
-     *
-     * Known limitation: on timeout, a late reply still lands in the
-     * caller's mailbox. Safe for per-call task green threads (the thread
-     * exits and sends to dead procs are dropped); a long-lived green thread
-     * mixing Actor.call and raw receive could observe a stale reply after
-     * a timeout. */
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
-                          + timeout_ms;
-    for (;;) {
-        void *msg = NULL;
-        if (march_sched_try_recv2(&msg)) {
-            if (msg == MARCH_RECV_NO_MSG) return mk_err_cstr("actor_call: no reply");
-            return mk_ok(msg);
-        }
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (now_ms >= deadline_ms)
-            return mk_err_cstr("actor_call: timeout");
-        march_sched_yield();
-    }
-}
-
-/* Foreign-caller bridge: the calling OS thread has no green-thread context,
- * so a helper green thread performs the call protocol and hands the result
- * back over a one-shot condvar.  The waiter enforces timeout_ms with
- * pthread_cond_timedwait; on timeout it marks the ctx abandoned and the
- * helper green thread frees it (and drops the unclaimed result) instead. */
-typedef struct {
-    void             *actor;
-    march_actor_meta *meta;
-    int32_t           msg_tag;
-    int64_t           timeout_ms;
-    void             *result;
-    int               done;
-    int               abandoned;
-    pthread_mutex_t   mu;
-    pthread_cond_t    cv;
-} foreign_call_ctx;
-
-static void foreign_call_entry(void *arg) {
-    foreign_call_ctx *ctx = (foreign_call_ctx *)arg;
-    /* Pass the same bound the waiter uses so a never-replying actor cannot
-     * leak this green thread: actor_call_green enforces timeout_ms itself
-     * (deadline-bounded yield-poll) and returns Err(timeout) here, we see
-     * abandoned=1, and we free ctx. */
-    void *res = actor_call_green(ctx->actor, ctx->meta, ctx->msg_tag,
-                                 ctx->timeout_ms);
-    pthread_mutex_lock(&ctx->mu);
-    if (ctx->abandoned) {
-        pthread_mutex_unlock(&ctx->mu);
-        march_decrc(res);  /* unclaimed Ok/Err — drop our reference */
-        pthread_mutex_destroy(&ctx->mu);
-        pthread_cond_destroy(&ctx->cv);
-        free(ctx);
-        return;
-    }
-    ctx->result = res;
-    ctx->done   = 1;
-    pthread_cond_signal(&ctx->cv);
-    pthread_mutex_unlock(&ctx->mu);
-}
-
 void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     int64_t *a = (int64_t *)actor;
     if (!a[3]) {
@@ -1981,50 +2294,89 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         return mk_err_cstr("actor not found");
     }
 
+    march_proc *caller = march_sched_current();
+    if (!caller) {
+        march_decrc(inner_msg);
+        return mk_err_cstr("actor_call: not in scheduler context");
+    }
+
     /* Read the tag from inner_msg so we can reproduce it on the augmented msg.
      * inner_msg is assumed to be a zero-arg constructor (16 bytes: header only).
      * We decrc it now — the caller owned one reference. */
-    int32_t msg_tag = ((march_hdr *)inner_msg)->tag;
-    march_decrc(inner_msg);
-
-    if (!march_sched_current()) {
-        foreign_call_ctx *ctx = (foreign_call_ctx *)calloc(1, sizeof(*ctx));
-        if (!ctx) return mk_err_cstr("actor_call: oom");
-        ctx->actor = actor; ctx->meta = meta; ctx->msg_tag = msg_tag;
-        ctx->timeout_ms = timeout_ms > 0 ? timeout_ms : 5000;
-        pthread_mutex_init(&ctx->mu, NULL);
-        pthread_cond_init(&ctx->cv, NULL);
-
-        march_ensure_sched_started();
-        march_sched_spawn(foreign_call_entry, ctx);
-
-        int64_t wait_ms = timeout_ms > 0 ? timeout_ms : 5000;
-        struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec  += wait_ms / 1000;
-        deadline.tv_nsec += (wait_ms % 1000) * 1000000L;
-        if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L; }
-
-        pthread_mutex_lock(&ctx->mu);
-        int timed_out = 0;
-        while (!ctx->done && !timed_out) {
-            if (pthread_cond_timedwait(&ctx->cv, &ctx->mu, &deadline) == ETIMEDOUT)
-                timed_out = !ctx->done;
-        }
-        if (timed_out) {
-            ctx->abandoned = 1;   /* helper green thread now owns ctx */
-            pthread_mutex_unlock(&ctx->mu);
-            return mk_err_cstr("actor_call: timeout");
-        }
-        void *r = ctx->result;
-        pthread_mutex_unlock(&ctx->mu);
-        pthread_mutex_destroy(&ctx->mu);
-        pthread_cond_destroy(&ctx->cv);
-        free(ctx);
-        return r;
+    int32_t msg_tag;
+    if (IS_HEAP_PTR(inner_msg)) {
+        msg_tag = ((march_hdr *)inner_msg)->tag;
+        march_decrc(inner_msg);
+    } else {
+        /* Enum-shaped sentinel types (several nullary ctors) compile to
+         * immediates: odd tagged ints carrying the ctor index. Decode
+         * instead of dereferencing (which would fault). */
+        int64_t raw = (int64_t)(intptr_t)inner_msg;
+        msg_tag = (raw & 1) ? (int32_t)(raw >> 1) : 0;
     }
-    return actor_call_green(actor, meta, msg_tag, timeout_ms);
+
+    /* Positional dispatch: the sentinel's per-type tag IS the handler
+     * index. The actor's dispatch switch matches GLOBAL msg tags (F19:
+     * base 0x0100_0000 + declaration index, unique across actors), so
+     * translate index → global tag via the base stamped at alloc time.
+     * Without this every call message falls to the dispatch default arm
+     * and is silently dropped — the caller blocks forever (or times out).
+     *
+     * Only rebase a tag BELOW the F19 global floor: a caller may also pass
+     * the actor's OWN _Msg constructor (e.g. actor_call(pool, Checkout(0)))
+     * whose tag is ALREADY global — rebasing it again would double-add the
+     * base and misroute (the erased_option_niche_fbip_codegen regression). */
+    if (meta->call_tag_base && msg_tag < 0x01000000)
+        msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
+
+    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
+     * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
+    void *call_msg = march_alloc(24);
+    MARCH_SET_TAG(call_msg, msg_tag);
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+
+    march_sched_send(meta->green_thread, call_msg);
+
+    if (timeout_ms <= 0) {
+        /* Preserve wait-forever semantics for callers that opt out. */
+        void *result = march_sched_recv();
+        if (result == MARCH_RECV_NO_MSG)
+            return mk_err_cstr("no reply (timeout or unhandled Call)");
+        return mk_ok(result);
+    }
+
+    /* Timed wait: poll the mailbox with cooperative yields until the
+     * deadline.  A parked-with-deadline mechanism needs timer support the
+     * scheduler doesn't have; replies are normally immediate, so the yield
+     * loop only spins for the (rare) slow-actor case, bounded by timeout_ms.
+     *
+     * The Err payloads match the interpreter's no-reply message exactly so
+     * both backends surface the same value.
+     *
+     * Known limitation: on timeout, a late reply still lands in the
+     * caller's mailbox. Safe for per-call task green threads (the thread
+     * exits and sends to dead procs are dropped); a long-lived green thread
+     * mixing Actor.call and raw receive could observe a stale reply after
+     * a timeout. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t deadline_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000
+                          + timeout_ms;
+    for (;;) {
+        void *msg = NULL;
+        if (march_sched_try_recv2(&msg)) {
+            if (msg == MARCH_RECV_NO_MSG)
+                return mk_err_cstr("no reply (timeout or unhandled Call)");
+            return mk_ok(msg);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now_ms = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            return mk_err_cstr("no reply (timeout or unhandled Call)");
+        march_sched_yield();
+    }
 }
+
 
 /*
  * march_actor_reply: send a reply back to the caller blocked in actor_call.
@@ -2489,12 +2841,20 @@ void *march_string_to_float(void *s) {
     if (end == str->data || *end != '\0') {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
-    /* Some(f): tag=1, one double field at offset 16. */
+    /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float
+     * box — NOT the raw double. The compiler's generic Boxed-ADT ctor
+     * convention treats every ctor field slot as pointer-width and, for a
+     * Float field, loads it as `ptr` then calls march_unbox_float(ptr) to
+     * recover the double (see native_float_arr_to_list's identical
+     * float-boxing convention above and the compiled `List(Float)` fix this
+     * mirrors). Storing the raw double bits here instead made
+     * march_unbox_float dereference the float's own bit pattern as a heap
+     * pointer — SIGSEGV. */
     void *some = march_alloc(16 + 8);
     int32_t *tp = (int32_t *)((char *)some + 8);
     tp[0] = 1;
-    double *fp = (double *)((char *)some + 16);
-    fp[0] = f;
+    void **fp = (void **)((char *)some + 16);
+    fp[0] = march_alloc_float(f);
     return some;
 }
 
@@ -3318,6 +3678,46 @@ void march_register_supervisor(void *supervisor, int64_t strategy,
     meta->supervisor_window_secs  = window_secs;
 }
 
+/* Called once per declared supervise-block child, from the generated
+ * Name_spawn() body, right after BOTH the child and the supervisor itself
+ * have been spawned (march_spawn already ran on both). Links parent->child
+ * (for the crash trap to find "is this actor supervised, and by whom") and
+ * records enough for a later restart: which March closure respawns this
+ * child (spawn_clo — a reference to <ActorName>_spawn as a first-class
+ * value, NOT a raw C function pointer; see march_sup_child's field
+ * comment), and which Int-typed state-field slot of the supervisor holds
+ * its encoded pid (word_idx, see march_sup_child above). spawn_clo arrives
+ * with ownership transferred from the caller (the normal convention for a
+ * non-borrowed argument) and is held here permanently — never decref'd —
+ * so it stays valid for every future restart, exactly like a cleanup
+ * closure stored on meta->cleanup_head. */
+void march_actor_register_child(void *supervisor, void *child,
+                                 void *spawn_clo, int64_t word_idx) {
+    march_actor_meta *sup_meta = find_or_create_meta(supervisor);
+    march_actor_meta *child_meta = find_or_create_meta(child);
+    /* The child's green thread is already running by this point (march_spawn
+     * started it before this registration call) and reads meta->supervisor
+     * at its own startup under the same g_tbl_mu (see actor_green_thread) —
+     * confirmed via ThreadSanitizer as an unsynchronized publish otherwise. */
+    pthread_mutex_lock(&g_tbl_mu);
+    child_meta->supervisor = supervisor;
+    pthread_mutex_unlock(&g_tbl_mu);
+    child_meta->sup_child_index = sup_meta->sup_num_children;
+    int idx = sup_meta->sup_num_children;
+    sup_meta->sup_children = realloc(sup_meta->sup_children,
+                                      (size_t)(idx + 1) * sizeof(march_sup_child));
+    sup_meta->sup_children[idx].spawn_clo = spawn_clo;
+    sup_meta->sup_children[idx].word_idx = word_idx;
+    sup_meta->sup_num_children = idx + 1;
+}
+
+/* pid_index_of: the Int a compiled supervisor stores in its own state field
+ * to represent a just-spawned child's Pid (see march_pid_of_int for the
+ * reverse direction). */
+int64_t march_pid_index_of(void *actor) {
+    return find_or_create_meta(actor)->pid_index;
+}
+
 /* monitor: establish a monitor link from watcher to target.
    Returns a unique monitor ref.  If target is already dead,
    delivers Down immediately by incrementing watcher's down_count. */
@@ -3397,13 +3797,49 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
     march_incrc(cleanup);  /* Keep closure alive */
 }
 
+/* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)
+ * name, with bit63 forced equal to bit62 so the value survives generic-slot
+ * tag round-trips.  MUST match the compiler's Llvm_ctx.atom_hash exactly —
+ * runtime-produced atoms (:ok / :error from the capability plane) compare
+ * equal to the same atom literals in March source only through this hash. */
+static int64_t march_atom_of_name(const char *name) {
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (const char *p = name; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= UINT64_C(1099511628211);
+    }
+    uint64_t bit62 = (h >> 62) & 1;
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    return (int64_t)h;
+}
+
 /* get_cap: get the capability associated with an actor pid.
-   Returns None (tag=0) — capability enforcement is compile-time only. */
+ *
+ * Option(Cap) is NICHE-encoded (Cap is a heap pointer type): None = NULL,
+ * Some(cap) = the cap pointer itself.  The previous stub returned a boxed
+ * 16-byte tag-0 cell, which the niche decode read as Some(garbage-cap) for
+ * EVERY pid, live or dead — making the whole compiled epoch-Cap plane
+ * non-functional (send_checked validated that empty cell's zeroed
+ * pid_index/epoch against real metas, failed, and silently dropped).
+ *
+ * Cap object layout (see march_send_checked below):
+ *   word[0..1] = march_hdr (rc/tag, filled by march_alloc)
+ *   word[2]    = actor ptr
+ *   word[3]    = pid_index
+ *   word[4]    = epoch
+ */
 void *march_get_cap(void *pid) {
-    (void)pid;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
+    if (!pid || !IS_HEAP_PTR(pid)) return NULL;       /* no actor -> None */
+    int64_t *a = (int64_t *)pid;
+    if (!a[3]) return NULL;                            /* dead actor -> None */
+    march_actor_meta *meta = find_or_create_meta(pid);
+    if (!meta) return NULL;
+    void *cap = march_alloc(40);
+    int64_t *w = (int64_t *)cap;
+    w[2] = (int64_t)(uintptr_t)pid;
+    w[3] = meta->pid_index;
+    w[4] = meta->epoch;
+    return cap;
 }
 
 /* ── Capability revocation table ──────────────────────────────────────── */
@@ -3436,9 +3872,8 @@ static int revoc_contains(int64_t pid_index, int64_t epoch) {
     return 0;
 }
 
-/* revoke_cap(pid_index, epoch): add (pid_index, epoch) to the revocation table.
- * Idempotent — does nothing if already revoked. */
-void march_revoke_cap(int64_t pid_index, int64_t epoch) {
+/* Add (pid_index, epoch) to the revocation table.  Idempotent. */
+static void revoc_add(int64_t pid_index, int64_t epoch) {
     if (revoc_contains(pid_index, epoch)) return;
     march_revoc_entry *e = malloc(sizeof(march_revoc_entry));
     if (!e) return;
@@ -3450,23 +3885,28 @@ void march_revoke_cap(int64_t pid_index, int64_t epoch) {
     pthread_mutex_unlock(&g_revoc_mu);
 }
 
-/* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
+/* revoke_cap(cap): revoke the capability.  Takes the March-level Cap object
+ * (layout documented at march_get_cap) and returns the :ok atom, matching the
+ * interpreter's `revoke_cap : Cap(a) -> Atom`.  A null/non-heap cap (e.g. the
+ * root_cap null sentinel) is a no-op returning :error. */
+int64_t march_revoke_cap(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return march_atom_of_name("error");
+    int64_t *w = (int64_t *)cap;
+    revoc_add(w[3], w[4]);
+    return march_atom_of_name("ok");
+}
+
+/* is_cap_valid(cap): return 1 if the capability is valid, 0 otherwise.
  * A capability is invalid if it is in the revocation table, the actor is dead,
- * or the actor's current epoch differs. */
-int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
+ * or the actor's current epoch differs.  Takes the March-level Cap object,
+ * matching the interpreter's `is_cap_valid : Cap(a) -> Bool`. */
+int64_t march_is_cap_valid(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return 0;
+    int64_t *w = (int64_t *)cap;
+    int64_t pid_index = w[3];
+    int64_t epoch     = w[4];
     if (revoc_contains(pid_index, epoch)) return 0;
-    /* Look up actor by pid_index to check liveness and current epoch. */
-    pthread_mutex_lock(&g_tbl_mu);
-    march_actor_meta *m = NULL;
-    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
-        march_actor_meta *cur = g_actor_tbl[i];
-        while (cur) {
-            if (cur->pid_index == pid_index) { m = cur; break; }
-            cur = cur->tbl_next;
-        }
-        if (m) break;
-    }
-    pthread_mutex_unlock(&g_tbl_mu);
+    march_actor_meta *m = find_meta_by_pid_index(pid_index);
     if (!m || !march_is_alive(m->actor)) return 0;
     if (m->epoch != epoch) return 0;
     return 1;
@@ -3484,10 +3924,14 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
  *
  * If cap is not a heap pointer (e.g. None/null), silently drop the message.
  */
-void march_send_checked(void *cap, void *msg) {
+int64_t march_send_checked(void *cap, void *msg) {
+    /* Returns the :ok atom on delivery, :error on any validation failure —
+     * matching the interpreter's `send_checked : Cap(a) -> a -> Atom`
+     * (previously returned void; the call site then read garbage as the
+     * atom, so the result compared equal to neither :ok nor :error). */
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     void    *actor     = (void *)(uintptr_t)cap_words[2];
@@ -3495,28 +3939,43 @@ void march_send_checked(void *cap, void *msg) {
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     march_actor_meta *meta = find_meta(actor);
-    if (!meta || meta->pid_index != pidx || meta->epoch != epoch) {
+    if (!meta || meta->pid_index != pidx || meta->epoch != epoch
+        || !march_is_alive(actor)) {
         march_decrc(msg);
-        return;
+        return march_atom_of_name("error");
     }
     void *result = march_send(actor, msg);
     march_decrc(result);
+    return march_atom_of_name("ok");
 }
 
-/* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */
+/* march_pid_of_int(n) is an escape hatch: March code that stores a child's
+ * pid as a plain Int (e.g. a supervisor's Int-typed state field, see Task 3)
+ * converts it back to a usable Pid via this call. When n does not name any
+ * actor this process has spawned (a stale/garbage index), march_send /
+ * march_kill / march_is_alive all read their `actor` argument's $e_alive
+ * flag (word index 3) UNCONDITIONALLY with no NULL check — returning NULL
+ * here would crash every one of them. Instead return a pointer to a static,
+ * already-"dead" actor struct: same header/dispatch/alive word layout as a
+ * real actor, with $e_alive already 0, so every caller's EXISTING
+ * "actor already dead" early-return path (march_kill's `if (!fields[3])
+ * return;`, march_send's `if (!a[3]) { ...none...; return; }`,
+ * march_is_alive's plain read) handles it exactly like any other actor
+ * that was already killed — no new code path, nothing to get wrong.
+ * rc starts at a billion: no realistic amount of incrc/decrc traffic on a
+ * Pid value approaches that within one process's lifetime, so this static
+ * object is never freed. */
+static struct { march_hdr hdr; int64_t dispatch; int64_t alive; }
+    march_dead_actor_sentinel = { .hdr = { .rc = 1000000000, .tag = 0, .pad = 0 },
+                                   .dispatch = 0, .alive = 0 };
+
 void *march_pid_of_int(int64_t n) {
-    return (void *)(intptr_t)n;
-}
-
-/* get_actor_field: retrieve a named field from an actor's state. Stub: returns None. */
-void *march_get_actor_field(void *pid, void *name) {
-    (void)pid; (void)name;
-    void *none = march_alloc(16);
-    /* tag 0 = None, already zeroed by march_alloc */
-    return none;
+    march_actor_meta *m = find_meta_by_pid_index(n);
+    if (m) return m->actor;
+    return &march_dead_actor_sentinel;
 }
 
 /* ── Value pretty-printing ───────────────────────────────────────────── */
@@ -3546,6 +4005,10 @@ void *march_value_to_string(void *v) {
      * the interpreter — instead of misreading the layout (len-as-tag) and
      * printing "#<tag:len>".  Result is +1: alias the borrowed input. */
     if (tag == MARCH_STRING_TAG) { march_incrc(v); return v; }
+    /* Boxed float in an erased slot: render the value, not "#<tag:-3>"
+     * (float-boxing design; also closes a cousin of the to_string-on-erased
+     * divergence). */
+    if (tag == MARCH_FLOAT_TAG) return march_float_to_string(march_unbox_float(v));
     char buf[128];
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);
@@ -3627,6 +4090,132 @@ static inline int64_t call_closure_1_int(void *clo, void *arg) {
 static inline void *call_closure_2(void *clo, void *a, void *b) {
     void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 8);
     return fn(clo, a, b);
+}
+
+/* ── Signal.watch: deferred signal dispatch (compiled runtime) ──────────
+ * One watcher closure per stable signal code 0-4 (Term Int Hup Usr1 Usr2 —
+ * see stdlib/signal.march, which translates the `Sig` enum to these codes and
+ * wraps the handler in a 1-arg discard thunk, so the watcher is a standard
+ * 1-arg closure invoked via call_closure_1 with a dummy argument).
+ *
+ * The OS handler `march_signal_dispatch` runs in async-signal context and does
+ * ONLY atomic flag stores — no allocation, no March code.  A drain point in
+ * the scheduler / HTTP loops calls `march_signal_drain`, which runs the March
+ * closure inline on a normal stack (never a guard-paged green-thread stack:
+ * we install plain handlers, mirroring http_signal_handler, and the drain runs
+ * from the loop body, not the signal handler).
+ *
+ * Code 3 (Usr1) is RESERVED for the scheduler's green-thread preemption
+ * (SIGUSR1, march_scheduler.c) and therefore cannot be watched in compiled
+ * programs — march_signal_watch refuses it.  Term/Int (0/1) suppress the
+ * default graceful shutdown on the first delivery while watched, and escape to
+ * shutdown (g_http_shutdown) on the second. */
+static void *_Atomic g_signal_handlers[5] = { NULL, NULL, NULL, NULL, NULL };
+static _Atomic int   g_signal_pending[5]  = { 0, 0, 0, 0, 0 };
+static _Atomic int   g_signal_seen[5]     = { 0, 0, 0, 0, 0 };
+
+/* Graceful-shutdown flag.  The strong definition lives in march_http.c; this
+ * WEAK definition provides the symbol for the REPL/JIT runtime-only build, where
+ * march_http.c is absent (the JIT compiles march_runtime.c standalone, and the
+ * signal dispatcher below references this flag).  When both TUs are linked (the
+ * normal full build), march_http.c's strong definition overrides this one — no
+ * duplicate symbol.  Set by the unwatched Term/Int path and by the
+ * watched-signal second-delivery escape hatch. */
+__attribute__((weak)) _Atomic int g_http_shutdown = 0;
+
+static int march_signal_os_of_code(int code) {
+    switch (code) {
+        case 0: return SIGTERM; case 1: return SIGINT; case 2: return SIGHUP;
+        case 3: return SIGUSR1; case 4: return SIGUSR2; default: return -1;
+    }
+}
+static int march_signal_code_of_os(int sig) {
+    switch (sig) {
+        case SIGTERM: return 0; case SIGINT: return 1; case SIGHUP: return 2;
+        case SIGUSR1: return 3; case SIGUSR2: return 4; default: return -1;
+    }
+}
+
+/* Async-signal-safe: only atomic stores; no alloc, no March code. */
+static void march_signal_dispatch(int sig) {
+    int code = march_signal_code_of_os(sig);
+    if (code < 0) return;
+    if (atomic_load_explicit(&g_signal_handlers[code], memory_order_acquire)) {
+        /* Watched: defer to the drain.  Term/Int escape to graceful shutdown
+         * only on a second delivery (the Ctrl-C-twice escape hatch). */
+        if ((code == 0 || code == 1)
+                && atomic_load_explicit(&g_signal_seen[code], memory_order_relaxed))
+            atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+        atomic_store_explicit(&g_signal_pending[code], 1, memory_order_relaxed);
+        atomic_store_explicit(&g_signal_seen[code], 1, memory_order_relaxed);
+    } else if (code == 0 || code == 1) {
+        /* Unwatched Term/Int → graceful shutdown (matches http_signal_handler). */
+        atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+    }
+}
+
+/* Run all pending watchers on the current (normal) stack.  Called from the
+ * scheduler loop and the HTTP event loops — NEVER from signal context.  The
+ * atomic exchange coalesces repeated pre-drain deliveries into one call. */
+void march_signal_drain(void) {
+    for (int code = 0; code < 5; code++) {
+        if (atomic_exchange_explicit(&g_signal_pending[code], 0,
+                                     memory_order_acq_rel)) {
+            void *clo = atomic_load_explicit(&g_signal_handlers[code],
+                                             memory_order_acquire);
+            if (clo) {
+                /* March closure ABI (see march_thunk_trampoline): the apply fn
+                 * ptr lives at byte offset +16 and takes (closure, int64 arg).
+                 * The watcher is a 1-arg discard thunk, so the arg is a dummy.
+                 * Calling does not consume the closure — the watcher stays
+                 * registered for the next delivery. */
+                typedef void *(*apply_fn_t)(void *, int64_t);
+                apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
+                apply(clo, (int64_t)0);
+            }
+        }
+    }
+}
+
+/* Register a watcher.  The closure is passed OWNED (Perceus: the borrow pass
+ * marks this call site as consuming), so we keep its reference in the table
+ * and release it on replace / unwatch. */
+void march_signal_watch(int64_t code, void *clo) {
+    if (code < 0 || code > 4) { if (clo) march_decrc(clo); return; }
+    if (code == 3) {
+        fprintf(stderr,
+            "march: Signal.watch(Usr1) is unsupported in compiled programs — "
+            "SIGUSR1 is reserved for the scheduler's green-thread preemption; "
+            "the watcher is ignored.\n");
+        if (clo) march_decrc(clo);
+        return;
+    }
+    void *old = atomic_exchange_explicit(&g_signal_handlers[code], clo,
+                                         memory_order_acq_rel);
+    if (old) march_decrc(old);
+    atomic_store_explicit(&g_signal_seen[code], 0, memory_order_relaxed);
+    atomic_store_explicit(&g_signal_pending[code], 0, memory_order_relaxed);
+    /* Install a plain handler (no SA_ONSTACK), mirroring http_signal_handler;
+     * overrides any prior Term/Int shutdown handler with the watcher-aware one. */
+    signal(march_signal_os_of_code((int)code), march_signal_dispatch);
+}
+
+/* Remove a watcher, restoring the signal's default disposition. */
+void march_signal_unwatch(int64_t code) {
+    if (code < 0 || code > 4 || code == 3) return;
+    void *old = atomic_exchange_explicit(&g_signal_handlers[code], NULL,
+                                         memory_order_acq_rel);
+    if (old) march_decrc(old);
+    atomic_store_explicit(&g_signal_pending[code], 0, memory_order_relaxed);
+    atomic_store_explicit(&g_signal_seen[code], 0, memory_order_relaxed);
+    signal(march_signal_os_of_code((int)code), SIG_DFL);
+}
+
+/* Send a signal to our own process (Signal.raise) — the symmetric trigger,
+ * useful for self-scheduled work and for testing watchers. */
+void march_signal_raise_self(int64_t code) {
+    int os = march_signal_os_of_code((int)code);
+    if (os >= 0) kill(getpid(), os);
 }
 
 void *march_typed_array_from_list(void *list) {
@@ -3879,7 +4468,11 @@ void *native_float_arr_from_list(void *lst) {
     void *arr = native_arr_alloc(n);
     void *cur = lst;
     for (int64_t i = 0; i < n; i++) {
-        double v; memcpy(&v, (char *)cur + 16, 8);
+        /* List(Float) elements are BOXED (see native_float_arr_to_list): the
+         * Cons element slot holds a march_alloc_float pointer, so unbox it
+         * rather than reading the slot as a raw double. */
+        void *boxed = *(void **)((char *)cur + 16);
+        double v = march_unbox_float(boxed);
         memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &v, 8);
         cur = *(void **)((char *)cur + 24);
     }
@@ -3890,9 +4483,19 @@ void *native_float_arr_to_list(void *arr) {
     int64_t len = native_float_arr_length(arr);
     void *lst = make_nil();
     for (int64_t i = len - 1; i >= 0; i--) {
+        /* List(Float) elements are BOXED in compiled code — the Cons element
+         * slot (offset 16) is a uniform pointer-width word, and a raw IEEE-754
+         * double stored there would later be dereferenced by march_unbox_float
+         * as a heap-float pointer (SIGSEGV at the float's bit pattern + 16).
+         * Box each element with march_alloc_float so the produced list matches
+         * the compiler's representation. Mirrors native_int_arr_to_list's
+         * tagged-immediate storage — floats can't be tagged, so they box. */
+        double v;
+        memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        void *boxed = march_alloc_float(v);
         void *cons = march_alloc(32);
         *(int32_t *)((char *)cons + 8) = 1;
-        memcpy((char *)cons + 16, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        *(void **)((char *)cons + 16) = boxed;
         *(void **)((char *)cons + 24) = lst;
         lst = cons;
     }

@@ -22,6 +22,7 @@ foreign functions with their March types and C symbol names:
 ```march
 mod Demo do
   needs IO.Foreign                       -- using an extern implies this capability
+  needs Ffi                              -- the extern block's own Cap(Ffi) requirement
 
   extern "demo" : Cap(Ffi) do
     fn add(a: Int, b: Int): Int = "demo_add"

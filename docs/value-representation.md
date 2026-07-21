@@ -164,6 +164,23 @@ the `record_put`-uniform-handoff bug families (§7). A NATURAL-repr even `Int`
 type (record shape) disambiguates it. A UNIFORM slot resolves the same
 ambiguity dynamically via the odd/even tag.
 
+**Floats in UNIFORM slots — the open exception.** A `Float` in a UNIFORM
+slot is *today* stored as its raw IEEE-754 bits bitcast into the `ptr`
+slot, untagged, and decoded by the reader's static type. This is **unsound
+against generic code**: the raw bits are even and in the canonical range,
+so `IS_HEAP_PTR` accepts them — a generic RC op writes into `*(3.5)`
+(SIGSEGV) and a generic `<=` integer-compares the bits (correct for
+positive floats by IEEE coincidence, backwards for negatives). The fix
+(`specs/plans/2026-07-13-float-boxing-design.md`) is to **box** a Float
+crossing an erasure boundary in a `MARCH_FLOAT_TAG` (-3) heap cell — making
+a UNIFORM slot uniformly heap-or-tagged and `needs_rc (TVar _)` genuinely
+sound. The runtime box API (`march_alloc_float`/`march_unbox_float`,
+value-aware `march_poly_eq`/`march_poly_compare`) landed additively as
+stage 1; the codegen flip that populates UNIFORM slots with boxes is
+staged (decision-gated). Until it lands, the monomorphism restriction
+keeps unannotated let-bound lambdas monomorphic so generic float
+comparators never reach a UNIFORM Float slot.
+
 **Claim 4 — verified (IR), Probe A (UNIFORM).** `let t = (n+40, n+1)` (tuple,
 runtime-derived so the constant-folder cannot eliminate it) allocates a
 2-field cell and stores **both** fields tagged, as `ptr`:

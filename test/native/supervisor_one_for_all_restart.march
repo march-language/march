@@ -1,0 +1,47 @@
+mod SupervisorOneForAllRestart do
+
+  actor Worker do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Work() do
+      { count: state.count + 1 }
+    end
+  end
+
+  actor Sup do
+    state { wa : Int, wb : Int }
+    init  { wa: 0, wb: 0 }
+
+    supervise do
+      strategy one_for_all
+      max_restarts 5 within 60
+      Worker wa
+      Worker wb
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main() do
+    let sup = spawn(Sup)
+    let wa1 = child_int(sup, "wa")
+    let wb1 = child_int(sup, "wb")
+
+    kill(pid_of_int(wa1))
+
+    let wa2 = child_int(sup, "wa")
+    let wb2 = child_int(sup, "wb")
+
+    println(bool_to_string(wa2 != wa1))
+    println(bool_to_string(wb2 != wb1))
+    println(bool_to_string(is_alive(pid_of_int(wa2))))
+    println(bool_to_string(is_alive(pid_of_int(wb2))))
+  end
+
+end

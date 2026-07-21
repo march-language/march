@@ -59,6 +59,11 @@ type value =
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
   | VVaultHandle of int                 (** Opaque handle into vault_registry *)
   | VRingBuf of value ring              (** Fixed-capacity mutable circular buffer — single-owner *)
+  | VResource of int64
+      (** Opaque FFI `resource` handle (e.g. a native DB/Stmt handle from an
+          extern call). Holds the raw marshaled march_value bits; never
+          introspected by the interpreter, only round-tripped through
+          ffi_marshal_iv/ffi_unmarshal_iv back into subsequent extern calls. *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -256,6 +261,15 @@ let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
     Reset per module eval via [reset_scheduler_state]. *)
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
+(** General-interface method dispatch table — maps (iface_name, method_name,
+    type_name) to the concrete method value, so a call to a general (non
+    type-dispatched-builtin) interface method routes by the FIRST argument's
+    runtime type instead of the last-bound name. Keyed by method too (unlike
+    [impl_tbl]'s single (iface,type) slot) so a MULTI-method interface's methods
+    don't overwrite each other. [type_name] is the declaring-module-qualified
+    identity for a colliding short name, else the bare name (see DImpl eval). *)
+let iface_method_tbl : (string * string * string, value) Hashtbl.t = Hashtbl.create 8
+
 (** Interface methods that are dispatched by the argument's type through a
     type-directed builtin ([show], [eq], [compare], [hash]) rather than by name.
 
@@ -294,6 +308,54 @@ let is_type_dispatched_iface = function
     Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
 let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(** Same-short-name type collision set — the interpreter's counterpart to
+    [Collision_set] in lib/tir (native/TIR backend, Task 0 of
+    specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). The interpreter
+    never lowers to TIR, so this walks the AST directly instead of
+    [Tir.type_def]s. Maps a type's bare declared short name -> present iff
+    2+ DISTINCT declaring-module-qualified names (e.g. "NA.Thing" and
+    "NB.Thing") declare it somewhere in the module being run. A short name
+    declared exactly once — by far the common case — must be ABSENT (not
+    present with degenerate content): every consumer's gate is "member of
+    this table", so the non-colliding path must stay cheap and exact.
+    Computed once per [eval_module_env] run, from the FULL AST upfront
+    (before any [DType]/[DImpl] is evaluated) since eval order alone can't
+    tell a first same-short-name declaration from the only one. *)
+let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let is_colliding_type_name (short_name : string) : bool =
+  Hashtbl.mem type_collision_set short_name
+
+(** Populate [type_collision_set] by walking [decls] recursively (descending
+    into [DMod], accumulating a "Sub.Sub2." prefix the same way
+    [module_stack]/[current_doc_prefix] do at eval time — see the [DMod] arm
+    of [eval_decl] below) and collecting every [DType]/[DAlwaysLinearType]'s
+    declaring-module-qualified name. *)
+let compute_type_collision_set (decls : decl list) : unit =
+  Hashtbl.reset type_collision_set;
+  let by_short : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+  let add_qualified qualified =
+    let short = match String.rindex_opt qualified '.' with
+      | None   -> qualified
+      | Some i -> String.sub qualified (i + 1) (String.length qualified - i - 1)
+    in
+    let existing = match Hashtbl.find_opt by_short short with Some l -> l | None -> [] in
+    if not (List.mem qualified existing) then
+      Hashtbl.replace by_short short (qualified :: existing)
+  in
+  let rec walk prefix ds =
+    List.iter (function
+        | DType (_, name, _, _, _) | DAlwaysLinearType (_, name, _, _, _) ->
+          add_qualified (prefix ^ name.txt)
+        | DMod (sub, _, inner, _) -> walk (prefix ^ sub.txt ^ ".") inner
+        | _ -> ()
+      ) ds
+  in
+  walk "" decls;
+  Hashtbl.iter (fun short names ->
+      if List.length names >= 2 then Hashtbl.replace type_collision_set short ()
+    ) by_short
+
 (** Record field-set → type name mapping.
     Maps a canonical key (sorted, comma-joined field names) to the declaring type name.
     Populated when [eval_decl] processes [DType] nodes with [TDRecord].
@@ -304,6 +366,22 @@ let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
     Populated when [eval_decl] processes [DType] nodes.
     Used by ffi_marshal_field/unmarshal to look up record fields and ctor args. *)
 let ffi_type_decl_tbl : (string, March_ast.Ast.type_def) Hashtbl.t = Hashtbl.create 16
+
+(** Names of `resource`-declared FFI types (e.g. `resource Db`), populated
+    alongside [ffi_type_decl_tbl] when [eval_decl] processes [DType] nodes.
+
+    The parser desugars `resource Foo` to [DType (Public, "Foo", [], TDVariant [], _)]
+    (see lib/parser/parser.mly, resource_decl) — an empty-constructor variant.
+    Every *other* grammar production for a type declaration requires
+    [separated_nonempty_list(PIPE, variant)], i.e. at least one constructor,
+    so [TDVariant []] is a structurally reliable signal that a [DType] came
+    from a `resource` declaration and not a genuine user type. We use that
+    signal here (rather than adding a new AST decl constructor, which would
+    force exhaustiveness updates across ~90 unrelated match sites in
+    typecheck/lower/borrow/format for no behavioral gain) to mark the name as
+    opaque: the FFI marshal layer must treat it as a raw handle ([VResource])
+    instead of trying to interpret it as a zero-case variant discriminant. *)
+let ffi_resource_tbl : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 (** Protocol → sorted role list mapping.
     Populated when [eval_decl] processes [DProtocol] nodes.
@@ -390,6 +468,51 @@ let revocation_table : (int * int, unit) Hashtbl.t = Hashtbl.create 4
 
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
+
+(* ---- Signal.watch interpreter state ─────────────────────────────────
+   One deferred watcher per signal, indexed by a stable code 0-4
+   (Term, Int, Hup, Usr1, Usr2 — see stdlib/signal.march, which translates
+   the [Sig] enum to these codes before calling [signal_watch]).  The OS
+   handler [handle_os_signal] runs at OCaml's safe points and only flips the
+   [signal_pending] flag; the scheduler drain (see [run_scheduler]) applies
+   the March closure on a normal green-thread stack.  A watcher on Term/Int
+   suppresses the default graceful-shutdown for the first delivery; a second
+   delivery escapes to shutdown (the escape hatch). *)
+let signal_watchers : value option array = Array.make 5 None
+let signal_pending  : bool array          = Array.make 5 false
+let signal_seen     : bool array          = Array.make 5 false
+
+(** Map a stable signal code (0-4) to its OCaml OS signal number. *)
+let signal_os_of_code = function
+  | 0 -> Sys.sigterm | 1 -> Sys.sigint | 2 -> Sys.sighup
+  | 3 -> Sys.sigusr1 | 4 -> Sys.sigusr2
+  | _ -> invalid_arg "signal_os_of_code"
+
+(** Map an incoming OS signal number to our stable code, or [-1] if unknown. *)
+let signal_code_of_os n =
+  if n = Sys.sigterm then 0 else if n = Sys.sigint then 1
+  else if n = Sys.sighup then 2 else if n = Sys.sigusr1 then 3
+  else if n = Sys.sigusr2 then 4 else -1
+
+(** OS signal handler.  Async-context-safe: only writes flag arrays (OCaml
+    defers delivery to safe points, so no true async re-entrancy).  Never
+    allocates or runs March code here — the drain does that. *)
+let handle_os_signal (osnum : int) : unit =
+  let code = signal_code_of_os osnum in
+  if code >= 0 then
+    match signal_watchers.(code) with
+    | Some _ ->
+      (* Watched: defer to the scheduler drain.  Term/Int escape to shutdown
+         only on a second delivery. *)
+      if signal_seen.(code) && (code = 0 || code = 1) then
+        shutdown_requested := true;
+      signal_pending.(code) <- true;
+      signal_seen.(code)    <- true
+    | None ->
+      (* Unwatched: Term/Int fall back to graceful shutdown.  Hup/Usr1/Usr2
+         handlers are only installed while watched (removed on unwatch), so
+         this branch runs for Term/Int in practice. *)
+      if code = 0 || code = 1 then shutdown_requested := true
 
 (* ---- Logger global state ───────────────────────────────────────────
    Logger v2 keeps richer field values (Int, Float, Bool, Atom, String,
@@ -887,6 +1010,49 @@ let type_name_of_value = function
     Hashtbl.find_opt record_type_tbl key
   | _         -> None
 
+(** Constructor -> declaring-module-QUALIFIED type name, populated ONLY for
+    a ctor whose type's short name collides (see [type_collision_set]).
+    Deliberately a SEPARATE table from [ctor_type_tbl] (which stays bare
+    for every ctor, colliding or not) rather than qualifying [ctor_type_tbl]
+    itself in place: [ctor_type_tbl]/[type_name_of_value] are also consulted
+    by [impl_tbl] (Eq/Ord/Show/Hash/Json/`own` dispatch), [ffi_type_decl_tbl]
+    (actor message tag-index routing) and [record_type_tbl] (Json
+    record-decode) — none of which key their OWN tables by the qualified
+    name, so qualifying the shared bare lookup in place would silently break
+    those unrelated round-trips for a colliding type. Keeping this table
+    separate and additive-only means a non-colliding program is byte-for-byte
+    unaffected, and [iface_method_tbl] (general-interface dispatch, the only
+    consumer of [dispatch_type_name_of_value] below) is the only thing that
+    sees the qualified identity. *)
+let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
+    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
+    short name, so a general-interface method call routes through
+    [iface_method_tbl] to the actual argument's impl rather than whichever
+    same-short-name type's impl happened to register last. Non-colliding
+    values (the common case) fall back to [type_name_of_value] unchanged. *)
+let dispatch_type_name_of_value = function
+  | VCon (tag, _) as v ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some qualified -> Some qualified
+     | None -> type_name_of_value v)
+  | v -> type_name_of_value v
+
+(** Register every constructor of a [TDVariant] type in [ctor_type_tbl]
+    (bare, as always) and, when [name_txt]'s short name collides (per
+    [type_collision_set]), ALSO in [ctor_qualified_type_tbl] under the
+    current [module_stack]-derived qualified name. Shared by every [DType]/
+    [DAlwaysLinearType] eval site so the qualification rule can't drift
+    between them. *)
+let register_type_ctors (name_txt : string) (variants : variant list) : unit =
+  List.iter (fun (v : variant) ->
+      Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
+      if is_colliding_type_name name_txt then
+        Hashtbl.replace ctor_qualified_type_tbl v.var_name.txt
+          (current_doc_prefix () ^ name_txt)
+    ) variants
+
 (** Forward-reference hook for dispatch in comparison operators.
     Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
     Set to the real [apply] after it is defined (see [apply_hook] pattern). *)
@@ -1021,6 +1187,7 @@ let rec value_to_string v =
      | None   -> Printf.sprintf "Vault(#%d)" id)
   | VRingBuf r ->
     Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
+  | VResource _ -> "#<resource>"
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -1287,6 +1454,22 @@ let list_index pred lst =
    int_enc=`Tagged: Int/Bool as tagged word via make_int (Option/Result payloads). *)
 let rec ffi_marshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (v : value) : int64 =
   match ty, v with
+  (* Opaque FFI `resource` handle: pass the raw marshaled bits straight
+     through, regardless of the expected type — a VResource is only ever
+     produced by ffi_unmarshal_iv's own resource case below, so it's always
+     already the correct representation for re-entering an extern call.
+     Bump the refcount first: the OCaml [value] keeps its own live reference
+     to [mv] independent of this call, but dynamic_ffi_call's post-call
+     cleanup unconditionally drops every heap-classified argument it
+     marshaled (mirroring the fact that e.g. VString's str_new allocates a
+     fresh, call-scoped march_value). A resource is the one case where the
+     marshaled march_value is NOT a fresh call-scoped allocation but the same
+     long-lived handle the March-level variable still holds, so without this
+     dup the cleanup drop would prematurely free it (and run its native
+     destructor) after its first use as an argument — e.g. passing the same
+     `Db` handle into two successive `sqlite_prepare` calls would close the
+     connection after the first. *)
+  | _, VResource mv -> Ffi_marshal.dup mv; mv
   | TyCon ({txt = "Int"|"Char"; _}, []), VInt n ->
     let n64 = Int64.of_int n in
     if int_enc = `Tagged then Ffi_marshal.make_int n64 else n64
@@ -1371,6 +1554,11 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
     if Ffi_marshal.variant_tag mv = 0
     then VCon ("Ok",  [ffi_unmarshal_payload a_ty (Ffi_marshal.variant_field mv 0)])
     else VCon ("Err", [ffi_unmarshal_payload e_ty (Ffi_marshal.variant_field mv 0)])
+  | TyCon ({txt = tname; _}, _) when Hashtbl.mem ffi_resource_tbl tname ->
+    (* `resource Foo` — an opaque FFI handle (see ffi_resource_tbl comment).
+       Never consult ffi_type_decl_tbl's variant path for these: the raw bits
+       are not a variant discriminant, just wrap them as-is. *)
+    VResource mv
   | TyCon ({txt = tname; _}, _) ->
     (match Hashtbl.find_opt ffi_type_decl_tbl tname with
      | Some (TDRecord fdecls) ->
@@ -1383,7 +1571,7 @@ let rec ffi_unmarshal_iv (int_enc : [`Raw | `Tagged]) (ty : ty) (mv : int64) : v
      | Some (TDVariant vars) ->
        let tag = Ffi_marshal.variant_tag mv in
        let var = (try List.nth vars tag
-                  with Failure _ ->
+                  with Failure _ | Invalid_argument _ ->
                     eval_error "FFI unmarshal: variant tag %d out of range for %s" tag tname) in
        let args = List.mapi (fun i arg_ty ->
          ffi_unmarshal_field arg_ty (Ffi_marshal.variant_field mv i))
@@ -3053,7 +3241,36 @@ let mpst_close me =
 (** Call the Show impl for [v] if one is registered, else fall back to
     value_to_string.  Used by to_string and println builtins so they
     respect user-defined impl Show even when the prelude is not loaded. *)
-let show_dispatch (v : value) : string =
+(* ── Portable hash primitives ─────────────────────────────────────────────
+   Bit-for-bit reimplementations of the compiled runtime's hash functions
+   (march_hash_int / march_hash_string, runtime/march_runtime.c) so the
+   polymorphic `hash()` builtin agrees across backends. Both mask to 62 bits
+   (non-negative, <= 2^62-1 = OCaml max_int) so the result fits the
+   interpreter's 63-bit native-int Value exactly. See runtime/march_runtime.c
+   MARCH_HASH_MASK for the invariant. *)
+let march_hash_mask = 0x3FFFFFFFFFFFFFFFL
+
+(* splitmix64 finalizer, matching march_hash_int. *)
+let march_hash_int64 (x : int64) : int64 =
+  let open Int64 in
+  let v = logxor x (shift_right_logical x 30) in
+  let v = mul v 0xbf58476d1ce4e5b9L in
+  let v = logxor v (shift_right_logical v 27) in
+  let v = mul v 0x94d049bb133111ebL in
+  let v = logxor v (shift_right_logical v 31) in
+  logand v march_hash_mask
+
+(* FNV-1a 64-bit over the UTF-8 bytes, matching march_hash_string. *)
+let march_hash_string64 (s : string) : int64 =
+  let open Int64 in
+  let h = ref 0xcbf29ce484222325L in       (* 14695981039346656037 *)
+  String.iter (fun c ->
+      h := logxor !h (of_int (Char.code c));
+      h := mul !h 0x100000001b3L            (* 1099511628211 *)
+    ) s;
+  logand !h march_hash_mask
+
+let rec show_dispatch (v : value) : string =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
@@ -3062,6 +3279,16 @@ let show_dispatch (v : value) : string =
   | VBool b   -> string_of_bool b
   | VString s -> s
   | VAtom a   -> ":" ^ a
+  | VTuple vs ->
+    (* Tuples format through [show] recursively — a nested string is DISPLAYED
+       (unquoted), matching each element's own `show` and the compiled tuple
+       Show impls (`Show$Tuple<N>`, prelude).  Without this, tuples fell to the
+       repr-form [value_to_string], which QUOTES nested strings, diverging from
+       compiled output — the interpreter was internally inconsistent too
+       (Option/List go through their unquoted Show impls, only tuples quoted).
+       [value_to_string] itself is unchanged (it is the repr form, pinned by
+       test_value_to_string). *)
+    "(" ^ String.concat ", " (List.map show_dispatch vs) ^ ")"
   | _ ->
     (match type_name_of_value v with
      | Some tname ->
@@ -3236,6 +3463,17 @@ let base_env : env =
           (try VString (input_line stdin)
            with End_of_file -> VString "")
         | _ -> eval_error "io_read_line: expected unit"))
+  ; ("read_byte", VBuiltin ("read_byte", function
+        | [VUnit] | [] ->
+          (try VInt (Char.code (input_char stdin))
+           with End_of_file -> VInt (-1))
+        | _ -> eval_error "read_byte: expected unit"))
+    (* io_read_byte: alias for read_byte, avoids name conflict inside IO module *)
+  ; ("io_read_byte", VBuiltin ("io_read_byte", function
+        | [VUnit] | [] ->
+          (try VInt (Char.code (input_char stdin))
+           with End_of_file -> VInt (-1))
+        | _ -> eval_error "io_read_byte: expected unit"))
     (* print_stderr: write string to stderr without newline *)
   ; ("print_stderr", VBuiltin ("print_stderr", function
         | [VString s] -> Printf.eprintf "%s%!" s; VUnit
@@ -3663,10 +3901,16 @@ let base_env : env =
         | [v] -> VString (show_dispatch v)
         | _ -> eval_error "show: expected one argument"))
   ; ("hash", VBuiltin ("hash", function
-        | [VInt n]    -> VInt (Hashtbl.hash n)
-        | [VFloat f]  -> VInt (Hashtbl.hash f)
-        | [VString s] -> VInt (Hashtbl.hash s)
-        | [VBool b]   -> VInt (Hashtbl.hash b)
+        (* Cross-backend hash() equality: reimplement the compiled runtime's
+           algorithms (march_hash_int/float/string, runtime/march_runtime.c)
+           bit-for-bit in Int64, with the same 62-bit mask so the result is
+           representable in the interpreter's 63-bit native-int Value. Was
+           OCaml's Hashtbl.hash, which shared zero bits with the compiled
+           hash by design. *)
+        | [VInt n]    -> VInt (Int64.to_int (march_hash_int64 (Int64.of_int n)))
+        | [VFloat f]  -> VInt (Int64.to_int (march_hash_int64 (Int64.bits_of_float f)))
+        | [VString s] -> VInt (Int64.to_int (march_hash_string64 s))
+        | [VBool b]   -> VInt (if b then 1 else 0)
         | [v] ->
           (match type_name_of_value v with
            | Some tname ->
@@ -6728,16 +6972,29 @@ let base_env : env =
               | _ -> eval_error "actor_cast: message must be a constructor, got %s"
                        (value_to_string msg)))
         | _ -> eval_error "actor_cast: expected (Pid, message)"))
-  (* actor_call: synchronous call — sends Call(ref, msg) and waits for a reply.
-     The target handler must call actor_reply(ref, result) to unblock the caller.
+  (* actor_call: synchronous call, CANONICAL (compiled) protocol — the message
+     is a zero-arg sentinel constructor whose TAG selects the receiving
+     handler, and the runtime injects the caller (here: the reply ref) as
+     that handler's single argument.  The handler answers with
+     actor_reply(reply_to, result) / Actor.reply.  Mirrors the compiled
+     runtime's march_actor_call exactly (specs/lang/actors.md "Synchronous
+     Request-Reply"; the maintainer decision documents the compiled form as
+     canonical — the interpreter previously wrapped the call as a 2-arg
+     Call(ref, msg) needing an `on Call(ref, msg)` handler, so NO single
+     example worked in both backends).  Routing:
+       1. A handler NAMED like the sentinel wins (same-name sentinel types).
+       2. Otherwise the sentinel's constructor INDEX within its own declared
+          type selects the actor's handler at that index — the compiled
+          tag-routing.  With the documented `type GetReq = GetReq` single-ctor
+          sentinel this is index 0 = the actor's FIRST handler.
      Returns Ok(result) or Err(reason). *)
   ; ("actor_call", VBuiltin ("actor_call", function
         | [VPid pid; msg; VInt _timeout_ms] ->
           let ref_id = !next_call_ref in
           next_call_ref := ref_id + 1;
-          let call_msg = match msg with
-            | VCon (tag, args) -> VCon ("Call", [VInt ref_id; VCon (tag, args)])
-            | VAtom tag        -> VCon ("Call", [VInt ref_id; VAtom tag])
+          let sentinel_tag = match msg with
+            | VCon (tag, _) -> tag
+            | VAtom tag     -> tag
             | _ -> eval_error "actor_call: message must be a constructor, got %s"
                      (value_to_string msg)
           in
@@ -6746,14 +7003,44 @@ let base_env : env =
            | Some inst when not inst.ai_alive ->
              VCon ("Err", [VString "actor not alive"])
            | Some inst ->
-             Queue.push call_msg inst.ai_mailbox;
-             !run_scheduler_hook ();
-             (match Hashtbl.find_opt pending_replies ref_id with
-              | Some result ->
-                Hashtbl.remove pending_replies ref_id;
-                VCon ("Ok", [result])
+             let handlers = inst.ai_def.actor_handlers in
+             let handler_name =
+               if List.exists (fun h -> h.ah_msg.txt = sentinel_tag) handlers
+               then Some sentinel_tag
+               else
+                 (* Tag-index routing: the sentinel's ctor index within its own
+                    declared type picks the handler at that index. *)
+                 (match Hashtbl.find_opt ctor_type_tbl sentinel_tag with
+                  | Some tyname ->
+                    (match Hashtbl.find_opt ffi_type_decl_tbl tyname with
+                     | Some (March_ast.Ast.TDVariant variants) ->
+                       let rec idx i = function
+                         | [] -> None
+                         | (v : March_ast.Ast.variant) :: rest ->
+                           if v.var_name.txt = sentinel_tag then Some i
+                           else idx (i + 1) rest
+                       in
+                       (match idx 0 variants with
+                        | Some i ->
+                          (match List.nth_opt handlers i with
+                           | Some h -> Some h.ah_msg.txt
+                           | None -> None)
+                        | None -> None)
+                     | _ -> None)
+                  | None -> None)
+             in
+             (match handler_name with
               | None ->
-                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])))
+                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])
+              | Some hname ->
+                Queue.push (VCon (hname, [VInt ref_id])) inst.ai_mailbox;
+                !run_scheduler_hook ();
+                (match Hashtbl.find_opt pending_replies ref_id with
+                 | Some result ->
+                   Hashtbl.remove pending_replies ref_id;
+                   VCon ("Ok", [result])
+                 | None ->
+                   VCon ("Err", [VString "no reply (timeout or unhandled Call)"]))))
         | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
   (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
   ; ("actor_reply", VBuiltin ("actor_reply", function
@@ -7764,7 +8051,10 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
+  Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset type_collision_set;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
@@ -7794,7 +8084,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear vault_registry;
   Hashtbl.clear vault_name_registry;
   vault_next_id := 0;
-  Hashtbl.clear ffi_type_decl_tbl
+  Hashtbl.clear ffi_type_decl_tbl;
+  Hashtbl.clear ffi_resource_tbl
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -7808,6 +8099,26 @@ let run_scheduler () =
   let changed = ref true in
   while !changed && not !shutdown_requested do
     changed := false;
+    (* Drain deferred OS-signal watchers (Signal.watch): apply each pending
+       handler on a normal green-thread stack, coalescing repeats to one call.
+       The handler is typed [() -> ()] but may be spelled [fn -> body] (0-arg)
+       or [fn _ -> body] (1-arg unit discard) — apply with the matching arity. *)
+    for code = 0 to 4 do
+      if signal_pending.(code) then begin
+        signal_pending.(code) <- false;
+        match signal_watchers.(code) with
+        | Some handler ->
+          (try
+             ignore (match handler with
+               | VClosure (_, [], _) -> apply handler []
+               | _                   -> apply handler [VUnit])
+           with exn ->
+             Printf.eprintf "signal watcher (code %d) raised: %s\n%!"
+               code (Printexc.to_string exn));
+          changed := true
+        | None -> ()
+      end
+    done;
     (* Snapshot current pids to avoid issues with new actors spawned mid-pass *)
     let pids = Hashtbl.fold (fun pid _ acc -> pid :: acc) actor_registry [] in
     List.iter (fun pid ->
@@ -8017,6 +8328,45 @@ let task_builtins : env =
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
+  (* mint_cap — the gated proof-cap mint. Gating is a compile-time check; at
+     runtime it is a no-op alias of cap_narrow (caps are opaque unit sentinels). *)
+  ; ("mint_cap", VBuiltin ("mint_cap", function
+    | [_cap] -> VUnit
+    | _ -> eval_error "mint_cap: expected 1 argument"))
+
+  (* Signal.watch — register/remove a deferred OS-signal watcher.  [code] is
+     the stable 0-4 signal code produced by stdlib/signal.march.  The handler
+     runs later, from the scheduler drain (see [run_scheduler]); here we only
+     record it and (lazily) install the OS handler.  Term/Int (0/1) already
+     carry the shutdown handler from [run_module], so we only install/restore
+     Hup/Usr1/Usr2 (>= 2) on watch/unwatch to leave their default disposition
+     intact when unwatched. *)
+  ; ("signal_watch", VBuiltin ("signal_watch", function
+      | [VInt code; handler] when code >= 0 && code < 5 ->
+        signal_watchers.(code) <- Some handler;
+        signal_pending.(code)  <- false;
+        signal_seen.(code)     <- false;
+        if code >= 2 then
+          Sys.set_signal (signal_os_of_code code) (Sys.Signal_handle handle_os_signal);
+        VUnit
+      | [VInt _; _] -> eval_error "signal_watch: signal code out of range (0-4)"
+      | _ -> eval_error "signal_watch: expected (Int, handler)"))
+  ; ("signal_unwatch", VBuiltin ("signal_unwatch", function
+      | [VInt code] when code >= 0 && code < 5 ->
+        signal_watchers.(code) <- None;
+        signal_pending.(code)  <- false;
+        signal_seen.(code)     <- false;
+        if code >= 2 then
+          Sys.set_signal (signal_os_of_code code) Sys.Signal_default;
+        VUnit
+      | [VInt _] -> eval_error "signal_unwatch: signal code out of range (0-4)"
+      | _ -> eval_error "signal_unwatch: expected (Int)"))
+  ; ("signal_raise_self", VBuiltin ("signal_raise_self", function
+      | [VInt code] when code >= 0 && code < 5 ->
+        Unix.kill (Unix.getpid ()) (signal_os_of_code code);
+        VUnit
+      | [VInt _] -> eval_error "signal_raise_self: signal code out of range (0-4)"
+      | _ -> eval_error "signal_raise_self: expected (Int)"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
@@ -8419,10 +8769,7 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DType (_, name, _, td, _) ->
     (* Populate ctor_type_tbl so dispatch can find the type from a constructor value. *)
     (match td with
-     | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-         ) variants
+     | TDVariant variants -> register_type_ctors name.txt variants
      | TDRecord fields ->
        (* Register record type by its field names for Json derive dispatch *)
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
@@ -8430,8 +8777,12 @@ let rec eval_decl (env : env) (d : decl) : env =
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
     (* Also register in ffi_type_decl_tbl so the FFI marshal layer can look up
-       field/ctor types for record and variant arguments. *)
+       field/ctor types for record and variant arguments. A `resource Foo`
+       declaration desugars to TDVariant [] (see resource_decl in parser.mly);
+       mark such names in ffi_resource_tbl so the marshal layer treats them as
+       opaque handles instead of zero-case variants. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8500,8 +8851,31 @@ let rec eval_decl (env : env) (d : decl) : env =
         in
         let e' = (def.fn_name.txt, combined)
                    :: List.remove_assoc def.fn_name.txt e in
-        inner_ref := e';
-        eval_mod_decls rest e'
+        (* Default-arg base-name reconstruction for a NESTED-module member:
+           a mangled `foo$N` also registers under the base name `foo` as a
+           VMultiarity so a reduced-arity call `Inner.foo(x)` dispatches by
+           arity — mirrors the same reconstruction [make_recursive_env] does
+           for top-level default-arg fns. Without this, nested default-arg fns
+           are callable compiled (TIR _default_dispatch) but not interpreted. *)
+        let e'' =
+          match String.rindex_opt def.fn_name.txt '$' with
+          | Some dollar_pos when dollar_pos > 0 ->
+            let base = String.sub def.fn_name.txt 0 dollar_pos in
+            let suffix = String.sub def.fn_name.txt (dollar_pos + 1)
+                           (String.length def.fn_name.txt - dollar_pos - 1) in
+            (match int_of_string_opt suffix with
+             | Some _ ->
+               let existing = match List.assoc_opt base e' with
+                 | Some (VMultiarity vs) -> vs
+                 | _ -> [] in
+               let base_v = VMultiarity
+                 ((arity, rec_closure) :: List.remove_assoc arity existing) in
+               (base, base_v) :: List.remove_assoc base e'
+             | None -> e')
+          | _ -> e'
+        in
+        inner_ref := e'';
+        eval_mod_decls rest e''
       | d :: rest ->
         let e' = eval_decl e d in
         inner_ref := e';
@@ -8514,7 +8888,22 @@ let rec eval_decl (env : env) (d : decl) : env =
        these under the qualified prefix, not inherited outer bindings. *)
     let rec declared_names acc = function
       | [] -> acc
-      | DFn (def, _) :: rest -> declared_names (def.fn_name.txt :: acc) rest
+      | DFn (def, _) :: rest ->
+        let nm = def.fn_name.txt in
+        let acc = nm :: acc in
+        (* A mangled default-arg decl `foo$N` also exposes its base name `foo`
+           so the reconstructed `Inner.foo` VMultiarity (bound in the module
+           env above) is prefixed/exported for a reduced-arity call. *)
+        let acc =
+          match String.rindex_opt nm '$' with
+          | Some i when i > 0 &&
+                        (match int_of_string_opt
+                                 (String.sub nm (i + 1) (String.length nm - i - 1))
+                         with Some _ -> true | None -> false) ->
+            String.sub nm 0 i :: acc
+          | _ -> acc
+        in
+        declared_names acc rest
       | DLet (_, b, _) :: rest ->
         let rec pat_names a = function
           | PatVar n -> n.txt :: a
@@ -8569,6 +8958,18 @@ let rec eval_decl (env : env) (d : decl) : env =
       | TyVar n      -> n.txt
       | _            -> ""
     in
+    (* Declaring-module-qualified identity for [iface_method_tbl] ONLY, when
+       [type_name]'s short name collides (see [type_collision_set]) — e.g.
+       "NA.Thing" vs "NB.Thing" so each same-short-name type's general-interface
+       impl gets its own dispatch-table slot instead of overwriting the
+       other's (Hashtbl.replace on a shared bare key). [impl_tbl] below keeps
+       using bare [type_name] unchanged (see [ctor_qualified_type_tbl]'s doc
+       comment for why qualifying it in place would be unsafe there). *)
+    let dispatch_type_name =
+      if type_name <> "" && is_colliding_type_name type_name
+      then current_doc_prefix () ^ type_name
+      else type_name
+    in
     let is_json_iface =
       String.length idef.impl_iface.txt >= 4
       && String.sub idef.impl_iface.txt 0 4 = "Json"
@@ -8606,6 +9007,14 @@ let rec eval_decl (env : env) (d : decl) : env =
                the wrong method and recurses forever (neq → eq → neq). *)
             if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
               Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* General (non-builtin, non-Json) interface methods also go in the
+               per-method dispatch table so a call routes by the first arg's
+               runtime type, not the last-bound name (fixes multi-impl dispatch,
+               e.g. Speak(Dog) + Speak(Cat), and — via [dispatch_type_name] —
+               Speak(NA.Thing) + Speak(NB.Thing)). *)
+            if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
+              Hashtbl.replace iface_method_tbl
+                (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
             Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
@@ -8617,7 +9026,38 @@ let rec eval_decl (env : env) (d : decl) : env =
            dispatches through impl_tbl, so binding the bare name in the env
            would shadow the builtin and break dispatch when 2+ impls exist. *)
         if (is_json_iface && mname.txt = "to_json") || is_dispatched then env
-        else new_env
+        else if is_json_iface then new_env  (* from_json &c.: name-bound (dispatch is on return type) *)
+        else if is_type_dispatched_iface idef.impl_iface.txt then new_env
+          (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
+             of a builtin-named interface: bind the concrete method by name. *)
+        else begin
+          (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
+             runtime type via iface_method_tbl) instead of the concrete method,
+             so 2+ impls dispatch by type rather than last-binding-wins. Bound
+             once per method name (idempotent across sibling impls). *)
+          let iface = idef.impl_iface.txt in
+          let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
+          let already = match List.assoc_opt mname.txt env with
+            | Some (VBuiltin (n, _)) -> n = disp_tag
+            | _ -> false in
+          if already then env
+          else
+            let disp = VBuiltin (disp_tag, fun args ->
+              match args with
+              | arg0 :: _ ->
+                (match dispatch_type_name_of_value arg0 with
+                 | Some tname ->
+                   (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
+                    | Some m -> !iface_dispatch_hook m args
+                    | None -> eval_error
+                        "no implementation of interface `%s` for type `%s`" iface tname)
+                 | None -> eval_error
+                     "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
+              | [] -> eval_error
+                  "interface method `%s` called with no arguments" mname.txt)
+            in
+            (mname.txt, disp) :: env
+        end
       ) env idef.impl_methods
 
   | DProtocol (name, pdef, _sp) ->
@@ -8643,16 +9083,18 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DAlwaysLinearType (_, name, _, td, _) ->
     (* Treat like DType at runtime — register constructors/records for dispatch. *)
     (match td with
-     | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-         ) variants
+     | TDVariant variants -> register_type_ctors name.txt variants
      | TDRecord fields ->
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
        let key = String.concat "," (List.sort String.compare field_names) in
        Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
+    (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl.
+       always_linear types can't currently arise from `resource` declarations
+       (resource_decl only produces DType), but handle it the same way as the
+       other two registration sites for defense in depth. *)
     (match td with
+     | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
      | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
      | _ -> ());
     env
@@ -8758,11 +9200,20 @@ let eval_module_env (m : module_) : env =
   dyn_sup_next_vpid := (-1);
   (* Pre-register builtin constructor → type mappings so Show/impl dispatch works *)
   Hashtbl.reset impl_tbl;
+  Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset ctor_qualified_type_tbl;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
     ; "Some", "Option"; "None", "Option"
     ; "Cons", "List";  "Nil",  "List" ];
+  (* Same-short-name type collision set (see [type_collision_set]'s doc
+     comment): computed ONCE per run, from the full AST, before any DType/
+     DImpl below is evaluated — [is_colliding_type_name]/[register_type_ctors]
+     consult it as they go. Also resets it, so a later test run in the same
+     process (all run_eval tests share this one OCaml process) never sees a
+     stale collision entry left over from an unrelated earlier module. *)
+  compute_type_collision_set m.mod_decls;
 
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
@@ -8889,6 +9340,14 @@ let eval_module_env (m : module_) : env =
         | TyVar n      -> n.txt
         | _            -> ""
       in
+      (* See the top-level [DImpl] arm above for why [dispatch_type_name] is
+         a SEPARATE, [iface_method_tbl]-only qualified identity rather than
+         qualifying [type_name] (and thus [impl_tbl]) itself. *)
+      let dispatch_type_name =
+        if type_name <> "" && is_colliding_type_name type_name
+        then current_doc_prefix () ^ type_name
+        else type_name
+      in
       let is_json_iface =
         String.length idef.impl_iface.txt >= 4
         && String.sub idef.impl_iface.txt 0 4 = "Json"
@@ -8922,6 +9381,12 @@ let eval_module_env (m : module_) : env =
                  the wrong method and recurses forever (neq → eq → neq). *)
               if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
                 Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+              (* General (non-builtin, non-Json) interface methods also go in the
+                 per-method dispatch table so a call routes by the first arg's
+                 runtime type, not the last-bound name. *)
+              if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
+                Hashtbl.replace iface_method_tbl
+                  (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
               let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
               Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()
@@ -8932,7 +9397,38 @@ let eval_module_env (m : module_) : env =
              above, don't rebind the bare name globally — it would shadow the
              builtin and break dispatch when 2+ impls of the iface exist. *)
           if is_json_iface || is_dispatched then acc_env
-          else new_acc
+          else if is_type_dispatched_iface idef.impl_iface.txt then new_acc
+            (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
+               of a builtin-named interface: bind the concrete method by name, as
+               before — it's not in iface_method_tbl and is called directly. *)
+          else begin
+            (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
+               runtime type via iface_method_tbl) instead of the concrete method,
+               so 2+ impls dispatch by type rather than last-binding-wins.
+               Idempotent across sibling impls. *)
+            let iface = idef.impl_iface.txt in
+            let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
+            let already = match List.assoc_opt mname.txt acc_env with
+              | Some (VBuiltin (n, _)) -> n = disp_tag
+              | _ -> false in
+            if already then acc_env
+            else
+              let disp = VBuiltin (disp_tag, fun args ->
+                match args with
+                | arg0 :: _ ->
+                  (match dispatch_type_name_of_value arg0 with
+                   | Some tname ->
+                     (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
+                      | Some m -> !iface_dispatch_hook m args
+                      | None -> eval_error
+                          "no implementation of interface `%s` for type `%s`" iface tname)
+                   | None -> eval_error
+                       "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
+                | [] -> eval_error
+                    "interface method `%s` called with no arguments" mname.txt)
+              in
+              (mname.txt, disp) :: acc_env
+          end
         ) env idef.impl_methods in
       env_ref := env';
       make_recursive_env rest env'
@@ -8945,16 +9441,15 @@ let eval_module_env (m : module_) : env =
     | DType (_, name, _, td, _) :: rest ->
       (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
       (match td with
-       | TDVariant variants ->
-         List.iter (fun (v : variant) ->
-             Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-           ) variants
+       | TDVariant variants -> register_type_ctors name.txt variants
        | TDRecord fields ->
          let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
          let key = String.concat "," (List.sort String.compare field_names) in
          Hashtbl.replace record_type_tbl key name.txt
        | _ -> ());
+      (* resource Foo desugars to TDVariant []; see comment at ffi_resource_tbl. *)
       (match td with
+       | TDVariant [] -> Hashtbl.replace ffi_resource_tbl name.txt ()
        | TDVariant _ | TDRecord _ -> Hashtbl.replace ffi_type_decl_tbl name.txt td
        | _ -> ());
       make_recursive_env rest env
@@ -9059,11 +9554,16 @@ let run_module (m : module_) : unit =
   (* Reset global app state for fresh run *)
   app_spawn_order   := [];
   shutdown_requested := false;
+  (* Reset Signal.watch state for a fresh run. *)
+  Array.fill signal_watchers 0 5 None;
+  Array.fill signal_pending  0 5 false;
+  Array.fill signal_seen     0 5 false;
   let env = eval_module_env m in
-  (* Install SIGTERM/SIGINT handlers for graceful shutdown *)
-  let handle_signal (_ : int) = shutdown_requested := true in
-  Sys.set_signal Sys.sigterm (Sys.Signal_handle handle_signal);
-  Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_signal);
+  (* Install SIGTERM/SIGINT handlers: graceful shutdown by default, or (once a
+     Signal.watch watcher is registered) deferred dispatch with a
+     second-delivery shutdown escape hatch. *)
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle handle_os_signal);
+  Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_os_signal);
   match List.assoc_opt "__app_init__" env with
   | Some init_fn ->
     (* App entry point: evaluate app body to get { spec, on_start, on_stop } *)

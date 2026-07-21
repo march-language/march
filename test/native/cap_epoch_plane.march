@@ -1,0 +1,58 @@
+-- Regression: the compiled epoch-Cap / dead-actor send plane must be
+-- byte-identical to the interpreter.  Previously (specs/todos.md, core-march.md
+-- §4.10.6) the compiled plane was non-functional end to end:
+--   * march_get_cap was a stub returning a boxed 16-byte tag-0 cell; under
+--     Option(Cap)'s NICHE encoding (None=NULL) that decoded as Some(garbage)
+--     for EVERY pid, live or dead.
+--   * march_send_checked returned void — the call site read garbage as the
+--     result atom (equal to neither :ok nor :error).
+--   * revoke_cap / is_cap_valid had no codegen wiring at all (link error
+--     `_revoke_cap` undefined).
+--   * `match send(dead_pid, M)` decoded march_send's BOXED Option cells with
+--     the niche strategy (send's result was typed as a fresh var, and the
+--     typechecker's unit is TTuple [] which niche_payload_ok wrongly accepted)
+--     — the boxed None decoded as Some.
+-- Now: get_cap returns the real 5-word cap (niche None=NULL for dead/unknown),
+-- send_checked/revoke_cap return runtime-interned :ok/:error atoms (FNV-1a,
+-- bit63:=bit62, pre-seeded in the atom show table), is_cap_valid is wired, and
+-- send is typed Option(Unit) with TTuple [] niche-unsafe.
+mod Main do
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn main() do
+    let p = spawn(Counter)
+    match get_cap(p) do
+      Some(cap) ->
+        println("valid: " ++ to_string(is_cap_valid(cap)))
+        println("send_checked live: " ++ to_string(send_checked(cap, Inc())))
+        let _ = revoke_cap(cap)
+        println("valid after revoke: " ++ to_string(is_cap_valid(cap)))
+        println("send_checked revoked: " ++ to_string(send_checked(cap, Inc())))
+      None -> println("no cap")
+    end
+    -- dead-actor plane: a fresh actor, cap captured while alive, then killed
+    let q = spawn(Counter)
+    let live_cap = get_cap(q)
+    let _ = kill(q)
+    match send(q, Inc()) do
+      Some(_) -> println("send dead: Some")
+      None -> println("send dead: None")
+    end
+    match get_cap(q) do
+      Some(_) -> println("get_cap dead: Some")
+      None -> println("get_cap dead: None")
+    end
+    match live_cap do
+      Some(cap) ->
+        println("stale cap valid: " ++ to_string(is_cap_valid(cap)))
+        println("send_checked stale: " ++ to_string(send_checked(cap, Inc())))
+      None -> println("no cap")
+    end
+  end
+end

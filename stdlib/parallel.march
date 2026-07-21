@@ -74,6 +74,13 @@ mod Parallel do
 
   **Contract:** `merge` must be associative and `zero` must be its identity.
 
+  **Reproducibility note:** the input is split into `System.cpu_count()` chunks,
+  so the *grouping* of `merge` applications depends on the backend's CPU/domain
+  count. If `merge` is only approximately associative (e.g. floating-point `+.`),
+  the result is not bit-identical across backends — do not golden-compare such a
+  `preduce`. Integer merges (`+`, `max`, `||`) are exactly associative and are
+  reproducible.
+
   ## Examples
 
       -- Parallel sum of squares
@@ -115,10 +122,17 @@ mod Parallel do
   doc """
   Parallel sum of a float `Vec`.
 
+  **Not bit-reproducible across backends.** Floating-point addition is not
+  associative, and the number of parallel chunks depends on the worker count,
+  which differs between the interpreter (`Domain.recommended_domain_count`) and
+  the compiled runtime (physical CPU count). The same input can therefore sum to
+  slightly different values on different backends — do **not** golden-compare the
+  result of `psum_float` (or any `preduce` with a non-associative merge).
+
   ## Examples
 
       march> Parallel.psum_float(RRB.from_list([1.0, 2.5, 3.5]))
-      7.0
+      7.
   """
   fn psum_float(v): Float do
     preduce(v, 0.0, fn n -> n, fn (a, b) -> a +. b)

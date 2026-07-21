@@ -36,6 +36,22 @@ type ctx = {
   (* fn_name → 1-indexed source line; looked up when recording source map segments *)
   segments     : (int * int) list ref;
   (* (output_line_0indexed, source_line_0indexed) segments collected during fn emission *)
+  local_fns    : (string, unit) Hashtbl.t;
+  (* ELetRec-local function names seen during emission — legitimate bare-call
+     targets that are not in fn_names *)
+  unmapped     : (string, unit) Hashtbl.t;
+  (* direct-call names that resolve to nothing (not a user fn, local fn,
+     extern, or mapped builtin): emitting them would produce a runtime
+     ReferenceError, so emit_module raises Js_emit_error instead *)
+  name_env     : (string, string) Hashtbl.t;
+  (* source local-binding name → the JS identifier it is currently emitted as.
+     A `let x = …` that SHADOWS an in-scope `x` is emitted under a fresh unique
+     JS name (x$sN) so the RHS — evaluated while the outer `x` is still the
+     live one — never resolves to the block-hoisted inner `const x` in its
+     temporal dead zone. Populated with params (identity) at fn entry, then
+     pushed/popped around each ELet body. *)
+  mutable shadow_ctr : int;
+  (* monotonic counter minting the $sN suffix for shadowing rebindings *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -51,6 +67,10 @@ let create_ctx ?(fn_lines=[]) () = {
   fn_lines     = (let t = Hashtbl.create 16 in
                   List.iter (fun (n, l) -> Hashtbl.replace t n l) fn_lines; t);
   segments     = ref [];
+  local_fns    = Hashtbl.create 8;
+  unmapped     = Hashtbl.create 4;
+  name_env     = Hashtbl.create 16;
+  shadow_ctr   = 0;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -139,6 +159,53 @@ let emit_atom_raw ctx = function
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
   | Tir.ALit l    -> emit_literal ctx l
 
+(** The JS identifier a source local name is currently emitted as.
+    Falls back to the plain mangling for anything not in [name_env]
+    (closure free-vars accessed via EField, or top-level names). *)
+let js_local ctx name =
+  match Hashtbl.find_opt ctx.name_env name with
+  | Some js -> js
+  | None    -> mangle name
+
+(** Mint the JS identifier for a NEW local binding of [name]. When [name] is
+    already in scope the binding SHADOWS it, so we mint a fresh unique id
+    (name$sN) — this is what makes a self-referential rebinding safe on JS:
+    the RHS (emitted before [install_local]) still resolves the source name to
+    the outer binding, and the fresh inner id never collides with it (no
+    temporal-dead-zone read of a same-named block-hoisted const). *)
+let fresh_local_name ctx name =
+  if Hashtbl.mem ctx.name_env name then begin
+    ctx.shadow_ctr <- ctx.shadow_ctr + 1;
+    mangle name ^ "$s" ^ string_of_int ctx.shadow_ctr
+  end else mangle name
+
+(** Install [js] as the current emission of source [name]; returns the previous
+    mapping so [unbind_local] can restore it when the binding leaves scope. *)
+let install_local ctx name js =
+  let prev = Hashtbl.find_opt ctx.name_env name in
+  Hashtbl.replace ctx.name_env name js;
+  prev
+
+let unbind_local ctx name prev =
+  match prev with
+  | Some o -> Hashtbl.replace ctx.name_env name o
+  | None   -> Hashtbl.remove ctx.name_env name
+
+(** Bind a case branch's pattern variables: emit `const <js> = <scrut>._i` for
+    each and register it (shadow-renaming an outer same-named local), so the
+    branch body's uses resolve to the pattern binding rather than any outer
+    rename. Returns the restore list for [unbind_br_vars] after the body. *)
+let bind_br_vars ctx scrut_name br_vars =
+  List.mapi (fun i bv ->
+    let nm = bv.Tir.v_name in
+    let js = fresh_local_name ctx nm in
+    emitl ctx (Printf.sprintf "const %s = %s._%d;" js scrut_name i);
+    (nm, install_local ctx nm js)
+  ) br_vars
+
+let unbind_br_vars ctx binds =
+  List.iter (fun (nm, prev) -> unbind_local ctx nm prev) (List.rev binds)
+
 (* Standard atom emission: user-defined function names use their $clo wrapper
    so that ECallPtr dispatch (f._0(f, args)) works when they're first-class.
    Both AVar and ADefRef can hold a module-level function reference — check fn_names.
@@ -154,7 +221,8 @@ let emit_atom ctx = function
     end else if Hashtbl.mem ctx.fn_names v.Tir.v_name
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
     then emit ctx (n ^ "$clo")
-    else emit ctx n
+    (* Local binding: honour any active shadow-rename. *)
+    else emit ctx (js_local ctx v.Tir.v_name)
   | Tir.ADefRef d ->
     let n = mangle d.Tir.did_name in
     if Hashtbl.mem ctx.extern_fns d.Tir.did_name then begin
@@ -259,6 +327,7 @@ let literal_tag_js br_tag =
 let js_runtime_module_path = function
   | "dom"    -> Some "./march_dom.mjs"
   | "canvas" -> Some "./march_canvas.mjs"
+  | "audio"  -> Some "./march_audio.mjs"
   | _        -> None
 
 (** True when the library name is a JS module specifier (not a C lib name).
@@ -400,6 +469,18 @@ let compute_async_fns (ctx : ctx) (fns : Tir.fn_def list) : unit =
     ) fns
   done
 
+(* True when an expression is pure RC bookkeeping (inc/dec-ref, free) with no
+   real returned value — a no-op on the JS backend, where RC is free (GC'd).
+   Used to detect Perceus's self-tail-call ESeq(call, decrc...) shape (see
+   perceus.ml's "EXCEPTION: self-recursive tail calls" comment): when the
+   trailing side of an ESeq chain reduces to only this, the expression BEFORE
+   it is the chain's actual tail value, not a fire-and-forget statement. *)
+let rec is_rc_noop_only = function
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EFree _ -> true
+  | Tir.ESeq (a, b) -> is_rc_noop_only a && is_rc_noop_only b
+  | _ -> false
+
 (* ── Forward declarations ────────────────────────────────────────── *)
 
 let rec emit_val  ctx expr = emit_val_impl  ctx expr
@@ -489,7 +570,13 @@ and emit_val_impl ctx expr =
           | "string_pad_right" | "string_index_of" | "string_last_index_of"
           | "char_from_int" | "byte_to_char" | "char_to_int"
           | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace"
-          | "list_append" | "list_concat" -> true | _ -> false) ->
+          | "list_append" | "list_concat"
+          (* Int builtins with 63-bit semantics — checked implementations in
+             march_runtime.mjs (exact within ±2^53, throw beyond) *)
+          | "int_and" | "int_or" | "int_xor" | "int_not"
+          | "int_shl" | "int_shr" | "int_popcount"
+          | "int_mod" | "int_div" | "int_mod_euclid" | "int_div_euclid"
+            -> true | _ -> false) ->
         let rt = "march_" ^ n in
         use_runtime ctx rt;
         emit ctx (rt ^ "(");
@@ -517,11 +604,40 @@ and emit_val_impl ctx expr =
       | "math_log10", [a] -> emit ctx "Math.log10("; emit_atom ctx a; emit ctx ")"
       | "math_pow",   [a; b] ->
         emit ctx "Math.pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "int_abs", [a] -> emit ctx "Math.abs("; emit_atom ctx a; emit ctx ")"
+      (* int_pow: exponentiation by squaring in the runtime (negative exponent
+         -> 0, mirroring the native backend, not JS's fractional Math.pow).
+         From origin/main. *)
+      | "int_pow", [a; b] ->
+        use_runtime ctx "march_int_pow";
+        emit ctx "march_int_pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
+      | "float_abs",   [a] -> emit ctx "Math.abs(";   emit_atom ctx a; emit ctx ")"
+      (* float_floor/ceil/round return Int in March; the results are
+         integer-valued JS numbers, which IS the JS target's Int repr *)
+      | "float_floor", [a] -> emit ctx "Math.floor("; emit_atom ctx a; emit ctx ")"
+      | "float_ceil",  [a] -> emit ctx "Math.ceil(";  emit_atom ctx a; emit ctx ")"
+      | "float_round", [a] ->
+        (* OCaml Float.round rounds half AWAY FROM ZERO; JS Math.round rounds
+           half toward +inf — delegate to the runtime helper *)
+        use_runtime ctx "march_float_round";
+        emit ctx "march_float_round("; emit_atom ctx a; emit ctx ")"
+      (* unix_time takes a Unit argument in March; the JS runtime fn takes none *)
+      | "unix_time", _ ->
+        use_runtime ctx "march_unix_time";
+        emit ctx "march_unix_time()"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with
          | Some ed -> emit_extern_call ctx ed args
          | None ->
+           (* A direct call that is not a user fn, letrec-local fn, or
+              parameter can only be an unmapped builtin — the bare emit below
+              would be a guaranteed ReferenceError at runtime, so record it
+              and let emit_module fail the compile instead. *)
+           if not (Hashtbl.mem ctx.fn_names name)
+              && not (Hashtbl.mem ctx.local_fns name)
+              && not (Hashtbl.mem ctx.param_names name)
+           then Hashtbl.replace ctx.unmapped name ();
            let is_async_callee = Hashtbl.mem ctx.async_fns name in
            if is_async_callee then emit ctx "(await ";
            emit ctx (mangle name ^ "(");
@@ -646,30 +762,63 @@ and emit_stmts_impl ctx expr =
 
   | Tir.ELet (v, (Tir.ECase _ as case_expr), rest) ->
     (* let v = match ... — emit switch that assigns to v.
-       Wrap in a block so this binding can shadow an outer variable of the same name. *)
+       Wrap in a block so this binding can shadow an outer variable of the same
+       name; [js] is a fresh id when v shadows, so the case (which sees the
+       OUTER v) and [rest] (which sees the new v) never collide. *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
-    emitl ctx ("let " ^ mangle v.Tir.v_name ^ ";");
-    emit_case ctx (Some (mangle v.Tir.v_name)) case_expr;
+    emitl ctx ("let " ^ js ^ ";");
+    emit_case ctx (Some js) case_expr;
+    let prev = install_local ctx name js in
     emit_stmts ctx rest;
+    unbind_local ctx name prev;
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELet (v, e1, e2) ->
-    (* Wrap in a block so this binding can shadow a parameter or outer let of the same name. *)
+    (* Wrap in a block so this binding can shadow a parameter or outer let of
+       the same name. The RHS [e1] is emitted BEFORE [install_local], so a
+       self-referential rebinding (`let x = x + 1`) resolves its `x` to the
+       OUTER binding; [js] is a fresh id when shadowing, so the inner const
+       never shadows that read in its temporal dead zone. *)
+    let name = v.Tir.v_name in
+    let js = fresh_local_name ctx name in
     emit_indent ctx; emit ctx "{\n";
     ctx.indent <- ctx.indent + 1;
     emit_indent ctx;
-    emit ctx ("const " ^ mangle v.Tir.v_name ^ " = ");
+    emit ctx ("const " ^ js ^ " = ");
     emit_val ctx e1;
     emit ctx ";\n";
+    let prev = install_local ctx name js in
     emit_stmts ctx e2;
+    unbind_local ctx name prev;
     ctx.indent <- ctx.indent - 1;
     emit_indent ctx; emit ctx "}\n"
 
   | Tir.ELetRec (fns, body) ->
+    (* Register names first: mutually-recursive locals may call each other
+       (and themselves) before their own decl is emitted. *)
+    List.iter (fun (fn : Tir.fn_def) ->
+      Hashtbl.replace ctx.local_fns fn.Tir.fn_name ()) fns;
     List.iter (emit_fn_decl ctx) fns;
     emit_stmts ctx body
+
+  | Tir.ESeq (e1, e2) when is_rc_noop_only e2 && not (is_rc_noop_only e1) ->
+    (* Perceus keeps a self-tail-call in the ESeq(call, post_dec_vars...)
+       shape specifically so llvm_emit.ml's has_self_tail_call can recognize
+       and TCO-rewrite it (see perceus.ml's "EXCEPTION: self-recursive tail
+       calls" comment) — the trailing EDecRC's are meant to become dead code
+       once TCO emits the loop back-edge. The JS backend has no such TCO
+       rewrite, so without this case the generic ESeq handling below would
+       emit e1 (the call) as a bare statement — discarding its return value —
+       then emit_stmts on e2 (all RC no-ops in JS) would produce nothing,
+       leaving the function to fall off the end and implicitly return
+       undefined. Since e2 is pure RC bookkeeping (free in JS), e1 IS this
+       chain's real tail value; recurse via emit_stmts so it gets proper
+       return/switch-tail treatment instead of being flattened away. *)
+    emit_stmts ctx e1
 
   | Tir.ESeq (e1, e2) ->
     (match e1 with
@@ -735,7 +884,7 @@ and emit_case_impl ctx result_var expr =
       (* Tuple: exactly one branch, directly destructure _0, _1, ... *)
       List.iter (fun br ->
         let scrut_name = match scrutinee with
-          | Tir.AVar sv -> mangle sv.Tir.v_name
+          | Tir.AVar sv -> js_local ctx sv.Tir.v_name
           | _ ->
             let tmp = "_tup" in
             emit_indent ctx;
@@ -744,15 +893,13 @@ and emit_case_impl ctx result_var expr =
             emit ctx ";\n";
             tmp
         in
-        List.iteri (fun i bv ->
-          emitl ctx (Printf.sprintf "const %s = %s._%d;"
-            (mangle bv.Tir.v_name) scrut_name i)
-        ) br.Tir.br_vars;
+        let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
         (match result_var with
          | Some rv ->
            emit_indent ctx; emit ctx (rv ^ " = ");
            emit_val ctx br.Tir.br_body; emit ctx ";\n"
-         | None -> emit_stmts ctx br.Tir.br_body)
+         | None -> emit_stmts ctx br.Tir.br_body);
+        unbind_br_vars ctx binds
       ) branches;
       (match default with
        | Some d ->
@@ -772,13 +919,11 @@ and emit_case_impl ctx result_var expr =
         emit ctx (" === " ^ literal_tag_js br.Tir.br_tag ^ ") {\n");
         with_indent ctx (fun () ->
           (* bind branch vars (rare for literal patterns, but possible) *)
-          List.iteri (fun j bv ->
-            let scrut_name = match scrutinee with
-              | Tir.AVar sv -> mangle sv.Tir.v_name | _ -> "_s" in
-            emitl ctx (Printf.sprintf "const %s = %s._%d;"
-              (mangle bv.Tir.v_name) scrut_name j)
-          ) br.Tir.br_vars;
-          emit_result br.Tir.br_body)
+          let scrut_name = match scrutinee with
+            | Tir.AVar sv -> js_local ctx sv.Tir.v_name | _ -> "_s" in
+          let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
+          emit_result br.Tir.br_body;
+          unbind_br_vars ctx binds)
       ) branches;
       (match default with
        | Some d ->
@@ -800,7 +945,7 @@ and emit_case_impl ctx result_var expr =
           with_indent ctx (fun () ->
             (* Bind constructor fields to br_vars *)
             let scrut_name = match scrutinee with
-              | Tir.AVar sv -> mangle sv.Tir.v_name
+              | Tir.AVar sv -> js_local ctx sv.Tir.v_name
               | _ ->
                 let tmp = "_scrut" in
                 emit_indent ctx;
@@ -809,10 +954,7 @@ and emit_case_impl ctx result_var expr =
                 emit ctx ";\n";
                 tmp
             in
-            List.iteri (fun i bv ->
-              emitl ctx (Printf.sprintf "const %s = %s._%d;"
-                (mangle bv.Tir.v_name) scrut_name i)
-            ) br.Tir.br_vars;
+            let binds = bind_br_vars ctx scrut_name br.Tir.br_vars in
             (match result_var with
              | Some rv ->
                emit_indent ctx;
@@ -821,7 +963,15 @@ and emit_case_impl ctx result_var expr =
                emit ctx ";\n";
                emitl ctx "break;"
              | None ->
-               emit_stmts ctx br.Tir.br_body)
+               (* Statement position: emit_stmts does not always end in a
+                  `return` (e.g. a trailing Unit-typed call emits as a bare
+                  statement), and a JS case arm without break/return FALLS
+                  THROUGH into the next case or the non-exhaustive-match
+                  default throw. The break is unreachable (harmless) when the
+                  body did return. (from origin/main) *)
+               emit_stmts ctx br.Tir.br_body;
+               emitl ctx "break;");
+            unbind_br_vars ctx binds
           )
         );
         emitl ctx "  }"
@@ -866,7 +1016,18 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
      that happen to share a name with a module-level function. *)
   Hashtbl.clear ctx.param_names;
   List.iter (fun p -> Hashtbl.replace ctx.param_names p.Tir.v_name ()) fn.Tir.fn_params;
+  (* Seed the shadow-rename scope with the params (identity mapping) and, for
+     a nested (ELetRec) fn, SAVE the enclosing fn's local scope so it can be
+     restored — a nested fn's body reaches outer values via $fv closure fields,
+     never by their source names, so it only needs its own params in scope. *)
+  let saved_names = Hashtbl.copy ctx.name_env in
+  Hashtbl.clear ctx.name_env;
+  List.iter (fun p ->
+    Hashtbl.replace ctx.name_env p.Tir.v_name (mangle p.Tir.v_name))
+    fn.Tir.fn_params;
   with_indent ctx (fun () -> emit_stmts ctx fn.Tir.fn_body);
+  Hashtbl.clear ctx.name_env;
+  Hashtbl.iter (fun k v -> Hashtbl.replace ctx.name_env k v) saved_names;
   Hashtbl.clear ctx.param_names;
   emit_indent ctx;
   emit ctx "}\n";
@@ -1089,6 +1250,9 @@ const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
 const negate_int      = { _0: ($_, x) => -x };
 const negate_float    = { _0: ($_, x) => -x };
+const float_abs       = { _0: ($_, x) => Math.abs(x) };
+const float_floor     = { _0: ($_, x) => Math.floor(x) };
+const float_ceil      = { _0: ($_, x) => Math.ceil(x) };
 |}
 
 (** Raised by [emit_module] when used C-backed externs are compiled with [--target js].
@@ -1124,19 +1288,41 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
   ) m.Tir.tm_externs in
   (* Chunk C: reject used C-backed externs — they have no JS implementation *)
   let bad_externs = List.filter (fun ed -> classify_js_extern ed = CBacked) used_ed in
-  if bad_externs <> [] then begin
-    let msgs = List.map (fun (ed : Tir.extern_decl) ->
+  let extern_msgs = List.map (fun (ed : Tir.extern_decl) ->
+    Printf.sprintf
+      "error: extern \"%s\" function `%s` cannot be called on the JavaScript target.\n\
+       The JS backend supports only JS-module externs:\n\
+         extern \"node:fs\"   extern \"npm:lodash\"   extern \"./local.mjs\"\n\
+       `%s` is bound to the C symbol `%s`, which has no JS runtime\n\
+       implementation. To call it from JS, wrap it in a JS module, or build a\n\
+       native/wasm target."
+      ed.Tir.ed_lib_name ed.Tir.ed_march_name ed.Tir.ed_march_name ed.Tir.ed_c_name
+  ) bad_externs in
+  (* Unmapped builtins: previously these were emitted as bare calls that threw
+     ReferenceError at runtime; fail the compile with a diagnostic instead. *)
+  let unmapped_names =
+    List.sort String.compare
+      (Hashtbl.fold (fun k () acc -> k :: acc) ctx.unmapped []) in
+  let unmapped_msgs = List.map (fun name ->
+    match name with
+    | "int_max_value" | "int_min_value" ->
       Printf.sprintf
-        "error: extern \"%s\" function `%s` cannot be called on the JavaScript target.\n\
-         The JS backend supports only JS-module externs:\n\
-           extern \"node:fs\"   extern \"npm:lodash\"   extern \"./local.mjs\"\n\
-         `%s` is bound to the C symbol `%s`, which has no JS runtime\n\
-         implementation. To call it from JS, wrap it in a JS module, or build a\n\
-         native/wasm target."
-        ed.Tir.ed_lib_name ed.Tir.ed_march_name ed.Tir.ed_march_name ed.Tir.ed_c_name
-    ) bad_externs in
-    raise (Js_emit_error msgs)
-  end;
+        "error: builtin `%s` is not supported on the JavaScript target.\n\
+         Its value (±2^62) is not representable there: March Int is stored in\n\
+         a JS double, which is exact only within ±(2^53 - 1). Restructure the\n\
+         code to avoid full 63-bit values (e.g. stdlib Random uses a 32-bit\n\
+         core for exactly this reason), or build a native/wasm target."
+        name
+    | _ ->
+      Printf.sprintf
+        "error: builtin `%s` has no JavaScript-target implementation.\n\
+         The compiled call would throw ReferenceError at runtime. Add a\n\
+         mapping in lib/tir/js_emit.ml (+ runtime/march_runtime.mjs if it\n\
+         needs a helper), or build a native/wasm target."
+        name
+  ) unmapped_names in
+  if extern_msgs <> [] || unmapped_msgs <> [] then
+    raise (Js_emit_error (extern_msgs @ unmapped_msgs));
   let (extern_imports, extern_consts) = emit_extern_bridges ctx used_ed in
   (* Chunk B: __js_err_to helper — emitted only when at least one raises extern is used *)
   let raises_helper =
@@ -1150,10 +1336,27 @@ let emit_module ?(source_file="") ?(fn_lines=[]) (m : Tir.tir_module) : string *
      whether the compiled code already uses them directly. *)
   Hashtbl.replace ctx.runtime_uses "march_float_to_string" ();
   Hashtbl.replace ctx.runtime_uses "march_string_byte_length" ();
+  let int_rt_builtins2 =   (* two-argument runtime-backed int builtins *)
+    [ "int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr";
+      "int_mod"; "int_div"; "int_mod_euclid"; "int_div_euclid" ] in
+  let int_rt_builtins1 = [ "int_not"; "int_popcount" ] in
+  List.iter (fun n -> Hashtbl.replace ctx.runtime_uses ("march_" ^ n) ())
+    (int_rt_builtins2 @ int_rt_builtins1);
+  Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
+  Hashtbl.replace ctx.runtime_uses "march_float_round" ();
   let runtime_wrappers =
     "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
-    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n"
+    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
+    String.concat "" (List.map (fun n ->
+      Printf.sprintf "const %s = { _0: ($_, a, b) => march_%s(a, b) };\n" n n)
+      int_rt_builtins2) ^
+    String.concat "" (List.map (fun n ->
+      Printf.sprintf "const %s = { _0: ($_, a) => march_%s(a) };\n" n n)
+      int_rt_builtins1) ^
+    "const int_abs     = { _0: ($_, a) => Math.abs(a) };\n" ^
+    "const unix_time   = { _0: ($_) => march_unix_time() };\n" ^
+    "const float_round = { _0: ($_, a) => march_float_round(a) };\n"
   in
   let runtime_import =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in

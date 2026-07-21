@@ -331,7 +331,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     if all_params = [] then ""
     else ", " ^ String.concat ", "
       (List.map (fun (_, (v : Tir.var), base) ->
-        Printf.sprintf "%s %%%s.arg" (Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty) base
+        Printf.sprintf "%s %%%s.arg" (Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty) base
       ) all_params)
   in
   let mutco_vis = if ctx.Llvm_ctx.compile_so then "hidden " else "" in
@@ -453,7 +453,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     let fn_llvm     = Llvm_builtins.mangle_extern fn.Tir.fn_name in
     let params_str  = String.concat ", "
       (List.map (fun (v : Tir.var) ->
-        Printf.sprintf "%s %%%s.arg" (Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty) (Llvm_ctx.llvm_name v.Tir.v_name)
+        Printf.sprintf "%s %%%s.arg" (Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty) (Llvm_ctx.llvm_name v.Tir.v_name)
       ) fn.Tir.fn_params)
     in
     let wrap_vis =

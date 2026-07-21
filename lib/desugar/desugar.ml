@@ -906,9 +906,24 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
            else match m.md_default with
              | None -> None
              | Some default_expr ->
-               (* Synthesise a fn_def for the default: fn method_name = default_expr
-                  The default body is a value of the method type (often a lambda),
-                  so wrap it in a zero-param clause. *)
+               (* Synthesise a fn_def for the default method.  The default body
+                  has the method's FULL arrow type (`a -> a -> Bool`), so it is
+                  almost always a lambda `fn x y -> ...`.  FLATTEN that lambda's
+                  parameters into the synthesised fn's OWN parameters, rather
+                  than wrapping it in a zero-param clause that merely RETURNS the
+                  lambda.  Otherwise the call `neqx(a, b)` compiles to a 2-arg
+                  call of a 0-param function: the args are dropped, the returned
+                  closure is never applied, and its pointer is used as the result
+                  — so the method always yields the same answer regardless of its
+                  arguments (item 283; the interpreter applied the closure and
+                  so was correct).  A non-lambda default (a bare value method)
+                  keeps the zero-param clause. *)
+               let desugared = desugar_expr default_expr in
+               let clause_params, clause_body =
+                 match desugared with
+                 | ELam (ps, body, _) -> List.map (fun p -> FPNamed p) ps, body
+                 | other -> [], other
+               in
                let fn_def : fn_def = {
                  fn_name = m.md_name;
                  fn_vis = Private;
@@ -916,9 +931,9 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                  fn_attrs = [];
                  fn_ret_ty = None;
                  fn_clauses = [{
-                   fc_params = [];
+                   fc_params = clause_params;
                    fc_guard = None;
-                   fc_body = desugar_expr default_expr;
+                   fc_body = clause_body;
                    fc_span = m.md_name.span;
                  }];
                  fn_bounds = [];
@@ -1893,7 +1908,7 @@ let maybe_inject_island_bridges
     The TIR lowering detects and skips the dispatcher DFns, rewriting call sites
     based on arity using the [greet$N] mangled names instead.
 *)
-let expand_defaults_decl (d : decl) : decl list =
+let rec expand_defaults_decl (d : decl) : decl list =
   match d with
   | DFn (def, sp) ->
     (match def.fn_clauses with
@@ -1954,6 +1969,16 @@ let expand_defaults_decl (d : decl) : decl list =
             The TIR pipeline rewrites call sites via _default_dispatch table. *)
          mangled_decls @ [full_decl]
        end)
+  | DMod (name, vis, inner, sp) ->
+    (* Recurse so a default-arg fn defined inside a NESTED module also gets its
+       `foo$N` arity variants.  Without this the nested fn's `FPDefault` params
+       reach [desugar_fn_def]'s strip-fast-path (added for the tuple-UAF fix)
+       and lose their default VALUES entirely, so a reduced-arity call
+       `Inner.foo(x)` fails.  Expansion runs before [desugar_decl], so the
+       fast-path never sees the (now-expanded) fn.  Paired with the
+       eval nested `foo$N`→base VMultiarity reconstruction so both backends
+       agree. *)
+    [DMod (name, vis, List.concat_map expand_defaults_decl inner, sp)]
   | _ -> [d]
 
 (* ---- Intra-module qualification pass ---- *)
@@ -2111,6 +2136,86 @@ let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
   in
   walk entry_prefix decls
 
+(** Normalize hand-written references that self-qualify with the ENTRY
+    module's OWN name. TIR unwraps the entry module (the parser splits a
+    file's sole top-level [mod Foo do ... end] into [mod_name]/[mod_decls],
+    and TIR emits those members WITHOUT the [Foo.] prefix — see
+    [qualify_module_refs]'s doc comment / [entry_prefix = ""]). But a source
+    reference that spells out its own module — [Foo.bar(x)] inside [mod Foo],
+    or [Outer.Inner.wrapped(5)] inside entry [mod Outer] — keeps its leading
+    own-name segment (a dotted [EVar] never matches [make_qualifier]'s bare
+    [is_own] test), so the reference and the unwrapped definition never
+    converge → "unbound variable" (interp) / "Undefined symbols" (compiled).
+
+    This strips ONLY the single leading [mod_name ^ "."] segment from every
+    [EVar], so [Foo.wrapped -> wrapped] and [Outer.Inner.wrapped ->
+    Inner.wrapped] (the nested [Inner.] survives to match the nested
+    definition's still-qualified emitted name). A dotted name can never be a
+    local binding, so no scope tracking is needed; constructor names ([ECon])
+    live in a separate namespace and are left untouched. Applied only to the
+    entry module, before [qualify_module_refs]. *)
+let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
+  let prefix = mod_name ^ "." in
+  let plen = String.length prefix in
+  let rename (n : name) : name =
+    let len = String.length n.txt in
+    if len > plen && String.sub n.txt 0 plen = prefix
+    then { n with txt = String.sub n.txt plen (len - plen) }
+    else n
+  in
+  let rec rw e =
+    match e with
+    | EVar n -> EVar (rename n)
+    | ELit _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
+    | ELam (ps, body, sp)       -> ELam (ps, rw body, sp)
+    | EBlock (es, sp)           -> EBlock (List.map rw es, sp)
+    | ELet (b, sp)              -> ELet ({ b with bind_expr = rw b.bind_expr }, sp)
+    | ELetFn (nm, ps, ret, body, sp) -> ELetFn (nm, ps, ret, rw body, sp)
+    | ELetQ (pat, result, cont, sp)  -> ELetQ (pat, rw result, rw cont, sp)
+    | EMatch (scrut, branches, sp) ->
+      let branches' = List.map (fun br ->
+          { br with branch_body  = rw br.branch_body
+                 ; branch_guard = Option.map rw br.branch_guard }) branches in
+      EMatch (rw scrut, branches', sp)
+    | EApp (f, args, sp)        -> EApp (rw f, List.map rw args, sp)
+    | ECon (n, args, sp)        -> ECon (n, List.map rw args, sp)
+    | ETuple (es, sp)           -> ETuple (List.map rw es, sp)
+    | ERecord (fs, sp)          -> ERecord (List.map (fun (n, ex) -> (n, rw ex)) fs, sp)
+    | ERecordUpdate (b, fs, sp) ->
+      ERecordUpdate (rw b, List.map (fun (n, ex) -> (n, rw ex)) fs, sp)
+    | EField (ex, n, sp)        -> EField (rw ex, n, sp)
+    | EIf (c, t, f, sp)         -> EIf (rw c, rw t, rw f, sp)
+    | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (rw c, rw b)) arms, sp)
+    | EPipe (l, r, sp)          -> EPipe (rw l, rw r, sp)
+    | EAnnot (ex, ty, sp)       -> EAnnot (rw ex, ty, sp)
+    | EDbg (Some ex, sp)        -> EDbg (Some (rw ex), sp)
+    | ESend (cap, msg, sp)      -> ESend (rw cap, rw msg, sp)
+    | ESpawn (ex, sp)           -> ESpawn (rw ex, sp)
+    | EAssert (ex, sp)          -> EAssert (rw ex, sp)
+    | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
+    | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)
+  in
+  let rec strip_decls decls =
+    List.map (function
+      | DFn (def, sp) ->
+        let def' = { def with fn_clauses = List.map (fun c ->
+            { c with fc_body  = rw c.fc_body
+                   ; fc_guard = Option.map rw c.fc_guard }) def.fn_clauses } in
+        DFn (def', sp)
+      | DLet (vis, b, sp) ->
+        DLet (vis, { b with bind_expr = rw b.bind_expr }, sp)
+      | DActor (vis, name, actor, sp) ->
+        let actor' = { actor with
+          actor_init     = rw actor.actor_init
+        ; actor_handlers = List.map (fun h -> { h with ah_body = rw h.ah_body })
+                             actor.actor_handlers } in
+        DActor (vis, name, actor', sp)
+      | DMod (name, vis, inner, sp) -> DMod (name, vis, strip_decls inner, sp)
+      | d -> d
+    ) decls
+  in
+  strip_decls decls
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
@@ -2156,6 +2261,12 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
     ) expanded in
+  (* The entry file's own top-level mod name is unwrapped by TIR, so a
+     source reference that self-qualifies with it (e.g. [Foo.bar] inside
+     [mod Foo]) must have that leading segment stripped before qualification,
+     or the reference never converges on the bare-emitted definition. *)
+  let decls =
+    if is_entry then strip_entry_self_qual m.mod_name.txt decls else decls in
   let entry_prefix = if is_entry then "" else m.mod_name.txt ^ "." in
   let decls = qualify_module_refs ~entry_prefix decls in
   { m with mod_decls = decls }

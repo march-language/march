@@ -6,7 +6,7 @@ permalink: /docs/cookbook/capabilities/
 
 # Capabilities
 
-The capability system lets you express resource requirements in function types. A function annotated with `needs Cap(IO)` can only be called by code that also holds that capability — enforced at compile time with no runtime cost.
+The capability system lets you express resource requirements in function types. A module that declares `needs IO` can only be used by code that also holds that capability — enforced at compile time with no runtime cost.
 
 ---
 
@@ -15,36 +15,37 @@ The capability system lets you express resource requirements in function types. 
 `needs` lists the capabilities a function requires:
 
 ```march
-needs Cap(IO)
-fn write_log(msg : String) : () do
+needs IO
+fn write_log(msg : String) : Result((), String) do
   File.append("app.log", msg ++ "\n")
 end
 ```
 
-A caller that doesn't declare `needs Cap(IO)` will get a compile error if it tries to call `write_log`. The requirement propagates upward through the call graph automatically.
+A caller that doesn't declare `needs IO` will get a compile error if it tries to call `write_log`. The requirement propagates upward through the call graph automatically.
 
 ---
 
 ## Proof capabilities
 
-`proof cap` declares a capability that can only be *created* inside one module — useful for authority tokens:
+`proof cap` declares a capability that can only be *created* inside one module — useful for authority tokens. Minting goes through the gated `mint_cap` builtin, which only typechecks inside a public function of the declaring module and takes the ambient `Cap(IO)` (or a narrower cap) to authorize the mint. Proof-cap types are always referred to by their qualified `Module.Name` form, even from inside the declaring module:
 
 ```march
 mod Admin do
   proof cap AdminCap
+  needs IO
+  needs Admin.AdminCap
 
-  fn make_cap() : Cap(AdminCap) do
-    cap AdminCap
+  fn make_cap(io : Cap(IO)) : Cap(Admin.AdminCap) do
+    mint_cap(io)
   end
 
-  needs Cap(AdminCap)
-  fn delete_all_users() : Result((), String) do
+  fn delete_all_users(_admin : Cap(Admin.AdminCap)) : Result((), String) do
     Db.execute("DELETE FROM users")
   end
 end
 ```
 
-Outside `Admin`, no code can manufacture a `Cap(AdminCap)`. It can only pass one through that it received from `Admin.make_cap()`. The capability becomes an unforgeable proof of authorization.
+Outside `Admin`, no code can manufacture a `Cap(Admin.AdminCap)`. It can only pass one through that it received from `Admin.make_cap()`. The capability becomes an unforgeable proof of authorization.
 
 ---
 
@@ -66,25 +67,34 @@ This statically prevents audio/video processing code from accidentally allocatin
 ## Complete example: sandboxed plugin runner
 
 ```march
-mod Plugin do
-  proof cap PluginCap
+mod PluginDemo do
+  mod Plugin do
+    proof cap PluginCap
+    needs IO
+    needs Plugin.PluginCap
 
-  fn grant() : Cap(PluginCap) do cap PluginCap end
+    fn grant(io : Cap(IO)) : Cap(Plugin.PluginCap) do
+      mint_cap(io)
+    end
 
-  needs Cap(PluginCap)
-  fn run(code : String) : Result(String, String) do
-    sandbox_eval(code)
+    fn run(_cap : Cap(Plugin.PluginCap), code : String) : Result(String, String) do
+      sandbox_eval(code)
+    end
   end
-end
 
-mod Main do
-  fn main() do
-    let _cap = Plugin.grant()
-    -- _cap satisfies the `needs Cap(PluginCap)` requirement for run() below;
-    -- caps are ambient — not passed as arguments
-    match Plugin.run("1 + 1") do
-      Ok(v)  -> println("result: " ++ v)
-      Err(e) -> println("error: " ++ e)
+  mod Main do
+    needs IO
+    needs Plugin.PluginCap
+
+    fn main() do
+      let cap = Plugin.grant(root_cap)
+      -- `cap` must be threaded explicitly into `run` below — capabilities
+      -- are ordinary values passed as arguments, not ambient state; there is
+      -- no way to manufacture one without going through `Plugin.grant`
+      match Plugin.run(cap, "1 + 1") do
+        Ok(v)  -> println("result: " ++ v)
+        Err(e) -> println("error: " ++ e)
+      end
     end
   end
 end

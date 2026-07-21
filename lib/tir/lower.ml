@@ -64,6 +64,7 @@ let fresh_var = Lower_state.fresh_var
 let nonexhaustive_panic = Lower_state.nonexhaustive_panic
 let _fn_param_types = Lower_state._fn_param_types
 let _use_aliases = Lower_state._use_aliases
+let _protocol_roles = Lower_state._protocol_roles
 let _module_aliases = Lower_state._module_aliases
 let _module_alias_snapshots = Lower_state._module_alias_snapshots
 let _current_module_fns = Lower_state._current_module_fns
@@ -84,6 +85,7 @@ let note_alias_candidate = Lower_state.note_alias_candidate
 let lower_type_def = Lower_decls.lower_type_def
 let lower_fn_def = Lower_decls.lower_fn_def
 let rename_tir_vars = Lower_decls.rename_tir_vars
+let uniquify_fn = Lower_decls.uniquify_fn
 
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
@@ -117,6 +119,25 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
       | None -> ty
     in
     k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
+  | Ast.ETuple (es, _) ->
+    (* Bind a tuple to a fresh var typed from its ELEMENTS when the tuple's
+       own span does not record a tuple type.  Desugar synthesises the
+       multi-arg-fn match scrutinee as an [ETuple] sharing the function/match
+       span (fn_span); [ty_of_expr] on that tuple therefore returns the MATCH
+       RESULT type (the fn's return type), not the tuple type — which then
+       reaches codegen as a non-pointer scrutinee destructured as $TupleN and
+       ICEs ("constructor pattern $TupleN(...) destructures a non-pointer
+       scrutinee").  Each [__argN] element has its own correctly-typed
+       synthetic span, so deriving [TTuple] from the per-element types sidesteps
+       the collision.  A tuple whose own span correctly records a [TTuple] keeps
+       that precise type unchanged. *)
+    lower_atoms_k env es (fun atoms ->
+      let ty = match ty_of_expr env e with
+        | Tir.TTuple _ as t -> t
+        | _ -> Tir.TTuple (List.map (ty_of_expr env) es)
+      in
+      let v = fresh_var ty in
+      Tir.ELet (v, Tir.ETuple atoms, k (Tir.AVar v)))
   | _ ->
     let rhs = lower_expr env e in
     let v = fresh_var (ty_of_expr env e) in
@@ -402,12 +423,26 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       | Tir.TTuple ts -> List.length ts
       | _ -> 3  (* fallback — shouldn't happen for well-typed code *)
     in
+    (* Resolve the protocol's sorted role list so the runtime can register
+       role_names[] in tuple-position order (name-based routing must line up
+       with the endpoint tuple positions).  Empty string ⇒ runtime falls back
+       to lazy first-encounter registration. *)
+    let proto_name = match proto_arg with
+      | Ast.ECon (n, [], _) | Ast.EVar n -> n.txt
+      | _ -> ""
+    in
+    let roles_csv =
+      match Hashtbl.find_opt _protocol_roles proto_name with
+      | Some roles -> String.concat "," roles
+      | None -> ""
+    in
     lower_to_atom_k env proto_arg (fun proto' ->
       let n_atom = Tir.ALit (March_ast.Ast.LitInt n_roles) in
+      let roles_atom = Tir.ALit (March_ast.Ast.LitString roles_csv) in
       let fn_var : Tir.var = {
-        v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TPtr Tir.TUnit);
+        v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt; Tir.TString], Tir.TPtr Tir.TUnit);
         v_lin = Tir.Unr } in
-      Tir.EApp (fn_var, [proto'; n_atom]))
+      Tir.EApp (fn_var, [proto'; n_atom; roles_atom]))
 
   | Ast.EApp (Ast.EVar { txt = "MPST.send"; _ }, [ch_arg; role_arg; val_arg], _) ->
     (* Lower role name to a string for the runtime's name→index lookup. *)
@@ -470,7 +505,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            (match args with
             | first_arg :: _
               when not (Hashtbl.mem !_current_module_fns name) ->
-              (match resolve_iface_method env name (Typecheck.span_of_expr first_arg) with
+              (* `to_string` is a universal formatter that is SEMANTICALLY
+                 identical to `show` on any type with a Show impl (verified: the
+                 interpreter's `to_string` and `show` produce byte-identical
+                 output, and for primitives Show$T.show delegates to the very
+                 same *_to_string C helper).  But compiled `to_string` was a
+                 codegen builtin that fell through to the generic
+                 `march_value_to_string` for non-primitives → `#<tag:N>` garbage.
+                 Route it through the Show dispatch so a container/ADT gets its
+                 real `Show$T.show`, exactly as `println` already does.  If no
+                 Show impl resolves (a Show-less type), fall through to the old
+                 `to_string` builtin — no regression. *)
+              let dispatch_name = if name = "to_string" then "show" else name in
+              (match resolve_iface_method env dispatch_name (Typecheck.span_of_expr first_arg) with
                | Some mangled_name -> Ast.EVar { txt = mangled_name; span = fn_span }
                | None -> f_expr)
             | _ -> f_expr))
@@ -798,6 +845,47 @@ let builtin_type_defs : Tir.type_def list = [
   Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
 ]
 
+(** Pre-Pass-1 AST walker that reproduces the SET of TIR type NAMES Pass 2
+    will eventually populate into [tm_types], computed BEFORE
+    [collect_iface_impls] (Pass 1) runs — the [types] ref Pass 2 fills is
+    still empty at that point.  Feeding these names to [Collision_set.compute]
+    up front lets [collect_iface_impls] qualify a colliding-type impl's mangled
+    symbol; the whole point is that this EARLY set agrees with the LATER
+    [Collision_set.compute tm_types] (Task 1/2's driver), so a type is never
+    globally-tagged/forced-Boxed by the late set while its impl symbols stay
+    un-qualified by the early set (a first-wins collapse → silent miscompile).
+
+    Only the type NAME matters to [Collision_set] (it ignores ctors and the
+    variant/record distinction), so an empty-ctor placeholder stands in for
+    each declared type.
+
+    [~prefix] mirrors Pass 2's nested-module qualification (prefix ^ tname.txt,
+    with "sub_name.txt ^ \".\"" appended at each [DMod] level — see the [DType]
+    arms under [DMod] in [lower_module]).  Actor-generated types are the
+    EXCEPTION: Pass 2 emits <Name>_Msg/_Actor/_State BARE — neither the
+    top-level nor the nested [DActor] arm applies the module prefix to
+    [Lower_actor.lower_actor]'s returned [types] (only to its [fns]).  So the
+    [DActor] arm here inserts BARE names regardless of [~prefix], matching the
+    real emission; without it the early set could miss an
+    actor-type-name/user-type-name collision (e.g. bare [Foo_Msg] from
+    [actor Foo] vs a user type [A.Foo_Msg]) that the late [tm_types] set
+    catches. *)
+let rec collect_type_names ~prefix acc decls =
+  List.fold_left (fun acc d -> match d with
+      | Ast.DType (_, name, _, _, _)
+      | Ast.DAlwaysLinearType (_, name, _, _, _) ->
+        Tir.TDVariant (prefix ^ name.txt, []) :: acc
+      | Ast.DActor (_, name, _, _) ->
+        (* BARE, ignoring ~prefix — see doc comment above. *)
+        Tir.TDVariant (name.txt ^ Tir_names.actor_msg_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_struct_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_state_suffix, [])
+        :: acc
+      | Ast.DMod (sub_name, _, inner_decls, _) ->
+        collect_type_names ~prefix:(prefix ^ sub_name.txt ^ ".") acc inner_decls
+      | _ -> acc
+    ) acc decls
+
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
@@ -830,6 +918,29 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     | [] -> ()
   in
   preregister_mods m.mod_decls;
+  (* Collect protocol → sorted-role-list mappings (mirrors the interpreter's
+     [protocol_roles_tbl]) so the [MPST.new] lowering can pass role names to
+     the runtime in tuple-position (role-name-sorted) order. *)
+  Hashtbl.reset _protocol_roles;
+  let rec collect_roles acc = function
+    | [] -> acc
+    | Ast.ProtoMsg (s, r, _) :: rest -> collect_roles (s.txt :: r.txt :: acc) rest
+    | Ast.ProtoLoop steps :: rest -> collect_roles (collect_roles acc steps) rest
+    | Ast.ProtoChoice (ch, branches) :: rest ->
+      let branch_roles =
+        List.concat_map (fun (_, steps) -> collect_roles [] steps) branches in
+      collect_roles (ch.txt :: branch_roles @ acc) rest
+  in
+  let rec register_protocols decls =
+    List.iter (fun d -> match d with
+      | Ast.DProtocol (name, pdef, _) ->
+        let roles = List.sort_uniq String.compare
+            (collect_roles [] pdef.Ast.proto_steps) in
+        Hashtbl.replace _protocol_roles name.Ast.txt roles
+      | Ast.DMod (_, _, inner, _) -> register_protocols inner
+      | _ -> ()) decls
+  in
+  register_protocols m.mod_decls;
   let fns = ref [] in
   let types = ref [] in
   _fns_ref := fns;
@@ -966,6 +1077,17 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       reg_method "hash" ty_name mangled
     ) hash_specs;
   end; (* end of builtin iface injection *)
+  (* Collision-conditional impl-symbol qualification (Task 3 of
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the collision
+     set BEFORE [collect_iface_impls] (Pass 1, directly below) runs, but the
+     [types] ref above is populated only by Pass 2 — so we can't reuse it.
+     [collect_type_names] (top-level, above) walks the AST directly, producing
+     the SAME set of qualified/bare TIR type names Pass 2 will eventually put
+     into [tm_types] (including actor-generated types) — see its doc comment. *)
+  let collision_set =
+    Collision_set.compute
+      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
+  in
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies.
      Recursively processes DMod contents so that impls declared inside
@@ -998,19 +1120,50 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | Ast.DImpl (idef, _) ->
           let type_name = match idef.impl_ty with
             | Ast.TyCon ({ txt = name; _ }, _) -> name
-            | Ast.TyTuple _  -> "$Tuple"
+            (* Tuples dispatch by ARITY ("$Tuple2", "$Tuple3", …) so a distinct
+               `impl Show((a,b))` vs `impl Show((a,b,c))` each resolve to their
+               own method — arity-agnostic "$Tuple" collapsed them onto one slot.
+               Mirrors the arity-keyed tuple pattern tags (`Tir_names.tuple_tag`)
+               and the matching lookup in [Lower_state.resolve_iface_method]. *)
+            | Ast.TyTuple tys -> Printf.sprintf "$Tuple%d" (List.length tys)
             | Ast.TyRecord _ -> "$Record"
             | _ -> "$Unknown"
           in
+          (* Collision-conditional: a colliding short type name gets a symbol
+             qualified by THIS impl's declaring module (mod_prefix, already
+             threaded for rename_tir_vars) so two same-short-name impls of a
+             GENERAL interface no longer mangle onto one symbol (last-write-wins
+             miscompile — see accept/t89's doc comment). Single-declaration
+             types are untouched: mangled/qualified_key/dispatch-table entries
+             stay byte-identical. Not gated on interface name: Eq/Ord/Show/Hash
+             impls for colliding types (accept/t88) are unaffected either way
+             because those dispatch natively through ctor-qualified structural
+             functions (ensure_adt_eq_fn &c.), never consulting this mangled
+             symbol table — qualifying their entries too is harmless. *)
+          let declaring_qualified_type_name =
+            if mod_prefix <> "" && Collision_set.is_colliding collision_set type_name then
+              (* mod_prefix already ends in "." (see the DMod recursion below) *)
+              String.sub mod_prefix 0 (String.length mod_prefix - 1) ^ "." ^ type_name
+            else type_name
+          in
           List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
               let mangled = Printf.sprintf "%s$%s.%s"
-                idef.impl_iface.txt type_name mname.txt in
+                idef.impl_iface.txt declaring_qualified_type_name mname.txt in
               let qualified_key = idef.impl_iface.txt ^ "." ^ mname.txt in
               (* Only lower the function body once per mangled name
                  (avoids double-lowering when DMod recursion re-encounters a
-                 top-level impl that was already processed). *)
+                 top-level impl that was already processed).  Keyed on the
+                 (possibly module-qualified) MANGLED name rather than the bare
+                 type_name: a colliding bare type_name now legitimately maps to
+                 MULTIPLE (type_name, mangled) pairs (one per declaring
+                 module's impl) under the same qualified_key, so guarding on
+                 type_name alone would wrongly treat the second impl as
+                 already-registered (the exact first-wins bug this task
+                 fixes). For a non-colliding type, declaring_qualified_type_name
+                 = type_name always, so mangled is identical across
+                 re-encounters and this check behaves exactly as before. *)
               let already = match Hashtbl.find_opt !_iface_methods qualified_key with
-                | Some l -> List.mem_assoc type_name l
+                | Some l -> List.mem_assoc mangled (List.map (fun (a, b) -> (b, a)) l)
                 | None   -> false
               in
               if not already then begin
@@ -1320,9 +1473,26 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DTransitions _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.
-           The qualified fn_defs are already in [fns] from DMod processing above. *)
+           The qualified fn_defs are already in [fns] from DMod processing above.
+
+           Each alias is registered into BOTH the program-global [_use_aliases]
+           table AND this (entry) module's own [env.current_module_aliases] —
+           mirroring the nested-module DUse handler (register_aliases above).
+           The per-module table is what [resolve_use_alias] consults for
+           MODULE-QUALIFIED (dotted) references: after the global fallback was
+           restricted to unqualified names (to stop one module's bulk import
+           hijacking another's qualified call), a bulk `import Foo` at the entry
+           file's top level followed by the partial-qualified `Sub.fn(...)` form
+           must still resolve to `Foo.Sub.fn` via THIS module's own table, or it
+           would emit an undefined `_Sub.fn` symbol. *)
         let prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "." in
         let all_fn_names = List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns in
+        let register short fn_name =
+          note_alias_candidate short fn_name;
+          Hashtbl.replace !_use_aliases short fn_name;
+          if not (Hashtbl.mem env.current_module_aliases short) then
+            Hashtbl.replace env.current_module_aliases short fn_name
+        in
         (match ud.use_sel with
          | Ast.UseSingle -> ()
          | Ast.UseAll ->
@@ -1333,17 +1503,14 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
-                 note_alias_candidate short fn_name;
-                 Hashtbl.replace !_use_aliases short fn_name
+                 register short fn_name
                end
              ) all_fn_names
          | Ast.UseNames names ->
            List.iter (fun (n : Ast.name) ->
                let qualified = prefix ^ n.txt in
-               if List.mem qualified all_fn_names then begin
-                 note_alias_candidate n.txt qualified;
-                 Hashtbl.replace !_use_aliases n.txt qualified
-               end
+               if List.mem qualified all_fn_names then
+                 register n.txt qualified
              ) names
          | Ast.UseExcept excluded ->
            let excl_set = List.map (fun (n : Ast.name) -> n.txt) excluded in
@@ -1353,10 +1520,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   && String.sub fn_name 0 plen = prefix
                then begin
                  let short = String.sub fn_name plen (String.length fn_name - plen) in
-                 if not (List.mem short excl_set) then begin
-                   note_alias_candidate short fn_name;
-                   Hashtbl.replace !_use_aliases short fn_name
-                 end
+                 if not (List.mem short excl_set) then
+                   register short fn_name
                end
              ) all_fn_names)
       | Ast.DAlias (ad, _) ->
@@ -1448,6 +1613,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             { fn with fn_body = body }
         ) all_fns
   in
+  (* Alpha-rename any shadowed local binder to a fresh unique name so that
+     every name-based downstream pass (cprop/fold/inline/dce and the JS
+     [const] emitter) is immune to variable capture across shadowing.  A
+     non-shadowing binder keeps its source name, so only genuinely-shadowing
+     functions change shape.  See [Lower_decls.uniquify_fn]. *)
+  let all_fns = List.map uniquify_fn all_fns in
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = all_fns;
     tm_types = builtin_type_defs @ List.rev !types;

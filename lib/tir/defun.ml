@@ -21,14 +21,26 @@ let builtin_names : StringSet.t =
       "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
-      "read_line"; "io_read_line"; "not";
+      "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";
+      (* Cancellation/race builtins — each has a dedicated codegen arm in
+         llvm_emit (task_cancel_by_id/task_cancel/task_is_cancelled/
+         task_cancel_token_new/task_spawn_with_cancel).  Without a builtin_names
+         entry, defun treats a reference to one (e.g. `List.each(rest, fn t ->
+         task_cancel_by_id(t))` in Task.race/any) as a first-class function and
+         emits a `@task_cancel_by_id$clo_wrap` trampoline whose body calls the
+         non-existent `@task_cancel_by_id` (only the C symbol
+         `@march_task_cancel_by_id` exists) → `use of undefined value`. *)
+      "task_cancel_by_id"; "task_cancel"; "task_is_cancelled";
+      "task_cancel_token_new"; "task_spawn_with_cancel";
       "get_work_pool";
+      (* Signal.watch builtins — keep as EApp for dedicated codegen *)
+      "signal_watch"; "signal_unwatch"; "signal_raise_self";
       (* Float builtins *)
       "float_abs"; "float_ceil"; "float_floor"; "float_round";
       "float_truncate"; "int_to_float";
@@ -75,11 +87,12 @@ let builtin_names : StringSet.t =
       (* Resource ownership *)
       "own";
       (* Capability builtins *)
-      "cap_narrow"; "root_cap";
+      "cap_narrow"; "root_cap"; "mint_cap";
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size";
       "run_until_idle"; "register_resource"; "get_cap";
-      "send_checked"; "pid_of_int"; "get_actor_field";
+      "send_checked"; "revoke_cap"; "is_cap_valid";
+      "pid_of_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)
@@ -191,7 +204,11 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
   in
 
   let fv_var (v : Tir.var) (bound : StringSet.t) =
-    if StringSet.mem v.Tir.v_name bound || StringSet.mem v.Tir.v_name top_level then ()
+    if StringSet.mem v.Tir.v_name bound || StringSet.mem v.Tir.v_name top_level
+       (* Collision-dispatch sentinels ([Mono] → [Llvm_dispatch]) are globally
+          known callees resolved directly at LLVM emission — never free
+          variables to capture into a closure. *)
+       || Dispatch_registry.is_sentinel v.Tir.v_name then ()
     else add_fv v
   in
 
@@ -435,9 +452,10 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
        ELetRec, and locally-bound names that are called are necessarily callable
        (closures), never operators/builtins (which are never let/param-bound). *)
     | Tir.EApp (f_var, args)
-      when StringSet.mem f_var.Tir.v_name bound
+      when (not (Dispatch_registry.is_sentinel f_var.Tir.v_name))
+        && (StringSet.mem f_var.Tir.v_name bound
         || (not (StringSet.mem f_var.Tir.v_name top_level)
-            && (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)) ->
+            && (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false))) ->
       (* A locally-bound name (ELetRec/let/param) is a closure pointer and MUST
          dispatch through ECallPtr — even when a top-level function shares the
          name.  Otherwise a stdlib helper's local `go` (the canonical accumulator

@@ -1,0 +1,29 @@
+-- fix-campaign batch 3 (2026-07-07) -- `cap no_panic`, the GUARDED-match gap,
+-- ACCEPT side. Proves the guarded-match exhaustiveness fix is NOT over-rejecting:
+-- a guarded match whose GUARDLESS arms are exhaustive can never fall through, so
+-- it stays accepted even inside a `cap no_panic` module.
+--
+-- The guarded arm `Some(v) when v > 0` is followed by an UNGUARDED `Some(v)` arm
+-- and an unguarded `None`, so the guardless branches `{Some, None}` cover the
+-- whole `Option(Int)` domain. `check_exhaustiveness` computes coverage over the
+-- guardless matrix (`typecheck.ml`), finds it exhaustive, and records nothing;
+-- `check_no_panic_module` has no span to promote, so `--check` exits 0. Reject
+-- companion: `reject/t50` (drop the unguarded `Some(v)` -> guardless-non-
+-- exhaustive -> rejected). See core-march-types.md §2.8.11.
+mod GuardOk do
+  cap no_panic
+
+  fn classify(opt : Option(Int)) : Int do
+    match opt do
+      Some(v) when v > 0 -> v
+      Some(v) -> 0
+      None -> 0
+    end
+  end
+
+  fn main() do
+    println(int_to_string(classify(Some(5))))
+    println(int_to_string(classify(Some(-3))))
+    println(int_to_string(classify(None)))
+  end
+end
