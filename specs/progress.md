@@ -283,6 +283,29 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-20, impl-coherence declaring-module identity — FQN dispatch Stage 1)
+
+**Interface impl coherence now distinguishes same-short-name types by their
+declaring module.** Two genuinely-distinct ADTs that share a short name across
+modules (`AeLib.AeDir` vs `AeLib2.AeDir`) can each declare their own
+`impl Eq(AeDir)` without a false `Overlapping implementation` error — previously
+both lowered to `TCon("AeDir")` and the coherence check over-fired.
+`register_impl_shape` (`lib/typecheck/typecheck.ml`) threads the impl's declaring
+module and resolves each head to a declaring-module identity (qualified `Mod.T` →
+prefix; bare `T` → the module iff it declares `T`; else conservative); `env.impls`
+entries carry that identity as a third tuple element and two heads overlap only
+when they resolve to two DISTINCT concrete modules. The stored head type stays
+BARE, so constraint discharge is untouched. **No codegen/mangling change — TIR
+snapshots + codegen goldens byte-identical.** `test/imports/adt_eq_native` drops
+its blanket `impl Eq(a)` workaround for per-module `impl Eq(AeDir)` (compiles +
+runs end-to-end). This is Stage 1 of the FQN dispatch-identity slice
+(`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`); Stages 2–3 (interpreter
+`impl_tbl` + native runtime ctor-tag dispatch for the GENERAL user-interface
+colliding case) remain open — that case is still correctly rejected natively until
+Stage 3. Suite: **compiler 519 / stdlib 810 / snapshots 31 / types 169 / oracle 0
+divergences** (pre-existing, unrelated `native_ffi_result` golden failure —
+`nan` vs `bad int`, FFI error-string, no `impl`s involved — filed separately).
+
 ## Current State (as of 2026-07-18, compiled-only correctness sweep + backend-divergence cluster + merge-loss audit)
 
 **A large correctness pass, then a merge-loss audit that explained a chunk of it.**

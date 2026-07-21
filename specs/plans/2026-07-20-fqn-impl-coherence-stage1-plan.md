@@ -25,7 +25,7 @@
 - Modify: `lib/typecheck/typecheck.ml` — `impls` field (`:503`), `base_env` seed (`:2254-2258`), `register_impl_shape` (`:5924-6005`), discharge read (`:6113-6116`), check_decl DImpl re-reg (`:8396-8401`), pass-1 fold call sites (`:9556`, `:9610`, `:9611`, `:9618`, `:9847`).
 - Modify: `lsp/lib/analysis.ml` — impls destructure sites (`:3498`, `:4672`).
 - Test: `test/test_compiler.ml` (new coherence unit tests).
-- Test fixtures: `specs/lang/types/accept/t87_impl_distinct_modules.march` (new), existing `reject/t79`, `reject/t80`, `accept/t83`, `accept/t85`.
+- Test fixtures: `specs/lang/types/accept/t88_impl_distinct_modules.march` (new), existing `reject/t79`, `reject/t80`, `accept/t83`, `accept/t85`.
 
 **Interfaces:**
 - Produces: `register_impl_shape : ?decl_module:string -> env -> Ast.impl_def -> env` (new optional `decl_module`, default `""`).
@@ -34,7 +34,7 @@
 
 - [ ] **Step 1: Write failing witness — two distinct same-name types accept**
 
-Create `specs/lang/types/accept/t87_impl_distinct_modules.march`:
+Create `specs/lang/types/accept/t88_impl_distinct_modules.march`:
 
 ```march
 -- Coherence accept: two DISTINCT types that share the short name `Thing`,
@@ -66,7 +66,7 @@ end
 - [ ] **Step 2: Run the witness harness — confirm it currently FAILS**
 
 Run: `dune build @types-check 2>&1 | grep -E "t87|Overlapping|passed, .* failed"`
-Expected: `[accept/t87_impl_distinct_modules.march] FAIL — should typecheck but was rejected` (today the bare-name key rejects it).
+Expected: `[accept/t88_impl_distinct_modules.march] FAIL — should typecheck but was rejected` (today the bare-name key rejects it).
 
 - [ ] **Step 3: Widen the `impls` entry tuple to carry the head's declaring module**
 
@@ -287,7 +287,7 @@ Expected: LSP tests pass (the `test_lsp.ml:867` `impls is a list` check still ho
 - [ ] **Step 13: Commit**
 
 ```bash
-git add lib/typecheck/typecheck.ml lsp/lib/analysis.ml test/test_compiler.ml specs/lang/types/accept/t87_impl_distinct_modules.march
+git add lib/typecheck/typecheck.ml lsp/lib/analysis.ml test/test_compiler.ml specs/lang/types/accept/t88_impl_distinct_modules.march
 git commit -m "fix(typecheck): impl-coherence keys on declaring-module identity
 
 Two distinct same-short-name types from different modules (AeLib.AeDir vs
