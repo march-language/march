@@ -283,6 +283,39 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, `Html.raw`/`~H` sigil compiled-only content-loss fix)
+
+**`Html.raw(...)` content no longer silently disappears when interpolated
+into a `~H` sigil in compiled binaries.** Found auditing
+`docs/cookbook/html.md`: `~H"<button>${Html.raw("XXXYYY")}</button>"` printed
+`<button></button>` compiled (correct interpreted:
+`<button>XXXYYY</button>`), and the documented "Layouts and partials" nesting
+pattern (`~H"<body>${Html.raw(IOList.to_string(body))}</body>"`) silently
+dropped the entire embedded fragment the same way. Root cause:
+`Html.Safe = Safe(String)` (`Html.raw`'s return type) is a single-ctor,
+single-field ADT that `Repr.repr_of_ty` (`lib/tir/repr.ml`) classifies
+`Boxed` rather than `Newtype` at this call site (confirmed with
+`MARCH_REPR_AUDIT=1`), so its lone constructor gets ctor tag 0 — the same tag
+`IOList.Empty` gets, since every Boxed ADT's constructor tags are numbered
+independently with no runtime cross-type discriminant. The `~H` sigil
+desugars each `${expr}` to `html_auto_escape(expr)`
+(`lib/desugar/desugar.ml`), and the hand-written runtime
+`march_html_auto_escape` (`runtime/march_extras.c`) can only dispatch on that
+raw tag byte: its fallback path ("constructor with tag >= 0 → flatten as
+IOList") read a `Safe("XXXYYY")` cell as an empty IOList, producing `""` with
+no error. Fix: resolve the ambiguity where static type information is still
+available — `lib/tir/llvm_emit.ml`'s `html_auto_escape` `EApp` case now
+special-cases an atom whose static TIR type is `TCon ("Safe", _)` (gated by
+`Collision_set.is_colliding` so an unrelated same-short-name user type still
+falls through to the generic runtime path), loading the wrapped String
+directly out of the Boxed cell's field 0 and passing it through unescaped —
+`Html.Safe`'s verbatim-insertion contract — with no runtime call needed for
+this case. New regression coverage: `test/native/html_safe_raw.march` (+
+`.expected`), a compiled native golden covering both the direct
+`Html.raw(...)` interpolation and the nested-layout pattern. Full quick suite
+green (776 tests) before and after. Details: `specs/todos.md` "P0 — Blocking
+/ Active".
+
 ## Current State (as of 2026-07-21, `string_to_float` compiled-only SIGSEGV fix)
 
 **`string_to_float` / `String.to_float` no longer segfaults compiled.**
