@@ -37,13 +37,10 @@ let test_bare_toplevel_type_not_colliding () =
   Alcotest.(check bool) "single bare Thing not colliding" false
     (Collision_set.is_colliding cs "Thing")
 
-let tests = [
-  "no collision", `Quick, test_no_collision;
-  "two-module collision", `Quick, test_two_module_collision;
-  "bare toplevel not colliding", `Quick, test_bare_toplevel_type_not_colliding;
+let suites = [
+  ( "collision_set", [
+      Alcotest.test_case "no collision"                `Quick test_no_collision;
+      Alcotest.test_case "two-module collision"         `Quick test_two_module_collision;
+      Alcotest.test_case "bare toplevel not colliding"  `Quick test_bare_toplevel_type_not_colliding;
+    ] );
 ]
-
-let () =
-  Alcotest.run "collision_set"
-    [ "collision_set",
-      List.map (fun (name, speed, fn) -> Alcotest.test_case name speed fn) tests ]

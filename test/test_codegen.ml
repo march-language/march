@@ -9187,4 +9187,5 @@ let codegen_suites =
         ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
+  @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
 
