@@ -283,6 +283,39 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
+
+Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
+`RRB`/`Array`) no longer SIGSEGVs on the second push of a `Float` element. Root
+cause: `Array.push` calls `lst_len(tail)`, whose inner `go` discards the
+list-head field via a wildcard pattern (`Cons(_, t) -> go(t, acc + 1)`).
+`lower_match.ml`'s pattern-matrix compiler gave every constructor-field
+synthetic variable the `TVar "_"` placeholder type at creation; a NAMED field
+gets rebound to its real (trackable) type downstream and flows through
+`mono.ml`'s monomorphization normally, but a WILDCARD-discarded field never
+gets rebound, so it kept `TVar "_"` forever. `Rc_types.needs_rc (TVar "_")`
+conservatively answers `true`, so Perceus emitted a `dec_rc` on it — and for a
+concretely-Float instantiation, the field's actual runtime representation is
+an unboxed double bit-reinterpreted as `ptr` (no heap box), so that `dec_rc`
+read a tag field out of a raw float bit pattern and crashed.
+
+- `lib/typecheck/typecheck.ml`'s `infer_pattern`, `PatWild` arm now records its
+  inferred type into `env.type_map` (mirroring `PatVar`), so the wildcard's
+  span has a resolvable entry.
+- `lib/tir/lower_match.ml`'s `compile_matrix_impl` now looks up every
+  constructor field's type via `Lower_state.ty_of_span` on the sub-pattern's
+  own span, instead of defaulting unconditionally to the unknown-type
+  placeholder — so a discarded field flows through monomorphization exactly
+  like a named one.
+
+New compiled native golden `test/native/rrb_push_float.march` (+ `.expected` +
+`test/dune` rule). **Found but not fixed here:** a second, distinct
+Float-erasure bug in `Array.get`/`RRB.get` — that function is never
+monomorphized at all even when called on a concrete `PVec(Float)`, so reading
+back a pushed `Float` via `RRB.get` still crashes (`march_incrc` on a raw
+double); confirmed Float-specific (the identical call sequence over `Int`
+elements works). Filed in `specs/todos.md`'s P0 section.
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type
