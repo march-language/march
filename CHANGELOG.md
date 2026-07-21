@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A self-tail-recursive function forwarding a freshly-built value as its own
+  next argument (e.g. an accumulator built via `String.join`/`String.split`)
+  could silently corrupt that value in compiled programs — freed one
+  instruction before it was reused for the next iteration. Symptom: wrong
+  answers with no crash or error, e.g. `stdlib/toml.march`'s integer parsing
+  (`Toml.get_int` on `"port = 9000"`) returned `9` instead of `9000` compiled
+  while the interpreter was correct. Affects any compiled program using this
+  accumulator-recursion shape over a value not extracted from an
+  already-borrowed container (a list/tree traversal passing along an existing
+  field, e.g. `Cons(_, t) -> go(t, ...)`, was unaffected).
 - Interfaces implemented separately for two same-short-name types declared in
   different modules (e.g. two modules each with their own `impl Speak(Thing)`)
   now dispatch to the correct implementation at runtime, in both the
