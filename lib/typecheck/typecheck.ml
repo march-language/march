@@ -2444,16 +2444,16 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
        TChan (ref SError)
      | _ ->
-    let arity = match lookup_type name.txt env with
-      | Some a -> a
+    let arity, resolved_via_qualification = match lookup_type name.txt env with
+      | Some a -> a, false
       | None   ->
         (* Try qualified module resolution: "Mod.Type" *)
         match resolve_qualified_type name.txt env with
-        | _, Some a -> a
+        | _, Some a -> a, true
         | _ ->
           Err.error env.errors ~span:name.span
             (qualified_error_msg name.txt env);
-          0
+          0, false
     in
     (* March uses a single global type namespace: a type declared inside a
        module has its *bare* name as its canonical identity.  Both the type's
@@ -2474,7 +2474,20 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
       match String.rindex_opt name.txt '.' with
       | Some i ->
         let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
-        (match lookup_type bare env with Some a when a = arity -> bare | _ -> name.txt)
+        if resolved_via_qualification then
+          (* [resolve_qualified_type] just confirmed module `Mod` itself
+             declares a type named [bare] with this arity — that's what
+             qualification MEANS, unambiguously (no cross-module bare-name
+             collision risk the way a bare reference would have), so the
+             canonical bare `TCon` applies unconditionally.  This is the ONLY
+             way an opaque `ptype` (never promoted to the outer bare
+             namespace — see the opaque-type pattern in
+             `specs/lang/modules.md`) still canonicalizes correctly: its bare
+             name is never independently visible in [env] to cross-check
+             against, by design. *)
+          bare
+        else
+          (match lookup_type bare env with Some a when a = arity -> bare | _ -> name.txt)
       | None -> name.txt
     in
     let args' = List.map (surface_ty env ~tvars) args in
@@ -4597,6 +4610,26 @@ and infer_match env span scrut scrut_ty branches =
   check_redundant_arms env scrut_ty branches;
   result_ty
 
+(** Whether every diagnostic in [scratch] stems from a data constructor used
+    in type position — a phantom/typestate tag like `Handle(Open)`, where
+    `Open` is a constructor of some ADT rather than a type name, which
+    [surface_ty] legitimately cannot resolve (it emits [qualified_error_msg]'s
+    unqualified-name form, "I cannot find `Open`.", for the ctor name).
+    Recognised by checking that the unresolved name IS a known constructor
+    ([env.ctors]) — genuinely bogus names (typo'd/renamed types, unknown
+    modules) are never registered there, so this returns [false] for those
+    and the caller must surface the error instead of discarding it. *)
+and annotation_errors_are_phantom_tags_only env (scratch : March_errors.Errors.ctx) =
+  let prefix = "I cannot find `" in
+  let plen = String.length prefix in
+  List.for_all (fun (d : March_errors.Errors.diagnostic) ->
+    let msg = d.March_errors.Errors.message in
+    String.length msg >= plen + 2
+    && String.sub msg 0 plen = prefix
+    && String.sub msg (String.length msg - 2) 2 = "`."
+    && StrMap.mem (String.sub msg plen (String.length msg - plen - 2)) env.ctors
+  ) scratch.March_errors.Errors.diagnostics
+
 (** Compute the type of a `let`-binding RHS, honouring an optional type
     annotation (`let x : T = e`, finding 16).  When [bind_ty] is present the
     annotation becomes a CHECKING context for the RHS (via [check_expr]) — a
@@ -4604,12 +4637,15 @@ and infer_match env span scrut scrut_ty branches =
     bound at a more specific instance (`let f : (Int) -> Int = fn x -> x`)
     still typechecks.
 
-    The annotation is resolved into a scratch error context first: if
-    [surface_ty] cannot resolve it (e.g. a phantom/typestate tag used in type
-    position, `let h : Handle(Open) = …`, which is a data constructor, not a
-    type name), we discard the scratch errors and fall back to plain inference
-    — exactly the pre-finding-16 behaviour for annotations the type grammar
-    can't express, so no legitimate program starts being rejected. *)
+    The annotation is resolved into a scratch error context first.  If
+    [surface_ty] fails ONLY because of a phantom/typestate tag used in type
+    position (`let h : Handle(Open) = …`), we discard the scratch errors and
+    fall back to plain inference — the pre-finding-16 behaviour for
+    annotations the type grammar can't express.  But if any failure is a
+    genuinely unresolvable name (unknown module, typo'd/renamed type — see
+    the `RRB`/`Vec(Int) = "not a vec"` soundness hole), the annotation is
+    real and broken: surface the scratch diagnostics as real errors instead
+    of silently ignoring the annotation. *)
 and infer_let_annotated env sp bind_ty bind_expr =
   match bind_ty with
   | None -> infer_expr env bind_expr
@@ -4617,11 +4653,16 @@ and infer_let_annotated env sp bind_ty bind_expr =
     let scratch = March_errors.Errors.create () in
     let tvars = ref [] in
     let ann_ty = surface_ty { env with errors = scratch } ~tvars ann in
-    if March_errors.Errors.has_errors scratch then
-      (* Annotation not expressible as a resolvable type — ignore it (legacy
-         behaviour) and infer from the RHS alone. *)
+    if March_errors.Errors.has_errors scratch then begin
+      if not (annotation_errors_are_phantom_tags_only env scratch) then
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          March_errors.Errors.error env.errors ~span:d.March_errors.Errors.span
+            d.March_errors.Errors.message
+        ) scratch.March_errors.Errors.diagnostics;
+      (* Annotation not (fully) expressible as a resolvable type — infer from
+         the RHS alone; any genuine error was already surfaced above. *)
       infer_expr env bind_expr
-    else begin
+    end else begin
       check_expr env bind_expr ann_ty ~reason:(Some (RAnnotation sp));
       ann_ty
     end
