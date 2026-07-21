@@ -32,6 +32,13 @@ git log is authoritative for exact commits.
   rendered `<button></button>`. Fine in the interpreter. Affects the
   documented layout/partial-nesting pattern
   (`~H"<body>${Html.raw(IOList.to_string(body))}</body>"`) as well.
+- `Option.or_else` and `Option.unwrap_or_else` crashed at runtime
+  (`arity mismatch: expected 0 args, got 1`) when called with a genuine
+  zero-argument callback — `fn -> ...`, the natural spelling for their
+  declared `() -> a` parameter. Both functions invoked the callback as
+  `f(())` (passing an explicit unit value) instead of `f()`, which only
+  matched a 1-arg-discard closure (`fn _ -> ...`). Fixed to call `f()`;
+  affects both the interpreter and compiled programs.
 
 ### Fixed
 
