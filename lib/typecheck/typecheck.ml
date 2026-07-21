@@ -5989,6 +5989,53 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   in
   let modules_distinct m1 m2 =
     match m1, m2 with Some a, Some b -> a <> b | _ -> false in
+  (* Bare short name of the head type (drop any `Mod.` prefix), used by the
+     Task-6b double-collision stopgap below. *)
+  let head_bare_name =
+    match idef.impl_ty with
+    | Ast.TyCon (n, _) ->
+      (match String.rindex_opt n.txt '.' with
+       | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
+       | None -> n.txt)
+    | _ -> ""
+  in
+  (* Task-6b stopgap. The declaring-module relaxation below is sound only when
+     the two same-short-name colliding types have DISJOINT constructor NAME
+     sets. If they share a constructor name (e.g. both `type Thing = Shared |
+     …`), the constructor-tag identity the backends and interpreter route on is
+     ambiguous — [env.ctors] keys on the BARE ctor name, and [ci_module]
+     disambiguation is diagnostic-only (feeds NO dispatch/mangling) — so a
+     general-interface method silently MISDISPATCHES in both backends
+     (registration-order-dependent, interp/compiled can disagree). Until the
+     full `ci_module.Type.Ctor`-qualified ctor identity lands (see
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md), REJECT this specific
+     double-collision shape through the EXISTING overlap path rather than
+     miscompile it. Constructor short-names for a (bare type, module) pair are
+     read off [env.ctors]' keys INCLUDING the module-qualified `Mod.Ctor` keys:
+     [add_ctor] structurally dedups the BARE ctor key (dropping the identically-
+     shaped ctor of the OTHER module), so the bare key alone cannot tell the two
+     modules' ctors apart — the qualified keys carry each module's own entry. *)
+  let ctor_names_of bare_type_name declaring_module =
+    StrMap.fold (fun k cis acc ->
+        if List.exists (fun (ci : ctor_info) ->
+               ci.ci_type = bare_type_name && ci.ci_module = declaring_module)
+             cis
+        then
+          let short = match String.rindex_opt k '.' with
+            | Some i -> String.sub k (i + 1) (String.length k - i - 1)
+            | None -> k in
+          if List.mem short acc then acc else short :: acc
+        else acc)
+      env.ctors []
+  in
+  let ctor_sets_disjoint m_old =
+    match head_type_module, m_old with
+    | Some new_mod, Some old_mod ->
+      let new_ctors = ctor_names_of head_bare_name new_mod in
+      let old_ctors = ctor_names_of head_bare_name old_mod in
+      not (List.exists (fun c -> List.mem c old_ctors) new_ctors)
+    | _ -> false  (* can't prove disjoint → don't relax (conservative) *)
+  in
   (* Declaring-module coherence relaxation (FQN dispatch, all stages landed):
      two same-short-name types declared in DIFFERENT modules are genuinely
      distinct, so each may implement the SAME interface without overlapping.
@@ -6021,7 +6068,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (modules_distinct m_old head_type_module))
+             && not (modules_distinct m_old head_type_module
+                     && ctor_sets_disjoint m_old))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp

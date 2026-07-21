@@ -312,16 +312,21 @@ same way (`lib/eval/eval.ml`). **Flag-day:** `register_impl_shape`
 declaring-module relaxation. Witnesses: `accept/t89_impl_general_iface_collision`
 (typecheck-level, flipped from `reject/t82`) and the first cross-backend
 RUNTIME witness `test/imports/speak_collision_native` (compiled + interpreted,
-both print `from-A`/`from-B` correctly). **KNOWN RESIDUAL GAP (deferred,
-tracked in `specs/todos.md`):** when two colliding same-short-name types ALSO
-share a CONSTRUCTOR name, dispatch misroutes in BOTH backends —
-registration-order-dependent, and the two backends can disagree on which
-wrong body wins. This needs the design doc's `ci_module.Type.Ctor` extra
-qualification layer (out of scope for this slice; verified empirically with a
-dedicated fixture, not assumed). Does not affect the common case (distinct
-ctor names, or no collision at all) and was already rejected before this
-slice (not a new regression). Suite: **compiler 520 / eval 235 / codegen 434 /
-stdlib 810 / snapshots 31 / types 170 (89 accept + 81 reject)**, `git status
+both print `from-A`/`from-B` correctly). **NARROWED RESIDUAL GAP (Task 6b,
+2026-07-21; tracked as its own OPEN item in `specs/todos.md`):** when two
+colliding same-short-name types ALSO share a CONSTRUCTOR name (a "double
+collision", e.g. both `type Thing = Shared | …`), this specific shape is now
+REJECTED at typecheck (a safe compile error) rather than silently
+misdispatching. `register_impl_shape` (`lib/typecheck/typecheck.ml`) only
+relaxes coherence when the two colliding types' constructor NAME sets are
+disjoint; when they intersect, the existing overlap path rejects the second
+impl. Reject witness `reject/t82_impl_coherence_shared_ctor_double_collision`;
+the common case (distinct ctor names) stays accepted (`accept/t89`) and runs
+correctly in both backends (`test/imports/speak_collision_native`). Making the
+double-collision programs actually WORK (instead of being rejected) still needs
+the design doc's `ci_module.Type.Ctor` extra qualification layer (out of scope
+for this stopgap). Suite: **compiler 521 / eval 235 / codegen 434 /
+stdlib 810 / snapshots 31 / types 171 (89 accept + 82 reject)**, `git status
 test/snapshots/` empty. Design:
 `specs/plans/2026-07-20-fqn-impl-dispatch-identity.md` (status now
 `implemented`); execution plan:

@@ -633,6 +633,33 @@ let test_impl_coherence_same_module_duplicate_err () =
   Alcotest.(check bool) "same-module duplicate impl: error"
     true (has_errors ctx)
 
+let test_impl_coherence_shared_ctor_double_collision_err () =
+  (* Task-6b stopgap: two DISTINCT same-short-name types in sibling modules that
+     ALSO share a constructor name (`Shared`) are a "double collision". The
+     backends and interpreter route dispatch on the BARE constructor tag
+     (ci_module is diagnostic-only), so a general-interface method would silently
+     misdispatch in BOTH backends. Until the full ci_module.Type.Ctor ctor
+     identity lands, this specific shape is REJECTED via the existing overlap
+     path (register_impl_shape's ctor-set-disjointness check) rather than
+     miscompiled. Reject witness: specs/lang/types/reject/t82. Contrast with
+     test_impl_coherence_distinct_modules_general_iface_ok (DISTINCT ctor names,
+     the common case, which MUST still be accepted). *)
+  let ctx = typecheck {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod NA do
+      type Thing = Shared | OnlyA
+      impl Speak(Thing) do fn speak(_x) do "a" end end
+    end
+    mod NB do
+      type Thing = Shared | OnlyB
+      impl Speak(Thing) do fn speak(_x) do "b" end end
+    end
+  end|} in
+  Alcotest.(check bool) "shared-ctor-name double collision: error"
+    true (has_errors ctx)
+
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
   let ctx = typecheck {|mod Test do
@@ -7912,6 +7939,7 @@ let compiler_suites =
           Alcotest.test_case "impl coherence: distinct modules ok (builtin)" `Quick test_impl_coherence_distinct_modules_ok;
           Alcotest.test_case "impl coherence: distinct modules general-iface ok" `Quick test_impl_coherence_distinct_modules_general_iface_ok;
           Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
+          Alcotest.test_case "impl coherence: shared-ctor double collision err" `Quick test_impl_coherence_shared_ctor_double_collision_err;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;

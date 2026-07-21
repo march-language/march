@@ -8,11 +8,14 @@ module-qualified impl symbols (bd… Task 3), runtime tag-switch dispatch
 flag-day that drops the builtin-only coherence gate so ALL interfaces get the
 declaring-module relaxation (this commit). Witnesses: `accept/t89`
 (typecheck) and `test/imports/speak_collision_native` (cross-backend runtime,
-interpreted + compiled). **Known residual gap (deferred, tracked separately):**
-when two colliding same-short-name types ALSO share a CONSTRUCTOR name, dispatch
-misroutes in BOTH backends (the shared ctor collapses to one dispatch identity) —
-this needs the `ci_module.Type.Ctor` extra qualification layer described below,
-which was NOT built in this slice. Implementation companion to
+interpreted + compiled). **Narrowed residual gap (Task 6b, 2026-07-21; tracked
+separately):** when two colliding same-short-name types ALSO share a CONSTRUCTOR
+name (a "double collision"), this specific shape is now REJECTED at typecheck (a
+safe compile error) rather than silently misdispatching — `register_impl_shape`
+only relaxes coherence when the two colliding types' constructor NAME sets are
+disjoint (reject witness `reject/t82_impl_coherence_shared_ctor_double_collision`).
+Making these programs actually WORK still needs the `ci_module.Type.Ctor` extra
+qualification layer described below, which was NOT built in this slice. Implementation companion to
 `specs/plans/2026-07-17-fqn-type-ctor-identity.md` (the umbrella FQN overhaul)
 and `specs/plans/2026-07-17-interface-impl-coherence.md` (the coherence check
 itself). This doc resolves the specific slice the umbrella doc names as
