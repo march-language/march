@@ -2687,9 +2687,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_node_discovery.out
         (system "./native_node_discovery")))))
 
+; The two nodes' green threads write to stdout concurrently, so the LINE ORDER
+; of the 5 status lines is inherently non-deterministic (TCP/scheduler timing).
+; Each line is intact (println is atomic) and unique, so we canonicalize by
+; sorting both sides before diffing: order-tolerant, but still fails on any
+; missing line, wrong peer, or wrong live_peers count. The golden is stored
+; pre-sorted (LC_ALL=C).
+(rule
+ (target native_node_discovery.sorted.out)
+ (deps native_node_discovery.out)
+ (action
+  (with-stdout-to native_node_discovery.sorted.out
+   (system "LC_ALL=C sort native_node_discovery.out"))))
+
 (rule
  (alias runtest)
- (action (diff native/node_discovery.expected native_node_discovery.out)))
+ (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
 
 ; ── Compiler-emitted enroll/stub: auto-registration of __rpc_stub functions ──
 ; Demonstrates that the compiler populates the C remote registry at @main, so
