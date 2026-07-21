@@ -787,6 +787,7 @@ let setup_interpreter_ffi () =
 
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
+let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
@@ -1533,16 +1534,43 @@ let compile filename =
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   (* Parse *)
+  (* A hard parse failure (unlike a desugar/typecheck error) produces no
+     [module_ast] at all — [compile] exits right here, well before the
+     --emit-core-ast / --check-json branches further down ever run. Per the
+     Global Constraints ("if march produces a parse ... error before
+     typecheck is even reached, that's 'reject' too, with those
+     diagnostics"), --emit-core-ast must still emit its one JSON document
+     to stdout in this case, so it gets its own short-circuit here rather
+     than falling through to the plain-text-only exit. There is no AST to
+     serialize, so "module" is JSON null. *)
+  let emit_core_ast_parse_failure (diag : March_errors.Errors.diagnostic) =
+    if !emit_core_ast_file <> None then begin
+      let doc =
+        March_dump.Dump.json_obj [
+          ("format_version", "1");
+          ("verdict", March_dump.Dump.json_string "reject");
+          ("diagnostics",
+           March_dump.Dump.json_list [March_errors.Errors.render_diagnostic_json diag]);
+          ("module", "null");
+        ]
+      in
+      print_string doc
+    end
+  in
   let module_ast =
     try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
     with
     | March_errors.Errors.ParseError (msg, hint, _) ->
       Printf.eprintf "%s\n"
         (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+      emit_core_ast_parse_failure
+        (March_errors.Errors.parse_error_diagnostic ~filename ?hint ~msg lexbuf);
       exit 1
     | March_parser.Parser.Error ->
       Printf.eprintf "%s\n"
         (March_errors.Errors.render_parse_error ~src ~filename ~msg:"I got stuck here:" lexbuf);
+      emit_core_ast_parse_failure
+        (March_errors.Errors.parse_error_diagnostic ~filename ~msg:"I got stuck here:" lexbuf);
       exit 1
   in
   (* Display any declaration-level parse errors collected during recovery *)
@@ -1661,12 +1689,45 @@ let compile filename =
     let f = d.span.March_ast.Ast.file in
     f = filename || f = "" || f = "<unknown>" || List.mem f user_files
   in
+  (* Same accept/reject condition --check uses below (has_user_errors ||
+     has_parse_errors || has_resolve_errors || has_desugar_errors) — hoisted
+     here (rather than left at its original position further down) so
+     --emit-core-ast can reuse the identical binding for its "verdict"
+     without re-deriving the condition or running the human-readable
+     diagnostic-printing loop below (mirrors --check-json's short-circuit,
+     which also runs before that loop). *)
+  let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && is_user_file d
+    ) diags in
   if !check_json then begin
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
     ) diags;
     exit 0
+  end;
+  if !emit_core_ast_file <> None then begin
+    let verdict =
+      if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors
+      then "reject" else "accept"
+    in
+    let diagnostics_json =
+      diags
+      |> List.filter is_user_file
+      |> List.map March_errors.Errors.render_diagnostic_json
+      |> March_dump.Dump.json_list
+    in
+    let module_json = March_dump.Ast_json.module_to_json user_ast in
+    let doc =
+      March_dump.Dump.json_obj [
+        ("format_version", "1");
+        ("verdict", March_dump.Dump.json_string verdict);
+        ("diagnostics", diagnostics_json);
+        ("module", module_json);
+      ]
+    in
+    print_string doc;
+    exit (if verdict = "accept" then 0 else 1)
   end;
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then begin
@@ -1682,9 +1743,6 @@ let compile filename =
       end
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
-  let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
-      d.severity = March_errors.Errors.Error && is_user_file d
-    ) diags in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
   if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
@@ -3390,6 +3448,8 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
+     " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
@@ -3397,6 +3457,15 @@ let () =
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   March_eval.Eval.pmap_threshold_value := !pmap_threshold;
+  (* --emit-core-ast takes its target file as its own flag argument (not a
+     positional file), so route it into the normal [f] :: compile dispatch
+     below rather than falling through to the REPL branch. *)
+  (match !emit_core_ast_file with
+   | Some f when !files = [] -> files := [f]
+   | Some _ ->
+     Printf.eprintf "march: --emit-core-ast takes exactly one file (its own argument); do not also pass a positional file\n";
+     exit 1
+   | None -> ());
   match !files with
   | []  ->
     let runtime_so = ensure_runtime_so () in
