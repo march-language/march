@@ -6036,6 +6036,22 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
       not (List.exists (fun c -> List.mem c old_ctors) new_ctors)
     | _ -> false  (* can't prove disjoint → don't relax (conservative) *)
   in
+  (* Task 0 (constructor module-qualified identity plan) dev harness: a
+     TEMPORARY, opt-in-only bypass of the Task-6b ctor_sets_disjoint stopgap
+     above, letting later tasks in this plan compile/run double-collision
+     fixtures while the real ci_module.Type.Ctor-qualified ctor identity is
+     under development. Mirrors MARCH_DEV_RELAX_COHERENCE from the prior FQN
+     dispatch-identity plan's own Task 0 (fully removed once that plan's
+     Stage 3 landed). This plan's Task 6 removes both the stopgap and this
+     bypass together in one flag-day commit — never leave this env var
+     checked without also removing ctor_sets_disjoint's gate at the same
+     time. Default (unset) behavior is byte-identical to before this dev
+     harness existed. *)
+  let dev_relax_ctor_coherence =
+    match Sys.getenv_opt "MARCH_DEV_RELAX_CTOR_COHERENCE" with
+    | Some ("1" | "true") -> true
+    | _ -> false
+  in
   (* Declaring-module coherence relaxation (FQN dispatch, all stages landed):
      two same-short-name types declared in DIFFERENT modules are genuinely
      distinct, so each may implement the SAME interface without overlapping.
@@ -6069,7 +6085,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
              && not (modules_distinct m_old head_type_module
-                     && ctor_sets_disjoint m_old))
+                     && (ctor_sets_disjoint m_old || dev_relax_ctor_coherence)))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp
