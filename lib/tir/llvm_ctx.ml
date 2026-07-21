@@ -94,6 +94,13 @@ type ctx = {
   (* Tracks which ADT structural equality functions have been generated.
      Registered before body generation to handle recursive types (e.g. List). *)
   emitted_eq_fns : (string, unit) Hashtbl.t;
+  (* Tracks which generated runtime interface-dispatch functions
+     ([__march_ifdispatch$...]) have been emitted — a same-short-name
+     colliding type's general-interface method routes through one of these,
+     which switches on the callee's runtime ctor tag (Task 1's global tags)
+     and tail-calls the correct module-qualified impl (Task 3's symbols).
+     Sibling of [emitted_eq_fns]; see [Llvm_dispatch.ensure_dispatch_fn]. *)
+  emitted_dispatch_fns : (string, unit) Hashtbl.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
   (* Extern march_names declared `blocking` — dispatched on an OS thread. *)
@@ -223,6 +230,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
+  emitted_dispatch_fns = Hashtbl.create 8;
   extern_map = Hashtbl.create 8;
   blocking_externs = Hashtbl.create 4;
   raises_externs = Hashtbl.create 4;

@@ -121,8 +121,21 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
         (* Intersect all free variable names with known top-level function
            names — this covers both direct EApp calls and closure fn-ptr
            references stored in EAlloc args. *)
-        let refs = StringSet.inter (free_vars fd.Tir.fn_body) fn_names in
-        StringSet.iter (fun callee -> Queue.push callee queue) refs
+        let body_refs = free_vars fd.Tir.fn_body in
+        let refs = StringSet.inter body_refs fn_names in
+        StringSet.iter (fun callee -> Queue.push callee queue) refs;
+        (* Collision-dispatch sentinels ([Mono] → [Llvm_dispatch]) are not TIR
+           functions, so the intersection above drops them — but the
+           module-qualified impl symbols they route to at LLVM time ARE real
+           fn_defs that would otherwise look unreachable (nothing in the TIR
+           call graph names them). Follow the [Dispatch_registry] rows so those
+           impl bodies survive to link. Empty for any non-colliding program. *)
+        StringSet.iter (fun name ->
+          if Dispatch_registry.is_sentinel name then
+            match Dispatch_registry.lookup name with
+            | Some rows -> List.iter (fun (_, sym) -> Queue.push sym queue) rows
+            | None -> ())
+          body_refs
     end
   done;
   !visited

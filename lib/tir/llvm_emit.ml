@@ -141,6 +141,7 @@ type ctx = Llvm_ctx.ctx = {
   emitted_wraps : (string, unit) Hashtbl.t;
   extra_fns : Buffer.t;
   emitted_eq_fns : (string, unit) Hashtbl.t;
+  emitted_dispatch_fns : (string, unit) Hashtbl.t;
   extern_map : (string, string) Hashtbl.t;
   blocking_externs : (string, unit) Hashtbl.t;
   raises_externs : (string, unit) Hashtbl.t;
@@ -1787,6 +1788,49 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)
       && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
     emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
+
+  (* ── Colliding general-interface runtime dispatch ──────────────────── *)
+  (* Mono rewrote a call whose static (bare) argument type is declared by >=2
+     modules into a call to this sentinel; generate (once, memoized in
+     ctx.emitted_dispatch_fns) a function that switches on the callee's
+     runtime ctor tag and tail-calls the correct module-qualified impl —
+     lazily, exactly as [==] generates [ensure_adt_eq_fn].  The exact impl
+     symbols (with Mono's per-call specialization suffix) come from
+     [Dispatch_registry], keyed by this sentinel name. *)
+  | Tir.EApp (f, args) when Dispatch_registry.is_sentinel f.Tir.v_name ->
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    (* arg0 is the dispatched value; force to ptr so the Boxed-header tag load
+       is well-typed (Task 2 forces colliding types Boxed → this is a no-op in
+       practice). Remaining args forward verbatim. *)
+    let param_tys, arg_vals =
+      List.split (List.mapi (fun i (ty, v) ->
+          if i = 0 then ("ptr", coerce ctx ty v "ptr") else (ty, v)) arg_pairs) in
+    let rows = match Dispatch_registry.lookup f.Tir.v_name with
+      | Some r -> r | None -> [] in
+    (* Return type = the impls' actual return (they all share it); fall back to
+       the call-site annotation if the impl isn't registered. *)
+    let ret_tir = match rows with
+      | (_, sym) :: _ ->
+        (match Hashtbl.find_opt ctx.top_fn_ret_ty sym with
+         | Some t -> t | None -> fn_ret_tir f.Tir.v_ty)
+      | [] -> fn_ret_tir f.Tir.v_ty in
+    let ret_ty = llvm_ret_ty ret_tir in
+    (match Llvm_dispatch.ensure_dispatch_fn ctx ~fn_name:f.Tir.v_name
+             ~param_tys ~ret_ty ~rows with
+     | None ->
+       failwith (Printf.sprintf
+         "interface dispatch fn %s has no runtime-tag rows" f.Tir.v_name)
+     | Some fn_name ->
+       let args_str = String.concat ", "
+           (List.map2 (fun ty v -> ty ^ " " ^ v) param_tys arg_vals) in
+       if ret_ty = "void" then begin
+         emit ctx (Printf.sprintf "call void @%s(%s)" fn_name args_str);
+         ("i64", "0")
+       end else begin
+         let r = fresh ctx "ifd" in
+         emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fn_name args_str);
+         (ret_ty, r)
+       end)
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

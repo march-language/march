@@ -4551,6 +4551,104 @@ end
   Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
     (List.mem "Speak$Thing.speak" fn_names)
 
+(** Task 4: two same-short-name colliding types implementing one GENERAL
+    interface must, at a call site whose static (bare) argument type is
+    ambiguous, dispatch on the value's RUNTIME constructor tag — not
+    first-wins. The emitted IR must contain a generated dispatch function that
+    switches [i32] on the tag and tail-calls BOTH module-qualified impls
+    (Task 3's symbols), and BOTH impl bodies must survive DCE (they are
+    referenced only from the LLVM-level dispatch fn). Compiled through the full
+    native pipeline (Lower→Mono→Defun→Perceus→Dce→Llvm_emit); the fixture is
+    Stage-1-rejected by the coherence gate, so MARCH_DEV_RELAX_COHERENCE
+    bypasses it. This is the correctness proof reject/t82 stands in for. *)
+let test_colliding_general_iface_runtime_dispatch () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do
+    println(speak(NA.TA))
+    println(speak(NB.TB))
+  end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
+  let ir =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         let tir = March_tir.Lower.lower_module ~type_map m in
+         let iface_methods = March_tir.Lower.get_iface_methods () in
+         let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+         let tir = March_tir.Defun.defunctionalize tir in
+         let tir = March_tir.Perceus.perceus tir in
+         let tir = March_tir.Dce.prune_unreachable tir in
+         March_tir.Llvm_emit.emit_module tir)
+  in
+  Alcotest.(check bool) "dispatch fn generated" true
+    (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
+  Alcotest.(check bool) "switches on runtime tag" true
+    (ir_contains ir "switch i32");
+  (* Both module-qualified impls are tail-called from the switch (specialized
+     name carries Mono's "$Thing" suffix). *)
+  Alcotest.(check bool) "tail-calls NA impl" true
+    (ir_contains ir "tail call ptr @Speak$NA.Thing.speak");
+  Alcotest.(check bool) "tail-calls NB impl" true
+    (ir_contains ir "tail call ptr @Speak$NB.Thing.speak");
+  (* Both impl bodies survive DCE (reachable only via the dispatch fn). *)
+  Alcotest.(check bool) "NA impl body defined" true
+    (ir_contains ir "define ptr @Speak$NA.Thing.speak");
+  Alcotest.(check bool) "NB impl body defined" true
+    (ir_contains ir "define ptr @Speak$NB.Thing.speak")
+
+(** Byte-identity guard (Task 4): a NON-colliding program must never reach the
+    dispatch-fn path — no [__march_ifdispatch] symbol may appear in its IR. *)
+let test_noncolliding_no_dispatch_fn () =
+  let src = {|
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  type Dog = Dog
+  type Cat = Cat
+  impl Speak(Dog) do
+    fn speak(_self) do "woof" end
+  end
+  impl Speak(Cat) do
+    fn speak(_self) do "meow" end
+  end
+  fn main() do
+    println(speak(Dog))
+    println(speak(Cat))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "no dispatch fn for distinct-name types" false
+    (ir_contains ir "__march_ifdispatch")
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -8959,6 +9057,12 @@ let codegen_suites =
           test_colliding_impls_get_distinct_symbols;
         Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
           test_noncolliding_impl_symbol_stays_bare;
+      ]);
+      ("dispatch: colliding general-iface runtime tag switch", [
+        Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick
+          test_colliding_general_iface_runtime_dispatch;
+        Alcotest.test_case "non-colliding program emits no dispatch fn" `Quick
+          test_noncolliding_no_dispatch_fn;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
