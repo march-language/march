@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- An inline lambda passed directly as a call argument (e.g. `Dom.on_frame(fn _
+  -> ...)`) failed to parse if its body had a plain statement (not a `let`
+  binding) immediately followed by another expression — e.g. a function call
+  followed by an `if`/`else` — even though the identical body worked fine as a
+  named function or a lambda wrapped in `do...end`. Symptom: `I got stuck here`
+  at the following token. Inline lambda call arguments now accept bare
+  statements before the final expression, matching `do...end` block bodies.
 - A self-tail-recursive function forwarding a freshly-built value as its own
   next argument (e.g. an accumulator built via `String.join`/`String.split`)
   could silently corrupt that value in compiled programs — freed one
