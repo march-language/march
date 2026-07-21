@@ -283,6 +283,34 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, `string_to_float` compiled-only SIGSEGV fix)
+
+**`string_to_float` / `String.to_float` no longer segfaults compiled.**
+Found auditing `docs/cookbook/strings.md`: extracting the `Float` payload from
+`string_to_float`'s `Option(Float)` result and using it (e.g.
+`match string_to_float(s) do Some(f) -> float_to_string(f) ... end`) crashed
+(exit 139) only in compiled mode — fine interpreted. `Option(Float)` is
+correctly classified `Boxed` (`lib/tir/repr.ml`'s `niche_payload_ok` already
+excludes `TFloat` — 0.0 would alias the niche `None=0`), so the classification
+side was never the bug. The bug was in the hand-written runtime C:
+`march_string_to_float` (`runtime/march_runtime.c`) wrote the raw IEEE-754
+double directly into the `Some` cell's payload slot, but the LLVM codegen's
+generic Boxed-ADT ctor convention treats every ctor field slot as
+pointer-width and, for a `Float` field, loads it as `ptr` then calls
+`march_unbox_float(ptr)` — the same boxed-float convention already used
+correctly for `List(Float)` (`native_float_arr_to_list`/`_from_list`, the
+earlier float-boxing fix). `march_unbox_float` then dereferenced the float's
+own bit pattern as a heap pointer. Fix: box the payload with
+`march_alloc_float(f)` and store the pointer, matching the established
+convention. Verified `Some`/`None`/`0.0` (the exact aliasing case boxing
+exists to prevent)/negative floats, plus the real `String.to_float` stdlib
+path (used by `stdlib/toml.march`'s float parsing); full `dune runtest` green,
+zero regressions. New regression coverage:
+`test/native/string_to_float_option.march` (compiled golden-diff test) — the
+pre-existing `test_string_to_float` in `test/test_codegen.ml` only exercised
+the interpreter (`eval_with_string`), so this compiled-only representation
+bug had no coverage before. Details: `specs/todos.md` "Recently fixed".
+
 ## Current State (as of 2026-07-21, FQN dispatch-identity Stages 2-3 — native + interpreter collision-conditional dispatch)
 
 **Same-short-name types declared in different modules may now each implement

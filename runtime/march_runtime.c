@@ -2782,12 +2782,20 @@ void *march_string_to_float(void *s) {
     if (end == str->data || *end != '\0') {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
-    /* Some(f): tag=1, one double field at offset 16. */
+    /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float
+     * box — NOT the raw double. The compiler's generic Boxed-ADT ctor
+     * convention treats every ctor field slot as pointer-width and, for a
+     * Float field, loads it as `ptr` then calls march_unbox_float(ptr) to
+     * recover the double (see native_float_arr_to_list's identical
+     * float-boxing convention above and the compiled `List(Float)` fix this
+     * mirrors). Storing the raw double bits here instead made
+     * march_unbox_float dereference the float's own bit pattern as a heap
+     * pointer — SIGSEGV. */
     void *some = march_alloc(16 + 8);
     int32_t *tp = (int32_t *)((char *)some + 8);
     tp[0] = 1;
-    double *fp = (double *)((char *)some + 16);
-    fp[0] = f;
+    void **fp = (void **)((char *)some + 16);
+    fp[0] = march_alloc_float(f);
     return some;
 }
 

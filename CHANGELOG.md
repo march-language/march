@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
   last regardless of the value's actual type, and native code could miscompile
   via colliding constructor tags or value representation. Built-in interfaces
   (`Eq`, `Ord`, `Show`, `Hash`) were already correct and are unaffected. (#57)
+- `string_to_float` and `String.to_float` crashed (segfault) in compiled
+  programs whenever the parsed `Float` was actually used — e.g.
+  `match string_to_float(s) do Some(f) -> ... end`. Fine in the interpreter;
+  native code stored the parsed value in a representation the rest of the
+  compiler didn't expect. Affects any compiled program parsing floats from
+  strings, including `stdlib/toml.march`'s float handling.
 
 ### Documentation
 
