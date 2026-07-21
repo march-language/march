@@ -543,6 +543,28 @@
  (modules test_ast_json)
  (libraries march_lexer march_parser march_ast march_desugar march_dump alcotest))
 
+; ── `--emit-core-ast` golden test (emit-core-ast-a0 Task 3) ───────────────
+; Subprocess-based (models test_oracle.ml's idiom): invokes the REAL built
+; `march` binary's `--emit-core-ast` CLI flag against 3 corpus files from
+; specs/lang/types/{accept,reject}/ and diffs stdout byte-for-byte against
+; fixtures checked in under emit_core_ast/fixtures/. See
+; test_emit_core_ast.ml's header comment for which 3 files and why, and the
+; fixture-regeneration workflow. Depends on the real specs/lang/types source
+; tree (same dep the types-check alias above uses) so the corpus .march
+; files are present in the sandbox this rule executes in.
+(executable
+ (name test_emit_core_ast)
+ (modules test_emit_core_ast)
+ (libraries unix alcotest))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree emit_core_ast)
+       (source_tree %{project_root}/specs/lang/types))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run %{exe:test_emit_core_ast.exe}))))
+
 (executable
  (name debug_fmt)
  (modules debug_fmt)
