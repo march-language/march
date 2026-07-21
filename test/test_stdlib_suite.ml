@@ -11217,6 +11217,58 @@ let test_compiled_vault_scalar_roundtrip () =
     Alcotest.(check int)
       "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
 
+(* Regression: march_vault_update SIGSEGV'd (exit 139) when compiled — no
+   compiled test exercised Vault.update before this, only Vault.set/get (see
+   test_compiled_vault_scalar_roundtrip above).  Root cause was two stacked
+   bugs in march_vault_update (runtime/march_extras.c):
+     1. march_vault_get returns a niche-encoded Option(ptr) (None=NULL,
+        Some(v)=v itself — no boxed tag/payload struct), but vault_update
+        read a tag word at cur+8 and a payload at cur+16 as if it were a
+        boxed Option, dereferencing past the end of a scalar's allocation.
+     2. The closure's own apply-fn ABI takes its parameter in *native*
+        (untagged) representation while Vault stores values in *uniform*
+        (tagged-scalar-or-raw-pointer) representation — so a tagged Int
+        needs an untag before being handed to the closure (mirrors
+        rec_field_norm_uniform's handling of generic record fields), while
+        a heap pointer (e.g. String) passes through unchanged.
+   Exercises both an Int (tagged, needs untag) and a String (heap pointer,
+   passes through unchanged) update, plus a named top-level fn (not just an
+   inline lambda) since both use the same closure-invocation path. *)
+let test_compiled_vault_update () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_vaultupdate" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "u.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod VaultUpdate do\n\
+    \  fn inc(n) do\n\
+    \    n + 1\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let t = Vault.new(\"vu_test\")\n\
+    \    Vault.set(t, \"n\", 1)\n\
+    \    Vault.update(t, \"n\", fn n -> n + 1)\n\
+    \    Vault.update(t, \"n\", inc)\n\
+    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+    \    Vault.set(t, \"s\", \"ab\")\n\
+    \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
+    \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
+    \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "ubin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Vault.update applies fn correctly for Int and String, no SIGSEGV" 0 run_rc
+
 (* Regression: march_string_to_int niche-tags its strtoll result as (n<<1)|1
    with no range check.  For inputs outside March's 63-bit range (>= 2^62, or
    beyond int64 where strtoll clamps to LLONG_MAX) the shift overflowed the sign
@@ -12458,6 +12510,8 @@ let stdlib_suites =
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Slow
           test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled)" `Slow
+          test_compiled_vault_update;
         Alcotest.test_case "string_to_int out-of-range returns None (niche tag no overflow)" `Slow
           test_compiled_string_to_int_overflow_is_none;
         Alcotest.test_case "aliased owned arg f(x,x) does not double-free (compiled)" `Slow
