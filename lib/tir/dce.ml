@@ -121,8 +121,21 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
         (* Intersect all free variable names with known top-level function
            names — this covers both direct EApp calls and closure fn-ptr
            references stored in EAlloc args. *)
-        let refs = StringSet.inter (free_vars fd.Tir.fn_body) fn_names in
-        StringSet.iter (fun callee -> Queue.push callee queue) refs
+        let body_refs = free_vars fd.Tir.fn_body in
+        let refs = StringSet.inter body_refs fn_names in
+        StringSet.iter (fun callee -> Queue.push callee queue) refs;
+        (* Collision-dispatch sentinels ([Mono] → [Llvm_dispatch]) are not TIR
+           functions, so the intersection above drops them — but the
+           module-qualified impl symbols they route to at LLVM time ARE real
+           fn_defs that would otherwise look unreachable (nothing in the TIR
+           call graph names them). Follow the [Dispatch_registry] rows so those
+           impl bodies survive to link. Empty for any non-colliding program. *)
+        StringSet.iter (fun name ->
+          if Dispatch_registry.is_sentinel name then
+            match Dispatch_registry.lookup name with
+            | Some rows -> List.iter (fun (_, sym) -> Queue.push sym queue) rows
+            | None -> ())
+          body_refs
     end
   done;
   !visited
@@ -148,6 +161,20 @@ let rec dce_expr ~impure_fns ~changed : Tir.expr -> Tir.expr = function
   | Tir.ESeq (e1, e2) -> Tir.ESeq (dce_expr ~impure_fns ~changed e1, dce_expr ~impure_fns ~changed e2)
   | other -> other
 
+(** Remove top-level functions unreachable from the entry points (main /
+    tm_exports / tm_tests / setup / migrate stubs).  This is a LINKABILITY
+    requirement, not an optimization: the injected prelude/http stack references
+    externs (e.g. [_http_fetch]) that are not always linked, so an unreachable
+    function that mentions one produces "undefined symbols" at link time.  It
+    must therefore run before LLVM emit EVEN when the optimizer is disabled
+    (--no-opt).  Idempotent: filtering an already-pruned module is a no-op, so
+    it is safe to call both here and (transitively via [run]) inside [Opt.run]. *)
+let prune_unreachable (m : Tir.tir_module) : Tir.tir_module =
+  let reachable = reachable_fns m in
+  let fns = List.filter
+      (fun fd -> StringSet.mem fd.Tir.fn_name reachable) m.Tir.tm_fns in
+  { m with Tir.tm_fns = fns }
+
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   (* Step 1: remove dead let bindings within function bodies.
      Compute the transitive set of impure top-level functions first so we never
@@ -159,9 +186,6 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   ) m.Tir.tm_fns in
   (* Step 2: remove unreachable top-level functions *)
   let m1 = { m with Tir.tm_fns = fns' } in
-  let reachable = reachable_fns m1 in
-  let fns'' = List.filter (fun fd ->
-    if StringSet.mem fd.Tir.fn_name reachable then true
-    else begin changed := true; false end
-  ) m1.Tir.tm_fns in
-  { m1 with Tir.tm_fns = fns'' }
+  let m2 = prune_unreachable m1 in
+  if List.compare_lengths m2.Tir.tm_fns m1.Tir.tm_fns < 0 then changed := true;
+  m2

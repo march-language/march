@@ -60,8 +60,9 @@ public_key = "base64encodedkey="  # ed25519 public key (see below)
 **Generating a key pair:**
 
 ```sh
-forge keygen --output ~/.march/deploy_key
-# Writes: ~/.march/deploy_key (secret) and ~/.march/deploy_key.pub (public)
+forge hot-reload keygen
+# Writes the secret key to ~/.march/ed25519_secret.key and prints the
+# base64 public key to paste into forge.toml's [hot-reload] section.
 ```
 
 Put the public key in `forge.toml` and embed the secret key in the server binary at build time (or pass it as an environment variable — see your server's startup flags).
@@ -450,11 +451,11 @@ Invariants can only reference the actor's own state fields. External function ca
 ```toml
 [hot-reload]
 ssh_host   = "my-server"        # required: SSH host (alias or hostname)
-socket     = "/tmp/app.sock"    # required: Unix socket path on the remote
-public_key = "base64key="       # required: ed25519 public key (base64)
+socket     = "/tmp/app.sock"    # optional: Unix socket path on the remote (default: /tmp/march_hcr.sock)
+public_key = "base64key="       # ed25519 public key (base64), embedded for signature verification
 ```
 
-All three fields are required. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
+Only `ssh_host` is strictly required — `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
 
 ---
 

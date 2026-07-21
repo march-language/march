@@ -123,9 +123,11 @@ actor Counter do
   end
 end
 
-let c = spawn(Counter)
-send(c, Increment(5))
-send(c, Probe("after increment"))
+fn main() do
+  let c = spawn(Counter)
+  send(c, Increment(5))
+  send(c, Probe("after increment"))
+end
 ```
 
 ---
@@ -157,6 +159,7 @@ fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
     let left  = task_spawn(fn x -> par_sum(lo, mid, threshold))
     let right = task_spawn(fn x -> par_sum(mid + 1, hi, threshold))
     task_await_unwrap(left) + task_await_unwrap(right)
+  end
   end
 end
 ```
@@ -209,6 +212,10 @@ Actor monitoring and `Down` messages. Shows how to watch for actor death, handle
 Resource cleanup with user-defined `Drop` implementations. Resources registered via `own()` are released in reverse acquisition order when their actor crashes — the RAII pattern for actors.
 
 ```march
+interface Drop(a) do
+  fn drop : a -> Unit
+end
+
 impl Drop(DbConnection) do
   fn drop(conn) do
     match conn do
@@ -217,10 +224,12 @@ impl Drop(DbConnection) do
   end
 end
 
--- Register with an actor — dropped automatically on crash
-own(pid, DbConnection(100))
-own(pid, FileHandle("/var/log/worker.log"))
--- On crash: FileHandle dropped first, then DbConnection
+fn cleanup_demo(pid) do
+  -- Register with an actor — dropped automatically on crash
+  own(pid, DbConnection(100))
+  own(pid, FileHandle("/var/log/worker.log"))
+  -- On crash: FileHandle dropped first, then DbConnection
+end
 ```
 
 ---
@@ -258,9 +267,11 @@ fn print_chunk(chunk) do
   print(chunk)
 end
 
-match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
-Ok((status, _, _)) -> print("Status: " ++ int_to_string(status))
-Err(_)             -> print("Error!")
+fn stream_demo(client) do
+  match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
+  Ok((status, _, _)) -> print("Status: " ++ int_to_string(status))
+  Err(_)             -> print("Error!")
+  end
 end
 ```
 
@@ -289,12 +300,13 @@ An actor-backed HTTP API. A `Counter` actor holds state; HTTP routes `GET /count
 WebSocket server on port 9877. Handles `TextFrame`, `BinaryFrame`, `Ping`/`Pong`, and `Close` in a recursive loop.
 
 ```march
-fn handle_frame(conn, frame) do
+fn handle_frame(socket, frame) do
   match frame do
-  TextFrame(msg)   -> WsServer.send_text(conn, "echo: " ++ msg)
-  BinaryFrame(b)   -> WsServer.send_binary(conn, b)
-  Ping(data)       -> WsServer.send_pong(conn, data)
-  Close            -> WsServer.close(conn)
+  TextFrame(msg)      -> WebSocket.send_frame(socket, TextFrame("echo: " ++ msg))
+  BinaryFrame(data)   -> WebSocket.send_frame(socket, BinaryFrame(data))
+  Ping                -> WebSocket.send_frame(socket, Pong)
+  Pong                -> ()
+  Close(code, reason) -> WebSocket.close(socket, code, reason)
   end
 end
 ```
@@ -308,18 +320,22 @@ end
 Descriptive and bivariate statistics using the `Stats` module on plain `List(Float)` values.
 
 ```march
--- Weekly temperatures
-let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
+fn stats_demo() do
+  -- Weekly temperatures
+  let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
 
-println("mean:    " ++ float_to_string(Stats.mean(temps)))
-println("median:  " ++ float_to_string(Stats.median(temps)))
-println("std_dev: " ++ float_to_string(Stats.std_dev(temps)))
-println("p25:     " ++ float_to_string(Stats.percentile(temps, 25.0)))
-println("p75:     " ++ float_to_string(Stats.percentile(temps, 75.0)))
+  println("mean:    " ++ float_to_string(Stats.mean(temps)))
+  println("median:  " ++ float_to_string(Stats.median(temps)))
+  println("std_dev: " ++ float_to_string(Stats.std_dev(temps)))
+  println("p25:     " ++ float_to_string(Stats.percentile(temps, 25.0)))
+  println("p75:     " ++ float_to_string(Stats.percentile(temps, 75.0)))
 
--- Linear regression: hours studied → exam score
-let (slope, intercept) = Stats.linear_regression(hours, scores)
-let predicted = slope *. 9.0 +. intercept
+  -- Linear regression: hours studied → exam score
+  let hours  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let scores = [45.0, 52.0, 60.0, 67.0, 74.0, 80.0, 86.0, 91.0]
+  let (slope, intercept) = Stats.linear_regression(hours, scores)
+  let predicted = slope *. 9.0 +. intercept
+end
 ```
 
 Also shows `covariance`, `correlation`, `mode`, and the safe `Result`-returning variants (`mean_safe`, `std_dev_safe`).
@@ -332,11 +348,11 @@ Tabular data pipelines with the `DataFrame` module. Uses an employee dataset thr
 
 ```march
 -- Construct from typed columns
-let df = DataFrame.from_columns([
+let df = DataFrame.make_df([
   StrCol("name",   typed_array_from_list(["Alice", "Bob", "Charlie"])),
   StrCol("dept",   typed_array_from_list(["Eng", "Eng", "Sales"])),
-  IntCol("salary", typed_array_from_list([95000, 88000, 72000])),
-  FloatCol("rating", typed_array_from_list([4.5, 3.9, 4.2]))
+  IntCol("salary", native_int_arr_from_list([95000, 88000, 72000])),
+  FloatCol("rating", native_float_arr_from_list([4.5, 3.9, 4.2]))
 ])
 
 -- LazyFrame: filter, sort, derived column, collect
@@ -375,11 +391,16 @@ Four CSV parsing patterns from the stdlib: streaming rows, eager read, header-ba
 Three file reading patterns: full file into a string, lines into a list, and lazy line streaming with `File.with_lines` and `Seq.take`.
 
 ```march
--- Lazy: only reads lines as needed
-File.with_lines("data.txt", fn lines ->
-  let first10 = Seq.take(lines, 10) |> Seq.to_list()
-  List.each(first10, println)
-)
+fn main() do
+  -- Lazy: only reads lines as needed (returns Result, since the file may not exist)
+  match File.with_lines("data.txt", fn lines ->
+    let first10 = Seq.take(lines, 10) |> Seq.to_list()
+    List.each(first10, println)
+  ) do
+  Ok(_)  -> ()
+  Err(e) -> println("error: " ++ e)
+  end
+end
 ```
 
 ---

@@ -849,7 +849,16 @@ let bundle_fn ~root ~fn_name ?record_name ~dry_run () : (outcome, string) result
                 let edits = ref extra in
                 iter_app_exprs (fun callee args _sp ->
                     let target = match callee with
-                      | Ast.EVar n -> n.Ast.txt = fn_name
+                      | Ast.EVar n ->
+                        (* Bare `connect(...)` OR module-qualified `A.connect(...)`
+                           when it folds to a single dotted EVar — match on the
+                           last dotted segment so cross-file qualified call sites
+                           are rewritten too. *)
+                        n.Ast.txt = fn_name
+                        || (let suf = "." ^ fn_name in
+                            let nt = n.Ast.txt and sl = String.length ("." ^ fn_name) in
+                            String.length nt >= sl
+                            && String.sub nt (String.length nt - sl) sl = suf)
                       | Ast.EField (_, fld, _) -> fld.Ast.txt = fn_name
                       | _ -> false in
                     if target && List.length args = nparams then begin
@@ -870,8 +879,12 @@ let bundle_fn ~root ~fn_name ?record_name ~dry_run () : (outcome, string) result
                           let arg_texts = split_top_commas inner in
                           if List.length arg_texts = nparams then begin
                             let fields =
+                              (* March record literals use `field: value` (colon),
+                                 like `{ count: 0 }` — NOT `=`.  A `=` literal does
+                                 not parse, so the rewritten call site would fail
+                                 re-parse and the file would be silently skipped. *)
                               String.concat ", "
-                                (List.map2 (fun (pn, _) at -> Printf.sprintf "%s = %s" pn at)
+                                (List.map2 (fun (pn, _) at -> Printf.sprintf "%s: %s" pn at)
                                    params arg_texts) in
                             edits := { e_start = !popen + 1; e_stop = !pclose;
                                        e_repl = Printf.sprintf "{ %s }" fields } :: !edits

@@ -133,6 +133,7 @@ type ctx = Llvm_ctx.ctx = {
   fast_math : bool;
   pmap_threshold : int;
   type_defs : Tir.type_def list;
+  collision_set : (string, string list) Hashtbl.t;
   poly_ctors  : (string * string, Tir.ty list) Hashtbl.t;
   type_params : (string, string list) Hashtbl.t;
   var_slot  : (string, string) Hashtbl.t;
@@ -140,6 +141,7 @@ type ctx = Llvm_ctx.ctx = {
   emitted_wraps : (string, unit) Hashtbl.t;
   extra_fns : Buffer.t;
   emitted_eq_fns : (string, unit) Hashtbl.t;
+  emitted_dispatch_fns : (string, unit) Hashtbl.t;
   extern_map : (string, string) Hashtbl.t;
   blocking_externs : (string, unit) Hashtbl.t;
   raises_externs : (string, unit) Hashtbl.t;
@@ -382,16 +384,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ret_tir in
-      (* Use concrete param types so the wrapper signature matches ECallPtr's
-         call-site type annotation (which uses llvm_ty for each param). *)
+      let _ = nparams in
+      (* clo_wrap_define builds the wrapper's uniform-ptr ABI signature and the
+         concrete forwarding call (boxing/unboxing Float params + return). *)
       let param_tys = List.map llvm_ty ps_tirs in
-      let all_params = "ptr" :: param_tys in  (* clo + original params *)
-      let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-      let all_arg_decls = "%_clo" :: arg_names in
-      let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
-      let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
       Buffer.add_string ctx.extra_fns
-        (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+        (clo_wrap_define wrap_name param_tys target_ret fn_name)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in
@@ -502,17 +500,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        let wrap_name = fn_name ^ "$clo_wrap" in
        if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
          Hashtbl.add ctx.emitted_wraps wrap_name ();
-         let nparams     = List.length ps in
          let ret_tir     = fn_ret_tir v.Tir.v_ty in
          let target_ret  = llvm_ret_ty ret_tir in
          let param_tys   = List.map llvm_ty ps in
-         let all_params  = "ptr" :: param_tys in
-         let arg_names   = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-         let all_decls   = "%_clo" :: arg_names in
-         let decl_str    = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_decls) in
-         let call_args   = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
          Buffer.add_string ctx.extra_fns
-           (clo_wrap_define wrap_name decl_str target_ret fn_name call_args)
+           (clo_wrap_define wrap_name param_tys target_ret fn_name)
        end;
        let hp  = fresh ctx "cwrap" in
        emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
@@ -1073,8 +1065,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           let va_f = coerce ctx ty_a va "double" in
           let vb_f = coerce ctx ty_b vb "double" in
           emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
+        end else if ty_a = "ptr" || ty_b = "ptr" then begin
+          (* Erased operand(s): the static type is TVar, so the runtime value may
+             be a tagged int, a boxed Float (tag -3), or a string.  A raw
+             ptr→i64 + icmp mis-orders boxed floats (float-boxing, Stage 2 —
+             and, pre-boxing, negative-float bits: mechanism 2).  Dispatch on the
+             runtime tag via march_poly_compare (returns -1/0/1) and apply the
+             requested ordering vs 0.  A concrete i64 operand coerces to a tagged
+             immediate ptr, which march_poly_compare's odd→int arm handles. *)
+          let va_p = coerce ctx ty_a va "ptr" in
+          let vb_p = coerce ctx ty_b vb "ptr" in
+          let c = fresh ctx "pcmp" in
+          emit ctx (Printf.sprintf "%s = call i64 @march_poly_compare(ptr %s, ptr %s)" c va_p vb_p);
+          emit ctx (Printf.sprintf "%s = icmp %s i64 %s, 0" cmp (int_cmp_pred f.Tir.v_name) c)
         end else begin
-          (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
+          (* Both concrete i64: fast integer compare. *)
           let va' = coerce ctx ty_a va "i64" in
           let vb' = coerce ctx ty_b vb "i64" in
           emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
@@ -1187,7 +1192,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      where the runtime expects a tagged ptr; the runtime then treats `42` as a
      heap address and segfaults.  Coerce the argument to a tagged `ptr` first
      (i64→ptr applies the `(n<<1)|1` immediate tag) so the runtime's int path
-     fires correctly. *)
+     fires correctly.
+
+     Html.Safe special case: `Html.Safe(s)` (from `Html.raw`) is a single-ctor
+     ADT with one field, so `Repr.repr_of_ty` puts it on the Boxed path (its
+     lone ctor's tag is 0). IOList's `Empty` ctor is ALSO tag 0 — every Boxed
+     ADT's constructor tags are numbered independently starting at 0, so the
+     runtime has no way to tell a bare tag-0 heap cell apart from the other.
+     `march_html_auto_escape`'s fallback ("Constructor with tag >= 0: treat as
+     IOList") reads a `Safe("...")` value as an empty IOList and silently
+     drops the wrapped string instead of inserting it verbatim. Resolve this
+     here, while the argument's static TIR type is still known (mono has
+     already run): for a statically-known `Html.Safe` atom (and only when
+     "Safe" is not a same-short-name collision with some other module's type
+     — that ambiguous case must fall through to the generic runtime path
+     below), load the wrapped String directly out of the Boxed cell's field 0
+     (offset +16, the standard Boxed-ADT single-field layout) and pass it
+     through unescaped — verbatim insertion is exactly `Html.Safe`'s
+     contract, so no runtime call is needed at all. *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape"
+                            && (match atom_tir_ty a with
+                                | Tir.TCon ("Safe", _) ->
+                                  not (Collision_set.is_colliding ctx.collision_set "Safe")
+                                | _ -> false) ->
+    let vp = emit_atom_as ctx "ptr" a in
+    let fp = fresh ctx "safe_fp" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp vp);
+    let r = fresh ctx "safe_s" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
+    ("ptr", r)
+
   | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
     let v = emit_atom_as ctx "ptr" a in
     let r = fresh ctx "hae" in
@@ -1226,6 +1260,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
                 result clo_ptr);
     ("ptr", result)
+
+  (* Signal.watch (stdlib/signal.march): register/remove a deferred OS-signal
+     watcher, or raise a signal to self.  The `code` is an Int (untag to raw
+     i64); the watcher closure is passed OWNED (borrow.ml marks the arg
+     consuming) so the runtime keeps its reference across drains. *)
+  | Tir.EApp (f, [code_atom; clo_atom]) when f.Tir.v_name = "signal_watch" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    let (clo_ty, clo_v) = emit_atom ctx clo_atom in
+    let clo_ptr = coerce ctx clo_ty clo_v "ptr" in
+    emit ctx (Printf.sprintf "call void @march_signal_watch(i64 %s, ptr %s)"
+                code_i64 clo_ptr);
+    ("ptr", "null")
+  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_unwatch" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    emit ctx (Printf.sprintf "call void @march_signal_unwatch(i64 %s)" code_i64);
+    ("ptr", "null")
+  | Tir.EApp (f, [code_atom]) when f.Tir.v_name = "signal_raise_self" ->
+    let (code_ty, code_v) = emit_atom ctx code_atom in
+    let code_i64 = coerce ctx code_ty code_v "i64" in
+    emit ctx (Printf.sprintf "call void @march_signal_raise_self(i64 %s)" code_i64);
+    ("ptr", "null")
 
   (* task_await_unwrap(task_ptr) → spin-wait then untag result directly *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
@@ -1797,12 +1854,54 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
     emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
 
+  (* ── Colliding general-interface runtime dispatch ──────────────────── *)
+  (* Mono rewrote a call whose static (bare) argument type is declared by >=2
+     modules into a call to this sentinel; generate (once, memoized in
+     ctx.emitted_dispatch_fns) a function that switches on the callee's
+     runtime ctor tag and tail-calls the correct module-qualified impl —
+     lazily, exactly as [==] generates [ensure_adt_eq_fn].  The exact impl
+     symbols (with Mono's per-call specialization suffix) come from
+     [Dispatch_registry], keyed by this sentinel name. *)
+  | Tir.EApp (f, args) when Dispatch_registry.is_sentinel f.Tir.v_name ->
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    (* arg0 is the dispatched value; force to ptr so the Boxed-header tag load
+       is well-typed (Task 2 forces colliding types Boxed → this is a no-op in
+       practice). Remaining args forward verbatim. *)
+    let param_tys, arg_vals =
+      List.split (List.mapi (fun i (ty, v) ->
+          if i = 0 then ("ptr", coerce ctx ty v "ptr") else (ty, v)) arg_pairs) in
+    let rows = match Dispatch_registry.lookup f.Tir.v_name with
+      | Some r -> r | None -> [] in
+    (* Return type = the impls' actual return (they all share it); fall back to
+       the call-site annotation if the impl isn't registered. *)
+    let ret_tir = match rows with
+      | (_, sym) :: _ ->
+        (match Hashtbl.find_opt ctx.top_fn_ret_ty sym with
+         | Some t -> t | None -> fn_ret_tir f.Tir.v_ty)
+      | [] -> fn_ret_tir f.Tir.v_ty in
+    let ret_ty = llvm_ret_ty ret_tir in
+    (match Llvm_dispatch.ensure_dispatch_fn ctx ~fn_name:f.Tir.v_name
+             ~param_tys ~ret_ty ~rows with
+     | None ->
+       failwith (Printf.sprintf
+         "interface dispatch fn %s has no runtime-tag rows" f.Tir.v_name)
+     | Some fn_name ->
+       let args_str = String.concat ", "
+           (List.map2 (fun ty v -> ty ^ " " ^ v) param_tys arg_vals) in
+       if ret_ty = "void" then begin
+         emit ctx (Printf.sprintf "call void @%s(%s)" fn_name args_str);
+         ("i64", "0")
+       end else begin
+         let r = fresh ctx "ifd" in
+         emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fn_name args_str);
+         (ret_ty, r)
+       end)
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     (* Emit each arg once, collecting both type and value strings. *)
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
     let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
-    let args_str  = String.concat ", " arg_strs in
     (* Resolve unqualified cross-module references: lower.ml may emit a
        function reference without its module prefix (e.g. "base64_encode"
        for "Crypto.base64_encode").  Look up the qualified name first.
@@ -1814,6 +1913,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         | Some q -> q
         | None -> f.Tir.v_name
     in
+    (* Boundary B: a direct call to an apply fn (known_call rewrote a
+       non-escaping ECallPtr into EApp(apply_fn, ...)) must pass every scalar
+       arg through the uniform ptr closure ABI — tag Int/Bool via (n<<1)|1,
+       box Float via march_alloc_float — because the apply fn's params are now
+       `ptr` (Task 4).  Ordinary top-level direct calls keep their concrete
+       ABI, so guard the remap on is_apply_fn. *)
+    let arg_strs =
+      if is_apply_fn resolved_name then
+        List.map (fun (ty, v) ->
+          if ty = "i64" || ty = "double" then
+            let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
+          else ty ^ " " ^ v) arg_pairs
+      else arg_strs in
+    let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
       | None -> mangle_extern resolved_name in
@@ -1859,7 +1972,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       || builtin_ret_ty f.Tir.v_name <> None
       || (match f.Tir.v_name with
           | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | "print" | "print_stderr" | "io_read_line" | "read_line"
+          | "io_read_byte" | "read_byte" -> true
           | _ -> false)
     in
     (* Unresolved bare interface-method guard — see
@@ -1939,20 +2053,63 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       end else
         emit ctx (Printf.sprintf
           "%s = call ptr @march_dispatch_enter(i32 %d, ptr %s)" fp name_id vslot);
-      let result =
+      (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
+         slot has not been published yet (or the publish is not yet visible to
+         this thread) — e.g. an HTTP worker thread serving a request during the
+         first few seconds while the dispatch table is still being filled in.
+         In that window fall back to a DIRECT static call to the baseline symbol
+         (the exact fn we would have published), rather than jumping through a
+         NULL fn_ptr.  No leave is issued on this path: enter did not pin a
+         version when it returned NULL. *)
+      let is_null = fresh ctx "hrnull" in
+      emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" is_null fp);
+      let blk_direct = fresh_block ctx "hr_direct" in
+      let blk_disp   = fresh_block ctx "hr_disp" in
+      let blk_cont   = fresh_block ctx "hr_cont" in
+      emit ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                  is_null blk_direct blk_disp);
+      (* Direct (baseline) path — table not ready. *)
+      emit_label ctx blk_direct;
+      let direct_r =
+        if ret_ty = "void" then begin
+          emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+          None
+        end else begin
+          let r = fresh ctx "crd" in
+          emit ctx (Printf.sprintf "%s = call %s @%s(%s)"
+                      r ret_ty fname args_str);
+          Some r
+        end
+      in
+      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      (* Dispatched path — pinned to a published version; must leave after. *)
+      emit_label ctx blk_disp;
+      let disp_r =
         if ret_ty = "void" then begin
           emit ctx (Printf.sprintf "call void %s(%s)" fp args_str);
-          ("i64", "0")
+          None
         end else begin
           let r = fresh ctx "cr" in
           emit ctx (Printf.sprintf "%s = call %s %s(%s)" r ret_ty fp args_str);
-          (ret_ty, r)
+          Some r
         end
       in
       let v = fresh ctx "hrv" in
       emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
       emit ctx (Printf.sprintf
         "call void @march_dispatch_leave(i32 %d, i32 %s)" name_id v);
+      emit ctx (Printf.sprintf "br label %%%s" blk_cont);
+      (* Continuation — merge the two call results. *)
+      emit_label ctx blk_cont;
+      let result =
+        match direct_r, disp_r with
+        | Some rd, Some rs ->
+          let phi = fresh ctx "hrphi" in
+          emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+                      phi ret_ty rd blk_direct rs blk_disp);
+          (ret_ty, phi)
+        | _ -> ("i64", "0")
+      in
       result
     end
     else if ret_ty = "void" then begin
@@ -2100,7 +2257,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       || builtin_ret_ty f.Tir.v_name <> None
       || (match f.Tir.v_name with
           | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
-          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | "print" | "print_stderr" | "io_read_line" | "read_line"
+          | "io_read_byte" | "read_byte" -> true
           | _ -> false)
     in
     (* Unresolved bare interface-method guard — see
@@ -2241,6 +2399,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | _ -> List.map (fun _ -> "ptr") args)
       | _ -> List.map (fun _ -> "ptr") args
     in
+    (* Closure dispatch uses a uniform ptr ABI (the apply wrapper always takes
+       ptr params — see is_apply_fn / clo_wrap).  A `double` param type would
+       compile the arg into an FP register while the wrapper reads a GP register
+       (integer scalars coincide across the two classes, floats do NOT) — so a
+       Float closure argument must cross as a BOXED ptr (float-boxing, Stage 2),
+       matching coerce's ("double","ptr") arm.  clo_wrap unboxes on the far side
+       for named-fn targets; lambda apply bodies unbox lazily via coerce. *)
+    let orig_param_llvm_tys =
+      List.map (fun t -> if t = "double" || t = "i64" then "ptr" else t) orig_param_llvm_tys in
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
         (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
     let orig_arg_strs = List.map2 (fun pty a ->
@@ -2275,7 +2442,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | ps -> String.concat "," (List.map mangle_ty_for_eq ps))
         ~family:fam ~site:(site ^ ":" ^ ctor ^ " in " ^ ctx.cur_emit_fn)
     in
-    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
+    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (alloc_type_name, [])) with
      | Repr.Newtype payload ->
        audit "Newtype" "alloc";
        (* Newtype: no allocation. Emit the single payload atom directly. *)
@@ -2285,7 +2452,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             (arity mismatch — malformed TIR)"
            ctor (List.length args));
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ctx.type_defs payload then begin
+       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
          (* Scalar payload: tag (v<<1)|1 so it's odd → IS_HEAP_PTR = false *)
          let i64v = coerce ctx v_ty v_val "i64" in
          let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
@@ -2293,7 +2460,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        end else
          (* Pointer payload: pass through raw *)
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ctx.type_defs alloc_type_name ->
+     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name ->
        (* Niche (Option-shaped): None=0, Some(x)=x.
           repr_of_ty returns Boxed here because EAlloc's ctor key carries no type
           params; we use the actual arg TIR type to determine tagging. *)
@@ -2307,7 +2474,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =
-           Repr.niche_payload_ok ctx.type_defs arg_tir_ty
+           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
            (* Erased (TVar) payload: the rest of the erased convention —
               emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
               nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
@@ -2321,7 +2488,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ctx.type_defs arg_tir_ty then begin
+           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
              Some ("ptr", as_ptr)
@@ -2342,7 +2509,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              EAlloc ctor key has no payload, so use the TCon type params. *)
           let payload_niche_safe = match alloc_params with
             | [p] ->
-              Repr.niche_payload_ok ctx.type_defs p
+              Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs p
               (* Abstract (erased) payload: emit_case's abstract-arg niche path
                  and ensure_adt_eq_fn both treat Option(TVar) as NICHE, so the
                  alloc must too — boxing None here would make a niche match read
@@ -2354,7 +2521,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                  carries the concrete payload type — key the encode on the same
                  classification the decode (emit_case) uses, so None and Some
                  stay consistently encoded (both niche, or both boxed). *)
-              (match Repr.niche_repr_of_concrete ctx.type_defs alloc_type_name with
+              (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs alloc_type_name with
                | Some _ -> true
                | None   -> false)
           in
@@ -2433,6 +2600,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          let v_coerced = coerce ctx v_ty v_val field_ty in
          emit_store_field ctx ptr i field_ty v_coerced
        ) args;
+       (* Actor structs get a runtime shape id stamped into the header pad
+          word so get_actor_field's C implementation (march_get_actor_field,
+          runtime/march_extras.c) can look up a named state field by the
+          actor's own shape at runtime, regardless of whether the caller's
+          static Pid(a) type is concrete at that call site (it usually is
+          NOT — a call routed through a small generic helper like
+          child_int(sup, field) never resolves `a` past an abstract type
+          variable, since nothing in get_actor_field's own signature forces
+          monomorphization on it). Scoped to actor structs only via
+          is_actor_struct_name — not a general shape-stamping change for
+          every Boxed EAlloc/ctor-application site. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then
+         emit_set_shape ctx ptr (get_record_fields ctx (Tir.TCon (alloc_type_name, [])));
        (* HCR: if this is a known actor type, wire the dispatch slot ID immediately
           after allocation so the actor green thread uses the hot-reload table.
           Counter_spawn() is inlined+DCE'd by mono, so we can't rely on a spawn
@@ -2453,6 +2633,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
          | None -> ()
        end;
+       (* Actor.call tag-base registration. F19 (build_ctor_info) gives actor
+          _Msg ctors GLOBALLY-unique tags (base 0x0100_0000 + declaration
+          index) so cross-actor sends can't misroute — but march_actor_call
+          stamps the augmented call message with the SENTINEL's per-type
+          0-based tag (= handler index). Register this actor's first-msg-ctor
+          global tag so the runtime can translate index → global tag; without
+          it every compiled Actor.call falls to the dispatch default arm and
+          is dropped (the caller blocks forever / times out). Emitted at the
+          alloc (like the shape stamp above) so supervisor respawns, which
+          re-run the March-level spawn closure, re-register the fresh record. *)
+       if Tir_names.is_actor_struct_name alloc_type_name then begin
+         let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
+         let msg_ty_name = actor_base ^ Tir_names.actor_msg_suffix in
+         let first_ctor = List.find_map (function
+           | Tir.TDVariant (n, (c, _) :: _) when n = msg_ty_name -> Some c
+           | _ -> None) ctx.type_defs
+         in
+         match first_ctor with
+         | Some c ->
+           (match Hashtbl.find_opt ctx.ctor_info (msg_ty_name ^ "." ^ c) with
+            | Some e ->
+              emit ctx (Printf.sprintf
+                "call void @march_actor_set_call_base(ptr %s, i64 %d)"
+                ptr e.ce_tag)
+            | None -> ())
+         | None -> ()
+       end;
        ("ptr", ptr))
 
   | Tir.EAlloc (_, args) ->
@@ -2469,6 +2676,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Stack allocation ──────────────────────────────────────────────── *)
   | Tir.EStackAlloc (Tir.TCon (ctor, _), args) ->
+    (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
+       unconditionally, so it must never receive a Newtype- or Niche-repr
+       type — those "allocs" are erased immediates, and every consumer
+       decodes them under the erased convention (an ECase would untag the
+       stack POINTER → garbage). Escape.alloc_emits_heap_cell keeps such
+       allocs out of stack promotion; fail loudly if one slips through. *)
+    let sa_type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (sa_type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ ->
+       failwith (Printf.sprintf
+         "LLVM emit: EStackAlloc of erased-repr type %s (ctor %s) — \
+          construction would be boxed but consumers decode erased; \
+          escape analysis must not promote this alloc (finding L7)"
+         sa_type_name ctor)
+     | Repr.Boxed ->
+       if Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs sa_type_name then
+         failwith (Printf.sprintf
+           "LLVM emit: EStackAlloc of niche-shaped type %s (ctor %s) — \
+            same erased-vs-boxed split as Newtype (finding L7)"
+           sa_type_name ctor));
     let entry = ctor_entry ctx ctor (List.length args) in
     let ptr = emit_stack_alloc ctx (List.length args) in
     emit_store_tag ctx ptr entry.ce_tag;
@@ -2510,18 +2740,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Some i -> String.sub ctor 0 i
       | None -> ctor
     in
-    (match Repr.repr_of_ty ctx.type_defs (Tir.TCon (reuse_type_name, [])) with
+    (match Repr.repr_of_ty ~collision_set:ctx.collision_set ctx.type_defs (Tir.TCon (reuse_type_name, [])) with
      | Repr.Newtype payload ->
        let (_, rv) = emit_atom ctx reuse_atom in
        emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
        let (v_ty, v_val) = emit_atom ctx (List.hd args) in
-       if Repr.payload_needs_tag ctx.type_defs payload then begin
+       if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs payload then begin
          let i64v = coerce ctx v_ty v_val "i64" in
          let as_ptr = emit_tag_scalar ctx ~sh:"nt_sh" ~tag:"nt_tag" ~ptr:"nt_ptr" i64v in
          ("ptr", as_ptr)
        end else
          ("ptr", coerce ctx v_ty v_val "ptr")
-     | _ when Repr.is_niche_shaped ctx.type_defs reuse_type_name ->
+     | _ when Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name ->
        (* Niche reuse: old value is itself a niche value (0, tagged-int, or ptr).
           march_decrc's IS_HEAP_PTR guard makes it a no-op on 0 and tagged ints. *)
        let (_, old_v) = emit_atom ctx reuse_atom in
@@ -2536,7 +2766,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            | _ -> Tir.TUnit
          in
          let arg_niche_ok =
-           Repr.niche_payload_ok ctx.type_defs arg_tir_ty
+           Repr.niche_payload_ok ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty
            (* Erased (TVar) payload: the rest of the erased convention —
               emit_case's abstract-arg niche path, ensure_adt_eq_fn, and the
               nullary-None alloc — treats Option(TVar) as NICHE, and a TVar
@@ -2550,7 +2780,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          if not arg_niche_ok then None
          else begin
            let (v_ty, v_val) = emit_atom ctx arg in
-           if Repr.payload_needs_tag ctx.type_defs arg_tir_ty then begin
+           if Repr.payload_needs_tag ~collision_set:ctx.collision_set ctx.type_defs arg_tir_ty then begin
              let i64v = coerce ctx v_ty v_val "i64" in
              let as_ptr = emit_tag_scalar ctx ~sh:"niche_sh" ~tag:"niche_tag" ~ptr:"niche_ptr" i64v in
              Some ("ptr", as_ptr)
@@ -2559,7 +2789,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          end
        in
        (match args with
-        | [] when (match Repr.niche_repr_of_concrete ctx.type_defs reuse_type_name with
+        | [] when (match Repr.niche_repr_of_concrete ~collision_set:ctx.collision_set ctx.type_defs reuse_type_name with
                    | Some _ -> true
                    (* Payload not niche-safe (e.g. Float): the Some side is
                       encoded BOXED (emit_niche_payload returns None), so None
@@ -2617,7 +2847,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ctx.type_defs reuse_atom_parent_type
+       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
     then begin
       let entry = ctor_entry ctx ctor (List.length args) in
       let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
@@ -2633,7 +2863,50 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         emit_store_field ctx ptr i field_ty (coerce ctx v_ty v_val field_ty)
       ) args;
       ("ptr", ptr)
-    end else begin
+    end
+    else if Repr.is_actor_struct_type ctx.type_defs reuse_type_name then begin
+      (* Actor-state update (finding 20): an actor's message handler writes its
+         new state back into the actor struct via EReuse (see
+         lib/tir/lower_actor.ml).  The actor object is a stable, long-lived
+         singleton mutated SOLELY by its own daemon green thread — the RC of the
+         actor *handle* (how many `Pid` references exist) has nothing to do with
+         whether an in-place state write is safe.  The generic RC-conditional
+         FBIP path below is actively WRONG here: the main thread legitimately
+         does atomic incrc/decrc on the actor handle as it passes the Pid to
+         successive `send`s, so the handler's `rc == 1` check races that and can
+         observe rc > 1, taking the "fresh" branch — which allocates a COPY,
+         writes the new state into the copy, and DISCARDS it (the handler's
+         result is unit), silently LOSING the state update (memory-safe: no
+         crash, just a wrong-but-valid count).  actor_green_thread's
+         `a[0]=1` force to defeat the check is itself racy against that concurrent
+         incrc and cannot be made safe.  The fix: for an actor struct, ALWAYS
+         mutate in place — no RC load, no branch, no decrc, no fresh alloc.
+
+         Gate MUST be structural, not name-based: an adversarial review found
+         that a name-suffix check (the type con name ending in "_Actor") false-
+         positive-matched a user type coincidentally named e.g. `Tree_Actor`,
+         silently corrupting it under a shared (RC>1) FBIP reuse by skipping the
+         refcount check that shared-value safety depends on. [Repr.is_actor_struct_type]
+         instead confirms the type's field 0 is literally named "$d_dispatch" —
+         a name only [lower_actor.ml] can ever construct (user identifiers can
+         never start with `$`), so this cannot false-positive on user code. *)
+      let (_, rv) = emit_atom ctx reuse_atom in
+      let entry = ctor_entry ctx ctor (List.length args) in
+      emit_store_tag ctx rv entry.ce_tag;
+      List.iteri (fun i atom ->
+        let field_ty = match List.nth_opt entry.ce_fields i with
+          | Some t -> llvm_ty t
+          | None -> failwith (Printf.sprintf
+              "LLVM emit: actor-struct reuse %s has %d field(s) but field index \
+               %d was requested (arity mismatch)"
+              ctor (List.length entry.ce_fields) i)
+        in
+        let (v_ty, v_val) = emit_atom ctx atom in
+        emit_store_field ctx rv i field_ty (coerce ctx v_ty v_val field_ty)
+      ) args;
+      ("ptr", rv)
+    end
+    else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
     (* Pre-compute all arg values before branching *)
@@ -2722,7 +2995,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _ -> ""
     in
     if reuse_atom_parent_type <> ""
-       && Repr.is_niche_shaped ctx.type_defs reuse_atom_parent_type
+       && Repr.is_niche_shaped ~collision_set:ctx.collision_set ctx.type_defs reuse_atom_parent_type
     then begin
       let arg_vals = arg_vals_of () in
       let hp = emit_heap_alloc ctx 0 (List.length args) in

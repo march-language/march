@@ -1,0 +1,13 @@
+-- Native golden (Phase 7.2, Signal.watch Stage B): a WATCHED SIGTERM must NOT
+-- terminate the process (the default graceful-shutdown is suppressed on the
+-- first delivery) — the program runs its handler and survives to exit 0.  An
+-- UNWATCHED SIGTERM still kills the process (verified separately); this pins the
+-- suppression half of that contract.
+mod Main do
+  fn main() do
+    Signal.watch(Signal.Term, fn -> println("term handler"))
+    println("before term")
+    Signal.raise(Signal.Term)
+    println("survived term")
+  end
+end

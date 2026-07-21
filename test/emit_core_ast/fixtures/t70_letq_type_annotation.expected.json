@@ -1,0 +1,1 @@
+{"format_version":1,"verdict":"reject","diagnostics":[{"severity":"error","file":"specs/lang/types/reject/t70_letq_type_annotation.march","start_line":11,"start_col":4,"end_line":11,"end_col":6,"message":"A `let?` binding can't have a type annotation — its type is inferred from the `Ok` payload of the `Result` on the right.","code":null,"fix":null}],"module":null}

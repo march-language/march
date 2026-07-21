@@ -237,7 +237,7 @@ The `update` function eliminates the get-then-put pattern that Map requires:
 
 ```march
 mod WordCount do
-  fn count_words(words : List(String)) : HashMap(String, Int) do
+  fn count_words(words : List(String)) do
     List.fold_left(words, HashMap.new(), fn (acc, w) ->
       HashMap.update(acc, w, fn opt ->
         match opt do

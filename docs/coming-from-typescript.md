@@ -184,14 +184,14 @@ March uses nominal interfaces with explicit impl blocks — more like Rust trait
 
 ```march
 interface Show(a) do
-  fn show(x : a) : String
+  fn show : a -> String
 end
 
 impl Show(Int) do
   fn show(x) do int_to_string(x) end
 end
 
-fn print_it(x : a) : () needs Show(a) do
+fn print_it[a: Show](x : a) : () do
   println(show(x))
 end
 ```

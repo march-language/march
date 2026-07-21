@@ -1,0 +1,23 @@
+-- Regression: a 0-arg lambda `fn -> body` satisfies a declared `Unit -> Unit`
+-- callback parameter, and calling such a callback with `cb()` runs it.
+--
+-- A 0-arg lambda types to its body's result (a thunk), so it used to be
+-- un-passable to a declared `Unit -> Unit` param ("expected () but got
+-- () -> ()"), and `cb()` yielded the arrow type rather than Unit.  The
+-- typechecker now treats a `Unit -> T` arrow as a 0-arg callable at both the
+-- construction site (`fn -> body`) and the call site (`cb()`).
+--
+-- Native output must match the interpreter: "a", "a", "b".
+mod UnitCallbackZeroArg do
+
+  fn run_twice(cb : Unit -> Unit) : Unit do
+    cb()
+    cb()
+  end
+
+  fn main() : Unit do
+    run_twice(fn -> println("a"))
+    let g = fn -> println("b")
+    g()
+  end
+end

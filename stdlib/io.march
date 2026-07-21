@@ -9,6 +9,7 @@
 --   IO.write("no newline")         -- write to stdout, no newline
 --   IO.warn("something went wrong") -- write to stderr with newline
 --   let line = IO.read_line()      -- read a line from stdin
+--   let b = IO.read_byte()         -- read one raw byte from stdin (-1 on EOF)
 --   let x = IO.inspect(some_value) -- pretty-print and return value
 --   let line = IO.gets("Name: ")   -- print prompt then read line
 
@@ -36,6 +37,21 @@ mod IO do
   """
   fn read_line() : String do
     io_read_line()
+  end
+
+  doc """
+  Read a single raw byte from stdin (blocking, unbuffered) and return it
+  as an Int in 0..255. Returns -1 on EOF.
+
+  Do not mix with `IO.read_line()`/`IO.gets()` in a compiled program: those
+  read through stdio's own buffer, while `read_byte` reads directly off the
+  file descriptor, so bytes already buffered by a prior line read are
+  invisible to it.
+
+      let b = IO.read_byte()
+  """
+  fn read_byte() : Int do
+    io_read_byte()
   end
 
   doc """

@@ -65,6 +65,15 @@ type ctx = {
      fragment's representation decisions ran against a stale or empty table,
      causing niche-vs-boxed ABI mismatches across JIT fragments (B12). *)
   type_defs : Tir.type_def list;
+  (* Same-short-name type collision set, derived from [type_defs] (see
+     [Collision_set.compute]'s doc comment): short type name -> full
+     declaring names, present ONLY for short names declared by >=2 modules.
+     Consulted by [Llvm_toplevel.build_ctor_info] to decide whether a
+     TDVariant's constructors need a globally-unique runtime tag instead of
+     the ordinary per-type 0-based tag. Always derived from the same
+     [type_defs] this ctx was constructed with, so it can never drift out of
+     sync with the types build_ctor_info actually sees. *)
+  collision_set : (string, string list) Hashtbl.t;
   (* For resolving concrete field types from polymorphic type definitions.
      poly_ctors: (type_name, ctor_name) -> generic field types (may contain TVar)
      type_params: type_name -> ordered list of type-variable parameter names *)
@@ -85,6 +94,13 @@ type ctx = {
   (* Tracks which ADT structural equality functions have been generated.
      Registered before body generation to handle recursive types (e.g. List). *)
   emitted_eq_fns : (string, unit) Hashtbl.t;
+  (* Tracks which generated runtime interface-dispatch functions
+     ([__march_ifdispatch$...]) have been emitted — a same-short-name
+     colliding type's general-interface method routes through one of these,
+     which switches on the callee's runtime ctor tag (Task 1's global tags)
+     and tail-calls the correct module-qualified impl (Task 3's symbols).
+     Sibling of [emitted_eq_fns]; see [Llvm_dispatch.ensure_dispatch_fn]. *)
+  emitted_dispatch_fns : (string, unit) Hashtbl.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
   (* Extern march_names declared `blocking` — dispatched on an OS thread. *)
@@ -206,6 +222,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   fast_math;
   pmap_threshold;
   type_defs;
+  collision_set = Collision_set.compute type_defs;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
@@ -213,6 +230,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
+  emitted_dispatch_fns = Hashtbl.create 8;
   extern_map = Hashtbl.create 8;
   blocking_externs = Hashtbl.create 4;
   raises_externs = Hashtbl.create 4;
@@ -362,10 +380,12 @@ let llvm_ret_ty : Tir.ty -> string = function
       safely dereferenced for 16 bytes.
     EXCEPTION: niche-encoded Option-shaped types can carry None=0 (null), so
     [nonnull] and [dereferenceable] must be suppressed for them. *)
-let llvm_param_ty ?(type_defs : Tir.type_def list = []) (ty : Tir.ty) : string =
+let llvm_param_ty ?(type_defs : Tir.type_def list = [])
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (ty : Tir.ty) : string =
   match ty with
   | Tir.TCon ("Atom", []) -> "i64"
-  | Tir.TCon (name, _) when Repr.is_niche_shaped type_defs name -> "ptr"
+  | Tir.TCon (name, _) when Repr.is_niche_shaped ~collision_set type_defs name -> "ptr"
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
@@ -474,18 +494,21 @@ let coerce ctx from_ty v to_ty =
   if from_ty = to_ty then v
   else match (from_ty, to_ty) with
   | ("ptr", "double") ->
-    (* ptr → i64 → double (LLVM can't ptrtoint to double directly) *)
-    let i = fresh ctx "cv" in
+    (* Erased slot → Float: UNBOX the heap float cell (float-boxing, Stage 2).
+       A Float crossing an erasure boundary is stored as a `march_float_box`
+       (tag -3), never raw bits — so RC ops on the erased ptr are sound and
+       generic compare/eq dispatch on the box tag.  Concrete Float↔Float never
+       hits this arm (both sides are `double`); the raw-bits REPL-slot path is
+       the separate `("i64","double")` arm below. *)
     let r = fresh ctx "cv" in
-    emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
-    emit ctx (Printf.sprintf "%s = bitcast i64 %s to double" r i);
+    emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" r v);
     r
   | ("double", "ptr") ->
-    (* double → i64 → ptr *)
-    let i = fresh ctx "cv" in
+    (* Float → erased slot: BOX into a heap float cell (float-boxing, Stage 2).
+       Pairs with the unbox arm above; must stay in lockstep with every other
+       erased-Float encode site (clo_wrap double-return, Ok-Float wrapper). *)
     let r = fresh ctx "cv" in
-    emit ctx (Printf.sprintf "%s = bitcast double %s to i64" i v);
-    emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r i);
+    emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double %s)" r v);
     r
   | ("ptr", "i64") ->
     (* Untag a low-bit-tagged integer — CONDITIONALLY.  Producers store

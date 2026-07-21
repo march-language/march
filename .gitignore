@@ -33,6 +33,8 @@ test/native/rust_ffi/Cargo.lock
 .worktrees/
 *.ll
 .march/
+.forge/
+docs/_site/
 .claude/worktrees/
 march-phases/
 docs/superpowers/
@@ -47,3 +49,31 @@ docs/downloads/
 
 # Python bytecode
 __pycache__/
+
+# Compiled compiler/tooling binaries (build with `dune build`)
+/bin/march
+/bin/forge
+/bin/march-lsp
+
+# Compiled benchmark binaries (build via bench/run_bench.sh)
+/bench/*
+!/bench/*.march
+!/bench/*.ml
+!/bench/*.exs
+!/bench/*.rs
+!/bench/*.sh
+!/bench/*.mjs
+!/bench/*.py
+!/bench/dune
+!/bench/*.md
+!/bench/ocaml/
+!/bench/elixir/
+!/bench/rust/
+!/bench/tfb/
+
+# Runtime trace dumps
+/trace/
+
+# Stray build/tooling leftovers
+/.claire/
+/_build_wt/

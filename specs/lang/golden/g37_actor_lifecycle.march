@@ -4,9 +4,11 @@ mod Main do
   -- returns true; kill(pid) runs crash_actor (eval.ml:1766) which sets
   -- inst.ai_alive <- false, so is_alive then returns false. Observation is via
   -- the bool returned by is_alive (eval.ml:2964 — a registry lookup, SAFE
-  -- compiled), printed with println — NEVER get_actor_field / pid_of_int, which
-  -- SIGSEGV compiled. Determinism: a single actor, no mailbox/scheduler
-  -- dependence, so byte-identical interpreted vs compiled.
+  -- compiled), printed with println — deliberately not reading state back out via
+  -- get_actor_field / pid_of_int (those now work compiled as of the 2026-07-08
+  -- supervision plan; a bool-observed single actor keeps this witness minimal).
+  -- Determinism: a single actor, no mailbox/scheduler dependence, so
+  -- byte-identical interpreted vs compiled.
   actor Counter do
     state { count : Int }
     init  { count: 0 }

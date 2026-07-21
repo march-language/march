@@ -69,7 +69,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
          Boxed (float bits can't be tagged), so those still take the Boxed arm,
          which is correct for them (they DO carry a real heap header). *)
       let newtype_payload_opt =
-        match Repr.repr_of_ty ctx.Llvm_ctx.type_defs ty with
+        match Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs ty with
         | Repr.Newtype raw_payload ->
           (* [raw_payload] is the field type as written in the typedef — a
              [TVar] for a generic newtype (e.g. [Wrap(a)] applied to [Int]).
@@ -87,9 +87,9 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
          use the normal tag-at-offset-8 strategy — there is no heap header.
          Detect niche shape early and emit a null-check equality instead. *)
       let niche_payload_opt =
-        if Repr.is_niche_shaped ctx.Llvm_ctx.type_defs type_name then
+        if Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs type_name then
           match ty_args with
-          | [p] when Repr.niche_payload_ok ctx.Llvm_ctx.type_defs p -> Some p
+          | [p] when Repr.niche_payload_ok ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p -> Some p
           | [p] when (match p with Tir.TVar _ -> true | _ -> false) ->
             (* Abstract (erased) payload — e.g. Option(Any) from record_get.
                EAlloc and emit_case both niche-encode a niche-shaped type applied
@@ -142,7 +142,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
            let c = frsh "c" in
            e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
            e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
-         | _ when Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload_ty ->
+         | _ when Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload_ty ->
            (* Tagged scalar (Int/Bool, or a newtype over one) in a ptr slot:
               compare the raw tagged bits. *)
            let pa = frsh "pa" in let pb = frsh "pb" in
@@ -204,7 +204,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         (match payload_ty with
          | Tir.TString ->
            e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %%a, ptr %%b)" ok)
-         | _ when Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload_ty ->
+         | _ when Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload_ty ->
            (* Tagged scalar (Int/Bool) in ptr slot: compare raw tagged bits *)
            let pa = frsh "pa" in let pb = frsh "pb" in
            e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);
@@ -283,26 +283,40 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         | [] -> None
         | [tp] -> Some (tp, ctors_of tp)
         | tps ->
-          (* Multiple candidates: keep the largest ctor set when every other
-             candidate's per-tag field layout matches it on common tags. *)
-          let sorted = List.sort (fun (_, a) (_, b) ->
-              compare (List.length b) (List.length a))
-              (List.map (fun tp -> (tp, ctors_of tp)) tps) in
-          (match sorted with
-           | [] -> None
-           | ((_, big_ctors) as biggest) :: rest ->
-             let layout_of tag ctors =
-               Option.map (fun (_, _, flds) -> List.map field_load_llty flds)
-                 (List.find_opt (fun (t, _, _) -> t = tag) ctors)
-             in
-             let compatible = List.for_all (fun (_, cs) ->
-                 List.for_all (fun (tag, _, flds) ->
-                     layout_of tag big_ctors
-                     = Some (List.map field_load_llty flds)
-                   ) cs
-               ) rest
-             in
-             if compatible then Some biggest else None)
+          (* Multiple candidate declaring paths for one short name means this
+             short name is in the collision set (>=2 distinct qualified
+             TDVariant names share it — see [Collision_set.compute]): a
+             single-declaration type can never produce more than one match
+             here. Since [Llvm_toplevel.build_ctor_info]'s collision arm
+             gives every colliding type's constructors a GLOBALLY-unique
+             [ce_tag] (a dedicated counter, never reused across candidates),
+             no two candidates' tags can ever coincide — so it is always safe
+             to union every candidate's ctors into one switch table: each
+             tag uniquely identifies both the declaring type and the
+             constructor.
+             Before Task 1 this used to pick only the largest candidate and
+             required every other candidate's ctors to match its layout on
+             common TAG NUMBERS (tags were per-type 0-based, so two
+             candidates' tags could coincidentally collide, e.g. both
+             declaring a nullary ctor at tag 0) — that subsumption check was
+             a safety net against tag-number aliasing across candidates. With
+             tags now globally unique the aliasing risk that check guarded
+             against no longer exists, and the check instead incorrectly
+             rejected same-ctor-name colliders whose tags (correctly) no
+             longer overlap (e.g. two same-short-name types both declaring
+             `AeNorth`), silently falling back to pointer-identity-ish
+             [march_poly_compare] (which treats any two distinct non-string/
+             float heap cells as equal — a real `==` miscompile). *)
+          let all = List.map (fun tp -> (tp, ctors_of tp)) tps in
+          let union_ctors = List.concat_map snd all in
+          (* Representative type name = the first candidate (order is not
+             semantically load-bearing).  This assumes all colliding candidates
+             share the same type-parameter arity — true for every current
+             colliding fixture (all monomorphic ADTs); a set mixing e.g. a
+             nullary and a unary same-short-name type would need rep_tp chosen
+             per the use-site's instantiation instead. *)
+          let rep_tp = fst (List.hd all) in
+          Some (rep_tp, union_ctors)
       in
       match resolved with
       | None -> None

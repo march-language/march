@@ -39,7 +39,7 @@ let msg = """
 ## Common operations
 
 ```march
-String.length("hello")                   -- 5 (grapheme count)
+String.codepoint_count("hello")          -- 5 (grapheme count)
 String.byte_size("hello")                -- 5 (byte count)
 String.to_uppercase("hello")             -- "HELLO"
 String.to_lowercase("HELLO")             -- "hello"
@@ -70,7 +70,7 @@ bool_to_string(true)     -- "true"
 
 String.to_int("42")      -- Ok(42)
 String.to_float("3.14")  -- Ok(3.14)
-String.to_int("bad")     -- Err("not a valid integer")
+String.to_int("bad")     -- Err("not a valid integer: bad")
 ```
 
 ---

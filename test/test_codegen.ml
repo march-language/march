@@ -1,6 +1,86 @@
 (** March test suite — codegen tests. *)
 open Test_helpers
 
+(* ── js_pipeline: shared TIR->JS compile pipeline (lib/driver) ────────── *)
+
+let compile_to_js src =
+  let m = parse_and_desugar src in
+  March_driver.Js_pipeline.compile_module_to_js ~source_file:"<test>"
+    ~fn_lines:[] m
+
+let test_js_pipeline_simple_program_compiles () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn add(a: Int, b: Int) : Int do a + b end
+    fn main() : Unit do
+      let _ = add(1, 2)
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output mentions main" true
+      (Test_helpers.contains "main" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_typecheck_error_surfaces () =
+  match
+    compile_to_js
+      {|mod Test do
+    fn main() : Unit do
+      let _ = 1 + "not a number"
+      ()
+    end
+  end|}
+  with
+  | Ok _ -> Alcotest.fail "expected a typecheck error, got Ok"
+  | Error errs ->
+    Alcotest.(check bool) "at least one error message" true (errs <> [])
+
+let test_js_pipeline_dom_extern_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    resource Node
+    resource Event
+    extern "dom" : Cap(Ffi) do
+      fn dom_get_element_by_id(id: String) : Option(Node) = "march_dom_get_element_by_id"
+    end
+    fn main() : Unit do
+      let _ = dom_get_element_by_id("root")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references the extern symbol" true
+      (Test_helpers.contains "march_dom_get_element_by_id" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
+let test_js_pipeline_dom_event_key_reaches_output () =
+  match
+    compile_to_js
+      {|mod Test do
+    needs Ffi
+    extern "dom" : Cap(Ffi) do
+      fn dom_event_key(ev: String) : String = "march_dom_event_key"
+    end
+    fn main() : Unit do
+      let _ = dom_event_key("x")
+      ()
+    end
+  end|}
+  with
+  | Ok (js, _map) ->
+    Alcotest.(check bool) "output references march_dom_event_key" true
+      (Test_helpers.contains "march_dom_event_key" js)
+  | Error errs ->
+    Alcotest.failf "expected Ok, got errors: %s" (String.concat "; " errs)
+
 (* ── Tir_names: cross-pass name contract unit tests (Wave 3 Task 1) ──── *)
 
 let test_tir_names_tuple_tag () =
@@ -456,6 +536,125 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
     (ir_count ir "switch i32")
 
+(** Finding-19 memory-safety regression: two single-handler actors whose
+    messages, under the OLD per-actor 0-based Newtype encoding, were
+    indistinguishable at dispatch — a Logger message delivered to Counter's
+    mailbox was misrouted into Counter's Inc handler and its String payload
+    reinterpreted as an Int (memory-unsafe UB).
+
+    The fix forces each actor message type Boxed with a GLOBALLY-unique heap tag
+    and gives every dispatch ECase a dropping default arm. Assert the IR shape:
+      - Counter_dispatch switches on an i32 tag (Boxed decode — NOT a
+        tag-less Newtype value passed straight through), and
+      - has a case_default arm that decrefs the dropped message and returns
+        (the drop), rather than folding to `unreachable`, and
+      - Counter's and Logger's message ctor tags are DISTINCT (global numbering),
+        so a Logger message cannot match a Counter branch. *)
+let test_actor_foreign_msg_drop_boxed_dispatch () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    actor Logger do
+      state { seen : Int }
+      init  { seen: 0 }
+      on Log(m : String) do { seen: state.seen + 1 } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      send(c, Log("stray"))
+      run_until_idle()
+    end
+  end|} in
+  (* Boxed decode: the single-handler dispatch loads an i32 ctor tag and
+     switches on it (a tag-less Newtype would pass the value straight through
+     with no `switch i32`). *)
+  Alcotest.(check bool) "Counter dispatch switches on an i32 tag (Boxed, not Newtype)"
+    true (ir_contains ir "switch i32");
+  (* Dropping default arm: the dispatch has a case_default that releases the
+     message (via march_decrc) — the foreign-message drop, not `unreachable`. *)
+  Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
+    true (ir_contains ir "case_default");
+  (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
+     0x01000000+ actor-message tag space; distinctness is what makes a foreign
+     message fall to the default arm. The base tag 16777216 (0x01000000) is
+     assigned to the first message ctor; a second, distinct tag must also appear. *)
+  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
+    true (ir_contains ir "store i32 16777216");
+  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
+    true (ir_contains ir "store i32 16777217")
+
+(** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
+    actor's handler writes its new state back via an EReuse on the actor
+    struct. That EReuse must be UNCONDITIONAL — no refcount load/branch — or
+    the handler can race the caller's concurrent incrc/decrc on the actor
+    handle and silently lose the write (see specs/todos.md finding 20).
+    Assert the absence of the generic RC-conditional FBIP shape (an atomic RC
+    load + `icmp eq i64 _, 1` + the `fbip_fresh`/`fbip_reuse` block pair) in
+    the emitted module. *)
+let test_actor_struct_ereuse_unconditional () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init  { count: 0 }
+      on Inc(x : Int) do { count: state.count + x } end
+    end
+    fn main() : Unit do
+      let c = spawn(Counter)
+      send(c, Inc(3))
+      run_until_idle()
+    end
+  end|} in
+  Alcotest.(check bool) "no RC-conditional fbip_fresh block for the actor-struct reuse"
+    false (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "no atomic RC load guarding the actor-struct reuse"
+    false (ir_contains ir "load atomic i64")
+
+(** Finding 20 follow-up (adversarial-review Critical, fixed): the actor-struct
+    always-in-place gate must be STRUCTURAL (does this type's field 0 carry
+    the compiler-only "$d_dispatch" marker lower_actor.ml alone can construct
+    — see Repr.is_actor_struct_type), not a name-suffix heuristic. A prior
+    version gated on the type constructor name ending in "_Actor", which
+    false-positive-matched an ORDINARY user type coincidentally named
+    `Tree_Actor` — such a type's EReuse would then skip the refcount check,
+    silently corrupting a SHARED (RC>1) value in place. Assert a non-actor
+    `..._Actor`-named type's EReuse still takes the RC-conditional path. *)
+let test_actor_suffix_named_user_type_not_treated_as_actor () =
+  let ir = emit_actor_ir {|mod Test do
+    type Tree_Actor = TLeaf(Int) | TNode(Tree_Actor, Tree_Actor)
+    fn bump(t : Tree_Actor) : Tree_Actor do
+      match t do
+        TLeaf(n) -> TLeaf(n + 1)
+        TNode(l, r) -> TNode(bump(l), r)
+      end
+    end
+    fn main() : Unit do
+      let original = TNode(TLeaf(10), TLeaf(20))
+      let shared = original
+      let bumped = bump(original)
+      println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+    end
+    fn bumped_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> bumped_val(l)
+      end
+    end
+    fn shared_val(t : Tree_Actor) : Int do
+      match t do
+        TLeaf(n) -> n
+        TNode(l, _) -> shared_val(l)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the RC-conditional fbip_fresh block"
+    true (ir_contains ir "fbip_fresh");
+  Alcotest.(check bool) "a `_Actor`-suffixed non-actor type's reuse KEEPS the atomic RC load"
+    true (ir_contains ir "load atomic i64")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -862,6 +1061,139 @@ let test_llvm_no_call_to_double_underscore () =
     with Not_found -> false
   in
   Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
+
+(* --- name-resolution: cross-module qualified-alias hijack (RC-underflow root
+   cause) --------------------------------------------------------------------
+
+   A bulk `import Bastion` in ONE module registers the DOTTED short name
+   `Logger.debug` -> `Bastion.Logger.debug` in the program-global [_use_aliases]
+   table (register_aliases strips only the import prefix "Bastion.").  That
+   global table is consulted while lowering EVERY module.  It must NOT hijack a
+   module-qualified `Logger.debug` reference written in an UNRELATED module —
+   one that never imported Bastion, and that the typechecker bound to the stdlib
+   `Logger.debug/1`.  Pre-fix, lowering rewrote it to the arity-2
+   `Bastion.Logger.debug`, emitting a call with an uninitialised second argument
+   -> RC underflow / SIGSEGV at runtime.  The fix restricts the global
+   [_use_aliases] fallback to UNQUALIFIED (dot-free) names; the importing module
+   itself still resolves its own qualified alias via [current_module_aliases]. *)
+let test_qualified_alias_no_cross_module_hijack () =
+  let open March_tir.Lower in
+  Hashtbl.reset _fn_param_types;
+  _use_aliases := Hashtbl.create 8;
+  _module_aliases := Hashtbl.create 8;  (* isolate: resolve_use_alias's prefix fallback reads it *)
+  (* Simulate another module's `import Bastion`: a DOTTED global alias plus an
+     ordinary UNQUALIFIED one. *)
+  Hashtbl.replace !_use_aliases "Logger.debug" "Bastion.Logger.debug";
+  Hashtbl.replace !_use_aliases "helper" "Some.Mod.helper";
+  with_current_module_fns [] (fun () ->
+    (* A module that did NOT import Bastion — empty current_module_aliases. *)
+    let non_importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+    Alcotest.(check string)
+      "qualified `Logger.debug` NOT hijacked by another module's global import"
+      "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
+    (* The importing module itself still resolves its own qualified alias. *)
+    let importer =
+      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+    Hashtbl.replace importer.current_module_aliases
+      "Logger.debug" "Bastion.Logger.debug";
+    Alcotest.(check string)
+      "importing module still resolves its own qualified alias"
+      "Bastion.Logger.debug" (resolve_use_alias importer "Logger.debug");
+    (* Unqualified names still resolve through the global table (unchanged). *)
+    Alcotest.(check string)
+      "unqualified global alias still applies"
+      "Some.Mod.helper" (resolve_use_alias non_importer "helper"))
+
+(* Companion to the hijack guard: the entry file's OWN top-level bulk import
+   must still resolve the partial-qualified call form.  `import Foo` (UseAll,
+   where Foo has a sub-module Foo.Sub) registers the DOTTED short name
+   `Sub.greet` -> `Foo.Sub.greet`.  After the global `_use_aliases` fallback was
+   restricted to unqualified names, the entry file's own `Sub.greet(...)` call
+   must resolve via the entry module's `current_module_aliases` — the top-level
+   DUse arms now register there too (mirroring the nested-import path).  Without
+   that, lowering emits an undefined `@Sub.greet` call (the same failure
+   direction as the hijack bug, but for a legitimate import).  This exercises the
+   full lower pipeline: pre-fix the emitted IR calls bare `@Sub.greet`, post-fix
+   it calls the qualified `@Foo.Sub.greet`. *)
+let test_entry_bulk_import_resolves_partial_qualified () =
+  let src = {|mod Main do
+    mod Foo do
+      mod Sub do
+        fn greet(n : Int) : Int do n + 1 end
+      end
+    end
+    import Foo
+    fn run(x : Int) : Int do Sub.greet(x) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  (* The qualified target must be CALLED; the bare `@Sub.greet(` (undefined /
+     unresolved) must NOT appear. Note `@Foo.Sub.greet` does not contain the
+     substring `@Sub.greet`, so the negative check is a clean discriminator. *)
+  Alcotest.(check bool) "partial-qualified call resolves to Foo.Sub.greet" true
+    (Test_helpers.contains "@Foo.Sub.greet" ir);
+  Alcotest.(check bool) "no unresolved bare @Sub.greet call" false
+    (Test_helpers.contains "@Sub.greet(" ir)
+
+(* A record type loaded from the COMPILED module registry (a dependency in the
+   `--compile`/`--test` unit, not prebound from source) stores its field types as
+   UNRESOLVED surface types that name sibling types by their BARE name (e.g.
+   `mod Conduit`'s `type UniqueConstraint = { scope : UniqueScope }` — both types
+   in one module, `UniqueScope` referenced unqualified).  When a referring module
+   annotates against `Conduit.UniqueConstraint`, [surface_ty] must expand that
+   record's fields; before the fix it expanded them in the REFERRER's env, which
+   held only the QUALIFIED sibling name (`Conduit.UniqueScope`) — [load_module_
+   into_env]/registry loading never seeded the bare `UniqueScope`.  Result: a
+   bogus "I cannot find `UniqueScope`" pointing at the definer's field span,
+   reproduced ~16x (once per test file importing the dep) under `forge test`
+   while `forge check` (which prebinds the dep FROM SOURCE, seeding bare names)
+   stayed clean.  Fix: registry type/record loading seeds the bare name too, and
+   registry-record field expansion threads the defining module's env.  This test
+   drives the exact registry path: register a module with a bare-named sibling
+   type referenced by a record field, then resolve the qualified record in a
+   separate module — pre-fix errors, post-fix clean. *)
+let test_registry_record_field_bare_sibling_type_resolves () =
+  let open March_modules.Module_registry in
+  reset ();
+  let dummy = March_ast.Ast.dummy_span in
+  let bare_ty n = March_ast.Ast.TyCon ({ March_ast.Ast.txt = n; span = dummy }, []) in
+  register "Widgets" {
+    me_name = "Widgets";
+    me_entries = [
+      (* A variant sibling type, referenced BARE by the record field below. *)
+      { ex_name = "Scope"; ex_kind = ExType 0; ex_public = true };
+      (* The record whose stored field type names `Scope` by its bare name —
+         exactly how the compiler serialises a same-module sibling reference. *)
+      { ex_name = "Constraint";
+        ex_kind = ExRecord (0, [("scope", bare_ty "Scope")]);
+        ex_public = true };
+    ];
+  };
+  (* A DIFFERENT module references the qualified record type; expanding it must
+     resolve the bare `Scope` field type. *)
+  let src = {|mod Client do
+    fn describe(c : Widgets.Constraint) : Int do 0 end
+  end|} in
+  let m = Test_helpers.parse_and_desugar src in
+  let (errors, _tm) = March_typecheck.Typecheck.check_module m in
+  reset ();
+  let msgs = List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+      errors.March_errors.Errors.diagnostics in
+  let mentions_scope =
+    List.exists (fun s -> Test_helpers.contains "Scope" s
+                          && Test_helpers.contains "cannot find" s) msgs in
+  Alcotest.(check bool)
+    "no 'cannot find Scope' when expanding a registry record's bare-named field"
+    false mentions_scope;
+  Alcotest.(check bool)
+    "referrer typechecks cleanly against the registry record type"
+    false (March_errors.Errors.has_errors errors)
 
 (* --- multiline tests --- *)
 
@@ -4115,6 +4447,489 @@ let test_repr_scalar_is_boxed () =
   | March_tir.Repr.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for TInt"
 
+(** Same-short-name colliding types must never classify Niche even when they
+    are structurally Option-shaped: a niche repr has no runtime tag slot, so
+    a colliding type's value would be indistinguishable at runtime even with
+    Task 1's globally-unique ctor tags (those tags live in the heap-cell
+    header, which niche values don't have). *)
+let test_repr_colliding_niche_shaped_type_forced_boxed () =
+  let defs = March_tir.Tir.[
+    TDVariant ("NA.Option2", [("TA", []); ("TWithPayload", [TInt])]);
+    TDVariant ("NB.Option2", [("TB", []); ("TWithPayload2", [TInt])]);
+  ] in
+  let cs = March_tir.Collision_set.compute defs in
+  Alcotest.(check bool) "colliding niche-shaped type is NOT niche"
+    false (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "NA.Option2");
+  (match March_tir.Repr.repr_of_ty ~collision_set:cs defs
+           (March_tir.Tir.TCon ("NA.Option2", [March_tir.Tir.TInt])) with
+   | March_tir.Repr.Boxed -> ()
+   | _ -> Alcotest.fail "expected forced Boxed repr for colliding niche-shaped type")
+
+(** Non-colliding types (the common case: a single declaring module) must be
+    completely unaffected by the collision_set threading — this is the
+    byte-identity guarantee the plan calls out as highest-risk. *)
+let test_repr_noncolliding_niche_shaped_type_unaffected () =
+  let defs = March_tir.Tir.[
+    TDVariant ("Option", [("None", []); ("Some", [TVar "a"])])
+  ] in
+  let cs = March_tir.Collision_set.compute defs in  (* empty — single declaration *)
+  Alcotest.(check bool) "Option stays niche"
+    true (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "Option")
+
+(* ── lower.ml: collision-conditional module-qualified impl symbols
+   (Task 3, specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) ────────── *)
+
+(** Two DISTINCT same-short-name types (declared in different modules), each
+    implementing the same GENERAL user interface, must lower to TWO DISTINCT
+    mangled fn_defs — not collapse onto one via [collect_iface_impls]'s
+    first-wins `already` guard (pre-fix: only "Speak$Thing.speak" survived,
+    silently dropping NB's "from-B" impl body entirely). Since FQN dispatch
+    Stage 3 landed, the typechecker ACCEPTS this shape (accept/t89) — no gate
+    bypass needed. This test only proves both impl BODIES survive lowering as
+    independently-addressable symbols; correct dispatch at call sites is covered
+    by [test_colliding_general_iface_runtime_dispatch] below and the
+    cross-backend runtime witness test/imports/speak_collision_native. *)
+let test_colliding_impls_get_distinct_symbols () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
+  let fn_names = List.map (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name)
+      tir_module.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "two distinct Speak impl symbols" true
+    (List.mem "Speak$NA.Thing.speak" fn_names && List.mem "Speak$NB.Thing.speak" fn_names)
+
+(** Non-colliding types (the common case: a single declaring module per
+    short name) must be completely unaffected — mangled symbols stay bare,
+    exactly like before this task. Highest-risk byte-identity guarantee the
+    plan calls out. *)
+let test_noncolliding_impl_symbol_stays_bare () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
+  let fn_names = List.map (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name)
+      tir_module.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
+    (List.mem "Speak$Thing.speak" fn_names)
+
+(** Task 4: two same-short-name colliding types implementing one GENERAL
+    interface must, at a call site whose static (bare) argument type is
+    ambiguous, dispatch on the value's RUNTIME constructor tag — not
+    first-wins. The emitted IR must contain a generated dispatch function that
+    switches [i32] on the tag and tail-calls BOTH module-qualified impls
+    (Task 3's symbols), and BOTH impl bodies must survive DCE (they are
+    referenced only from the LLVM-level dispatch fn). Compiled through the full
+    native pipeline (Lower→Mono→Defun→Perceus→Dce→Llvm_emit). Since FQN dispatch
+    Stage 3 landed, the typechecker ACCEPTS this shape (accept/t89) — no gate
+    bypass needed. End-to-end runtime proof (compiled + interpreted):
+    test/imports/speak_collision_native. *)
+let test_colliding_general_iface_runtime_dispatch () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do
+    println(speak(NA.TA))
+    println(speak(NB.TB))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "dispatch fn generated" true
+    (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
+  Alcotest.(check bool) "switches on runtime tag" true
+    (ir_contains ir "switch i32");
+  (* Both module-qualified impls are tail-called from the switch (specialized
+     name carries Mono's "$Thing" suffix). *)
+  Alcotest.(check bool) "tail-calls NA impl" true
+    (ir_contains ir "tail call ptr @Speak$NA.Thing.speak");
+  Alcotest.(check bool) "tail-calls NB impl" true
+    (ir_contains ir "tail call ptr @Speak$NB.Thing.speak");
+  (* Both impl bodies survive DCE (reachable only via the dispatch fn). *)
+  Alcotest.(check bool) "NA impl body defined" true
+    (ir_contains ir "define ptr @Speak$NA.Thing.speak");
+  Alcotest.(check bool) "NB impl body defined" true
+    (ir_contains ir "define ptr @Speak$NB.Thing.speak")
+
+(** Byte-identity guard (Task 4): a NON-colliding program must never reach the
+    dispatch-fn path — no [__march_ifdispatch] symbol may appear in its IR. *)
+let test_noncolliding_no_dispatch_fn () =
+  let src = {|
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  type Dog = Dog
+  type Cat = Cat
+  impl Speak(Dog) do
+    fn speak(_self) do "woof" end
+  end
+  impl Speak(Cat) do
+    fn speak(_self) do "meow" end
+  end
+  fn main() do
+    println(speak(Dog))
+    println(speak(Cat))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "no dispatch fn for distinct-name types" false
+    (ir_contains ir "__march_ifdispatch")
+
+(* ── Task 4 review Finding 1: multi-constructor colliding type ───────────
+   [test_colliding_general_iface_runtime_dispatch] above only exercises a
+   colliding type with a SINGLE constructor on each side. The task report
+   claims (manually verified, not pinned by an automated test) that a
+   colliding type with MULTIPLE constructors routes every one of its tags to
+   the SAME impl symbol ([Llvm_dispatch.tags_of_type] enumerates all of a
+   type's global tags; [emit_dispatch_fn]'s [concat_map] must emit one switch
+   arm per tag while sharing one destination row/impl per declaring type).
+   These helpers extract the actual switch-arm structure from the emitted
+   IR so the assertions are shape-based (not dependent on the specific
+   global tag integers, which shift with the corpus). *)
+
+(** [(tag, row_label)] pairs found inside the [switch i32 ... [ ... ]] block
+    of the (single, in this corpus) generated [__march_ifdispatch] function. *)
+let dispatch_switch_arms (ir : string) : (string * string) list =
+  (* Anchor on the dispatch fn's [define] line first — a colliding impl body
+     may itself contain an unrelated [switch i32] (e.g. matching a
+     multi-constructor scrutinee inside the impl method), so searching for
+     "switch i32" from position 0 can find the WRONG switch. *)
+  let fn_start =
+    Str.search_forward (Str.regexp_string "define ptr @__march_ifdispatch") ir 0 in
+  let start = Str.search_forward (Str.regexp_string "switch i32") ir fn_start in
+  let close = Str.search_forward (Str.regexp_string "\n  ]") ir start in
+  let block = String.sub ir start (close - start) in
+  let re = Str.regexp "i32 \\([0-9]+\\), label \\(%row[0-9]+\\)" in
+  let rec go pos acc =
+    match Str.search_forward re block pos with
+    | i ->
+      let tag = Str.matched_group 1 block in
+      let lbl = Str.matched_group 2 block in
+      go (i + String.length (Str.matched_string block)) ((tag, lbl) :: acc)
+    | exception Not_found -> List.rev acc
+  in
+  go 0 []
+
+(** The symbol tail-called from the block labelled [lbl] (e.g. ["%row4"]). *)
+let dispatch_row_symbol (ir : string) (lbl : string) : string =
+  let name = String.sub lbl 1 (String.length lbl - 1) in
+  let hdr_pos = Str.search_forward (Str.regexp_string (name ^ ":")) ir 0 in
+  let re = Str.regexp "@\\([A-Za-z0-9_.$]+\\)(" in
+  ignore (Str.search_forward re ir hdr_pos);
+  Str.matched_group 1 ir
+
+(** [NA.Thing] has TWO constructors (TA, TA2); [NB.Thing] has ONE (TB).
+    Every constructor tag NA.Thing owns must route to NA's impl, and
+    NB.Thing's single tag to NB's impl — i.e. exactly one row label is hit
+    by two switch arms (both landing on the same NA symbol) and one row
+    label by a single arm (the NB symbol). *)
+let test_colliding_multi_ctor_shares_one_impl () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA | TA2
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          TA -> "from-A-TA"
+          TA2 -> "from-A-TA2"
+        end
+      end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do
+    println(speak(NA.TA))
+    println(speak(NA.TA2))
+    println(speak(NB.TB))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  Alcotest.(check bool) "dispatch fn generated" true
+    (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
+  let arms = dispatch_switch_arms ir in
+  Alcotest.(check int) "three switch arms total (TA, TA2, TB tags)" 3
+    (List.length arms);
+  let labels = List.map snd arms in
+  let uniq_labels = List.sort_uniq compare labels in
+  Alcotest.(check int) "exactly two distinct row labels (one per impl)" 2
+    (List.length uniq_labels);
+  let count_of lbl = List.length (List.filter (fun l -> l = lbl) labels) in
+  let two_arm_labels = List.filter (fun l -> count_of l = 2) uniq_labels in
+  let one_arm_labels = List.filter (fun l -> count_of l = 1) uniq_labels in
+  (match two_arm_labels, one_arm_labels with
+   | [na_lbl], [nb_lbl] ->
+     let na_sym = dispatch_row_symbol ir na_lbl in
+     let nb_sym = dispatch_row_symbol ir nb_lbl in
+     Alcotest.(check bool) "both TA/TA2 tags route to NA's impl" true
+       (ir_contains na_sym "NA.Thing.speak");
+     Alcotest.(check bool) "TB's single tag routes to NB's impl" true
+       (ir_contains nb_sym "NB.Thing.speak");
+     Alcotest.(check bool) "the two rows resolve to distinct impls" true
+       (na_sym <> nb_sym)
+   | _ ->
+     Alcotest.failf
+       "expected exactly one row hit by 2 arms (NA) and one row hit by 1 \
+        arm (NB); got arms=[%s]"
+       (String.concat "; "
+          (List.map (fun (t, l) -> Printf.sprintf "(%s,%s)" t l) arms)))
+
+(* ── Task 4 review Finding 2: ECallPtr None-branch of try_collision_dispatch
+   ───────────────────────────────────────────────────────────────────────
+   [Mono.try_collision_dispatch] is wired into THREE call sites: the [EApp]
+   None-branch (exercised above by [test_colliding_general_iface_runtime_dispatch]),
+   the [iface_impl_name] name-collision branch, and the [ECallPtr]
+   None-branch. A natural March fixture reliably reaching the [ECallPtr]
+   branch could not be constructed: a generic wrapper function calling the
+   colliding method, and a higher-order closure parameter calling it, BOTH
+   still resolve through the [EApp] path in this compiler (verified
+   empirically — mono only ever sees a bare, unresolved [EApp "speak"] for
+   these shapes, never a pre-existing [ECallPtr] naming an unresolved
+   interface method).  Real cross-module ECallPtr dispatch (the scenario
+   [try_collision_dispatch]'s doc comment cites — a capability parameter
+   whose concrete type is erased to [TVar "_"] at lowering time) requires a
+   multi-file MARCH_LIB_PATH dependency graph that this single-file test
+   harness cannot construct.
+
+   So — mirroring [test_iface_guard_fires_ecallptr] above, which isolates
+   [llvm_emit]'s ECallPtr consumer the same way for the same reason — this
+   test hand-builds a TIR module and drives the REAL [Mono.monomorphize]
+   directly: a bare [ECallPtr] naming an unresolved method ("speak") with
+   two colliding "Thing" impls registered in [iface_methods]. This proves
+   the ECallPtr None-branch (mono.ml, the `Tir.ECallPtr (fn_atom, args) ->
+   ... Hashtbl.find_opt fn_table orig_name -> None` arm) rewrites to the
+   dispatch sentinel exactly like the EApp branch does, and registers both
+   impls' rows in [Dispatch_registry] — without depending on which
+   real-frontend shape happens to produce ECallPtr today. *)
+let test_mono_ecallptr_collision_dispatch () =
+  let open March_tir.Tir in
+  let mkv name ty = { v_name = name; v_ty = ty; v_lin = Unr } in
+  let thing_ty = TCon ("Thing", []) in
+  let impl_a_name = "Speak$NA.Thing.speak" in
+  let impl_b_name = "Speak$NB.Thing.speak" in
+  let impl_fn name lit = {
+    fn_name   = name;
+    fn_params = [ mkv "_self" thing_ty ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString lit));
+    fn_kind   = FnNormal;
+  } in
+  let arg_var = mkv "x" thing_ty in
+  let speak_var = mkv "speak" (TFn ([ thing_ty ], TString)) in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   =
+      ELet (arg_var, EAlloc (thing_ty, []),
+            ECallPtr (AVar speak_var, [ AVar arg_var ]));
+    fn_kind   = FnNormal;
+  } in
+  let tir = {
+    tm_name = "EcpDispatch";
+    tm_fns  = [ impl_fn impl_a_name "from-A"; impl_fn impl_b_name "from-B"; main_fn ];
+    tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [];
+  } in
+  let iface_methods : (string, (string * string) list) Hashtbl.t = Hashtbl.create 4 in
+  Hashtbl.replace iface_methods "speak" [ ("Thing", impl_a_name); ("Thing", impl_b_name) ];
+  let tir' = March_tir.Mono.monomorphize ~iface_methods tir in
+  let main' =
+    match List.find_opt (fun fn -> fn.fn_name = "main") tir'.tm_fns with
+    | Some fn -> fn
+    | None -> Alcotest.fail "specialized module has no `main` fn"
+  in
+  let sentinel_name =
+    match main'.fn_body with
+    | ELet (_, _, EApp (f, _)) -> Some f.v_name
+    | e -> Alcotest.failf "unexpected main body shape: %s" (show_expr e)
+  in
+  (match sentinel_name with
+   | None -> Alcotest.fail "ECallPtr call site was not rewritten to an EApp"
+   | Some sentinel ->
+     Alcotest.(check bool) "ECallPtr rewritten to the dispatch sentinel" true
+       (March_tir.Dispatch_registry.is_sentinel sentinel);
+     Alcotest.(check string) "sentinel name matches Speak.speak.Thing convention"
+       "__march_ifdispatch$Speak$speak$Thing" sentinel;
+     (match March_tir.Dispatch_registry.lookup sentinel with
+      | None -> Alcotest.fail "no dispatch rows registered for the sentinel"
+      | Some rows ->
+        let syms = List.map snd rows |> List.sort compare in
+        Alcotest.(check (list string))
+          "both colliding impls registered as dispatch rows"
+          (List.sort compare [ impl_a_name; impl_b_name ]) syms))
+
+(* ── Final-review Finding 2: iface_impl_name name-collision branch ───────────
+   The THIRD [Mono.try_collision_dispatch] call site — distinct from the two
+   above.  It is NOT the [None]-branch (callee absent from [fn_table]); here the
+   callee name IS a real user top-level function present in [fn_table], but it
+   ALSO happens to be an interface method name, AND the user function's
+   first-parameter type does not match the call's concrete first-argument type
+   (the classic `fn show(r: String)` shadowing the [Show] method while a prelude
+   generic calls `show(x)` on a different type).  mono must dispatch to the
+   interface impl, not the user function — and when that argument type is a
+   COLLIDING short name (two impls in different modules), it must route through
+   [try_collision_dispatch] rather than [resolve_impl_by_type]'s silent
+   first-match.
+
+   Reaching this branch (mono.ml's `Some orig_fn when <param/arg mismatch> ->`
+   arm) requires the callee to resolve to a user fn in [fn_table], which the
+   ECallPtr/None-branch shapes above do not — so, mirroring
+   [test_mono_ecallptr_collision_dispatch]'s hand-built-TIR technique, this test
+   supplies BOTH a user fn `speak(_: String)` (populating [fn_table]) and two
+   colliding "Thing" impls under `speak` in [iface_methods], then calls
+   `speak(x : Thing)` directly ([EApp], not [ECallPtr]).  A regression here
+   would silently fall through to [resolve_impl_by_type]'s first match. *)
+let test_mono_iface_name_collision_dispatch () =
+  let open March_tir.Tir in
+  let mkv name ty = { v_name = name; v_ty = ty; v_lin = Unr } in
+  let thing_ty = TCon ("Thing", []) in
+  let impl_a_name = "Speak$NA.Thing.speak" in
+  let impl_b_name = "Speak$NB.Thing.speak" in
+  let impl_fn name lit = {
+    fn_name   = name;
+    fn_params = [ mkv "_self" thing_ty ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString lit));
+    fn_kind   = FnNormal;
+  } in
+  (* A REAL user top-level fn named `speak` whose first param is String — it
+     lands in fn_table and shares the name with the Show-style method, but its
+     param type (String) differs from the call's arg type (Thing), which is what
+     trips the name-collision guard. *)
+  let user_speak = {
+    fn_name   = "speak";
+    fn_params = [ mkv "s" TString ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString "user-speak"));
+    fn_kind   = FnNormal;
+  } in
+  let arg_var = mkv "x" thing_ty in
+  let speak_var = mkv "speak" (TFn ([ thing_ty ], TString)) in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   =
+      ELet (arg_var, EAlloc (thing_ty, []),
+            EApp (speak_var, [ AVar arg_var ]));
+    fn_kind   = FnNormal;
+  } in
+  let tir = {
+    tm_name = "IfaceNameDispatch";
+    tm_fns  =
+      [ impl_fn impl_a_name "from-A"; impl_fn impl_b_name "from-B";
+        user_speak; main_fn ];
+    tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [];
+  } in
+  let iface_methods : (string, (string * string) list) Hashtbl.t = Hashtbl.create 4 in
+  Hashtbl.replace iface_methods "speak" [ ("Thing", impl_a_name); ("Thing", impl_b_name) ];
+  let tir' = March_tir.Mono.monomorphize ~iface_methods tir in
+  let main' =
+    match List.find_opt (fun fn -> fn.fn_name = "main") tir'.tm_fns with
+    | Some fn -> fn
+    | None -> Alcotest.fail "specialized module has no `main` fn"
+  in
+  let sentinel_name =
+    match main'.fn_body with
+    | ELet (_, _, EApp (f, _)) -> Some f.v_name
+    | e -> Alcotest.failf "unexpected main body shape: %s" (show_expr e)
+  in
+  (match sentinel_name with
+   | None -> Alcotest.fail "name-collision call site was not rewritten to an EApp"
+   | Some sentinel ->
+     Alcotest.(check bool) "call rewritten to the dispatch sentinel (not user fn)" true
+       (March_tir.Dispatch_registry.is_sentinel sentinel);
+     Alcotest.(check string) "sentinel name matches Speak.speak.Thing convention"
+       "__march_ifdispatch$Speak$speak$Thing" sentinel;
+     (match March_tir.Dispatch_registry.lookup sentinel with
+      | None -> Alcotest.fail "no dispatch rows registered for the sentinel"
+      | Some rows ->
+        let syms = List.map snd rows |> List.sort compare in
+        Alcotest.(check (list string))
+          "both colliding impls registered as dispatch rows"
+          (List.sort compare [ impl_a_name; impl_b_name ]) syms))
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -5967,6 +6782,144 @@ let test_opt_without_perceus () =
   in
   Alcotest.(check bool) "Opt on RC-free TIR produces no RC nodes" false any_rc
 
+(* ── Hot Code Reload: leaf change does not drag the caller chain ──────────
+   Regression for the `forge deploy hot` crash: changing one leaf function used
+   to change the TRANSITIVE Merkle impl_hash of every caller up to `main`, so a
+   hot deploy flagged the whole chain — including the running entry point — for
+   swap, which OOM/corrupts the runtime.  Two fixes are exercised here:
+     1. HCR reload-identity hashes are non-transitive (Hash.hash_fn_def), so a
+        leaf-body change only changes the leaf's hash, not its callers'.
+     2. The entry point (`main`/`ModName.main`) is excluded from the reloadable
+        boundary, so it is never a dispatch slot / swap candidate. *)
+
+(* Lower March source to a post-Perceus TIR module, the same shape the compiler
+   feeds to Llvm_emit / Pipeline.hash_module. *)
+let hcr_lower (src : string) : March_tir.Tir.tir_module =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~hot_reload:true m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  March_tir.Perceus.perceus tir
+
+(* The NON-transitive HCR reload-identity hash per function name — this mirrors
+   how bin/main.ml now populates hr_impl_hashes (Hash.hash_fn_def, sig+body,
+   no callee/type fold). *)
+let hcr_reload_hashes (m : March_tir.Tir.tir_module) : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  List.iter (fun (fd : March_tir.Tir.fn_def) ->
+    let h = March_cas.Hash.hash_fn_def fd in
+    Hashtbl.replace tbl fd.March_tir.Tir.fn_name h.March_cas.Hash.impl_hash)
+    m.March_tir.Tir.tm_fns;
+  tbl
+
+(* The TRANSITIVE Merkle impl_hash per function name — the CAS compilation key
+   (unchanged by this fix; still used for incremental-build correctness). *)
+let hcr_transitive_hashes (m : March_tir.Tir.tir_module) : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 16 in
+  let add (hd : March_cas.Cas.hashed_def) =
+    match hd.March_cas.Cas.hd_def with
+    | March_cas.Cas.FnDef fd ->
+      Hashtbl.replace tbl fd.March_tir.Tir.fn_name hd.March_cas.Cas.hd_impl_hash
+    | March_cas.Cas.TypeDef _ -> ()
+  in
+  List.iter (function
+    | March_cas.Pipeline.HSingle { hs_hdef } -> add hs_hdef
+    | March_cas.Pipeline.HGroup { hg_hdefs; _ } -> List.iter add hg_hdefs)
+    (March_cas.Pipeline.hash_module m);
+  tbl
+
+(* A 3-deep caller chain: main → mid → leaf.  In lowered TIR the entry file's
+   top module name is stripped, so the names are bare `leaf`/`mid`/`main` — the
+   same shape the compiler hashes.  [leaf_body] is spliced into `leaf` so we can
+   produce a leaf-only change. *)
+let hcr_chain_src (leaf_body : string) : string =
+  Printf.sprintf {|mod App do
+    fn leaf(n : Int) : Int do %s end
+    fn mid(n : Int) : Int do leaf(n) + 1 end
+    fn main() : Unit do println(int_to_string(mid(3))) end
+  end|} leaf_body
+
+let hget tbl k = Hashtbl.find_opt tbl k
+
+let test_hcr_leaf_change_only_changes_leaf_reload_hash () =
+  let m0 = hcr_lower (hcr_chain_src "n * 2") in
+  let m1 = hcr_lower (hcr_chain_src "n * 3") in  (* leaf body changed *)
+  let r0 = hcr_reload_hashes m0 and r1 = hcr_reload_hashes m1 in
+  (* Leaf's non-transitive reload hash DOES change. *)
+  Alcotest.(check bool) "leaf reload hash changes" true
+    (hget r0 "leaf" <> hget r1 "leaf" && hget r0 "leaf" <> None);
+  (* Its callers' reload hashes are UNCHANGED (bodies are byte-identical).
+     THIS is the crux of the fix: pre-fix these were transitive Merkle roots
+     that folded in the leaf's hash, so they changed too and dragged the whole
+     chain (up to main) into the hot-swap set. *)
+  Alcotest.(check bool) "mid reload hash unchanged" true
+    (hget r0 "mid" = hget r1 "mid" && hget r0 "mid" <> None);
+  Alcotest.(check bool) "main reload hash unchanged" true
+    (hget r0 "main" = hget r1 "main" && hget r0 "main" <> None)
+
+let test_hcr_transitive_hash_still_propagates_for_cas () =
+  (* Sanity: the CAS/compilation key IS still transitive — a leaf change DOES
+     propagate to callers there — so incremental-build cache correctness is
+     preserved.  Only the HCR reload identity is non-transitive. *)
+  let m0 = hcr_lower (hcr_chain_src "n * 2") in
+  let m1 = hcr_lower (hcr_chain_src "n * 3") in
+  let t0 = hcr_transitive_hashes m0 and t1 = hcr_transitive_hashes m1 in
+  Alcotest.(check bool) "transitive leaf hash changes" true
+    (hget t0 "leaf" <> hget t1 "leaf");
+  Alcotest.(check bool) "transitive caller (mid) hash ALSO changes" true
+    (hget t0 "mid" <> hget t1 "mid" && hget t0 "mid" <> None)
+
+(* Build a TIR module directly, mirroring the forgepm multi-file layout where
+   `Blog.main` (the app entry point) IS under the `--hot-reload Blog` boundary
+   because it comes from a library file (its module prefix is retained, unlike a
+   single-file entry). Chain: Blog.main → Blog.handle → Blog.hero. *)
+let hcr_boundary_module () : March_tir.Tir.tir_module =
+  let open March_tir.Tir in
+  let vref name = { v_name = name; v_ty = TFn ([TInt], TInt); v_lin = Unr } in
+  let hero : fn_def =
+    { fn_name = "Blog.hero";
+      fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
+      fn_ret_ty = TInt;
+      fn_kind = FnNormal;
+      fn_body = EAtom (ALit (March_ast.Ast.LitInt 1)) } in
+  let handle : fn_def =
+    { fn_name = "Blog.handle";
+      fn_params = [{ v_name = "n"; v_ty = TInt; v_lin = Unr }];
+      fn_ret_ty = TInt;
+      fn_kind = FnNormal;
+      fn_body = EApp (vref "Blog.hero",
+                      [AVar { v_name = "n"; v_ty = TInt; v_lin = Unr }]) } in
+  let main : fn_def =
+    { fn_name = "Blog.main"; fn_params = []; fn_ret_ty = TInt;
+      fn_kind = FnNormal;
+      fn_body = EApp (vref "Blog.handle",
+                      [ALit (March_ast.Ast.LitInt 3)]) } in
+  { tm_name = "Blog"; tm_fns = [main; handle; hero]; tm_types = [];
+    tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+let test_hcr_entry_point_not_a_reloadable_slot () =
+  (* Blog.main is under the "Blog" boundary but must NOT be published as a slot,
+     because it is the running entry point.  Its callees remain reloadable. *)
+  let m = hcr_boundary_module () in
+  let ir = March_tir.Llvm_emit.emit_module
+             ~hot_reload:(Some (March_tir.Hot_reload.default_config "Blog")) m in
+  (* No baseline publish nor name registration for the entry point. *)
+  Alcotest.(check bool) "entry point Blog.main NOT published as a slot" false
+    (ir_contains ir "ptr @Blog.main,");
+  Alcotest.(check bool) "entry point Blog.main NOT registered as a name" false
+    (ir_contains ir "call void @march_dispatch_register_name" &&
+     ir_contains ir "Blog.main\\00");
+  (* Its callees ARE published as reloadable slots. *)
+  Alcotest.(check bool) "Blog.handle IS published as a slot" true
+    (ir_contains ir "ptr @Blog.handle,");
+  Alcotest.(check bool) "Blog.hero IS published as a slot" true
+    (ir_contains ir "ptr @Blog.hero,");
+  (* Boundary→boundary calls still route through the versioned dispatch table,
+     including from main's body — proving main still calls swappable versions. *)
+  Alcotest.(check bool) "boundary callees still dispatch-routed" true
+    (ir_contains ir "@march_dispatch_enter")
+
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
 (* ── Guard-exhaustion fallthrough (B3) ─────────────────────────────────────
@@ -6141,6 +7094,135 @@ let test_float_lit_no_wildcard_panics_compiled () =
       true
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
+
+(* ── `--check` diagnostic-display determinism ───────────────────────────
+   Repeated `march --check` of the SAME source file must produce
+   byte-identical stderr every run. Regression for a display-nondeterminism
+   bug: `--check` cached a "clean check" CAS artifact after ANY successful
+   check (bin/main.ml), then a later identical-source invocation hit that
+   cache and `exit 0`ed BEFORE the diagnostic-printing pass — so a module
+   that emits a warning/hint (here: the Check-3 `Cap(IO)`-narrowing HINT)
+   printed it on the first (cache-miss) run and stayed SILENT on every
+   subsequent (cache-hit) run. Because the CAS store lives at the shared
+   project-root `.march/cas` and is cleared intermittently (concurrent
+   sessions, `dune cache trim`), the hint reappeared ~1-in-N — real, if
+   display-only (the exit code is invariant 0). Fix: only cache a `--check`
+   run that emitted NO user-facing diagnostics, so a cache hit provably
+   means "nothing to print" and its silent exit is byte-identical to a fresh
+   run.
+
+   A fresh unique temp path guarantees a cache MISS on the first run, so
+   pre-fix this test is reliably RED (run 1 prints the hint, run 2 is
+   silent); post-fix all runs print identically. *)
+let test_check_diagnostic_display_deterministic () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_capcheck_determinism"
+      "mod CapCheckDet do\n\
+      \  needs IO\n\
+      \  fn run(io : Cap(IO)) do io end\n\
+       end\n"
+  in
+  let check_cmd = Printf.sprintf
+    "cd %s && %s --check %s 2>&1"
+    (Filename.quote project_root)
+    (Filename.quote main_exe) (Filename.quote src)
+  in
+  let iterations = 12 in
+  let first = read_cmd_output check_cmd in
+  (* The narrowing HINT must actually appear (otherwise the test is vacuous —
+     it would pass trivially if `--check` printed nothing at all). *)
+  Alcotest.(check bool)
+    "the Cap(IO)-narrowing HINT is present in --check output"
+    true
+    (ir_contains first "narrowing" || ir_contains first "HINT");
+  let all_identical = ref true in
+  for _ = 2 to iterations do
+    let out = read_cmd_output check_cmd in
+    if out <> first then all_identical := false
+  done;
+  Alcotest.(check bool)
+    (Printf.sprintf
+       "repeated --check produces byte-identical stderr across %d runs \
+        (no cache-driven diagnostic suppression)" iterations)
+    true
+    !all_identical
+
+(* ── Erased-Option FBIP reuse (RC underflow) ────────────────────────────
+   A niche-represented Option (`Some(x) ≡ x`) that crosses a fully-polymorphic
+   boundary (`actor_call`'s reply is `Result(Option(a), _)` with `a` an
+   unresolved unification variable) reaches Perceus as `Option(TVar)`.
+   `Repr.repr_of_ty` conservatively boxes that (niche_payload_ok(TVar)=false),
+   but codegen (`llvm_case.ml`'s `effective_repr` abstract-arg recovery) niche-
+   encodes it — the value shares storage with its payload.  Pre-fix,
+   `scrutinee_shares_payload_storage` trusted `repr_of_ty`'s Boxed verdict, so
+   `add_scrutinee_free_for` treated the value as a distinct boxed cell and
+   handed it to FBIP, which rewrote `Some(conn) -> Ok(conn)` into
+   `reuse maybe_conn as Ok(conn)`.  Because `conn` aliases `maybe_conn` (niche),
+   the reuse stored the payload into its own reused cell — a self-referential
+   object → `march: RC underflow (rc was 0)` (SIGABRT, exit 134) when the
+   value is later consumed.  Fix: `scrutinee_shares_payload_storage` mirrors
+   codegen's abstract-arg niche recovery.  See docs/value-representation.md §7.
+   Runs the binary because the symptom is a runtime abort, not an IR shape. *)
+let test_erased_option_niche_fbip_no_underflow_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_erased_option_niche"
+    "mod Main do\n\
+    \  needs IO.Spawn\n\
+    \  type Conn = PgConn(Int) | LiteConn(String)\n\
+    \  actor Pool do\n\
+    \    state { n : Int }\n\
+    \    init { n: 0 }\n\
+    \    on Checkout(reply_to) do\n\
+    \      let _ = actor_reply(reply_to, Some(PgConn(42)))\n\
+    \      state\n\
+    \    end\n\
+    \  end\n\
+    \  fn describe(c) do\n\
+    \    match c do\n\
+    \    PgConn(fd)  -> \"pg:\" ++ int_to_string(fd)\n\
+    \    LiteConn(k) -> \"lite:\" ++ k\n\
+    \    end\n\
+    \  end\n\
+    \  fn checkout(pool) do\n\
+    \    let t = task_spawn(fn _ ->\n\
+    \      match actor_call(pool, Checkout(0), 5000) do\n\
+    \      Err(e)         -> Err(e)\n\
+    \      Ok(maybe_conn) ->\n\
+    \        match maybe_conn do\n\
+    \        None       -> Err(\"none\")\n\
+    \        Some(conn) -> Ok(conn)\n\
+    \        end\n\
+    \      end\n\
+    \    )\n\
+    \    task_await_unwrap(t)\n\
+    \  end\n\
+    \  fn main() do\n\
+    \    match checkout(spawn(Pool)) do\n\
+    \    Ok(conn) -> println(describe(conn))\n\
+    \    Err(e)   -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  (* NB: no interpreter parity check here — the interpreter's actor_call /
+     task_spawn interaction does not deliver the reply for this shape ("err: no
+     reply"), an unrelated interpreter limitation.  The RC bug is purely a
+     COMPILED-backend defect, so we assert on the compiled binary alone:
+     pre-fix it aborted with `RC underflow` (SIGABRT, exit 134); post-fix it
+     prints pg:42 and exits 0. *)
+  let bin = Filename.concat tmp "erasedoptbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check bool)
+      "compiled erased-niche-Option checkout prints pg:42 with no RC underflow \
+       (not SIGABRT/exit 134)"
+      true
+      (ir_contains run_out "pg:42"
+       && ir_contains run_out "EXIT:0"
+       && not (ir_contains run_out "RC underflow"))
 
 (* ── Nested-tuple destructure in a block-level `let` (Core March golden) ──
    `let ((a, b), (c, d)) = ((1, 2), (3, 4))` failed to compile: the emitted IR
@@ -6491,6 +7573,33 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** `--compile --no-opt` must still prune unreachable top-level functions.
+    Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
+    not an optimization: the injected prelude/http stack references
+    not-always-linked externs (e.g. `_http_fetch`).  Before the fix DCE ran only
+    inside Opt.run, so `--no-opt` left the whole prelude reachable and a trivial
+    program failed to link with "Undefined symbols: _http_fetch".  This test
+    compiles a trivial `println("hi")` with `--no-opt` and asserts the binary
+    links, runs, prints `hi`, and exits 0. It fails (link error) pre-fix. *)
+let test_compiled_no_opt_prunes_unreachable () =
+  let src =
+    "mod Main do\n  fn main() do println(\"hi\") end\nend\n" in
+  let (project_root, main_exe, src_path, tmp) =
+    write_march_source ~name:"no_opt_prune" src in
+  let bin = Filename.concat tmp "no_opt_prune_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~extra_args:"--no-opt"
+          ~main_exe ~bin ~src:src_path () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?"
+      (Filename.quote bin)) in
+    Alcotest.(check bool)
+      ("--no-opt compile links, runs, prints hi, exits 0 (got: " ^ run_out ^ ")")
+      true
+      (run_out = "hi\nEXIT:0")
+
 (** int_div_euclid: native codegen must route through march_checked_ediv and
     match the interpreter's Euclidean quotient across all four sign quadrants.
     Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
@@ -6523,6 +7632,201 @@ let test_compiled_int_mod_euclid_parity () =
          \  end\n\
           end\n"
     ~expected:"[1, 2, 2, 1]"
+    ()
+
+(** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
+    the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
+    left the outer binding's literal mapping (`x -> 10`) in scope when the
+    shadowing RHS was not itself a literal/alias/record, so the body's uses of
+    the *new* `x` were substituted with the *old* value — a silently-wrong
+    compile on BOTH the native and JS backends (interpreter was correct). The
+    chain `((10 + 5) * 2)` discriminates cleanly: correct = 30, buggy = 10
+    (every shadow kept reading the original 10). *)
+let test_compiled_let_shadowing_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_let_shadowing"
+    ~src:"mod LetShadowParity do\n\
+         \  fn main() do\n\
+         \    let x = 10\n\
+         \    let x = x + 5\n\
+         \    let x = x * 2\n\
+         \    println(int_to_string(x))\n\
+         \  end\n\
+          end\n"
+    ~expected:"30"
+    ()
+
+(** Entry-module self-qualification: a hand-written call that spells out the
+    entry file's OWN top-level module name (`Foo.wrapped(x)` inside `mod Foo`,
+    or `Outer.Inner.wrapped(x)` inside entry `mod Outer`) must resolve. TIR
+    unwraps the entry module — its members are emitted WITHOUT the entry
+    mod-name prefix — but a dotted source reference kept its `Foo.` /
+    `Outer.` segment (it never matched desugar's bare `make_qualifier`), so
+    reference and definition never converged: "unbound variable: Foo.wrapped"
+    (interp) / "Undefined symbols: _Foo.wrapped" (compiled), on BOTH backends.
+    The desugar strip pass removes only the single leading entry-own segment,
+    so `Outer.Inner.wrapped -> Inner.wrapped` survives to match the nested
+    definition. `wrapped(5)` = 6 via `Foo.bar` / `Outer.Inner.helper`. *)
+let test_compiled_entry_self_qual_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual"
+    ~src:"mod Foo do\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do Foo.bar(x) end\n\
+         \  fn main() do println(int_to_string(Foo.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Nested variant of {!test_compiled_entry_self_qual_parity}: the entry file's
+    sole top-level mod is `Outer`, so `Outer.Inner.wrapped(5)` must strip only
+    the leading `Outer.` down to `Inner.wrapped` (the nested `Inner.` stays,
+    matching the still-qualified nested definition). *)
+let test_compiled_entry_self_qual_nested_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_nested"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn main() do println(int_to_string(Outer.Inner.wrapped(5))) end\n\
+          end\n"
+    ~expected:"6"
+    ()
+
+(** Over-stripping guard for {!test_compiled_entry_self_qual_parity}: bare
+    intra-module calls (`wrapped(5)`) and single-level nested-module
+    references that do NOT lead with the entry name (`Inner.wrapped(5)`) must
+    STILL resolve after the strip pass. Prints 6 twice. *)
+let test_compiled_entry_self_qual_no_overstrip_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_entry_self_qual_no_overstrip"
+    ~src:"mod Outer do\n\
+         \  mod Inner do\n\
+         \    fn helper(x) do x + 1 end\n\
+         \    fn wrapped(x) do helper(x) end\n\
+         \  end\n\
+         \  fn bar(x) do x + 1 end\n\
+         \  fn wrapped(x) do bar(x) end\n\
+         \  fn main() do\n\
+         \    println(int_to_string(wrapped(5)))\n\
+         \    println(int_to_string(Inner.wrapped(5)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"6\n6"
+    ()
+
+(** MPST (multiparty session types), 3-role Relay — the FIRST MPST test that
+    RUNS the compiled binary (the [test_session_compile_*] tests only grep IR,
+    so they never caught this).
+
+    Two independent compiled-only bugs are pinned here:
+    (1) Layout: [march_mpst_new] used to return a March linked list (Cons
+        cells), while the typechecker types [MPST.new(P)] as a flat N-tuple and
+        the compiled destructure reads tuple field offsets 16/24/32.  Reading
+        past a 32-byte Cons cell yielded a garbage endpoint pointer → SIGSEGV
+        (exit 139, zero stderr) on EVERY compiled MPST program.  Fixed by
+        returning a flat N-tuple (mirroring [march_chan_new]).
+    (2) Role name/index skew: endpoints carry positional role indices 0..N-1
+        (tuple-position = role-name-SORTED order), but send/recv route by role
+        NAME via [mpst_resolve_role], which used to assign names to slots in
+        first-encounter order → indices didn't line up → empty-queue abort even
+        after the layout fix.  Fixed by threading the sorted role names to the
+        runtime so [role_names[i]] is pre-registered in tuple-position order.
+
+    The tuple destructure `(cc, lc, sc)` is role-name-SORTED
+    (Client, Logger, Server), NOT declaration order — so this also exercises
+    the sorted-order contract between the typechecker and the runtime. *)
+let test_compiled_mpst_relay_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay"
+    ~src:"mod MpstRelayParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"req\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, m1)\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, m2)\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"req"
+    ()
+
+(** MPST Relay with DISTINCT payloads on each of the three hops.  Where the
+    forwarding variant above could mask a name→index misroute (every hop
+    carries the same "req"), this one sends a unique literal per hop and prints
+    all three received values.  Any skew between the tuple-position role index
+    and the name-resolved routing index would deliver the wrong string or hit
+    an empty queue (abort) — so this specifically exercises fix (2), the
+    sorted role-name pre-registration, not just the tuple-layout fix. *)
+let test_compiled_mpst_relay_distinct_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_mpst_relay_distinct"
+    ~src:"mod MpstRelayDistinctParity do\n\
+         \  type Client = Client\n\
+         \  type Server = Server\n\
+         \  type Logger = Logger\n\
+         \  protocol Relay do\n\
+         \    Client -> Server : String\n\
+         \    Server -> Logger : String\n\
+         \    Logger -> Client : String\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let (cc, lc, sc) = MPST.new(Relay)\n\
+         \    let cc2 = MPST.send(cc, Server, \"c2s\")\n\
+         \    let (m1, sc2) = MPST.recv(sc, Client)\n\
+         \    let sc3 = MPST.send(sc2, Logger, \"s2l\")\n\
+         \    let (m2, lc2) = MPST.recv(lc, Server)\n\
+         \    let lc3 = MPST.send(lc2, Client, \"l2c\")\n\
+         \    let (m3, cc3) = MPST.recv(cc2, Logger)\n\
+         \    println(m1)\n\
+         \    println(m2)\n\
+         \    println(m3)\n\
+         \    MPST.close(cc3) MPST.close(sc3) MPST.close(lc3)\n\
+         \  end\n\
+          end\n"
+    ~expected:"c2s\ns2l\nl2c"
+    ()
+
+(** Guarded-match IR-bloat fix: a 3-arm guarded match with a wildcard
+    catch-all ([n > 0 -> "pos"], [n < 0 -> "neg"], [_ -> "zero"]) used to
+    re-lower a FRESH fallback join point per guard check, duplicating the
+    tail body (panic/"zero") per arm.  The fix threads ONE shared 0-arg join
+    point per arm (see lib/tir/lower_match.ml's guard path + the reduced
+    test/snapshots/perceus/guard_match.expected).  This parity test guards
+    the *behaviour*: all three guard outcomes must still print identically on
+    the interpreter and the compiled backend after the shared-JP refactor. *)
+let test_compiled_guarded_match_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_guarded_match"
+    ~src:"mod GuardedMatchParity do\n\
+         \  fn classify(x : Int) : String do\n\
+         \    match x do\n\
+         \      n when n > 0 -> \"pos\"\n\
+         \      n when n < 0 -> \"neg\"\n\
+         \      _ -> \"zero\"\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(classify(5))\n\
+         \    println(classify(-3))\n\
+         \    println(classify(0))\n\
+         \  end\n\
+          end\n"
+    ~expected:"pos\nneg\nzero"
     ()
 
 (** Variant 1: List(Int) — pre-fix symptom was SIGSEGV (exit 139). The
@@ -7040,6 +8344,48 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(** Cross-module ambiguous-constructor resolution (compiled-only regression).
+
+    `Msgpack.Value` and `Json.JsonValue` (both stdlib) share the bare constructor
+    names `Null`/`Bool`/`Str`/`Array` at DIFFERENT tag positions (`Array` is tag 5
+    in `Value`, tag 4 in `JsonValue`). Pre-fix, an unannotated `Msgpack` function
+    resolving a bare `Array`/`Str`/`Null` could pick the sibling module's variant,
+    so:
+      • `encode_val`'s scrutinee typed as `JsonValue` → the `Int`/`Array`/`Map`
+        arms (Msgpack-only) collapsed to a non-exhaustive `switch`, and
+        `Msgpack.encode(Msgpack.int(42))` panicked with "non-exhaustive pattern
+        match" at runtime (interpreter was fine — this was compiled-only), and
+      • `decode` constructed `alloc JsonValue.Array` (tag 4) where a `Value`
+        (tag 5) was meant, so a decoded array no longer matched `Msgpack.Array`.
+    The interpreter got both right, making this a pure codegen parity divergence.
+    Fixed as a side effect of the sibling-ctor-shadowing fix (`add_ctor` moving a
+    module's own re-registered constructor to the front of its candidate list —
+    see the "sibling-ctor shadowing" entry in `specs/progress.md`). This
+    exercises the Msgpack-only arms (Int, Array, Map) through both encode and a
+    decode round-trip. *)
+let test_msgpack_cross_module_ctor_resolution_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_msgpack_ctor_resolution"
+    ~src:"mod MsgpackCtorResolution do\n\
+         \  fn describe(bs : List(Int)) : String do\n\
+         \    match Msgpack.decode(bs) do\n\
+         \      Ok(Msgpack.Int(n))   -> \"int:\" ++ String.from_int(n)\n\
+         \      Ok(Msgpack.Array(_)) -> \"array\"\n\
+         \      Ok(Msgpack.Map(_))   -> \"map\"\n\
+         \      Ok(_)                -> \"other\"\n\
+         \      Err(e)               -> \"err:\" ++ e\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(String.from_int(List.length(Msgpack.encode(Msgpack.int(42)))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.int(7))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.array(Cons(Msgpack.int(1), Cons(Msgpack.int(2), Nil))))))\n\
+         \    println(describe(Msgpack.encode(Msgpack.map(Cons((Msgpack.str(\"k\"), Msgpack.int(9)), Nil)))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"1\nint:7\narray\nmap"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -7066,6 +8412,7 @@ declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
+declare void @march_actor_set_call_base(ptr %actor, i64 %base)
 declare ptr  @getenv(ptr)
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
@@ -7085,6 +8432,7 @@ declare i32  @march_test_report()
 declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
+declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_html_auto_escape(ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
@@ -7292,6 +8640,12 @@ declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)
 declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
 declare void @march_task_cancel_by_id(ptr %task)
+declare void @march_signal_watch(i64 %code, ptr %clo)
+declare void @march_signal_unwatch(i64 %code)
+declare void @march_signal_raise_self(i64 %code)
+declare ptr  @march_alloc_float(double %v)
+declare double @march_unbox_float(ptr %p)
+declare i64  @march_poly_compare(ptr %a, ptr %b)
 |}
 
 let golden_preamble_native_net_io : string = {|
@@ -7412,12 +8766,16 @@ declare i64  @march_mailbox_size(ptr %pid)
 declare void @march_run_until_idle()
 declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
 declare ptr  @march_get_cap(ptr %pid)
-declare void @march_send_checked(ptr %cap, ptr %msg)
+declare i64  @march_send_checked(ptr %cap, ptr %msg)
+declare i64  @march_revoke_cap(ptr %cap)
+declare i64  @march_is_cap_valid(ptr %cap)
 declare ptr  @march_pid_of_int(i64 %n)
 declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
 declare void @march_link(ptr %actor_a, ptr %actor_b)
 declare void @march_unlink(ptr %actor_a, ptr %actor_b)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
+declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx)
+declare i64  @march_pid_index_of(ptr %actor)
 declare ptr  @march_value_to_string(ptr %v)
 ; Session-typed channel builtins (binary)
 declare ptr  @march_chan_new(ptr %proto_name)
@@ -7427,7 +8785,7 @@ declare i64  @march_chan_close(ptr %ep)
 declare ptr  @march_chan_choose(ptr %ep, ptr %label)
 declare ptr  @march_chan_offer(ptr %ep)
 ; Multi-party session type (MPST) builtins
-declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles, ptr %roles_csv)
 declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
 declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
 declare i64  @march_mpst_close(ptr %ep)
@@ -7447,6 +8805,12 @@ declare void @march_cancel_token_cancel(ptr %tok)
 declare i64  @march_cancel_token_is_cancelled(ptr %tok)
 declare ptr  @march_task_spawn_with_cancel_thunk(ptr %clo, ptr %tok)
 declare void @march_task_cancel_by_id(ptr %task)
+declare void @march_signal_watch(i64 %code, ptr %clo)
+declare void @march_signal_unwatch(i64 %code)
+declare void @march_signal_raise_self(i64 %code)
+declare ptr  @march_alloc_float(double %v)
+declare double @march_unbox_float(ptr %p)
+declare i64  @march_poly_compare(ptr %a, ptr %b)
 |}
 
 (** Reassemble the historical preamble text for a given (is_wasm, repl)
@@ -7650,6 +9014,48 @@ let test_cross_tls_gzip_linux_amd64_elf () =
           true (ir_contains needed so))
       ["libssl.so.3"; "libcrypto.so.3"; "libz.so.1"]
 
+(** Phase 7.1: a default-arg function must be callable BY NAME from March source
+    at every arity — desugar emits only mangled `greet$N` decls, so before the
+    typecheck default-arg call-resolution fix a source-level `greet("Bob")` died
+    with "I cannot find `greet`. Did you mean `greet$1`?" under --check/--compile
+    AND interpretation. Exercises reduced (1-arg, one default), partial (2-arg,
+    one default), and full (3-arg) arities; parity asserts interp == compiled. *)
+let test_compiled_default_args_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_default_args_source_call"
+    ~src:"mod M do\n\
+         \  fn greet(name, greeting \\\\ \"Hi\", punct \\\\ \"!\") do\n\
+         \    greeting ++ \", \" ++ name ++ punct\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(greet(\"Bob\"))\n\
+         \    println(greet(\"Al\", \"Yo\"))\n\
+         \    println(greet(\"Cy\", \"Hey\", \"?\"))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Hi, Bob!\nYo, Al!\nHey, Cy?"
+    ()
+
+(** Phase 7.1 (nested): a default-arg fn defined inside a NESTED module is also
+    callable by name at reduced arity, on both backends — needs the desugar
+    `expand_defaults_decl` DMod recursion AND the eval nested `foo$N`→base
+    VMultiarity reconstruction/exposure (compiled worked via TIR alone, interp
+    did not, before those). *)
+let test_compiled_nested_default_args_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_default_args"
+    ~src:"mod A do\n\
+         \  mod B do\n\
+         \    fn f(x, y \\\\ 100) do x + y end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(int_to_string(B.f(1)))\n\
+         \    println(int_to_string(B.f(2, 20)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"101\n22"
+    ()
+
 let codegen_suites =
   [
       ( "cross_compile", [
@@ -7686,6 +9092,14 @@ let codegen_suites =
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
           Alcotest.test_case "nested atom lit: no tag switch"   `Quick test_nested_atom_lit_pattern_no_tag_switch;
+        ] );
+      ( "actor_dispatch_codegen", [
+          Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
+            `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
+            `Quick test_actor_struct_ereuse_unconditional;
+          Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
+            `Quick test_actor_suffix_named_user_type_not_treated_as_actor;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
@@ -7931,6 +9345,28 @@ let codegen_suites =
         Alcotest.test_case "niche_float_boxed"    `Quick test_repr_niche_float_is_boxed;
         Alcotest.test_case "niche_unit_boxed"     `Quick test_repr_niche_unit_is_boxed;
         Alcotest.test_case "nested_niche_boxed"   `Quick test_repr_nested_niche_is_boxed;
+        Alcotest.test_case "colliding_niche_shaped_forced_boxed" `Quick
+          test_repr_colliding_niche_shaped_type_forced_boxed;
+        Alcotest.test_case "noncolliding_niche_shaped_unaffected" `Quick
+          test_repr_noncolliding_niche_shaped_type_unaffected;
+      ]);
+      ("lower: collision-conditional impl symbols", [
+        Alcotest.test_case "colliding general-iface impls get distinct symbols" `Quick
+          test_colliding_impls_get_distinct_symbols;
+        Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
+          test_noncolliding_impl_symbol_stays_bare;
+      ]);
+      ("dispatch: colliding general-iface runtime tag switch", [
+        Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick
+          test_colliding_general_iface_runtime_dispatch;
+        Alcotest.test_case "non-colliding program emits no dispatch fn" `Quick
+          test_noncolliding_no_dispatch_fn;
+        Alcotest.test_case "multi-ctor colliding type shares one impl per type" `Quick
+          test_colliding_multi_ctor_shares_one_impl;
+        Alcotest.test_case "mono ECallPtr None-branch reaches try_collision_dispatch" `Quick
+          test_mono_ecallptr_collision_dispatch;
+        Alcotest.test_case "mono iface_impl_name name-collision branch reaches try_collision_dispatch" `Quick
+          test_mono_iface_name_collision_dispatch;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
@@ -8122,15 +9558,30 @@ let codegen_suites =
       ( "js_backend_opt", [
           Alcotest.test_case "Opt safe without Perceus" `Quick test_opt_without_perceus;
         ] );
+      ( "hot_reload_leaf_change", [
+          Alcotest.test_case "leaf change: only leaf reload hash changes" `Quick test_hcr_leaf_change_only_changes_leaf_reload_hash;
+          Alcotest.test_case "transitive CAS hash still propagates"       `Quick test_hcr_transitive_hash_still_propagates_for_cas;
+          Alcotest.test_case "entry point excluded from reloadable slots" `Quick test_hcr_entry_point_not_a_reloadable_slot;
+        ] );
       ( "guard_exhaustion_codegen", [
           Alcotest.test_case "compiled guard exhaustion panics (B3)" `Quick
             test_guard_exhaustion_panics_compiled;
+          Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
+            test_compiled_guarded_match_parity;
+        ] );
+      ( "check_diagnostic_determinism", [
+          Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick
+            test_check_diagnostic_display_deterministic;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
             test_float_lit_match_arm_compiled;
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "erased_option_niche_fbip_codegen", [
+          Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
+            test_erased_option_niche_fbip_no_underflow_compiled;
         ] );
       ( "nested_tuple_let_codegen", [
           Alcotest.test_case "compiled nested-tuple `let` destructure binds leaf vars" `Quick
@@ -8155,10 +9606,28 @@ let codegen_suites =
             test_erased_update_multi_field_values_compiled;
         ] );
       ( "iface_impl_mono_codegen", [
+          Alcotest.test_case "compiled default-arg call at every arity (source-level resolution)" `Quick
+            test_compiled_default_args_parity;
+          Alcotest.test_case "compiled nested-module default-arg call (both backends)" `Quick
+            test_compiled_nested_default_args_parity;
+          Alcotest.test_case "compiled --no-opt prunes unreachable fns (links, prints hi)" `Quick
+            test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
+          Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
+            test_compiled_let_shadowing_parity;
+          Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
+            test_compiled_entry_self_qual_parity;
+          Alcotest.test_case "compiled entry-module nested self-qualification parity" `Quick
+            test_compiled_entry_self_qual_nested_parity;
+          Alcotest.test_case "compiled entry-module self-qual no-overstrip parity" `Quick
+            test_compiled_entry_self_qual_no_overstrip_parity;
+          Alcotest.test_case "compiled MPST 3-role Relay parity (runs binary; layout+role-index fix)" `Quick
+            test_compiled_mpst_relay_parity;
+          Alcotest.test_case "compiled MPST Relay distinct-payload parity (runs binary; role name->index)" `Quick
+            test_compiled_mpst_relay_distinct_parity;
           Alcotest.test_case "compiled println(List(Int)) parity (Wave2 T1)" `Quick
             test_compiled_println_int_list_parity;
           Alcotest.test_case "compiled println(List(String)) parity (Wave2 T1)" `Quick
@@ -8208,6 +9677,10 @@ let codegen_suites =
           Alcotest.test_case "== operator on generic newtype (type_params subst path) (P1)" `Quick
             test_newtype_eq_operator_generic_payload_compiled;
         ] );
+      ( "cross_module_ctor_resolution", [
+          Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
+            test_msgpack_cross_module_ctor_resolution_compiled;
+        ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_native;
@@ -8222,6 +9695,22 @@ let codegen_suites =
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
             test_unreadable_sibling_dir_does_not_crash_check;
         ] );
+      ( "name_resolution", [
+          Alcotest.test_case "qualified call not hijacked by another module's global import" `Quick
+            test_qualified_alias_no_cross_module_hijack;
+          Alcotest.test_case "entry-file bulk import resolves partial-qualified call" `Quick
+            test_entry_bulk_import_resolves_partial_qualified;
+          Alcotest.test_case "registry record's bare-named sibling field type resolves" `Quick
+            test_registry_record_field_bare_sibling_type_resolves;
+        ] );
+      ( "js_pipeline", [
+          Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
+          Alcotest.test_case "typecheck error surfaces"      `Quick test_js_pipeline_typecheck_error_surfaces;
+          Alcotest.test_case "dom extern reaches output"     `Quick test_js_pipeline_dom_extern_reaches_output;
+          Alcotest.test_case "dom event_key reaches output"  `Quick test_js_pipeline_dom_event_key_reaches_output;
+        ] );
   ]
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
+  @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
+  @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
 

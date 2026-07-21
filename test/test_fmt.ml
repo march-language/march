@@ -93,6 +93,75 @@ end|} in
   check_parses "lambda" src;
   check_idempotent "lambda" src
 
+(** Regression test: a lambda with a multi-statement body must not be
+    collapsed to a literal "..." placeholder (invalid syntax). *)
+let contains_substring haystack needle =
+  let hl = String.length haystack and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
+  go 0
+
+let check_no_ellipsis_placeholder label src =
+  let formatted = fmt src in
+  if contains_substring formatted "-> ..." then
+    Alcotest.fail (Printf.sprintf "%s: lambda body collapsed to '...':\n%s" label formatted)
+
+let test_multiline_lambda_let () =
+  let src = {|mod Test do
+fn make() : Int -> Int do
+  fn x ->
+    let y = x + 1
+    let z = y * 2
+    z
+end
+end|} in
+  check_parses "multiline lambda let" src;
+  check_idempotent "multiline lambda let" src;
+  check_no_ellipsis_placeholder "multiline lambda let" src
+
+let test_multiline_lambda_call_arg () =
+  let src = {|mod Test do
+fn make(xs : List(Int)) : List(Int) do
+  List.map(xs, fn x ->
+    let y = x + 1
+    let z = y * 2
+    z
+  )
+end
+end|} in
+  check_parses "multiline lambda call arg" src;
+  check_idempotent "multiline lambda call arg" src;
+  check_no_ellipsis_placeholder "multiline lambda call arg" src
+
+let test_multiline_lambda_pipe_stage () =
+  let src = {|mod Test do
+fn make(xs : List(Int)) : List(Int) do
+  xs
+  |> List.map(fn x ->
+    let y = x + 1
+    let z = y * 2
+    z
+  )
+  |> List.filter(fn x -> x > 0)
+end
+end|} in
+  check_parses "multiline lambda pipe stage" src;
+  check_idempotent "multiline lambda pipe stage" src;
+  check_no_ellipsis_placeholder "multiline lambda pipe stage" src
+
+let test_multiline_lambda_nested_ctor () =
+  let src = {|mod Test do
+fn wrap(w : Int, th : Int) : Int do
+  GenTree(w, Thunk(fn _ ->
+    let a = List.map(th, fn c -> c + 1)
+    let b = force(th)
+    List.append(a, b)
+  ))
+end
+end|} in
+  check_parses "multiline lambda nested ctor" src;
+  check_idempotent "multiline lambda nested ctor" src;
+  check_no_ellipsis_placeholder "multiline lambda nested ctor" src
+
 let test_type_variant () =
   let src = {|mod Test do
 type Color = Red | Green | Blue
@@ -194,6 +263,20 @@ end|} in
 (* Idempotence property: format is a fixpoint                         *)
 (* ------------------------------------------------------------------ *)
 
+let test_small_float_literal () =
+  (* string_of_float renders small-magnitude floats in scientific notation
+     (e.g. "9.537e-07"), but the March lexer's float literal only accepts
+     digit+ '.' digit+ — no exponent form. The formatter must expand
+     scientific notation back to plain decimal so a second --fmt pass
+     doesn't fail to parse. *)
+  let src = {|mod Test do
+fn f(x : Float) : Float do
+  if x < 0.0000009537 do 1.0 else 2.0 end
+end
+end|} in
+  check_parses "small float literal" src;
+  check_idempotent "small float literal" src
+
 let test_format_fixpoint () =
   (* A source written in already-formatted style should be unchanged *)
   let src = {|mod Demo do
@@ -293,6 +376,10 @@ let () =
       test_case "let binding"     `Quick test_let_binding;
       test_case "pipe chain"      `Quick test_pipe_chain;
       test_case "lambda"          `Quick test_lambda;
+      test_case "multiline lambda let"          `Quick test_multiline_lambda_let;
+      test_case "multiline lambda call arg"     `Quick test_multiline_lambda_call_arg;
+      test_case "multiline lambda pipe stage"   `Quick test_multiline_lambda_pipe_stage;
+      test_case "multiline lambda nested ctor"  `Quick test_multiline_lambda_nested_ctor;
       test_case "type variant"    `Quick test_type_variant;
       test_case "type record"     `Quick test_type_record;
       test_case "fn"          `Quick test_pub_fn;
@@ -303,6 +390,7 @@ let () =
       test_case "use decl"        `Quick test_use_decl;
       test_case "doc comment"     `Quick test_doc_comment;
       test_case "type alias"      `Quick test_type_alias;
+      test_case "small float literal" `Quick test_small_float_literal;
       test_case "format fixpoint" `Quick test_format_fixpoint;
       test_case "trailing blank insensitive" `Quick test_trailing_blank_insensitive;
     ];

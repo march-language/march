@@ -1,0 +1,16 @@
+-- `let?` with a wildcard pattern (widening slice 8, §2.10). `let? _ = e`
+-- propagates Err but discards the Ok payload — the sequencing-for-effect /
+-- must-succeed idiom. Still requires a Result body after it.
+mod Main do
+  fn f() : Result(Int, String) do Ok(1) end
+  fn run() : Result(Int, String) do
+    let? _ = f()
+    Ok(0)
+  end
+  fn main() do
+    match run() do
+      Ok(v)  -> println(int_to_string(v))
+      Err(_) -> println("err")
+    end
+  end
+end

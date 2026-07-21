@@ -1,0 +1,14 @@
+mod Main do
+  -- Linearity widening slice 7 -- (T-LinCoerce) positive, REQUIRES the L2
+  -- fix (2026-07-10): a single arithmetic use of a `linear Int` record field
+  -- must typecheck. Pre-fix, constraint discharge did not strip the TLin
+  -- wrapper and rejected this with "`linear Int` does not implement Num"
+  -- despite the use being linearity-correct. See core-march-types.md §2.9.4.
+  type Packet = { linear data : Int, size : Int }
+  fn ok2(p : Packet) : Int do
+    p.data + 1
+  end
+  fn main() : () do
+    ()
+  end
+end

@@ -82,6 +82,7 @@ let corpus = [
   "record_update",                   "record_update.march";
   "self_tco_loop",                   "self_tco_loop.march";
   "nested_generic_adt",              "nested_generic_adt.march";
+  "nested_cons_ctor_heap",           "nested_cons_ctor_heap.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────

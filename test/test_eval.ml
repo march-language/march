@@ -1490,6 +1490,74 @@ let test_default_method_eval () =
   Alcotest.(check bool) "neq default returns true for 1 neq 2" true
     (vbool result)
 
+let test_general_iface_multi_impl_dispatch () =
+  (* Two impls of ONE general interface for DISTINCT types must each dispatch to
+     their own body by the argument's runtime type, not the last-bound name.
+     Regression: the interp used to name-bind general-interface methods (last
+     impl wins), so speak(Dog) wrongly ran Cat's body (meow/meow). Now routed
+     through iface_method_tbl by type. *)
+  let src = {|mod Test do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    type Dog = Dog
+    type Cat = Cat
+    impl Speak(Dog) do fn speak(_x) do "woof" end end
+    impl Speak(Cat) do fn speak(_x) do "meow" end end
+    fn say_dog() do speak(Dog) end
+    fn say_cat() do speak(Cat) end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "speak(Dog) dispatches to Dog's body"
+    "woof" (vstr (call_fn env "say_dog" []));
+  Alcotest.(check string) "speak(Cat) dispatches to Cat's body"
+    "meow" (vstr (call_fn env "say_cat" []))
+
+let test_interp_colliding_general_iface_dispatch () =
+  (* Layer 1b: two SAME-short-name types (NA.Thing vs NB.Thing) each impl'ing
+     the same GENERAL user interface must dispatch to their own body,
+     interpreted. Regression: iface_method_tbl used to be keyed
+     (iface, method, bare_type_name) — both impls collided on
+     ("Speak", "speak", "Thing"), so only the LAST-registered body
+     (NB's) was ever reachable, even for an NA.Thing value.
+
+     `say` is deliberately declared INSIDE each of NA/NB (rather than calling
+     `speak` from an outer scope) to sidestep an unrelated, pre-existing gap:
+     a nested module's DImpl-bound interface dispatcher never gets exposed
+     under a "NA.speak" qualified key (`eval_decl`'s DMod arm only exports
+     names `declared_names` collects, which walks DFn/DLet/DMod/DExtern, not
+     DImpl) — calling bare `speak` from a SIBLING or outer module is a
+     separate, out-of-scope limitation. Dispatch itself is keyed purely by
+     the argument's own runtime type via the GLOBAL iface_method_tbl/
+     ctor_qualified_type_tbl, so calling through NA's or NB's own local
+     `speak` binding still exercises the real fix. *)
+  let src = {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod NA do
+      type Thing = TA
+      impl Speak(Thing) do
+        fn speak(_self) do "from-A" end
+      end
+      fn say() do speak(TA) end
+    end
+    mod NB do
+      type Thing = TB
+      impl Speak(Thing) do
+        fn speak(_self) do "from-B" end
+      end
+      fn say() do speak(TB) end
+    end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "NA.say() dispatches to NA.Thing's Speak impl"
+    "from-A" (vstr (call_fn env "NA.say" []));
+  Alcotest.(check string) "NB.say() dispatches to NB.Thing's Speak impl"
+    "from-B" (vstr (call_fn env "NB.say" []))
+
 let test_default_method_user_type () =
   (* Regression: a user-declared `interface Eq(a)` (name collides with the
      built-in Eq) with a default `neq` calling `eq`, implemented for a USER
@@ -1875,15 +1943,18 @@ let test_defun_erased_closure_in_tuple_becomes_ecallptr () =
   Alcotest.(check bool) "erased closure call in run is ECallPtr" true
     (has_callptr run_fn.March_tir.Tir.fn_body)
 
-(* Regression: a default-arg function defined inside a NESTED module must keep
-   its real parameter list, not be routed through the general desugar path that
-   boxes every parameter into a synthesised tuple
-   (`let $t = (a, ...) in case $t of Tuple(...)`).  [expand_defaults_decl] only
-   runs on top-level decls, so before the fix a nested default-arg fn kept its
-   [FPDefault] params, [clause_is_trivial] returned false, and [desugar_fn_def]
-   produced the tuple adapter.  When such a fn also takes a type-erased closure
-   parameter, that adapter mismanaged the closure's refcount and freed it before
-   its call — a use-after-free (bastion Form.Wrapper.render via CSRF.tag). *)
+(* Regression: a default-arg function defined inside a NESTED module must not be
+   routed through the general desugar path that boxes every parameter into a
+   synthesised tuple (`let $t = (a, ...) in case $t of Tuple(...)`), which — for
+   a fn also taking a type-erased closure parameter — mismanaged the closure's
+   refcount and freed it before its call (use-after-free; bastion
+   Form.Wrapper.render via CSRF.tag).  As of the Phase 7.1 nested default-arg
+   fix, [expand_defaults_decl] now recurses into [DMod], so a nested default-arg
+   fn is EXPANDED into mangled `render$N` variants (each a normal fn with real
+   FPNamed params) rather than kept as a single strip-fast-path fn — the same
+   no-param-tuple guarantee, reached by expansion instead of the fast-path.
+   Assert the full-arity mangled decl (`render$4`, all 4 params) has real params
+   and no tuple-match body. *)
 let test_desugar_nested_default_arg_no_param_tuple () =
   let m = parse_and_desugar {|mod Outer do
     mod Inner do
@@ -1900,14 +1971,14 @@ let test_desugar_nested_default_arg_no_param_tuple () =
       | None ->
         (match d with
          | March_ast.Ast.DFn (def, _)
-           when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "render" -> Some def
+           when def.March_ast.Ast.fn_name.March_ast.Ast.txt = "render$4" -> Some def
          | March_ast.Ast.DMod (_, _, inner, _) -> find_render inner
          | _ -> None)
     ) None decls
   in
   let render = match find_render m.March_ast.Ast.mod_decls with
     | Some d -> d
-    | None -> Alcotest.fail "nested render fn not found after desugar"
+    | None -> Alcotest.fail "nested render$4 (full-arity mangled) fn not found after desugar"
   in
   let clause = List.hd render.March_ast.Ast.fn_clauses in
   (* The body must NOT be a match over a synthesised param tuple. *)
@@ -2687,11 +2758,19 @@ let test_atomic_rc_local_decrc_not_atomic () =
 let test_escape_local_discarded_promoted () =
   (* A value created but never returned or stored should be stack-promoted.
      After Perceus inserts EDecRC for the dead binding, escape analysis
-     recognises EDecRC as a non-escaping position and promotes to EStackAlloc. *)
+     recognises EDecRC as a non-escaping position and promotes to EStackAlloc.
+     HISTORY (L7 fix, 2026-07-10): this test originally used a single-ctor
+     unary `Box(Int)` — a NEWTYPE-repr type whose EAlloc emits an erased
+     immediate, no heap cell. Promoting it produced a boxed stack cell that
+     consumers decoded under the erased convention (garbage at runtime —
+     invisible here because these tests inspect TIR only, never emitted IR).
+     Escape analysis now only promotes genuinely Boxed allocs, so the vehicle
+     is a 2-field ctor; the Newtype exclusion is pinned by
+     test_escape_newtype_not_promoted below. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2699,6 +2778,28 @@ let test_escape_local_discarded_promoted () =
             m.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "locally discarded value is stack-promoted"
     true (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_newtype_not_promoted () =
+  (* L7 pin: a Newtype-repr alloc (single-ctor unary ADT) must NOT be
+     stack-promoted even when it provably does not escape — its EAlloc emits
+     an erased immediate ((v<<1)|1), so EStackAlloc would create a boxed
+     construction that every consumer (ECase untag, field reads) decodes
+     under the erased convention. Live symptom pre-fix:
+     `let c = R(22); match c do R(n) -> n end` printed nondeterministic
+     garbage compiled (the untagged stack ADDRESS). *)
+  let m = escape_module {|mod Test do
+    type Res = R(Int)
+    fn make_and_match() : Int do
+      let c = R(22)
+      match c do
+        R(n) -> n
+      end
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_and_match")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "newtype-repr alloc is NOT stack-promoted"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
 
 let test_escape_returned_not_promoted () =
   (* A value that is returned from the function escapes — must stay on the heap. *)
@@ -2750,11 +2851,13 @@ let test_escape_match_field_promoted () =
 
 let test_escape_decrc_eliminated_after_promotion () =
   (* After stack-promotion of a discarded value, the EDecRC that Perceus
-     inserted for it should be removed (no RC needed for stack values). *)
+     inserted for it should be removed (no RC needed for stack values).
+     Vehicle is a 2-field (Boxed-repr) ctor — see the L7 note on
+     test_escape_local_discarded_promoted. *)
   let m = escape_module {|mod Test do
-    type Box = Box(Int)
+    type Box = Box(Int, Int)
     fn make_and_ignore() : Int do
-      let b = Box(42)
+      let b = Box(42, 43)
       0
     end
   end|} in
@@ -2966,14 +3069,14 @@ let test_actor_tir_supervisor_spawn_calls_register () =
       on DoWork() do { count: state.count + 1 } end
     end
     actor Supervisor do
-      state { count : Int }
-      init { count: 0 }
+      state { worker : Int }
+      init { worker: 0 }
       supervise do
         strategy one_for_one
         max_restarts 3 within 5
         Worker worker
       end
-      on Start() do { count: state.count } end
+      on Start() do { worker: state.worker } end
     end
     fn main() : Unit do () end
   end|} in
@@ -4164,8 +4267,56 @@ let test_h_sigil_get_form_not_injected_with_conn () =
   Alcotest.(check string) "GET form: no injection"
     {|<form method="get">x</form>|} (vstr result)
 
+(* Signal.watch (7.2, Stage A): deferred green-thread dispatch of an OS-signal
+   watcher.  Drive the drain directly — register an OCaml handler on the Usr1
+   slot (code 3), raise SIGUSR1 to ourselves, pump [run_scheduler], and assert
+   the handler ran exactly once per drain, with pre-drain repeats coalesced. *)
+let signal_wait_pending code =
+  (* Spin so OCaml delivers the deferred signal at a safe point (the [ref]
+     allocation gives the runtime a chance to run the handler). *)
+  let spins = ref 0 in
+  while not March_eval.Eval.signal_pending.(code) && !spins < 20_000_000 do
+    incr spins; ignore (Sys.opaque_identity (ref !spins))
+  done
+
+let test_signal_watch_deferred () =
+  let count = ref 0 in
+  let handler = March_eval.Eval.VBuiltin
+      ("test_sig_handler", fun _ -> incr count; March_eval.Eval.VUnit) in
+  March_eval.Eval.signal_watchers.(3) <- Some handler;
+  March_eval.Eval.signal_pending.(3)  <- false;
+  March_eval.Eval.signal_seen.(3)     <- false;
+  Sys.set_signal Sys.sigusr1 (Sys.Signal_handle March_eval.Eval.handle_os_signal);
+  (* Two deliveries before any drain must coalesce to a single handler call. *)
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  signal_wait_pending 3;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "USR1 watcher ran exactly once" 1 !count;
+  (* A later delivery + drain runs it again. *)
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  signal_wait_pending 3;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "USR1 watcher ran again after redelivery" 2 !count;
+  (* unwatch clears the slot: a delivery afterwards must NOT set pending nor run
+     the handler (handle_os_signal no-ops for an unwatched Usr1).  We can't wait
+     on a flag that will never be set, so just give the runtime a bounded window
+     of safe points to (not) deliver, then drain. *)
+  March_eval.Eval.signal_watchers.(3) <- None;
+  March_eval.Eval.signal_pending.(3)  <- false;
+  Unix.kill (Unix.getpid ()) Sys.sigusr1;
+  for i = 0 to 100_000 do ignore (Sys.opaque_identity (ref i)) done;
+  March_eval.Eval.run_scheduler ();
+  Alcotest.(check int) "unwatched USR1 does not run the handler" 2 !count;
+  March_eval.Eval.signal_pending.(3) <- false;
+  Sys.set_signal Sys.sigusr1 Sys.Signal_default
+
 let eval_suites =
   [
+      ( "signal_watch", [
+          Alcotest.test_case "deferred USR1 drain + coalesce + unwatch" `Quick
+            test_signal_watch_deferred;
+        ] );
       ( "browser http",
         [
           Alcotest.test_case "fetch unavailable by default" `Quick test_http_fetch_unavailable_by_default;
@@ -4308,6 +4459,8 @@ let eval_suites =
           Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "general iface multi-impl dispatch" `Quick test_general_iface_multi_impl_dispatch;
+          Alcotest.test_case "interp colliding general iface dispatch (Layer 1b)" `Quick test_interp_colliding_general_iface_dispatch;
           Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
@@ -4428,6 +4581,7 @@ let eval_suites =
         ] );
       ( "escape_analysis", [
           Alcotest.test_case "local discarded promoted"      `Quick test_escape_local_discarded_promoted;
+          Alcotest.test_case "newtype not promoted (L7)"     `Quick test_escape_newtype_not_promoted;
           Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
           Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
           Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;

@@ -1,0 +1,21 @@
+-- Native golden (Phase 2, float-boxing Stage 2): a Float crossing a type-erasure
+-- boundary is heap-BOXED (march_float_box, tag -3), so RC on the erased slot is
+-- sound and generic compare dispatches on the box tag.  This exercises every
+-- fixed path in one program:
+--   * List.map with a NAMED Float->Float fn  → clo_wrap ptr-ABI + unbox/box
+--   * Ok(Float) destructure                  → Result payload round-trip
+--   * mergesort_by with a lambda comparator  → erased-Float compare via
+--     march_poly_compare (the original P0 that SIGSEGV'd / mis-sorted compiled)
+-- All three must match the interpreter (2. / 3.5 / -9.).
+mod Main do
+  fn dbl(x : Float) : Float do x *. 2.0 end
+  fn main() do
+    println(float_to_string(List.head(List.map([1.0, 2.5, 3.0], dbl))))
+    let r = Ok(3.5)
+    match r do
+      Ok(f) -> println(float_to_string(f))
+      Err(_) -> println("err")
+    end
+    println(float_to_string(List.head(Sort.mergesort_by([3.5, -1.25, 2.75, 0.5, -9.0, 4.5], fn a -> fn b -> a < b))))
+  end
+end

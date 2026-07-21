@@ -1,9 +1,11 @@
--- Regression fixture: auto-discovered via a RELATIVE MARCH_LIB_PATH entry
--- and never explicitly imported.  Pre-fix, diagnostics from lib-path
--- modules were silently dropped: user_files held only realpath'd
--- (canonical) paths while spans carried this relative path, so
--- is_user_file misclassified the error as stdlib-internal and ill-typed
--- TIR reached codegen (undefined pattern-binder symbols at link time).
+-- Regression fixture: an ill-typed module auto-discovered via a RELATIVE
+-- MARCH_LIB_PATH directory.  When the entry (libpath_entry.march) does NOT
+-- reference it, reachability pruning drops it and the build succeeds; when the
+-- entry DOES reference it (libpath_entry_ref.march), it stays in the build and
+-- its type error must surface (exit 1).  The referenced-and-relative case also
+-- guards the user_files path-canonicalization fix: spans carry the as-parsed
+-- (relative) path, which must be recognised as user code so the diagnostic is
+-- not misclassified as stdlib-internal and silently tolerated.
 mod LibpathIllTyped do
 
   fn broken() : Int do

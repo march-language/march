@@ -90,7 +90,7 @@ mod Iterable do
   (uncurried-collection convention).  Callback `f(acc, x)` returns the
   new accumulator.
   """
-  fn fold(xs : List(a), zero : b, f : (b, a) -> b) : b do
+  fn fold(xs : List(a), zero : b, f : b -> a -> b) : b do
     fn go(lst : List(a), acc : b) : b do
       match lst do
       Nil        -> acc
