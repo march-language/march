@@ -1,0 +1,29 @@
+-- EXPECT-ERROR: Overlapping implementation
+-- Coherence (FQN dispatch Stage 1): two DISTINCT same-short-name types each
+-- implementing a GENERAL user interface still OVERLAP-reject. Unlike the
+-- type-dispatched builtins (Eq/Ord/Show/Hash, which dispatch natively through
+-- generated ctor-qualified structural functions — see accept/t88), a general
+-- interface dispatches on the BARE type name in BOTH backends (interp impl_tbl,
+-- mono resolve_impl_by_type) and mangles both impls to ONE symbol, so allowing
+-- them would SILENTLY run the wrong method body compiled (verified from-A/from-A).
+-- The declaring-module relaxation is therefore scoped to the builtins; the
+-- general case is deferred to Stage 3 (runtime ctor-tag dispatch,
+-- specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). Accept twin: accept/t88.
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do 0 end
+end
