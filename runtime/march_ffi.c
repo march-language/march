@@ -33,15 +33,18 @@ int64_t     march_get_int(march_value v)  { return v >> 1; }
 march_value march_make_bool(int b)        { return ((march_value)(b ? 1 : 0) << 1) | 1; }
 int         march_get_bool(march_value v) { return (int)(v >> 1) != 0; }
 
+/* Float-boxing (Stage 2): a Float carried in a march_value (erased) slot — an
+ * Option/Result payload, a generic record/variant field — is now a heap
+ * march_float_box (tag -3), NOT raw bitcast bits.  march_make_float BOXES and
+ * march_get_float UNBOXES so a Float that the C side stuffs into a generic slot
+ * matches how compiled March reads it back (coerce ("ptr","double") =
+ * march_unbox_float).  Direct primitive Float args/returns still pass as a bare
+ * `double` and never touch these. */
 march_value march_make_float(double f) {
-    march_value w;
-    memcpy(&w, &f, sizeof w);
-    return w;
+    return march_from_ptr(march_alloc_float(f));
 }
 double march_get_float(march_value v) {
-    double f;
-    memcpy(&f, &v, sizeof f);
-    return f;
+    return march_unbox_float(march_as_ptr(v));
 }
 
 /* String/Bytes share the march_string layout {rc;tag;pad;len;data[]}. */
@@ -88,6 +91,13 @@ march_value march_from_ptr(void *p)       { return (march_value)(intptr_t)p; }
 march_value march_str_new(const uint8_t *utf8, size_t len) {
     march_string *s = (march_string *)march_string_alloc((int64_t)len);
     if (len) memcpy(s->data, utf8, len);
+    /* NUL-terminate like march_string_lit.  march_string_alloc reserves len+1
+     * bytes but uses malloc (not calloc), so data[len] is otherwise an
+     * uninitialized byte — a UB landmine for any strlen/`%s` consumer of an
+     * FFI-built string.  march_println is len-bounded so this is invisible to
+     * it, but the guarantee (all runtime-built march_strings are NUL-terminated)
+     * should hold uniformly. */
+    s->data[len] = '\0';
     return march_from_ptr(s);
 }
 march_value march_bytes_new(const uint8_t *data, size_t len) {
@@ -371,6 +381,40 @@ int64_t ffi_test_point_sum(march_value p) {
     return march_record_field(p, 0) + march_record_field(p, 1);
 }
 
+/* Self-diagnosing probe for the ffi_result CI flake.  Takes a decoded
+ * Result(Int,String) cell (as built by march_ok/march_err — tag@8, payload@16),
+ * writes the cell's tag and, for an Err(String) payload, the string's pointer,
+ * len and first bytes to stderr, and RETURNS the Err payload length (-1 for Ok)
+ * as a plain Int — deliberately not a Result passthrough, to avoid any
+ * FFI-return ownership subtlety.  Used by the separate ffi_result_diag.march
+ * program (not the pristine ffi_result.march reproducer), which prints the
+ * returned length so the call survives DCE.  A CI failure then reveals whether
+ * the cell already carries a len-7 "bad int" (=> ffi_test_parse returned the
+ * wrong string — the shim miscompiled) or a correct len-3 "nan" (=> the
+ * divergence is downstream of the shim). */
+int64_t ffi_result_err_len(march_value r) {
+    int32_t     tag     = march_variant_tag(r);
+    march_value payload = march_variant_field(r, 0);
+    if (tag == 0) {                       /* Ok(Int) */
+        fprintf(stderr, "[ffi_result diag] tag=0 (Ok) payload=%lld\n",
+                (long long)payload);
+        fflush(stderr);
+        return -1;
+    }
+    /* Err(String): payload is a heap march_string pointer. */
+    march_string *ms  = (march_string *)march_as_ptr(payload);
+    long long     len = (long long)ms->len;
+    fprintf(stderr, "[ffi_result diag] tag=%d (Err) payload=%p len=%lld bytes=",
+            (int)tag, (void *)ms, len);
+    for (long long i = 0; i < len && i < 16; i++)
+        fprintf(stderr, "%02x ", (unsigned char)ms->data[i]);
+    fprintf(stderr, "str=\"");
+    fwrite(ms->data, 1, (size_t)(len < 32 ? len : 32), stderr);
+    fprintf(stderr, "\"\n");
+    fflush(stderr);
+    return len;
+}
+
 /* Fallible: a single ASCII digit → Ok(Int), else Err(String). Result built
  * directly via march_ok/march_err (no env needed). */
 march_value ffi_test_parse(march_value s) {
@@ -378,6 +422,28 @@ march_value ffi_test_parse(march_value s) {
     if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
         return march_ok(march_make_int(v.ptr[0] - '0'));
     return march_err(march_str_new((const uint8_t *)"nan", 3));
+}
+
+/* ── CI-flake layout probe (temporary; remove once ffi_result is root-caused) ──
+ * The intermittent GH-Actions `ffi_result` flake prints "bad int" — the Err
+ * string of the never-called ffi_raise_parse, which sits IMMEDIATELY AFTER
+ * ffi_test_parse in this file (and, with source-order layout / no
+ * -ffunction-sections, in the linked binary).  march_println is len-bounded, so
+ * emitting the 7-byte "bad int" requires a REAL march_string{len=7,"bad int"},
+ * which only ffi_raise_parse constructs — i.e. control reaches the adjacent
+ * sibling, not a stray-pointer read.  This never-called guard is inserted
+ * BETWEEN the two so it becomes ffi_test_parse's adjacent neighbour instead of
+ * ffi_raise_parse.  If the flake's wrong string flips from "bad int" to
+ * "PROBE_GUARD_FELL_THROUGH", a function-layout/fall-through into the adjacent
+ * sibling is proven; if it stays "bad int", adjacency is NOT the cause and the
+ * path to ffi_raise_parse is something else (symbol/dispatch).  Mirrors
+ * ffi_test_parse's exact shape (same signature/ABI, digit fast-path, Err via
+ * march_err) so a layout artifact would hit it the same way. */
+march_value ffi_layout_probe_guard(march_value s) {
+    march_slice v = march_str_borrow(s);
+    if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
+        return march_ok(march_make_int(v.ptr[0] - '0'));
+    return march_err(march_str_new((const uint8_t *)"PROBE_GUARD_FELL_THROUGH", 24));
 }
 
 /* `raises` variant: returns the bare Ok payload (Int) on success and raises an
@@ -407,24 +473,32 @@ march_value ffi_maybe_half(double x) {
     return march_some_boxed(march_make_float(x / 2.0));
 }
 
-/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche. */
+/* Option(Unit): Some(()) when flag != 0, else None — Unit is also non-niche, so
+ * BOTH arms must be boxed (like ffi_maybe_half): the compiler represents
+ * Option(Unit) as a heap cell (None=tag 0, Some=tag 1) and its match reads the
+ * cell tag, so a raw niche None (0) would be dereferenced as a null cell and
+ * segfault. Pair march_some_boxed with march_none_boxed, never march_none. */
 march_value ffi_maybe_unit(int64_t flag) {
-    return flag ? march_some_boxed(0) : march_none();  /* Unit Option matches by null-check */
+    return flag ? march_some_boxed(0) : march_none_boxed();
 }
 
 /* Upcall: apply a March closure f : (Int) -> Int to x, return f(x).
- * Args are in NATIVE slot rep (Int = raw machine int, NOT march_make_int); the
- * result is the GENERIC tagged word (read Int with march_get_int). */
+ * Args must be TAGGED march_values (build with march_make_int), per march_call's
+ * contract: a compiled closure's apply-fn untags/unboxes its scalar params at
+ * entry (the uniform closure scalar ABI), so a raw machine int would be
+ * untagged as (x >> 1) and compute the wrong result. The generic tagged result
+ * is read back with march_get_int. */
 int64_t ffi_apply1(march_value f, int64_t x) {
-    march_value arg = (march_value)x;                 /* raw Int slot */
+    march_value arg = march_make_int(x);              /* tagged Int slot */
     return march_get_int(march_call(f, 1, &arg));     /* tagged Int result */
 }
 
-/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool. */
+/* Upcall: count how many of [1..n] satisfy a March predicate (Int) -> Bool.
+ * Args are tagged (march_make_int) for the same reason as ffi_apply1. */
 int64_t ffi_count_matching(march_value pred, int64_t n) {
     int64_t count = 0;
     for (int64_t i = 1; i <= n; i++) {
-        march_value arg = (march_value)i;             /* raw Int slot */
+        march_value arg = march_make_int(i);          /* tagged Int slot */
         if (march_get_bool(march_call(pred, 1, &arg))) count++;
     }
     return count;

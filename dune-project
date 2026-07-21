@@ -1,7 +1,7 @@
 (lang dune 3.7)
 (using menhir 2.1)
 (name march)
-(version 0.1.0)
+(version 0.1.1)
 
 (generate_opam_files true)
 

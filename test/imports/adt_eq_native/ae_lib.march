@@ -7,6 +7,14 @@ type AeShape = AeDot | AeBox(Int, String) | AeWrap(AeShape)
 
 type AeDir = AeNorth | AeSouth | AeEast | AeWest
 
+impl Eq(AeShape) do
+  fn eq(x, y) do eq(x, y) end
+end
+
+impl Eq(AeDir) do
+  fn eq(x, y) do eq(x, y) end
+end
+
 fn mk_box(n, s) do AeBox(n, s) end
 
 fn east() do AeEast end

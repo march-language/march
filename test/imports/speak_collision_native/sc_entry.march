@@ -1,0 +1,32 @@
+-- Entry: general-interface dispatch on two same-short-name types (`Thing`)
+-- declared in different modules — the first CROSS-BACKEND runtime witness for
+-- FQN dispatch identity Stage 3 (native + interpreter collision-conditional
+-- dispatch). Companion to test/imports/adt_eq_native (the Stage-1 Eq witness).
+-- Run BOTH compiled (via the test/dune @runtest rule) and interpreted.
+mod ScEntry do
+
+import ScLibA
+import ScLibB
+
+fn check(name, cond) do
+  if cond do
+    println("ok " ++ name)
+    0
+  else
+    println("FAIL " ++ name)
+    1
+  end
+end
+
+fn main() do
+  let failures =
+    check("module A dispatch", ScLibA.say() == "from-A")
+    + check("module B dispatch", ScLibB.say() == "from-B")
+  if failures == 0 do
+    println("all ok")
+  else
+    panic("speak_collision_native: " ++ int_to_string(failures) ++ " failures")
+  end
+end
+
+end

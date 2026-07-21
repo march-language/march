@@ -1,0 +1,52 @@
+mod SupervisorRestForOneRestart do
+
+  actor Worker do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Work() do
+      { count: state.count + 1 }
+    end
+  end
+
+  actor Sup do
+    state { reader : Int, parser : Int, writer : Int }
+    init  { reader: 0, parser: 0, writer: 0 }
+
+    supervise do
+      strategy rest_for_one
+      max_restarts 5 within 60
+      Worker reader
+      Worker parser
+      Worker writer
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main() do
+    let sup = spawn(Sup)
+    let r1 = child_int(sup, "reader")
+    let p1 = child_int(sup, "parser")
+    let w1 = child_int(sup, "writer")
+
+    kill(pid_of_int(p1))
+
+    let r2 = child_int(sup, "reader")
+    let p2 = child_int(sup, "parser")
+    let w2 = child_int(sup, "writer")
+
+    println(bool_to_string(r2 == r1))
+    println(bool_to_string(p2 != p1))
+    println(bool_to_string(w2 != w1))
+    println(bool_to_string(is_alive(pid_of_int(r2))))
+    println(bool_to_string(is_alive(pid_of_int(p2))))
+    println(bool_to_string(is_alive(pid_of_int(w2))))
+  end
+
+end

@@ -34,7 +34,7 @@ March sits in the ML/Elixir family. Most concepts map directly — the main diff
 
 ```march
 interface Eq(a) do
-  fn eq(x : a, y : a) : Bool
+  fn eq : a -> a -> Bool
 end
 
 impl Eq(Int) do

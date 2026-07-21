@@ -1,0 +1,15 @@
+-- Refinement types (widening slice 12, §2.14). A refined RETURN type is
+-- checked at the function's OWN definition site: every path through the
+-- body must provably satisfy the predicate. `good`'s guard makes both
+-- branches (`n` when `n >= 0`, else the literal `0`) satisfy `_ >= 0`, so
+-- the exhaustive-branch proof succeeds regardless of what `main` later
+-- passes (`-3`) -- this is a property of the FUNCTION, not the call site.
+-- Reject companion: reject/t72 (an unguarded branch that can return < 0).
+mod M do
+  fn good(n : Int) : {Int | _ >= 0} do
+    if n >= 0 do n else 0 end
+  end
+  fn main() do
+    println(int_to_string(good(-3)))
+  end
+end

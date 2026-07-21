@@ -24,11 +24,13 @@ let hierarchy : (string * string option) list = [
   ("IO.Process",    Some "IO");
   ("IO.Clock",      Some "IO");
   ("IO.Random",     Some "IO");
+  ("IO.Signal",     Some "IO");
   ("IO.Database",   Some "IO.NetConnect");
   ("IO.Spawn",      Some "IO");
   ("IO.Mut",        Some "IO");
   ("IO.Telemetry",  Some "IO");
   ("IO.NetConnect.TLS", Some "IO.NetConnect");
+  ("IO.WebSocket",       Some "IO.NetConnect");
   ("IO.Foreign",         Some "IO");
   ("IO.Foreign.Blocking", Some "IO.Foreign");
 ]

@@ -1,0 +1,20 @@
+-- `let?` Result-propagation, happy path (widening slice 8, §2.10). A chain of
+-- `let?` bindings threads Ok payloads; each binding's RHS is Result(_, String)
+-- and the body is Result(_, String) with the SAME error type. Yields
+-- Result(Int, String). (T-LetQ). Value-witnessed by golden g42.
+mod Main do
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+  fn chain(x : Int) : Result(Int, String) do
+    let? a = step(x)
+    let? b = step(a)
+    Ok(b * 10)
+  end
+  fn main() do
+    match chain(5) do
+      Ok(v)  -> println(int_to_string(v))
+      Err(e) -> println(e)
+    end
+  end
+end

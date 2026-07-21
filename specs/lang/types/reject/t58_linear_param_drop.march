@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  -- Linearity slice 7 -- (T-LinDrop): a `linear` fn param that the body never
+  -- consumes is rejected at fn-body close (check_linear_all_consumed).
+  -- Full message: "The linear value `r` was never used." See §2.9.2.
+  type Res = R(Int)
+  fn bad(linear r : Res) : () do
+    ()
+  end
+  fn main() : () do
+    ()
+  end
+end

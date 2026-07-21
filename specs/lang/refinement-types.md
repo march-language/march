@@ -294,6 +294,27 @@ march --check --no-measure-axioms app.march
 
 ---
 
+## Conformance status
+
+Refinement types are now a conformance-tested part of the language reference
+(widening slice 12; `core-march-types.md` §2.14). The central fact §2.14
+pins down: `{T | pred}` is completely transparent to `typecheck.ml`'s own
+unification (a refined type has the identical typing derivation as its
+base type) — checking happens entirely in the separate `lib/refinecheck`
+pass this page already describes, at exactly two sites, both mechanically
+witnessed: a **precondition** at a direct call (accept/reject pair
+`t75`/`t71`) and a **postcondition** on the function's own body
+(`t76`/`t72`). The "direct calls only" limitation this page's own
+Limitations section states is now a passing corpus fact, not only prose:
+`accept/t77_refine_hof_bypass_limitation` proves a refined function called
+*through* a higher-order parameter is NOT checked, even when the identical
+literal at a direct call site is rejected. `cap no_panic`'s division-safety
+check is confirmed as a second, independent `Refine.discharge` consumer
+(`t78`/`t73`). Golden `g46_refinement_erasure` witnesses the zero-runtime-
+footprint property this transparency implies: a program whose obligations
+all provably hold at `--check` time runs byte-identically interpreted and
+compiled, since neither backend inserts any runtime predicate check.
+
 ## Next Steps
 
 - [Type System](types.md) — the types refinements attach to

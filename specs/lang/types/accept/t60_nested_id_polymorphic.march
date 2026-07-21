@@ -1,0 +1,22 @@
+-- Slice 6 (nested-module soundness), the LEGIT-POLYMORPHISM accept -- the
+-- positive counterpart to `reject/t51`-`t54`: a nested unannotated
+-- `fn id(x) do x end` used at BOTH `Int` and `String` in the same nested
+-- module. This is exactly the code the P0 prebind fix must keep accepting.
+-- Notably it was ALSO broken pre-fix, but in the OTHER direction: the stale
+-- qualified-prebind placeholder pinned `id` to its FIRST use, so a second use
+-- at a different type spuriously ERRORED (`id` was accidentally monomorphic,
+-- not polymorphic). The fix reconciles the qualified key to `id`'s real
+-- body-checked scheme `a -> a`, RESTORING legitimate let-polymorphism while
+-- closing the launder. A second, independent witness that the fix neither
+-- over-restricts nor over-monomorphises. See core-march-types.md §2.8.13.
+mod Outer do
+  mod App do
+    fn id(x) do x end
+
+    fn both() : Int do
+      let a = id(42)
+      let b = id("hi")
+      a + string_length(b)
+    end
+  end
+end

@@ -8,13 +8,15 @@ mod Main do
   -- `{ count: … }` record, so it type-conforms.
   --
   -- `spawn(Counter)` typechecks via the `ESpawn` arm (`:4185`): the argument is
-  -- a bare actor NAME (`EVar`/`ECon(_,[],_)`, `:4194-4202`), so it is accepted;
-  -- the expression's result type is `Pid[<fresh var>]` (`:4203`, `t_pid` alias
-  -- `:983`). NOTE (see core-march-types.md §2.6): that parameter is a FRESH
-  -- UNIFICATION VARIABLE, *not* the actor's state type -- the `Pid[state_ty]`
-  -- binding at `:6821` is not what a bare `spawn(Counter)` observably yields.
-  -- The `is_alive : Pid(a) -> Bool` builtin (`:1341`) accepts the result, its
-  -- own polymorphic `a` unifying with that fresh var.
+  -- a bare actor NAME (`EVar`/`ECon(_,[],_)`), so it is accepted; the
+  -- expression's result type is `Pid[state]` -- the ESpawn arm reaches the
+  -- actor's `Pid[state_ty]` vars binding (made by the DActor arm) directly by
+  -- name, since the nullary-ctor registration shadows it at ECon occurrences.
+  -- (Historically this was `Pid[<fresh var>]` -- finding 18, fixed 2026-07-18;
+  -- see accept/t87 for the state-type propagation witness and reject/t81 for
+  -- the cross-actor Pid confusion this now catches.)
+  -- The `is_alive : Pid(a) -> Bool` builtin accepts the result, its
+  -- own polymorphic `a` unifying with the state record type.
   actor Counter do
     state { count : Int }
     init  { count: 0 }

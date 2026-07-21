@@ -2,24 +2,16 @@
 -- fns (2) --
 ## classify
 fn classify(x : Int) : String =
-  let $jp_clo12 : () -> '_ = letrec [$jp11] in
-$jp11 in
-let n : Int = x in
-let $guard10 : Bool = >(n, 0) in
-case $guard10 of
-  true() -> "pos"
-  _ -> let $jp_clo7 : () -> '_ = letrec [$jp6] in
+  let $jp_clo7 : () -> '_ = letrec [$jp6] in
 $jp6 in
 let n : Int = x in
-let $guard5 : Bool = <(n, 0) in
-case $guard5 of
-  true() -> "neg"
-  _ -> let $jp_clo2 : () -> '_ = letrec [$jp1] in
-$jp1 in
-"zero"
+let $guard8 : Bool = >(n, 0) in
+case $guard8 of
+  true() -> "pos"
+  _ -> $jp_clo7()
 
 ## main
 fn main() : () =
-  let $t15 : String = classify(5) in
-println($t15)
+  let $t11 : String = classify(5) in
+println($t11)
 

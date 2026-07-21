@@ -1,0 +1,24 @@
+mod P26CondArmGeLe do
+  -- §3.3/§3.4 arm-boundary lookahead: an ECond (scrutinee-less `match do cond
+  -- -> body end` boolean chain) arm condition may use the TWO-CHAR comparison
+  -- operators `>=` / `<=`, not only `>` / `<`. The token filter's `->`-scan
+  -- (which distinguishes an arm boundary from a block continuation) previously
+  -- got stuck on the two-char `>=`/`<=` before reaching the next arm's `->`, so
+  -- `s >= 90 -> ...` was a parse error while `s > 89 -> ...` parsed. Fixed.
+  -- Value-witness (like p02/p03): mixes `>=` (two arms) and `<=` (one arm) and
+  -- prints a discriminating value per input.
+  fn grade(s : Int) : String do
+    match do
+      s >= 90 -> "A"
+      s >= 80 -> "B"
+      s <= 0  -> "Z"
+      true    -> "F"
+    end
+  end
+  fn main() do
+    println(grade(95))
+    println(grade(85))
+    println(grade(0))
+    println(grade(50))
+  end
+end

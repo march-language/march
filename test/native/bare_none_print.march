@@ -1,0 +1,15 @@
+-- Regression (items 347/465): a bare unpinned `None` (element type never
+-- pinned) used to FAIL TO LINK compiled — `Show$Option.show$Option_V__<n>`
+-- referenced an unresolvable `show` because mono minted a distinct `$V_<n>`
+-- specialization per dangling type-var id. mono now defaults a residual
+-- (dangling) TVar to `Int` in the specialization subst, so the element type
+-- concretizes to a battle-tested repr and the impl references resolve.
+-- Interp == compiled; prints None-shaped output regardless of element type.
+mod Main do
+  fn main() : () do
+    println(None)
+    println(to_string(None))
+    let x : Option(String) = None
+    println(x)
+  end
+end

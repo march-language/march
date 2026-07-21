@@ -172,9 +172,18 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     && not (Llvm_builtins.is_builtin_fn fn.Tir.fn_name)
   in
 
+  (* Apply wrappers use the uniform ptr ABI for params too (not just the return
+     above): a Float param crosses BOXED as a ptr (float-boxing, Stage 2), so an
+     apply fn that mono specialized to a concrete Float param must still DECLARE
+     it as ptr — otherwise the ECallPtr call site (which passes a boxed ptr) and
+     this definition disagree on register class (FP vs GP) for the float.  The
+     entry prologue below unboxes such params back to double for the body. *)
+  let is_apply_wrapper = Tir_names.is_apply_fn fn.Tir.fn_name in
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty in
+      let pty = if is_apply_wrapper && (base = "double" || base = "i64") then "ptr" else base in
+      pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
   (* In --compile-so mode, give every non-exported function hidden ELF
@@ -223,8 +232,22 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let param_slots = List.map (fun (v : Tir.var) ->
     let ty = Llvm_ctx.llvm_ty v.Tir.v_ty in
     let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+    let vn = Llvm_ctx.llvm_name v.Tir.v_name in
     Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
-    Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (Llvm_ctx.llvm_name v.Tir.v_name) slot);
+    if is_apply_wrapper && ty = "double" then begin
+      (* Float apply-fn param arrives BOXED (uniform ptr ABI, matching the
+         ptr-typed signature above); unbox to double for the body's slot. *)
+      let d = Llvm_ctx.fresh ctx "cv" in
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %%%s.arg)" d vn);
+      Llvm_ctx.emit ctx (Printf.sprintf "store double %s, ptr %%%s.addr" d slot)
+    end else if is_apply_wrapper && ty = "i64" then begin
+      (* Int/Bool apply-fn param arrives TAGGED as a ptr (uniform ptr ABI —
+         every call path tags scalars, boundaries A+B); conditionally untag
+         (ashr iff odd) back to the raw i64 the body reads. *)
+      let u = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) "i64" in
+      Llvm_ctx.emit ctx (Printf.sprintf "store i64 %s, ptr %%%s.addr" u slot)
+    end else
+      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot);
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
@@ -293,6 +316,14 @@ let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   let ret_ty = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
+      (* Called without ~collision_set (this JIT-fragment forward-`declare`
+         helper has no ctx in scope).  Known, low-risk omission: the only thing
+         collision_set changes here is whether a forced-Boxed colliding type
+         gets `ptr nonnull dereferenceable(16)` vs a niche type's bare `ptr` —
+         an LLVM PARAMETER-ATTRIBUTE difference, not an ABI/type difference, and
+         in the SAFE direction (a `declare` carrying fewer attributes than its
+         `define` stays link-compatible; the attributes are optimizer hints).
+         See specs Task 2 note; same class as the wider collision-set threading. *)
       Llvm_ctx.llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 
@@ -345,6 +376,15 @@ let emit_atom_show_table ctx =
     buffer_contains ctx.Llvm_ctx.extra_fns "define ptr @march_atom_to_string"
   in
   if referenced && not already_defined then begin
+    (* Pre-seed the atoms the RUNTIME itself produces (the capability plane's
+       :ok/:error from march_send_checked/march_revoke_cap) so they render as
+       ":ok"/":error" even when the program never writes those literals —
+       without this they fall through to the ":<atom>" fallback below. *)
+    List.iter (fun name ->
+        let h = Llvm_ctx.atom_hash name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.atom_names h) then
+          Hashtbl.replace ctx.Llvm_ctx.atom_names h name)
+      ["ok"; "error"];
     (* Sort by hash for deterministic IR (Hashtbl.fold order is unspecified),
        keeping the CAS content hash stable across identical inputs. *)
     let atoms =
@@ -390,8 +430,92 @@ let emit_atom_show_table ctx =
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
 let build_ctor_info ctx (m : Tir.tir_module) =
+  (* Finding-19 memory-safety fix: actor message variant constructors
+     (<Actor>_Msg) get GLOBALLY-unique heap tags across all actors, not the
+     per-variant 0-based tag ordinary ADTs use.  Rationale: a message meant for
+     actor B may be delivered to actor A's mailbox (send does not gate by
+     target actor — a separate, deferred type-system gap).  With per-actor
+     0-based tags, B's first message ctor and A's first message ctor both carry
+     tag 0, so A's dispatch ECase reads tag 0 and MISROUTES B's payload into A's
+     first handler at the wrong type (memory-unsafe).  A global tag makes B's
+     ctor tag distinct from every one of A's, so it falls to A's dispatch
+     default arm and is dropped (parity with the interpreter's silent drop).
+     Base is well clear of small-ADT tags and of MARCH_MIGRATE_TAG
+     (0x4D494752); i32 header field, so ~0x60000000 headroom remains. *)
+  let actor_msg_tag = ref 0x0100_0000 in
+  (* Same idea as [actor_msg_tag], for same-short-name types declared by >=2
+     modules (see [Collision_set.compute]'s doc comment). A DISTINCT counter
+     from [actor_msg_tag]: an actor-message ctor and a colliding user-type
+     ctor must never share a tag either, so the two global ranges are kept
+     well apart (0x0100_0000 vs 0x0200_0000) even though only one collision
+     kind can apply to any given TDVariant. *)
+  let collision_tag = ref 0x0200_0000 in
   List.iter (fun td ->
     match td with
+    | Tir.TDVariant (_name, ctors) when Tir_names.is_actor_msg_name _name ->
+      (* Actor message type: assign global tags, but otherwise identical to the
+         generic TDVariant arm (type_params + qualified ctor_info key +
+         poly_ctors), so send-site EAlloc and dispatch ECase resolve the same
+         ce_tag from the same key. *)
+      let seen = Hashtbl.create 4 in
+      let params = ref [] in
+      let rec collect_tvars = function
+        | Tir.TVar n ->
+          if not (Hashtbl.mem seen n) then begin
+            Hashtbl.add seen n (); params := n :: !params
+          end
+        | Tir.TCon (_, args) -> List.iter collect_tvars args
+        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
+        | Tir.TTuple ts     -> List.iter collect_tvars ts
+        | Tir.TPtr t        -> collect_tvars t
+        | _                 -> ()
+      in
+      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
+      Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
+      List.iter (fun (ctor_name, field_tys) ->
+        let g = !actor_msg_tag in
+        incr actor_msg_tag;
+        let key = _name ^ "." ^ ctor_name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+        if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
+          Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
+      ) ctors
+    | Tir.TDVariant (_name, ctors) when Collision_set.is_colliding ctx.Llvm_ctx.collision_set _name ->
+      (* Same-short-name type declared by >=2 modules: assign globally-unique
+         tags from the dedicated [collision_tag] counter, otherwise identical
+         to the generic TDVariant arm below (type_params + qualified
+         ctor_info key + poly_ctors). A later runtime tag switch (Task 4/5)
+         needs every one of this type's constructors to carry a tag no other
+         colliding type's constructor can also carry, since the static
+         [Tir.ty] stays the bare, unqualified [TCon(short_name, _)] for both
+         declaring modules (see [Collision_set]'s module doc — never qualify
+         TCon references, only ctor identity/impl module/runtime tags carry
+         module identity). *)
+      let seen = Hashtbl.create 4 in
+      let params = ref [] in
+      let rec collect_tvars = function
+        | Tir.TVar n ->
+          if not (Hashtbl.mem seen n) then begin
+            Hashtbl.add seen n (); params := n :: !params
+          end
+        | Tir.TCon (_, args) -> List.iter collect_tvars args
+        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
+        | Tir.TTuple ts     -> List.iter collect_tvars ts
+        | Tir.TPtr t        -> collect_tvars t
+        | _                 -> ()
+      in
+      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
+      Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
+      List.iter (fun (ctor_name, field_tys) ->
+        let g = !collision_tag in
+        incr collision_tag;
+        let key = _name ^ "." ^ ctor_name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+        if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
+          Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
+      ) ctors
     | Tir.TDVariant (_name, ctors) ->
       (* Collect free type-variable names in declaration order for poly resolution *)
       let seen = Hashtbl.create 4 in
@@ -466,6 +590,19 @@ let emit_module ~emit_expr
      We include any *_dispatch function unconditionally so that actor hot-reload
      works when the --hot-reload boundary is the file-level module. *)
   let is_actor_dispatch_fn = Tir_names.is_actor_dispatch_fn in
+  (* Program-entry functions must NEVER be reloadable slots.  The running green
+     thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
+     @march_main); swapping it while live corrupts the runtime allocator (OOM).
+     But in the standard hot-reload layout the real entry is a shim
+     (HotEntry.main → App.main), so App.main — the app's own `main` that runs the
+     never-returning accept loop — is permanently on the call stack too.  Both
+     are named `main` (bare or `.main`-suffixed), so we exclude EVERY such
+     function from the boundary, not just the single compiler-chosen entry. *)
+  let is_entry_fn (n : string) =
+    String.equal n "main"
+    || (String.length n > 5
+        && String.equal (String.sub n (String.length n - 5) 5) ".main")
+  in
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
@@ -473,7 +610,8 @@ let emit_module ~emit_expr
       m.Tir.tm_fns
       |> List.filter_map (fun fn ->
            let n = fn.Tir.fn_name in
-           if Hot_reload.is_reloadable cfg (Llvm_ctx.module_of_name n)
+           if is_entry_fn n then None
+           else if Hot_reload.is_reloadable cfg (Llvm_ctx.module_of_name n)
               || is_actor_dispatch_fn n
            then Some n else None)
       |> Hot_reload.Name_table.build
@@ -640,7 +778,8 @@ let emit_module ~emit_expr
      Also skip functions that are members of a mutual-TCO group — those were
      already emitted (as wrappers) by emit_mutual_tco_group above. *)
   let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
-                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
+                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line";
+                           "io_read_byte"; "read_byte"] in
   let migrate_suffix = "_migrate_state" in
   let migrate_suffix_len = String.length migrate_suffix in
   List.iter (fun fn ->
@@ -983,16 +1122,43 @@ let emit_module ~emit_expr
        (match main_fn_name with
         | Some name ->
           let mangled = Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern name) in
+          (* [main] may be declared 0-arity or take a single [Cap(IO)]
+             parameter (checked at desugar time by
+             [Desugar.check_main_signature]). [march_spawn_main]'s runtime
+             ABI is a bare 0-argument, void-returning function pointer
+             (runtime/march_runtime.c's [main_fn_green_thread] casts and
+             calls it with no arguments), so a 1-parameter [main] cannot be
+             passed to it directly, that mismatch is exactly what produced
+             the SIGBUS. Instead of changing the scheduler ABI, emit a thin
+             0-arg adapter that supplies the erased root capability (Cap(IO)
+             compiles to a null pointer, see specs/lang/capabilities.md,
+             section Runtime behaviour) and forwards into the real, 1-arg
+             mangled main. *)
+          let main_arity =
+            match List.find_opt (fun (fn : Tir.fn_def) -> fn.Tir.fn_name = name) m.Tir.tm_fns with
+            | Some fn -> List.length fn.Tir.fn_params
+            | None -> 0
+          in
+          let spawn_target, thunk_def =
+            if main_arity = 0 then (Printf.sprintf "@%s" mangled, "")
+            else
+              ("@march_main_entry_thunk",
+               Printf.sprintf
+                 "\ndefine private void @march_main_entry_thunk() {\nentry:\n\
+                    call void @%s(ptr null)\n\
+                    ret void\n}\n" mangled)
+          in
           Buffer.add_string out
             (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
              declare void @march_spawn_main(ptr %%fn)\n\
+             %s\
              define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
                call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
                call void @march_remote_init()\n\
              %s%s\
-               call void @march_spawn_main(ptr @%s)\n\
+               call void @march_spawn_main(ptr %s)\n\
                call void @march_run_scheduler()\n\
-               ret i32 0\n}\n" hr_setup stub_setup mangled)
+               ret i32 0\n}\n" thunk_def hr_setup stub_setup spawn_target)
         | None ->
           (* Library module with no user-defined main: emit a stub @main so
              clang can link a valid binary (forge build type-checks libraries). *)

@@ -1,0 +1,13 @@
+-- A generic Int closure that captures its Int arg and is RC-tracked: exercises
+-- march_incrc on a value that MUST be a tagged immediate, never a heap deref.
+mod Main do
+  fn apply_twice(f, x) do
+    let a = f(x)
+    let b = f(x)
+    a + b
+  end
+  fn main() do
+    -- fn captures nothing but forces the erased-Int RC path through a HOF
+    println(int_to_string(apply_twice(fn n -> n * 3, 7)))   -- 21 + 21 = 42
+  end
+end

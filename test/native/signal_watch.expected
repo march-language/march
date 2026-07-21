@@ -1,0 +1,3 @@
+before raise
+after raise
+caught usr2

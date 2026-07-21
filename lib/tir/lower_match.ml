@@ -160,6 +160,40 @@ let is_atomic_fallback : Tir.expr -> bool = function
   | Tir.EAtom _ -> true
   | _ -> false
 
+(** Hoist a (non-atomic) fallback expression [fb] into a fresh 0-arg join
+    point.  Returns [(clo_var, lambda_expr)] where:
+      - [lambda_expr] is the lambda-creation site
+        [ELetRec([jp_fn], EAtom(AVar jp_fn))] whose body is [fb];
+        [Defun.defunctionalize] lifts [jp_fn] to a top-level fn with a
+        closure struct for [fb]'s free variables.
+      - [clo_var] is the fresh variable the closure is bound to; every
+        fall-through site becomes [EApp(clo_var, [])], which Defun rewrites
+        to [ECallPtr].
+
+    Callers bind the closure with [ELet(clo_var, lambda_expr, body)] and use
+    [EApp(clo_var, [])] as the (shared) fall-through call inside [body], so
+    the fallback body is emitted ONCE instead of duplicated at every
+    fall-through site. *)
+let hoist_fallback_jp (fb : Tir.expr) : Tir.var * Tir.expr =
+  let jp_fn_name = Lower_state.fresh_name "jp" in
+  let jp_fn_ty   = Tir.TFn ([], Lower_types.unknown_ty) in
+  let jp_fn : Tir.fn_def = {
+    fn_name   = jp_fn_name;
+    fn_params = [];
+    fn_ret_ty = Lower_types.unknown_ty;
+    fn_body   = fb;
+    fn_kind   = Tir.FnJoinPoint;
+  } in
+  let jp_fn_var : Tir.var = {
+    v_name = jp_fn_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
+  } in
+  let lambda_expr = Tir.ELetRec ([jp_fn], Tir.EAtom (Tir.AVar jp_fn_var)) in
+  let clo_name = Lower_state.fresh_name "jp_clo" in
+  let clo_var : Tir.var = {
+    v_name = clo_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
+  } in
+  (clo_var, lambda_expr)
+
 (** Public entry point: hoist a non-trivial [fallback] into a join point
     before invoking [compile_matrix_impl].
 
@@ -183,30 +217,7 @@ let rec compile_matrix
   | Some fb when is_atomic_fallback fb ->
     compile_matrix_impl env scruts rows fallback
   | Some fb ->
-    let jp_fn_name = Lower_state.fresh_name "jp" in
-    let jp_fn_ty   = Tir.TFn ([], Lower_types.unknown_ty) in
-    (* The fn_def — body is the original fallback expression. *)
-    let jp_fn : Tir.fn_def = {
-      fn_name   = jp_fn_name;
-      fn_params = [];
-      fn_ret_ty = Lower_types.unknown_ty;
-      fn_body   = fb;
-      fn_kind   = Tir.FnJoinPoint;
-    } in
-    (* The fn-name var, used in the [EAtom(AVar …)] body of the lambda-
-       creation [ELetRec]. *)
-    let jp_fn_var : Tir.var = {
-      v_name = jp_fn_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
-    } in
-    (* Lambda-creation site: [ELetRec([jp_fn], EAtom(AVar jp_fn_var))].
-       Defun recognises this and lifts [jp_fn] to a top-level fn (with
-       a closure struct for any free variables of [fb]). *)
-    let lambda_expr = Tir.ELetRec ([jp_fn], Tir.EAtom (Tir.AVar jp_fn_var)) in
-    (* Bind the closure to a fresh var so we can call it multiple times. *)
-    let clo_name = Lower_state.fresh_name "jp_clo" in
-    let clo_var : Tir.var = {
-      v_name = clo_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
-    } in
+    let (clo_var, lambda_expr) = hoist_fallback_jp fb in
     (* Every fall-through site uses [EApp(clo_var, [])].  Defun rewrites
        this to [ECallPtr] because [clo_var] has a [TFn] type and is not
        a top-level name. *)
@@ -418,7 +429,27 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
     compile_matrix env [scrut] rows None
   end else begin
     (* Guards present: compile each branch individually with fallthrough
-       to the remaining branches when the guard fails. *)
+       to the remaining branches when the guard fails.
+
+       The fallthrough expression ([rest_expr] = the lowering of the
+       remaining arms) is referenced in TWO places per arm:
+         1. the guard-fail default (the ECase's [Some ...] branch), and
+         2. the pattern-fail fallback (passed to [compile_matrix]).
+       Embedding [rest_expr] directly in both — and letting [compile_matrix]
+       re-hoist a FRESH join point around it every level — duplicated the
+       whole tail (panic bodies, "zero" bodies, and every deeper join point)
+       once per arm, producing O(arms) join-point closures with byte-
+       identical bodies.  Instead, hoist [rest_expr] into ONE 0-arg join
+       point and reference the SAME [EApp(clo_var, [])] in both spots, so the
+       tail body is emitted once.  We call [compile_matrix_impl] directly
+       (not [compile_matrix]) with the already-hoisted call so the fallback
+       is not re-hoisted into a second join point.
+
+       The join point is only materialized when the tail is actually
+       reachable — i.e. the arm has a guard (guard may fail) or a non-trivial
+       pattern (pattern may not match).  An unguarded, trivial (wildcard/var)
+       final arm always matches, so its tail is dead and no closure is
+       emitted for it. *)
     let rec go = function
       | [] -> Lower_state.nonexhaustive_panic ()  (* every branch's guard failed *)
       | (br : Ast.branch) :: rest ->
@@ -433,21 +464,37 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
         List.iter (fun (name, sp) ->
           Hashtbl.replace Lower_state._fn_param_types name (Lower_state.ty_of_span env sp)) pat_names;
         let body = lower_expr env br.branch_body in
-        let guarded_body = match br.branch_guard with
-          | None -> body
-          | Some guard ->
-            let guard_expr = lower_expr env guard in
-            let gv : Tir.var = { v_name = Lower_state.fresh_name "guard";
-                                 v_ty = Tir.TBool; v_lin = Tir.Unr } in
-            Tir.ELet (gv, guard_expr,
-              Tir.ECase (Tir.AVar gv,
-                [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
-                Some rest_expr))
-        in
+        let guard_expr_opt = Option.map (lower_expr env) br.branch_guard in
         List.iter (fun (name, _) -> Hashtbl.remove Lower_state._fn_param_types name) pat_names;
         List.iter (fun (name, ty) ->
           Hashtbl.replace Lower_state._fn_param_types name ty) saved_shadowed;
-        compile_matrix env [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
+        (* The tail is reachable iff the guard can fail OR the pattern can
+           fail to match. *)
+        let needs_fallback =
+          br.branch_guard <> None || not (is_trivial_pat br.branch_pat) in
+        let (fallback_opt, wrap) =
+          if needs_fallback then
+            let (clo_var, lambda_expr) = hoist_fallback_jp rest_expr in
+            (Some (Tir.EApp (clo_var, [])),
+             fun e -> Tir.ELet (clo_var, lambda_expr, e))
+          else
+            (None, fun e -> e)
+        in
+        let guarded_body = match guard_expr_opt with
+          | None -> body
+          | Some guard_expr ->
+            let gv : Tir.var = { v_name = Lower_state.fresh_name "guard";
+                                 v_ty = Tir.TBool; v_lin = Tir.Unr } in
+            let guard_fail = match fallback_opt with
+              | Some call -> call
+              | None -> Lower_state.nonexhaustive_panic () in
+            Tir.ELet (gv, guard_expr,
+              Tir.ECase (Tir.AVar gv,
+                [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
+                Some guard_fail))
+        in
+        wrap (compile_matrix_impl env [scrut]
+                [([br.branch_pat], guarded_body)] fallback_opt)
     in
     go branches
   end

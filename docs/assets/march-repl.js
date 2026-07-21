@@ -250,7 +250,7 @@
     var cls  = this._cls;
     var trimmed = code.trim();
 
-    if (!trimmed) return;
+    if (!trimmed) { this._input.focus(); return; }
 
     if (this._cmdHist[0] !== code) this._cmdHist.unshift(code);
     if (this._cmdHist.length > 50) this._cmdHist.pop();

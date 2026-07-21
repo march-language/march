@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g39)
+# Golden corpus index (g01–g46)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled** — run the whole corpus
-with `specs/lang/golden/verify.sh` (39/39 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (46/46 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -20,7 +20,33 @@ prose finding, not a golden program); `g38`–`g39` the session-typed channel
 operational addition (§4.11 channel runtime — binary `Chan.new`/`send`/`recv`/
 `close` and `choose`/`offer`, ENABLED by the concurrent F1/F2 codegen fix that
 made odd-Int/Bool channel payloads byte-identical compiled; MPST is documented
-but diverges compiled — F3 — and is deliberately NOT a golden program).
+but diverges compiled — F3 — and is deliberately NOT a golden program); `g40`
+the actor foreign-message-drop addition (finding 19 — a message for a DIFFERENT
+actor `send` to this Pid is silently DROPPED in both backends, ENABLED by the
+compiled fix that forces actor message types Boxed with globally-unique tags and
+gives the dispatch a dropping default arm, replacing the prior memory-unsafe
+misroute); `g41` the linearity-erasure addition (§4.12 — linear/affine
+annotations are compile-time-erased, widening slice 7; its affine binding is
+consumed by a DIRECT match, the regression witness for finding L7 — FIXED
+2026-07-10: escape analysis no longer stack-promotes erased-repr allocs,
+`specs/todos.md`); `g43` the parallelism addition (§4.14, widening slice 9 —
+the data-parallel determinism guarantee: `List.pmap == List.map` plus the RRB
+`Parallel` integer/bool reductions, the first compiled witness for the RRB
+`Parallel` module; `psum_float` deliberately excluded — IEEE non-associativity,
+finding P1); `g44` the distributed-CRDT addition (§4.15, widening slice 10 —
+the convergence laws of the single-process-testable CRDT core: GCounter/
+PNCounter/ORSet merge + VectorClock causality, including the disjoint-key
+`compare`/`.concurrent` case that used to crash compiled via the read-then-
+update-map use-after-free, finding C1, FIXED 2026-07-11 — `specs/todos.md`);
+`g45` the Perceus RC addition
+(§4.16, widening slice 11 — the dual-position dup/drop invariant B1, the ONE
+rule in this corpus verified three ways: interp==compiled, a committed TIR
+snapshot, AND `MARCH_SANITIZE=1` clean); `g46` the refinement-types addition
+(`core-march-types.md` §2.14, widening slice 12 — refinement obligations are
+discharged entirely at `--check` time by a separate pass, `lib/refinecheck`,
+that erases to nothing at runtime; a program whose obligations all provably
+hold therefore runs byte-identically, the same erasure property golden g41
+established for linear/affine annotations).
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -63,6 +89,13 @@ but diverges compiled — F3 — and is deliberately NOT a golden program).
 | `g37_actor_lifecycle` | `spawn` → `is_alive` (`true`) → `kill` → `is_alive` (`false`), each printed via a `Bool→String` helper (registry-bool observation, SAFE compiled) | `kill`/`is_alive` + `crash_actor`/`ai_alive` (§4.10.6, `eval.ml:2961/2964/1766/1772`) |
 | `g38_chan_int_echo` | binary `Chan.new`/`send`/`recv`/`close` round-trip carrying an **odd** `Int` payload (`42` sent, `43` returned) — exactly the value class the concurrent F1/F2 codegen fix made byte-identical compiled | `chan_new`/`chan_send`/`chan_recv`/`chan_close` (§4.11.2–.3, `eval.ml:2632/2645/2655/2666`) |
 | `g39_chan_choose_offer` | `Chan.choose`/`Chan.offer` branch selection over a protocol with TYPE-DISTINCT branches (`ok -> Int`, `err -> String`, avoiding the F4 merge-rule pitfall); chooser picks `:ok`, sends an odd `Int` (`43`) after the label | choose=send-atom / offer=recv-atom (§4.11.4, `eval.ml:5581/5588`) |
+| `g40_actor_foreign_msg_drop` | a `Logger` message (`Zlog(String)`) `send` to a `Counter` Pid is silently DROPPED (not misrouted) in both backends, sandwiched BETWEEN two count-changing messages (`Inc(3)`, drop, `Inc(4)`); `Counter` `Report`s `count=7`, the stray `Zlog` contributing nothing (a misroute would reinterpret the `String` payload as a garbage `Int`) — this shape used to be flaky (finding 20, an unrelated actor-struct FBIP/RC race, now fixed), so it now also witnesses that determinism | foreign-message drop: interp handler-name miss (§4.10, `eval.ml:7545`); compiled Boxed message + globally-unique tag + dispatch default arm (finding 19 fix, `lib/tir/lower_actor.ml`, `lib/tir/repr.ml`, `lib/tir/llvm_toplevel.ml`); actor-struct `EReuse` always-in-place (finding 20 fix, `lib/tir/llvm_emit.ml`) |
+| `g41_linear_annotations_erased` | all three linearity keyword surfaces in one deterministic program — a `linear` fn param (matched inside the callee), a `linear let` (consumed by the call), an `affine` type-modifier binding consumed by a DIRECT match — the direct match doubles as the L7 regression witness (FIXED 2026-07-10: escape analysis stack-promoted non-escaping erased-repr allocs into boxed stack cells that erased-convention consumers decoded as garbage; this golden's first run caught it); prints `42` / `done`, byte-identical, stable across repeated runs | linearity erasure (§4.12): no runtime use-accounting on either backend; `v_lin` is optimization-only compiled; static rules in `core-march-types.md` §2.9; escape-promotion gate `lib/tir/escape.ml` `alloc_emits_heap_cell` (slice 7 + L7 fix, 2026-07-10) |
+| `g42_letq_short_circuit` | a two-step `let?` Result chain: `chain(5)` succeeds through both steps (E-LetQ-Ok twice → `ok 70`), `chain(-1)` fails the first step so the second `let?` never runs (E-LetQ-Err short-circuits, returns Err verbatim → `err neg`); deterministic, no scheduler | `let?` Result-propagation (§4.13): native `ELetQ` eval, Ok-bind-and-continue / Err-short-circuit, byte-identical both backends; typing in `core-march-types.md` §2.10 (slice 8, 2026-07-10) |
+| `g43_parallel_determinism` | data-parallel determinism guarantee: `List.pmap == List.map` (order-preserving) on 199 elements plus `Parallel.psum`/`pcount`/`pany`/`pall`/`preduce` over the same RRB `Vec` (associative merges + identities) — same result interp (eager/sequential tasks) and compiled (real multi-core scheduler), stress-verified 0/15 crashes; first compiled witness for the RRB `Parallel` module. `psum_float` excluded (IEEE non-associativity, finding P1) | E-PMap / E-PReduce (§4.14): pmap gathers in spawn order; associative-merge reduce is chunk-count-independent |
+| `g44_crdt_convergence` | distributed CRDT convergence laws (single-process core): GCounter/PNCounter/ORSet merge commutative + idempotent + value; VectorClock `happens_before` on causally-ordered clocks AND `.concurrent` on disjoint-key clocks — byte-identical both backends, stress-verified 0/20 crashes. The disjoint-key case used to crash compiled (finding C1, a `strip_scrut_decrc` scrutinee-dec ordering bug in `lib/tir/llvm_case.ml`); FIXED 2026-07-11 and now included unconditionally | CRDT-Converge (§4.15): join-semilattice merge laws; VectorClock partial order; live-network layers are a prose scope boundary |
+| `g45_dual_position_borrow` | Perceus dual-position dup/drop invariant (B1, `specs/perceus-invariants.md` §2.1): `both(a: owned, b: borrowed, n: owned)` called as `both(s, s, 1)` — the exact shape that used to RC-underflow (owned-side and borrowed-side accounting each independently believing they alone consumed the one reference). Verified three ways: interp==compiled byte-identical; post-Perceus TIR matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly (one `inc_rc s` before the call, one `dec_rc` after); compiled binary clean under `MARCH_SANITIZE=1` (ASan+UBSan), exit 0, no leak/UAF report | E-Call-Dual-Position (§4.16): exactly one balancing `EIncRC`/`EDecRC` pair for a variable at both an owned and a borrowed position of the same call |
+| `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair whose postcondition and precondition both provably hold (`--check` exit 0) therefore runs byte-identically — same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is ever inserted |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
@@ -97,16 +130,23 @@ note explaining why:
   that is what `g37` witnesses. (`revoke_cap`/`is_cap_valid` are additionally not
   registered in the typechecker, so they are not even surface-callable — a second
   finding in §4.10.6.)
-- **The supervision / `one_for_one` restart plane** — supervisor declaration +
-  child restart + epoch invalidation (§4.10.7) is documented in prose + `eval.ml`
-  citations, NOT by a golden program, because the entire child-observation
-  surface diverges or crashes compiled (filed findings in `specs/todos.md`): the
-  only surface way to reach a supervised child, `get_actor_field`/`pid_of_int`,
-  SIGSEGVs compiled (`examples/supervision_strategies.march` exits 139), and even
-  a `get_actor_field`-free "supervisor spawns its declared children" witness
-  (observed via a printing child `init`) diverges — interp runs each child's
-  `init` at `spawn(Sup)`, compiled runs none. A divergent/crashing program cannot
-  be a golden `MATCH`, so no restart witness was added.
+- **The supervision / restart plane** — supervisor declaration + child restart
+  + epoch invalidation (§4.10.7) has no golden HERE, but the historical reason
+  changed (2026-07-08, compiled-actor-supervision plan): `get_actor_field`/
+  `pid_of_int` now WORK compiled, supervisors DO spawn their declared children,
+  and all three restart strategies are compiled — pinned by six stable native
+  golden tests in `test/native/` (`pid_of_int_roundtrip`,
+  `get_actor_field_direct`, `supervisor_spawn_children`, `supervisor_
+  one_for_one_restart`, `supervisor_one_for_all_restart`,
+  `supervisor_rest_for_one_restart`), which serve the interp-vs-compiled
+  anchoring role for this plane. The full 3-strategy
+  `examples/supervision_strategies.march` demo remains excluded from BOTH
+  corpora — historically because of the multi-scheduler kill+respawn
+  stack-corruption crash (FIXED 2026-07-09/10: TLS migration barrier +
+  single-owner run queues, commits `9407cc6f`/`81adf1b1`; 200/200 clean at
+  N=4 and N=8), and PERMANENTLY because its concurrent workers' prints
+  interleave nondeterministically (30/30 runs byte-differ) — inherent to
+  parallel actors, so it can never be a byte-identical `MATCH`.
 - **Multi-party session types (`MPST.*`)** — the MPST runtime (§4.11.5) is
   complete and correct interpreted (a 3-role all-`String` relay runs cleanly),
   but **every** `MPST.*` program segfaults compiled (exit 139, filed as F3 in

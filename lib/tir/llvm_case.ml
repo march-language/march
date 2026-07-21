@@ -41,12 +41,29 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       if String.length t > 0 && t.[0] >= 'A' && t.[0] <= 'Z' then Some t else None
     ) branches in
     ctor_tags <> [] &&
-    List.exists (function
-      | Tir.TDVariant (tname, variants) ->
-        Repr.is_niche_shaped ctx.Llvm_ctx.type_defs tname
-        && (let ctor_names = List.map fst variants in
-            List.for_all (fun t -> List.mem t ctor_names) ctor_tags)
-      | _ -> false) ctx.Llvm_ctx.type_defs
+    (* Candidate owners: EVERY variant typedef whose ctor set contains all the
+       branch ctor tags — with the scrutinee type erased, any of them could be
+       its true type.  Commit to the niche decode only when they ALL classify
+       niche-shaped (mirrors [newtype_recovery_payload]'s all-owners ambiguity
+       discipline below; any ambiguity keeps Boxed, the status quo).  The
+       previous [List.exists] committed on the FIRST niche-shaped owner: a
+       single-ctor branch set like ["Row"] matched Csv's niche-shaped
+       `CsvRow = CsvEof | Row(List(String))` even when the value was really a
+       BOXED `DataFrame.Row = Row(List((String, Value)))` — the niche identity
+       decode then bound the box pointer itself as the payload, whose header
+       read as an empty list (tag 0 = Nil): DataFrame group_by/inner_join/
+       summarize silently returned 0 rows compiled.  Matches that list a
+       DISTINGUISHING ctor set (e.g. both CsvEof and Row) are unaffected:
+       their only owner is the genuine niche type. *)
+    (let owners = List.filter_map (function
+       | Tir.TDVariant (tname, variants)
+         when (let ctor_names = List.map fst variants in
+               List.for_all (fun t -> List.mem t ctor_names) ctor_tags) ->
+         Some tname
+       | _ -> None) ctx.Llvm_ctx.type_defs in
+     owners <> [] &&
+     List.for_all (fun tname ->
+       Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs tname) owners)
   in
   (* Newtype analogue of the niche recovery: [lower_match] mints destructured
      sub-pattern variables with [unknown_ty], so a nested match on one (e.g.
@@ -88,22 +105,22 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       let owner_reprs = List.filter_map (function
         | Tir.TDVariant (tname, variants)
           when List.exists (fun (c, _) -> c = tag) variants ->
-          Some (Repr.repr_of_ty ctx.Llvm_ctx.type_defs
+          Some (Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs
                   (Tir.TCon (last_seg tname, [])))
         | _ -> None) ctx.Llvm_ctx.type_defs in
       (match owner_reprs with
        | Repr.Newtype p0 :: rest
          when List.for_all (function
              | Repr.Newtype p ->
-               Repr.payload_needs_tag ctx.Llvm_ctx.type_defs p
-               = Repr.payload_needs_tag ctx.Llvm_ctx.type_defs p0
+               Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p
+               = Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p0
              | _ -> false) rest ->
          Some p0
        | _ -> None)
     | _ -> None
   in
   let effective_repr =
-    match Repr.repr_of_ty ctx.Llvm_ctx.type_defs scrut_tir_ty_init with
+    match Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs scrut_tir_ty_init with
     | Repr.Boxed
       when (match scrut_tir_ty_init with Tir.TVar _ -> true | _ -> false)
            && newtype_recovery_payload () <> None ->
@@ -127,7 +144,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         (match scrut_tir_ty_init with
          | Tir.TCon (name, args) when args <> [] ->
            (List.exists (function Tir.TVar _ -> true | _ -> false) args)
-           && Repr.is_niche_shaped ctx.Llvm_ctx.type_defs name
+           && Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs name
          | _ -> false)
       ) ->
       Repr.Niche { payload = Tir.TVar "_"; tagged = false }
@@ -150,7 +167,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
          Non-niche-shaped TCons return None and stay Boxed. *)
       (match scrut_tir_ty_init with
        | Tir.TCon (name, []) ->
-         (match Repr.niche_repr_of_concrete ctx.Llvm_ctx.type_defs name with
+         (match Repr.niche_repr_of_concrete ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs name with
           | Some r -> r
           | None -> Repr.Boxed)
        | _ -> Repr.Boxed)
@@ -198,7 +215,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      | [br] ->
        (match br.Tir.br_vars with
         | [field_var] ->
-          let needs_tag = Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload in
+          let needs_tag = Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload in
           let (fty, fval) =
             if needs_tag then
               ("i64", Llvm_ctx.emit_untag_known_scalar ctx ~raw:"nt_raw" ~unt:"nt_unt" scrut_val)
@@ -610,16 +627,34 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     end
   end;
 
-  (* Helper: if body = ESeq(EDecRC(v)|EAtomicDecRC(v), rest) where
-     v.v_name = scrut_name, return (v, rest).
-     Both atomic and non-atomic DecRC qualify — the decrc_freed path handles
-     the conditional IncRC of children either way. *)
+  (* Helper: find the scrutinee's own EDecRC/EAtomicDecRC within a leading
+     run of bare DecRC ops and return (v, rest) with the OTHER leading decs
+     preserved in their original order around the extraction point.
+
+     The scrutinee's dec is not always the literal head of the branch body:
+     [add_cross_decrcs] in perceus.ml prepends OTHER cross-branch-dead
+     variables' EDecRC/EAtomicDecRC ops in front of it whenever the branch
+     also has, say, a closure parameter that's unused on this specific arm
+     (e.g. Map.node_insert's HLeaf arm: `dec_rc eq; dec_rc node; ...` — the
+     scrutinee `node`'s dec is SECOND, not first). A literal head-only match
+     here silently falls through to the plain (unprotected) EDecRC codegen
+     below, leaving extracted heap fields under-refcounted whenever the
+     scrutinee is actually shared at that point — this was finding C1: a
+     String map key's refcount under-counted this way, freed prematurely,
+     surfacing as a use-after-free in march_hash_string when a later
+     Map.keys/get_or traversal read it. Fixed 2026-07-11. *)
   let strip_scrut_decrc scrut_name body =
-    match body with
-    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
-    | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
-      when String.equal v.Tir.v_name scrut_name -> Some (v, rest)
-    | _ -> None
+    let rec go acc e =
+      match e with
+      | Tir.ESeq (((Tir.EDecRC (Tir.AVar v)) as op), rest)
+      | Tir.ESeq (((Tir.EAtomicDecRC (Tir.AVar v)) as op), rest) ->
+        if String.equal v.Tir.v_name scrut_name then
+          Some (v, List.fold_left (fun inner o -> Tir.ESeq (o, inner)) rest acc)
+        else
+          go (op :: acc) rest
+      | _ -> None
+    in
+    go [] body
   in
 
   (* True iff [body] reuses the scrutinee's own storage via an
