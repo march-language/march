@@ -1,0 +1,11 @@
+-- Library module B: declares its OWN `Thing` (same short name as ScLibA.Thing,
+-- a genuinely distinct type in a different module) and implements `Speak` for
+-- it. Coherence keys on the declaring module, so both impls coexist; dispatch
+-- routes each module's `Thing` value to its own body.
+mod ScLibB do
+  type Thing = TB
+  impl Speak(Thing) do
+    fn speak(_self) do "from-B" end
+  end
+  fn say() do speak(TB) end
+end
