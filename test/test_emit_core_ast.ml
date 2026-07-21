@@ -11,7 +11,7 @@
 
     Each fixture in [emit_core_ast/fixtures/*.expected.json] pins the EXACT
     stdout bytes `march --emit-core-ast <corpus file>` produced at the time
-    the fixture was captured, for one of three representative
+    the fixture was captured, for one of four representative
     `specs/lang/types/{accept,reject}/*.march` corpus programs (referenced
     in place — the .march source is NOT copied into this test's fixtures
     directory):
@@ -25,6 +25,13 @@
       - [t01_int_vs_string.march]   (reject) — a reject case: a type
         mismatch (`Int` vs `String` at `++`) that produces diagnostics
         AND still emits its (pre-typecheck) desugared module tree.
+      - [t70_letq_type_annotation.march] (reject) — a genuinely FATAL parse
+        error (a `let?` binding with a type annotation, which the parser
+        rejects outright rather than recovering from). This exercises the
+        dedicated `emit_core_ast_parse_failure` short-circuit in
+        [bin/main.ml] (no `Ast.module_` is ever produced), which emits
+        `"module":null` instead of a desugared tree — the one case in the
+        whole 170-file corpus that hits this path.
 
     The march process is always invoked with the corpus file path spelled
     RELATIVE to the project root, with the project root as the subprocess's
@@ -156,6 +163,10 @@ let cases = [
     fixture_name = "t01_int_vs_string.expected.json";
     expected_exit = 1;
     label = "reject: Int/String type mismatch (t01_int_vs_string)" };
+  { corpus_rel = "specs/lang/types/reject/t70_letq_type_annotation.march";
+    fixture_name = "t70_letq_type_annotation.expected.json";
+    expected_exit = 1;
+    label = "reject: fatal parse error, module is null (t70_letq_type_annotation)" };
 ]
 
 let test_case_matches_fixture case () =
