@@ -185,23 +185,54 @@ let dep_to_lib_paths ~root (dep_name, dep) =
     root, not the top-level one).  Dedup is by dep name, nearest-wins (a
     project's own direct dep shadows the same name pulled in transitively),
     and a [visited] set guards against dependency cycles. *)
-let rec collect_transitive_deps visited (root, deps) =
-  List.concat_map (fun (dep_name, dep) ->
-      if Hashtbl.mem visited dep_name then []
-      else begin
-        Hashtbl.add visited dep_name ();
-        let here = [(root, dep_name, dep)] in
-        let nested =
+let collect_transitive_deps visited (root, deps) =
+  (* Walk the dependency graph BREADTH-FIRST by depth, so a SHALLOWER dep
+     always shadows a same-named dep reachable only through a deeper path.
+     In particular every DIRECT dep of the root is claimed before any
+     transitive dep is examined, so the root's own `depot = { path = ... }`
+     wins over a sibling's `depot = { git = ... }`.
+
+     The previous DEPTH-FIRST walk descended into the first sibling's own
+     deps before visiting later direct siblings: for `deps = [bastion; depot]`
+     where bastion depends on depot-via-git, it visited+claimed bastion's git
+     `depot` first (which resolves to the empty CAS dir `~/.march/cas/deps/depot`
+     and contributes NO lib path), so the root's direct path `depot` was
+     dropped as already-visited — leaving depot's lib entirely off
+     MARCH_LIB_PATH and every `import Depot` / depot constructor unresolvable.
+
+     [visited] dedups by dep NAME (nearest-depth-wins); ordering of the result
+     is depth-major, declared order within a depth, which is deterministic and
+     keeps direct deps first on the search path. *)
+  let out = ref [] in
+  let frontier = ref [ (root, deps) ] in
+  while !frontier <> [] do
+    let level = !frontier in
+    frontier := [];
+    (* Pass A: claim every not-yet-seen dep at THIS depth before descending. *)
+    let level_entries =
+      List.concat_map (fun (root, deps) ->
+          List.filter_map (fun (dep_name, dep) ->
+              if Hashtbl.mem visited dep_name then None
+              else begin
+                Hashtbl.add visited dep_name ();
+                Some (root, dep_name, dep)
+              end)
+            deps)
+        level
+    in
+    out := !out @ level_entries;
+    (* Pass B: enqueue the next depth from the deps just claimed. *)
+    frontier :=
+      List.filter_map (fun (root, dep_name, dep) ->
           match Project.dep_root_dir ~project_root:root (dep_name, dep) with
           | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
             (match Project.load_from_dir dep_dir with
-             | Ok dep_proj -> collect_transitive_deps visited (dep_dir, dep_proj.Project.deps)
-             | Error _ -> [])
-          | _ -> []
-        in
-        here @ nested
-      end
-    ) deps
+             | Ok dep_proj -> Some (dep_dir, dep_proj.Project.deps)
+             | Error _ -> None)
+          | _ -> None)
+        level_entries
+  done;
+  !out
 
 (** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
     of the [march] compiler.  Contains the project's own lib/, any dep lib

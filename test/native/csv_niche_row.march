@@ -1,0 +1,49 @@
+-- Regression: Csv.read_all / Csv.each_row_with_header silently returned zero
+-- rows when COMPILED (fine interpreted). `CsvRow = CsvEof | Row(List(String))`
+-- (stdlib/csv.march) is niche-shaped (one nullary ctor + one single-payload
+-- ctor), but typecheck.ml's hardcoded builtin signature for `csv_next_row`
+-- declared its return type as the bare `TCon("CsvRow", [])` while the TIR
+-- registers user ptypes under their module-qualified name ("Csv.CsvRow").
+-- That name mismatch made Repr.niche_repr_of_concrete's `find_variant` miss
+-- the type definition and fall back to Boxed, even though the C runtime
+-- (runtime/march_runtime.c: march_csv_next_row) returns raw NULL for EOF —
+-- a Niche-only convention. Under the wrong (Boxed) classification the
+-- compiled match read an uninitialized/irrelevant tag byte and treated every
+-- real row as EOF immediately, so callbacks never fired and aggregations
+-- silently summed to 0 with no error.
+mod Test do
+  needs IO.FileRead
+
+  fn nth(lst, i) do
+    match lst do
+    Nil -> "?"
+    Cons(h, t) -> do
+      if i == 0 do
+        h
+      else
+        nth(t, i - 1)
+      end
+    end
+    end
+  end
+
+  fn main() : Unit do
+    let path = "/tmp/march_native_csv_niche_row.csv"
+    match File.write(path, "name,amount\nalice,10\nbob,20\ncarol,5\n") do
+    Err(e) -> panic("write failed")
+    Ok(_) -> :ok
+    end
+
+    match Csv.read_all(path, ",", :rfc4180) do
+    Err(e) -> println("read_all err")
+    Ok(rows) -> println("row count: " ++ int_to_string(List.length(rows)))
+    end
+
+    match Csv.each_row_with_header(path, ",", :rfc4180, fn (header, fields) -> println("row: " ++ nth(fields, 0))) do
+    Err(e) -> println("each_row_with_header err")
+    Ok(_) -> println("each_row_with_header: ok")
+    end
+
+    match File.delete(path) do _ -> () end
+  end
+end

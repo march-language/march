@@ -825,6 +825,62 @@ let lookup_ctor name env =
   | Some (ci :: _) -> Some ci
   | _ -> None
 
+(** Same-module precedence for an UNQUALIFIED constructor reference.
+
+    When two sibling modules in the same package define distinct types that
+    share a constructor name (e.g. `IslandSocket.Registry(List(IslandHandler))`
+    and `Islands.Registry(List(Descriptor))`), the bare-name entry in
+    [env.ctors] holds BOTH candidates and [lookup_ctor] returns whichever was
+    registered last — a single global winner shared by every module, regardless
+    of which module's body is being checked.  Since March keys nominal types by
+    bare name, both `Registry`s look identical at the type level; only the
+    constructors' argument types differ, so the wrong candidate silently unifies
+    the sibling's element type in (the observed "expected Descriptor but got
+    IslandHandler").
+
+    A module's own top-level definition must outrank a same-named one from a
+    module it does not even import.  [prebind_mod_members] seeds a
+    module-qualified key `Module.Ctor` (bare [ci_type]) for every module's
+    public constructors, keyed by the ACCUMULATED, entry-unwrapped module path
+    (e.g. a sibling `Islands` seeds `Islands.Registry`; a nested `mod Outer do
+    mod Inner` under the unwrapped entry seeds `Inner.Registry`; a nested
+    module under a non-entry `Outer` seeds `Outer.Inner.Registry`).  We look the
+    bare name up under the current module's own such key first.
+
+    The key must exactly match prebind's accumulated path.  [cap_qual_prefix]
+    tracks precisely that path (accumulated across enclosing [DMod]s, empty at
+    the TIR-unwrapped entry level — see its field doc).  At the unwrapped entry
+    level [cap_qual_prefix] is "" while prebind still seeds under the entry
+    module name, which [current_module] holds — so use [cap_qual_prefix] when
+    set and fall back to [current_module] at the entry level.  This makes
+    same-module precedence work for top-level siblings, dotted single-decl
+    module names, AND arbitrarily nested modules.
+
+    If the current module does not define [name] the key is absent and we fall
+    through to the existing resolution — preserving imported names and
+    d95fe942's order-independence for genuinely cross-module bare references,
+    whose module path does not match the definer's.
+
+    Ambiguity guard: the `Module.Ctor` key shares its STRING namespace with the
+    `Type.Ctor` disambiguation form prebind also seeds (see the `bare_type_qctor`
+    site).  When a module's leaf name coincides with a DIFFERENT package's TYPE
+    name (real case: bastion `mod Gate` with an opaque `type Gate`, vs depot's
+    `mod Depot.Gate` whose regular `type Gate` seeds the disambiguation key
+    `Gate.Gate`), the `Gate.Gate` bucket holds BOTH ctors and the head is
+    order-dependent — exactly the pollution same-module precedence is meant to
+    avoid.  So only trust this key when it resolves UNAMBIGUOUSLY to one ctor;
+    otherwise return None and let the caller fall through.  For an opaque type
+    the module's own bare-`Ctor` key wins the head during its Pass-2 check (its
+    private ctor is never prebind-seeded into the bare key, so nothing displaces
+    it), making the bare fallback correct there. *)
+let lookup_ctor_same_module name env =
+  let self = if env.cap_qual_prefix <> "" then env.cap_qual_prefix
+             else env.current_module in
+  if self = "" || String.contains name '.' then None
+  else match StrMap.find_opt (self ^ "." ^ name) env.ctors with
+    | Some [ci] -> Some ci
+    | _ -> None
+
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
     several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); [lookup_ctor]
@@ -834,6 +890,24 @@ let lookup_ctor name env =
 let lookup_ctor_in_type name type_name env =
   match StrMap.find_opt name env.ctors with
   | Some cis -> List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis
+  | None -> None
+
+(** Like [lookup_ctor_in_type] but returns a candidate ONLY when it is the sole
+    one whose parent type matches [type_name].  When two DISTINCT types in the
+    same package share a constructor name (e.g. `IslandSocket.Registry` and
+    `Islands.Registry`, both with bare [ci_type] "Registry"), an expected type
+    of `Registry` matches BOTH candidates — [lookup_ctor_in_type] would return
+    the order-dependent head, silently defeating same-module precedence.  This
+    variant reports no match in that ambiguous case so the caller falls through
+    to same-module resolution, while a KNOWN scrutinee type whose name is unique
+    among the candidates (the Finding-1 case: local `Local = Reg(Int)` vs
+    imported `Remote = Reg(String)`) still wins outright. *)
+let lookup_ctor_in_type_unique name type_name env =
+  match StrMap.find_opt name env.ctors with
+  | Some cis ->
+    (match List.filter (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+     | [ci] -> Some ci
+     | _ -> None)
   | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
@@ -1859,9 +1933,17 @@ let builtin_bindings : (string * scheme) list =
     ("try_finally",
       poly2 (fun a b -> TArrow (TArrow (t_int, a),
                                 TArrow (TArrow (t_int, b), a))));
-    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march) *)
+    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march).
+       The TIR registers user ptypes under their module-qualified name
+       ("Csv.CsvRow"), so this MUST match that qualification: a bare
+       "CsvRow" here makes Repr.niche_repr_of_concrete's find_variant miss
+       the type definition and silently fall back to Boxed, even though
+       CsvRow is niche-shaped (CsvEof nullary + Row single-payload). Under
+       Boxed the compiled match reads a heap object's tag byte, but the C
+       runtime returns raw NULL for EOF (a Niche-only convention) — so every
+       row is misread against an uninitialized tag. *)
     ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
-    ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));
+    ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
     (* TCP/HTTP transport builtins *)
     (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)
@@ -3156,15 +3238,38 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        prefer the candidate whose parent type matches, instead of relying on
        [lookup_ctor]'s order-dependent "most recently registered wins". *)
     (let ci_opt =
-       let by_expected =
+       (* Resolution precedence for a bare (unqualified) pattern constructor:
+          1. A KNOWN scrutinee type that UNIQUELY identifies the constructor
+             wins first — matching a value of an imported type
+             `N.Remote = Reg(String)` via bare `Reg(s)` must resolve to
+             `N.Remote`'s ctor even when the current module locally defines a
+             same-named `Reg` on a different type (Finding-1).
+          2. Otherwise same-module precedence: a module's own constructor
+             outranks a same-named sibling's.  This is what wins when the
+             expected type name is itself shared by several candidates (two
+             sibling `Registry` types) so step 1 is ambiguous.
+          3. Then the order-dependent expected-type head (legacy behaviour for
+             a genuinely ambiguous cross-module name with no same-module match).
+          4. Then the raw head / qualified resolution. *)
+       let expected_tn =
          if String.contains name.txt '.' then None
-         else
-           match expected with
-           | Some t ->
-             (match repr t with
-              | TCon (tn, _) -> lookup_ctor_in_type name.txt tn env
-              | _ -> None)
+         else match expected with
+           | Some t -> (match repr t with TCon (tn, _) -> Some tn | _ -> None)
            | None -> None
+       in
+       let by_expected_unique = match expected_tn with
+         | Some tn -> lookup_ctor_in_type_unique name.txt tn env
+         | None -> None
+       in
+       match by_expected_unique with
+       | Some _ as r -> r
+       | None ->
+       match lookup_ctor_same_module name.txt env with
+       | Some _ as r -> r
+       | None ->
+       let by_expected = match expected_tn with
+         | Some tn -> lookup_ctor_in_type name.txt tn env
+         | None -> None
        in
        match by_expected with
        | Some _ as r -> r
@@ -4454,7 +4559,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
-      (let ci_opt = match lookup_ctor name.txt env with
+      (let ci_opt = match lookup_ctor_same_module name.txt env with
+         | Some _ as r -> r
+         | None ->
+         match lookup_ctor name.txt env with
          | Some _ as r -> r
          | None ->
            (* Try qualified module resolution: "Mod.Ctor" *)
