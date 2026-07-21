@@ -418,12 +418,16 @@ type ctor_info = {
       is deliberately kept bare for cross-module unification (see
       [prebind_mod_members]'s reverted qualified-ci_type experiment), so two
       same-named types' constructors are indistinguishable by [ci_type] alone.
-      [ci_module] disambiguates them for DIAGNOSTIC purposes only — currently
-      [ctors_for_type]'s exhaustiveness universe, which otherwise merges a user
-      `Handle`'s ctors with stdlib's same-named `Handle` (linear-L4 ctor
-      cross-talk). It feeds NO codegen/mangling/dispatch, so it is byte-identical
-      at the backend, and it is NOT part of [add_ctor]'s structural dedup key.
-      First metadata slice of the module-qualified ctor identity in
+      [ci_module] disambiguates them for [ctors_for_type]'s exhaustiveness
+      universe, which otherwise merges a user `Handle`'s ctors with stdlib's
+      same-named `Handle` (linear-L4 ctor cross-talk), AND — since the FQN
+      dispatch-identity plan's Task 1 — is part of [add_ctor]'s structural
+      dedup key, so two DIFFERENT modules' identically-shaped ctors (e.g. both
+      a nullary `Shared`) are kept as distinct candidates instead of the
+      second collapsing onto the first. It still feeds NO codegen/mangling/
+      dispatch, so this is byte-identical at the backend for any program that
+      does not hit this exact double-collision shape.  First metadata slice of
+      the module-qualified ctor identity in
       specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4). *)
 }
 
@@ -837,10 +841,15 @@ let lookup_ctor_in_type name type_name env =
   | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
-    Deduplicates STRUCTURALLY (same ci_type, ci_params, and ci_arg_tys) —
-    but by MOVING the existing entry to the FRONT rather than no-op'ing.
-    Two types with the same short name but different arity (e.g. stdlib's
-    `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+    Deduplicates STRUCTURALLY (same ci_type, ci_module, ci_params, and
+    ci_arg_tys) — but by MOVING the existing entry to the FRONT rather than
+    no-op'ing.  Two types with the same short name but different arity (e.g.
+    stdlib's `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+    So are two DIFFERENT modules' identically-shaped ctors (e.g. both a
+    nullary `Shared` on a type named `Thing`) — [ci_module] is part of the
+    comparison (FQN dispatch-identity plan, Task 1) precisely so this case
+    is no longer treated as "the same ctor" and does not collapse the
+    second registration onto the first.
 
     Why move-to-front matters (sibling-ctor shadowing regression,
     2026-07-10): Pass-1 prebind seeds every nested module's bare ctor keys
@@ -848,18 +857,24 @@ let lookup_ctor_in_type name type_name env =
     declaration order — so a later sibling `mod B`'s `Mk` sits AHEAD of
     `mod A`'s same-named `Mk`.  Pass-2 then re-registers each module's own
     ctors (check_decl DType) right before checking that module's bodies —
-    but the re-registration is structurally identical to the Pass-1 seed,
-    so a no-op dedup left B's candidate at the head and A's OWN body
+    but the re-registration is structurally identical to the Pass-1 seed
+    (SAME ci_module both times, since a module always re-registers its OWN
+    ctors), so a no-op dedup left B's candidate at the head and A's OWN body
     resolved `Mk(1)` against B's `Mk(String)` ("expected String but got
     Int" pointing inside A).  Moving the re-registered entry to the front
     restores the declaring module's recency for its own body check (the
     pre-d95fe942 semantics) while keeping the Pass-1 seeds — and therefore
     the cross-module order-independence — intact.  A singleton list is
-    unaffected; only genuinely shared names reorder. *)
+    unaffected; only genuinely shared names reorder.  Adding [ci_module] to
+    the comparison does not disturb this: same-module re-registration always
+    has matching [ci_module] on both sides, so it is unaffected; only
+    cross-module identically-shaped ctors (previously wrongly deduped) now
+    stay distinct. *)
 let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
   let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
   let same c =
     c.ci_type = ci.ci_type
+    && c.ci_module = ci.ci_module
     && c.ci_params = ci.ci_params
     && c.ci_arg_tys = ci.ci_arg_tys
   in

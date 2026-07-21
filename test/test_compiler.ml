@@ -700,6 +700,37 @@ end
   Alcotest.(check bool) "dev-relax bypasses the ctor-disjointness stopgap"
     false saw_errors
 
+(* FQN dispatch-identity plan, Task 1: add_ctor's structural dedup (same
+   ci_type/ci_params/ci_arg_tys) used to collapse a SECOND module's
+   identically-shaped ctor onto the first, discarding which module the
+   surviving candidate belongs to entirely — env.ctors "Shared" ended up
+   with only ONE ctor_info even though DcA and DcB each declare their own
+   nullary `Shared`. Later tasks in this plan (double-collision resolution)
+   need BOTH candidates retrievable under the bare key, so add_ctor's `same`
+   predicate now also compares ci_module. This fixture has no `impl`s, so it
+   does not touch the Task-6b coherence stopgap (register_impl_shape) at
+   all — it exercises add_ctor in isolation. *)
+let test_add_ctor_keeps_distinct_module_identical_shape_ctors () =
+  let (_errors, env) = typecheck_full {|mod Top do
+    mod DcA do
+      type Thing = Shared | OnlyA
+    end
+    mod DcB do
+      type Thing = Shared | OnlyB
+    end
+    fn main() do () end
+  end|} in
+  let candidates =
+    match March_typecheck.Typecheck.StrMap.find_opt "Shared"
+            env.March_typecheck.Typecheck.ctors with
+    | None -> []
+    | Some cis -> cis
+  in
+  let modules = List.sort_uniq compare
+      (List.map (fun ci -> ci.March_typecheck.Typecheck.ci_module) candidates) in
+  Alcotest.(check int) "two distinct declaring modules survive for `Shared`"
+    2 (List.length modules)
+
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
   let ctx = typecheck {|mod Test do
@@ -7981,6 +8012,7 @@ let compiler_suites =
           Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
           Alcotest.test_case "impl coherence: shared-ctor double collision err" `Quick test_impl_coherence_shared_ctor_double_collision_err;
           Alcotest.test_case "dev-relax ctor coherence bypasses stopgap" `Quick test_dev_relax_ctor_coherence_bypasses_stopgap;
+          Alcotest.test_case "add_ctor keeps distinct-module identical-shape ctors" `Quick test_add_ctor_keeps_distinct_module_identical_shape_ctors;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;

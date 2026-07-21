@@ -332,6 +332,24 @@ test/snapshots/` empty. Design:
 `implemented`); execution plan:
 `docs/superpowers/plans/2026-07-20-fqn-dispatch-stage3-native.md`.
 
+**FQN dispatch-identity constructor-identity plan, Task 1 (2026-07-21, `lib/typecheck/typecheck.ml`
+`add_ctor`):** the real fix's first step. `add_ctor`'s structural dedup (the
+`same` predicate: `ci_type`/`ci_params`/`ci_arg_tys`) did not compare
+`ci_module`, so two DIFFERENT modules' identically-shaped ctors (e.g. both a
+nullary `Shared`) collapsed onto a single `ctor_info` in `env.ctors` — losing
+which module the surviving candidate belonged to entirely. `ci_module` is now
+part of the comparison, so both candidates survive under the bare key (later
+tasks in this plan need both retrievable to resolve a double collision).
+Same-module Pass-1→Pass-2 re-registration (the 2026-07-10 sibling-ctor-
+shadowing move-to-front fix, `3caa0d1b`) is unaffected — a module always
+re-registers its OWN ctors, so `ci_module` always matches on both sides;
+verified its regression test (`test_tc_sibling_ctor_own_module_wins`) still
+passes. Bookkeeping only so far: `ci_module` still feeds no codegen/mangling/
+dispatch. New unit test `test_add_ctor_keeps_distinct_module_identical_shape_ctors`
+(`test/test_compiler.ml`, `typecheck` suite). Suite: **compiler 523**
+(+1 new test) / eval 235 / codegen 436 (+2 from Task 0) / stdlib 810 /
+snapshots 31, `git status test/snapshots/` empty.
+
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
 **`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the
