@@ -28,6 +28,13 @@ git log is authoritative for exact commits.
   compiler didn't expect. Affects any compiled program parsing floats from
   strings, including `stdlib/toml.march`'s float handling.
 
+### Fixed
+
+- `Dom.clone`, `Dom.first_child`, and `Dom.last_child` were declared as
+  extern runtime builtins but never got a public stdlib wrapper, like every
+  other DOM function — so they were unreachable from March code
+  ("Module `Dom` does not export ...") despite being documented.
+
 ### Documentation
 
 - Corrected stale claims and two tutorial code blocks in the top-level
@@ -37,6 +44,18 @@ git log is authoritative for exact commits.
   typecheck and run as written; the project-layout map now lists `stdlib/`,
   `forge/`, `lsp/`, and `test/`, previously omitted entirely.
 - Corrected the `install.sh` `MARCH_VERSION` pin-example comment.
+- Audited every March code example across the docs site (guides, the
+  language tour, the cookbook, and the stdlib reference) against the current
+  compiler and fixed everything that no longer typechecked, ran, or matched
+  its claimed output — including a large number of stale API references in
+  `docs/stdlib.md` (wrong module names, argument order, arity, or return
+  types across `String`, `Math`, `JSON`, `HTTP`, `Vault`, `URI`, `Dom`, and
+  more), the REPL transcript in `docs/getting-started.md` (real prompt is
+  numbered, `= value` output by default), and dozens of smaller fixes across
+  `docs/cookbook/*`. Several real compiler/stdlib bugs surfaced along the way
+  (silent wrong answers and crashes, mostly compiled-only) that are outside a
+  docs fix's scope and were filed separately rather than papered over in the
+  docs.
 
 ## [0.1.1] - 2026-07-21
 
