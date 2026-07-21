@@ -3209,6 +3209,20 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
        | _ -> None)
     | _ -> None
   in
+  (* A binding whose resolved type names an `always_linear type` must be
+     tracked as Linear even when it carries no [TLin] wrapper and the
+     scrutinee isn't itself a pre-tracked linear variable to inherit from —
+     e.g. `let? sock = connect(addr)` or `with Ok(sock) <- connect(addr)`
+     bind `sock` straight from a fresh call's result type, with no prior
+     linear tracking to propagate. Mirrors the auto-promotion that [ELet]'s
+     `auto_lin` and [bind_lam_param]'s `effective_lin` already perform for
+     plain lets and function params — without it, `sock` is bound as an
+     ordinary variable and its uses are never checked for double-consumption. *)
+  let always_linear_of t =
+    match repr t with
+    | TCon (name, _) when List.mem name env.always_linear_types -> Some Ast.Linear
+    | _ -> None
+  in
   List.fold_left (fun acc_env (name, sch) ->
       match sch with
       | Mono t ->
@@ -3222,13 +3236,19 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
               bind_linear name lin t' acc_env
             | None ->
-              let env1 = bind_var name (Mono t') acc_env in
-              bind_linear_field_sentinels name t' env1))
+              (match always_linear_of t' with
+               | Some lin -> bind_linear name lin t' acc_env
+               | None ->
+                 let env1 = bind_var name (Mono t') acc_env in
+                 bind_linear_field_sentinels name t' env1)))
       | Poly (_, _, t) ->
-        (* Generalised binding: bind normally but also add field sentinels for
-           any linear fields in the underlying type. *)
-        let env1 = bind_var name sch acc_env in
-        bind_linear_field_sentinels name (repr t) env1
+        (match always_linear_of t with
+         | Some lin -> bind_linear name lin t acc_env
+         | None ->
+           (* Generalised binding: bind normally but also add field sentinels for
+              any linear fields in the underlying type. *)
+           let env1 = bind_var name sch acc_env in
+           bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
 (** After a scope closes, check that every in-scope linear var was used. *)

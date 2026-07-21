@@ -20,6 +20,14 @@ git log is authoritative for exact commits.
   named function or a lambda wrapped in `do...end`. Symptom: `I got stuck here`
   at the following token. Inline lambda call arguments now accept bare
   statements before the final expression, matching `do...end` block bodies.
+- A linear or `always_linear`-typed value *acquired* through `let? p = e` or
+  `with Ok(p) <- e do ... end` — rather than bound by a plain `let` or a
+  function parameter — was never tracked as linear at all, so consuming it
+  twice (e.g. passing the same handle to two separate calls, each behind its
+  own `let?`) went completely undetected. The identical double-use was
+  already correctly rejected when the value came from an ordinary `let` or a
+  function parameter. Affects any code acquiring a linear resource through a
+  Result-returning `let?`/`with` chain.
 - A self-tail-recursive function forwarding a freshly-built value as its own
   next argument (e.g. an accumulator built via `String.join`/`String.split`)
   could silently corrupt that value in compiled programs — freed one
@@ -94,6 +102,17 @@ git log is authoritative for exact commits.
   (silent wrong answers and crashes, mostly compiled-only) that are outside a
   docs fix's scope and were filed separately rather than papered over in the
   docs.
+- `docs/cookbook/linear-types.md`'s Typestate section and its "safe socket
+  lifecycle" example — left unfixed by the docs audit above pending a design
+  decision — didn't compile as written and were internally inconsistent
+  (`via` transition functions shown returning `Result`/tuples, an acquisition
+  function listed as a transition despite not taking a handle, a socket type
+  missing its state parameter). Rewritten so each resource's lifecycle splits
+  into an ordinary Result-returning acquisition function outside
+  `transitions` plus pure `Handle -> Handle` transitions declared inside it,
+  matching the working pattern in `specs/lang/capabilities.md`. Every code
+  block was verified against the compiler, including that a wrong-order
+  transition call is correctly rejected.
 
 ## [0.1.1] - 2026-07-21
 
