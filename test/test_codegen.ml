@@ -4483,13 +4483,12 @@ let test_repr_noncolliding_niche_shaped_type_unaffected () =
     implementing the same GENERAL user interface, must lower to TWO DISTINCT
     mangled fn_defs — not collapse onto one via [collect_iface_impls]'s
     first-wins `already` guard (pre-fix: only "Speak$Thing.speak" survived,
-    silently dropping NB's "from-B" impl body entirely — the miscompile
-    reject/t82 exists to prevent reaching codegen with, until Stage 3 lands
-    runtime ctor-tag dispatch). This fixture is Stage-1-rejected by the
-    typechecker's coherence gate, so MARCH_DEV_RELAX_COHERENCE bypasses that
-    gate to exercise lower.ml directly. Task 3 only proves both impl BODIES
-    survive lowering as independently-addressable symbols — correct dispatch
-    at call sites is a later task (mono/codegen, not covered here). *)
+    silently dropping NB's "from-B" impl body entirely). Since FQN dispatch
+    Stage 3 landed, the typechecker ACCEPTS this shape (accept/t89) — no gate
+    bypass needed. This test only proves both impl BODIES survive lowering as
+    independently-addressable symbols; correct dispatch at call sites is covered
+    by [test_colliding_general_iface_runtime_dispatch] below and the
+    cross-backend runtime witness test/imports/speak_collision_native. *)
 let test_colliding_impls_get_distinct_symbols () =
   let src = {|
 mod Top do
@@ -4511,14 +4510,9 @@ mod Top do
   fn main() do 0 end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
-  let tir_module =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         March_tir.Lower.lower_module ~type_map m)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
   let fn_names = List.map (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name)
       tir_module.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "two distinct Speak impl symbols" true
@@ -4558,9 +4552,10 @@ end
     switches [i32] on the tag and tail-calls BOTH module-qualified impls
     (Task 3's symbols), and BOTH impl bodies must survive DCE (they are
     referenced only from the LLVM-level dispatch fn). Compiled through the full
-    native pipeline (Lower→Mono→Defun→Perceus→Dce→Llvm_emit); the fixture is
-    Stage-1-rejected by the coherence gate, so MARCH_DEV_RELAX_COHERENCE
-    bypasses it. This is the correctness proof reject/t82 stands in for. *)
+    native pipeline (Lower→Mono→Defun→Perceus→Dce→Llvm_emit). Since FQN dispatch
+    Stage 3 landed, the typechecker ACCEPTS this shape (accept/t89) — no gate
+    bypass needed. End-to-end runtime proof (compiled + interpreted):
+    test/imports/speak_collision_native. *)
 let test_colliding_general_iface_runtime_dispatch () =
   let src = {|
 mod Top do
@@ -4585,20 +4580,15 @@ mod Top do
   end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
-  let ir =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         let tir = March_tir.Lower.lower_module ~type_map m in
-         let iface_methods = March_tir.Lower.get_iface_methods () in
-         let tir = March_tir.Mono.monomorphize ~iface_methods tir in
-         let tir = March_tir.Defun.defunctionalize tir in
-         let tir = March_tir.Perceus.perceus tir in
-         let tir = March_tir.Dce.prune_unreachable tir in
-         March_tir.Llvm_emit.emit_module tir)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
   Alcotest.(check bool) "dispatch fn generated" true
     (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
   Alcotest.(check bool) "switches on runtime tag" true
@@ -4727,20 +4717,15 @@ mod Top do
   end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
-  let ir =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         let tir = March_tir.Lower.lower_module ~type_map m in
-         let iface_methods = March_tir.Lower.get_iface_methods () in
-         let tir = March_tir.Mono.monomorphize ~iface_methods tir in
-         let tir = March_tir.Defun.defunctionalize tir in
-         let tir = March_tir.Perceus.perceus tir in
-         let tir = March_tir.Dce.prune_unreachable tir in
-         March_tir.Llvm_emit.emit_module tir)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Dce.prune_unreachable tir in
+  let ir = March_tir.Llvm_emit.emit_module tir in
   Alcotest.(check bool) "dispatch fn generated" true
     (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
   let arms = dispatch_switch_arms ir in

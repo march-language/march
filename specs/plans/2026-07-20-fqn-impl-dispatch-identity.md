@@ -1,6 +1,18 @@
 # FQN impl-coherence & dispatch identity — design + staged plan (A-full)
 
-**Status:** design / approved-for-implementation. Implementation companion to
+**Status:** implemented (2026-07-21). Tasks 0-6 landed on branch
+`claude/fqn-dispatch-identity-stages`: collision-set + dev harness (a77f1142),
+globally-unique runtime tags + forced Boxed repr for colliding types, lowering
+module-qualified impl symbols (bd… Task 3), runtime tag-switch dispatch
+(97f1c275), interpreter `iface_method_tbl` qualification (8d858b01), and the
+flag-day that drops the builtin-only coherence gate so ALL interfaces get the
+declaring-module relaxation (this commit). Witnesses: `accept/t89`
+(typecheck) and `test/imports/speak_collision_native` (cross-backend runtime,
+interpreted + compiled). **Known residual gap (deferred, tracked separately):**
+when two colliding same-short-name types ALSO share a CONSTRUCTOR name, dispatch
+misroutes in BOTH backends (the shared ctor collapses to one dispatch identity) —
+this needs the `ci_module.Type.Ctor` extra qualification layer described below,
+which was NOT built in this slice. Implementation companion to
 `specs/plans/2026-07-17-fqn-type-ctor-identity.md` (the umbrella FQN overhaul)
 and `specs/plans/2026-07-17-interface-impl-coherence.md` (the coherence check
 itself). This doc resolves the specific slice the umbrella doc names as

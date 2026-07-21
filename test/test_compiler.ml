@@ -593,12 +593,16 @@ let test_impl_coherence_distinct_modules_ok () =
   Alcotest.(check bool) "distinct-module same-name builtin impls: no error"
     false (has_errors ctx)
 
-let test_impl_coherence_distinct_modules_general_iface_err () =
-  (* A GENERAL user interface still overlap-rejects two distinct same-short-name
-     types: both backends dispatch it on the bare type name and mangle both
-     impls to one symbol (silent wrong body compiled), so the declaring-module
-     relaxation is scoped to the builtins. Deferred to Stage 3 (runtime
-     ctor-tag dispatch). *)
+let test_impl_coherence_distinct_modules_general_iface_ok () =
+  (* Two DISTINCT same-short-name types in sibling nested modules may each
+     implement a GENERAL user interface — coherence keys on the declaring
+     module, so the distinct types do NOT overlap. Since FQN dispatch Stage 3
+     landed (globally-unique runtime tags + forced Boxed repr + module-qualified
+     impl symbols + a generated runtime tag-switch dispatch fn; interp qualifies
+     iface_method_tbl), each type's value dispatches to its own body in BOTH
+     backends. Previously rejected (a general interface then mangled both impls
+     to ONE symbol — silent wrong body compiled). Runtime witnesses:
+     specs/lang/types/accept/t89, test/imports/speak_collision_native. *)
   let ctx = typecheck {|mod Top do
     interface Speak(a) do
       fn speak : a -> String
@@ -612,8 +616,8 @@ let test_impl_coherence_distinct_modules_general_iface_err () =
       impl Speak(Thing) do fn speak(_x) do "b" end end
     end
   end|} in
-  Alcotest.(check bool) "distinct-module general-iface impls: error"
-    true (has_errors ctx)
+  Alcotest.(check bool) "distinct-module general-iface impls: no error"
+    false (has_errors ctx)
 
 let test_impl_coherence_same_module_duplicate_err () =
   (* Two impls of the SAME interface for the SAME type in one module still
@@ -7906,7 +7910,7 @@ let compiler_suites =
           Alcotest.test_case "iface constraint satisfied"   `Quick test_interface_constraint_satisfied;
           Alcotest.test_case "iface constraint missing impl" `Quick test_interface_constraint_missing_impl;
           Alcotest.test_case "impl coherence: distinct modules ok (builtin)" `Quick test_impl_coherence_distinct_modules_ok;
-          Alcotest.test_case "impl coherence: distinct modules general-iface err" `Quick test_impl_coherence_distinct_modules_general_iface_err;
+          Alcotest.test_case "impl coherence: distinct modules general-iface ok" `Quick test_impl_coherence_distinct_modules_general_iface_ok;
           Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;

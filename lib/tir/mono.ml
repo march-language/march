@@ -392,7 +392,8 @@ let rec rewrite_calls
      registers >=2 DISTINCT impl symbols under the same bare static type name
      [tname], that short name is declared by >=2 modules (Collision_set) and
      [resolve_impl_by_type]'s first-match would silently run the WRONG body
-     (reject/t82's from-A/from-A hazard).  Instead, route the call through a
+     (the from-A/from-A hazard accept/t89 documents).  Instead, route the call
+     through a
      generated runtime tag-switch dispatch function ([Llvm_dispatch], emitted
      lazily at LLVM time): enqueue EVERY colliding impl (specialized under
      this call's arg types, so we capture the exact emitted symbol including

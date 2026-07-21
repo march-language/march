@@ -1108,7 +1108,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              qualified by THIS impl's declaring module (mod_prefix, already
              threaded for rename_tir_vars) so two same-short-name impls of a
              GENERAL interface no longer mangle onto one symbol (last-write-wins
-             miscompile — see reject/t82's doc comment). Single-declaration
+             miscompile — see accept/t89's doc comment). Single-declaration
              types are untouched: mangled/qualified_key/dispatch-table entries
              stay byte-identical. Not gated on interface name: Eq/Ord/Show/Hash
              impls for colliding types (accept/t88) are unaffected either way

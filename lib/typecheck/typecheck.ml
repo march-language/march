@@ -5989,31 +5989,18 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   in
   let modules_distinct m1 m2 =
     match m1, m2 with Some a, Some b -> a <> b | _ -> false in
-  (* The declaring-module relaxation below (allow two same-short-name types from
-     DIFFERENT modules to each implement the interface) is SOUND only for
-     interfaces whose native dispatch keys on CONSTRUCTOR identity — the
-     type-dispatched built-ins Eq/Ord/Show/Hash, which the backend routes through
-     generated structural functions (ensure_adt_eq_fn &c.), ctor-qualified and
-     correct. A GENERAL user interface dispatches on the BARE type name in BOTH
-     backends (interp impl_tbl, mono resolve_impl_by_type) and mangles two
-     same-short-name impls to ONE symbol, so allowing them would SILENTLY run the
-     wrong method body compiled (verified: `from-A`/`from-A`). Those stay rejected
-     here until Stage 3 adds runtime ctor-tag dispatch. See
+  (* Declaring-module coherence relaxation (FQN dispatch, all stages landed):
+     two same-short-name types declared in DIFFERENT modules are genuinely
+     distinct, so each may implement the SAME interface without overlapping.
+     This is sound for EVERY interface — not just the type-dispatched built-ins
+     Eq/Ord/Show/Hash — because Stage 3 taught the native backend to give each
+     colliding type a globally-unique runtime tag, force uniform Boxed repr,
+     mangle each impl to a module-qualified symbol, and route ambiguous call
+     sites through a generated runtime tag-switch dispatch fn; the interpreter
+     qualifies iface_method_tbl the same way. A general interface therefore
+     dispatches on the value's real type in BOTH backends (verified
+     `from-A`/`from-B` — accept/t89, test/imports/speak_collision_native). See
      specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
-  let iface_native_type_dispatched name =
-    match name with "Eq" | "Ord" | "Show" | "Hash" -> true | _ -> false in
-  (* TEMPORARY dev-harness escape hatch (removed in Task 7 of
-     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md): with
-     MARCH_DEV_RELAX_COHERENCE=1/true set, skip the overlap-relaxation gate
-     entirely so Tasks 1-6 can compile and iterate on `reject/t82`-shaped
-     same-short-name-collision fixtures before Stage 3's real runtime
-     ctor-tag dispatch lands. Does NOT make dispatch correct — only unblocks
-     compiling for iteration. *)
-  let dev_relax_all_coherence =
-    match Sys.getenv_opt "MARCH_DEV_RELAX_COHERENCE" with
-    | Some ("1" | "true") -> true
-    | _ -> false
-  in
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
      already-registered one is a compile error — this is what makes the two
@@ -6034,9 +6021,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (dev_relax_all_coherence
-                     || (iface_native_type_dispatched key
-                         && modules_distinct m_old head_type_module)))
+             && not (modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp
