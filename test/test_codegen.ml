@@ -4548,7 +4548,7 @@ end
     (List.mem "Speak$Thing.speak" fn_names)
 
 (* ── lower.ml: collision-conditional module-qualified ctor CONSTRUCTION
-   (Task 3, specs/plans/2026-07-21-fqn-dispatch-identity-stages.md — the
+   (Task 3, docs/superpowers/plans/2026-07-21-ctor-module-identity.md — the
    "native construction" task) ───────────────────────────────────────────
 
    Two DISTINCT same-short-name types (declared in different modules) that
@@ -4645,6 +4645,84 @@ end
    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) ->
      Alcotest.(check string) "bare (unqualified) ctor key" "Thing.Shared" k
    | _ -> Alcotest.fail "expected EAlloc body in DcA.mk")
+
+(* ── Final-review finding: ctor construction INSIDE an impl method body
+   (not just a module-level `fn mk()`) must ALSO get the qualified key.
+   [collect_iface_impls] (Pass 1) lowers impl method bodies via
+   [Lower_decls.lower_fn_def env mdef] — closing over the TOP-LEVEL [env]
+   (whose [mod_prefix] is always "") rather than a module-scoped [mod_env]
+   like Pass 2's [lower_mod_decls] builds. Its own [mod_prefix] recursion
+   parameter was only used for the impl SYMBOL name and [rename_tir_vars],
+   never folded into the [env] that actually reaches the [ECon] gate — so a
+   bare `Shared` constructed directly inside an impl method's OWN body
+   stayed unqualified even after this task's first fix, silently
+   reproducing the exact double-collision bug for this one construction
+   site. *)
+let test_colliding_ctor_construction_inside_impl_method_gets_qualified_key () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+    fn again : a -> a
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+      fn again(_self) do Shared end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+      fn again(_self) do Shared end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
+  let tir =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         March_tir.Lower.lower_module ~type_map m)
+  in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) -> k
+    | _ -> Alcotest.fail (Printf.sprintf "expected EAlloc body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_key = ctor_key_of_alloc (find_fn "Speak$DcA.Thing.again") in
+  let b_key = ctor_key_of_alloc (find_fn "Speak$DcB.Thing.again") in
+  Alcotest.(check bool)
+    "DcA's and DcB's impl-method-body Shared construction get distinct qualified keys"
+    true (a_key <> b_key);
+  Alcotest.(check bool) "DcA's impl-method key mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_key 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's impl-method key mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
 
 (** Task 4: two same-short-name colliding types implementing one GENERAL
     interface must, at a call site whose static (bare) argument type is
@@ -9445,6 +9523,8 @@ let codegen_suites =
           test_colliding_ctor_construction_gets_qualified_key;
         Alcotest.test_case "non-colliding ctor construction stays bare" `Quick
           test_noncolliding_ctor_construction_stays_bare;
+        Alcotest.test_case "colliding ctor construction inside impl method body gets qualified key" `Quick
+          test_colliding_ctor_construction_inside_impl_method_gets_qualified_key;
       ]);
       ("dispatch: colliding general-iface runtime tag switch", [
         Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick

@@ -1216,7 +1216,26 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the dispatch entry — the function is already precompiled. *)
                 ignore mdef;
                 if lower_bodies then begin
-                  let fn = Lower_decls.lower_fn_def env mdef in
+                  (* [env] is closed over from [lower_module]'s top level and
+                     never carries THIS impl's declaring-module prefix on its
+                     own — [mod_prefix] above (the recursion parameter) was,
+                     pre-fix, only used for the mangled SYMBOL name and
+                     [rename_tir_vars] a few lines below, never folded into
+                     the [env] that [lower_fn_def] threads down into
+                     [lower_expr]'s [ECon] gate. Without [mod_env], a bare
+                     colliding-type constructor written directly inside an
+                     impl method's OWN body (e.g. `fn again(_self) do Shared
+                     end`) would lower with [env.mod_prefix = ""], so the
+                     collision-conditional qualification in [lower_expr]
+                     never fires and the ctor key stays bare — reproducing
+                     the same double-collision bug this task exists to fix,
+                     just for THIS construction site instead of a
+                     module-level `fn mk()`. [mod_env] mirrors
+                     [lower_mod_decls]'s own [mod_env] (Pass 2, below) using
+                     the SAME [mod_prefix] value already used for [mangled]
+                     a few lines above — no new prefix computation. *)
+                  let mod_env = { env with mod_prefix } in
+                  let fn = Lower_decls.lower_fn_def mod_env mdef in
                   (* If this impl is inside a module, qualify any references to
                      module-local functions (e.g. bigint_eq_impl → BigInt.bigint_eq_impl)
                      so that mono can find them in fn_table (which uses the
