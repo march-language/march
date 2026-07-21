@@ -69,7 +69,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
          Boxed (float bits can't be tagged), so those still take the Boxed arm,
          which is correct for them (they DO carry a real heap header). *)
       let newtype_payload_opt =
-        match Repr.repr_of_ty ctx.Llvm_ctx.type_defs ty with
+        match Repr.repr_of_ty ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs ty with
         | Repr.Newtype raw_payload ->
           (* [raw_payload] is the field type as written in the typedef — a
              [TVar] for a generic newtype (e.g. [Wrap(a)] applied to [Int]).
@@ -87,9 +87,9 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
          use the normal tag-at-offset-8 strategy — there is no heap header.
          Detect niche shape early and emit a null-check equality instead. *)
       let niche_payload_opt =
-        if Repr.is_niche_shaped ctx.Llvm_ctx.type_defs type_name then
+        if Repr.is_niche_shaped ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs type_name then
           match ty_args with
-          | [p] when Repr.niche_payload_ok ctx.Llvm_ctx.type_defs p -> Some p
+          | [p] when Repr.niche_payload_ok ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs p -> Some p
           | [p] when (match p with Tir.TVar _ -> true | _ -> false) ->
             (* Abstract (erased) payload — e.g. Option(Any) from record_get.
                EAlloc and emit_case both niche-encode a niche-shaped type applied
@@ -142,7 +142,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
            let c = frsh "c" in
            e (Printf.sprintf "%s = fcmp oeq double %s, %s" c da db);
            e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
-         | _ when Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload_ty ->
+         | _ when Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload_ty ->
            (* Tagged scalar (Int/Bool, or a newtype over one) in a ptr slot:
               compare the raw tagged bits. *)
            let pa = frsh "pa" in let pb = frsh "pb" in
@@ -204,7 +204,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         (match payload_ty with
          | Tir.TString ->
            e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %%a, ptr %%b)" ok)
-         | _ when Repr.payload_needs_tag ctx.Llvm_ctx.type_defs payload_ty ->
+         | _ when Repr.payload_needs_tag ~collision_set:ctx.Llvm_ctx.collision_set ctx.Llvm_ctx.type_defs payload_ty ->
            (* Tagged scalar (Int/Bool) in ptr slot: compare raw tagged bits *)
            let pa = frsh "pa" in let pb = frsh "pb" in
            e (Printf.sprintf "%s = ptrtoint ptr %%a to i64" pa);

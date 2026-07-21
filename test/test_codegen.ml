@@ -4447,6 +4447,35 @@ let test_repr_scalar_is_boxed () =
   | March_tir.Repr.Boxed -> ()
   | _ -> Alcotest.fail "expected Boxed for TInt"
 
+(** Same-short-name colliding types must never classify Niche even when they
+    are structurally Option-shaped: a niche repr has no runtime tag slot, so
+    a colliding type's value would be indistinguishable at runtime even with
+    Task 1's globally-unique ctor tags (those tags live in the heap-cell
+    header, which niche values don't have). *)
+let test_repr_colliding_niche_shaped_type_forced_boxed () =
+  let defs = March_tir.Tir.[
+    TDVariant ("NA.Option2", [("TA", []); ("TWithPayload", [TInt])]);
+    TDVariant ("NB.Option2", [("TB", []); ("TWithPayload2", [TInt])]);
+  ] in
+  let cs = March_tir.Collision_set.compute defs in
+  Alcotest.(check bool) "colliding niche-shaped type is NOT niche"
+    false (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "NA.Option2");
+  (match March_tir.Repr.repr_of_ty ~collision_set:cs defs
+           (March_tir.Tir.TCon ("NA.Option2", [March_tir.Tir.TInt])) with
+   | March_tir.Repr.Boxed -> ()
+   | _ -> Alcotest.fail "expected forced Boxed repr for colliding niche-shaped type")
+
+(** Non-colliding types (the common case: a single declaring module) must be
+    completely unaffected by the collision_set threading — this is the
+    byte-identity guarantee the plan calls out as highest-risk. *)
+let test_repr_noncolliding_niche_shaped_type_unaffected () =
+  let defs = March_tir.Tir.[
+    TDVariant ("Option", [("None", []); ("Some", [TVar "a"])])
+  ] in
+  let cs = March_tir.Collision_set.compute defs in  (* empty — single declaration *)
+  Alcotest.(check bool) "Option stays niche"
+    true (March_tir.Repr.is_niche_shaped ~collision_set:cs defs "Option")
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -8845,6 +8874,10 @@ let codegen_suites =
         Alcotest.test_case "niche_float_boxed"    `Quick test_repr_niche_float_is_boxed;
         Alcotest.test_case "niche_unit_boxed"     `Quick test_repr_niche_unit_is_boxed;
         Alcotest.test_case "nested_niche_boxed"   `Quick test_repr_nested_niche_is_boxed;
+        Alcotest.test_case "colliding_niche_shaped_forced_boxed" `Quick
+          test_repr_colliding_niche_shaped_type_forced_boxed;
+        Alcotest.test_case "noncolliding_niche_shaped_unaffected" `Quick
+          test_repr_noncolliding_niche_shaped_type_unaffected;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

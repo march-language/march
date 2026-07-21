@@ -181,7 +181,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let is_apply_wrapper = Tir_names.is_apply_fn fn.Tir.fn_name in
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty in
+      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty in
       let pty = if is_apply_wrapper && (base = "double" || base = "i64") then "ptr" else base in
       pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in

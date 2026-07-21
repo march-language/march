@@ -372,10 +372,12 @@ let llvm_ret_ty : Tir.ty -> string = function
       safely dereferenced for 16 bytes.
     EXCEPTION: niche-encoded Option-shaped types can carry None=0 (null), so
     [nonnull] and [dereferenceable] must be suppressed for them. *)
-let llvm_param_ty ?(type_defs : Tir.type_def list = []) (ty : Tir.ty) : string =
+let llvm_param_ty ?(type_defs : Tir.type_def list = [])
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (ty : Tir.ty) : string =
   match ty with
   | Tir.TCon ("Atom", []) -> "i64"
-  | Tir.TCon (name, _) when Repr.is_niche_shaped type_defs name -> "ptr"
+  | Tir.TCon (name, _) when Repr.is_niche_shaped ~collision_set type_defs name -> "ptr"
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
