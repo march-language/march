@@ -1755,6 +1755,44 @@ let check_app_main_exclusivity (errors : Err.ctx) (decls : decl list) : unit =
          ms.file ms.start_line as_.file as_.start_line)
   | _ -> ()
 
+(** Check that [main], if present, has a valid entry-point signature: zero
+    parameters, or exactly one parameter of declared type [Cap(IO)] — the
+    initial IO capability the runtime grants at startup (see
+    specs/lang/capabilities.md, "Putting it together"). Any other arity or
+    parameter type is rejected here with a clear diagnostic rather than left
+    to silently misbehave downstream: the interpreter calls every [main] with
+    zero arguments regardless of its declared arity, so a 1-parameter [main]
+    that slips past this check becomes a partial application that is
+    evaluated but never invoked (silent no-op, no error, no output); the
+    native/WASI backend's runtime trampoline ([march_spawn_main]) invokes the
+    compiled entry point through a bare 0-argument function pointer, so a
+    mismatched-arity [main] there is an ABI-level miscompile (observed as a
+    SIGBUS). *)
+let check_main_signature (errors : Err.ctx) (decls : decl list) : unit =
+  let is_cap_io_ty = function
+    | Some (TyCon (n, [ TyCon (inner, []) ])) -> n.txt = "Cap" && inner.txt = "IO"
+    | _ -> false
+  in
+  List.iter (function
+      | DFn (def, _) when def.fn_name.txt = "main" ->
+        (match def.fn_clauses with
+         | [] -> ()
+         | clause :: _ ->
+           match clause.fc_params with
+           | [] -> ()
+           | [ FPNamed p ] when is_cap_io_ty p.param_ty -> ()
+           | [ FPDefault (p, _) ] when is_cap_io_ty p.param_ty -> ()
+           | params ->
+             let n = List.length params in
+             Err.error errors ~span:clause.fc_span
+               (Printf.sprintf
+                  "`main` must take zero arguments, or exactly one argument of type `Cap(IO)` — the initial IO capability the runtime grants at startup.\n\
+                   Found %d parameter%s instead.\n\
+                   help: use `fn main() : () do ... end`, or `fn main(cap : Cap(IO)) : () do ... end` to receive the IO capability."
+                  n (if n = 1 then "" else "s")))
+      | _ -> ()
+    ) decls
+
 (* ── Island bridge auto-generation ─────────────────────────────────────── *)
 
 (** Check if the original declarations include [DDeriving(type_name, ...Json...)]
@@ -2241,6 +2279,7 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   expr_err_ctx := caller_ctx;
   Fun.protect ~finally:(fun () -> expr_err_ctx := saved_ctx) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
+  check_main_signature errors m.mod_decls;
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in
   (* Collect interfaces and fns for satisfy expansion. *)

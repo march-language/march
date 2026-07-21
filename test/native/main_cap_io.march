@@ -1,0 +1,17 @@
+-- Regression: `fn main(cap : Cap(IO)) : ()` — the documented entry-point
+-- pattern for receiving the initial IO capability (specs/lang/capabilities.md,
+-- "Putting it together") — used to SIGBUS when compiled: march_spawn_main's
+-- runtime trampoline invokes the compiled entry point through a bare
+-- 0-argument function pointer, but a 1-parameter `main` was emitted with a
+-- real (unused) parameter in its LLVM signature, an ABI mismatch. The fix
+-- emits a thin 0-arg adapter that supplies the erased Cap(IO) (a null
+-- pointer) and forwards into the real, 1-arg mangled main. Compile, run, diff
+-- stdout.
+mod MainCapIo do
+  needs IO
+
+  fn main(cap : Cap(IO)) : () do
+    let _console : Cap(IO.Console) = cap_narrow(cap)
+    println("main ran with cap")
+  end
+end

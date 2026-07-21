@@ -1390,6 +1390,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/toml_get_int.expected native_toml_get_int.out)))
 
+; ── Regression: `fn main(cap : Cap(IO)) : ()` compiles and runs (SIGBUS fix) ──
+(rule
+ (targets native_main_cap_io native_main_cap_io.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/main_cap_io.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_main_cap_io
+        native/main_cap_io.march)
+   (with-stdout-to native_main_cap_io.out
+        (system "./native_main_cap_io")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/main_cap_io.expected native_main_cap_io.out)))
+
 ; ── P6 regression: unboxed newtype (Counter(Int)) — construct + match across ──
 ; ── function boundaries with tagged scalar payload.  No heap allocation.     ──
 (rule

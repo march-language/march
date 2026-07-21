@@ -9598,7 +9598,27 @@ let run_module (m : module_) : unit =
     match List.assoc_opt "main" env with
     | None   -> ()
     | Some v ->
-      let _ = apply v [] in
+      (* [main] may be declared 0-arity or take a single [Cap(IO)] parameter
+         (checked at desugar time by [Desugar.check_main_signature]); the
+         latter receives the erased root capability, matching [root_cap]'s
+         own runtime representation ([VUnit], see the initial env binding
+         above). Top-level functions are bound to a [VBuiltin] recursion
+         wrapper (see the [DFn] case of [eval_decl], the "<rec:name/arity>"
+         closure), not directly to a [VClosure], so arity can't be read off
+         [v] itself — read it from the entry module's own AST instead. *)
+      let main_arity = List.find_map (function
+          | DFn (def, _) when def.fn_name.txt = "main" ->
+            (match def.fn_clauses with
+             | [clause] -> Some (List.length (clause_params clause))
+             | _ -> None)
+          | _ -> None
+        ) m.mod_decls
+      in
+      let args = match main_arity with
+        | Some 1 -> [VUnit]
+        | _ -> []
+      in
+      let _ = apply v args in
       run_scheduler ()
 
 (* ------------------------------------------------------------------ *)
