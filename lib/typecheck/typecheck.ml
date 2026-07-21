@@ -3268,8 +3268,18 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   match pat with
-  | Ast.PatWild _ ->
-    [], fresh_var env.level
+  | Ast.PatWild sp ->
+    let t = fresh_var env.level in
+    (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
+       up the resolved (possibly-still-polymorphic) type via ty_of_span for
+       constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
+       Without this, a discarded field's synthetic TIR var never resolves to
+       a concrete type through monomorphization (unlike a NAMED field, which
+       gets fixed up the same way) and Perceus conservatively treats it as
+       RC-managed, corrupting compiled programs when the concrete type is
+       actually an unboxed scalar (e.g. Float) — see lower_match.ml. *)
+    Hashtbl.replace env.type_map sp t;
+    [], t
 
   | Ast.PatVar name ->
     let t = fresh_var env.level in
