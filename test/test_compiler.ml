@@ -796,6 +796,40 @@ end
   Alcotest.(check bool) "explicitly-qualified third-module reference typechecks cleanly"
     false (has_errors ctx)
 
+(* Review follow-up (Minor finding): test_ctor_lexical_preference_both_modules
+   above only asserts `has_errors = false`, which cannot distinguish "lexical
+   preference picked the CORRECT candidate" from "it picked either candidate,
+   no type error either way" — both DcA's and DcB's `Thing` share the same
+   bare surface type `TCon("Thing", [])` (ci_type is bare pre-Stage-3), so a
+   wrong pick still type-checks cleanly. This test locks in the actual
+   property directly by calling `lookup_ctor` itself with `current_module`
+   set to each module in turn and inspecting which candidate's `ci_module`
+   comes back — mirroring Task 1's own env-inspection technique
+   (test_add_ctor_keeps_distinct_module_identical_shape_ctors above). A
+   regression that reverted `lookup_ctor` back to "first in the list" would
+   fail this test even though it would NOT fail
+   test_ctor_lexical_preference_both_modules. *)
+let test_ctor_lexical_preference_directly_inspects_lookup_ctor () =
+  let (_errors, env) = typecheck_full {|mod Top do
+    mod DcA do
+      type Thing = Shared | OnlyA
+    end
+    mod DcB do
+      type Thing = Shared | OnlyB
+    end
+    fn main() do () end
+  end|} in
+  let module_of_lookup current_module =
+    let env' = { env with March_typecheck.Typecheck.current_module } in
+    match March_typecheck.Typecheck.lookup_ctor "Shared" env' with
+    | Some ci -> ci.March_typecheck.Typecheck.ci_module
+    | None -> "<none>"
+  in
+  Alcotest.(check string) "lookup_ctor with current_module=DcA returns DcA's own Shared"
+    "DcA" (module_of_lookup "DcA");
+  Alcotest.(check string) "lookup_ctor with current_module=DcB returns DcB's own Shared"
+    "DcB" (module_of_lookup "DcB")
+
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
   let ctx = typecheck {|mod Test do
@@ -8081,6 +8115,7 @@ let compiler_suites =
           Alcotest.test_case "ctor lexical preference: both modules resolve own bare ref" `Quick test_ctor_lexical_preference_both_modules;
           Alcotest.test_case "ctor truly cross-module ambiguous: hard error" `Quick test_ctor_truly_ambiguous_is_error;
           Alcotest.test_case "ctor qualified reference from third module: ok" `Quick test_ctor_qualified_reference_from_third_module_ok;
+          Alcotest.test_case "ctor lexical preference: lookup_ctor returns own-module candidate directly" `Quick test_ctor_lexical_preference_directly_inspects_lookup_ctor;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;
