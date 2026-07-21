@@ -1048,6 +1048,61 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/atom_ctor_field.expected native_atom_ctor_field.out)))
 
+; ── Regression: TCO self-call must not free a freshly-allocated argument it ──
+; is itself forwarding into the next iteration (stdlib/toml.march
+; string_to_int_digits: String.split/String.join accumulator recursion
+; compiled 9000 -> 9). See test/native/tco_fresh_arg_decrc.march for the
+; full analysis. Compile natively, run, diff stdout.
+(rule
+ (targets native_tco_fresh_arg_decrc native_tco_fresh_arg_decrc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/tco_fresh_arg_decrc.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tco_fresh_arg_decrc
+        native/tco_fresh_arg_decrc.march)
+   (with-stdout-to native_tco_fresh_arg_decrc.out
+        (system "./native_tco_fresh_arg_decrc")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tco_fresh_arg_decrc.expected native_tco_fresh_arg_decrc.out)))
+
+; ── Regression: stdlib/toml.march integer parsing compiled natively. No ──
+; compiled/native Toml coverage existed before this (test_toml.march via
+; test_stdlib_march.ml only runs interpreted). Compile natively, run, diff
+; stdout. See test/native/tco_fresh_arg_decrc.march for the underlying bug.
+(rule
+ (targets native_toml_get_int native_toml_get_int.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/toml_get_int.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_toml_get_int
+        native/toml_get_int.march)
+   (with-stdout-to native_toml_get_int.out
+        (system "./native_toml_get_int")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/toml_get_int.expected native_toml_get_int.out)))
+
 ; ── P6 regression: unboxed newtype (Counter(Int)) — construct + match across ──
 ; ── function boundaries with tagged scalar payload.  No heap allocation.     ──
 (rule

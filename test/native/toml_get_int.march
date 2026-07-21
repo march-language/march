@@ -1,0 +1,27 @@
+-- Regression: stdlib/toml.march's integer parsing (string_to_int_digits,
+-- a String.split/String.join accumulator recursion) compiled natively.
+-- No compiled/native coverage of Toml existed before this — test/stdlib/
+-- test_toml.march (test/test_stdlib_march.ml) only runs interpreted, which
+-- never exercises the Perceus/TCO TIR pipeline and so never caught
+-- Toml.get_int("port = 9000", "port") returning 9 instead of 9000 compiled.
+-- See test/native/tco_fresh_arg_decrc.march for the underlying TCO bug.
+-- Compile natively, run, diff stdout.
+mod TomlGetInt do
+  fn get_int_or(src : String, key : String) : String do
+    match Toml.parse(src) do
+    Err(_) -> "parse error"
+    Ok(t) ->
+      match Toml.get_int(t, key) do
+      Some(n) -> int_to_string(n)
+      None -> "none"
+      end
+    end
+  end
+
+  fn main() : Unit do
+    println(get_int_or("port = 9000", "port"))
+    println(get_int_or("port = 7", "port"))
+    println(get_int_or("count = 123456", "count"))
+    println(get_int_or("negative = -42", "negative"))
+  end
+end

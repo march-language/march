@@ -689,10 +689,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       ) ctx.tco_param_info args in
     (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
           old slot values (the consumed container wrappers) which are still valid.
-          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire. *)
+          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire.
+          EXCEPTION: a Dec/IncRC target that is itself one of [args] is not an
+          "old container being released" — it is the SAME value being forwarded
+          into the next iteration's parameter slot. Under real (non-TCO)
+          recursion this DecRC only fires once the whole nested call has fully
+          returned, by which point nothing below still needs that reference; in
+          the flattened loop there is no such delay, so executing it here would
+          drop a freshly-owned, uncompensated value (no matching prior IncRC) to
+          refcount 0 immediately before it is reused as the next iteration's
+          value — a use-after-free. Skip RC ops on these variables; ownership is
+          transferred into the new slot instead. *)
+    let arg_var_names =
+      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+    in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
+        when List.mem v.Tir.v_name arg_var_names ->
+        emit_dec_chain rest
       | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
@@ -738,14 +755,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same
-          ordering rationale as the ELet-wrapped case above. *)
+          ordering rationale as the ELet-wrapped case above.
+          EXCEPTION: a Dec/IncRC target that is itself one of [args] is the
+          SAME value being forwarded into the next iteration's parameter slot,
+          not an old container being released — see the matching guard and
+          explanation in the ELet-wrapped case above. Skip RC ops on these
+          variables so a freshly-owned, uncompensated argument (e.g. the
+          result of a fresh allocation with no prior IncRC, as opposed to a
+          borrowed field promoted via IncRC) isn't dropped to refcount 0 and
+          freed immediately before being reused as the next iteration's value. *)
+    let arg_var_names =
+      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+    in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
+        when List.mem v.Tir.v_name arg_var_names ->
+        emit_dec_chain rest
       | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
                   | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
+      | (Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+        | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v))
+        when List.mem v.Tir.v_name arg_var_names ->
+        ()
       | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
         | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
         ignore (emit_expr ctx op)

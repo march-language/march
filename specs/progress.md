@@ -283,6 +283,46 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, TCO self-call freed a freshly-allocated forwarded argument)
+
+Compiled-only miscompile: `stdlib/toml.march`'s `string_to_int_digits` (a
+`String.split`/`String.join` accumulator recursion, `str_to_int(String.join(rest,
+""), acc*10+digit_val(c))`) silently returned the wrong answer —
+`Toml.get_int(_, "port")` on `"port = 9000"` gave `9` (first digit only)
+compiled while the interpreter got `9000` right, no crash or error.
+
+- **Root cause:** Perceus classifies `str_to_int`'s parameter `s` as borrowed
+  (its only use, `string_split(s, "")`, is itself a borrowed-position call),
+  so a self-tail-call forwarding a dead-afterward borrowed arg gets a
+  caller-side post-call `EDecRC` — correct for real (non-TCO) recursion, where
+  that decrement only fires once the whole nested call has fully returned. The
+  TCO loop-rewrite (`lib/tir/llvm_emit.ml`'s two self-TCO interception cases)
+  ran that `EDecRC` eagerly, immediately before storing the same value into
+  the parameter slot for the next iteration — freeing a freshly-allocated,
+  uncompensated value (refcount 1, no prior `IncRC`) one instruction before it
+  was reused. A `Cons(_, t)`-style list-traversal self-call hits the identical
+  code path but survives by accident: extracting a field from a still-borrowed
+  container gets a compensating `IncRC` first, so the eager decrement only
+  cancels that back out instead of freeing anything.
+- **Fix:** both TCO dec-chain executors in `llvm_emit.ml` now skip any
+  `EDecRC`/`EAtomicDecRC`/`EIncRC`/`EAtomicIncRC` whose target variable is
+  itself one of the tail-call's forwarded arguments — that reference is being
+  handed off into the next iteration's slot, not released.
+- **Checked, not shared root cause:** two other compiled-only bugs found in
+  the same docs audit (`task_54ced6d5` string_to_float/Option(Float) segfault,
+  `task_eabe2334` `Csv.read_all`/`each_row_with_header` returns 0 rows) do
+  *not* share this cause — `Csv.collect_loop`'s accumulator is forwarded via a
+  constructor allocation (`Cons(fields, acc)`), which never reaches Perceus's
+  `EApp` borrowed-arg post-call-Dec logic at all. Confirmed with a targeted
+  repro (unaffected pre-fix) and confirmed `Csv.read_all` still returns 0 rows
+  post-fix. Left open for separate investigation.
+- **Tests:** `test/native/tco_fresh_arg_decrc.{march,expected}` (minimal,
+  stdlib-independent repro) and `test/native/toml_get_int.{march,expected}`
+  (the actual `Toml.get_int` case — no compiled/native Toml coverage existed
+  before this), both native-compile-and-run golden diffs in `test/dune`.
+  `scripts/run-tests.sh -q` (779 tests) and a full `dune build @runtest`
+  (native golden corpus, including the two new tests) both green.
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type
