@@ -537,6 +537,12 @@
  (modules test_search)
  (libraries march_search alcotest unix))
 
+; ── Core-AST -> JSON serializer smoke tests (emit-core-ast-a0 Task 1) ─────
+(test
+ (name test_ast_json)
+ (modules test_ast_json)
+ (libraries march_lexer march_parser march_ast march_desugar march_dump alcotest))
+
 (executable
  (name debug_fmt)
  (modules debug_fmt)
