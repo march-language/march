@@ -55,11 +55,18 @@ let test_constraint_cnum () =
     {|{"kind":"CNum","ty":{"kind":"TVar","id":3}}|}
     (J.constraint_to_json (T.CNum (T.TVar (ref (T.Unbound (3, 0))))))
 
-(* Module_to_json ~types: end-to-end smoke test that the real pipeline
+(* Module_to_json ~types: end-to-end test that the real pipeline
    (parse -> desugar -> check_module_full -> module_to_json on the SAME
    desugared tree, mirroring bin/main.ml's --emit-core-ast branch) produces
-   a "resolved_ty" key on emitted expr nodes. Not a golden byte-for-byte
-   check (that's Task 5) — just proves the plumbing is wired end to end. *)
+   a "resolved_ty" key on emitted expr nodes, populated with a REAL resolved
+   type from the span-keyed type_map lookup — not just present-but-null.
+   `let a = 1` types the literal `1` as `Int`, so the emitted JSON must
+   contain a concrete `{"kind":"TCon","name":"Int",...}` value under
+   "resolved_ty" somewhere. Asserting only key-presence would pass even if
+   span lookup were completely broken (every node stuck at the `None`
+   fallback, i.e. "resolved_ty":null everywhere) — this assertion is the one
+   that actually exercises the lookup and would catch that regression. Not
+   a golden byte-for-byte check (that's Task 5). *)
 let test_module_emits_resolved_ty () =
   let m = Test_helpers.parse_module "mod M do\nlet a = 1\nend\n" in
   let desugared = March_desugar.Desugar.desugar_module m in
@@ -68,7 +75,9 @@ let test_module_emits_resolved_ty () =
   in
   let json = J.module_to_json ~types:type_map desugared in
   Alcotest.(check bool) "module JSON mentions resolved_ty"
-    true (astring_contains json "resolved_ty")
+    true (astring_contains json "resolved_ty");
+  Alcotest.(check bool) "module JSON resolves the Int literal to a concrete TCon, not null"
+    true (astring_contains json {|"resolved_ty":{"kind":"TCon","name":"Int"|})
 
 let () =
   Alcotest.run "ty_json"
