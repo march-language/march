@@ -6002,6 +6002,18 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
      specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
   let iface_native_type_dispatched name =
     match name with "Eq" | "Ord" | "Show" | "Hash" -> true | _ -> false in
+  (* TEMPORARY dev-harness escape hatch (removed in Task 7 of
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md): with
+     MARCH_DEV_RELAX_COHERENCE=1/true set, skip the overlap-relaxation gate
+     entirely so Tasks 1-6 can compile and iterate on `reject/t82`-shaped
+     same-short-name-collision fixtures before Stage 3's real runtime
+     ctor-tag dispatch lands. Does NOT make dispatch correct — only unblocks
+     compiling for iteration. *)
+  let dev_relax_all_coherence =
+    match Sys.getenv_opt "MARCH_DEV_RELAX_COHERENCE" with
+    | Some ("1" | "true") -> true
+    | _ -> false
+  in
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
      already-registered one is a compile error — this is what makes the two
@@ -6022,8 +6034,9 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (iface_native_type_dispatched key
-                     && modules_distinct m_old head_type_module))
+             && not (dev_relax_all_coherence
+                     || (iface_native_type_dispatched key
+                         && modules_distinct m_old head_type_module)))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp

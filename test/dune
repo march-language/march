@@ -508,6 +508,11 @@
  (libraries march_tir march_ast alcotest))
 
 (test
+ (name test_collision_set)
+ (modules test_collision_set)
+ (libraries march_tir alcotest))
+
+(test
  (name test_refine)
  (modules test_refine)
  (libraries march_refine alcotest unix))
