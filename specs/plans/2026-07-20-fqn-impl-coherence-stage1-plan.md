@@ -420,7 +420,7 @@ git commit -m "docs(specs): record impl-coherence declaring-module identity (Sta
 - `adt_eq_native` drops blanket workaround → Task 2. ✓
 - Byte-identical goldens → Task 3 Step 2. ✓
 - Docs freshness → Task 3 Steps 4–5. ✓
-- Stages 2–3 (interp dispatch, native runtime ctor-tag dispatch) are explicitly OUT of this plan (see the design spec) — general-user-interface colliding dispatch still (correctly) rejects natively until Stage 3; that residual is expected here.
+- Stages 2–3 (interp dispatch, native runtime ctor-tag dispatch) are explicitly OUT of this plan (see the design spec). NOTE (post-implementation): the Stage-1 relaxation was SCOPED to the type-dispatched builtins (`Eq`/`Ord`/`Show`/`Hash`) after a final-review spike confirmed a general user-interface collision would silently miscompile natively (`from-A`/`from-A`) — so general-user-interface same-short-name collisions are REJECTED at declaration (`reject/t82`) until Stage 3 adds runtime ctor-tag dispatch. The builtin gate keys on the interface NAME (matching the interpreter's `is_type_dispatched_iface` convention); a user interface that shadows one of those four names with an extra non-structural method is a theoretical Stage-3 follow-up edge.
 
 **Placeholder scan:** No TBD/TODO; every code step shows exact code. The only "read the site first" is LSP Step 9 (the surrounding body is site-specific) — the pattern change is fully specified.
 

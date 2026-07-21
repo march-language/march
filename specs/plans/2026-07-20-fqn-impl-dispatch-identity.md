@@ -196,7 +196,15 @@ first** (release-relevant, byte-identical goldens); 2–3 complete A-full.
 - Emit **runtime ctor-tag → declaring-module → impl-symbol** selection at
   general-interface call sites whose static type is a colliding short name
   (vtable-style tag dispatch, following `ensure_adt_eq_fn`).
-- Effect: the spike case prints `from-A` / `from-B`.
+- Effect: the spike case prints `from-A` / `from-B`; flip `reject/t82` (general
+  same-short-name collision) to an accept + a compiled cross-backend witness.
+- Also retire the Stage-1 builtin-name gate: Stage 1 scopes the coherence
+  relaxation to `Eq`/`Ord`/`Show`/`Hash` by INTERFACE NAME (matching the
+  interpreter's `is_type_dispatched_iface` convention). Once general-interface
+  dispatch is ctor-correct, that name gate is unnecessary and its one exotic hole
+  (a user interface shadowing one of those four names with an extra
+  non-structural method could receive the relaxation while its extra method still
+  dispatches on the bare type name) closes with it.
 - Gate: full codegen suite; snapshot review of any intentionally-changed IR;
   CAS-cache correctness check on a value-revealing program; oracle green.
 
