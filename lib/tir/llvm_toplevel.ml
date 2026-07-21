@@ -316,6 +316,14 @@ let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   let ret_ty = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
+      (* Called without ~collision_set (this JIT-fragment forward-`declare`
+         helper has no ctx in scope).  Known, low-risk omission: the only thing
+         collision_set changes here is whether a forced-Boxed colliding type
+         gets `ptr nonnull dereferenceable(16)` vs a niche type's bare `ptr` —
+         an LLVM PARAMETER-ATTRIBUTE difference, not an ABI/type difference, and
+         in the SAFE direction (a `declare` carrying fewer attributes than its
+         `define` stays link-compatible; the attributes are optimizer hints).
+         See specs Task 2 note; same class as the wider collision-set threading. *)
       Llvm_ctx.llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 

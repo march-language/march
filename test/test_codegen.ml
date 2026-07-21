@@ -4839,6 +4839,97 @@ let test_mono_ecallptr_collision_dispatch () =
           "both colliding impls registered as dispatch rows"
           (List.sort compare [ impl_a_name; impl_b_name ]) syms))
 
+(* ── Final-review Finding 2: iface_impl_name name-collision branch ───────────
+   The THIRD [Mono.try_collision_dispatch] call site — distinct from the two
+   above.  It is NOT the [None]-branch (callee absent from [fn_table]); here the
+   callee name IS a real user top-level function present in [fn_table], but it
+   ALSO happens to be an interface method name, AND the user function's
+   first-parameter type does not match the call's concrete first-argument type
+   (the classic `fn show(r: String)` shadowing the [Show] method while a prelude
+   generic calls `show(x)` on a different type).  mono must dispatch to the
+   interface impl, not the user function — and when that argument type is a
+   COLLIDING short name (two impls in different modules), it must route through
+   [try_collision_dispatch] rather than [resolve_impl_by_type]'s silent
+   first-match.
+
+   Reaching this branch (mono.ml's `Some orig_fn when <param/arg mismatch> ->`
+   arm) requires the callee to resolve to a user fn in [fn_table], which the
+   ECallPtr/None-branch shapes above do not — so, mirroring
+   [test_mono_ecallptr_collision_dispatch]'s hand-built-TIR technique, this test
+   supplies BOTH a user fn `speak(_: String)` (populating [fn_table]) and two
+   colliding "Thing" impls under `speak` in [iface_methods], then calls
+   `speak(x : Thing)` directly ([EApp], not [ECallPtr]).  A regression here
+   would silently fall through to [resolve_impl_by_type]'s first match. *)
+let test_mono_iface_name_collision_dispatch () =
+  let open March_tir.Tir in
+  let mkv name ty = { v_name = name; v_ty = ty; v_lin = Unr } in
+  let thing_ty = TCon ("Thing", []) in
+  let impl_a_name = "Speak$NA.Thing.speak" in
+  let impl_b_name = "Speak$NB.Thing.speak" in
+  let impl_fn name lit = {
+    fn_name   = name;
+    fn_params = [ mkv "_self" thing_ty ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString lit));
+    fn_kind   = FnNormal;
+  } in
+  (* A REAL user top-level fn named `speak` whose first param is String — it
+     lands in fn_table and shares the name with the Show-style method, but its
+     param type (String) differs from the call's arg type (Thing), which is what
+     trips the name-collision guard. *)
+  let user_speak = {
+    fn_name   = "speak";
+    fn_params = [ mkv "s" TString ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString "user-speak"));
+    fn_kind   = FnNormal;
+  } in
+  let arg_var = mkv "x" thing_ty in
+  let speak_var = mkv "speak" (TFn ([ thing_ty ], TString)) in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   =
+      ELet (arg_var, EAlloc (thing_ty, []),
+            EApp (speak_var, [ AVar arg_var ]));
+    fn_kind   = FnNormal;
+  } in
+  let tir = {
+    tm_name = "IfaceNameDispatch";
+    tm_fns  =
+      [ impl_fn impl_a_name "from-A"; impl_fn impl_b_name "from-B";
+        user_speak; main_fn ];
+    tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [];
+  } in
+  let iface_methods : (string, (string * string) list) Hashtbl.t = Hashtbl.create 4 in
+  Hashtbl.replace iface_methods "speak" [ ("Thing", impl_a_name); ("Thing", impl_b_name) ];
+  let tir' = March_tir.Mono.monomorphize ~iface_methods tir in
+  let main' =
+    match List.find_opt (fun fn -> fn.fn_name = "main") tir'.tm_fns with
+    | Some fn -> fn
+    | None -> Alcotest.fail "specialized module has no `main` fn"
+  in
+  let sentinel_name =
+    match main'.fn_body with
+    | ELet (_, _, EApp (f, _)) -> Some f.v_name
+    | e -> Alcotest.failf "unexpected main body shape: %s" (show_expr e)
+  in
+  (match sentinel_name with
+   | None -> Alcotest.fail "name-collision call site was not rewritten to an EApp"
+   | Some sentinel ->
+     Alcotest.(check bool) "call rewritten to the dispatch sentinel (not user fn)" true
+       (March_tir.Dispatch_registry.is_sentinel sentinel);
+     Alcotest.(check string) "sentinel name matches Speak.speak.Thing convention"
+       "__march_ifdispatch$Speak$speak$Thing" sentinel;
+     (match March_tir.Dispatch_registry.lookup sentinel with
+      | None -> Alcotest.fail "no dispatch rows registered for the sentinel"
+      | Some rows ->
+        let syms = List.map snd rows |> List.sort compare in
+        Alcotest.(check (list string))
+          "both colliding impls registered as dispatch rows"
+          (List.sort compare [ impl_a_name; impl_b_name ]) syms))
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -9257,6 +9348,8 @@ let codegen_suites =
           test_colliding_multi_ctor_shares_one_impl;
         Alcotest.test_case "mono ECallPtr None-branch reaches try_collision_dispatch" `Quick
           test_mono_ecallptr_collision_dispatch;
+        Alcotest.test_case "mono iface_impl_name name-collision branch reaches try_collision_dispatch" `Quick
+          test_mono_iface_name_collision_dispatch;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

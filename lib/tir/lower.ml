@@ -845,6 +845,47 @@ let builtin_type_defs : Tir.type_def list = [
   Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
 ]
 
+(** Pre-Pass-1 AST walker that reproduces the SET of TIR type NAMES Pass 2
+    will eventually populate into [tm_types], computed BEFORE
+    [collect_iface_impls] (Pass 1) runs — the [types] ref Pass 2 fills is
+    still empty at that point.  Feeding these names to [Collision_set.compute]
+    up front lets [collect_iface_impls] qualify a colliding-type impl's mangled
+    symbol; the whole point is that this EARLY set agrees with the LATER
+    [Collision_set.compute tm_types] (Task 1/2's driver), so a type is never
+    globally-tagged/forced-Boxed by the late set while its impl symbols stay
+    un-qualified by the early set (a first-wins collapse → silent miscompile).
+
+    Only the type NAME matters to [Collision_set] (it ignores ctors and the
+    variant/record distinction), so an empty-ctor placeholder stands in for
+    each declared type.
+
+    [~prefix] mirrors Pass 2's nested-module qualification (prefix ^ tname.txt,
+    with "sub_name.txt ^ \".\"" appended at each [DMod] level — see the [DType]
+    arms under [DMod] in [lower_module]).  Actor-generated types are the
+    EXCEPTION: Pass 2 emits <Name>_Msg/_Actor/_State BARE — neither the
+    top-level nor the nested [DActor] arm applies the module prefix to
+    [Lower_actor.lower_actor]'s returned [types] (only to its [fns]).  So the
+    [DActor] arm here inserts BARE names regardless of [~prefix], matching the
+    real emission; without it the early set could miss an
+    actor-type-name/user-type-name collision (e.g. bare [Foo_Msg] from
+    [actor Foo] vs a user type [A.Foo_Msg]) that the late [tm_types] set
+    catches. *)
+let rec collect_type_names ~prefix acc decls =
+  List.fold_left (fun acc d -> match d with
+      | Ast.DType (_, name, _, _, _)
+      | Ast.DAlwaysLinearType (_, name, _, _, _) ->
+        Tir.TDVariant (prefix ^ name.txt, []) :: acc
+      | Ast.DActor (_, name, _, _) ->
+        (* BARE, ignoring ~prefix — see doc comment above. *)
+        Tir.TDVariant (name.txt ^ Tir_names.actor_msg_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_struct_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_state_suffix, [])
+        :: acc
+      | Ast.DMod (sub_name, _, inner_decls, _) ->
+        collect_type_names ~prefix:(prefix ^ sub_name.txt ^ ".") acc inner_decls
+      | _ -> acc
+    ) acc decls
+
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
@@ -1037,28 +1078,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     ) hash_specs;
   end; (* end of builtin iface injection *)
   (* Collision-conditional impl-symbol qualification (Task 3 of
-     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the
-     collision set BEFORE [collect_iface_impls] (Pass 1, directly below)
-     runs, but the [types] ref above is populated only by Pass 2 (the
-     DType arms further down in this function) — Pass 1 runs to completion
-     first, so [types] is still empty here.  Walk the AST directly instead,
-     mirroring exactly how Pass 2 will qualify a nested-module type's TIR
-     name (prefix ^ tname.txt, where prefix is built by appending
-     "sub_name.txt ^ \".\"" at each DMod level — see the DType arms under
-     DMod further below) so the names fed to [Collision_set.compute] agree
-     with the eventual [tm_types] names.  Only the short/qualified NAME
-     matters to [Collision_set.compute] (it ignores ctors), so a
-     placeholder empty-ctor [TDVariant] stands in for each declared type. *)
-  let rec collect_type_names ~prefix acc decls =
-    List.fold_left (fun acc d -> match d with
-        | Ast.DType (_, name, _, _, _)
-        | Ast.DAlwaysLinearType (_, name, _, _, _) ->
-          Tir.TDVariant (prefix ^ name.txt, []) :: acc
-        | Ast.DMod (sub_name, _, inner_decls, _) ->
-          collect_type_names ~prefix:(prefix ^ sub_name.txt ^ ".") acc inner_decls
-        | _ -> acc
-      ) acc decls
-  in
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the collision
+     set BEFORE [collect_iface_impls] (Pass 1, directly below) runs, but the
+     [types] ref above is populated only by Pass 2 — so we can't reuse it.
+     [collect_type_names] (top-level, above) walks the AST directly, producing
+     the SAME set of qualified/bare TIR type names Pass 2 will eventually put
+     into [tm_types] (including actor-generated types) — see its doc comment. *)
   let collision_set =
     Collision_set.compute
       (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)

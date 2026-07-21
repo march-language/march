@@ -309,6 +309,12 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
              float heap cells as equal — a real `==` miscompile). *)
           let all = List.map (fun tp -> (tp, ctors_of tp)) tps in
           let union_ctors = List.concat_map snd all in
+          (* Representative type name = the first candidate (order is not
+             semantically load-bearing).  This assumes all colliding candidates
+             share the same type-parameter arity — true for every current
+             colliding fixture (all monomorphic ADTs); a set mixing e.g. a
+             nullary and a unary same-short-name type would need rep_tp chosen
+             per the use-site's instantiation instead. *)
           let rep_tp = fst (List.hd all) in
           Some (rep_tp, union_ctors)
       in
