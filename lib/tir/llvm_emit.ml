@@ -133,6 +133,7 @@ type ctx = Llvm_ctx.ctx = {
   fast_math : bool;
   pmap_threshold : int;
   type_defs : Tir.type_def list;
+  collision_set : (string, string list) Hashtbl.t;
   poly_ctors  : (string * string, Tir.ty list) Hashtbl.t;
   type_params : (string, string list) Hashtbl.t;
   var_slot  : (string, string) Hashtbl.t;

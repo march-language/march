@@ -65,6 +65,15 @@ type ctx = {
      fragment's representation decisions ran against a stale or empty table,
      causing niche-vs-boxed ABI mismatches across JIT fragments (B12). *)
   type_defs : Tir.type_def list;
+  (* Same-short-name type collision set, derived from [type_defs] (see
+     [Collision_set.compute]'s doc comment): short type name -> full
+     declaring names, present ONLY for short names declared by >=2 modules.
+     Consulted by [Llvm_toplevel.build_ctor_info] to decide whether a
+     TDVariant's constructors need a globally-unique runtime tag instead of
+     the ordinary per-type 0-based tag. Always derived from the same
+     [type_defs] this ctx was constructed with, so it can never drift out of
+     sync with the types build_ctor_info actually sees. *)
+  collision_set : (string, string list) Hashtbl.t;
   (* For resolving concrete field types from polymorphic type definitions.
      poly_ctors: (type_name, ctor_name) -> generic field types (may contain TVar)
      type_params: type_name -> ordered list of type-variable parameter names *)
@@ -206,6 +215,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   fast_math;
   pmap_threshold;
   type_defs;
+  collision_set = Collision_set.compute type_defs;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
