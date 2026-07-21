@@ -71,12 +71,25 @@ let resolve_exe_path name =
     | None   -> name
   end
 
+(** A real stdlib directory always contains [prelude.march] (every
+    [stdlib_file_list] below starts with it). Gating on that, rather than
+    just "a directory with this name exists", avoids a false match on an
+    unrelated same-named directory — e.g. `test/stdlib/` holds the stdlib
+    test suite's `test_*.march` fixtures, not the real stdlib, and a bare
+    [Sys.file_exists] can't tell them apart when the compiler is invoked
+    with CWD = `test/`. *)
+let looks_like_stdlib_dir d =
+  Sys.file_exists d && Sys.is_directory d
+  && Sys.file_exists (Filename.concat d "prelude.march")
+
 (** Locate the stdlib directory.
     Resolution order:
     1. MARCH_STDLIB environment variable (explicit override)
     2. Paths relative to the resolved march executable:
        - bin/../stdlib          (source-tree / opam switch layout)
        - bin/../../stdlib       (nested build layout)
+       - bin/../../../stdlib    (dune's _build/default/bin/ layout, exe invoked
+                                  with a CWD other than the project root)
        - bin/../share/march/stdlib  (installed share layout)
     3. "stdlib" relative to CWD (works when running from the March repo root) *)
 let find_stdlib_dir () =
@@ -89,13 +102,14 @@ let find_stdlib_dir () =
       (* Exe-relative candidates — work regardless of CWD *)
       Filename.concat exe_dir "../stdlib";
       Filename.concat exe_dir "../../stdlib";
+      Filename.concat exe_dir "../../../stdlib";
       (* Installed share layout: bin/../share/march/stdlib or bin/../share/march *)
       Filename.concat exe_dir "../share/march/stdlib";
       Filename.concat exe_dir "../share/march";
       (* CWD-relative fallback — works when invoked from the March repo root *)
       "stdlib";
     ] in
-    List.find_opt Sys.file_exists candidates
+    List.find_opt looks_like_stdlib_dir candidates
 
 (** Parse a stdlib source file and return its top-level declarations.
     Each stdlib file is a single [mod Name do ... end] wrapper.
