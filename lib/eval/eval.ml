@@ -308,6 +308,54 @@ let is_type_dispatched_iface = function
     Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
 let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(** Same-short-name type collision set — the interpreter's counterpart to
+    [Collision_set] in lib/tir (native/TIR backend, Task 0 of
+    specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). The interpreter
+    never lowers to TIR, so this walks the AST directly instead of
+    [Tir.type_def]s. Maps a type's bare declared short name -> present iff
+    2+ DISTINCT declaring-module-qualified names (e.g. "NA.Thing" and
+    "NB.Thing") declare it somewhere in the module being run. A short name
+    declared exactly once — by far the common case — must be ABSENT (not
+    present with degenerate content): every consumer's gate is "member of
+    this table", so the non-colliding path must stay cheap and exact.
+    Computed once per [eval_module_env] run, from the FULL AST upfront
+    (before any [DType]/[DImpl] is evaluated) since eval order alone can't
+    tell a first same-short-name declaration from the only one. *)
+let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+let is_colliding_type_name (short_name : string) : bool =
+  Hashtbl.mem type_collision_set short_name
+
+(** Populate [type_collision_set] by walking [decls] recursively (descending
+    into [DMod], accumulating a "Sub.Sub2." prefix the same way
+    [module_stack]/[current_doc_prefix] do at eval time — see the [DMod] arm
+    of [eval_decl] below) and collecting every [DType]/[DAlwaysLinearType]'s
+    declaring-module-qualified name. *)
+let compute_type_collision_set (decls : decl list) : unit =
+  Hashtbl.reset type_collision_set;
+  let by_short : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+  let add_qualified qualified =
+    let short = match String.rindex_opt qualified '.' with
+      | None   -> qualified
+      | Some i -> String.sub qualified (i + 1) (String.length qualified - i - 1)
+    in
+    let existing = match Hashtbl.find_opt by_short short with Some l -> l | None -> [] in
+    if not (List.mem qualified existing) then
+      Hashtbl.replace by_short short (qualified :: existing)
+  in
+  let rec walk prefix ds =
+    List.iter (function
+        | DType (_, name, _, _, _) | DAlwaysLinearType (_, name, _, _, _) ->
+          add_qualified (prefix ^ name.txt)
+        | DMod (sub, _, inner, _) -> walk (prefix ^ sub.txt ^ ".") inner
+        | _ -> ()
+      ) ds
+  in
+  walk "" decls;
+  Hashtbl.iter (fun short names ->
+      if List.length names >= 2 then Hashtbl.replace type_collision_set short ()
+    ) by_short
+
 (** Record field-set → type name mapping.
     Maps a canonical key (sorted, comma-joined field names) to the declaring type name.
     Populated when [eval_decl] processes [DType] nodes with [TDRecord].
@@ -961,6 +1009,49 @@ let type_name_of_value = function
     let key = String.concat "," (List.sort String.compare field_names) in
     Hashtbl.find_opt record_type_tbl key
   | _         -> None
+
+(** Constructor -> declaring-module-QUALIFIED type name, populated ONLY for
+    a ctor whose type's short name collides (see [type_collision_set]).
+    Deliberately a SEPARATE table from [ctor_type_tbl] (which stays bare
+    for every ctor, colliding or not) rather than qualifying [ctor_type_tbl]
+    itself in place: [ctor_type_tbl]/[type_name_of_value] are also consulted
+    by [impl_tbl] (Eq/Ord/Show/Hash/Json/`own` dispatch), [ffi_type_decl_tbl]
+    (actor message tag-index routing) and [record_type_tbl] (Json
+    record-decode) — none of which key their OWN tables by the qualified
+    name, so qualifying the shared bare lookup in place would silently break
+    those unrelated round-trips for a colliding type. Keeping this table
+    separate and additive-only means a non-colliding program is byte-for-byte
+    unaffected, and [iface_method_tbl] (general-interface dispatch, the only
+    consumer of [dispatch_type_name_of_value] below) is the only thing that
+    sees the qualified identity. *)
+let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
+(** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
+    declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
+    short name, so a general-interface method call routes through
+    [iface_method_tbl] to the actual argument's impl rather than whichever
+    same-short-name type's impl happened to register last. Non-colliding
+    values (the common case) fall back to [type_name_of_value] unchanged. *)
+let dispatch_type_name_of_value = function
+  | VCon (tag, _) as v ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some qualified -> Some qualified
+     | None -> type_name_of_value v)
+  | v -> type_name_of_value v
+
+(** Register every constructor of a [TDVariant] type in [ctor_type_tbl]
+    (bare, as always) and, when [name_txt]'s short name collides (per
+    [type_collision_set]), ALSO in [ctor_qualified_type_tbl] under the
+    current [module_stack]-derived qualified name. Shared by every [DType]/
+    [DAlwaysLinearType] eval site so the qualification rule can't drift
+    between them. *)
+let register_type_ctors (name_txt : string) (variants : variant list) : unit =
+  List.iter (fun (v : variant) ->
+      Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
+      if is_colliding_type_name name_txt then
+        Hashtbl.replace ctor_qualified_type_tbl v.var_name.txt
+          (current_doc_prefix () ^ name_txt)
+    ) variants
 
 (** Forward-reference hook for dispatch in comparison operators.
     Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
@@ -7962,6 +8053,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset type_collision_set;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
@@ -8676,10 +8769,7 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DType (_, name, _, td, _) ->
     (* Populate ctor_type_tbl so dispatch can find the type from a constructor value. *)
     (match td with
-     | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-         ) variants
+     | TDVariant variants -> register_type_ctors name.txt variants
      | TDRecord fields ->
        (* Register record type by its field names for Json derive dispatch *)
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
@@ -8868,6 +8958,18 @@ let rec eval_decl (env : env) (d : decl) : env =
       | TyVar n      -> n.txt
       | _            -> ""
     in
+    (* Declaring-module-qualified identity for [iface_method_tbl] ONLY, when
+       [type_name]'s short name collides (see [type_collision_set]) — e.g.
+       "NA.Thing" vs "NB.Thing" so each same-short-name type's general-interface
+       impl gets its own dispatch-table slot instead of overwriting the
+       other's (Hashtbl.replace on a shared bare key). [impl_tbl] below keeps
+       using bare [type_name] unchanged (see [ctor_qualified_type_tbl]'s doc
+       comment for why qualifying it in place would be unsafe there). *)
+    let dispatch_type_name =
+      if type_name <> "" && is_colliding_type_name type_name
+      then current_doc_prefix () ^ type_name
+      else type_name
+    in
     let is_json_iface =
       String.length idef.impl_iface.txt >= 4
       && String.sub idef.impl_iface.txt 0 4 = "Json"
@@ -8908,10 +9010,11 @@ let rec eval_decl (env : env) (d : decl) : env =
             (* General (non-builtin, non-Json) interface methods also go in the
                per-method dispatch table so a call routes by the first arg's
                runtime type, not the last-bound name (fixes multi-impl dispatch,
-               e.g. Speak(Dog) + Speak(Cat)). *)
+               e.g. Speak(Dog) + Speak(Cat), and — via [dispatch_type_name] —
+               Speak(NA.Thing) + Speak(NB.Thing)). *)
             if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
               Hashtbl.replace iface_method_tbl
-                (idef.impl_iface.txt, mname.txt, type_name) fn_val;
+                (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
             Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
@@ -8942,7 +9045,7 @@ let rec eval_decl (env : env) (d : decl) : env =
             let disp = VBuiltin (disp_tag, fun args ->
               match args with
               | arg0 :: _ ->
-                (match type_name_of_value arg0 with
+                (match dispatch_type_name_of_value arg0 with
                  | Some tname ->
                    (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
                     | Some m -> !iface_dispatch_hook m args
@@ -8980,10 +9083,7 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DAlwaysLinearType (_, name, _, td, _) ->
     (* Treat like DType at runtime — register constructors/records for dispatch. *)
     (match td with
-     | TDVariant variants ->
-       List.iter (fun (v : variant) ->
-           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-         ) variants
+     | TDVariant variants -> register_type_ctors name.txt variants
      | TDRecord fields ->
        let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
        let key = String.concat "," (List.sort String.compare field_names) in
@@ -9102,10 +9202,18 @@ let eval_module_env (m : module_) : env =
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset ctor_qualified_type_tbl;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
     ; "Some", "Option"; "None", "Option"
     ; "Cons", "List";  "Nil",  "List" ];
+  (* Same-short-name type collision set (see [type_collision_set]'s doc
+     comment): computed ONCE per run, from the full AST, before any DType/
+     DImpl below is evaluated — [is_colliding_type_name]/[register_type_ctors]
+     consult it as they go. Also resets it, so a later test run in the same
+     process (all run_eval tests share this one OCaml process) never sees a
+     stale collision entry left over from an unrelated earlier module. *)
+  compute_type_collision_set m.mod_decls;
 
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
@@ -9232,6 +9340,14 @@ let eval_module_env (m : module_) : env =
         | TyVar n      -> n.txt
         | _            -> ""
       in
+      (* See the top-level [DImpl] arm above for why [dispatch_type_name] is
+         a SEPARATE, [iface_method_tbl]-only qualified identity rather than
+         qualifying [type_name] (and thus [impl_tbl]) itself. *)
+      let dispatch_type_name =
+        if type_name <> "" && is_colliding_type_name type_name
+        then current_doc_prefix () ^ type_name
+        else type_name
+      in
       let is_json_iface =
         String.length idef.impl_iface.txt >= 4
         && String.sub idef.impl_iface.txt 0 4 = "Json"
@@ -9270,7 +9386,7 @@ let eval_module_env (m : module_) : env =
                  runtime type, not the last-bound name. *)
               if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
                 Hashtbl.replace iface_method_tbl
-                  (idef.impl_iface.txt, mname.txt, type_name) fn_val;
+                  (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
               let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
               Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()
@@ -9300,7 +9416,7 @@ let eval_module_env (m : module_) : env =
               let disp = VBuiltin (disp_tag, fun args ->
                 match args with
                 | arg0 :: _ ->
-                  (match type_name_of_value arg0 with
+                  (match dispatch_type_name_of_value arg0 with
                    | Some tname ->
                      (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
                       | Some m -> !iface_dispatch_hook m args
@@ -9325,10 +9441,7 @@ let eval_module_env (m : module_) : env =
     | DType (_, name, _, td, _) :: rest ->
       (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
       (match td with
-       | TDVariant variants ->
-         List.iter (fun (v : variant) ->
-             Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
-           ) variants
+       | TDVariant variants -> register_type_ctors name.txt variants
        | TDRecord fields ->
          let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
          let key = String.concat "," (List.sort String.compare field_names) in

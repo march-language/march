@@ -1514,6 +1514,50 @@ let test_general_iface_multi_impl_dispatch () =
   Alcotest.(check string) "speak(Cat) dispatches to Cat's body"
     "meow" (vstr (call_fn env "say_cat" []))
 
+let test_interp_colliding_general_iface_dispatch () =
+  (* Layer 1b: two SAME-short-name types (NA.Thing vs NB.Thing) each impl'ing
+     the same GENERAL user interface must dispatch to their own body,
+     interpreted. Regression: iface_method_tbl used to be keyed
+     (iface, method, bare_type_name) — both impls collided on
+     ("Speak", "speak", "Thing"), so only the LAST-registered body
+     (NB's) was ever reachable, even for an NA.Thing value.
+
+     `say` is deliberately declared INSIDE each of NA/NB (rather than calling
+     `speak` from an outer scope) to sidestep an unrelated, pre-existing gap:
+     a nested module's DImpl-bound interface dispatcher never gets exposed
+     under a "NA.speak" qualified key (`eval_decl`'s DMod arm only exports
+     names `declared_names` collects, which walks DFn/DLet/DMod/DExtern, not
+     DImpl) — calling bare `speak` from a SIBLING or outer module is a
+     separate, out-of-scope limitation. Dispatch itself is keyed purely by
+     the argument's own runtime type via the GLOBAL iface_method_tbl/
+     ctor_qualified_type_tbl, so calling through NA's or NB's own local
+     `speak` binding still exercises the real fix. *)
+  let src = {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod NA do
+      type Thing = TA
+      impl Speak(Thing) do
+        fn speak(_self) do "from-A" end
+      end
+      fn say() do speak(TA) end
+    end
+    mod NB do
+      type Thing = TB
+      impl Speak(Thing) do
+        fn speak(_self) do "from-B" end
+      end
+      fn say() do speak(TB) end
+    end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "NA.say() dispatches to NA.Thing's Speak impl"
+    "from-A" (vstr (call_fn env "NA.say" []));
+  Alcotest.(check string) "NB.say() dispatches to NB.Thing's Speak impl"
+    "from-B" (vstr (call_fn env "NB.say" []))
+
 let test_default_method_user_type () =
   (* Regression: a user-declared `interface Eq(a)` (name collides with the
      built-in Eq) with a default `neq` calling `eq`, implemented for a USER
@@ -4416,6 +4460,7 @@ let eval_suites =
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
           Alcotest.test_case "general iface multi-impl dispatch" `Quick test_general_iface_multi_impl_dispatch;
+          Alcotest.test_case "interp colliding general iface dispatch (Layer 1b)" `Quick test_interp_colliding_general_iface_dispatch;
           Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
