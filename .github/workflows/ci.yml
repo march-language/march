@@ -85,7 +85,7 @@ jobs:
       # (the flake has never reproduced on macOS) and non-blocking (the evidence
       # is the point; a red X here must not fail the pipeline).
       - name: FFI Result flake probe (Linux-only diagnostic; non-blocking)
-        if: runner.os == 'Linux'
+        if: ${{ always() && runner.os == 'Linux' }}
         continue-on-error: true
         run: |
           eval $(opam env)
@@ -98,7 +98,7 @@ jobs:
       # a non-reproducing binary) plus an ASAN/UBSan pass.  Linux-only,
       # non-blocking; the evidence is the point.
       - name: FFI Result UB probe — valgrind + ASAN (Linux-only; non-blocking)
-        if: runner.os == 'Linux'
+        if: ${{ always() && runner.os == 'Linux' }}
         continue-on-error: true
         run: |
           eval $(opam env)
