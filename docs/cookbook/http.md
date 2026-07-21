@@ -15,9 +15,10 @@ March has two HTTP modules: `HttpClient` for making requests and `HttpServer` fo
 Simple GET:
 
 ```march
-match HttpClient.get("https://api.example.com/users") do
-  Ok(resp)  -> println(resp.body)
-  Err(msg)  -> println("error: " ++ msg)
+let client = HttpClient.new_client()
+match HttpClient.get(client, "https://api.example.com/users") do
+  Ok(resp) -> println(Http.response_body(resp))
+  Err(_)   -> println("error: request failed")
 end
 ```
 
@@ -25,14 +26,15 @@ POST with a JSON body:
 
 ```march
 let body = Json.to_string(Json.Object([
-  ("name", Json.String("Alice")),
+  ("name", Json.Str("Alice")),
   ("age",  Json.Number(30.0))
 ]))
 
-match HttpClient.post("https://api.example.com/users", body) do
-  Ok(resp) when resp.status == 201 -> println("created")
-  Ok(resp) -> println("unexpected: " ++ int_to_string(resp.status))
-  Err(e)   -> println("failed: " ++ e)
+let client = HttpClient.new_client()
+match HttpClient.post(client, "https://api.example.com/users", body) do
+  Ok(resp) when Http.response_status_code(resp) == 201 -> println("created")
+  Ok(resp) -> println("unexpected: " ++ int_to_string(Http.response_status_code(resp)))
+  Err(_)   -> println("failed")
 end
 ```
 
@@ -41,12 +43,13 @@ With a configured client (base URL, auth, retries):
 ```march
 let client =
   HttpClient.new_client()
-  |> HttpClient.add_request_step(HttpClient.step_base_url("https://api.example.com"))
-  |> HttpClient.add_request_step(HttpClient.step_bearer_auth(token))
-  |> HttpClient.with_retry(3)
+  |> HttpClient.add_request_step("base_url", HttpClient.step_base_url("https://api.example.com"))
+  |> HttpClient.add_request_step("auth", HttpClient.step_bearer_auth(token))
+  |> HttpClient.with_retry(3, 100)
 
-match HttpClient.run(client, HttpClient.get("/users")) do
-  Ok(resp) -> resp.body
+let req = Request(Get, SchemeHttp, "", None, "/users", None, Nil, "")
+match HttpClient.run(client, req) do
+  Ok(resp) -> Ok(Http.response_body(resp))
   Err(msg) -> Err(msg)
 end
 ```
