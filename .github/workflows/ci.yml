@@ -65,6 +65,22 @@ jobs:
           eval $(opam env)
           dune runtest
 
+      # Diagnostic for the intermittent, GH-Actions-only `ffi_result` flake
+      # (parse("zz") occasionally prints "bad int" instead of "nan").  The
+      # runtest byte-exact diff is quarantined (test/dune @ffi_result_diff_manual),
+      # so this probe stress-compiles the case ~40x with the CAS + dune caches
+      # cleared each time and reports whether the produced BINARIES differ
+      # (codegen/link non-determinism) or are identical (execution-time UB), plus
+      # a full disassembly of the adjacent shims on any wrong output.  Linux-only
+      # (the flake has never reproduced on macOS) and non-blocking (the evidence
+      # is the point; a red X here must not fail the pipeline).
+      - name: FFI Result flake probe (Linux-only diagnostic; non-blocking)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          eval $(opam env)
+          scripts/ffi_result_flake_probe.sh 40
+
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         run: |
           eval $(opam env)
