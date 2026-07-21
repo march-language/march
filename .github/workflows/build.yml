@@ -91,6 +91,11 @@ jobs:
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
+          # macos-15 (our minimum macOS target) has no matching STABLE opam
+          # binary release yet; the 2.4 prereleases do support it. Without this,
+          # setup-ocaml fails with "Failed to find any opam release that matches
+          # the specified version constraint" on the darwin-arm64 release build.
+          allow-prerelease-opam: true
 
       - name: Install system dependencies (native)
         if: "!matrix.cross"
