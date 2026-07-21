@@ -1547,11 +1547,13 @@ let compile filename =
     if !emit_core_ast_file <> None then begin
       let doc =
         March_dump.Dump.json_obj [
-          ("format_version", "1");
+          ("format_version", "2");
           ("verdict", March_dump.Dump.json_string "reject");
           ("diagnostics",
            March_dump.Dump.json_list [March_errors.Errors.render_diagnostic_json diag]);
           ("module", "null");
+          ("schemes", "[]");
+          ("instantiations", "[]");
         ]
       in
       print_string doc
@@ -1718,12 +1720,36 @@ let compile filename =
       |> March_dump.Dump.json_list
     in
     let module_json = March_dump.Ast_json.module_to_json ~types:type_map user_ast in
+    let schemes_json =
+      Hashtbl.fold
+        (fun ids (cs, ty) acc ->
+          March_dump.Dump.json_obj
+            [ ("ids", March_dump.Dump.json_list (List.map string_of_int ids));
+              ("constraints",
+               March_dump.Dump.json_list (List.map March_dump.Ast_json.constraint_to_json cs));
+              ("body", March_dump.Ast_json.resolved_ty_to_json ty) ]
+          :: acc)
+        typecheck_env.March_typecheck.Typecheck.scheme_witnesses []
+    in
+    let insts_json =
+      Hashtbl.fold
+        (fun (sp : March_ast.Ast.span) (ids, args) acc ->
+          March_dump.Dump.json_obj
+            [ ("use_span", March_dump.Ast_json.span_to_json sp);
+              ("ids", March_dump.Dump.json_list (List.map string_of_int ids));
+              ("args",
+               March_dump.Dump.json_list (List.map March_dump.Ast_json.resolved_ty_to_json args)) ]
+          :: acc)
+        typecheck_env.March_typecheck.Typecheck.inst_witnesses []
+    in
     let doc =
       March_dump.Dump.json_obj [
-        ("format_version", "1");
+        ("format_version", "2");
         ("verdict", March_dump.Dump.json_string verdict);
         ("diagnostics", diagnostics_json);
         ("module", module_json);
+        ("schemes", March_dump.Dump.json_list schemes_json);
+        ("instantiations", March_dump.Dump.json_list insts_json);
       ]
     in
     print_string doc;
