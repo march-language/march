@@ -7,6 +7,11 @@ module J = March_dump.Ast_json
 let check name expected actual =
   Alcotest.(check string) name expected actual
 
+let astring_contains hay needle =
+  let hl = String.length hay and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
 let test_tcon () =
   check "Int" {|{"kind":"TCon","name":"Int","args":[]}|}
     (J.resolved_ty_to_json (T.TCon ("Int", [])))
@@ -50,6 +55,21 @@ let test_constraint_cnum () =
     {|{"kind":"CNum","ty":{"kind":"TVar","id":3}}|}
     (J.constraint_to_json (T.CNum (T.TVar (ref (T.Unbound (3, 0))))))
 
+(* Module_to_json ~types: end-to-end smoke test that the real pipeline
+   (parse -> desugar -> check_module_full -> module_to_json on the SAME
+   desugared tree, mirroring bin/main.ml's --emit-core-ast branch) produces
+   a "resolved_ty" key on emitted expr nodes. Not a golden byte-for-byte
+   check (that's Task 5) — just proves the plumbing is wired end to end. *)
+let test_module_emits_resolved_ty () =
+  let m = Test_helpers.parse_module "mod M do\nlet a = 1\nend\n" in
+  let desugared = March_desugar.Desugar.desugar_module m in
+  let (_errors, type_map, _env) =
+    March_typecheck.Typecheck.check_module_full desugared
+  in
+  let json = J.module_to_json ~types:type_map desugared in
+  Alcotest.(check bool) "module JSON mentions resolved_ty"
+    true (astring_contains json "resolved_ty")
+
 let () =
   Alcotest.run "ty_json"
     [ ("encoder",
@@ -60,4 +80,5 @@ let () =
          Alcotest.test_case "tvar_link_deep_repr" `Quick test_tvar_link_deep_repr;
          Alcotest.test_case "trecord_order" `Quick test_trecord_order_preserved;
          Alcotest.test_case "tchan_unsupported" `Quick test_tchan_unsupported;
-         Alcotest.test_case "constraint_cnum" `Quick test_constraint_cnum ]) ]
+         Alcotest.test_case "constraint_cnum" `Quick test_constraint_cnum;
+         Alcotest.test_case "module_emits_resolved_ty" `Quick test_module_emits_resolved_ty ]) ]

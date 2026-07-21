@@ -16,7 +16,12 @@ let parse_and_desugar src =
   in
   March_desugar.Desugar.desugar_module m
 
-let json_of src = March_dump.Ast_json.module_to_json (parse_and_desugar src)
+(* This suite only asserts structural shape (tagged "kind" markers, field
+   presence), not resolved-type values, so an empty [type_map] is fine here —
+   every node's "resolved_ty" will just be null. The resolved_ty *value*
+   contract is covered by test_ty_json.ml's test_module_emits_resolved_ty. *)
+let json_of src =
+  March_dump.Ast_json.module_to_json ~types:(Hashtbl.create 0) (parse_and_desugar src)
 
 let contains ~needle haystack =
   let nlen = String.length needle and hlen = String.length haystack in

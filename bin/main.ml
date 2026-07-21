@@ -1717,7 +1717,7 @@ let compile filename =
       |> List.map March_errors.Errors.render_diagnostic_json
       |> March_dump.Dump.json_list
     in
-    let module_json = March_dump.Ast_json.module_to_json user_ast in
+    let module_json = March_dump.Ast_json.module_to_json ~types:type_map user_ast in
     let doc =
       March_dump.Dump.json_obj [
         ("format_version", "1");

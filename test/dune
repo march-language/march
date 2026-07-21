@@ -547,7 +547,7 @@
 (test
  (name test_ty_json)
  (modules test_ty_json)
- (libraries march_dump march_typecheck alcotest))
+ (libraries march_test_helpers march_dump march_typecheck march_desugar alcotest))
 
 ; ── HM scheme + instantiation witness tests (emit-core-ast-v2 A1 Task 2) ──
 (test
