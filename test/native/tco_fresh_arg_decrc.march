@@ -1,0 +1,51 @@
+-- Regression: TCO self-call must not free a freshly-allocated argument that
+-- it is itself forwarding into the next iteration.
+--
+-- Shape: a tail-recursive fn whose only parameter use is a call into a
+-- borrowed-parameter builtin (String.split), so Perceus classifies the
+-- param itself as borrowed too.  Each iteration constructs a BRAND NEW
+-- owned value (via String.join) with refcount 1 — no compensating IncRC,
+-- unlike a `Cons(_, t)`-style field extraction from a still-alive borrowed
+-- container — and forwards it as the next iteration's argument.  Perceus
+-- emits the borrowed-arg cleanup `ESeq(EApp(self,args), EDecRC(arg))`,
+-- correct for real (non-TCO) recursion where the DecRC only fires once the
+-- whole nested call has fully returned.  The TCO loop-rewrite used to run
+-- that DecRC eagerly, immediately before storing the same value into the
+-- parameter slot for the next iteration — freeing it one instruction before
+-- it was reused, corrupting every iteration after the first.
+--
+-- stdlib/toml.march's string_to_int_digits hit this exact shape and turned
+-- `Toml.get_int(_, "port")` on "port = 9000" into 9 (first digit only)
+-- compiled while the interpreter (which never runs the Perceus/TCO TIR
+-- pipeline) got 9000 right. Compile natively, run, diff stdout.
+mod TcoFreshArgDecrc do
+  fn digit_val(c : String) : Int do
+    match c do
+    "0" -> 0
+    "1" -> 1
+    "2" -> 2
+    "3" -> 3
+    "4" -> 4
+    "5" -> 5
+    "6" -> 6
+    "7" -> 7
+    "8" -> 8
+    "9" -> 9
+    _ -> 0
+    end
+  end
+
+  fn str_to_int(s : String, acc : Int) : Int do
+    match String.split(s, "") do
+    Nil -> acc
+    Cons(c, rest) ->
+      str_to_int(String.join(rest, ""), acc * 10 + digit_val(c))
+    end
+  end
+
+  fn main() : Unit do
+    println(int_to_string(str_to_int("9000", 0)))
+    println(int_to_string(str_to_int("42", 0)))
+    println(int_to_string(str_to_int("7", 0)))
+  end
+end

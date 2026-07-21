@@ -852,9 +852,9 @@ void march_panic(void *s) {
  * exits 1.  The message text matches the interpreter byte-for-byte so the
  * two backends agree under the oracle.
  *
- * Non-zero behaviour is unchanged: idiv/imod use signed C operators
- * (matching sdiv/srem) and umod uses unsigned (matching the prior urem
- * lowering of int_mod_euclid). */
+ * Non-zero behaviour: idiv/imod use signed C operators (matching sdiv/srem);
+ * ediv/emod implement signed Euclidean division/remainder (non-negative
+ * remainder), mirroring eval.ml's int_div_euclid/int_mod_euclid. */
 static int64_t march_div_by_zero(const char *op) {
     char buf[64];
     int  n = snprintf(buf, sizeof buf, "%s: division by zero", op);
@@ -872,17 +872,28 @@ int64_t march_checked_imod(int64_t a, int64_t b) {
     return a % b;
 }
 
-int64_t march_checked_umod(int64_t a, int64_t b) {
+/* Euclidean remainder (int_mod_euclid): the remainder is always non-negative
+ * and strictly less than |b|. Mirrors eval.ml byte-for-byte:
+ *   r = a mod b; if r < 0 then r + abs b else r
+ * The previous lowering used unsigned `%`, which agrees with this only when the
+ * divisor is positive; for a NEGATIVE divisor it diverged from the interpreter
+ * (e.g. int_mod_euclid(-7, -3) → -7 unsigned vs. 2 Euclidean). Signed `%` gives
+ * a remainder with the dividend's sign, so the correction adds |b| when it is
+ * negative. (abs(b) for b == INT64_MIN is unrepresentable, matching eval.ml's
+ * own OCaml `abs min_int` edge — not defended here, no caller reaches it.) */
+int64_t march_checked_emod(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_mod_euclid");
-    return (int64_t)((uint64_t)a % (uint64_t)b);
+    int64_t r = a % b;
+    if (r < 0) return r + (b < 0 ? -b : b);
+    return r;
 }
 
 /* Euclidean division (int_div_euclid): the quotient q such that the Euclidean
  * remainder a - q*b is always non-negative. Mirrors eval.ml byte-for-byte:
  *   q = a / b; r = a - q*b; if r < 0 then (b > 0 ? q-1 : q+1) else q
  * C's `/` truncates toward zero like OCaml's, so the correction step is what
- * turns truncated division into Euclidean division. Signed throughout —
- * unlike the umod sibling above, which is genuinely unsigned. */
+ * turns truncated division into Euclidean division. Signed throughout, the
+ * div-side pair of march_checked_emod above. */
 int64_t march_checked_ediv(int64_t a, int64_t b) {
     if (b == 0) return march_div_by_zero("int_div_euclid");
     int64_t q = a / b;
@@ -1366,6 +1377,12 @@ static _Atomic int64_t g_next_monitor_ref = 0;
  * the scheduler; the outer loop will pick up newly-queued actors. */
 static _Thread_local int g_in_scheduler = 0;
 
+/* Process-wide: an inline march_sched_run() is executing on some thread.
+ * (g_in_scheduler is _Thread_local — a re-entrancy guard only — so foreign
+ * threads cannot see it; without this flag they would start a second,
+ * concurrent scheduler set over the same g_scheds globals.) */
+static _Atomic int g_sched_inline_running = 0;
+
 /* Lazy initialization flag for the green thread scheduler.
  * _Atomic so concurrent first-spawns don't double-init via a plain read-write
  * race on a non-atomic int. */
@@ -1393,6 +1410,8 @@ static void *sched_bg_entry(void *arg) {
  * inline scheduler loop is already handling all green threads. */
 static void march_ensure_sched_started(void) {
     if (march_sched_in_scheduler()) return;  /* already inside the scheduler — no background thread needed */
+    if (atomic_load_explicit(&g_sched_inline_running, memory_order_acquire))
+        return;  /* inline scheduler already running — it runs all green threads */
     int expected = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &g_sched_bg_started, &expected, 1,
@@ -1954,6 +1973,35 @@ typedef struct {
  * into word 4.  march_task_await acquire-loads word 4, never dereferencing
  * the proc ptr (word 2) after the proc may have been freed by sched_loop.
  */
+/* Foreign-thread task_await support: green threads yield-wait (they must
+ * never block an OS scheduler thread), but foreign threads (evloop pthreads)
+ * previously busy-spun with sched_yield, burning a core per in-flight
+ * request.  A single global condvar is broadcast on every task completion;
+ * foreign waiters do a timed wait and re-check their own done flag, so a
+ * broadcast that fires before a waiter registers is harmless (50ms bound). */
+static pthread_mutex_t g_task_done_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_task_done_cv = PTHREAD_COND_INITIALIZER;
+
+static void task_wait_done(int64_t *task) {
+    if (march_sched_in_scheduler()) {
+        while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                    memory_order_acquire) == 0) {
+            march_sched_yield();
+        }
+        return;
+    }
+    pthread_mutex_lock(&g_task_done_mu);
+    while (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                memory_order_acquire) == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);          /* cond waits use REALTIME */
+        ts.tv_nsec += 50 * 1000000L;                  /* 50ms re-check bound */
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_task_done_cv, &g_task_done_mu, &ts);
+    }
+    pthread_mutex_unlock(&g_task_done_mu);
+}
+
 static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
@@ -1982,6 +2030,14 @@ static void march_thunk_trampoline(void *arg) {
         /* Release-store: ensures task[3] is visible before the done flag. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_release);
+        /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
+         * timed wait.  Must happen after the done-store above (so waiters that
+         * wake see done=1) and touches no task fields, so it is safe to do
+         * before or after the decrc below; placed here to keep the "signal
+         * completion" steps together. */
+        pthread_mutex_lock(&g_task_done_mu);
+        pthread_cond_broadcast(&g_task_done_cv);
+        pthread_mutex_unlock(&g_task_done_mu);
         /* Drop the trampoline's RC hold taken at spawn time (see incrc in
          * march_task_spawn_thunk).  If the caller already dropped their handle
          * (fire-and-forget), this is the last reference and frees the object.
@@ -2048,12 +2104,7 @@ void *march_task_spawn_thunk(void *clo_ptr) {
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        /* Yield the OS timeslice so we don't busy-wait when called from outside
-         * a green-thread context (march_sched_yield is a no-op in that case). */
-        sched_yield();
-    }
+    task_wait_done(task);
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -2065,10 +2116,7 @@ void *march_task_await(void *task_obj) {
 void *march_task_await_value(void *task_obj) {
     if (!task_obj) return (void *)1; /* tagged Unit/null */
     int64_t *task = (int64_t *)task_obj;
-    while (atomic_load_explicit((_Atomic int64_t *)&task[4], memory_order_acquire) == 0) {
-        march_sched_yield();
-        sched_yield();
-    }
+    task_wait_done(task);
     return (void *)(uintptr_t)task[3]; /* tagged result */
 }
 
@@ -2152,8 +2200,18 @@ void march_run_scheduler(void) {
     }
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
+    /* Publish that an inline scheduler is running BEFORE march_sched_run()
+     * starts workers.  Ordering: this store happens-before the workers start,
+     * which happens-before the main green thread runs, which happens-before
+     * any evloop pthread exists — so evloop-origin march_ensure_sched_started
+     * calls always observe the flag.  A theoretical window exists only for
+     * foreign threads created before march_run_scheduler() is entered, which
+     * do not occur in compiled-program startup (main itself is the first
+     * green thread). */
+    atomic_store_explicit(&g_sched_inline_running, 1, memory_order_release);
     march_sched_request_shutdown();
     march_sched_run();
+    atomic_store_explicit(&g_sched_inline_running, 0, memory_order_release);
     g_in_scheduler = 0;
     atomic_store_explicit(&g_sched_initialized, 0, memory_order_release);
 }
@@ -2318,6 +2376,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         march_sched_yield();
     }
 }
+
 
 /*
  * march_actor_reply: send a reply back to the caller blocked in actor_call.
@@ -2782,12 +2841,20 @@ void *march_string_to_float(void *s) {
     if (end == str->data || *end != '\0') {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
-    /* Some(f): tag=1, one double field at offset 16. */
+    /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float
+     * box — NOT the raw double. The compiler's generic Boxed-ADT ctor
+     * convention treats every ctor field slot as pointer-width and, for a
+     * Float field, loads it as `ptr` then calls march_unbox_float(ptr) to
+     * recover the double (see native_float_arr_to_list's identical
+     * float-boxing convention above and the compiled `List(Float)` fix this
+     * mirrors). Storing the raw double bits here instead made
+     * march_unbox_float dereference the float's own bit pattern as a heap
+     * pointer — SIGSEGV. */
     void *some = march_alloc(16 + 8);
     int32_t *tp = (int32_t *)((char *)some + 8);
     tp[0] = 1;
-    double *fp = (double *)((char *)some + 16);
-    fp[0] = f;
+    void **fp = (void **)((char *)some + 16);
+    fp[0] = march_alloc_float(f);
     return some;
 }
 
@@ -3411,11 +3478,19 @@ typedef struct {
 } csv_handle;
 
 static void *csv_row_result(void *fields_list) {
-    /* Row(fields) — constructor tag 0, 1 field */
-    void *row = march_alloc(24);
-    /* tag=0 for Row (first/only constructor) */
-    MARCH_FIELD(row, 0) = (int64_t)fields_list;
-    return row;
+    /* csv_next_row's March return type is the niche-shaped ADT
+       `CsvRow = CsvEof | Row(List(String))`: one nullary ctor + one
+       single-field ctor, whose payload (List(String)) is heap-pointer-shaped
+       and therefore niche-safe (see Repr.niche_repr_of_concrete / rc_types).
+       The compiler represents this WITHOUT a wrapper box: CsvEof = NULL,
+       Row(fields) = the fields-list pointer itself. A separate `march_alloc`
+       wrapper here (as an earlier version of this function did) doesn't
+       match that representation: the compiled match's non-null branch binds
+       the scrutinee pointer directly as the payload, so a wrapper box got
+       bound as `fields` instead of the actual list, and Perceus/FBIP treat
+       the scrutinee as owning no allocation of its own (niche values have no
+       separate header), corrupting the wrapper's memory once it's dec_rc'd. */
+    return fields_list;
 }
 
 /* Parse one CSV row from f according to delimiter/mode.

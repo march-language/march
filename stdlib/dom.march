@@ -129,6 +129,9 @@ mod Dom do
   doc "Create a text node containing the given string. Use `append` to attach it to an element."
   fn text_node(text)                   do dom_create_text_node(text) end
 
+  doc "Return a deep clone of `el` (all descendants included), detached from the tree."
+  fn clone(el)                         do dom_clone(el) end
+
   doc "Append `child` as the last child of `parent`. If `child` is already in the tree it is moved."
   fn append(parent, child)             do dom_append_child(parent, child) end
 
@@ -146,6 +149,12 @@ mod Dom do
 
   doc "Return a `List(Node)` of the direct element children of `el` (text nodes excluded)."
   fn children(el)                      do dom_children(el) end
+
+  doc "Return the first element child of `el`, or `None` if `el` has no element children."
+  fn first_child(el)                   do dom_first_child(el) end
+
+  doc "Return the last element child of `el`, or `None` if `el` has no element children."
+  fn last_child(el)                    do dom_last_child(el) end
 
   doc "Remove all child nodes from `el`, leaving it empty."
   fn clear(el)                         do dom_clear_children(el) end

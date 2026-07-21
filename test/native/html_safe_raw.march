@@ -1,0 +1,26 @@
+-- Regression test: Html.raw(...) content must survive interpolation into a
+-- ~H sigil in COMPILED binaries. Html.Safe is a single-ctor Boxed ADT whose
+-- ctor tag (0) collides with IOList's Empty tag (also 0) -- the two ADTs are
+-- tagged independently, so the runtime's generic march_html_auto_escape
+-- can't tell a Safe("...") apart from an empty IOList by tag alone. This
+-- used to silently drop the wrapped string in compiled output (fine
+-- interpreted). See llvm_emit.ml's html_auto_escape EApp case.
+mod HtmlSafeRaw do
+  fn body_partial() : IOList do
+    ~H"<h1>Welcome</h1>"
+  end
+
+  fn layout(body : IOList) : IOList do
+    ~H"<body>${Html.raw(IOList.to_string(body))}</body>"
+  end
+
+  fn main() : Unit do
+    let icon = Html.raw("XXXYYY")
+    let direct = ~H"<button>${icon}</button>"
+    println(IOList.to_string(direct))
+
+    let body = body_partial()
+    let nested = layout(body)
+    println(IOList.to_string(nested))
+  end
+end

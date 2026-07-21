@@ -3347,6 +3347,134 @@ let test_tc_qualified_sig_type_order_independent () =
   Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
     false (has_errors ctx)
 
+(* Same-module precedence: two sibling modules define DISTINCT types that share
+   a constructor name (`Reg`), with different element types, and NEITHER imports
+   the other.  An UNQUALIFIED reference to `Reg` inside each module must resolve
+   to that module's OWN `Reg` — not to the sibling's same-named one.  Because
+   March keys nominal types by bare name, both `Reg`s are the same `TCon("Reg")`
+   at the type level; only the constructors' argument types (`List(Foo)` vs
+   `List(Bar)`) differ.  Before the fix, the bare-name entry in `env.ctors` held
+   a single global winner shared by both modules, so whichever module lost the
+   head saw the sibling's element type ("expected Bar but got Foo").  A module's
+   own definition must outrank an un-imported sibling's. *)
+let test_tc_same_module_ctor_precedence () =
+  let ctx = typecheck {|mod App do
+    mod AMod do
+      type Foo = Foo(Int)
+      type Reg = Reg(List(Foo))
+      fn a_add(r : Reg, n : Int) : Reg do
+        match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+      end
+      fn a_items(r : Reg) : List(Foo) do
+        match r do Reg(items) -> items end
+      end
+    end
+    mod BMod do
+      type Bar = Bar(String)
+      type Reg = Reg(List(Bar))
+      fn b_add(r : Reg, s : String) : Reg do
+        match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+      end
+      fn b_items(r : Reg) : List(Bar) do
+        match r do Reg(items) -> items end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same-module ctor outranks un-imported sibling — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence must NOT override a KNOWN scrutinee type that uniquely
+   identifies the constructor.  `Consumer` locally defines `Local = Reg(Int)` yet
+   pattern-matches a value of sibling `RemoteMod.Remote = Reg(String)` via bare
+   `Reg(s)` with the scrutinee type annotated.  The two types have DISTINCT names
+   (`Local` vs `Remote`), so the expected type uniquely selects `Remote`'s ctor —
+   it must win over same-module precedence, else `s` binds `Int` and unification
+   against the `String` return spuriously fails ("expected String but got Int").
+   Guards the layered [lookup_ctor_in_type_unique]-before-same-module ordering at
+   the pattern site. *)
+let test_tc_expected_type_beats_same_module () =
+  let ctx = typecheck {|mod App do
+    mod RemoteMod do
+      type Remote = Reg(String)
+      fn wrap(s : String) : Remote do Reg(s) end
+    end
+    mod Consumer do
+      type Local = Reg(Int)
+      fn local_val() : Local do Reg(7) end
+      fn use_remote(x : RemoteMod.Remote) : String do
+        match x do Reg(s) -> s end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unique expected type outranks same-module ctor — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence for a genuinely NESTED module.  `Inner` and `Sib` sit
+   two levels deep under a non-entry `Outer`, so their constructors are seeded
+   under the accumulated path key (`Outer.Inner.Reg` / `Outer.Sib.Reg`), which
+   the leaf `current_module` name does not match — resolution relies on the
+   [cap_qual_prefix] accumulated path.  Each nested module's bare `Reg` must
+   still resolve to its own type. *)
+let test_tc_same_module_ctor_precedence_nested () =
+  let ctx = typecheck {|mod Top do
+    mod Outer do
+      mod Inner do
+        type Foo = Foo(Int)
+        type Reg = Reg(List(Foo))
+        fn i_add(r : Reg, n : Int) : Reg do
+          match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+        end
+        fn i_items(r : Reg) : List(Foo) do
+          match r do Reg(items) -> items end
+        end
+      end
+      mod Sib do
+        type Bar = Bar(String)
+        type Reg = Reg(List(Bar))
+        fn s_add(r : Reg, s : String) : Reg do
+          match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+        end
+        fn s_items(r : Reg) : List(Bar) do
+          match r do Reg(items) -> items end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested-module same-module ctor precedence — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence for an OPAQUE type whose module leaf name coincides
+   with another package's regular type name.  `mod Gate` defines `opaque type
+   Gate = Gate(Int,Int,Int)`; a sibling `OtherPkg` defines a distinct regular
+   `type Gate = Gate(Int×5)`.  The opaque module's own module-qualified key
+   `Gate.Gate` shares its string namespace with OtherPkg's `Type.Ctor`
+   disambiguation key (also `Gate.Gate`), so that bucket holds BOTH ctors —
+   [lookup_ctor_same_module]'s uniqueness guard must decline the ambiguous key
+   and let the module's own bare-`Gate` head (seeded by its Pass-2 check, never
+   displaced because an opaque type's private ctor is not prebind-seeded into
+   the bare key) win.  Without the guard, `Gate.Gate`'s order-dependent head
+   resolves to OtherPkg's 5-arg ctor → "Constructor Gate expects 5 argument(s)
+   but I got 3".  (Real instance: bastion `mod Gate` vs depot `mod Depot.Gate`.) *)
+let test_tc_same_module_opaque_ctor_precedence () =
+  (* `OtherPkg` must be seeded AFTER `mod Gate` so its `Type.Ctor` form is the
+     order-dependent head of the shared `Gate.Gate` bucket — the arrangement
+     that reproduces the pollution (declaration order = prebind seed order). *)
+  let ctx = typecheck {|mod Root do
+    mod Gate do
+      opaque type Gate = Gate(Int, Int, Int)
+      fn make(a : Int, b : Int, c : Int) : Gate do Gate(a, b, c) end
+      fn first(g : Gate) : Int do
+        match g do Gate(a, _, _) -> a end
+      end
+    end
+    mod OtherPkg do
+      type Gate = Gate(Int, Int, Int, Int, Int)
+      fn o_make() : Gate do Gate(1, 2, 3, 4, 5) end
+    end
+  end|} in
+  Alcotest.(check bool) "opaque module ctor outranks same-named regular type — no errors"
+    false (has_errors ctx)
+
 (* Regression (2026-07-10): a module must be able to use its OWN constructor
    when a SIBLING module declares a same-named one with a different payload.
    d95fe942's Pass-1 bare-ctor seeding put the later sibling's `Mk` at the
@@ -11790,6 +11918,10 @@ let stdlib_suites =
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
         Alcotest.test_case "sibling ctor: own module wins" `Quick test_tc_sibling_ctor_own_module_wins;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
+        Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
+        Alcotest.test_case "expected type beats same-module" `Quick test_tc_expected_type_beats_same_module;
+        Alcotest.test_case "nested same-module ctor precedence" `Quick test_tc_same_module_ctor_precedence_nested;
+        Alcotest.test_case "opaque same-module ctor precedence" `Quick test_tc_same_module_opaque_ctor_precedence;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;

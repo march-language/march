@@ -33,7 +33,7 @@ This lays out a minimal project:
 ```
 mcount/
 ├── forge.toml          # project manifest
-├── src/
+├── lib/
 │   └── mcount.march    # entry point (has main())
 └── test/
     └── mcount_test.march
@@ -53,7 +53,7 @@ license = ""
 [deps]
 ```
 
-The generated `src/mcount.march` just prints a greeting. We'll replace it.
+The generated `lib/mcount.march` just prints a greeting. We'll replace it.
 
 Run it as-is to confirm the toolchain works:
 
@@ -146,7 +146,7 @@ destructures with a tuple pattern.
 
 ## 5. The full program
 
-Putting it together — replace `src/mcount.march` with:
+Putting it together — replace `lib/mcount.march` with:
 
 ```march
 mod Mcount do
@@ -237,7 +237,7 @@ Running it prints:
 ```
 the: 3
 cat: 2
-sat: 1
+mat: 1
 ```
 
 Since `TopWords.main` works on an inline string literal — no argv, no files — you
@@ -307,18 +307,19 @@ interpreter:
 
 ```sh
 forge build
+# built: .march/build/debug/mcount
 ```
 
 Then run it on a real file:
 
 ```sh
-./mcount src/mcount.march
-# 38 96 947 src/mcount.march
+.march/build/debug/mcount lib/mcount.march
+# 39 128 1036 lib/mcount.march
 
 echo $?      # 0 — success
-./mcount     # no file:  prints usage to stderr, exits 2
+.march/build/debug/mcount     # no file:  prints usage to stderr, exits 2
 echo $?      # 2
-./mcount /no/such/file
+.march/build/debug/mcount /no/such/file
 echo $?      # 1
 ```
 
