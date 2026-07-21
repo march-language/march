@@ -10,6 +10,11 @@
 --       Dom.set_text(el, "0")
 --       Dom.on(el, "click", fn _ -> Dom.set_text(el, "clicked!"))
 --   end
+--
+-- Note: set_timeout/set_interval/on_frame take a zero-arg callback typed
+-- `Unit -> Unit` — pass a 0-arg lambda `fn -> ...`. (The typechecker accepts
+-- `fn -> body` against a `Unit -> Unit` parameter, treating it as a
+-- unit-consuming thunk.)
 
 mod Dom do
   needs Ffi
@@ -80,15 +85,25 @@ mod Dom do
     -- ── Event properties ───────────────────────────────────────────────
     fn dom_event_target(ev: Event)              : Node   = "march_dom_event_target"
     fn dom_event_type(ev: Event)                : String = "march_dom_event_type"
+    fn dom_event_key(ev: Event)                 : String = "march_dom_event_key"
     fn dom_prevent_default(ev: Event)           : Unit   = "march_dom_prevent_default"
     fn dom_stop_propagation(ev: Event)          : Unit   = "march_dom_stop_propagation"
     fn dom_event_x(ev: Event)                   : Int    = "march_dom_event_x"
     fn dom_event_y(ev: Event)                   : Int    = "march_dom_event_y"
+    fn dom_taps(el: Node)                       : List((Int, Int)) = "march_dom_taps"
+    fn dom_key_presses()                        : List(String) = "march_dom_key_presses"
+    fn dom_store_get(key: String)               : Option(String) = "march_dom_store_get"
+    fn dom_store_set(key: String, val: String)  : Unit = "march_dom_store_set"
+    fn dom_pointer_pos(el: Node)                : (Int, Int) = "march_dom_pointer_pos"
+    fn dom_window_size()                        : (Int, Int) = "march_dom_window_size"
 
     -- ── Window ─────────────────────────────────────────────────────────
     fn dom_alert(msg: String)                   : Unit   = "march_dom_alert"
     fn dom_href()                               : String = "march_dom_href"
     fn dom_set_href(url: String)                : Unit   = "march_dom_set_href"
+    -- cb is a zero-arg callback: a 0-arg March lambda `fn -> body` checks
+    -- against a declared `Unit -> Unit` param (the typechecker treats it as a
+    -- unit-consuming thunk), so `fn -> body` is the natural spelling here.
     fn dom_set_timeout(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_timeout"
     fn dom_set_interval(ms: Int, cb: Unit -> Unit) : Unit = "march_dom_set_interval"
     fn dom_request_animation_frame(cb: Unit -> Unit) : Unit = "march_dom_request_animation_frame"
@@ -114,6 +129,9 @@ mod Dom do
   doc "Create a text node containing the given string. Use `append` to attach it to an element."
   fn text_node(text)                   do dom_create_text_node(text) end
 
+  doc "Return a deep clone of `el` (all descendants included), detached from the tree."
+  fn clone(el)                         do dom_clone(el) end
+
   doc "Append `child` as the last child of `parent`. If `child` is already in the tree it is moved."
   fn append(parent, child)             do dom_append_child(parent, child) end
 
@@ -131,6 +149,12 @@ mod Dom do
 
   doc "Return a `List(Node)` of the direct element children of `el` (text nodes excluded)."
   fn children(el)                      do dom_children(el) end
+
+  doc "Return the first element child of `el`, or `None` if `el` has no element children."
+  fn first_child(el)                   do dom_first_child(el) end
+
+  doc "Return the last element child of `el`, or `None` if `el` has no element children."
+  fn last_child(el)                    do dom_last_child(el) end
 
   doc "Remove all child nodes from `el`, leaving it empty."
   fn clear(el)                         do dom_clear_children(el) end
@@ -195,6 +219,9 @@ mod Dom do
   doc "Return the event type string for `ev` (e.g. \"click\", \"input\")."
   fn event_type(ev)                    do dom_event_type(ev) end
 
+  doc "Return the key that triggered a `\"keydown\"`/`\"keyup\"` event (e.g. \"ArrowLeft\", \"a\", \" \" for space)."
+  fn event_key(ev)                     do dom_event_key(ev) end
+
   doc "Prevent the browser's default action for `ev` (e.g. stop a link from navigating, a form from submitting)."
   fn prevent_default(ev)               do dom_prevent_default(ev) end
 
@@ -207,6 +234,24 @@ mod Dom do
   doc "Return the y-coordinate of `ev` relative to the target element (`event.offsetY`)."
   fn event_y(ev)                       do dom_event_y(ev) end
 
+  doc "Drain and return the pointer taps (pointerdown events) on `el` since the last call, as element-relative `(x, y)` integer pairs. The first call installs the buffering listener. Poll this once per animation frame for game input."
+  fn taps(el)                          do dom_taps(el) end
+
+  doc "Drain and return the keyboard keys (keydown `event.key` strings, e.g. \" \", \"ArrowLeft\", \"a\") pressed since the last call. The first call installs a document-level buffering listener which prevents the browser default ONLY for space and arrow keys (so game input doesn't scroll the page). Poll once per animation frame."
+  fn key_presses()                     do dom_key_presses() end
+
+  doc "Read `key` from the browser's localStorage. Returns `None` if the key is absent or storage is unavailable (e.g. private browsing)."
+  fn store_get(key)                    do dom_store_get(key) end
+
+  doc "Write `val` under `key` in the browser's localStorage. Silently does nothing if storage is unavailable."
+  fn store_set(key, val)               do dom_store_set(key, val) end
+
+  doc "The live cursor position over `el` as element-relative `(x, y)` integers, updated by a `mousemove` listener installed on the first call. Defaults to `el`'s center before any movement. Unlike `taps`, this reads the current position rather than draining a buffer."
+  fn pointer_pos(el)                   do dom_pointer_pos(el) end
+
+  doc "The browser window's inner size (`window.innerWidth`/`innerHeight`) in CSS pixels, as `(w, h)`. No devicePixelRatio handling."
+  fn window_size()                     do dom_window_size() end
+
   doc "Show a blocking browser `alert()` dialog with `msg`."
   fn alert(msg)                        do dom_alert(msg) end
 
@@ -216,13 +261,13 @@ mod Dom do
   doc "Navigate to `url` by setting `window.location.href`. This replaces the current page."
   fn navigate(url)                     do dom_set_href(url) end
 
-  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`."
+  doc "Call `cb` once after `ms` milliseconds (non-blocking, runs on the event loop). Equivalent to `setTimeout`. `cb` is a zero-arg callback — pass `fn -> ...`."
   fn set_timeout(ms, cb)               do dom_set_timeout(ms, cb) end
 
-  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM."
+  doc "Call `cb` repeatedly every `ms` milliseconds. Equivalent to `setInterval`. Returns no handle — cancel by keeping a flag in the DOM. `cb` is a zero-arg callback — pass `fn -> ...`."
   fn set_interval(ms, cb)              do dom_set_interval(ms, cb) end
 
-  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations."
+  doc "Schedule `cb` to run before the next browser repaint (`requestAnimationFrame`). Use for smooth 60 fps animations. `cb` is a zero-arg callback — pass `fn -> ...`."
   fn on_frame(cb)                      do dom_request_animation_frame(cb) end
 
 end

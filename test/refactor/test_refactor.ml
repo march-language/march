@@ -126,7 +126,7 @@ let test_bundle_param_object () =
   Alcotest.(check bool) "body uses args.host"      true (contains a "args.host");
   Alcotest.(check bool) "body uses args.port"      true (contains a "args.port");
   Alcotest.(check bool) "call site rewritten (string arg intact)" true
-    (contains b "{ host = \"localhost\", port = 8080, timeout = 30 }")
+    (contains b "{ host: \"localhost\", port: 8080, timeout: 30 }")
 
 let test_bundle_requires_annotations () =
   let root = mk_project [

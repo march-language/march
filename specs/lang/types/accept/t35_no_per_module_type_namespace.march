@@ -1,25 +1,33 @@
 -- The no-per-module-type-namespace DESIGN POINT (widening slice 2, Task 3) --
 -- documented as an intentional design fact, NOT a bug (see core-march-types.md
 -- §2.5). Two sibling modules `A` and `B` each declare their OWN type named
--- `Foo`. Because types export/resolve by BARE name only (`typecheck.ml:6899-
--- 6900`'s "referred to by their bare name" design, and the `9001e4c0`
--- bare/qualified canonicalization it motivates), `A.Foo` and `B.Foo` are
--- literally the SAME nominal `TCon("Foo", [])` -- there is no per-module type
--- identity to keep them apart. `take_a` is annotated with the QUALIFIED
--- `A.Foo`, yet a `B.Foo` value (`B.make()`, a totally different constructor
--- with a different payload shape) is silently accepted with no diagnostic.
+-- `Foo`. Because types export/resolve by BARE name only, `A.Foo` and `B.Foo`
+-- are literally the SAME nominal `TCon("Foo", [])` -- there is no per-module
+-- type identity to keep them apart. `take_a` is annotated with the QUALIFIED
+-- `A.Foo`, yet a `B.Foo` value (`B.make()`, a different constructor with a
+-- different payload shape) is silently accepted with no diagnostic.
+--
+-- RECONCILED 2026-07-10 (post-merge of the order-independent-resolution work,
+-- d95fe942): the two sibling types now use DISTINCT constructor names
+-- (`MkA`/`MkB`). The original same-named-`Mk` version of this program no
+-- longer typechecks -- NOT because per-module type identity appeared (it did
+-- not; this program still passes), but because a same-named constructor in a
+-- sibling module now shadows a module's OWN constructor inside its own body
+-- (`Mk(1)` in `A.make` resolved against B's `Mk(String)`). That new
+-- cross-module ctor-shadowing behavior is filed as its own finding in
+-- specs/todos.md ("sibling-module constructor shadowing").
 --
 -- Value-witnessed: prints `7` -- proving the call actually typechecks AND
 -- runs (not merely `--check`-clean), passing a `B.Foo`-shaped value where an
 -- `A.Foo` annotation was written.
 mod Main do
   mod A do
-    type Foo = Mk(Int)
-    fn make() : Foo do Mk(1) end
+    type Foo = MkA(Int)
+    fn make() : Foo do MkA(1) end
   end
   mod B do
-    type Foo = Mk(String)
-    fn make() : Foo do Mk("x") end
+    type Foo = MkB(String)
+    fn make() : Foo do MkB("x") end
   end
 
   fn take_a(_x : A.Foo) : Int do 7 end

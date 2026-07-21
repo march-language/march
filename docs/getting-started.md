@@ -111,38 +111,39 @@ Or via forge:
 dune exec forge -- interactive
 ```
 
-The REPL loads the standard library and drops you into a prompt:
+The REPL loads the standard library and drops you into a numbered prompt:
 
 ```
-march>
+march(1)>
 ```
 
 Try some expressions:
 
 ```
-march> 1 + 1
-2 : Int
+march(1)> 1 + 1
+= 2
 
-march> "Hello" ++ " " ++ "March"
-"Hello March" : String
+march(2)> "Hello" ++ " " ++ "March"
+= "Hello March"
 
-march> let xs = [1, 2, 3, 4, 5]
-[1, 2, 3, 4, 5] : List(Int)
+march(3)> let xs = [1, 2, 3, 4, 5]
+val xs = [1, 2, 3, 4, 5]
 
-march> xs |> List.map(fn x -> x * x)
-[1, 4, 9, 16, 25] : List(Int)
+march(4)> xs |> List.map(fn x -> x * x)
+= [1, 4, 9, 16, 25]
 ```
 
 The last result is always bound to `v`:
 ```
-march> 42 * 2
-84 : Int
+march(5)> 42 * 2
+= 84
 
-march> v + 1
-85 : Int
+march(6)> v + 1
+= 85
 ```
 
-See the [REPL guide](repl.md) for all commands.
+Run `:set +t` to also print each result's inferred type (`:set -t` to turn it
+back off) — see the [REPL guide](repl.md) for the full command list.
 
 ---
 

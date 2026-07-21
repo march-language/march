@@ -1181,11 +1181,11 @@ expression), it produces `ELetQ (p, e, EBlock ([], sp), sp)`
 lambda-body call site) — an empty `EBlock` as the continuation. This parses
 completely successfully; menhir never rejects it. The rejection happens
 later, in `Typecheck.infer_expr`'s `ELetQ` case
-(`lib/typecheck/typecheck.ml:4174–4188`): it pattern-matches the
+(`lib/typecheck/typecheck.ml:4651–4665`; re-grep `ELetQ`): it pattern-matches the
 continuation, and specifically when it sees `Ast.EBlock ([], _)` — the
 empty-continuation shape `fold_letq` produces exactly when `let?` was last —
 it raises `` `let?` cannot be the last expression in a block. `` (full
-message includes a suggested fix, `typecheck.ml:4181–4187`) and returns
+message includes a suggested fix, `typecheck.ml:4658–4663`) and returns
 `TError` rather than unifying a result type. So `march --check` still exits
 1 for this program (typecheck failure, not codegen/eval failure), but the
 diagnostic is a **type** error, not a **parse** error — worth stating
@@ -1198,7 +1198,7 @@ the outer `fn`/checking the token stream is well-formed — the failure
 surfaces only once type inference visits the `ELetQ` node). This is a
 deliberate, documented design choice (the `fold_letq` doc comment says so
 outright: "the typechecker flags the empty continuation with a clear
-error"), not a parser gap to file.
+error"), not a parser gap to file. The positive companion — a well-formed multi-`let?` block that DOES parse and run — is [`parse/p25_letq_block_fold.march`](grammar/parse/p25_letq_block_fold.march) (a two-step chain printing `70`, witnessing that `fold_letq` nests the continuations right-associatively).
 
 ## 6. Patterns
 
@@ -2381,12 +2381,19 @@ obsolete-`pub`-keyword and one-`mod`-per-file reachability/rejection
 findings. A later pass (fully resolving §9's DSL declaration forms) added
 eight more (`p18`–`p22`, `r11`–`r13`) anchoring `actor`/`supervise`,
 `app`/`on_start`/`Supervisor.spec`, `protocol`/`choose`, `transitions`, and
-the capability-directive forms — 35 programs total (22 `parse/`, 13
-`reject/`) as of this pass.
+the capability-directive forms. Two later passes added the §7.3 curried-call
+juxtaposition witnesses (`p23`–`p24`, `r14`) and a slice-8 companion
+(`p25`, the positive `let?`-block-fold parse witness for §5.4) —
+**39 programs total (25 `parse/`, 14 `reject/`)** as of this pass.
 
 **CI-wired** as a separate slow lane, `grammar-check` (`test/dune`), mirroring
 the `types-check` alias `specs/lang/types/` already uses — not part of
-`runtest`/`oracle`, run directly with `dune build @grammar-check`.
+`runtest`/`oracle`, run directly with `dune build @grammar-check`. The corpus
+count is now guarded against drift by `scripts/check-docs.sh` Check C (which
+covers this INDEX alongside the golden and types corpora), so the three
+authoritative count sites in `grammar/INDEX.md` (title ranges, the
+`currently N/N` run line, the `N programs total` footer) cannot silently
+diverge from the on-disk file count again.
 
 ## Known parser findings
 

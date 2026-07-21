@@ -31,16 +31,18 @@ static const march_cap_entry_t march_cap_lattice[] = {
   { "IO.Process", "IO" },
   { "IO.Clock", "IO" },
   { "IO.Random", "IO" },
+  { "IO.Signal", "IO" },
   { "IO.Database", "IO.NetConnect" },
   { "IO.Spawn", "IO" },
   { "IO.Mut", "IO" },
   { "IO.Telemetry", "IO" },
   { "IO.NetConnect.TLS", "IO.NetConnect" },
+  { "IO.WebSocket", "IO.NetConnect" },
   { "IO.Foreign", "IO" },
   { "IO.Foreign.Blocking", "IO.Foreign" },
 };
 
-const int march_cap_lattice_size = 18;
+const int march_cap_lattice_size = 20;
 
 /* Looks up `path` in the static table; returns its parent (or NULL if
  * `path` is a root, or if `path` is not present in the table at all). */

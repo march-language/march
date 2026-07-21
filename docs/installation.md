@@ -165,8 +165,8 @@ forge new my_project
 ```
 _build/default/
 ├── bin/main.exe          # march compiler / interpreter
-├── forge/bin/forge.exe   # forge build tool
-└── lsp/bin/march_lsp.exe # LSP server (for editor integration)
+├── forge/bin/main.exe    # forge build tool
+└── lsp/bin/main.exe      # LSP server (for editor integration)
 ```
 
 ---

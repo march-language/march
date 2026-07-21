@@ -57,6 +57,7 @@ mod Canvas do
     fn canvas_bezier_curve_to(ctx: Context, cp1x: Float, cp1y: Float, cp2x: Float, cp2y: Float, x: Float, y: Float) : Unit = "march_canvas_bezier_curve_to"
     fn canvas_fill(ctx: Context)                                    : Unit = "march_canvas_fill"
     fn canvas_stroke(ctx: Context)                                  : Unit = "march_canvas_stroke"
+    fn canvas_fill_noise_circle(ctx: Context, cx: Float, cy: Float, radius: Float, alpha: Float) : Unit = "march_canvas_fill_noise_circle"
 
     -- ── Text ───────────────────────────────────────────────────────────
     fn canvas_fill_text(ctx: Context, text: String, x: Float, y: Float)   : Unit = "march_canvas_fill_text"
@@ -139,6 +140,9 @@ mod Canvas do
 
   doc "Stroke the current path's outline with the current stroke style."
   fn stroke(ctx)                       do canvas_stroke(ctx) end
+
+  doc "Fill a circle centered at `(cx, cy)` with radius `radius` using a tileable, world-aligned value-noise texture (a soft cloudy/wispy look), faded to transparent at the edge. `alpha` caps the overall opacity. The noise tile is generated once and cached, so repeated calls are cheap."
+  fn fill_noise_circle(ctx, cx, cy, radius, alpha) do canvas_fill_noise_circle(ctx, cx, cy, radius, alpha) end
 
   doc "Draw `text` filled with the current fill style, baseline at `(x, y)`."
   fn fill_text(ctx, text, x, y)        do canvas_fill_text(ctx, text, x, y) end

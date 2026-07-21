@@ -1,0 +1,23 @@
+-- Regression: interface DEFAULT method that uses its own arguments must be
+-- compiled with those arguments flowing through.  Item 283: `inject_defaults`
+-- previously wrapped the default lambda in a 0-param fn that merely RETURNED
+-- the closure; a 2-arg call site then dropped the args and used the closure
+-- pointer as the result, so `neqx` yielded the same value for every input in
+-- compiled code (the interpreter applied the closure and stayed correct).
+mod Main do
+  interface Eqx(a) do
+    fn eqx : a -> a -> Bool
+    fn neqx : a -> a -> Bool do fn (x, y) -> not(eqx(x, y)) end
+  end
+  type P = P(Int)
+  impl Eqx(P) do
+    fn eqx(x, y) do
+      match x do P(a) -> (match y do P(b) -> a == b end) end
+    end
+  end
+  fn main() : () do
+    println(bool_to_string(neqx(P(1), P(2))))
+    println(bool_to_string(neqx(P(3), P(3))))
+    println(bool_to_string(neqx(P(5), P(9))))
+  end
+end

@@ -1,0 +1,34 @@
+-- Regression (item 45): NativeFloatArr <-> List(Float) bridges must box/unbox.
+-- `native_float_arr_to_list` memcpy'd raw IEEE-754 doubles into the Cons element
+-- slot, but compiled `List(Float)` stores BOXED floats there (a uniform
+-- pointer-width word), so a later unbox dereferenced the raw double as a
+-- heap-float pointer → SIGSEGV at (float-bits + 16).  The inverse
+-- `native_float_arr_from_list` symmetrically read the boxed pointer as a raw
+-- double, filling native arrays with garbage.  Fix boxes in to_list and unboxes
+-- in from_list.  Exercises: native->list->box-into-ADT->unbox, and the
+-- list->native->list round-trip + sum.
+mod Main do
+  type V = IV(Int) | FV(Float)
+
+  fn cmp(a : V, b : V) : Int do
+    match a do
+      FV(x) -> (match b do FV(y) -> if x > y do 1 else 0 end | _ -> 0 end)
+      _ -> 0
+    end
+  end
+
+  fn main() : () do
+    -- native float -> List(Float) -> box into FV -> unbox & compare
+    let b = match native_float_arr_to_list(native_float_arr_make(1, 50.0)) do
+      Cons(f, _) -> FV(f)
+      _ -> IV(0)
+    end
+    println(int_to_string(cmp(FV(60.0), b)))   -- 1 (60 > 50)
+    println(int_to_string(cmp(FV(40.0), b)))   -- 0 (40 < 50)
+
+    -- round-trip: List(Float) -> NativeFloatArr -> List(Float)
+    let arr = NativeArray.from_list_float(Cons(1.5, Cons(2.5, Cons(3.0, Nil))))
+    println(float_to_string(NativeArray.sum_float(arr)))   -- 7.
+    println(to_string(NativeArray.to_list_float(arr)))     -- [1.5, 2.5, 3.]
+  end
+end

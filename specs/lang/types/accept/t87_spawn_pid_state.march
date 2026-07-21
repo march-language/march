@@ -1,0 +1,28 @@
+mod Main do
+  -- `spawn(Actor)` yields `Pid[state]` (NOT `Pid[<fresh var>]`) -- the actor's
+  -- state record type propagates to the observable Pid.  Fixed 2026-07-18
+  -- (finding 18, core-march-types.md §2.6.3): the ESpawn arm now reaches the
+  -- actor's `Pid[state_ty]` vars binding (bound by the DActor arm) directly by
+  -- name.  Two same-actor pids therefore share ONE concrete Pid type: putting
+  -- both in one list needs no opportunistic unification, and `is_alive` /
+  -- `kill` (`Pid(a) -> …`) instantiate `a` at the state record type.
+  -- The cross-actor confusion this typing now catches is reject/t81.
+  actor Counter do
+    state { count : Int }
+    init  { count: 0 }
+
+    on Inc() do
+      { count: state.count + 1 }
+    end
+  end
+
+  fn main() : Unit do
+    let p1 = spawn(Counter)
+    let p2 = spawn(Counter)
+    let both = Cons(p1, Cons(p2, Nil))
+    match both do
+      Cons(h, _) -> if is_alive(h) do kill(h) else () end
+      Nil        -> ()
+    end
+  end
+end

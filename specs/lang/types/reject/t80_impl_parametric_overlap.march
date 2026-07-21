@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: Overlapping implementation
+-- Coherence Stage 2 (parametric overlap): `impl Descr(Box(a))` covers every
+-- `Box(_)`, so a more-specific `impl Descr(Box(Int))` OVERLAPS it (a ↦ Int) —
+-- two impls could match `Box(1)` and the backends would disagree on which runs.
+-- Rejected via `types_overlap` (unifiability), which `canonical_impl_key`
+-- exact-equality (Stage 1) did not catch. Accept twin: t85.
+mod M do
+  interface Descr(a) do
+    fn descr : a -> String
+  end
+  type Box(a) = Box(a)
+  impl Descr(Box(a)) do
+    fn descr(_self) do "box" end
+  end
+  impl Descr(Box(Int)) do
+    fn descr(_self) do "box-int" end
+  end
+  fn main() do
+    println(descr(Box(1)))
+  end
+end

@@ -18,10 +18,10 @@ mod IslandPerfServer do
 
 actor Counter do
   state { count : Int }
-  init { count = 0 }
+  init { count: 0 }
 
   on Inc() do
-    { state with count = state.count + 1 }
+    { state with count: state.count + 1 }
   end
 end
 

@@ -1,0 +1,10 @@
+-- Negative golden: a builtin with no JS-target mapping must be a COMPILE
+-- error (pinned diagnostic on stderr), not a silent bare-call emit that
+-- throws ReferenceError at runtime. int_max_value is doubly unsupported:
+-- its value (2^62 - 1) is not representable in the JS target's double-backed
+-- Int, so it gets the tailored message.
+mod JsUnmappedBuiltin do
+  fn main() : Unit do
+    println(int_to_string(int_max_value(())))
+  end
+end

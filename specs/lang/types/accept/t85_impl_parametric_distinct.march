@@ -1,0 +1,20 @@
+-- Coherence Stage 2 (accept): `impl Descr(Box(a))` + `impl Descr(Bag(a))` have
+-- DIFFERENT head constructors (Box vs Bag), so they do NOT unify — no overlap.
+-- Guards that `types_overlap` requires the head ctor to match.
+mod M do
+  interface Descr(a) do
+    fn descr : a -> String
+  end
+  type Box(a) = Box(a)
+  type Bag(a) = Bag(a)
+  impl Descr(Box(a)) do
+    fn descr(_self) do "box" end
+  end
+  impl Descr(Bag(a)) do
+    fn descr(_self) do "bag" end
+  end
+  fn main() do
+    println(descr(Box(1)))
+    println(descr(Bag("x")))
+  end
+end

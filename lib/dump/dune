@@ -1,4 +1,4 @@
 (library
  (name march_dump)
- (modules dump)
+ (modules dump ast_json)
  (libraries march_ast march_tir march_typecheck unix))

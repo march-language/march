@@ -617,10 +617,18 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     do { crc = connect(fd, res->ai_addr, res->ai_addrlen); }
     while (crc < 0 && errno == EINTR);   /* preemption signal — retry */
     if (crc < 0) {
+        int saved_errno = errno;
         march_unblock_preempt(&saved);
         close(fd);
         freeaddrinfo(res);
-        void *s = march_string_lit("tcp_connect: connection refused", 31);
+        /* Surface the real errno instead of a hardcoded guess — "connection
+         * refused" here previously meant any connect() failure, which hid
+         * the actual cause (e.g. EHOSTUNREACH/EPERM from macOS's Local
+         * Network TCC permission, vs a genuine ECONNREFUSED). */
+        char msg[96];
+        int msg_len = snprintf(msg, sizeof(msg), "tcp_connect: %s",
+                                strerror(saved_errno));
+        void *s = march_string_lit(msg, msg_len);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
         *(void **)((char *)r + 16) = s;
@@ -1727,7 +1735,11 @@ typedef struct {
 } http_pool_t;
 
 static http_pool_t g_pool;
-_Atomic int g_http_shutdown = 0;  /* set by signal handler — also used by march_http_evloop.c */
+/* Strong definition of the graceful-shutdown flag (also used by
+ * march_http_evloop.c and, via a weak fallback, march_runtime.c — which needs
+ * the symbol in the REPL/JIT runtime-only build where march_http.c is absent).
+ * This strong def overrides that weak one whenever both are linked. */
+_Atomic int g_http_shutdown = 0;  /* set by signal handlers to request shutdown */
 
 static void http_signal_handler(int sig) {
     (void)sig;

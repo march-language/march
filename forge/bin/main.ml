@@ -12,7 +12,7 @@ let known_builtin_names =
     "interactive"; "i"; "clean"; "deps"; "add"; "publish"; "retire";
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
-    "licenses"; "tree"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
+    "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "ffi"; "fix"; "help";
     "completions"; "deploy"; "hot-reload" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
@@ -762,6 +762,11 @@ let tree_cmd =
   Cmd.v (Cmd.info "tree" ~doc:"Print the project dependency tree")
     Term.(const (fun () -> handle (Cmd_tree.run_tree ())) $ const ())
 
+let outdated_cmd =
+  Cmd.v (Cmd.info "outdated"
+           ~doc:"Show dependencies that have a newer version available in the registry")
+    Term.(const (fun () -> handle (Cmd_outdated.run ())) $ const ())
+
 let why_cmd =
   let name =
     Arg.(required & pos 0 (some string) None &
@@ -1158,7 +1163,7 @@ let () =
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd; retire_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
-      licenses_cmd; tree_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
+      licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
       cap_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; completions_cmd; help_cmd ]
   in
   let main =

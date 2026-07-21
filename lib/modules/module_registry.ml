@@ -34,6 +34,15 @@ let loading : (string, unit) Hashtbl.t = Hashtbl.create 4
 (** Stdlib directory path, set by the compiler entry point. *)
 let _stdlib_dir : string option ref = ref None
 
+(** Lazily-built index of declared module name -> file path for every
+    `.march` file directly inside the stdlib directory, keyed by the name
+    after `mod ` on that file's first top-level module declaration (see the
+    "one mod per file" convention).  Fallback for module names whose
+    CamelCase->snake_case filename guess ([module_name_to_filename]) doesn't
+    match the real file — e.g. all-caps acronym module names like `RRB`
+    (declared in `rrb_vec.march`), which the guess mangles to `r_r_b.march`. *)
+let _stdlib_index : (string, string) Hashtbl.t option ref = ref None
+
 (* ---- Public API ---- *)
 
 let register name exports =
@@ -51,7 +60,8 @@ let set_stdlib_dir dir =
 let reset () =
   Hashtbl.clear registry;
   Hashtbl.clear loading;
-  _stdlib_dir := None
+  _stdlib_dir := None;
+  _stdlib_index := None
 
 (* ---- Stdlib file discovery ---- *)
 
@@ -69,17 +79,83 @@ let module_name_to_filename name =
   Buffer.add_string buf ".march";
   Buffer.contents buf
 
+let read_file path =
+  let ic = open_in_bin path in
+  let n = in_channel_length ic in
+  let b = Bytes.create n in
+  really_input ic b 0 n;
+  close_in ic;
+  Bytes.to_string b
+
+(** A real stdlib directory always contains [prelude.march] (every
+    [stdlib_file_list] in bin/main.ml starts with it). Gating on that,
+    rather than just "a directory named stdlib exists", avoids a false
+    match on an unrelated same-named directory — e.g. `test/stdlib/`
+    holds the stdlib test suite's `test_*.march` fixtures, not the real
+    stdlib, and `Sys.file_exists "stdlib"` alone can't tell them apart
+    when the compiler is invoked with CWD = `test/`. *)
+let looks_like_stdlib_dir d =
+  Sys.file_exists d && Sys.is_directory d
+  && Sys.file_exists (Filename.concat d "prelude.march")
+
 let find_stdlib_dir () =
   match !_stdlib_dir with
   | Some d -> Some d
   | None ->
     let candidates = [
-      "stdlib";
+      (* Exe-relative candidates first — unambiguous regardless of CWD. *)
       Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
       Filename.concat (Filename.dirname Sys.executable_name) "../../stdlib";
       Filename.concat (Filename.dirname Sys.executable_name) "../../../stdlib";
+      (* CWD-relative fallback last — works when invoked from the repo root. *)
+      "stdlib";
     ] in
-    List.find_opt (fun d -> Sys.file_exists d && Sys.is_directory d) candidates
+    List.find_opt looks_like_stdlib_dir candidates
+
+(** Scan the first top-level `mod <Name> do` declaration out of a `.march`
+    source string, without a full parse — just enough to index the file by
+    its real declared module name. *)
+let top_level_mod_name_of_source src =
+  let lines = String.split_on_char '\n' src in
+  List.find_map (fun line ->
+    let line = String.trim line in
+    let prefix = "mod " in
+    if String.length line > String.length prefix
+       && String.sub line 0 (String.length prefix) = prefix then
+      let rest = String.sub line (String.length prefix)
+          (String.length line - String.length prefix) in
+      match String.index_opt rest ' ' with
+      | Some i -> Some (String.sub rest 0 i)
+      | None -> None
+    else None
+  ) lines
+
+(** Build (once, cached) an index of every `.march` file directly inside
+    [dir], keyed by its real declared module name (see
+    [top_level_mod_name_of_source]) — a fallback for module names whose
+    naming-convention filename guess doesn't exist (e.g. acronym names). *)
+let build_stdlib_index dir =
+  let tbl = Hashtbl.create 128 in
+  (try
+     Array.iter (fun name ->
+       if Filename.check_suffix name ".march" then
+         let path = Filename.concat dir name in
+         try
+           match top_level_mod_name_of_source (read_file path) with
+           | Some mname -> if not (Hashtbl.mem tbl mname) then Hashtbl.add tbl mname path
+           | None -> ()
+         with Sys_error _ -> ()
+     ) (Sys.readdir dir)
+   with Sys_error _ -> ());
+  tbl
+
+let stdlib_index dir =
+  match !_stdlib_index with
+  | Some t -> t
+  | None ->
+    let t = build_stdlib_index dir in
+    _stdlib_index := Some t;
+    t
 
 let find_stdlib_file mod_name =
   match find_stdlib_dir () with
@@ -87,7 +163,8 @@ let find_stdlib_file mod_name =
   | Some dir ->
     let fname = module_name_to_filename mod_name in
     let path = Filename.concat dir fname in
-    if Sys.file_exists path then Some path else None
+    if Sys.file_exists path then Some path
+    else Hashtbl.find_opt (stdlib_index dir) mod_name
 
 (* ---- Extracting exports from parsed declarations ---- *)
 
@@ -137,14 +214,6 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
   { me_name = mod_name; me_entries = entries }
 
 (* ---- Loading and parsing ---- *)
-
-let read_file path =
-  let ic = open_in_bin path in
-  let n = in_channel_length ic in
-  let b = Bytes.create n in
-  really_input ic b 0 n;
-  close_in ic;
-  Bytes.to_string b
 
 let parse_file path src =
   let lexbuf = Lexing.from_string src in

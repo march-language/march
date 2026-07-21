@@ -1,0 +1,27 @@
+mod Main do
+  -- Exhaustiveness, local-shadow of an `always_linear` stdlib name — the ctor
+  -- half of the L4 fix (2026-07-17). A module declaring its OWN `type Handle`
+  -- with its own constructor `H` must match exhaustively on `H(_)` alone. Before
+  -- the fix, `ctors_for_type` gathered every constructor whose BARE `ci_type`
+  -- string-equalled `Handle` — merging stdlib's same-named `type Handle`'s
+  -- constructor into the user type's expected universe — so `match x do H(n) ->
+  -- .. end` spuriously warned `Non-exhaustive pattern match — missing case:
+  -- Handle(_)`. Constructors now carry `ci_module`; when the current module
+  -- declares its own same-named type, the exhaustiveness universe is restricted
+  -- to that module's own constructors (a genuine cross-module clash stays
+  -- merged, the conservative behavior). Paired with the linearity half in
+  -- accept/t81. First slice of module-qualified ctor identity; see
+  -- core-march-types.md §2.9.5 and
+  -- specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4).
+  type Handle = H(Int)
+
+  fn unwrap(x : Handle) : Int do
+    match x do
+      H(n) -> n
+    end
+  end
+
+  fn main() : () do
+    println(int_to_string(unwrap(H(9))))
+  end
+end

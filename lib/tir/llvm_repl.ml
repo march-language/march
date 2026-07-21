@@ -314,14 +314,8 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
      results (B11). *)
   let fn_llvm_name = Llvm_ctx.llvm_name (Llvm_builtins.mangle_extern fn.Tir.fn_name) in
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
-  let nparams = List.length fn.Tir.fn_params in
   let target_ret = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
   let param_tys = List.map (fun v -> Llvm_ctx.llvm_ty v.Tir.v_ty) fn.Tir.fn_params in
-  let all_params = "ptr" :: param_tys in
-  let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
-  let all_arg_decls = "%_clo" :: arg_names in
-  let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
-  let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
   (* Same check-then-add emitted_wraps guard as the other two clo_wrap_define
      call sites: the fn is registered in ctx.top_fns BEFORE emit_fn above, so
      a body that references ITSELF as a first-class value (e.g.
@@ -331,7 +325,7 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
   if not (Hashtbl.mem ctx.Llvm_ctx.emitted_wraps wrap_name) then begin
     Hashtbl.add ctx.Llvm_ctx.emitted_wraps wrap_name ();
     Buffer.add_string ctx.Llvm_ctx.extra_fns
-      (Llvm_calls.clo_wrap_define wrap_name decl_str target_ret fn_llvm_name call_args)
+      (Llvm_calls.clo_wrap_define wrap_name param_tys target_ret fn_llvm_name)
   end;
   (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in

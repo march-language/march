@@ -1,0 +1,26 @@
+mod Main do
+  -- `let?` Result-propagation operational witness (core-march.md §4.13, widening
+  -- slice 8). A two-step `let?` chain: `chain(5)` succeeds through both steps
+  -- (Ok path, E-LetQ-Ok twice) and prints `ok 70`; `chain(-1)` fails the FIRST
+  -- step, so the second `let?` never runs (E-LetQ-Err short-circuits, returning
+  -- the Err verbatim) and prints `err neg`. Deterministic, no scheduler — the
+  -- Ok/Err propagation is byte-identical interpreted vs compiled.
+  fn step(x : Int) : Result(Int, String) do
+    if x > 0 do Ok(x + 1) else Err("neg") end
+  end
+  fn chain(x : Int) : Result(Int, String) do
+    let? a = step(x)
+    let? b = step(a)
+    Ok(b * 10)
+  end
+  fn main() do
+    match chain(5) do
+      Ok(v)  -> println("ok " ++ int_to_string(v))
+      Err(e) -> println("err " ++ e)
+    end
+    match chain(-1) do
+      Ok(v)  -> println("ok " ++ int_to_string(v))
+      Err(e) -> println("err " ++ e)
+    end
+  end
+end

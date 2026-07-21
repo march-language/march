@@ -28,13 +28,16 @@ mod CanvasDemo do
     Canvas.fill_text(ctx, "March Canvas Demo", 20.0, 100.0)
   end
 
-  -- Exercises translate/rotate/save/restore with a static rotated bar.
-  -- (Not animated via Dom.on_frame: that extern currently can't be called
-  -- with a zero-arg lambda — see the "Fix Dom.on_frame" follow-up task.)
-  fn draw_rotated_bar(ctx) : Unit do
+  -- Exercises translate/rotate/save/restore with a spinning bar, animated
+  -- via Dom.on_frame. The callback takes one ignored Int argument
+  -- (`fn _ -> ...`) — see stdlib/dom.march's module doc.
+  fn tick(ctx, angle) : Unit do
+    Canvas.set_fill_style(ctx, "#1a1a2e")
+    Canvas.fill_rect(ctx, 130.0, 130.0, 220.0, 140.0)
+
     Canvas.save(ctx)
     Canvas.translate(ctx, 240.0, 200.0)
-    Canvas.rotate(ctx, 0.4)
+    Canvas.rotate(ctx, angle)
     Canvas.set_fill_style(ctx, "#9b59b6")
     Canvas.fill_rect(ctx, -60.0, -8.0, 120.0, 16.0)
     Canvas.restore(ctx)
@@ -43,6 +46,8 @@ mod CanvasDemo do
     Canvas.begin_path(ctx)
     Canvas.arc(ctx, 240.0, 200.0, 6.0, 0.0, 6.283185307179586)
     Canvas.fill(ctx)
+
+    Dom.on_frame(fn _ -> tick(ctx, angle + 0.03))
   end
 
   fn draw_tap_marker(ctx, ev) : Unit do
@@ -70,9 +75,9 @@ mod CanvasDemo do
           None -> println("2d context unavailable")
           Some(ctx) ->
             draw_static_scene(ctx)
-            draw_rotated_bar(ctx)
             load_and_draw_sprite(ctx)
             Dom.listen(node, "pointerdown", fn ev -> draw_tap_marker(ctx, ev))
+            Dom.on_frame(fn _ -> tick(ctx, 0.0))
         end
     end
   end

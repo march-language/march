@@ -3,8 +3,8 @@
 -- nested if's else side), not every path.  The current path-INSENSITIVE
 -- approximation still treats the scrutinee as borrowed on this branch,
 -- keeping br_vars alive on both sub-paths (a bounded, intentional leak on
--- the true side rather than a path-sensitive free that risks a UAF, per
--- the sort_by regression this documents).
+-- the true side rather than a path-sensitive free that risks a UAF for the
+-- genuine single-sub-path case; see specs/perceus-invariants.md §6).
 mod ScrutineeBorrowedConservatism do
   fn first_or_recheck(xs : List(Int), flag : Bool) : Int do
     match xs do

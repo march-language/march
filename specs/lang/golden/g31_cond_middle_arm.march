@@ -7,10 +7,11 @@ mod Main do
   -- (`s > 89`) false and the SECOND (`s > 69`) true, so the MIDDLE arm is
   -- selected — earlier false arms are skipped, later arms (including the
   -- terminal `true` catch-all) are never consulted once one is selected.
-  -- (The thresholds use `>` rather than `>=`: a `>=` in an ECond arm currently
-  -- confuses the token filter's arm-boundary lookahead and fails to parse —
-  -- an out-of-scope parser gotcha, routed around here since middle-arm
-  -- selection is what this program exercises, not the comparison operator.)
+  -- (The thresholds use `>` rather than `>=` for historical reasons — a `>=` in
+  -- an ECond arm USED to confuse the token filter's arm-boundary lookahead and
+  -- fail to parse (item 110). That is now FIXED; `>=`/`<=` in an ECond arm parse
+  -- fine, witnessed by grammar `parse/p26_cond_arm_ge_le`. This golden keeps `>`
+  -- since middle-arm selection, not the operator, is what it exercises.)
   fn grade(s) do
     match do
       s > 89 -> "A"

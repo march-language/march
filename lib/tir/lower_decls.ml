@@ -75,6 +75,106 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
   in
   rename_fn SSet.empty fn
 
+(* ── Shadow uniquification (alpha-rename of shadowed local binders) ── *)
+
+(** Make every local binder name within a function UNIQUE by alpha-renaming
+    any binder that SHADOWS a name already in scope to a fresh name
+    ([orig ^ "$sh" ^ N]).  References within the shadowed binder's scope are
+    rewritten to match.
+
+    Why this is necessary — the lowering CPS builds a block like
+    [let x = 10 ; let x = x + 5 ; int_to_string(x)] into a right-nested chain
+    of [ELet]s that reuse the SOURCE name verbatim:
+        let x : Int = 10 in
+        let x : Int = +(x, 5) in
+        int_to_string(x)
+    The tree is structurally correct (proper lexical nesting), and the native
+    codegen ([llvm_emit]) copes because it renames colliding alloca slots.
+    But every NAME-BASED TIR pass is vulnerable to capture: copy-propagation
+    ([cprop]/[fold]) records [x -> 10] from the OUTER binding and substitutes
+    it into [int_to_string(x)] — whose [x] semantically refers to the INNER
+    binding — folding the program to [int_to_string(10)] (prints 10, not 15).
+    The [--target js] backend independently emits nested [const x = (… x …)]
+    blocks that hit the temporal-dead-zone (TDZ) on the self-reference.
+
+    Making binder names unique at the end of lowering fixes the whole class at
+    once (cprop, fold, inline, dce, and the JS [const] emitter) and aligns the
+    compiled backends with the interpreter's lexical scoping.
+
+    Minimal by design: a binder that does NOT shadow keeps its original name,
+    so non-shadowing code (the overwhelming majority) is byte-for-byte
+    unchanged and only genuinely-shadowing programs shift in TIR snapshots. *)
+let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
+  let module SMap = Map.Make (String) in
+  let counter = ref 0 in
+  let fresh (base : string) : string =
+    incr counter; Printf.sprintf "%s$sh%d" base !counter in
+  (* env maps a source name to the unique TIR name currently in scope. *)
+  let resolve env name = match SMap.find_opt name env with Some n -> n | None -> name in
+  let rename_var env (v : Tir.var) : Tir.var = { v with Tir.v_name = resolve env v.Tir.v_name } in
+  let rename_atom env = function
+    | Tir.AVar v -> Tir.AVar (rename_var env v)
+    | a -> a in
+  (* Introduce a binder: if its name is already bound in [env] it shadows, so
+     give it a fresh unique name; otherwise keep it.  Returns the (possibly
+     renamed) var and the extended env for the binder's scope. *)
+  let intro env (v : Tir.var) : Tir.var * 'a =
+    if SMap.mem v.Tir.v_name env then
+      let nn = fresh v.Tir.v_name in
+      ({ v with Tir.v_name = nn }, SMap.add v.Tir.v_name nn env)
+    else
+      (v, SMap.add v.Tir.v_name v.Tir.v_name env) in
+  let intro_all env (vs : Tir.var list) : Tir.var list * 'a =
+    let env', vs' =
+      List.fold_left (fun (env, acc) v ->
+          let v', env' = intro env v in (env', v' :: acc)) (env, []) vs in
+    (List.rev vs', env') in
+  let rec go env = function
+    | Tir.EAtom a        -> Tir.EAtom (rename_atom env a)
+    | Tir.EApp (v, args) -> Tir.EApp (rename_var env v, List.map (rename_atom env) args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom env f, List.map (rename_atom env) args)
+    | Tir.ELet (v, e1, e2) ->
+      (* e1 is in the OUTER scope; the binder is visible only in e2. *)
+      let e1' = go env e1 in
+      let v', env' = intro env v in
+      Tir.ELet (v', e1', go env' e2)
+    | Tir.ELetRec (fns, body) ->
+      (* Function names are mutually visible in all bodies and the continuation. *)
+      let env', fns_named =
+        List.fold_left (fun (env, acc) (f : Tir.fn_def) ->
+            if SMap.mem f.Tir.fn_name env then
+              let nn = fresh f.Tir.fn_name in
+              (SMap.add f.Tir.fn_name nn env, { f with Tir.fn_name = nn } :: acc)
+            else
+              (SMap.add f.Tir.fn_name f.Tir.fn_name env, f :: acc)) (env, []) fns in
+      let fns' = List.map (go_fn env') (List.rev fns_named) in
+      Tir.ELetRec (fns', go env' body)
+    | Tir.ECase (scrut, branches, def) ->
+      Tir.ECase (rename_atom env scrut,
+                 List.map (fun (br : Tir.branch) ->
+                     let vars', env' = intro_all env br.Tir.br_vars in
+                     { br with Tir.br_vars = vars'; Tir.br_body = go env' br.Tir.br_body })
+                   branches,
+                 Option.map (go env) def)
+    | Tir.ETuple atoms   -> Tir.ETuple (List.map (rename_atom env) atoms)
+    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom env a)) fields)
+    | Tir.EField (a, f)  -> Tir.EField (rename_atom env a, f)
+    | Tir.EUpdate (a, fields) ->
+      Tir.EUpdate (rename_atom env a, List.map (fun (k, v) -> (k, rename_atom env v)) fields)
+    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map (rename_atom env) args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map (rename_atom env) args)
+    | Tir.EFree a        -> Tir.EFree (rename_atom env a)
+    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom env a)
+    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom env a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom env a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom env a)
+    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom env a, ty, List.map (rename_atom env) args)
+    | Tir.ESeq (e1, e2)  -> Tir.ESeq (go env e1, go env e2)
+  and go_fn env (f : Tir.fn_def) : Tir.fn_def =
+    let params', env' = intro_all env f.Tir.fn_params in
+    { f with Tir.fn_params = params'; Tir.fn_body = go env' f.Tir.fn_body } in
+  go_fn SMap.empty fn
+
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)

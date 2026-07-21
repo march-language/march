@@ -1,0 +1,7 @@
+-- Shared interface for the speak_collision_native witness. Declared in its own
+-- module so both library modules (and the entry) see the same `Speak(a)`.
+mod ScSpeak do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+end

@@ -1,0 +1,16 @@
+mod Main do
+  -- Linearity (T-LinMark), affine fn-PARAM surface positive (L1 fix,
+  -- 2026-07-17): `affine c : Cap` in PARAM position now parses (an AFFINE
+  -- param production mirroring LINEAR) and is tracked affine — used at most
+  -- once. The type-modifier form `c : affine Cap` (t66) still works too.
+  -- See core-march-types.md §2.9.1.
+  type Cap = C(Int)
+  fn use_cap(affine c : Cap) : Int do
+    match c do
+      C(n) -> n
+    end
+  end
+  fn main() : () do
+    println(int_to_string(use_cap(C(5))))
+  end
+end
