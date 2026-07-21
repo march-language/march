@@ -617,10 +617,18 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
     do { crc = connect(fd, res->ai_addr, res->ai_addrlen); }
     while (crc < 0 && errno == EINTR);   /* preemption signal — retry */
     if (crc < 0) {
+        int saved_errno = errno;
         march_unblock_preempt(&saved);
         close(fd);
         freeaddrinfo(res);
-        void *s = march_string_lit("tcp_connect: connection refused", 31);
+        /* Surface the real errno instead of a hardcoded guess — "connection
+         * refused" here previously meant any connect() failure, which hid
+         * the actual cause (e.g. EHOSTUNREACH/EPERM from macOS's Local
+         * Network TCC permission, vs a genuine ECONNREFUSED). */
+        char msg[96];
+        int msg_len = snprintf(msg, sizeof(msg), "tcp_connect: %s",
+                                strerror(saved_errno));
+        void *s = march_string_lit(msg, msg_len);
         void *r = march_alloc(24);
         ((march_hdr *)r)->tag = 1; /* Err */
         *(void **)((char *)r + 16) = s;

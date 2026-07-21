@@ -312,6 +312,34 @@ sets on both, none Signal/stdlib-resolution related. `runtime/march_runtime.c`
 resolution (`bin/main.ml`) has the exact same missing-3-levels-up-candidate
 gap as the stdlib resolver did, filed as a follow-up (`specs/todos.md`).
 
+## Current State (as of 2026-07-21, lazy-stack-growth SIGSEGV handler si_code fix — Linux parallel/distributed crash)
+
+**Fixed the intermittent SIGSEGV (exit 139) in compiled parallel/distributed
+programs on Linux** (`List.pmap`/`pfilter` above the 1024 threshold, msgpack RPC —
+adversarial-regression #22, `rpc_auto_enroll`, `node_call_loopback`,
+`node_discovery`) that passed on macOS arm64. Despite presenting as a "concurrency
+data race," ThreadSanitizer (native aarch64 Linux) found **zero races** across the
+pmap and RPC corpora, and the crash reproduces under a single scheduler — it is not
+a race. **Root cause:** the green-thread lazy-stack-growth fault handler
+(`runtime/march_scheduler.c` `march_sigsegv_handler`) accepted SIGBUS
+unconditionally but required `SIGSEGV && si_code == SEGV_ACCERR`, so it **rejected a
+legitimate guard-page growth fault on any kernel that reports it as
+`SEGV_MAPERR`**. Verified empirically: an identical `mmap(PROT_NONE)`+access reports
+`SEGV_ACCERR` on native aarch64 Linux but `SEGV_MAPERR` under emulated/virtualized
+x86-64. This precisely explains the macOS-passes/Linux-crashes asymmetry (macOS
+delivers guard faults as SIGBUS, always accepted) and the flakiness (whether a run's
+green stack grows past its committed page is timing- and data-dependent, perturbed
+by concurrent scheduling; stack-heavy pmap/msgpack recursion trips it most). **Fix:**
+classify a stack-growth fault purely by the address-range check (fault address
+inside the running proc's `[grow_lo, grow_hi)` stack reservation — already documented
+as "the real safety gate"), for SIGSEGV and SIGBUS alike; the `si_code` gate is
+dropped. Genuine wild pointers are outside every proc's growable region and still
+terminate. **No RC/hot-path change, no perf cost.** Validation: reproduced crash
+(emulated x86-64) went 50/50 → 0/50 (light) and 15/15 → 0/15 (heavy stress);
+`rpc_auto_enroll` clean; full driver suite on native aarch64 Linux shows a
+byte-identical pre/post FAIL set (zero regressions); `bench/tree_transform`
+unchanged.
+
 ## Current State (as of 2026-07-20, impl-coherence declaring-module identity — FQN dispatch Stage 1)
 
 **Interface impl coherence now distinguishes same-short-name types by their
