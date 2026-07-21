@@ -13,6 +13,29 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- An all-caps acronym stdlib module name (e.g. `RRB`, declared in
+  `rrb_vec.march`) failed to resolve in a type annotation with "Unknown module
+  `RRB`", even though its functions worked fine as values. The lazy
+  qualified-name resolver guessed a module's filename by inserting `_` before
+  every uppercase letter (`ConsistentHash` -> `consistent_hash.march`), which
+  mangles an acronym into a filename that doesn't exist (`r_r_b.march`).
+  Falls back to a lazily-built index of the stdlib directory keyed by each
+  file's real declared module name when the naming-convention guess misses.
+  Fixing this exposed a second, related bug: a qualified reference to an
+  opaque type (`RRB.Vec(Int)`) failed to unify with real values of that type
+  (`expected 'RRB.Vec(Int)' but got 'Vec(r3)'`) because the qualified name
+  wasn't canonicalized to its bare form when the type's module was being
+  loaded for the first time. Both are fixed together.
+- `let x : T = e` type annotations silently accepted ANY resolution failure
+  in `T` and fell back to inferring the type from `e` alone with zero
+  diagnostics — e.g. `let e : Vec(Int) = "not a vec"` typechecked cleanly.
+  This was meant to tolerate a phantom/typestate tag used in type position
+  (`let h : Handle(Open) = ...`, where `Open` is a data constructor, not a
+  type name) but was too broad, silently discarding genuinely broken
+  annotations (an unresolvable module, a typo'd or renamed type) too.
+  Narrowed to only tolerate the phantom-tag case (an unresolved name that IS
+  a known data constructor); any other resolution failure now surfaces as a
+  real diagnostic.
 - An inline lambda passed directly as a call argument (e.g. `Dom.on_frame(fn _
   -> ...)`) failed to parse if its body had a plain statement (not a `let`
   binding) immediately followed by another expression — e.g. a function call
