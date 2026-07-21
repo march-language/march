@@ -108,6 +108,22 @@ let subst_atoms ~changed env avar atoms =
 let subst_fields ~changed env avar fields =
   List.map (fun (k, a) -> (k, subst_atom ~changed env avar a)) fields
 
+(** True iff the LEADING bare-DecRC run of [body] contains an
+    [EDecRC]/[EAtomicDecRC] of the variable named [name].
+
+    Mirrors [llvm_case.ml]'s [strip_scrut_decrc] scan: that pass transfers
+    ownership of the fields a [case] arm extracts from its scrutinee by matching
+    the arm's leading `dec_rc <scrutinee>` BY NAME (so that freeing the scrutinee
+    box IncRC's the still-live extracted fields).  cprop must therefore not
+    copy-propagate a [case] scrutinee out of sync with that dec: see the ECase
+    case below. *)
+let rec branch_leads_with_dec (name : string) (e : Tir.expr) : bool =
+  match e with
+  | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest) ->
+    String.equal v.Tir.v_name name || branch_leads_with_dec name rest
+  | _ -> false
+
 (** Propagate literals, variable aliases, and record-field knowledge.
     [env]  maps variable names to their literal values.
     [avar] maps variable names to their aliased variables (P12).
@@ -132,28 +148,42 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
 
   | Tir.ELet (v, rhs, body) ->
     let rhs' = cprop_expr ~changed env avar fenv rhs in
+    let name = v.Tir.v_name in
+    (* This binding SHADOWS any outer binding of the same name inside [body].
+       Drop the outer name's stale mappings first, so a shadow whose RHS is
+       NOT a literal/alias/record (e.g. `let x = x + 5`, an EApp) does not
+       leave the outer `x -> lit` mapping visible to the body — that leak
+       silently substituted the OLD value for the NEW `x` (mirrors the
+       shadow-filtering the ECase arm already does for branch-bound vars).
+       Look-ups for the incoming RHS still use the pre-removal envs so a
+       self-referential alias `let x = x` can still inherit the outer field
+       shape. remove_assoc on an absent name is a harmless no-op, so the
+       common non-shadowing case is unchanged. *)
+    let env0  = List.remove_assoc name env in
+    let avar0 = List.remove_assoc name avar in
+    let fenv0 = List.remove_assoc name fenv in
     (* Extend literal env when the RHS is a bare literal atom. *)
     let env' = match rhs' with
-      | Tir.EAtom (Tir.ALit lit) -> env_add v.Tir.v_name lit env
-      | _                        -> env
+      | Tir.EAtom (Tir.ALit lit) -> env_add name lit env0
+      | _                        -> env0
     in
     (* P12: extend avar_env when RHS is a non-closure variable alias. *)
     let avar' = match rhs' with
       | Tir.EAtom (Tir.AVar y) when not (is_closure_ty y.Tir.v_ty) ->
-        avar_add v.Tir.v_name y avar
-      | _ -> avar
+        avar_add name y avar0
+      | _ -> avar0
     in
     (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
     let fenv' = match rhs' with
       | Tir.ERecord fields ->
         (* [rhs'] is already fully substituted by the ERecord arm below, so
            [fields] here is post-substitution — store directly. *)
-        fenv_add v.Tir.v_name fields fenv
+        fenv_add name fields fenv0
       | Tir.EAtom (Tir.AVar base) ->
         (* Record alias: let r2 = r. If r has a known field list, copy it. *)
         (match fenv_find base.Tir.v_name fenv with
-         | Some fields -> fenv_add v.Tir.v_name fields fenv
-         | None        -> fenv)
+         | Some fields -> fenv_add name fields fenv0
+         | None        -> fenv0)
       | Tir.EUpdate (Tir.AVar base, new_fields) ->
         (* Merge: new_fields override the base record's known fields. *)
         (match fenv_find base.Tir.v_name fenv with
@@ -163,9 +193,9 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
              List.filter (fun (k, _) -> not (List.mem k new_keys)) base_fields
              @ new_fields
            in
-           fenv_add v.Tir.v_name merged fenv
-         | None -> fenv)
-      | _ -> fenv
+           fenv_add name merged fenv0
+         | None -> fenv0)
+      | _ -> fenv0
     in
     Tir.ELet (v, rhs', cprop_expr ~changed env' avar' fenv' body)
 
@@ -179,7 +209,27 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
     Tir.ELetRec (fns', cprop_expr ~changed env avar fenv body)
 
   | Tir.ECase (a, branches, default) ->
-    let a' = subst_atom ~changed env avar a in
+    (* Do NOT copy-propagate the scrutinee atom out of sync with an arm's
+       leading `dec_rc <scrutinee>`.  [llvm_case.ml]'s [strip_scrut_decrc]
+       matches that dec BY NAME to transfer ownership of the fields the arm
+       extracts (freeing the scrutinee box IncRC's the still-live fields).
+       Since cprop by design never rewrites EDecRC operands (see the RC-operand
+       cases below), substituting `case X` -> `case Y` while an arm keeps
+       `dec_rc X` desyncs the two: strip_scrut_decrc no longer recognises the
+       dec, skips the compensating field-IncRC, and the freed scrutinee
+       deep-frees a still-live extracted field -> RC underflow (the nested
+       `Cons(Ctor(heap_field), rest)` bug, surfaced once Beta_adt collapses the
+       outer Cons into a direct owned-local scrutinee whose alias cprop would
+       otherwise propagate).  Keep the scrutinee un-substituted whenever an arm
+       decrements the original scrutinee var. *)
+    let protect_scrut =
+      match a with
+      | Tir.AVar x ->
+        List.exists (fun b -> branch_leads_with_dec x.Tir.v_name b.Tir.br_body)
+          branches
+      | _ -> false
+    in
+    let a' = if protect_scrut then a else subst_atom ~changed env avar a in
     (* Branch bound variables shadow any outer literal/alias/field binding. *)
     let branches' = List.map (fun b ->
       let bound_names =

@@ -1,0 +1,27 @@
+-- EXPECT-ERROR: contains a non-exhaustive `match`, which panics at runtime
+-- fix-campaign batch 3 (2026-07-07) -- `cap no_panic`, the GUARDED-match gap.
+-- Closes the residual soundness hole F3's fix inherited: a `match` with a `when`
+-- guard used to short-circuit `check_exhaustiveness` (`typecheck.ml`) entirely,
+-- so a guarded, genuinely non-exhaustive match inside a `cap no_panic` module
+-- was neither recorded nor rejected -- `--check` exited 0 with zero diagnostics.
+--
+-- Here the GUARDLESS arms are just `{None}`, which is non-exhaustive (missing
+-- an unguarded `Some`). When the `when v > 0` guard fails at runtime (e.g. on
+-- `Some(-1)`), no arm matches and the match panics ("no matching clause"). The
+-- fix: for a guarded match, `check_exhaustiveness` computes coverage over the
+-- GUARDLESS branches only; if those are non-exhaustive it records the span into
+-- `env.nonexhaustive_match_spans` (WITHOUT a global Warning -- only `cap
+-- no_panic` modules opt into this strictness), and `check_no_panic_module`
+-- promotes it to an ERROR. Companion accept: `accept/t59` (adds an unguarded
+-- `Some(v)` arm -> guardless-exhaustive -> still accepts). See reject/t48 (F3,
+-- the guard-FREE non-exhaustive case) and core-march-types.md §2.8.11.
+mod Guarded do
+  cap no_panic
+
+  fn classify(opt : Option(Int)) : Int do
+    match opt do
+      Some(v) when v > 0 -> v
+      None -> 0
+    end
+  end
+end

@@ -1,0 +1,8 @@
+mod Main do
+  fn main() do
+    println(int_to_string(hash(42)))
+    println(int_to_string(hash("hello")))
+    println(int_to_string(hash(0 - 7)))
+    println(int_to_string(hash(1000000)))
+  end
+end

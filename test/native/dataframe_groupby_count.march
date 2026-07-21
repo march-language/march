@@ -1,0 +1,23 @@
+-- Regression: DataFrame.group_by + agg(Count) on a float-free frame must
+-- produce the grouped rows compiled.  Compiled group_by/inner_join/summarize
+-- silently returned EMPTY results (interp correct): from_rows_widen's
+-- `Cons(Row(first_pairs), _)` head-match reached emit_case with a TVar-erased
+-- sub-scrutinee, and the niche recovery hijacked the decode of the boxed
+-- `DataFrame.Row` because Csv's niche-shaped `CsvRow = CsvEof | Row(...)`
+-- shares the `Row` ctor name (see test/native/niche_ctor_ambiguity.march for
+-- the distilled mechanism).  first_pairs bound the Row box itself, which read
+-- as an empty list -> 0 builders -> DataFrame(Nil) -> row_count 0.
+mod Main do
+  fn main() : () do
+    let cats = Cons("a", Cons("b", Cons("a", Cons("b", Cons("a", Nil)))))
+    let ids  = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+    let df = DataFrame.make_df(Cons(IntCol("id", native_int_arr_from_list(ids)),
+                               Cons(StrCol("cat", typed_array_from_list(cats)), Nil)))
+    let grouped = DataFrame.group_by(df, Cons("cat", Nil))
+    let result = DataFrame.agg(grouped, Cons(Count, Nil))
+    match result do
+      Ok(out) -> println("Groups: " ++ int_to_string(DataFrame.row_count(out)))
+      Err(e) -> println("Err: " ++ e)
+    end
+  end
+end

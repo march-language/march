@@ -1,0 +1,13 @@
+-- Native golden (Phase 7.2, Signal.watch Stage B): a watched USR2 delivered by
+-- a self-raise must run its handler exactly once, from the scheduler drain, on
+-- a normal stack.  The handler prints AFTER main's body because dispatch is
+-- deferred (the drain runs once main's green thread finishes).  A final drain
+-- in march_sched_run makes the "raise then exit" ordering deterministic.
+mod Main do
+  fn main() do
+    Signal.watch(Signal.Usr2, fn -> println("caught usr2"))
+    println("before raise")
+    Signal.raise(Signal.Usr2)
+    println("after raise")
+  end
+end

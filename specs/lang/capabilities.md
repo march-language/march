@@ -89,6 +89,7 @@ IO
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock, monotonic time
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
+├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
@@ -124,6 +125,7 @@ Use the **narrowest capability that accurately describes what the code actually 
 | Spawn green tasks | `needs IO.Spawn` |
 | Wall clock or sleep | `needs IO.Clock` |
 | Random number generation | `needs IO.Random` |
+| Watch OS signals (`Signal.watch`) | `needs IO.Signal` |
 | Environment variables, child processes | `needs IO.Process` |
 | Calling C via `extern` | `needs IO.Foreign` |
 | Blocking C calls (OS threads) | `needs IO.Foreign` + `needs IO.Foreign.Blocking` |
@@ -516,10 +518,13 @@ A proof cap makes "migrations have run" part of the type:
 ```march
 mod Db do
   proof cap Migrated
+  needs IO
 
-  fn run_migrations(raw : Cap(Db.Raw)) : Cap(Db.Migrated) do
-    execute_pending_migrations(raw)
-    ()   -- Cap is runtime-erased; () is the actual runtime value
+  fn run_migrations(cap : Cap(IO)) : Cap(Db.Migrated) do
+    -- do the real migration work using the IO capability, then mint the proof.
+    -- `mint_cap` is the sanctioned way to construct a proof cap; it typechecks
+    -- ONLY here — inside a public `fn` of the declaring module. Runtime-erased.
+    mint_cap(cap)
   end
 
   fn query(m : Cap(Db.Migrated), sql : String) : List(Row) do
@@ -529,27 +534,39 @@ mod Db do
 end
 ```
 
-`Cap(Db.Migrated)` is **unforgeable**:
-- `cap_narrow` cannot produce it (it's not in the IO hierarchy)
-- The runtime-provided `Cap(IO)` in `main()` cannot produce it
-- Only public (`fn`) functions of `mod Db` can mint it — private (`pfn`) functions may pass it through but cannot create one from nothing
-- External code can pass it through, but cannot create one
+`Cap(Db.Migrated)` is **unforgeable** — every claim below is compiler-enforced (widening slice 6, 2026-07-08):
+- `cap_narrow` cannot produce it — enforced, not merely "not in the IO hierarchy": `cap_narrow`'s result may never be a nominal proof cap in *any* expression position (it only attenuates IO caps).
+- The runtime-provided `Cap(IO)` in `main()` cannot produce it — the only mint is `mint_cap`, and `mint_cap` is gated.
+- Only public (`fn`) functions of `mod Db` can `mint_cap` it — private (`pfn`) functions may pass it through but cannot construct one.
+- External code can pass it through, but cannot construct one — and no polymorphic launder through a nested unannotated helper can erase the cap type either (the deeper forge, closed by the nested-module soundness fix).
 
 Any module that accepts `Cap(Db.Migrated)` must declare `needs Db.Migrated`. Forgery is a compile error:
 
 ```march
-mod App do
-  needs Db.Migrated
+mod Sys do
+  mod Db do
+    proof cap Migrated
+  end
 
-  -- ERROR: App cannot produce Cap(Db.Migrated) from nothing
-  fn bad() : Cap(Db.Migrated) do () end
+  mod App do
+    needs IO
+    needs Db.Migrated
 
-  -- OK: pass-through is allowed
-  fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
+    -- ERROR: only public functions of `Db` can construct `Cap(Db.Migrated)`.
+    -- `mint_cap` outside the declaring module is rejected (here, by Check 6,
+    -- because the mint sits in the declared return position).
+    fn bad(cap : Cap(IO)) : Cap(Db.Migrated) do mint_cap(cap) end
+
+    -- ERROR: cap_narrow can no longer forge a proof cap in any position.
+    fn steal(cap : Cap(IO)) : Cap(Db.Migrated) do cap_narrow(cap) end
+
+    -- OK: pass-through is allowed
+    fn relay(m : Cap(Db.Migrated)) : Cap(Db.Migrated) do m end
+  end
 end
 ```
 
-> **Known mismatch, being reconciled in a later slice.** The `run_migrations` idiom shown above (`execute_pending_migrations(raw); ()`, minting the proof cap from a bare `()`) does not currently typecheck as written — a proof-cap-returning function body must produce its return value through `cap_narrow`, not a literal `()`. That works today (`cap_narrow`'s polymorphic return type instantiates to any `Cap(X)`, including a non-IO proof capability, at the call site), but it is broader than intended: `cap_narrow` is also the *ordinary* IO-capability-narrowing builtin, so nothing currently restricts proof-cap minting to `mod Db`'s own public functions the way the unforgeability guarantees above describe — any module holding an ordinary `Cap(IO)` can call `cap_narrow` at a `Cap(Db.Migrated)`-typed call site and mint one, without a `needs Db.Migrated` declaration of its own. This is a real, filed, open gap between the documented proof-cap security model and the current mechanism (not fixed by this reference pass); see `specs/todos.md` under "Compiler: Capabilities/effects" for the tracked finding and its live repro.
+> **Resolved (widening slice 6, 2026-07-08).** Earlier releases had two gaps here: the documented mint idiom didn't typecheck (a bare `()` at the end of a `Cap(Db.Migrated)`-returning body was rejected `expected Cap(Db.Migrated) but got ()`), and the mechanism that *did* work — `cap_narrow`, whose polymorphic return `Cap(a)` instantiated to any proof cap at the call site — was unrestricted, so any holder of an ordinary `Cap(IO)` could mint any proof cap by name with no covering `needs`. Both are now closed. The sanctioned mint is the gated **`mint_cap`** primitive (typechecks only inside a public `fn` of the declaring module; runtime-erased); **`cap_narrow` can no longer produce a proof cap** in any position; and the general nested-module type-erasure hole the deepest forge relied on (`consume(id(cap))`, laundering through a nested unannotated helper) is closed by the intra-module reference-soundness fix. See `specs/lang/core-march-types.md` §2.8.13 (proof-cap minting/forging/unforgeability) and §2.5.1 (`(T-QualRef)`) for the rule-numbered treatment and corpus witnesses. One narrow residual stays open — a `cap_narrow` result wrapped in a container through a polymorphic factory can still forge in some shapes (the taint tagger is non-recursive); tracked in `specs/todos.md` under "Compiler: Capabilities/effects".
 
 ### When to use proof caps
 

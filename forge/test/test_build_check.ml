@@ -16,6 +16,14 @@ let write_file path content =
   output_string oc content;
   close_out oc
 
+let contains s sub =
+  let n = String.length s and k = String.length sub in
+  let rec loop i =
+    if i + k > n then false
+    else if String.sub s i k = sub then true
+    else loop (i + 1)
+  in loop 0
+
 (** Scaffold a fresh project, cd into it, run [f], then clean up.
 
     The prefix intentionally avoids the "test_" pattern so that
@@ -424,6 +432,43 @@ let test_direct_path_dep_beats_transitive_git_dep () =
                     transitive git leafc, got Error: " ^ m)
               | Ok _ -> ())))
 
+(** Regression test: `forge test`'s [Cmd_test.project_env] must prepend the
+    same toolchain PATH prefix as `forge build`'s [Cmd_build.lib_path_env],
+    so the bare `march` invoked by `forge test` resolves to the project's
+    pinned `.march-version` rather than whatever `march` happens to be on
+    the ambient PATH. Confirmed live: a project pinned to a toolchain other
+    than the one on PATH had `forge check` honor the pin but `forge test`
+    silently compile with the ambient (wrong) compiler. *)
+let test_project_env_honors_toolchain_pin () =
+  let old_march_home = Sys.getenv_opt "MARCH_HOME" in
+  Fun.protect ~finally:(fun () ->
+      match old_march_home with
+      | Some h -> Unix.putenv "MARCH_HOME" h
+      | None -> Unix.putenv "MARCH_HOME" "")
+    (fun () ->
+      with_project ~project_type:Project.Lib (fun _name root ->
+          let home = Filename.temp_dir "march_home_" "" in
+          Unix.putenv "MARCH_HOME" home;
+          let bin = Filename.concat (Filename.concat (Filename.concat home "versions") "0.6.0") "bin" in
+          let _ = Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote bin)) in
+          let march_stub = Filename.concat bin "march" in
+          let oc = open_out march_stub in
+          output_string oc "#!/bin/sh\n";
+          close_out oc;
+          let _ = Sys.command (Printf.sprintf "chmod +x %s" (Filename.quote march_stub)) in
+          let oc = open_out (Filename.concat root ".march-version") in
+          output_string oc "0.6.0\n";
+          close_out oc;
+          match Project.load () with
+          | Error m -> Alcotest.fail ("expected project to load: " ^ m)
+          | Ok proj ->
+            let (lib_path_env, _output, _all_lib_paths, toolchain_pfx) =
+              Cmd_test.project_env proj in
+            Alcotest.(check bool) "toolchain_pfx points at the pinned version's bin"
+              true (contains toolchain_pfx "versions/0.6.0/bin");
+            Alcotest.(check bool) "lib_path_env is prefixed with the toolchain PATH override"
+              true (contains lib_path_env "versions/0.6.0/bin")))
+
 (* -------------------------------------------------------------------- suite *)
 
 let () =
@@ -452,5 +497,9 @@ let () =
       Alcotest.test_case "lib with broken orphan fails build"     `Quick test_build_lib_with_broken_orphan_fails;
       Alcotest.test_case "clean lib builds (no binary emitted)"   `Quick test_build_lib_clean_succeeds;
       Alcotest.test_case "app with broken orphan fails in check"  `Quick test_build_app_with_broken_orphan_fails_before_compile;
+    ];
+    "forge test", [
+      Alcotest.test_case "project_env honors .march-version toolchain pin" `Quick
+        test_project_env_honors_toolchain_pin;
     ];
   ]

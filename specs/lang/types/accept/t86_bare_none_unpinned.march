@@ -1,0 +1,17 @@
+-- Regression (items 347/465): a bare unpinned `None` — whose element type is
+-- never pinned — must typecheck and (crucially) COMPILE+LINK. Previously it
+-- failed to LINK compiled: mono minted a distinct `$V_<n>` Show$Option
+-- specialization per dangling type-var id, whose inner element `show` was
+-- unresolvable. mono now defaults a residual (dangling) TVar to `String` (a
+-- heap-ptr repr with IS_HEAP_PTR-guarded RC — safe whether the erased value is
+-- a real pointer or a tagged immediate), collapsing them into one resolvable
+-- specialization. Runtime witness: test/native/bare_none_print.march (interp ==
+-- compiled). This --check witness pins acceptance of the surface shapes.
+mod Main do
+  fn main() : () do
+    println(None)
+    println(to_string(None))
+    let x : Option(String) = None
+    println(x)
+  end
+end

@@ -123,7 +123,7 @@ mod Prelude do
   Left fold over a list.  Argument order: collection first, init
   second, callback last (uncurried-collection convention).
   """
-  fn fold_left(xs : List(a), acc : b, f : (b, a) -> b) : b do
+  fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b do
     match xs do
     Nil        -> acc
     Cons(h, t) -> fold_left(t, f(acc, h), f)
@@ -197,6 +197,39 @@ mod Prelude do
       Ok(x)  -> "Ok(" ++ show(x) ++ ")"
       Err(e) -> "Err(" ++ show(e) ++ ")"
       end
+    end
+  end
+
+  -- Tuple Show, per arity (2..5). Tuples are structural, so the dispatch keys
+  -- them by arity ("$Tuple2".."$Tuple5"); each element is shown via its own
+  -- Show impl and joined with ", " inside parens, matching the interpreter's
+  -- `VTuple` rendering. Fixes compiled `println`/`to_string` on a tuple, which
+  -- previously failed to link `_show` (no tuple Show) or printed `#<tag>`.
+  impl Show((a, b)) when Show(a), Show(b) do
+    fn show(t) do
+      let (x, y) = t
+      "(" ++ show(x) ++ ", " ++ show(y) ++ ")"
+    end
+  end
+
+  impl Show((a, b, c)) when Show(a), Show(b), Show(c) do
+    fn show(t) do
+      let (x, y, z) = t
+      "(" ++ show(x) ++ ", " ++ show(y) ++ ", " ++ show(z) ++ ")"
+    end
+  end
+
+  impl Show((a, b, c, d)) when Show(a), Show(b), Show(c), Show(d) do
+    fn show(t) do
+      let (w, x, y, z) = t
+      "(" ++ show(w) ++ ", " ++ show(x) ++ ", " ++ show(y) ++ ", " ++ show(z) ++ ")"
+    end
+  end
+
+  impl Show((a, b, c, d, e)) when Show(a), Show(b), Show(c), Show(d), Show(e) do
+    fn show(t) do
+      let (v, w, x, y, z) = t
+      "(" ++ show(v) ++ ", " ++ show(w) ++ ", " ++ show(x) ++ ", " ++ show(y) ++ ", " ++ show(z) ++ ")"
     end
   end
 

@@ -1,0 +1,33 @@
+mod Main do
+  -- Regression: js_emit.ml did not alpha-rename shadowed same-block `let`
+  -- bindings. `let x = ...; let x = f(x)` compiled under --target js to
+  -- `const x = (() => { ...; return f(x); })();` — the IIFE's reference to
+  -- `x` resolved to the not-yet-initialized new `const x` (JS block-scope
+  -- TDZ covers a declaration's own initializer), throwing "Cannot access
+  -- 'x' before initialization" at runtime instead of reading the prior `x`.
+  -- Covers: rebind via arithmetic, rebind via if/else (the Random.seed
+  -- shape), a 4-deep shadow chain, and a rebind that shadows a fn parameter.
+  fn bump(x : Int) : Int do
+    let x = x + 1
+    let x = x + 1
+    x
+  end
+
+  fn main() do
+    let x = 5
+    let x = x + 1
+    println(int_to_string(x))
+
+    let s0 = x * 2 + 1
+    let s0 = if s0 == 0 do 1 else s0 end
+    println(int_to_string(s0))
+
+    let y = 1
+    let y = y + 1
+    let y = y + 1
+    let y = y + 1
+    println(int_to_string(y))
+
+    println(int_to_string(bump(10)))
+  end
+end

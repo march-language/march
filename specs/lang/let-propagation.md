@@ -2,11 +2,26 @@
 
 # `let?` — Result Propagation Binding
 
-**Status:** Implemented and shipped. `let? p = e` binds the `Ok` payload of a
-`Result`-typed `e` and short-circuits — returning `Err(err)` immediately on the
-first `Err`. The RHS must be a `Result`, and a `let?` cannot be the last
-expression in a block. (Verified against the live compiler: a `let?`-chained
-program type-checks and runs, short-circuiting on the first `Err`.)
+**Status:** Implemented, shipped, and **conformance-tested** (widening slice 8,
+2026-07-10). `let? p = e` binds the `Ok` payload of a `Result`-typed `e` and
+short-circuits — returning `Err(err)` immediately on the first `Err`. The RHS
+must be a `Result`, the continuation must be a `Result` with the same error
+type, and a `let?` cannot be the last expression in a block. The normative
+rules are in `core-march-types.md` §2.10 (typing — `(T-LetQ)` + three
+diagnostics) and `core-march.md` §4.13 (operational — `(E-LetQ-Ok)` /
+`(E-LetQ-Err)` short-circuit), with corpus `types/{accept/t70–t72,
+reject/t67–t70}` and golden `g42`. This chapter is the tutorial companion.
+
+> **Implementation note — §4–§8 below read as a design/plan.** That material
+> was written as the *implementation spec*. `let?` shipped exactly as its
+> design describes: an `ELetQ` AST node typechecked natively (`typecheck.ml`
+> `infer_expr`) and evaluated natively (`eval.ml`) — with ONE deviation: the
+> dedicated "`let?` cannot have a type annotation" parser production shown in
+> §5.2 was never implemented. `let? x : T = e` is still correctly rejected,
+> but by the generic missing-`=` recovery (`` I was expecting `=` in the let?
+> binding here: ``), not a bespoke message. See `reject/t70` and the slice-8
+> finding in `specs/todos.md`.
+
 **Depends on:** the `Result` type, the `QUESTION` token, `EMatch`, and as-pattern / tuple-pattern support (all present).
 
 ---

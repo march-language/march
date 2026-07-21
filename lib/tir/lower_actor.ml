@@ -249,11 +249,23 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
           br_body = Tir.EApp (handler_fn_var, call_args) }
       ) actor.actor_handlers
   in
+  (* Default (drop) arm — finding-19 memory-safety fix.
+     `send` does not gate a message by its target actor (a deferred type-system
+     gap), so a message meant for a DIFFERENT actor can land in this actor's
+     mailbox.  Its <Actor>_Msg type is forced Boxed with a GLOBALLY-unique tag
+     (Repr.repr_of_ty / Llvm_toplevel.build_ctor_info), so a foreign message
+     carries a tag that matches NONE of this actor's dispatch branches and lands
+     here.  Return unit and drop it — byte-for-byte the interpreter's silent
+     foreign-message drop (eval.ml `No handler for this message tag`), instead of
+     misrouting its payload into the first handler at the wrong type.  The
+     scrutinee ($msg) is not referenced in this arm, so Perceus inserts the
+     dec_rc that releases the dropped message's heap cell (no leak). *)
+  let dispatch_default = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
   let dispatch_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_dispatch_suffix;
     fn_params = [actor_param; msg_var];
     fn_ret_ty = Tir.TUnit;
-    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
+    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, Some dispatch_default);
     fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
   } in
 
@@ -291,12 +303,42 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   let spawn_inner =
     Tir.ELet (actor_result_var, alloc_expr, Tir.EAtom (Tir.AVar actor_result_var))
   in
+  (* For a supervised field, spawn its declared child actor now (the
+     supervisor struct doesn't exist yet — that's fine, spawning doesn't
+     need it) and bind $init_<fname> to the child's pid_index Int instead
+     of loading it from `init`. The child's raw pointer is also bound
+     ($sup_child_ptr_<fname>) and stays in lexical scope all the way past
+     the EAlloc below, for wrap_sup (below) to register against $spawned. *)
+  let supervised_child_name (fname : string) : string option =
+    match actor.actor_supervise with
+    | None -> None
+    | Some sc ->
+      List.find_opt (fun (sf : Ast.supervise_field) -> sf.Ast.sf_name.txt = fname) sc.Ast.sc_fields
+      |> Option.map (fun sf -> match sf.Ast.sf_ty with
+          | Ast.TyCon (n, []) -> n.txt
+          | _ -> failwith ("supervise field " ^ fname ^ ": child type must be a bare actor name"))
+  in
   let spawn_with_fields =
     if hot_reload then
       spawn_inner
     else
       List.fold_right (fun (fname, ifv) acc ->
-          Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
+          match supervised_child_name fname with
+          | None -> Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
+          | Some child_actor_name ->
+            let child_spawn_var : Tir.var = {
+              v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
+              v_ty   = Tir.TFn ([], Tir.TPtr Tir.TUnit);
+              v_lin  = Tir.Unr;
+            } in
+            let march_spawn_var : Tir.var = { v_name = "spawn"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+            let pid_index_of_var : Tir.var = { v_name = "pid_index_of"; v_ty = Tir.TInt; v_lin = Tir.Unr } in
+            let raw_var = actor_var ("$sup_child_raw_" ^ fname) (Tir.TPtr Tir.TUnit) in
+            let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
+            Tir.ELet (raw_var, Tir.EApp (child_spawn_var, []),
+              Tir.ELet (child_ptr_var, Tir.EApp (march_spawn_var, [Tir.AVar raw_var]),
+                Tir.ELet (ifv, Tir.EApp (pid_index_of_var, [Tir.AVar child_ptr_var]),
+                  acc)))
         ) init_field_vars spawn_inner
   in
   (* ── 5b. Supervision registration ───────────────────────────────── *)
@@ -327,8 +369,42 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     match actor.actor_supervise with
     | None -> Tir.ELet (init_var, Lower_match.lower_expr env actor.actor_init, spawn_with_fields)
     | Some sc ->
+      let field_word_idx (fname : string) : int =
+        let rec find i = function
+          | [] -> failwith ("supervise field " ^ fname ^ " not found in actor state")
+          | (n, _) :: _ when n = fname -> i
+          | _ :: rest -> find (i + 1) rest
+        in find 0 state_fields_sorted
+      in
+      let mk_reg_child_calls (sup_atom : Tir.atom) (rest : Tir.expr) : Tir.expr =
+        List.fold_right (fun (sf : Ast.supervise_field) acc ->
+            let fname = sf.Ast.sf_name.txt in
+            let child_actor_name = match sf.Ast.sf_ty with
+              | Ast.TyCon (n, []) -> n.txt
+              | _ -> failwith ("supervise field " ^ fname ^ ": child type must be a bare actor name")
+            in
+            let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
+            let child_spawn_fn_var : Tir.var = {
+              v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
+              v_ty   = Tir.TFn ([], Tir.TPtr Tir.TUnit);
+              v_lin  = Tir.Unr;
+            } in
+            let reg_child_var : Tir.var = {
+              v_name = "register_supervisor_child";
+              v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TInt], Tir.TUnit);
+              v_lin  = Tir.Unr;
+            } in
+            Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
+              Tir.EApp (reg_child_var, [
+                sup_atom; Tir.AVar child_ptr_var; Tir.AVar child_spawn_fn_var;
+                Tir.ALit (Ast.LitInt (field_word_idx fname));
+              ]),
+              acc)
+          ) sc.Ast.sc_fields rest
+      in
       (* Replace the final EAtom($spawned) with:
            let $reg_sup_result = register_supervisor($spawned, strat, max, window) in
+           <one register_supervisor_child call per declared child> in
            EAtom($spawned)
          We thread the $spawned var through by wrapping the full body. *)
       let rec wrap_sup (e : Tir.expr) : Tir.expr =
@@ -338,7 +414,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
           Tir.ELet (v, Tir.EAlloc (ty, args),
             Tir.ELet ({ v_name = "$sup_reg"; v_ty = Tir.TUnit; v_lin = Tir.Unr },
               mk_reg_sup_call (Tir.AVar v) sc,
-              rest))
+              mk_reg_child_calls (Tir.AVar v) rest))
         | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap_sup body)
         | other -> other
       in

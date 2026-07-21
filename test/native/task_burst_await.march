@@ -1,0 +1,51 @@
+-- Regression: burst-of-task_spawn must not race the task object.
+--
+-- march_task_spawn_thunk used to initialise the Task object (proc handle,
+-- result, done flag) AFTER march_sched_spawn had already published the proc.
+-- With the M:N work-stealing scheduler, another OS thread can steal and run
+-- the thunk trampoline — which writes the result and release-stores the done
+-- flag — before the spawner returns, so the spawner's stores clobbered a
+-- completed result/done flag back to zero.  Symptoms: task_await hangs
+-- (done flag reset to 0) or returns a corrupted (zeroed) result.  Confirmed
+-- via ThreadSanitizer (march_runtime.c:1833 write vs the post-spawn store).
+--
+-- This test spawns a whole BURST of tasks first (all concurrent, so fast
+-- tasks complete while the spawner is still spawning the rest — the exact
+-- race window), then awaits them all and checks the exact sum.  It repeats
+-- for many rounds to make the non-deterministic race likely to fire.
+--
+-- Run under ThreadSanitizer to catch the race even when timing hides the
+-- corruption:
+--   MARCH_SANITIZE=thread march --compile -o /tmp/tba task_burst_await.march
+--   for i in $(seq 1 100); do /tmp/tba; done   # expect "3202800", no TSan report
+mod TaskBurstAwait do
+  needs IO.Spawn
+
+  pfn work(n : Int) : Int do
+    if n <= 1 do n else work(n - 1) + work(n - 2) end
+  end
+
+  -- Spawn `count` tasks up front, collect handles, then await them all.
+  -- Each task returns work(16)+i = 987 + i.  Sum over i=0..count-1.
+  pfn round(count : Int) : Int do
+    let ids = List.range(0, count)
+    let tasks = List.map(ids, fn i -> task_spawn(fn _ -> work(16) + i))
+    let results = List.map(tasks, fn t -> task_await_unwrap(t))
+    List.fold_left(results, 0, fn (acc, r) -> acc + r)
+  end
+
+  pfn run_rounds(r : Int, n_rounds : Int, count : Int, acc : Int) : Int do
+    if r >= n_rounds do
+      acc
+    else
+      run_rounds(r + 1, n_rounds, count, acc + round(count))
+    end
+  end
+
+  fn main() : Unit do
+    -- 40 rounds of 20 tasks; per round sum = 20*987 + (0+..+19) = 19740 + 190 = 19930
+    -- total = 40 * 19930 = 797200
+    let total = run_rounds(0, 40, 20, 0)
+    println(int_to_string(total))
+  end
+end

@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: was never used
+mod Main do
+  -- (T-LinDrop), return-position linearity propagation (L8 fix, 2026-07-17):
+  -- a call to `fn mk() : linear Res` now propagates its linearity to a plain
+  -- `let h = mk()` binding, so leaving `h` unconsumed is an ERROR — the return
+  -- qualifier is no longer decorative. See §2.9.1.
+  type Res = R(Int)
+  fn mk() : linear Res do R(1) end
+  fn main() : () do
+    let h = mk()
+    ()
+  end
+end

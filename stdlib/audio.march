@@ -1,0 +1,54 @@
+-- Audio — procedural sound-effect synthesis for March compiled with --target js.
+--
+-- Wraps the browser's Web Audio API to synthesize short sound effects on the
+-- fly (tones, frequency sweeps, filtered noise) instead of loading audio
+-- files -- no assets, no licensing, fully deterministic from code. Requires
+-- --target js; calling these functions from a native build panics.
+--
+-- Browsers block audio output until a user gesture occurs on the page --
+-- call `resume` from inside your first tap/click handler.
+--
+-- Usage:
+--   let actx = Audio.create()
+--   Audio.resume(actx)                              -- call on first user gesture
+--   Audio.beep(actx, 900.0, 0.05, "square")          -- laser-ish blip
+--   Audio.sweep(actx, 400.0, 900.0, 0.12, "sine")    -- rising chime
+--   Audio.noise_burst(actx, 0.2, 900.0)              -- explosion-ish thud
+--   Audio.set_volume(actx, 0.0)                      -- mute
+
+mod Audio do
+  needs Ffi
+
+  -- Opaque handle to a Web Audio context.
+  resource Ctx
+
+  extern "audio" : Cap(Ffi) do
+    fn audio_create()                                                        : Ctx = "march_audio_create"
+    fn audio_resume(actx: Ctx)                                               : Unit = "march_audio_resume"
+    fn audio_beep(actx: Ctx, freq: Float, duration: Float, wave: String)     : Unit = "march_audio_beep"
+    fn audio_sweep(actx: Ctx, freq_from: Float, freq_to: Float, duration: Float, wave: String) : Unit = "march_audio_sweep"
+    fn audio_noise_burst(actx: Ctx, duration: Float, filter_freq: Float)     : Unit = "march_audio_noise_burst"
+    fn audio_set_volume(actx: Ctx, vol: Float)                               : Unit = "march_audio_set_volume"
+  end
+
+  -- ── Public API ─────────────────────────────────────────────────────────
+
+  doc "Create a new Web Audio context. Call once at startup."
+  fn create()                          do audio_create() end
+
+  doc "Unlock audio output. Browsers block sound until a user gesture occurs on the page -- call this from inside your first tap/click handler."
+  fn resume(actx)                      do audio_resume(actx) end
+
+  doc "Play a flat tone at `freq` Hz for `duration` seconds. `wave` is one of \"sine\", \"square\", \"sawtooth\", \"triangle\"."
+  fn beep(actx, freq, duration, wave)  do audio_beep(actx, freq, duration, wave) end
+
+  doc "Play a tone that glides from `freq_from` Hz to `freq_to` Hz over `duration` seconds -- risers, chirps, fall-offs."
+  fn sweep(actx, freq_from, freq_to, duration, wave) do audio_sweep(actx, freq_from, freq_to, duration, wave) end
+
+  doc "Play a burst of filtered white noise for `duration` seconds, low-passed at `filter_freq` Hz -- impacts, explosions."
+  fn noise_burst(actx, duration, filter_freq) do audio_noise_burst(actx, duration, filter_freq) end
+
+  doc "Set the master volume, 0.0 (silent) to 1.0 (full)."
+  fn set_volume(actx, vol)             do audio_set_volume(actx, vol) end
+
+end

@@ -1,0 +1,45 @@
+-- Regression: self-referencing block-let shadowing (`let x = x + 5` rebinding
+-- the SAME name) miscompiled on the native (and JS) backends while the
+-- interpreter was correct.  Lowering emitted BOTH bindings under the source
+-- name `x`, so name-based TIR passes captured across the shadow: copy-prop /
+-- fold recorded `x -> <outer>` and substituted it into the inner binding's
+-- USE site (`int_to_string(x)`), folding e.g. `single(10)` to 10 instead of 15
+-- (silently — no crash).  Fixed by `Lower_decls.uniquify_fn`, which alpha-
+-- renames any shadowed local binder to a fresh unique name at the end of
+-- lowering.  This golden pins single, chained, and match-arm-body shadows;
+-- the compiled output must equal the interpreter's.
+mod ShadowSelfrefLet do
+  -- single self-referencing shadow
+  fn single(n : Int) : Int do
+    let x = n
+    let x = x + 5
+    x
+  end
+
+  -- chained self-referencing shadows (each RHS reads the previous binding)
+  fn chained(n : Int) : Int do
+    let x = n
+    let x = x * 2
+    let x = x + 1
+    let x = x * 10
+    x
+  end
+
+  -- shadow introduced inside a match-arm body
+  fn arm(n : Int) : Int do
+    match n do
+      0 -> 0
+      _ ->
+        let x = n
+        let x = x + 100
+        x
+    end
+  end
+
+  fn main() : Unit do
+    println(int_to_string(single(10)))
+    println(int_to_string(chained(3)))
+    println(int_to_string(arm(7)))
+    println(int_to_string(arm(0)))
+  end
+end

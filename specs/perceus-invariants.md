@@ -2,10 +2,12 @@
 
 This is the ownership-discipline contract for March's Perceus RC pass
 (`lib/tir/perceus.ml` and its Wave-3 file-split siblings `perceus_liveness.ml`,
-`perceus_elide.ml`, `perceus_fbip.ml`, `perceus_scrut.ml`). It exists because
-every rule below was independently rediscovered as a crash at least once —
-three separate campaigns (the Toml cluster, the P0 pipeline-review pass, the
-sort_by saga) kept re-deriving the same handful of facts about who owns what
+`perceus_elide.ml`, `perceus_fbip.ml`, `perceus_scrut.ml`) and its codegen
+counterpart in `lib/tir/llvm_case.ml` (§9), which turns TIR's static RC ops
+into runtime shared-vs-unique branches. It exists because every rule below
+was independently rediscovered as a crash at least once — four separate
+campaigns (the Toml cluster, the P0 pipeline-review pass, the sort_by saga,
+finding C1) kept re-deriving the same handful of facts about who owns what
 across a call, a branch, or a closure capture. **Each section cites the
 owning module as the source of truth and narrates around it**; where a doc
 comment is quoted, that comment governs — if this page and the code
@@ -597,6 +599,74 @@ closure-escapes rule's exact case list, the FBIP size-vs-arity argument)
 are cited to their governing module/doc-comment/commit directly, per the
 citation rule — the probes above exercise the code paths that implement
 them.
+
+---
+
+## 9. The scrutinee-dec ordering hazard in codegen (finding C1, fixed 2026-07-11)
+
+**Governing module: `lib/tir/llvm_case.ml`** (`strip_scrut_decrc`, the
+codegen-side counterpart to §7's TIR-level `add_scrutinee_free_for`).
+
+When Perceus emits a match arm whose scrutinee dies here (`ECase` on an
+owned, non-live-after variable), the arm body's TIR begins with a plain
+`EDecRC(scrutinee)` before the branch-bound fields are used (§7's
+mechanism). At codegen time, a plain `dec_rc` is unsound on its own: if the
+scrutinee is actually SHARED (refcount > 1 — e.g. a caller `inc_rc`'d it to
+hand a copy to one call while keeping its own reference for a later call on
+the same value), decrementing the header does not free the cell, so the
+branch-bound fields extracted from it are silently under-refcounted — they
+now have an extra live alias (the new binding) that was never counted.
+`llvm_case.ml` handles this correctly **when it can see it**: it detects the
+leading `EDecRC(scrutinee)`, replaces it with a runtime `march_decrc_freed`
+check, and on the shared (not-actually-freed) path, `IncRC`s each extracted
+heap field before the branch body runs — the mechanism cited in §7's
+comment ("In the shared (RC > 1) case llvm_emit increments their RC").
+
+**The bug: this detection required the scrutinee's `EDecRC` to be the
+LITERAL head of the branch body.** `add_cross_decrcs` (§7) can prepend
+OTHER cross-branch-dead variables' `EDecRC`s in front of it — e.g.
+`Map.node_insert`'s `HLeaf` arm emits `dec_rc eq; dec_rc node; ...` (`eq`,
+an unused comparator closure on this arm, dec'd before the scrutinee
+`node`). `strip_scrut_decrc`'s exact head-only match failed on this shape,
+silently falling through to a PLAIN, unprotected `dec_rc node` — the
+shared-path field protection never fired, and an extracted `String` key
+field's refcount went uncounted whenever `node` was shared.
+
+**Reproduction (finding C1, filed slice 10, 2026-07-10; root-caused and
+fixed slice-13, 2026-07-11):** the read-then-update map idiom
+`Map.insert(m, k, f(Map.get_or(m, k, ...)), cmp)` — used by
+`VectorClock.increment` and the `CRDT` counter updates — passes a function
+parameter `m` at a borrowed position (`get_or`) then an owned position
+(`insert`) in the SAME function, which requires an `inc_rc m` to hand
+`get_or` a temporary copy while `insert` still needs the original — making
+`m` (and, transitively, its tree nodes) genuinely shared at exactly the
+point `Map.node_insert`'s `HLeaf` arm's `dec_rc node` fires. Minimal
+reproduction (~12 lines, no newtype): a single call to a `vinc`-shaped
+helper (`get_or` then `insert` on the same map parameter) into a
+NON-EMPTY map (needed to reach the `HLeaf` comparison/expand path — an
+empty-map insert never exercises this arm), then a `List.fold_left(Map.keys(a),
+..., get_or(a, k, ...))` read that hashes the under-counted key — use-after-free
+in `march_hash_string`, SIGSEGV or a hang, interpreted execution unaffected.
+
+**Fix:** generalize `strip_scrut_decrc` to scan through a leading run of
+bare `EDecRC`/`EAtomicDecRC` ops (on any variable), extract the ONE matching
+the scrutinee wherever it falls in that run, and reconstruct the body with
+the other decs preserved in their original relative order/position around
+the extraction point. This widens exactly one match arm, changes no other
+logic, and preserves the ORIGINAL literal-head case exactly (zero
+intervening ops ⇒ identical behavior to before).
+
+**Verified:** the minimal reproduction and the original `VectorClock.compare`
+disjoint-clock scenario both go from crashing 100% of runs to matching the
+interpreter byte-for-byte across repeated runs (0 crashes); `MARCH_SANITIZE=1`
+on both is clean (no ASan/UBSan report); the full TIR snapshot suite is
+UNCHANGED (this is a pure codegen fix — Perceus's TIR emission itself never
+changed); the full six-runner suite (808 tests, including
+`test_compiled_dual_position_owned_borrowed`, the closest existing regression
+pin) and the `tree_transform`/`binary_trees` benchmarks are unaffected. Golden
+`g44_crdt_convergence` now includes the disjoint-key `VectorClock.compare`/
+`.concurrent` case unconditionally (previously excluded, scoped around this
+bug).
 
 ---
 

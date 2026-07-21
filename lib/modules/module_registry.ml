@@ -87,17 +87,30 @@ let read_file path =
   close_in ic;
   Bytes.to_string b
 
+(** A real stdlib directory always contains [prelude.march] (every
+    [stdlib_file_list] in bin/main.ml starts with it). Gating on that,
+    rather than just "a directory named stdlib exists", avoids a false
+    match on an unrelated same-named directory — e.g. `test/stdlib/`
+    holds the stdlib test suite's `test_*.march` fixtures, not the real
+    stdlib, and `Sys.file_exists "stdlib"` alone can't tell them apart
+    when the compiler is invoked with CWD = `test/`. *)
+let looks_like_stdlib_dir d =
+  Sys.file_exists d && Sys.is_directory d
+  && Sys.file_exists (Filename.concat d "prelude.march")
+
 let find_stdlib_dir () =
   match !_stdlib_dir with
   | Some d -> Some d
   | None ->
     let candidates = [
-      "stdlib";
+      (* Exe-relative candidates first — unambiguous regardless of CWD. *)
       Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
       Filename.concat (Filename.dirname Sys.executable_name) "../../stdlib";
       Filename.concat (Filename.dirname Sys.executable_name) "../../../stdlib";
+      (* CWD-relative fallback last — works when invoked from the repo root. *)
+      "stdlib";
     ] in
-    List.find_opt (fun d -> Sys.file_exists d && Sys.is_directory d) candidates
+    List.find_opt looks_like_stdlib_dir candidates
 
 (** Scan the first top-level `mod <Name> do` declaration out of a `.march`
     source string, without a full parse — just enough to index the file by

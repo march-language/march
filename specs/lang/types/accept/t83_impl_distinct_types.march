@@ -1,0 +1,20 @@
+-- Coherence accept: `impl Speak(Dog)` + `impl Speak(Cat)` are DISTINCT
+-- (interface, type) pairs — no overlap, both register. Companion to
+-- reject/t79 (duplicate) and accept/t84 (distinct interfaces).
+mod M do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  type Dog = Dog
+  type Cat = Cat
+  impl Speak(Dog) do
+    fn speak(_self) do "woof" end
+  end
+  impl Speak(Cat) do
+    fn speak(_self) do "meow" end
+  end
+  fn main() do
+    println(speak(Dog))
+    println(speak(Cat))
+  end
+end

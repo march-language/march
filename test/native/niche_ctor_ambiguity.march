@@ -1,0 +1,37 @@
+-- Regression: emit_case's TVar-erased NICHE recovery must not commit when the
+-- branch ctor set is AMBIGUOUS across differently-represented types.  The
+-- nested sub-pattern in Cons(Row(fp), rest) reaches emit_case with an erased
+-- scrutinee type (lower_match mints sub-pattern vars with unknown_ty); the
+-- recovery identifies the type by ctor NAME.  Previously it committed to the
+-- niche decode if ANY niche-shaped typedef owned the ctor (List.exists): the
+-- bare `Row` ctor here collides with stdlib Csv's niche-shaped
+-- `CsvRow = CsvEof | Row(List(String))`, which hijacked the decode of this
+-- BOXED single-ctor `Inner.Row` — the niche identity decode bound the box
+-- pointer itself as the payload, whose header tag (0) read as Nil, so fp was
+-- silently an empty list (len=0 compiled, len=2 interp; no crash, no ASAN
+-- signal).  This exact mechanism emptied DataFrame's group_by/inner_join/
+-- summarize compiled (DataFrame.Row shares the `Row` ctor name the same way —
+-- see test/native/dataframe_groupby_count.march).  The recovery now requires
+-- ALL candidate owner typedefs to classify niche-shaped (mirroring the newtype
+-- recovery's all-owners discipline); ambiguity keeps the Boxed decode.
+-- NOTE: the trigger deliberately relies on stdlib csv.march's `Row` ctor being
+-- in scope (its `ptype` privacy suppresses the ambiguous-ctor HINT, keeping
+-- stdout identical across backends).  Row must live in a NON-entry (nested)
+-- module: entry-module types register bare, so their sub-scrutinees resolve
+-- concretely and never reach the recovery.
+mod Main do
+  mod Inner do
+    type Row = Row(List(Int))
+    fn mkrow(i : Int) : Row do Row(Cons(i, Cons(i + 1, Nil))) end
+    fn consume(rows : List(Row)) : Int do
+      match rows do
+      Nil -> 0 - 1
+      Cons(Row(fp), rest) -> List.length(fp)
+      end
+    end
+  end
+  fn main() : () do
+    let rows = List.map(List.range(0, 2), fn i -> Inner.mkrow(i))
+    println("len=" ++ int_to_string(Inner.consume(rows)))
+  end
+end

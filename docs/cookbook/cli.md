@@ -75,20 +75,21 @@ mod Repeat do
   fn parse(argv : List(String)) : Args do
     -- drop the executable name, then walk the rest
     List.fold_left(List.drop(argv, 1), Args(1, None), fn (acc, arg) ->
-      let Args(count, file) = acc
-      match arg do
-        "-v" -> Args(count + 1, file)   -- repeated -v bumps the count
-        _    -> Args(count, Some(arg))  -- a non-flag is the filename
+      match acc do
+        Args(count, file) ->
+          match arg do
+            "-v" -> Args(count + 1, file)   -- repeated -v bumps the count
+            _    -> Args(count, Some(arg))  -- a non-flag is the filename
+          end
       end)
   end
 
   fn main() do
-    let Args(count, file) = parse(System.argv())
-    match file do
-      None       ->
+    match parse(System.argv()) do
+      Args(_count, None) ->
         IO.warn("usage: repeat [-v ...] <text>")
         System.exit(2)
-      Some(text) ->
+      Args(count, Some(text)) ->
         List.each(List.range(0, count), fn _ -> println(text))
     end
   end

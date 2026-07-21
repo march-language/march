@@ -61,30 +61,76 @@ let rec all_atom_vars (e : Tir.expr) : StringSet.t =
 
 (* ── Phase 1: Collect EAlloc candidates ──────────────────────────────────── *)
 
-(** Walk [e] and collect names of variables bound directly to EAlloc.
+(** True iff an [EAlloc ty] actually emits a heap cell.  A Newtype- or
+    Niche-repr "alloc" emits NO cell at all — [llvm_emit.ml]'s EAlloc arm
+    lowers it to a tagged/raw IMMEDIATE ((v<<1)|1 for a scalar payload,
+    the raw pointer otherwise).  Stack-promoting such an alloc forces a
+    boxed stack cell whose every consumer still decodes under the erased
+    convention (an ECase on a Newtype untags the raw pointer → garbage =
+    address>>1; slice-7 finding L7, `let c = R(22); match c ...` printed
+    nondeterministic junk compiled).  Promotion of an erased alloc is also
+    a strict pessimization even where it happens to be read back boxed —
+    the unpromoted form is a register-sized immediate.
+
+    The niche check mirrors llvm_emit's own EAlloc arm: [repr_of_ty] on a
+    param-less ctor key returns [Boxed] for Option-shaped types, so the
+    emitter guards separately with [is_niche_shaped] — as must we.  The
+    ctor key is "TypeName.CtorName"; derive the type name the same way.
+
+    [collision_set] (Task 2): must be threaded through to [Repr.repr_of_ty]/
+    [Repr.is_niche_shaped] so a same-short-name colliding type is classified
+    exactly as [llvm_emit.ml]'s EAlloc arm will classify it (forced Boxed).
+    Without it, this function — using the default empty table — would
+    classify a colliding niche-shaped type as "no heap cell" (Niche/Newtype)
+    while codegen actually allocates a Boxed cell for it, so
+    [collect_alloc_candidates] would mark its binding a stack-promotion
+    candidate for a value that is really heap-allocated: an escape-analysis/
+    codegen repr split, not merely a missed optimization. *)
+let alloc_emits_heap_cell
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (ctor, _) ->
+    let type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Repr.repr_of_ty ~collision_set type_defs (Tir.TCon (type_name, [])) with
+     | Repr.Newtype _ | Repr.Niche _ -> false
+     | Repr.Boxed -> not (Repr.is_niche_shaped ~collision_set type_defs type_name))
+  | _ -> true
+
+(** Walk [e] and collect names of variables bound directly to an EAlloc that
+    really allocates (see [alloc_emits_heap_cell]).
     Does not descend into ELetRec inner function bodies (separate scopes). *)
-let rec collect_alloc_candidates (e : Tir.expr) : StringSet.t =
+let rec collect_alloc_candidates
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list)
+    (e : Tir.expr) : StringSet.t =
   match e with
-  | Tir.ELet (v, Tir.EAlloc _, body) ->
-    StringSet.add v.Tir.v_name (collect_alloc_candidates body)
+  | Tir.ELet (v, Tir.EAlloc (ty, _), body)
+    when alloc_emits_heap_cell ~collision_set type_defs ty ->
+    StringSet.add v.Tir.v_name (collect_alloc_candidates ~collision_set type_defs body)
   | Tir.ELet (_, e1, e2) ->
-    StringSet.union (collect_alloc_candidates e1) (collect_alloc_candidates e2)
+    StringSet.union (collect_alloc_candidates ~collision_set type_defs e1)
+      (collect_alloc_candidates ~collision_set type_defs e2)
   | Tir.ELetRec (_, body) ->
     (* Inner fn bodies are separate scopes; only collect from the outer body *)
-    collect_alloc_candidates body
+    collect_alloc_candidates ~collision_set type_defs body
   | Tir.ECase (_, branches, default) ->
     let from_branches =
       List.fold_left (fun acc br ->
-        StringSet.union acc (collect_alloc_candidates br.Tir.br_body)
+        StringSet.union acc (collect_alloc_candidates ~collision_set type_defs br.Tir.br_body)
       ) StringSet.empty branches
     in
     let from_default = match default with
-      | Some d -> collect_alloc_candidates d
+      | Some d -> collect_alloc_candidates ~collision_set type_defs d
       | None -> StringSet.empty
     in
     StringSet.union from_branches from_default
   | Tir.ESeq (e1, e2) ->
-    StringSet.union (collect_alloc_candidates e1) (collect_alloc_candidates e2)
+    StringSet.union (collect_alloc_candidates ~collision_set type_defs e1)
+      (collect_alloc_candidates ~collision_set type_defs e2)
   | _ -> StringSet.empty
 
 (* ── Phase 2: Escape check ────────────────────────────────────────────────── *)
@@ -264,10 +310,12 @@ let rec promote_expr (e : Tir.expr) (promotable : StringSet.t) : Tir.expr =
 
 (* ── Per-function entry ───────────────────────────────────────────────────── *)
 
-let escape_fn (fn : Tir.fn_def) : Tir.fn_def =
+let escape_fn
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (fn : Tir.fn_def) : Tir.fn_def =
   let body = fn.Tir.fn_body in
-  (* Phase 1: collect EAlloc-bound variables *)
-  let candidates = collect_alloc_candidates body in
+  (* Phase 1: collect EAlloc-bound variables (Boxed-repr allocs only) *)
+  let candidates = collect_alloc_candidates ~collision_set type_defs body in
   if StringSet.is_empty candidates then fn
   else begin
     (* Phase 2: compute promotable set *)
@@ -285,4 +333,12 @@ let escape_fn (fn : Tir.fn_def) : Tir.fn_def =
 (* ── Module entry point ───────────────────────────────────────────────────── *)
 
 let escape_analysis (m : Tir.tir_module) : Tir.tir_module =
-  { m with Tir.tm_fns = List.map escape_fn m.Tir.tm_fns }
+  (* Computed once per module from its own [tm_types] — mirrors
+     [Llvm_ctx.make_ctx]'s [collision_set] derivation (Task 1), so escape
+     analysis's Boxed/Niche/Newtype classification of a same-short-name
+     colliding type always agrees with what codegen will actually emit for
+     it, even though this pass runs standalone (no [ctx] in scope; see
+     [alloc_emits_heap_cell]'s doc comment for why that agreement matters). *)
+  let collision_set = Collision_set.compute m.Tir.tm_types in
+  { m with Tir.tm_fns =
+      List.map (escape_fn ~collision_set m.Tir.tm_types) m.Tir.tm_fns }
