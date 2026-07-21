@@ -462,6 +462,39 @@ let test_tc_private_nested_member_diagnostic () =
   Alcotest.(check bool)
     "diagnostic names the private member, not 'Unknown module'" true says_private
 
+let test_tc_private_nested_member_name_collides_with_builtin () =
+  (* Same bug as [test_tc_private_nested_member_diagnostic], but the private
+     member's bare name ("hash") coincides with a globally-bound identifier
+     (the `Hash` interface's bare method scheme, typecheck.ml's default
+     interface-method bindings). Before the fix, `EVar`'s progressive
+     dot-suffix fallback — meant only to resolve multi-component interface
+     method paths like "Conduit.Storage.workflow_load" down to
+     "Storage.workflow_load" — stripped "Auth.hash" all the way to the bare
+     "hash" and silently matched the unrelated global, bypassing the privacy
+     check entirely: `Auth.hash("x")` typechecked clean (and ran to a garbage
+     value when compiled, since codegen still calls the real, private
+     `Auth.hash`, while typecheck's inferred type came from the wrong,
+     unrelated binding). `is_confirmed_private_qualified` now short-circuits
+     that fallback for a name confirmed private via [env.local_mods]. *)
+  let ctx = typecheck {|mod Main do
+    mod Auth do
+      pfn hash(s : String) : String do s end
+      fn verify(plain, stored) do hash(plain) == stored end
+    end
+    fn main() : String do Auth.hash("x") end
+  end|} in
+  Alcotest.(check bool) "private member shadowed by a global name: still rejected"
+    true (has_errors ctx);
+  let says_private =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "is private to module `Auth`") d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool)
+    "diagnostic names the private member, not a silent wrong resolution" true says_private
+
 let test_tc_if_bad_cond () =
   (* Condition must be Bool — using Int + 1 should produce an error. *)
   let ctx = typecheck {|mod Test do
@@ -7920,6 +7953,7 @@ let compiler_suites =
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
           Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
+          Alcotest.test_case "private nested member name collides with builtin" `Quick test_tc_private_nested_member_name_collides_with_builtin;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
           Alcotest.test_case "match expression"    `Quick test_tc_match;

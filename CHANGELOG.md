@@ -49,6 +49,15 @@ git log is authoritative for exact commits.
   `f(())` (passing an explicit unit value) instead of `f()`, which only
   matched a 1-arg-discard closure (`fn _ -> ...`). Fixed to call `f()`;
   affects both the interpreter and compiled programs.
+- `pfn` (private function) visibility could be silently bypassed when a
+  same-file nested module's private function shared its bare name with an
+  unrelated global (e.g. a function named `hash`, colliding with the `Hash`
+  interface's built-in method). The call typechecked without error, ran
+  correctly in the interpreter, and produced a garbage value in compiled
+  programs — a privacy violation that also corrupted the result, not just a
+  missing diagnostic. Now correctly rejected at `--check` and `--compile`
+  with the same "is private to module" error other privacy violations
+  already produced.
 
 ### Fixed
 
