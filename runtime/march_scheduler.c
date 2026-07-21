@@ -368,23 +368,44 @@ static void setup_alt_stack(void) {
  * process's stack reservation, we extend the accessible window with mprotect
  * and return — the CPU retries the faulting instruction and succeeds.
  *
- * If the fault is outside any known stack reservation (real bad-pointer), we
- * restore the default SIGSEGV handler and re-raise so the program terminates
- * with the usual signal.
+ * If the fault is outside any known stack reservation (a real bad pointer), we
+ * terminate the process at the `fatal:` label below with _exit(128 + signo)
+ * (see the long comment there for why re-raising the signal is unsafe from a
+ * green-thread altstack context).
  */
 static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
     (void)uctx;
 
-    /* A lazy-stack-growth fault is a protection fault on a PROT_NONE guard
-     * page.  On Linux that is delivered as SIGSEGV with si_code SEGV_ACCERR.
-     * On macOS the Mach exception EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE is
-     * translated to SIGBUS (not SIGSEGV), with a BUS_* si_code — so the old
-     * `SIGSEGV && SEGV_ACCERR` gate rejected every macOS stack-growth fault,
-     * leaving the thread to die with SIGBUS as soon as a green stack grew past
-     * the initial 4 KiB.  Accept SIGBUS regardless of si_code; the address-range
-     * check below is the real safety gate.  For SIGSEGV keep requiring
-     * SEGV_ACCERR so genuine invalid-address faults still terminate. */
-    if (sig == SIGSEGV && info->si_code != SEGV_ACCERR) goto fatal;
+    /* A lazy-stack-growth fault lands on a PROT_NONE guard page inside a
+     * green thread's reserved-but-not-yet-committed stack region.  How the
+     * kernel classifies that access is NOT portable, so we must NOT gate on
+     * si_code — the address-range check below is the real (and exact) safety
+     * gate:
+     *
+     *   - Bare-metal / faithful-KVM Linux: SIGSEGV, si_code SEGV_ACCERR
+     *     (the page exists but is PROT_NONE — an access-permission fault).
+     *   - Virtualized / emulated x86-64 (qemu-user, and some hypervisor VM
+     *     configurations — including CI runners): SIGSEGV, si_code
+     *     SEGV_MAPERR ("address not mapped").  Verified: on this exact code an
+     *     emulated x86-64 guest reports MAPERR for a PROT_NONE access while a
+     *     native aarch64 host reports ACCERR for the identical mmap+access.
+     *   - macOS: the Mach exception EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE
+     *     is translated to SIGBUS (not SIGSEGV), with a BUS_* si_code.
+     *
+     * The old `SIGSEGV && si_code != SEGV_ACCERR` gate handled only the first
+     * case, so a stack that grew past its initial 4 KiB died with an
+     * unhandled fault on any MAPERR-reporting Linux — flaky (whether a given
+     * run recurses deep enough to grow the stack is timing/data-dependent, and
+     * concurrent scheduling perturbs it) and Linux-only (macOS SIGBUS was
+     * already accepted unconditionally).  That asymmetry — "passes on macOS,
+     * intermittently SIGSEGVs on Linux" under stack-heavy parallel/distributed
+     * workloads (List.pmap, msgpack RPC) — is exactly this bug.
+     *
+     * Fix: classify a stack-growth fault purely by the address-range check
+     * below, for SIGSEGV and SIGBUS alike.  A genuine wild-pointer fault has an
+     * address outside every proc's growable region and still `goto fatal`s; a
+     * fault whose address is in range but whose backing mmap is somehow gone
+     * makes the mprotect fail and also `goto fatal`s.  No si_code gate needed. */
 
     {
         size_t page       = g_page_size;
