@@ -283,6 +283,35 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
+
+**`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the
+lazy on-demand loader) now resolve correctly regardless of the compiler's
+CWD.** `lib/modules/module_registry.ml`'s `find_stdlib_dir()` checked a bare,
+unvalidated `"stdlib"` CWD-relative candidate before any exe-relative one;
+invoking the compiler from `test/` (a real, common pattern — e.g. `cd test &&
+../_build/default/bin/main.exe --compile ... native/signal_term_suppress.march`)
+matched the unrelated `test/stdlib/` directory (the stdlib test suite's
+`test_*.march` fixtures) instead of the real stdlib, so `signal.march` never
+loaded and `Signal.watch` reported "Unknown module `Signal`". Both
+`find_stdlib_dir()` implementations (`module_registry.ml` and the independent,
+duplicate one in `bin/main.ml`) now gate every candidate on actually
+containing `prelude.march` instead of a bare name/existence check, closing the
+false-positive-namesake class generally; `bin/main.ml` also gained a missing
+exe-relative 3-levels-up candidate so the two resolvers agree under the
+standard `_build/default/bin/` dune layout. Verified: the reported repro no
+longer errors; `signal_term_suppress.march`/`signal_watch.march` compile from
+both `test/` and the project root, output byte-identical to
+`signal_term_suppress.expected`. Full suite: `run_compiler` 520/520,
+`run_eval` 233/233. `run_codegen`'s `llvm_ir_validity_gate` (11/71 failing
+with a cold `~/.cache/march`) and `run_stdlib`'s 15 "`cannot find
+runtime/march_runtime.c`" adversarial-regression failures are confirmed
+**pre-existing and cache-state/environment-dependent** — a controlled A/B
+(cleared cache, unpatched vs fixed compiler) showed byte-identical failure
+sets on both, none Signal/stdlib-resolution related. `runtime/march_runtime.c`
+resolution (`bin/main.ml`) has the exact same missing-3-levels-up-candidate
+gap as the stdlib resolver did, filed as a follow-up (`specs/todos.md`).
+
 ## Current State (as of 2026-07-21, lazy-stack-growth SIGSEGV handler si_code fix — Linux parallel/distributed crash)
 
 **Fixed the intermittent SIGSEGV (exit 139) in compiled parallel/distributed
