@@ -39,6 +39,7 @@
     contract in the Global Constraints. *)
 
 open March_ast.Ast
+module T = March_typecheck.Typecheck
 
 (* ------------------------------------------------------------------ *)
 (* Generic helpers                                                     *)
@@ -93,6 +94,128 @@ let visibility_to_json (v : visibility) : string =
   match v with
   | Private -> Dump.json_obj [ ("kind", Dump.json_string "Private") ]
   | Public -> Dump.json_obj [ ("kind", Dump.json_string "Public") ]
+
+(* ------------------------------------------------------------------ *)
+(* Internal (elaborated) ty / constraint_ -> JSON                      *)
+(* (distinct from the surface [ty_to_json] below: this encodes         *)
+(* [March_typecheck.Typecheck.ty], the post-elaboration internal type  *)
+(* representation, for --emit-core-ast v2's HM-witness annotations.    *)
+(* Defined up here, ahead of [expr_to_json], because [expr_to_json]    *)
+(* calls it (via [resolved_ty_field]) to emit each node's              *)
+(* ["resolved_ty"] field.) *)
+(* ------------------------------------------------------------------ *)
+
+let lin_str : linearity -> string = function
+  | Linear -> "linear"
+  | Affine -> "affine"
+  | Unrestricted -> "unrestricted"
+
+let natop_str : nat_op -> string = function
+  | NatAdd -> "add"
+  | NatMul -> "mul"
+
+(* Internal-ty -> JSON. Deep-repr at every level: resolve the head, then
+   recurse (each recursive call re-reprs its argument). Total over T.ty.
+   Contract: see test/test_ty_json.ml and the A1 design doc §2. *)
+let rec resolved_ty_to_json (t : T.ty) : string =
+  match T.repr t with
+  | T.TCon (name, args) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TCon");
+        ("name", Dump.json_string name);
+        ("args", Dump.json_list (List.map resolved_ty_to_json args)) ]
+  | T.TArrow (a, b) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TArrow");
+        ("from", resolved_ty_to_json a);
+        ("to", resolved_ty_to_json b) ]
+  | T.TTuple ts ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TTuple");
+        ("elems", Dump.json_list (List.map resolved_ty_to_json ts)) ]
+  | T.TRecord flds ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TRecord");
+        ("fields",
+         Dump.json_list
+           (List.map
+              (fun (n, ft) ->
+                Dump.json_obj
+                  [ ("name", Dump.json_string n);
+                    ("ty", resolved_ty_to_json ft) ])
+              flds)) ]
+  | T.TVar r ->
+    (match !r with
+     | T.Unbound (id, _) ->
+       Dump.json_obj
+         [ ("kind", Dump.json_string "TVar"); ("id", string_of_int id) ]
+     | T.Link _ ->
+       (* repr already follows links; unreachable, but stay total. *)
+       resolved_ty_to_json (T.repr t))
+  | T.TLin (l, inner) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TLin");
+        ("lin", Dump.json_string (lin_str l));
+        ("ty", resolved_ty_to_json inner) ]
+  | T.TNat n ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TNat"); ("n", string_of_int n) ]
+  | T.TNatOp (op, a, b) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TNatOp");
+        ("op", Dump.json_string (natop_str op));
+        ("a", resolved_ty_to_json a);
+        ("b", resolved_ty_to_json b) ]
+  | T.TChan _ ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "unsupported");
+        ("what", Dump.json_string "session") ]
+  | T.TError -> Dump.json_obj [ ("kind", Dump.json_string "TError") ]
+  | T.TRefine (base, _, _) ->
+    (* repr strips TRefine, so this is unreachable; recurse defensively. *)
+    resolved_ty_to_json base
+
+let constraint_to_json : T.constraint_ -> string = function
+  | T.CNum t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CNum"); ("ty", resolved_ty_to_json t) ]
+  | T.COrd t ->
+    Dump.json_obj [ ("kind", Dump.json_string "COrd"); ("ty", resolved_ty_to_json t) ]
+  | T.CInterface (n, t) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "CInterface");
+        ("name", Dump.json_string n);
+        ("ty", resolved_ty_to_json t) ]
+  | T.CADTBound (n, t) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "CADTBound");
+        ("name", Dump.json_string n);
+        ("ty", resolved_ty_to_json t) ]
+  | T.CTNatBound t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CTNatBound"); ("ty", resolved_ty_to_json t) ]
+
+(* [resolved_ty] annotation plumbing for --emit-core-ast v2.
+
+   [module_to_json] is called exactly once per CLI invocation (or per test
+   call, sequentially), so a file-local ref carrying the current run's
+   [type_map] is simpler than threading a [~types] labeled parameter through
+   every mutually-recursive encoder in this file (expr_to_json's own
+   [and]-group, plus the much larger decl_to_json group that reaches exprs
+   transitively through fn_clause_to_json, actor_handler_to_json,
+   test_def_to_json, etc.) — only [module_to_json]'s signature changes;
+   every other encoder here is untouched. [module_to_json] sets this before
+   walking the tree; [resolved_ty_field] reads it by span by exact identity
+   with however the typechecker keyed [type_map] (see
+   [March_typecheck.Typecheck.span_of_expr], which we call directly on each
+   expr node so this can never drift from the typechecker's own key). *)
+let current_types : (span, T.ty) Hashtbl.t option ref = ref None
+
+let resolved_ty_field (sp : span) : string * string =
+  match !current_types with
+  | None -> ("resolved_ty", "null")
+  | Some tbl ->
+    (match Hashtbl.find_opt tbl sp with
+     | Some t -> ("resolved_ty", resolved_ty_to_json t)
+     | None -> ("resolved_ty", "null"))
 
 (* ------------------------------------------------------------------ *)
 (* literal                                                             *)
@@ -168,21 +291,30 @@ let rec pattern_to_json (p : pattern) : string =
 (* ------------------------------------------------------------------ *)
 
 let rec expr_to_json (e : expr) : string =
+  (* Computed once per node, from the outer [e] — captured here, ahead of the
+     match, so per-arm shadowing of the name [e] (e.g. [EAnnot (e, ty, span)],
+     [EDbg (e, span)], [EAssert (e, span)]) can never affect which expr this
+     span was derived from. Uses the typechecker's own [span_of_expr] so the
+     lookup key is *exactly* how [type_map] was populated (T.ty Hashtbl.t
+     keyed by [Ast.span]) — not a re-derived/guessed span. *)
+  let rty = resolved_ty_field (T.span_of_expr e) in
   match e with
   | ELit (lit, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ELit");
       ("literal", literal_to_json lit);
       ("span", span_to_json span);
+      rty;
     ]
   | EVar n ->
-    Dump.json_obj [ ("kind", Dump.json_string "EVar"); ("name", name_to_json n) ]
+    Dump.json_obj [ ("kind", Dump.json_string "EVar"); ("name", name_to_json n); rty ]
   | EApp (fn, args, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EApp");
       ("fn", expr_to_json fn);
       ("args", Dump.json_list (List.map expr_to_json args));
       ("span", span_to_json span);
+      rty;
     ]
   | ECon (n, args, span) ->
     Dump.json_obj [
@@ -190,6 +322,7 @@ let rec expr_to_json (e : expr) : string =
       ("name", name_to_json n);
       ("args", Dump.json_list (List.map expr_to_json args));
       ("span", span_to_json span);
+      rty;
     ]
   | ELam (params, body, span) ->
     Dump.json_obj [
@@ -197,18 +330,21 @@ let rec expr_to_json (e : expr) : string =
       ("params", Dump.json_list (List.map param_to_json params));
       ("body", expr_to_json body);
       ("span", span_to_json span);
+      rty;
     ]
   | EBlock (exprs, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EBlock");
       ("exprs", Dump.json_list (List.map expr_to_json exprs));
       ("span", span_to_json span);
+      rty;
     ]
   | ELet (b, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ELet");
       ("binding", binding_to_json b);
       ("span", span_to_json span);
+      rty;
     ]
   | EMatch (scrutinee, branches, span) ->
     Dump.json_obj [
@@ -216,12 +352,14 @@ let rec expr_to_json (e : expr) : string =
       ("scrutinee", expr_to_json scrutinee);
       ("branches", Dump.json_list (List.map branch_to_json branches));
       ("span", span_to_json span);
+      rty;
     ]
   | ETuple (elts, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ETuple");
       ("elements", Dump.json_list (List.map expr_to_json elts));
       ("span", span_to_json span);
+      rty;
     ]
   | ERecord (fields, span) ->
     Dump.json_obj [
@@ -230,6 +368,7 @@ let rec expr_to_json (e : expr) : string =
            Dump.json_obj [ ("name", name_to_json n); ("value", expr_to_json e) ])
            fields));
       ("span", span_to_json span);
+      rty;
     ]
   | ERecordUpdate (base, fields, span) ->
     Dump.json_obj [
@@ -239,6 +378,7 @@ let rec expr_to_json (e : expr) : string =
            Dump.json_obj [ ("name", name_to_json n); ("value", expr_to_json e) ])
            fields));
       ("span", span_to_json span);
+      rty;
     ]
   | EField (target, n, span) ->
     Dump.json_obj [
@@ -246,6 +386,7 @@ let rec expr_to_json (e : expr) : string =
       ("target", expr_to_json target);
       ("field", name_to_json n);
       ("span", span_to_json span);
+      rty;
     ]
   | EIf (cond, then_, else_, span) ->
     Dump.json_obj [
@@ -254,6 +395,7 @@ let rec expr_to_json (e : expr) : string =
       ("then_", expr_to_json then_);
       ("else_", expr_to_json else_);
       ("span", span_to_json span);
+      rty;
     ]
   | ECond (arms, span) ->
     Dump.json_obj [
@@ -262,6 +404,7 @@ let rec expr_to_json (e : expr) : string =
            Dump.json_obj [ ("cond", expr_to_json c); ("body", expr_to_json b) ])
            arms));
       ("span", span_to_json span);
+      rty;
     ]
   | EPipe (lhs, rhs, span) ->
     Dump.json_obj [
@@ -269,6 +412,7 @@ let rec expr_to_json (e : expr) : string =
       ("lhs", expr_to_json lhs);
       ("rhs", expr_to_json rhs);
       ("span", span_to_json span);
+      rty;
     ]
   | EAnnot (e, ty, span) ->
     Dump.json_obj [
@@ -276,12 +420,14 @@ let rec expr_to_json (e : expr) : string =
       ("expr", expr_to_json e);
       ("ty", ty_to_json ty);
       ("span", span_to_json span);
+      rty;
     ]
   | EHole (n, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EHole");
       ("name", json_opt name_to_json n);
       ("span", span_to_json span);
+      rty;
     ]
   | EAtom (a, args, span) ->
     Dump.json_obj [
@@ -289,6 +435,7 @@ let rec expr_to_json (e : expr) : string =
       ("atom", Dump.json_string a);
       ("args", Dump.json_list (List.map expr_to_json args));
       ("span", span_to_json span);
+      rty;
     ]
   | ESend (cap, msg, span) ->
     Dump.json_obj [
@@ -296,24 +443,32 @@ let rec expr_to_json (e : expr) : string =
       ("cap", expr_to_json cap);
       ("msg", expr_to_json msg);
       ("span", span_to_json span);
+      rty;
     ]
   | ESpawn (actor, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ESpawn");
       ("actor", expr_to_json actor);
       ("span", span_to_json span);
+      rty;
     ]
   | EResultRef idx ->
-    (* No span field on this constructor — REPL-only magic value. *)
+    (* No span field on this constructor — REPL-only magic value.
+       [T.span_of_expr] maps it to [Ast.dummy_span] for [type_map] lookup
+       purposes (see typecheck.ml); [rty] is derived the same way here, so
+       it will be ["resolved_ty":null] unless something was recorded at
+       [dummy_span], matching the typechecker's own behavior exactly. *)
     Dump.json_obj [
       ("kind", Dump.json_string "EResultRef");
       ("index", json_opt json_int idx);
+      rty;
     ]
   | EDbg (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EDbg");
       ("expr", json_opt expr_to_json e);
       ("span", span_to_json span);
+      rty;
     ]
   | ELetFn (n, params, ret_ty, body, span) ->
     Dump.json_obj [
@@ -323,6 +478,7 @@ let rec expr_to_json (e : expr) : string =
       ("ret_ty", json_opt ty_to_json ret_ty);
       ("body", expr_to_json body);
       ("span", span_to_json span);
+      rty;
     ]
   | ELetQ (pat, value, cont, span) ->
     Dump.json_obj [
@@ -331,12 +487,14 @@ let rec expr_to_json (e : expr) : string =
       ("value", expr_to_json value);
       ("cont", expr_to_json cont);
       ("span", span_to_json span);
+      rty;
     ]
   | EAssert (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EAssert");
       ("expr", expr_to_json e);
       ("span", span_to_json span);
+      rty;
     ]
   | ESigil (name, content, span) ->
     Dump.json_obj [
@@ -344,6 +502,7 @@ let rec expr_to_json (e : expr) : string =
       ("sigil", Dump.json_string name);
       ("content", expr_to_json content);
       ("span", span_to_json span);
+      rty;
     ]
 
 and param_to_json (p : param) : string =
@@ -864,7 +1023,8 @@ and extern_fn_to_json (ef : extern_fn) : string =
 (* module_                                                             *)
 (* ------------------------------------------------------------------ *)
 
-let module_to_json (m : module_) : string =
+let module_to_json ~(types : (span, T.ty) Hashtbl.t) (m : module_) : string =
+  current_types := Some types;
   Dump.json_obj [
     ("name", name_to_json m.mod_name);
     ("decls", Dump.json_list (List.map decl_to_json m.mod_decls));
