@@ -315,6 +315,90 @@ Layer 1b (interp same-name) rides alongside: qualify the `iface_method_tbl` key 
 the `iface_native_type_dispatched` gate; flip `reject/t82` → accept + add a
 compiled+interp `from-A`/`from-B` runtime witness.
 
+### Layer 2 — the value-representation solution + dispatch codegen (execution-ready)
+
+**The blocking sub-problem (found while implementing step 2).** A runtime tag
+switch needs every colliding value to carry a readable, module-unique
+discriminator. But two representation optimisations defeat a naive tag change:
+- **Single-ctor / nullary types** (e.g. `Thing = TA`) may be lowered to an
+  immediate or an unallocated constant with **no stored tag word** — nothing to
+  switch on at runtime.
+- **Niche-repr types** (Option-shaped: one nullary + one payload ctor, `None`
+  encoded as a null pointer) special-case small tags; blindly bumping a niche
+  type's ctor tag to `0x0100_0000` corrupts the niche encode/decode.
+
+So the tag can't just be reassigned globally — the colliding type's whole
+representation has to guarantee a readable discriminator.
+
+**Solution — uniform tagged representation for colliding types (collision-
+conditional).** For any type in the collision set, the value-representation
+classifier (the `niche_repr_of_concrete` / boxed-vs-immediate decision in
+`llvm_data.ml` / `llvm_case.ml`) must emit the **uniform heap-boxed, tag-word
+representation** — never niche, never single-ctor-immediate. Then:
+- every colliding value stores an `i32` tag (`emit_store_tag`, `llvm_data.ml:25`)
+  that `emit_load_tag` (`:18`) can read at a dispatch site;
+- the tag is the **global** tag from step 2, so it is module-unique;
+- `EAlloc` and `match` for the colliding type already resolve via the
+  module-qualified `ctor_info` key, so they store/read the same global tag —
+  self-consistent.
+Because it is gated on the collision set, single-declaration types keep niche/
+immediate reprs → their emitted IR, CAS keys, and `.expected` snapshots are
+byte-identical. Verify with `git status test/snapshots/` + a CAS value-reveal on
+a niche-heavy single-declaration program (e.g. an `Option`-returning bench).
+
+**Dispatch codegen — one generated dispatch function per `(iface, method,
+colliding-short-name)`** (mirrors `ensure_adt_eq_fn`, `llvm_eq.ml:51`, not an
+inline switch at every call site):
+- Name: `__march_ifdispatch_<Iface>_<method>_<Short>`; generated lazily the first
+  time a call to that method on a colliding-short-name static type is emitted.
+- Body: `load tag from arg0; switch (tag) { <each colliding type T's ctor tags>
+  -> tail-call <T's qualified impl symbol>(args); default -> unreachable }`. The
+  `(type → its ctor tags → its qualified impl symbol)` rows come from the mono
+  dispatch table once it is keyed by module-qualified type (step 3) + `ctor_info`.
+- At the call site (`mono.ml` first-arg-type dispatch, `:318/375/521/632`): if the
+  static arg type's short name is in the collision set, emit a call to the
+  generated dispatch function instead of `resolve_impl_by_type`'s single static
+  symbol. Non-colliding calls are unchanged (byte-identical).
+
+**Collision set — computed once, threaded to three consumers.** Derive it from
+the module-qualified `TDVariant`/`TDRecord` names in the TIR module
+(`m.Tir.tm_types`; short = last `.` segment, module = prefix; short names under
+≥2 distinct module prefixes). Consumers: (a) `build_ctor_info` (global tags +
+repr force), (b) the repr classifier (force uniform tagged), (c) `mono` dispatch
+(emit the dispatch function / route). Compute in one place (a `Llvm_ctx` field
+populated at `build_ctor_info`, or a pre-pass) so all three agree.
+
+**Ctor-name collisions within the set.** For the target case (`NA.Thing = TA`,
+`NB.Thing = TB`) the ctor NAMES differ, so the `TypeName.CtorName` `ctor_info`
+keys already distinguish them. When two colliding types ALSO share ctor names
+(e.g. two `AeDir` both with `AeNorth`), the `ctor_info` key must become
+**module-qualified** (`ci_module.Type.Ctor`) and `EAlloc`/`match` must embed the
+same — this is the umbrella doc's Stage-4 ctor-identity carry. Do it
+collision-conditionally too; it is only reachable for same-ctor-name colliders.
+
+**Layer 3 finalisation + witnesses.** Drop the `iface_native_type_dispatched`
+gate (remove the `MARCH_DEV_RELAX_COHERENCE` dev bypass) so the coherence
+relaxation covers all interfaces; flip `reject/t82` → `accept/t82` (or a new
+accept) and delete the `run_compiler` "general-iface err" case added in Stage 1;
+add a runtime witness under `test/imports/` that RUNS both interpreted and
+compiled and asserts `from-A`/`from-B` (the first cross-backend runtime witness
+for same-name general dispatch). Update the `adt_eq_native`-style native golden
+set if any colliding fixture's IR intentionally changes.
+
+**Validation gate (all must pass):** full suite (`scripts/run-tests.sh`, not -q);
+`dune build @runtest @oracle` (native rules + parity); `git status
+test/snapshots/` empty (or reviewed + regenerated deliberately); a CAS
+value-reveal on a single-declaration niche program (byte-identity proof); the
+new `from-A`/`from-B` runtime witness green on BOTH backends. If any mangled
+symbol / tag changes for a single-declaration type, the collision-conditional
+gate has a leak — fix it, do not re-baseline goldens.
+
+**Estimated shape:** 3–4 focused sub-tasks (collision-set + repr force; global
+tags; dispatch-function codegen + mono routing; Layer 1b + Layer 3 + witnesses),
+each independently buildable, with byte-identity checked at every step. This is
+the compiler's highest miscompile-risk surface (value representation + tags);
+keep every intermediate green and collision-conditional.
+
 ## Test & validation strategy
 - Reuse the `specs/lang/types/{accept,reject}/` witness harness (t79/t80/t83/t85
   already exist; add t86-style two-module accept + an interp/native runtime
