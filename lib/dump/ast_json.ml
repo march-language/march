@@ -39,6 +39,7 @@
     contract in the Global Constraints. *)
 
 open March_ast.Ast
+module T = March_typecheck.Typecheck
 
 (* ------------------------------------------------------------------ *)
 (* Generic helpers                                                     *)
@@ -859,6 +860,101 @@ and extern_fn_to_json (ef : extern_fn) : string =
     ("ret_ty", ty_to_json ef.ef_ret_ty);
     ("symbol", json_opt Dump.json_string ef.ef_symbol);
   ]
+
+(* ------------------------------------------------------------------ *)
+(* Internal (elaborated) ty / constraint_ -> JSON                      *)
+(* (distinct from the surface [ty_to_json] above: this encodes         *)
+(* [March_typecheck.Typecheck.ty], the post-elaboration internal type  *)
+(* representation, for --emit-core-ast v2's HM-witness annotations.)   *)
+(* ------------------------------------------------------------------ *)
+
+let lin_str : linearity -> string = function
+  | Linear -> "linear"
+  | Affine -> "affine"
+  | Unrestricted -> "unrestricted"
+
+let natop_str : nat_op -> string = function
+  | NatAdd -> "add"
+  | NatMul -> "mul"
+
+(* Internal-ty -> JSON. Deep-repr at every level: resolve the head, then
+   recurse (each recursive call re-reprs its argument). Total over T.ty.
+   Contract: see test/test_ty_json.ml and the A1 design doc §2. *)
+let rec resolved_ty_to_json (t : T.ty) : string =
+  match T.repr t with
+  | T.TCon (name, args) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TCon");
+        ("name", Dump.json_string name);
+        ("args", Dump.json_list (List.map resolved_ty_to_json args)) ]
+  | T.TArrow (a, b) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TArrow");
+        ("from", resolved_ty_to_json a);
+        ("to", resolved_ty_to_json b) ]
+  | T.TTuple ts ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TTuple");
+        ("elems", Dump.json_list (List.map resolved_ty_to_json ts)) ]
+  | T.TRecord flds ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TRecord");
+        ("fields",
+         Dump.json_list
+           (List.map
+              (fun (n, ft) ->
+                Dump.json_obj
+                  [ ("name", Dump.json_string n);
+                    ("ty", resolved_ty_to_json ft) ])
+              flds)) ]
+  | T.TVar r ->
+    (match !r with
+     | T.Unbound (id, _) ->
+       Dump.json_obj
+         [ ("kind", Dump.json_string "TVar"); ("id", string_of_int id) ]
+     | T.Link _ ->
+       (* repr already follows links; unreachable, but stay total. *)
+       resolved_ty_to_json (T.repr t))
+  | T.TLin (l, inner) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TLin");
+        ("lin", Dump.json_string (lin_str l));
+        ("ty", resolved_ty_to_json inner) ]
+  | T.TNat n ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TNat"); ("n", string_of_int n) ]
+  | T.TNatOp (op, a, b) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "TNatOp");
+        ("op", Dump.json_string (natop_str op));
+        ("a", resolved_ty_to_json a);
+        ("b", resolved_ty_to_json b) ]
+  | T.TChan _ ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "unsupported");
+        ("what", Dump.json_string "session") ]
+  | T.TError -> Dump.json_obj [ ("kind", Dump.json_string "TError") ]
+  | T.TRefine (base, _, _) ->
+    (* repr strips TRefine, so this is unreachable; recurse defensively. *)
+    resolved_ty_to_json base
+
+let constraint_to_json : T.constraint_ -> string = function
+  | T.CNum t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CNum"); ("ty", resolved_ty_to_json t) ]
+  | T.COrd t ->
+    Dump.json_obj [ ("kind", Dump.json_string "COrd"); ("ty", resolved_ty_to_json t) ]
+  | T.CInterface (n, t) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "CInterface");
+        ("name", Dump.json_string n);
+        ("ty", resolved_ty_to_json t) ]
+  | T.CADTBound (n, t) ->
+    Dump.json_obj
+      [ ("kind", Dump.json_string "CADTBound");
+        ("name", Dump.json_string n);
+        ("ty", resolved_ty_to_json t) ]
+  | T.CTNatBound t ->
+    Dump.json_obj [ ("kind", Dump.json_string "CTNatBound"); ("ty", resolved_ty_to_json t) ]
 
 (* ------------------------------------------------------------------ *)
 (* module_                                                             *)

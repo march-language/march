@@ -543,6 +543,12 @@
  (modules test_ast_json)
  (libraries march_lexer march_parser march_ast march_desugar march_dump alcotest))
 
+; ── Internal-ty -> JSON encoder tests (emit-core-ast-v2 A1 Task 1) ────────
+(test
+ (name test_ty_json)
+ (modules test_ty_json)
+ (libraries march_dump march_typecheck alcotest))
+
 ; ── `--emit-core-ast` golden test (emit-core-ast-a0 Task 3) ───────────────
 ; Subprocess-based (models test_oracle.ml's idiom): invokes the REAL built
 ; `march` binary's `--emit-core-ast` CLI flag against 4 corpus files from
