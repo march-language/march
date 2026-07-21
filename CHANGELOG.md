@@ -65,6 +65,12 @@ git log is authoritative for exact commits.
   extern runtime builtins but never got a public stdlib wrapper, like every
   other DOM function — so they were unreachable from March code
   ("Module `Dom` does not export ...") despite being documented.
+- `fn main(cap : Cap(IO)) : ()` — the documented pattern for receiving the
+  initial IO capability — never actually worked: in the interpreter it
+  silently no-oped (the program appeared to exit successfully having done
+  nothing), and compiled programs crashed (SIGBUS) on startup. Both backends
+  now run it correctly; any other `main` arity or parameter type is now
+  rejected at compile time with a clear error instead of misbehaving.
 
 ### Documentation
 
