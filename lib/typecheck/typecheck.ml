@@ -1135,6 +1135,26 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   ) env.vars;
   !best
 
+(** True if [name] is a dotted qualified reference (`Mod.member`) whose
+    `member` is CONFIRMED private — either an in-file nested module's `pfn` /
+    private `let` (via [env.local_mods]) or a private export of a module
+    reachable through the registry.  Used to stop [EVar]'s progressive
+    dot-suffix fallback (see its use site) from silently resolving a privacy
+    violation to an unrelated same-named global (e.g. a bare interface
+    method or builtin) instead of reporting the violation. *)
+let is_confirmed_private_qualified (name : string) (env : env) : bool =
+  match split_qualified name with
+  | None -> false
+  | Some (mod_name, member) ->
+    (match StrMap.find_opt mod_name env.local_mods with
+     | Some priv when List.mem member priv -> true
+     | _ ->
+       match March_modules.Module_registry.ensure_loaded mod_name with
+       | None -> false
+       | Some exports ->
+         let open March_modules.Module_registry in
+         List.exists (fun e -> e.ex_name = member && not e.ex_public) exports.me_entries)
+
 (** Produce an error message for a qualified name that failed to resolve. *)
 let qualified_error_msg (name : string) (env : env) : string =
   match split_qualified name with
@@ -3983,6 +4003,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
          | _, Some sch -> instantiate env.level env sch
+         | _ when is_confirmed_private_qualified name.txt env ->
+           (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
+              as such — falling through to the dot-suffix fallback below would
+              let it silently resolve to an unrelated global of the same bare
+              name (e.g. `Auth.hash` matching the builtin `hash` from the
+              `Hash` interface), bypassing the visibility check entirely. *)
+           Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
