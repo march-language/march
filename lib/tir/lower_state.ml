@@ -143,7 +143,7 @@ type env = {
           [lower_mod_decls]'s [mod_env] at each [DMod] descent to the
           SAME [prefix] value that function already threads as a bare
           parameter for [rename_tir_vars]/fn-name qualification). Added
-          for Task 3 of specs/plans/2026-07-21-fqn-dispatch-identity-stages.md
+          for Task 3 of docs/superpowers/plans/2026-07-21-ctor-module-identity.md
           ("native construction — qualify ECon lowering for colliding
           types"): [collect_iface_impls] (Pass 1, impl-symbol
           qualification) already tracked an analogous [mod_prefix] as a

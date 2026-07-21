@@ -603,7 +603,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         | None -> tag
       in
       (* Collision-conditional module qualification (Task 3 of
-         specs/plans/2026-07-21-fqn-dispatch-identity-stages.md): a
+         docs/superpowers/plans/2026-07-21-ctor-module-identity.md): a
          same-short-name type declared by >= 2 modules stays a BARE
          [TCon(type_name, _)] in the static [Tir.ty] (the whole plan's
          "TCon stays bare" invariant — see [Collision_set]'s module doc),
@@ -913,7 +913,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   reset_counter ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
      fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of
-     specs/plans/2026-07-21-fqn-dispatch-identity-stages.md to ECon
+     docs/superpowers/plans/2026-07-21-ctor-module-identity.md to ECon
      construction below) needs the collision set BEFORE [collect_iface_impls]
      (Pass 1) and BEFORE any function body is lowered (Pass 1's stdlib_context
      bodies, Pass 2's user bodies) — but the [types] ref Pass 2 fills is still
@@ -1384,7 +1384,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              [rename_tir_vars]/qualified-fn-name uses below, now also
              reachable from [ECon] lowering deep inside [lower_fn_def]'s
              call into [lower_expr] (Task 3 of
-             specs/plans/2026-07-21-fqn-dispatch-identity-stages.md). *)
+             docs/superpowers/plans/2026-07-21-ctor-module-identity.md). *)
           let mod_env = { env with
             current_module_aliases = Hashtbl.copy env.current_module_aliases;
             mod_prefix = prefix } in

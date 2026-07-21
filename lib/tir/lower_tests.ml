@@ -145,7 +145,7 @@ let run
              inside a test/setup body nested in this module gets the same
              collision-conditional qualification [lower_mod_decls]'s normal
              (non-test) path gives it — see [env.mod_prefix]'s field doc
-             (Task 3, specs/plans/2026-07-21-fqn-dispatch-identity-stages.md). *)
+             (Task 3, docs/superpowers/plans/2026-07-21-ctor-module-identity.md). *)
           { base with Lower_state.mod_prefix = new_mod_prefix }
         in
         collect_tests inner_env prefix
