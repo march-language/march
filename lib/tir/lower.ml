@@ -845,6 +845,47 @@ let builtin_type_defs : Tir.type_def list = [
   Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
 ]
 
+(** Pre-Pass-1 AST walker that reproduces the SET of TIR type NAMES Pass 2
+    will eventually populate into [tm_types], computed BEFORE
+    [collect_iface_impls] (Pass 1) runs — the [types] ref Pass 2 fills is
+    still empty at that point.  Feeding these names to [Collision_set.compute]
+    up front lets [collect_iface_impls] qualify a colliding-type impl's mangled
+    symbol; the whole point is that this EARLY set agrees with the LATER
+    [Collision_set.compute tm_types] (Task 1/2's driver), so a type is never
+    globally-tagged/forced-Boxed by the late set while its impl symbols stay
+    un-qualified by the early set (a first-wins collapse → silent miscompile).
+
+    Only the type NAME matters to [Collision_set] (it ignores ctors and the
+    variant/record distinction), so an empty-ctor placeholder stands in for
+    each declared type.
+
+    [~prefix] mirrors Pass 2's nested-module qualification (prefix ^ tname.txt,
+    with "sub_name.txt ^ \".\"" appended at each [DMod] level — see the [DType]
+    arms under [DMod] in [lower_module]).  Actor-generated types are the
+    EXCEPTION: Pass 2 emits <Name>_Msg/_Actor/_State BARE — neither the
+    top-level nor the nested [DActor] arm applies the module prefix to
+    [Lower_actor.lower_actor]'s returned [types] (only to its [fns]).  So the
+    [DActor] arm here inserts BARE names regardless of [~prefix], matching the
+    real emission; without it the early set could miss an
+    actor-type-name/user-type-name collision (e.g. bare [Foo_Msg] from
+    [actor Foo] vs a user type [A.Foo_Msg]) that the late [tm_types] set
+    catches. *)
+let rec collect_type_names ~prefix acc decls =
+  List.fold_left (fun acc d -> match d with
+      | Ast.DType (_, name, _, _, _)
+      | Ast.DAlwaysLinearType (_, name, _, _, _) ->
+        Tir.TDVariant (prefix ^ name.txt, []) :: acc
+      | Ast.DActor (_, name, _, _) ->
+        (* BARE, ignoring ~prefix — see doc comment above. *)
+        Tir.TDVariant (name.txt ^ Tir_names.actor_msg_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_struct_suffix, [])
+        :: Tir.TDVariant (name.txt ^ Tir_names.actor_state_suffix, [])
+        :: acc
+      | Ast.DMod (sub_name, _, inner_decls, _) ->
+        collect_type_names ~prefix:(prefix ^ sub_name.txt ^ ".") acc inner_decls
+      | _ -> acc
+    ) acc decls
+
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
@@ -1036,6 +1077,17 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       reg_method "hash" ty_name mangled
     ) hash_specs;
   end; (* end of builtin iface injection *)
+  (* Collision-conditional impl-symbol qualification (Task 3 of
+     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the collision
+     set BEFORE [collect_iface_impls] (Pass 1, directly below) runs, but the
+     [types] ref above is populated only by Pass 2 — so we can't reuse it.
+     [collect_type_names] (top-level, above) walks the AST directly, producing
+     the SAME set of qualified/bare TIR type names Pass 2 will eventually put
+     into [tm_types] (including actor-generated types) — see its doc comment. *)
+  let collision_set =
+    Collision_set.compute
+      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
+  in
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies.
      Recursively processes DMod contents so that impls declared inside
@@ -1077,15 +1129,41 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | Ast.TyRecord _ -> "$Record"
             | _ -> "$Unknown"
           in
+          (* Collision-conditional: a colliding short type name gets a symbol
+             qualified by THIS impl's declaring module (mod_prefix, already
+             threaded for rename_tir_vars) so two same-short-name impls of a
+             GENERAL interface no longer mangle onto one symbol (last-write-wins
+             miscompile — see accept/t89's doc comment). Single-declaration
+             types are untouched: mangled/qualified_key/dispatch-table entries
+             stay byte-identical. Not gated on interface name: Eq/Ord/Show/Hash
+             impls for colliding types (accept/t88) are unaffected either way
+             because those dispatch natively through ctor-qualified structural
+             functions (ensure_adt_eq_fn &c.), never consulting this mangled
+             symbol table — qualifying their entries too is harmless. *)
+          let declaring_qualified_type_name =
+            if mod_prefix <> "" && Collision_set.is_colliding collision_set type_name then
+              (* mod_prefix already ends in "." (see the DMod recursion below) *)
+              String.sub mod_prefix 0 (String.length mod_prefix - 1) ^ "." ^ type_name
+            else type_name
+          in
           List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
               let mangled = Printf.sprintf "%s$%s.%s"
-                idef.impl_iface.txt type_name mname.txt in
+                idef.impl_iface.txt declaring_qualified_type_name mname.txt in
               let qualified_key = idef.impl_iface.txt ^ "." ^ mname.txt in
               (* Only lower the function body once per mangled name
                  (avoids double-lowering when DMod recursion re-encounters a
-                 top-level impl that was already processed). *)
+                 top-level impl that was already processed).  Keyed on the
+                 (possibly module-qualified) MANGLED name rather than the bare
+                 type_name: a colliding bare type_name now legitimately maps to
+                 MULTIPLE (type_name, mangled) pairs (one per declaring
+                 module's impl) under the same qualified_key, so guarding on
+                 type_name alone would wrongly treat the second impl as
+                 already-registered (the exact first-wins bug this task
+                 fixes). For a non-colliding type, declaring_qualified_type_name
+                 = type_name always, so mangled is identical across
+                 re-encounters and this check behaves exactly as before. *)
               let already = match Hashtbl.find_opt !_iface_methods qualified_key with
-                | Some l -> List.mem_assoc type_name l
+                | Some l -> List.mem_assoc mangled (List.map (fun (a, b) -> (b, a)) l)
                 | None   -> false
               in
               if not already then begin

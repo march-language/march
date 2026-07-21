@@ -204,7 +204,11 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
   in
 
   let fv_var (v : Tir.var) (bound : StringSet.t) =
-    if StringSet.mem v.Tir.v_name bound || StringSet.mem v.Tir.v_name top_level then ()
+    if StringSet.mem v.Tir.v_name bound || StringSet.mem v.Tir.v_name top_level
+       (* Collision-dispatch sentinels ([Mono] → [Llvm_dispatch]) are globally
+          known callees resolved directly at LLVM emission — never free
+          variables to capture into a closure. *)
+       || Dispatch_registry.is_sentinel v.Tir.v_name then ()
     else add_fv v
   in
 
@@ -448,9 +452,10 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
        ELetRec, and locally-bound names that are called are necessarily callable
        (closures), never operators/builtins (which are never let/param-bound). *)
     | Tir.EApp (f_var, args)
-      when StringSet.mem f_var.Tir.v_name bound
+      when (not (Dispatch_registry.is_sentinel f_var.Tir.v_name))
+        && (StringSet.mem f_var.Tir.v_name bound
         || (not (StringSet.mem f_var.Tir.v_name top_level)
-            && (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)) ->
+            && (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false))) ->
       (* A locally-bound name (ELetRec/let/param) is a closure pointer and MUST
          dispatch through ECallPtr — even when a top-level function shares the
          name.  Otherwise a stdlib helper's local `go` (the canonical accumulator

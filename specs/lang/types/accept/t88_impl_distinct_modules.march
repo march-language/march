@@ -5,7 +5,8 @@
 -- Eq/Ord/Show/Hash dispatch natively through generated ctor-qualified structural
 -- functions (ensure_adt_eq_fn), not the bare-type-name mangling that a general
 -- user interface uses. Regression for the bare-name coherence key
--- (AeLib.AeDir vs AeLib2.AeDir). Reject twin for a GENERAL interface: reject/t82.
+-- (AeLib.AeDir vs AeLib2.AeDir). General-interface companion: accept/t89
+-- (also accepted since FQN dispatch Stage 3 landed runtime ctor-tag dispatch).
 mod Top do
   mod NA do
     type Thing = TA

@@ -283,6 +283,55 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, FQN dispatch-identity Stages 2-3 — native + interpreter collision-conditional dispatch)
+
+**Same-short-name types declared in different modules may now each implement
+ANY interface — not just the type-dispatched builtins (Eq/Ord/Show/Hash) that
+Stage 1 relaxed — and dispatch correctly, both interpreted and compiled.**
+Builds on Stage 1's declaring-module coherence key. Stage 1 scoped its
+relaxation to the four builtins because a GENERAL user interface then mangled
+two same-short-name impls to ONE symbol and dispatched on the bare type name —
+silently running the wrong body compiled (`from-A`/`from-A`). This slice
+closes that gap, all changes **collision-conditional** (a program with no
+same-short-name collision is byte-identical to before): a `Collision_set` pass
+(`lib/tir/collision_set.ml` for native TIR, an AST-level twin in
+`lib/eval/eval.ml` for the interpreter) identifies short type names declared
+by ≥2 modules; colliding types then get (1) globally-unique runtime ctor tags
+(`lib/tir/llvm_toplevel.ml`, a dedicated counter separate from actor-message
+tags), (2) forced uniform Boxed representation so the tag is always readable
+(`lib/tir/repr.ml` and its dependents in `perceus.ml`/`escape.ml`), (3)
+module-qualified mangled impl symbols (`Speak$NA.Thing.speak` vs
+`Speak$NB.Thing.speak`, `lib/tir/lower.ml`), and (4) a generated runtime
+tag-switch dispatch function (`__march_ifdispatch$...`, `lib/tir/mono.ml` +
+`Llvm_dispatch`/`llvm_emit.ml`) that routes an ambiguous bare-typed call site
+on the value's real ctor tag; the interpreter qualifies `iface_method_tbl` the
+same way (`lib/eval/eval.ml`). **Flag-day:** `register_impl_shape`
+(`lib/typecheck/typecheck.ml`) drops the builtin-only
+`iface_native_type_dispatched` gate and the temporary
+`MARCH_DEV_RELAX_COHERENCE` dev-harness entirely, so every interface gets the
+declaring-module relaxation. Witnesses: `accept/t89_impl_general_iface_collision`
+(typecheck-level, flipped from `reject/t82`) and the first cross-backend
+RUNTIME witness `test/imports/speak_collision_native` (compiled + interpreted,
+both print `from-A`/`from-B` correctly). **NARROWED RESIDUAL GAP (Task 6b,
+2026-07-21; tracked as its own OPEN item in `specs/todos.md`):** when two
+colliding same-short-name types ALSO share a CONSTRUCTOR name (a "double
+collision", e.g. both `type Thing = Shared | …`), this specific shape is now
+REJECTED at typecheck (a safe compile error) rather than silently
+misdispatching. `register_impl_shape` (`lib/typecheck/typecheck.ml`) only
+relaxes coherence when the two colliding types' constructor NAME sets are
+disjoint; when they intersect, the existing overlap path rejects the second
+impl. Reject witness `reject/t82_impl_coherence_shared_ctor_double_collision`;
+the common case (distinct ctor names) stays accepted (`accept/t89`) and runs
+correctly in both backends (`test/imports/speak_collision_native`). Making the
+double-collision programs actually WORK (instead of being rejected) still needs
+the design doc's `ci_module.Type.Ctor` extra qualification layer (out of scope
+for this stopgap). Suite: **compiler 521 / eval 235 / codegen 434 /
+stdlib 810 / snapshots 31 / types 171 (89 accept + 82 reject)**, `git status
+test/snapshots/` empty. Design:
+`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md` (status now
+`implemented`); execution plan:
+`docs/superpowers/plans/2026-07-20-fqn-dispatch-stage3-native.md`.
+
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
 **`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the

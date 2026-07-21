@@ -51,8 +51,10 @@ let is_actor_struct_type (type_defs : Tir.type_def list) (name : string) : bool 
     keeps BOTH on the Boxed path in lock-step, so a two-handler-one-nullary
     message shape is encoded and decoded as a tagged heap cell (no crash from an
     encode/decode repr split). *)
-let is_niche_shaped (type_defs : Tir.type_def list) (name : string) : bool =
+let is_niche_shaped ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (name : string) : bool =
   if Tir_names.is_actor_msg_name name then false
+  else if Collision_set.is_colliding collision_set name then false
   else
   match find_variant type_defs name with
   | Some [ (_nullary, []); (_single, [_]) ]
@@ -71,7 +73,9 @@ let is_niche_shaped (type_defs : Tir.type_def list) (name : string) : bool =
     - Float: 0.0 bitcasts to 0 — not safe.
     - Unit: represented as i64 0 → not safe.
     - TVar: unknown → conservative false. *)
-let rec niche_payload_ok (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
+let rec niche_payload_ok
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TFloat | Tir.TUnit | Tir.TVar _ -> false
   (* The empty tuple IS unit (the typechecker's t_unit = TTuple []), and its
@@ -82,9 +86,9 @@ let rec niche_payload_ok (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
      appeared delivered compiled while the interpreter said None. *)
   | Tir.TTuple [] -> false
   | Tir.TCon _ ->
-    (match repr_of_ty type_defs ty with
+    (match repr_of_ty ~collision_set type_defs ty with
      | Niche _  -> false  (* nested niche: Some(None)=0=None *)
-     | Newtype inner -> niche_payload_ok type_defs inner
+     | Newtype inner -> niche_payload_ok ~collision_set type_defs inner
      | Boxed -> true)     (* boxed heap ptr, march_alloc never returns 0 *)
   | _ -> true  (* TInt, TBool, TString, TPtr, TFn — never raw 0 in ptr slot *)
 
@@ -92,8 +96,21 @@ let rec niche_payload_ok (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
     [params] are the concrete type arguments of the TCon (e.g. [TInt] for
     Option(Int)).  When [params] is empty (as in EAlloc's ctor key), Option-shaped
     types fall back to [Boxed]; callers that have the concrete payload use
-    [is_niche_shaped] + [niche_payload_ok] directly instead. *)
-and repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
+    [is_niche_shaped] + [niche_payload_ok] directly instead.
+
+    [collision_set] (Task 2, [Collision_set.compute]): a same-short-name type
+    declared by >=2 modules is forced [Boxed] regardless of its ctor shape —
+    same rationale as the actor-msg-name exclusion just below: a niche
+    (unboxed/null) or newtype (no-tag) representation has no runtime tag slot,
+    so a colliding type's globally-unique ctor tag (Task 1's
+    [Llvm_toplevel.build_ctor_info]) would be unreadable at a dispatch site
+    that only knows the short name. Defaults to the empty table (nothing
+    colliding) so a caller that cannot supply the real collision set — because
+    it genuinely has no [ctx]/type_defs-derived table in scope — gets the
+    historical behavior unchanged. *)
+and repr_of_ty
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
   match ty with
   (* Finding-19 memory-safety fix: force actor message variant types (<Actor>_Msg)
      to Boxed regardless of their ctor shape.  A single-handler actor's message
@@ -109,6 +126,9 @@ and repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
      Consulted uniformly by EAlloc/ECase/Perceus/borrow, so encode, decode, and
      RC all agree on Boxed for these types. *)
   | Tir.TCon (name, _) when Tir_names.is_actor_msg_name name -> Boxed
+  (* Task 2: same-short-name colliding type — force Boxed (see doc comment
+     above) BEFORE the ctor-shape match, mirroring the actor-msg exclusion. *)
+  | Tir.TCon (name, _) when Collision_set.is_colliding collision_set name -> Boxed
   | Tir.TCon (name, params) ->
     (match find_variant type_defs name with
      (* Float-payload newtype: stay boxed (can't tag float bits safely). *)
@@ -121,8 +141,8 @@ and repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
      | Some [ (_nullary, []); (_single, [_]) ]
      | Some [ (_single, [_]); (_nullary, []) ] ->
        (match params with
-        | [p] when niche_payload_ok type_defs p ->
-          Niche { payload = p; tagged = payload_needs_tag type_defs p }
+        | [p] when niche_payload_ok ~collision_set type_defs p ->
+          Niche { payload = p; tagged = payload_needs_tag ~collision_set type_defs p }
         | _ -> Boxed)
      | _ -> Boxed)
   | _ -> Boxed
@@ -130,12 +150,14 @@ and repr_of_ty (type_defs : Tir.type_def list) (ty : Tir.ty) : repr =
 (** True when a payload value must be tagged [(v<<1)|1] before being stored in a
     ptr slot, to prevent IS_HEAP_PTR from treating the raw bits as a heap pointer.
     Applies to Int and Bool (and recursively to newtypes-over-scalars). *)
-and payload_needs_tag (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
+and payload_needs_tag
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TInt | Tir.TBool -> true
   | Tir.TCon _ ->
-    (match repr_of_ty type_defs ty with
-     | Newtype inner -> payload_needs_tag type_defs inner
+    (match repr_of_ty ~collision_set type_defs ty with
+     | Newtype inner -> payload_needs_tag ~collision_set type_defs inner
      | _ -> false)
   | _ -> false
 
@@ -153,13 +175,25 @@ and payload_needs_tag (type_defs : Tir.type_def list) (ty : Tir.ty) : bool =
     scalar payload (Inc(10) stored as (10<<1)|1) is untagged again at the
     match binding; decoding it as tagged=false hands the raw tagged word to
     the branch body (observed as count = 21 + 11 instead of 10 + 5). *)
-let niche_repr_of_concrete (type_defs : Tir.type_def list) (name : string)
+let niche_repr_of_concrete
+    ?(collision_set : (string, string list) Hashtbl.t = Hashtbl.create 0)
+    (type_defs : Tir.type_def list) (name : string)
     : repr option =
   (* Finding-19: actor message types are Boxed (see repr_of_ty) — never niche.
      Returning None keeps emit_case's concrete-niche recovery path on the Boxed
      heap-tag strategy for a two-handler-one-nullary message shape, matching the
      Boxed EAlloc encode. *)
   if Tir_names.is_actor_msg_name name then None
+  (* Task 2: same-short-name colliding type — never niche, same rationale as
+     [repr_of_ty]/[is_niche_shaped]. This function independently re-derives
+     the ctor-shape classification for a NON-GENERIC TCon (see doc comment
+     below) rather than delegating to [is_niche_shaped], so it needs its own
+     exclusion — without it, a colliding type reached via a params-less TCon
+     (e.g. an ECase scrutinee typed [TCon(name, [])]) would decode Niche here
+     while the EAlloc encode side (gated on [is_niche_shaped]) encodes Boxed:
+     an encode/decode repr split, the exact class of memory-unsafety bug this
+     file's other exclusions guard against. *)
+  else if Collision_set.is_colliding collision_set name then None
   else
   match find_variant type_defs name with
   | Some [ (_nullary, []); (_single, [ p ]) ]
@@ -170,7 +204,7 @@ let niche_repr_of_concrete (type_defs : Tir.type_def list) (name : string)
         scalar tagged), untagged at their concrete use sites. *)
      | Tir.TVar _ -> Some (Niche { payload = p; tagged = false })
      | _ ->
-       if niche_payload_ok type_defs p
-       then Some (Niche { payload = p; tagged = payload_needs_tag type_defs p })
+       if niche_payload_ok ~collision_set type_defs p
+       then Some (Niche { payload = p; tagged = payload_needs_tag ~collision_set type_defs p })
        else None)
   | _ -> None

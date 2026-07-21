@@ -139,6 +139,15 @@ type env = {
       (** Module type definitions, used to query whether a matched
           scrutinee's constructor shares its heap object with the bound
           payload (newtype/niche representations).  Was [_type_defs]. *)
+  collision_set : (string, string list) Hashtbl.t;
+      (** Same-short-name type collision set (Task 2, [Collision_set.compute]),
+          derived from [type_defs] once per [perceus] run (mirrors
+          [Llvm_ctx.make_ctx]'s derivation).  Threaded into
+          [Repr.repr_of_ty]/[Repr.is_niche_shaped] so
+          [scrutinee_shares_payload_storage] agrees with codegen's
+          Boxed/Niche/Newtype classification for a colliding type — an
+          agreement gap here would double-free or leak the scrutinee's heap
+          object (see that function's doc comment). *)
   extern_names : StringSet.t;
       (** Names of user-defined extern (FFI) functions.  These are called via
           [ECallPtr] (not [EApp]) but, unlike opaque closures, their
@@ -224,6 +233,7 @@ type env = {
 let empty_env : env = {
   borrow_map = Borrow.empty;
   type_defs = [];
+  collision_set = Hashtbl.create 0;
   extern_names = StringSet.empty;
   current_fn_name = "";
   closure_fvs = StringSet.empty;
@@ -240,7 +250,7 @@ let empty_env : env = {
     double-free the object the branch variable now owns — the cause of the
     Toml get_str / nested-Option RC underflow. *)
 let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
-  match Repr.repr_of_ty env.type_defs ty with
+  match Repr.repr_of_ty ~collision_set:env.collision_set env.type_defs ty with
   | Repr.Newtype _ | Repr.Niche _ -> true
   | Repr.Boxed ->
     (* Erased-niche recovery — must mirror [llvm_case.ml]'s [effective_repr]
@@ -261,7 +271,7 @@ let scrutinee_shares_payload_storage (env : env) (ty : Tir.ty) : bool =
      | Tir.TCon (name, args)
        when args <> []
             && List.exists (function Tir.TVar _ -> true | _ -> false) args
-            && Repr.is_niche_shaped env.type_defs name -> true
+            && Repr.is_niche_shaped ~collision_set:env.collision_set env.type_defs name -> true
      | _ -> false)
 
 (** Collect the names of variables loaded directly from the closure parameter
@@ -1565,6 +1575,7 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
     { empty_env with
       borrow_map;
       type_defs = m.Tir.tm_types;
+      collision_set = Collision_set.compute m.Tir.tm_types;
       extern_names }
   in
   let repl_set =

@@ -181,7 +181,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let is_apply_wrapper = Tir_names.is_apply_fn fn.Tir.fn_name in
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = Llvm_ctx.llvm_name v.Tir.v_name in
-      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs v.Tir.v_ty in
+      let base = Llvm_ctx.llvm_param_ty ~type_defs:ctx.Llvm_ctx.type_defs ~collision_set:ctx.Llvm_ctx.collision_set v.Tir.v_ty in
       let pty = if is_apply_wrapper && (base = "double" || base = "i64") then "ptr" else base in
       pty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
@@ -316,6 +316,14 @@ let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   let ret_ty = Llvm_ctx.llvm_ret_ty fn.Tir.fn_ret_ty in
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
+      (* Called without ~collision_set (this JIT-fragment forward-`declare`
+         helper has no ctx in scope).  Known, low-risk omission: the only thing
+         collision_set changes here is whether a forced-Boxed colliding type
+         gets `ptr nonnull dereferenceable(16)` vs a niche type's bare `ptr` —
+         an LLVM PARAMETER-ATTRIBUTE difference, not an ABI/type difference, and
+         in the SAFE direction (a `declare` carrying fewer attributes than its
+         `define` stays link-compatible; the attributes are optimizer hints).
+         See specs Task 2 note; same class as the wider collision-set threading. *)
       Llvm_ctx.llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 
@@ -435,6 +443,13 @@ let build_ctor_info ctx (m : Tir.tir_module) =
      Base is well clear of small-ADT tags and of MARCH_MIGRATE_TAG
      (0x4D494752); i32 header field, so ~0x60000000 headroom remains. *)
   let actor_msg_tag = ref 0x0100_0000 in
+  (* Same idea as [actor_msg_tag], for same-short-name types declared by >=2
+     modules (see [Collision_set.compute]'s doc comment). A DISTINCT counter
+     from [actor_msg_tag]: an actor-message ctor and a colliding user-type
+     ctor must never share a tag either, so the two global ranges are kept
+     well apart (0x0100_0000 vs 0x0200_0000) even though only one collision
+     kind can apply to any given TDVariant. *)
+  let collision_tag = ref 0x0200_0000 in
   List.iter (fun td ->
     match td with
     | Tir.TDVariant (_name, ctors) when Tir_names.is_actor_msg_name _name ->
@@ -460,6 +475,41 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       List.iter (fun (ctor_name, field_tys) ->
         let g = !actor_msg_tag in
         incr actor_msg_tag;
+        let key = _name ^ "." ^ ctor_name in
+        if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
+          Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };
+        if not (Hashtbl.mem ctx.Llvm_ctx.poly_ctors (_name, ctor_name)) then
+          Hashtbl.replace ctx.Llvm_ctx.poly_ctors (_name, ctor_name) field_tys
+      ) ctors
+    | Tir.TDVariant (_name, ctors) when Collision_set.is_colliding ctx.Llvm_ctx.collision_set _name ->
+      (* Same-short-name type declared by >=2 modules: assign globally-unique
+         tags from the dedicated [collision_tag] counter, otherwise identical
+         to the generic TDVariant arm below (type_params + qualified
+         ctor_info key + poly_ctors). A later runtime tag switch (Task 4/5)
+         needs every one of this type's constructors to carry a tag no other
+         colliding type's constructor can also carry, since the static
+         [Tir.ty] stays the bare, unqualified [TCon(short_name, _)] for both
+         declaring modules (see [Collision_set]'s module doc — never qualify
+         TCon references, only ctor identity/impl module/runtime tags carry
+         module identity). *)
+      let seen = Hashtbl.create 4 in
+      let params = ref [] in
+      let rec collect_tvars = function
+        | Tir.TVar n ->
+          if not (Hashtbl.mem seen n) then begin
+            Hashtbl.add seen n (); params := n :: !params
+          end
+        | Tir.TCon (_, args) -> List.iter collect_tvars args
+        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
+        | Tir.TTuple ts     -> List.iter collect_tvars ts
+        | Tir.TPtr t        -> collect_tvars t
+        | _                 -> ()
+      in
+      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
+      Hashtbl.replace ctx.Llvm_ctx.type_params _name (List.rev !params);
+      List.iter (fun (ctor_name, field_tys) ->
+        let g = !collision_tag in
+        incr collision_tag;
         let key = _name ^ "." ^ ctor_name in
         if not (Hashtbl.mem ctx.Llvm_ctx.ctor_info key) then
           Hashtbl.replace ctx.Llvm_ctx.ctor_info key { Llvm_ctx.ce_tag = g; ce_fields = field_tys };

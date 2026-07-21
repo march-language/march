@@ -23,7 +23,7 @@
 (library
  (name march_test_codegen)
  (wrapped false)
- (modules test_codegen test_ir_verify)
+ (modules test_codegen test_ir_verify test_collision_set test_ctor_tags)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_modules march_resolver march_forge march_lint march_driver alcotest str unix threads.posix))
 
 (library
@@ -1431,6 +1431,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (glob_files imports/adt_eq_native/*.march))
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/adt_eq_native\" %{exe:../bin/main.exe} --compile -o adt_eq_native_bin \"$PWD/imports/adt_eq_native/ae_entry.march\" && ./adt_eq_native_bin")))
+
+; ── Witness: same-short-name GENERAL-interface dispatch in native builds ──
+; FQN dispatch identity Stage 3 (specs/plans/2026-07-20-fqn-impl-dispatch-identity.md):
+; two DISTINCT types sharing the short name `Thing`, declared in different
+; modules, each implementing the general user interface `Speak`. Coherence keys
+; on the declaring module (so both impls coexist); the native backend gives each
+; colliding type a globally-unique runtime tag, forces uniform Boxed repr,
+; mangles each impl to a module-qualified symbol, and routes ambiguous call
+; sites through a generated runtime tag-switch dispatch fn. Companion to
+; adt_eq_native above (the Stage-1 builtin-`Eq` witness) — this is the first
+; cross-backend witness for a GENERAL interface (run interpreted too, manually).
+; The fixture compiles natively and RUNS the binary, which panics (exit 1) on
+; any misdispatch (`from-A`/`from-B` must each reach their own impl body).
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files imports/speak_collision_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/speak_collision_native\" %{exe:../bin/main.exe} --compile -o speak_collision_native_bin \"$PWD/imports/speak_collision_native/sc_entry.march\" && ./speak_collision_native_bin")))
 
 ; ── Regression: record introspection builtins in native builds ──
 ; record_keys/values/entries/get/put/has_key/from_list were interpreter-only
