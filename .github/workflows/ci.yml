@@ -36,10 +36,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # z3: the refinement-type conformance corpus (@types-check) discharges
+          # pre/postcondition + division-safety VCs via the `z3` binary on PATH
+          # (lib/refine/solver.ml). Without it, refinement checks silently no-op
+          # and the reject/t71-t73 witnesses stop being rejected. Install it on
+          # both runners so the corpus is deterministic (macOS previously relied
+          # on the runner image's pre-installed z3).
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 brotli zstd llvm
+            brew install blake3 brotli zstd llvm z3
           else
-            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
             # libblake3-dev is not available in Ubuntu 24.04; build from source
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             cd /tmp/blake3/c
