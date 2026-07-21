@@ -350,6 +350,39 @@ dispatch. New unit test `test_add_ctor_keeps_distinct_module_identical_shape_cto
 (+1 new test) / eval 235 / codegen 436 (+2 from Task 0) / stdlib 810 /
 snapshots 31, `git status test/snapshots/` empty.
 
+**FQN dispatch-identity constructor-identity plan, Task 2 (2026-07-21,
+`lib/typecheck/typecheck.ml`):** constructor RESOLUTION now consumes the two
+distinct-module candidates Task 1 preserved. `lookup_ctor` and
+`lookup_ctor_in_type` no longer take "whichever candidate is first in the
+list" (order-dependent and meaningless once genuinely different candidates
+can share a bare key) — they prefer the candidate whose `ci_module` matches
+the reference's own LEXICAL current module (`env.current_module`), falling
+back to the first candidate only when the current module owns none of them.
+A new hard error closes the resolution gap this opens: a bare ctor reference
+whose candidates span more than one DECLARING MODULE, where the current
+module owns none of them, is now a compile `Err.error` demanding explicit
+qualification, instead of silently picking an arbitrary candidate. New helper
+`all_ctor_candidates_named` (deduping by `(ci_type, ci_module)` instead of
+`all_ctors_named`'s bare-type-name dedup) detects this specific shape without
+touching `all_ctors_named`'s existing callers — the PRE-EXISTING soft hint for
+a bare ctor name shared across genuinely unrelated, non-colliding types (e.g.
+two types in the SAME module both defining `Error`, `test_tc_qualified_ctor_
+ambiguity_hint` in `test/test_stdlib_suite.ml`) is untouched, since that shape
+has only one distinct declaring module. Applied identically at both
+resolution sites: the `ECon` check-site (`infer_expr`) and the `PatCon` arm of
+`infer_pattern`. 3 new `test/test_compiler.ml` cases: both modules' own bare
+`Shared` reference typechecks cleanly; a third module's bare, unqualified
+`Shared` reference (no local `Thing`) is a hard error; the same third module's
+explicitly-qualified `DcA.Shared` reference still typechecks. Regression-
+verified unchanged: `test_tc_qualified_ctor_ambiguity_hint` (stdlib suite) and
+`test_ambiguous_ctor_warns` (eval suite). Suite: **compiler 526** (+3 new
+tests) / eval 235 / codegen 436 / stdlib 810 (1 pre-existing environmental
+flake, `test_compiled_sanitize_clean_exit`, unrelated to this change — see its
+own tracking note), `git status test/snapshots/` empty. Still bookkeeping-only
+for codegen/mangling/runtime dispatch — the double-collision `impl` shape
+stays rejected by the Task 6b stopgap until a later task in this plan gives
+constructors the full `ci_module.Type.Ctor`-qualified identity.
+
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
 **`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the

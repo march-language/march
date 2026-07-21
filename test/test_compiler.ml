@@ -731,6 +731,71 @@ let test_add_ctor_keeps_distinct_module_identical_shape_ctors () =
   Alcotest.(check int) "two distinct declaring modules survive for `Shared`"
     2 (List.length modules)
 
+(* FQN dispatch-identity plan, Task 2: now that Task 1's add_ctor keeps BOTH
+   distinct-module candidates for a colliding bare ctor name (e.g. `Shared`),
+   RESOLUTION of a bare reference must prefer the candidate whose ci_module
+   matches the reference's own lexical current module — a bare `Shared`
+   written inside DcA's own code must mean DcA's own `Shared`, not whichever
+   candidate happens to be first in env.ctors's internal list. *)
+let test_ctor_lexical_preference_both_modules () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn mk_a() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    fn mk_b() do Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "both modules' own bare Shared reference typechecks cleanly"
+    false (has_errors ctx)
+
+(* A genuinely ambiguous bare reference — candidates from TWO DIFFERENT
+   declaring modules, and the referencing module (DcC) owns NEITHER — must be
+   a hard error requiring explicit qualification, not the pre-existing soft
+   hint (which stays reserved for the unrelated same-module/cross-type-sharing
+   case; see test_ctor_ambiguity_hint_unaffected_by_cross_module_error below). *)
+let test_ctor_truly_ambiguous_is_error () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+  end
+  mod DcC do
+    fn mk_ambiguous() do Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "third-module bare ambiguous ctor ref is a hard error"
+    true (has_errors ctx)
+
+(* The explicit-qualification escape hatch for the above must still work. *)
+let test_ctor_qualified_reference_from_third_module_ok () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+  end
+  mod DcC do
+    fn mk_explicit() do DcA.Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "explicitly-qualified third-module reference typechecks cleanly"
+    false (has_errors ctx)
+
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
   let ctx = typecheck {|mod Test do
@@ -8013,6 +8078,9 @@ let compiler_suites =
           Alcotest.test_case "impl coherence: shared-ctor double collision err" `Quick test_impl_coherence_shared_ctor_double_collision_err;
           Alcotest.test_case "dev-relax ctor coherence bypasses stopgap" `Quick test_dev_relax_ctor_coherence_bypasses_stopgap;
           Alcotest.test_case "add_ctor keeps distinct-module identical-shape ctors" `Quick test_add_ctor_keeps_distinct_module_identical_shape_ctors;
+          Alcotest.test_case "ctor lexical preference: both modules resolve own bare ref" `Quick test_ctor_lexical_preference_both_modules;
+          Alcotest.test_case "ctor truly cross-module ambiguous: hard error" `Quick test_ctor_truly_ambiguous_is_error;
+          Alcotest.test_case "ctor qualified reference from third module: ok" `Quick test_ctor_qualified_reference_from_third_module_ok;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;

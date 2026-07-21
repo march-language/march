@@ -824,21 +824,43 @@ let resolves_always_linear name env =
   then List.mem (env.current_module ^ "." ^ name) env.always_linear_types
   else List.mem name env.always_linear_types
 
+(** Resolve a bare constructor name to a candidate [ctor_info].  When several
+    candidates share the bare name (e.g. two DIFFERENT modules each declaring
+    their own `Shared`, kept distinct by [add_ctor] since Task 1 of the FQN
+    dispatch-identity plan), prefer the candidate whose [ci_module] matches
+    the reference's own LEXICAL current module — a bare `Shared` written
+    inside `DcA`'s own code should mean `DcA`'s own `Shared`, not whichever
+    candidate happens to be first in the internal list (order- and
+    module-arrangement-dependent, and meaningless now that multiple genuinely
+    different candidates can survive under one key). Falls back to the first
+    candidate when the current module owns none of them (the caller is
+    responsible for flagging that fallback as ambiguous when appropriate —
+    see the `ECon`/`PatCon` cross-module hard-error check). *)
 let lookup_ctor name env =
   match StrMap.find_opt name env.ctors with
-  | Some (ci :: _) -> Some ci
-  | _ -> None
+  | None -> None
+  | Some [] -> None
+  | Some (first :: _ as cis) ->
+    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
+     | Some _ as preferred -> preferred
+     | None -> Some first)
 
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
-    several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); [lookup_ctor]
-    returns only the most-recently-registered candidate, which is order- and
-    module-arrangement-dependent.  When the expected/scrutinee type is known,
-    this lets us pick the candidate that actually matches it. *)
+    several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); when more than
+    one candidate matches [type_name] (the same-short-name cross-module
+    collision case), prefer the one whose [ci_module] matches the reference's
+    own lexical current module, same as [lookup_ctor] above. When the
+    expected/scrutinee type is known, this lets us pick the candidate that
+    actually matches it. *)
 let lookup_ctor_in_type name type_name env =
   match StrMap.find_opt name env.ctors with
-  | Some cis -> List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis
   | None -> None
+  | Some cis ->
+    let matching = List.filter (fun (ci : ctor_info) -> ci.ci_type = type_name) cis in
+    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) matching with
+     | Some _ as preferred -> preferred
+     | None -> (match matching with [] -> None | first :: _ -> Some first))
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
     Deduplicates STRUCTURALLY (same ci_type, ci_module, ci_params, and
@@ -1129,6 +1151,23 @@ let all_ctors_named (name : string) (env : env) : string list =
       if Hashtbl.mem seen ci.ci_type then None
       else begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
     ) cis
+
+(** Like [all_ctors_named], but returns (type_name, declaring_module) pairs
+    without deduping by type_name alone — so two DIFFERENT modules' same-
+    short-name colliding types (which share [ci_type]) are counted as
+    distinct candidates. Used only by the genuinely-ambiguous-reference
+    hard-error check below; [all_ctors_named]'s existing bare-type-name
+    callers are untouched. *)
+let all_ctor_candidates_named (name : string) (env : env) : (string * string) list =
+  match StrMap.find_opt name env.ctors with
+  | None -> []
+  | Some cis ->
+    let seen = Hashtbl.create 4 in
+    List.filter_map (fun ci ->
+        let key = (ci.ci_type, ci.ci_module) in
+        if Hashtbl.mem seen key then None
+        else begin Hashtbl.add seen key (); Some key end
+      ) cis
 
 (** Suggest constructors close to [name]: case-insensitive match or first-2-char
     prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
@@ -3208,17 +3247,38 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
-       (* Emit a hint when the bare constructor name is ambiguous across types. *)
-       let all_types = all_ctors_named name.txt env in
-       (if List.length all_types > 1 && not (String.contains name.txt '.') then
-         Err.hint env.errors ~span:name.span
-           (Printf.sprintf
-              "Constructor `%s` is defined by multiple types (%s). \
-               Use a qualified form to disambiguate, e.g. `%s.%s`."
-              name.txt
-              (String.concat ", " all_types)
-              (List.hd all_types)
-              name.txt));
+       (* A bare, unqualified reference whose candidates span more than one
+          DECLARING MODULE (not just more than one bare type name — two
+          candidates from the SAME module sharing a ctor name across
+          unrelated types is the pre-existing, harmless case below) is
+          genuinely ambiguous when the current module owns none of them. *)
+       (if not (String.contains name.txt '.') then begin
+         let candidates = all_ctor_candidates_named name.txt env in
+         let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
+         let local_owns_one =
+           List.exists (fun (_, m) -> m = env.current_module) candidates in
+         if List.length distinct_modules > 1 && not local_owns_one then begin
+           let lines = List.map (fun (t, m) ->
+               Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
+                 m name.txt t m) candidates in
+           Err.error env.errors ~span:name.span
+             (Printf.sprintf
+                "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
+                 Use a qualified form to disambiguate."
+                name.txt (String.concat "\n" lines))
+         end else begin
+           let all_types = all_ctors_named name.txt env in
+           if List.length all_types > 1 then
+             Err.hint env.errors ~span:name.span
+               (Printf.sprintf
+                  "Constructor `%s` is defined by multiple types (%s). \
+                   Use a qualified form to disambiguate, e.g. `%s.%s`."
+                  name.txt
+                  (String.concat ", " all_types)
+                  (List.hd all_types)
+                  name.txt)
+         end
+       end);
        let arg_tys, result_ty = instantiate_ctor env ci in
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
@@ -4494,19 +4554,37 @@ let rec infer_expr env (e : Ast.expr) : ty =
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
-         (* Warn if a bare constructor name is ambiguous across multiple types.
-            Qualified names (containing '.') are already disambiguated — skip. *)
+         (* A bare, unqualified reference whose candidates span more than one
+            DECLARING MODULE (not just more than one bare type name — two
+            candidates from the SAME module sharing a ctor name across
+            unrelated types is the pre-existing, harmless case below) is
+            genuinely ambiguous when the current module owns none of them. *)
          (if not (String.contains name.txt '.') then begin
-           let all_types = all_ctors_named name.txt env in
-           if List.length all_types > 1 then
-             Err.hint env.errors ~span:name.span
+           let candidates = all_ctor_candidates_named name.txt env in
+           let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
+           let local_owns_one =
+             List.exists (fun (_, m) -> m = env.current_module) candidates in
+           if List.length distinct_modules > 1 && not local_owns_one then begin
+             let lines = List.map (fun (t, m) ->
+                 Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
+                   m name.txt t m) candidates in
+             Err.error env.errors ~span:name.span
                (Printf.sprintf
-                  "Constructor `%s` is defined by multiple types (%s). \
-                   Use a qualified form to disambiguate, e.g. `%s.%s`."
-                  name.txt
-                  (String.concat ", " all_types)
-                  (List.hd all_types)
-                  name.txt)
+                  "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
+                   Use a qualified form to disambiguate."
+                  name.txt (String.concat "\n" lines))
+           end else begin
+             let all_types = all_ctors_named name.txt env in
+             if List.length all_types > 1 then
+               Err.hint env.errors ~span:name.span
+                 (Printf.sprintf
+                    "Constructor `%s` is defined by multiple types (%s). \
+                     Use a qualified form to disambiguate, e.g. `%s.%s`."
+                    name.txt
+                    (String.concat ", " all_types)
+                    (List.hd all_types)
+                    name.txt)
+           end
          end);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
