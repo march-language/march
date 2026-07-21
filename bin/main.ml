@@ -1720,27 +1720,65 @@ let compile filename =
       |> March_dump.Dump.json_list
     in
     let module_json = March_dump.Ast_json.module_to_json ~types:type_map user_ast in
-    let schemes_json =
-      Hashtbl.fold
-        (fun ids (cs, ty) acc ->
-          March_dump.Dump.json_obj
-            [ ("ids", March_dump.Dump.json_list (List.map string_of_int ids));
-              ("constraints",
-               March_dump.Dump.json_list (List.map March_dump.Ast_json.constraint_to_json cs));
-              ("body", March_dump.Ast_json.resolved_ty_to_json ty) ]
-          :: acc)
-        typecheck_env.March_typecheck.Typecheck.scheme_witnesses []
+    (* The witness tables accumulate entries from the WHOLE typechecked
+       program (stdlib injection included), but the emitted "module" is
+       only [user_ast] — so scope both tables down to what the user's code
+       actually exercises, using the same file-membership test as
+       [is_user_file] above (entry file / "" / "<unknown>" / any resolved
+       import file). An instantiation's use_span.file tells us whether that
+       use-site is in user code; a scheme is kept iff some retained
+       instantiation still references its [ids] (scheme+instantiation are
+       recorded together at the same [instantiate] call keyed by the
+       use-site span, so this is lossless for every user-visible use,
+       including a user's use of a stdlib/builtin polymorphic function). *)
+    let is_user_span_file (f : string) =
+      f = filename || f = "" || f = "<unknown>" || List.mem f user_files
     in
-    let insts_json =
+    let insts_filtered =
       Hashtbl.fold
         (fun (sp : March_ast.Ast.span) (ids, args) acc ->
+          if is_user_span_file sp.March_ast.Ast.file then (sp, ids, args) :: acc else acc)
+        typecheck_env.March_typecheck.Typecheck.inst_witnesses []
+    in
+    let insts_sorted =
+      List.sort
+        (fun ((sp1 : March_ast.Ast.span), _, _) ((sp2 : March_ast.Ast.span), _, _) ->
+          compare
+            (sp1.March_ast.Ast.file, sp1.March_ast.Ast.start_line, sp1.March_ast.Ast.start_col,
+             sp1.March_ast.Ast.end_line, sp1.March_ast.Ast.end_col)
+            (sp2.March_ast.Ast.file, sp2.March_ast.Ast.start_line, sp2.March_ast.Ast.start_col,
+             sp2.March_ast.Ast.end_line, sp2.March_ast.Ast.end_col))
+        insts_filtered
+    in
+    let insts_json =
+      List.map
+        (fun (sp, ids, args) ->
           March_dump.Dump.json_obj
             [ ("use_span", March_dump.Ast_json.span_to_json sp);
               ("ids", March_dump.Dump.json_list (List.map string_of_int ids));
               ("args",
-               March_dump.Dump.json_list (List.map March_dump.Ast_json.resolved_ty_to_json args)) ]
-          :: acc)
-        typecheck_env.March_typecheck.Typecheck.inst_witnesses []
+               March_dump.Dump.json_list (List.map March_dump.Ast_json.resolved_ty_to_json args)) ])
+        insts_sorted
+    in
+    let retained_ids = List.map (fun (_, ids, _) -> ids) insts_sorted in
+    let schemes_filtered =
+      Hashtbl.fold
+        (fun ids (cs, ty) acc ->
+          if List.mem ids retained_ids then (ids, cs, ty) :: acc else acc)
+        typecheck_env.March_typecheck.Typecheck.scheme_witnesses []
+    in
+    let schemes_sorted =
+      List.sort (fun (ids1, _, _) (ids2, _, _) -> compare ids1 ids2) schemes_filtered
+    in
+    let schemes_json =
+      List.map
+        (fun (ids, cs, ty) ->
+          March_dump.Dump.json_obj
+            [ ("ids", March_dump.Dump.json_list (List.map string_of_int ids));
+              ("constraints",
+               March_dump.Dump.json_list (List.map March_dump.Ast_json.constraint_to_json cs));
+              ("body", March_dump.Ast_json.resolved_ty_to_json ty) ])
+        schemes_sorted
     in
     let doc =
       March_dump.Dump.json_obj [
