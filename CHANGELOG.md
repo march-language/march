@@ -86,6 +86,11 @@ git log is authoritative for exact commits.
   nothing), and compiled programs crashed (SIGBUS) on startup. Both backends
   now run it correctly; any other `main` arity or parameter type is now
   rejected at compile time with a clear error instead of misbehaving.
+- `Vault.update` crashed (segfault) in compiled programs, for both an inline
+  lambda and a named function callback — e.g.
+  `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
+  Affects the documented atomic-update pattern and the rate-limiter cookbook
+  example.
 
 ### Documentation
 

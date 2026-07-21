@@ -1034,14 +1034,15 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
      * crosses into a type-erased ptr slot (mirrors rec_field_norm_uniform
      * above for record fields).
      *
-     * A closure's apply fn, by contrast, always takes its parameters in
-     * their *native* (untagged) representation — only the return value is
-     * uniformly boxed to ptr (see the "Closure apply wrappers use the
-     * generic ptr ABI" comment in llvm_toplevel.ml's emit_fn). So a tagged
-     * scalar must be untagged before it's handed to fn, while a heap
-     * pointer passes through unchanged; the closure's return value is
-     * already in the same uniform/tagged form Vault stores, so it needs
-     * no further conversion before march_vault_set. */
+     * A closure apply fn's params (and return) use the uniform ptr ABI too
+     * (`lib/tir/llvm_toplevel.ml`'s emit_fn: "Apply wrappers use the uniform
+     * ptr ABI for params too... The entry prologue below unboxes such params
+     * back to double/i64 for the body" — the erased-i64 conditional-untag
+     * convention), so `cur` is passed straight through unchanged: the
+     * closure conditionally untags a tagged scalar itself at entry (a bare
+     * heap pointer is unaffected) and re-tags its result the same way on
+     * return, so the value handed back is already in the exact uniform form
+     * march_vault_set expects — no conversion needed on either side here. */
     void *cur = march_vault_get(handle, key_val);
     if (cur != NULL) { /* Some(cur) */
         /* f is a closure: heap object [rc(8)][tag(4)][pad(4)][fn_ptr@16][captures@24...].
@@ -1051,8 +1052,7 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
          * march_http_internal.h's closure_fn_t for the same convention. */
         typedef void *(*fn1_t)(void *, void *);
         fn1_t fn  = *(fn1_t *)((char *)f + 16);
-        void *arg = ((intptr_t)cur & 1) ? (void *)(((intptr_t)cur) >> 1) : cur;
-        void *new_val = fn(f, arg);
+        void *new_val = fn(f, cur);
         march_vault_set(handle, key_val, new_val);
         march_decrc(new_val);
     }
