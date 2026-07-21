@@ -4649,6 +4649,211 @@ end
   Alcotest.(check bool) "no dispatch fn for distinct-name types" false
     (ir_contains ir "__march_ifdispatch")
 
+(* ── Task 4 review Finding 1: multi-constructor colliding type ───────────
+   [test_colliding_general_iface_runtime_dispatch] above only exercises a
+   colliding type with a SINGLE constructor on each side. The task report
+   claims (manually verified, not pinned by an automated test) that a
+   colliding type with MULTIPLE constructors routes every one of its tags to
+   the SAME impl symbol ([Llvm_dispatch.tags_of_type] enumerates all of a
+   type's global tags; [emit_dispatch_fn]'s [concat_map] must emit one switch
+   arm per tag while sharing one destination row/impl per declaring type).
+   These helpers extract the actual switch-arm structure from the emitted
+   IR so the assertions are shape-based (not dependent on the specific
+   global tag integers, which shift with the corpus). *)
+
+(** [(tag, row_label)] pairs found inside the [switch i32 ... [ ... ]] block
+    of the (single, in this corpus) generated [__march_ifdispatch] function. *)
+let dispatch_switch_arms (ir : string) : (string * string) list =
+  (* Anchor on the dispatch fn's [define] line first — a colliding impl body
+     may itself contain an unrelated [switch i32] (e.g. matching a
+     multi-constructor scrutinee inside the impl method), so searching for
+     "switch i32" from position 0 can find the WRONG switch. *)
+  let fn_start =
+    Str.search_forward (Str.regexp_string "define ptr @__march_ifdispatch") ir 0 in
+  let start = Str.search_forward (Str.regexp_string "switch i32") ir fn_start in
+  let close = Str.search_forward (Str.regexp_string "\n  ]") ir start in
+  let block = String.sub ir start (close - start) in
+  let re = Str.regexp "i32 \\([0-9]+\\), label \\(%row[0-9]+\\)" in
+  let rec go pos acc =
+    match Str.search_forward re block pos with
+    | i ->
+      let tag = Str.matched_group 1 block in
+      let lbl = Str.matched_group 2 block in
+      go (i + String.length (Str.matched_string block)) ((tag, lbl) :: acc)
+    | exception Not_found -> List.rev acc
+  in
+  go 0 []
+
+(** The symbol tail-called from the block labelled [lbl] (e.g. ["%row4"]). *)
+let dispatch_row_symbol (ir : string) (lbl : string) : string =
+  let name = String.sub lbl 1 (String.length lbl - 1) in
+  let hdr_pos = Str.search_forward (Str.regexp_string (name ^ ":")) ir 0 in
+  let re = Str.regexp "@\\([A-Za-z0-9_.$]+\\)(" in
+  ignore (Str.search_forward re ir hdr_pos);
+  Str.matched_group 1 ir
+
+(** [NA.Thing] has TWO constructors (TA, TA2); [NB.Thing] has ONE (TB).
+    Every constructor tag NA.Thing owns must route to NA's impl, and
+    NB.Thing's single tag to NB's impl — i.e. exactly one row label is hit
+    by two switch arms (both landing on the same NA symbol) and one row
+    label by a single arm (the NB symbol). *)
+let test_colliding_multi_ctor_shares_one_impl () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA | TA2
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          TA -> "from-A-TA"
+          TA2 -> "from-A-TA2"
+        end
+      end
+    end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do
+    println(speak(NA.TA))
+    println(speak(NA.TA2))
+    println(speak(NB.TB))
+  end
+end
+|} in
+  Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "1";
+  let ir =
+    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_COHERENCE" "0")
+      (fun () ->
+         let m = parse_and_desugar src in
+         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+         let tir = March_tir.Lower.lower_module ~type_map m in
+         let iface_methods = March_tir.Lower.get_iface_methods () in
+         let tir = March_tir.Mono.monomorphize ~iface_methods tir in
+         let tir = March_tir.Defun.defunctionalize tir in
+         let tir = March_tir.Perceus.perceus tir in
+         let tir = March_tir.Dce.prune_unreachable tir in
+         March_tir.Llvm_emit.emit_module tir)
+  in
+  Alcotest.(check bool) "dispatch fn generated" true
+    (ir_contains ir "define ptr @__march_ifdispatch$Speak$speak$Thing");
+  let arms = dispatch_switch_arms ir in
+  Alcotest.(check int) "three switch arms total (TA, TA2, TB tags)" 3
+    (List.length arms);
+  let labels = List.map snd arms in
+  let uniq_labels = List.sort_uniq compare labels in
+  Alcotest.(check int) "exactly two distinct row labels (one per impl)" 2
+    (List.length uniq_labels);
+  let count_of lbl = List.length (List.filter (fun l -> l = lbl) labels) in
+  let two_arm_labels = List.filter (fun l -> count_of l = 2) uniq_labels in
+  let one_arm_labels = List.filter (fun l -> count_of l = 1) uniq_labels in
+  (match two_arm_labels, one_arm_labels with
+   | [na_lbl], [nb_lbl] ->
+     let na_sym = dispatch_row_symbol ir na_lbl in
+     let nb_sym = dispatch_row_symbol ir nb_lbl in
+     Alcotest.(check bool) "both TA/TA2 tags route to NA's impl" true
+       (ir_contains na_sym "NA.Thing.speak");
+     Alcotest.(check bool) "TB's single tag routes to NB's impl" true
+       (ir_contains nb_sym "NB.Thing.speak");
+     Alcotest.(check bool) "the two rows resolve to distinct impls" true
+       (na_sym <> nb_sym)
+   | _ ->
+     Alcotest.failf
+       "expected exactly one row hit by 2 arms (NA) and one row hit by 1 \
+        arm (NB); got arms=[%s]"
+       (String.concat "; "
+          (List.map (fun (t, l) -> Printf.sprintf "(%s,%s)" t l) arms)))
+
+(* ── Task 4 review Finding 2: ECallPtr None-branch of try_collision_dispatch
+   ───────────────────────────────────────────────────────────────────────
+   [Mono.try_collision_dispatch] is wired into THREE call sites: the [EApp]
+   None-branch (exercised above by [test_colliding_general_iface_runtime_dispatch]),
+   the [iface_impl_name] name-collision branch, and the [ECallPtr]
+   None-branch. A natural March fixture reliably reaching the [ECallPtr]
+   branch could not be constructed: a generic wrapper function calling the
+   colliding method, and a higher-order closure parameter calling it, BOTH
+   still resolve through the [EApp] path in this compiler (verified
+   empirically — mono only ever sees a bare, unresolved [EApp "speak"] for
+   these shapes, never a pre-existing [ECallPtr] naming an unresolved
+   interface method).  Real cross-module ECallPtr dispatch (the scenario
+   [try_collision_dispatch]'s doc comment cites — a capability parameter
+   whose concrete type is erased to [TVar "_"] at lowering time) requires a
+   multi-file MARCH_LIB_PATH dependency graph that this single-file test
+   harness cannot construct.
+
+   So — mirroring [test_iface_guard_fires_ecallptr] above, which isolates
+   [llvm_emit]'s ECallPtr consumer the same way for the same reason — this
+   test hand-builds a TIR module and drives the REAL [Mono.monomorphize]
+   directly: a bare [ECallPtr] naming an unresolved method ("speak") with
+   two colliding "Thing" impls registered in [iface_methods]. This proves
+   the ECallPtr None-branch (mono.ml, the `Tir.ECallPtr (fn_atom, args) ->
+   ... Hashtbl.find_opt fn_table orig_name -> None` arm) rewrites to the
+   dispatch sentinel exactly like the EApp branch does, and registers both
+   impls' rows in [Dispatch_registry] — without depending on which
+   real-frontend shape happens to produce ECallPtr today. *)
+let test_mono_ecallptr_collision_dispatch () =
+  let open March_tir.Tir in
+  let mkv name ty = { v_name = name; v_ty = ty; v_lin = Unr } in
+  let thing_ty = TCon ("Thing", []) in
+  let impl_a_name = "Speak$NA.Thing.speak" in
+  let impl_b_name = "Speak$NB.Thing.speak" in
+  let impl_fn name lit = {
+    fn_name   = name;
+    fn_params = [ mkv "_self" thing_ty ];
+    fn_ret_ty = TString;
+    fn_body   = EAtom (ALit (March_ast.Ast.LitString lit));
+    fn_kind   = FnNormal;
+  } in
+  let arg_var = mkv "x" thing_ty in
+  let speak_var = mkv "speak" (TFn ([ thing_ty ], TString)) in
+  let main_fn = {
+    fn_name   = "main";
+    fn_params = [];
+    fn_ret_ty = TString;
+    fn_body   =
+      ELet (arg_var, EAlloc (thing_ty, []),
+            ECallPtr (AVar speak_var, [ AVar arg_var ]));
+    fn_kind   = FnNormal;
+  } in
+  let tir = {
+    tm_name = "EcpDispatch";
+    tm_fns  = [ impl_fn impl_a_name "from-A"; impl_fn impl_b_name "from-B"; main_fn ];
+    tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [];
+  } in
+  let iface_methods : (string, (string * string) list) Hashtbl.t = Hashtbl.create 4 in
+  Hashtbl.replace iface_methods "speak" [ ("Thing", impl_a_name); ("Thing", impl_b_name) ];
+  let tir' = March_tir.Mono.monomorphize ~iface_methods tir in
+  let main' =
+    match List.find_opt (fun fn -> fn.fn_name = "main") tir'.tm_fns with
+    | Some fn -> fn
+    | None -> Alcotest.fail "specialized module has no `main` fn"
+  in
+  let sentinel_name =
+    match main'.fn_body with
+    | ELet (_, _, EApp (f, _)) -> Some f.v_name
+    | e -> Alcotest.failf "unexpected main body shape: %s" (show_expr e)
+  in
+  (match sentinel_name with
+   | None -> Alcotest.fail "ECallPtr call site was not rewritten to an EApp"
+   | Some sentinel ->
+     Alcotest.(check bool) "ECallPtr rewritten to the dispatch sentinel" true
+       (March_tir.Dispatch_registry.is_sentinel sentinel);
+     Alcotest.(check string) "sentinel name matches Speak.speak.Thing convention"
+       "__march_ifdispatch$Speak$speak$Thing" sentinel;
+     (match March_tir.Dispatch_registry.lookup sentinel with
+      | None -> Alcotest.fail "no dispatch rows registered for the sentinel"
+      | Some rows ->
+        let syms = List.map snd rows |> List.sort compare in
+        Alcotest.(check (list string))
+          "both colliding impls registered as dispatch rows"
+          (List.sort compare [ impl_a_name; impl_b_name ]) syms))
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -9063,6 +9268,10 @@ let codegen_suites =
           test_colliding_general_iface_runtime_dispatch;
         Alcotest.test_case "non-colliding program emits no dispatch fn" `Quick
           test_noncolliding_no_dispatch_fn;
+        Alcotest.test_case "multi-ctor colliding type shares one impl per type" `Quick
+          test_colliding_multi_ctor_shares_one_impl;
+        Alcotest.test_case "mono ECallPtr None-branch reaches try_collision_dispatch" `Quick
+          test_mono_ecallptr_collision_dispatch;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
