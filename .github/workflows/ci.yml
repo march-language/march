@@ -60,6 +60,20 @@ jobs:
           eval $(opam env)
           dune build
 
+      - name: DIAG ffi_result clang (temporary)
+        if: runner.os == 'Linux'
+        run: |
+          eval $(opam env)
+          echo "=== which -a clang ==="; which -a clang || true
+          echo "=== clang --version ==="; clang --version || true
+          dune build bin/main.exe
+          cd test
+          echo "=== MARCH_ECHO_CC compile of ffi_result ==="
+          MARCH_ECHO_CC=1 ../_build/default/bin/main.exe --compile -o /tmp/ff native/ffi_result.march 2>&1 | grep -E "MARCH_CC_CMD|compiled" | head -2
+          echo "=== output ==="; /tmp/ff || true
+          echo "=== also with -O0 and -O1 ==="
+          for O in 0 1 2 3; do ../_build/default/bin/main.exe --compile --opt $O -o /tmp/ff$O native/ffi_result.march >/dev/null 2>&1 && echo -n "O$O: " && /tmp/ff$O | tr '\n' ' ' && echo; done
+
       - name: Test
         run: |
           eval $(opam env)
