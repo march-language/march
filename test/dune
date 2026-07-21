@@ -2256,3 +2256,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_call_timeout.expected native_actor_call_timeout.out)))
+
+; ── Regression: Csv.read_all / each_row_with_header must not silently
+; return zero rows compiled — see test/native/csv_niche_row.march's header
+; comment for the full root cause (typecheck.ml declared csv_next_row's
+; return type as bare `CsvRow`, but the TIR registers the module-qualified
+; "Csv.CsvRow"; the name mismatch made niche classification silently fall
+; back to Boxed, which is incompatible with the runtime's NULL-for-EOF
+; convention). Compile, run, diff. ──
+(rule
+ (targets native_csv_niche_row native_csv_niche_row.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../stdlib/csv.march) (file ../stdlib/file.march)
+       (file native/csv_niche_row.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_csv_niche_row
+        native/csv_niche_row.march)
+   (with-stdout-to native_csv_niche_row.out
+        (system "./native_csv_niche_row")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))

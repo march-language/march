@@ -1635,9 +1635,17 @@ let builtin_bindings : (string * scheme) list =
     ("try_finally",
       poly2 (fun a b -> TArrow (TArrow (t_int, a),
                                 TArrow (TArrow (t_int, b), a))));
-    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march) *)
+    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march).
+       The TIR registers user ptypes under their module-qualified name
+       ("Csv.CsvRow"), so this MUST match that qualification: a bare
+       "CsvRow" here makes Repr.niche_repr_of_concrete's find_variant miss
+       the type definition and silently fall back to Boxed, even though
+       CsvRow is niche-shaped (CsvEof nullary + Row single-payload). Under
+       Boxed the compiled match reads a heap object's tag byte, but the C
+       runtime returns raw NULL for EOF (a Niche-only convention) — so every
+       row is misread against an uninitialized tag. *)
     ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
-    ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));
+    ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
     (* TCP/HTTP transport builtins *)
     (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)

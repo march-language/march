@@ -3118,11 +3118,19 @@ typedef struct {
 } csv_handle;
 
 static void *csv_row_result(void *fields_list) {
-    /* Row(fields) — constructor tag 0, 1 field */
-    void *row = march_alloc(24);
-    /* tag=0 for Row (first/only constructor) */
-    MARCH_FIELD(row, 0) = (int64_t)fields_list;
-    return row;
+    /* csv_next_row's March return type is the niche-shaped ADT
+       `CsvRow = CsvEof | Row(List(String))`: one nullary ctor + one
+       single-field ctor, whose payload (List(String)) is heap-pointer-shaped
+       and therefore niche-safe (see Repr.niche_repr_of_concrete / rc_types).
+       The compiler represents this WITHOUT a wrapper box: CsvEof = NULL,
+       Row(fields) = the fields-list pointer itself. A separate `march_alloc`
+       wrapper here (as an earlier version of this function did) doesn't
+       match that representation: the compiled match's non-null branch binds
+       the scrutinee pointer directly as the payload, so a wrapper box got
+       bound as `fields` instead of the actual list, and Perceus/FBIP treat
+       the scrutinee as owning no allocation of its own (niche values have no
+       separate header), corrupting the wrapper's memory once it's dec_rc'd. */
+    return fields_list;
 }
 
 /* Parse one CSV row from f according to delimiter/mode.
