@@ -283,6 +283,10 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, WebSocket connection-stability fix — non-blocking socket mode no longer leaks into the blocking WS handler)
+
+- **`lib/eval/eval.ml`'s interpreter WebSocket server (`http_server_listen`/`run_http_event_loop`) no longer disconnects idle WS clients.** The 2026-07-07 event-loop fix above put every accepted socket in non-blocking mode for its multiplexed HTTP accept loop but never cleared that flag before handing the fd to the WS handler closure, despite its own comment claiming the handoff was "blocking, exactly as before this fix." `ws_recv_frame`'s catch-all exception handler then silently turned the resulting `EAGAIN`/`EWOULDBLOCK` (raised by `Unix.recv` racing an idle/still-in-flight client) into a synthesized `Close(1001, "going away")` — observed as `forge scroll.serve` notebooks flipping to "disconnected" almost immediately after loading. Fix: `Unix.clear_nonblock sock` right before the WS handshake response is written (`http_run_pipeline_and_respond`). The compiled runtime (`runtime/march_http.c` `connection_thread`) had the same bug class with a different trigger: the 10s keep-alive `SO_RCVTIMEO` set at connection-thread startup was never cleared before the WS handoff, so an idle compiled WS connection would time out and get the same spurious synthesized close after 10s; fixed by resetting `SO_RCVTIMEO` to `{0,0}` at the same handoff point, matching the evloop server variant's existing `ws_handler_thread`, which already explicitly clears `O_NONBLOCK` there. Verified with a controlled WS client: idle connections now stay open 60s+ (previously died near-instantly), and a full `load`→`run`→`poll_run` round trip completes with the connection still open afterward. See `specs/todos.md` "Recently fixed" for the full writeup, including a separately-noticed (not fixed here) RFC 6455 Pong-payload-echo gap.
+
 ## Current State (as of 2026-07-08, order-independent multi-module name resolution)
 
 Multi-module typechecking is now **order-independent** for bare/qualified type

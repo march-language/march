@@ -2766,7 +2766,15 @@ let http_run_pipeline_and_respond
        in
        (* The handshake + subsequent WS frames are written/read with the
           same blocking helpers the old implementation used: this one
-          connection becomes WS-owned for its lifetime, same as before. *)
+          connection becomes WS-owned for its lifetime, same as before.
+          The accept loop above put this socket in non-blocking mode for
+          its own multiplexed select() bookkeeping; that flag is still set
+          here and must be cleared before handing off, or ws_recv_frame's
+          blocking-style Unix.recv calls raise EAGAIN/EWOULDBLOCK the
+          moment the client goes idle (even on the very first read, if it
+          races ahead of the client's next frame), which ws_recv_frame's
+          catch-all then misreports as the peer closing the connection. *)
+       (try Unix.clear_nonblock sock with _ -> ());
        tcp_send_all sock handshake;
        let fd_int = (Obj.magic sock : int) in
        let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
