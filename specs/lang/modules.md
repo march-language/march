@@ -211,7 +211,7 @@ Import only specific names:
 
 ```march
 import MathUtils, only: [square, cube]
-import String, only: [length, split, to_uppercase]
+import String, only: [trim, split, to_uppercase]
 ```
 
 Import everything except specific names:
@@ -223,7 +223,7 @@ import String, except: [dangerous_fn]
 Dotted import with brace selector:
 
 ```march
-import String.{length, split}
+import String.{trim, split}
 import MyApp.Utils.{format, parse}
 ```
 

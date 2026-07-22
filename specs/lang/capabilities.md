@@ -101,7 +101,7 @@ A module that declares `needs IO` can pass `Cap(IO)` to any function that requir
 
 ```march
 fn start(cap : Cap(IO)) : () do
-  let net_cap  : Cap(IO.NetListen)      = cap_narrow(cap)
+  let net_cap  : Cap(IO.Network)        = cap_narrow(cap)
   let tls_cap  : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
   Server.listen(net_cap, 8080)
 end
@@ -187,8 +187,8 @@ mod Cache do
   needs IO.Mut
 
   fn store(key : String, val : Int) : () do
-    let tbl = vault_new("app_cache")
-    vault_set(tbl, key, val)
+    let tbl = Vault.new("app_cache")
+    Vault.set(tbl, key, val)
   end
 end
 ```
@@ -402,10 +402,15 @@ This is informational, and it is **not necessarily backed by a type error** — 
 Here's how capability declarations compose across a small web application. Reading the `needs` list of each module answers "what does this module do to the world?" without opening the implementation:
 
 ```march
-mod Config do
+mod AppConfig do
+  -- Note: named `AppConfig`, not `Config` — `Config` is already a stdlib
+  -- module (`stdlib/config.march`), and a user module of the same name
+  -- would collide with it once this file joins a real multi-file build.
   needs IO.FileRead          -- reads one config file, nothing else
 
-  fn load(path : String) : Config do ... end
+  type AppConfig = AppConfig
+
+  fn load(path : String) : AppConfig do ... end
 end
 
 mod Metrics do
@@ -415,25 +420,32 @@ mod Metrics do
 end
 
 mod Api do
+  -- Likewise `WebServer`/`ConnCtx` here, not `HttpServer`/`Conn` — those
+  -- names are already taken by stdlib's `HttpServer` module.
+  use WebServer
+
   needs IO.NetListen         -- binds a port
   needs IO.NetConnect.TLS    -- outbound HTTPS only — no plaintext TCP
   needs IO.Mut               -- session vault
 
   fn start(io : Cap(IO.NetListen), tls : Cap(IO.NetConnect.TLS),
            mut : Cap(IO.Mut)) : () do
-    HttpServer.new()
-    |> HttpServer.plug(fn conn -> handle(conn, tls, mut))
-    |> HttpServer.run(io, 8080)
+    WebServer.new()
+    |> WebServer.plug(fn conn -> handle(conn, tls, mut))
+    |> WebServer.run(io, 8080)
   end
 end
 
 mod Main do
+  use AppConfig
+  use Api
+
   needs IO
 
   -- The initial Cap(IO) is provided implicitly by the runtime to `main()` —
   -- there is no `root_cap()` call in user code.
   fn main(cap : Cap(IO)) : () do
-    let config  = Config.load("/etc/myapp/config.toml")
+    let config  = AppConfig.load("/etc/myapp/config.toml")
     let io_cap  : Cap(IO.NetListen)      = cap_narrow(cap)
     let tls_cap : Cap(IO.NetConnect.TLS) = cap_narrow(cap)
     let mut_cap : Cap(IO.Mut)            = cap_narrow(cap)
@@ -442,7 +454,7 @@ mod Main do
 end
 ```
 
-`Config` is provably read-only. `Api` cannot read files and cannot use plaintext TCP. If `Config.load` ever called a network function, the build would fail until `needs IO.NetConnect` was added — no audit needed.
+`AppConfig` is provably read-only. `Api` cannot read files and cannot use plaintext TCP. If `AppConfig.load` ever called a network function, the build would fail until `needs IO.NetConnect` was added — no audit needed.
 
 ---
 
@@ -594,7 +606,7 @@ mod Sanitize do
   end
 
   fn render(s : Sanitized) : String do
-    let Sanitized(text) = s
+    let (Sanitized(text)) = s
     text
   end
 end
@@ -649,7 +661,6 @@ A `transitions` block names every valid state transition. The compiler verifies 
 mod Db do
   transitions Handle do
     ConnTag: Closed -> Open   via open
-    ConnTag: Open   -> Open   via query
     ConnTag: Open   -> Closed via close
   end
 end
@@ -764,13 +775,22 @@ type LogEnv = {
 }
 
 fn test_process() do
-  let captured = Ref.new([])
+  let captured = Vault.new("test_capture")
+  Vault.set(captured, "lines", Nil)
   let env : LogEnv = {
     log_cap: test_logger_cap(),
-    write:   fn line -> Ref.update(captured, fn xs -> Cons(line, xs))
+    write:   fn line ->
+      match Vault.get(captured, "lines") do
+      Some(xs) -> Vault.set(captured, "lines", Cons(line, xs))
+      None     -> Vault.set(captured, "lines", Cons(line, Nil))
+      end
   }
   let result = process(env, test_input)
-  assert_contains(Ref.get(captured), "expected message")
+  let lines = match Vault.get(captured, "lines") do
+    Some(xs) -> xs
+    None     -> Nil
+    end
+  Test.assert_true(List.any(lines, fn l -> String.contains(l, "expected message")), "should have captured the message")
 end
 ```
 

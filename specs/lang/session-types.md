@@ -23,9 +23,9 @@ Two classes of bug become compile errors:
 - **Wrong-order / wrong-direction communication.** `Chan.send` on a channel whose protocol says "receive next" doesn't type-check.
 - **Use-after-close.** The channel is *linear* — you cannot keep using an endpoint after `Chan.close`, or use the same continuation twice.
 
-Two more classes *sound* like they'd be compile errors but, as verified against the current implementation, are not always caught — see [The guarantees, in one place](#the-guarantees-in-one-place) below for the precise (narrower) story on dropped channels and unhandled `offer` branches.
+A third class sounds like it would be a compile error but, as verified against the current implementation, is not always caught — see [The guarantees, in one place](#the-guarantees-in-one-place) below for the precise (narrower) story on unhandled `offer` branches.
 
-The result is a static guarantee: if your program compiles, the two sides agree on the conversation and the channel is never used after close. (Two related properties — a channel is always eventually closed, and every offered case is handled — are *usually* true in practice but are not, in fact, mechanically enforced; see [The guarantees, in one place](#the-guarantees-in-one-place).)
+The result is a static guarantee: if your program compiles, the two sides agree on the conversation and the channel is never used after close. A related property — every offered case is handled — is only *usually* true in practice, not mechanically enforced; see [The guarantees, in one place](#the-guarantees-in-one-place). (A channel reaching the end of its protocol and then being dropped without `Chan.close` **is** mechanically caught, as of a fix that landed after this guarantee was first surveyed — see the same section for the precise, narrower shape of what's checked.)
 
 ---
 
@@ -69,7 +69,7 @@ A few rules the type checker enforces, so they never reach runtime:
 - **`Chan.new(proto)` returns the two endpoints.** Hand one to each role. They are linked: what one side sends, the other receives.
 - **`send`/`recv` must match the protocol's next step.** Calling `Chan.send` when the protocol says "receive next" is a type error.
 - **`Chan.close` only type-checks at the end of the protocol.** If there are still steps left, closing is rejected — you can't hang up mid-conversation.
-- **The endpoint is linear.** Each rebinding consumes the previous one, so you can't accidentally reuse a stale (pre-advance) handle. (Linearity here is the same generic `let`-binding tracker every other linear value uses, not session-specific accounting — see [The guarantees, in one place](#the-guarantees-in-one-place) for where "forgetting to close" actually does and doesn't get caught.)
+- **The endpoint is linear.** Each rebinding consumes the previous one, so you can't accidentally reuse a stale (pre-advance) handle — including a channel parameter, whose re-use is tracked as affine. A `let`-bound channel that reaches the end of the protocol and is then dropped without `Chan.close` is also rejected. See [The guarantees, in one place](#the-guarantees-in-one-place) for the precise shape of what this check does and doesn't cover.
 
 ---
 
@@ -171,13 +171,15 @@ If a program using session-typed channels compiles, then:
 
 - **No protocol violations.** Every `send`/`recv` matches the protocol's next step, on both sides, by construction (duality is checked when the protocol is declared).
 - **No use-after-close.** The channel is linear; an endpoint cannot be used after `Chan.close`, and `close` only type-checks once the protocol is complete.
+- **A `let`-bound endpoint that reaches the end of the protocol must be closed.** Dropping it unclosed at that point is rejected, and re-using a channel *parameter* (not just a `let`-bound continuation) is also caught. (This closed two formerly-open gaps, historically labeled F7 — see below for the one shape that's still deliberately out of scope.)
 
 These properties are the same ones you'd otherwise chase with runtime assertions and integration tests — promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
 
-**Two things that sound like guarantees but are not, verified live and filed as open findings** (`specs/todos.md`; see the [operational reference](core-march.md) §4.11.6 for the full write-up):
+**One thing that sounds like a guarantee but is not, verified live and filed as an open finding** (`specs/todos.md`; see the [operational reference](core-march.md) §4.11.6 for the full write-up):
 
-- **Dropped channels are not actually caught.** Linearity here rides the same generic `let`-binding tracker every other linear value uses, not session-specific accounting — a program that never calls `Chan.close` on an endpoint that has already reached the end of the protocol typechecks and runs cleanly (F7). The discipline holds for `let`-bound continuations threaded through in the same scope; it does not hold universally.
 - **An `offer` that doesn't handle every label is a warning, not an error.** `match`'s exhaustiveness check (the same one that governs every other `match` in March) only warns on a missing case — `--check` still exits 0. If your build treats warnings as informational only, an unhandled label compiles.
+
+**One narrower gap remains, deliberately out of scope of the fix above:** the must-close check only fires once an endpoint has reached the *end* of its protocol. Abandoning a channel *mid*-protocol — creating it and never touching one side again, before either endpoint reaches `end` — still typechecks and runs cleanly. That's the same territory as the no-scheduler `recv`-before-`send` deadlock boundary discussed below, not the "forgot to close a finished conversation" case.
 
 ---
 
@@ -190,7 +192,7 @@ Session types and [actors]({{ site.baseurl }}/docs/actors/) are **complementary*
 | **Shape** | identity + state + a mailbox; many senders, one receiver | a two-party conversation over one linear channel |
 | **Typing** | each `on Msg(...)` handler is typed, but message *order* is unconstrained — any actor can `send` any message at any time | the *sequence* of sends/receives is typed; order is enforced |
 | **Multiplicity** | one mailbox, fan-in from anywhere | exactly two endpoints, point-to-point |
-| **Lifetime** | long-lived process; mailbox always open | the channel *ends*, and `close` is checked once the protocol is complete — though (see above) nothing forces you to ever get there |
+| **Lifetime** | long-lived process; mailbox always open | the channel *ends*, `close` is checked once the protocol is complete, and (see above) dropping it unclosed once it gets there is now also rejected — though nothing forces the conversation to *reach* the end in the first place |
 | **Best for** | stateful services, supervision, fan-in event handling | strict request/reply or multi-step handshakes where ordering correctness matters |
 
 The mental model: **an actor's mailbox guarantees each message is well-typed; a session channel additionally guarantees the sends and receives that do happen arrive in the agreed order.** Reach for an actor when you have a stateful entity that many parties talk to (a counter, a connection, a supervised worker). Reach for a session channel when two parties run a fixed protocol and you want the compiler to prove they follow it — a login handshake, a request/reply exchange, a negotiation with branches.
