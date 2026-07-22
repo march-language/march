@@ -1,0 +1,34 @@
+-- Regression: RRB.push (Array.push's PVec/TrieNode/List(a) trie, specialised
+-- to Float) crashed compiled on the SECOND push, well before the tail buffer
+-- (32 elements) or trie levels are involved.
+--
+-- Array.push calls `lst_len(tail)` to measure the tail buffer.  lst_len's
+-- inner `go` discards the list-head field via a wildcard pattern
+-- (`Cons(_, t) -> go(t, acc + 1)`).  The pattern-matrix compiler
+-- (lower_match.ml) gives EVERY constructor-field synthetic variable the
+-- `TVar "_"` placeholder type at creation; a NAMED field (`Cons(h, t)`) gets
+-- fixed up to its real, trackable type when re-bound via `ty_of_span`, and
+-- that real type then flows through mono.ml's monomorphization substitution
+-- normally — but a WILDCARD-discarded field is never rebound, so it keeps
+-- `TVar "_"` forever. `Rc_types.needs_rc (TVar "_")` conservatively answers
+-- true ("assume heap-carrying"), so Perceus emits a `dec_rc` on the discarded
+-- field. For a concretely-Float instantiation, the field's actual runtime
+-- representation is a raw unboxed IEEE-754 double bit-reinterpreted as `ptr`
+-- (`Llvm_ctx.coerce ("double","ptr")` — a plain bitcast, no heap box), so
+-- that `dec_rc` reads the tag field out of a raw float bit pattern and
+-- SIGSEGVs (`march_decrc + 52`, faulting address `0x3ff8...0008`).
+--
+-- Fixed by recording PatWild's inferred type into typecheck.ml's `type_map`
+-- (mirroring PatVar) and having lower_match.ml's pattern-matrix compiler look
+-- up EVERY constructor field's type via `ty_of_span` instead of defaulting
+-- unconditionally to the unknown-type placeholder — so a discarded field now
+-- flows through monomorphization exactly like a named one.
+mod Main do
+  fn main() do
+    let v0 = RRB.empty()
+    let v1 = RRB.push(v0, 1.5)
+    let v2 = RRB.push(v1, 2.5)
+    let v3 = RRB.push(v2, 3.5)
+    println(RRB.length(v3))
+  end
+end

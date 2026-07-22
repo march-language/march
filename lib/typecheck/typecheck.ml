@@ -2840,16 +2840,16 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
        TChan (ref SError)
      | _ ->
-    let arity = match lookup_type name.txt env with
-      | Some a -> a
+    let env_loaded, arity = match lookup_type name.txt env with
+      | Some a -> env, a
       | None   ->
         (* Try qualified module resolution: "Mod.Type" *)
         match resolve_qualified_type name.txt env with
-        | _, Some a -> a
+        | env', Some a -> env', a
         | _ ->
           Err.error env.errors ~span:name.span
             (qualified_error_msg name.txt env);
-          0
+          env, 0
     in
     (* March uses a single global type namespace: a type declared inside a
        module has its *bare* name as its canonical identity.  Both the type's
@@ -2866,11 +2866,22 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
       (* The bare suffix is the component after the LAST '.' (the type's own
          name); everything before is the module path.  Using rindex rather than
          [split_qualified] (which splits at the FIRST dot for module-load
-         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`. *)
+         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`.
+         Look up the bare suffix in [env_loaded] (not the pre-resolution
+         [env]): when [name.txt] needed [resolve_qualified_type] to lazily
+         load its module, [load_module_into_env]'s [ExType]/[ExRecord] arms
+         seed the BARE name too (first-wins — see their doc comment), so an
+         opaque `ptype` seen for the first time via qualification (e.g.
+         `RRB.Vec`, never promoted to the outer bare namespace since it's
+         never `Public`) still canonicalizes correctly.  Looking this up in
+         the original [env] would always miss for such a type, silently
+         skipping canonicalization and leaving a real value (whose actual
+         type uses the bare `TCon`) unable to unify against the qualified
+         annotation. *)
       match String.rindex_opt name.txt '.' with
       | Some i ->
         let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
-        (match lookup_type bare env with Some a when a = arity -> bare | _ -> name.txt)
+        (match lookup_type bare env_loaded with Some a when a = arity -> bare | _ -> name.txt)
       | None -> name.txt
     in
     let args' = List.map (surface_ty env ~tvars) args in
@@ -3257,8 +3268,18 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   match pat with
-  | Ast.PatWild _ ->
-    [], fresh_var env.level
+  | Ast.PatWild sp ->
+    let t = fresh_var env.level in
+    (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
+       up the resolved (possibly-still-polymorphic) type via ty_of_span for
+       constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
+       Without this, a discarded field's synthetic TIR var never resolves to
+       a concrete type through monomorphization (unlike a NAMED field, which
+       gets fixed up the same way) and Perceus conservatively treats it as
+       RC-managed, corrupting compiled programs when the concrete type is
+       actually an unboxed scalar (e.g. Float) — see lower_match.ml. *)
+    Hashtbl.replace env.type_map sp t;
+    [], t
 
   | Ast.PatVar name ->
     let t = fresh_var env.level in
@@ -5292,6 +5313,26 @@ and infer_match env span scrut scrut_ty branches =
   check_redundant_arms env scrut_ty branches;
   result_ty
 
+(** Whether every diagnostic in [scratch] stems from a data constructor used
+    in type position — a phantom/typestate tag like `Handle(Open)`, where
+    `Open` is a constructor of some ADT rather than a type name, which
+    [surface_ty] legitimately cannot resolve (it emits [qualified_error_msg]'s
+    unqualified-name form, "I cannot find `Open`.", for the ctor name).
+    Recognised by checking that the unresolved name IS a known constructor
+    ([env.ctors]) — genuinely bogus names (typo'd/renamed types, unknown
+    modules) are never registered there, so this returns [false] for those
+    and the caller must surface the error instead of discarding it. *)
+and annotation_errors_are_phantom_tags_only env (scratch : March_errors.Errors.ctx) =
+  let prefix = "I cannot find `" in
+  let plen = String.length prefix in
+  List.for_all (fun (d : March_errors.Errors.diagnostic) ->
+    let msg = d.March_errors.Errors.message in
+    String.length msg >= plen + 2
+    && String.sub msg 0 plen = prefix
+    && String.sub msg (String.length msg - 2) 2 = "`."
+    && StrMap.mem (String.sub msg plen (String.length msg - plen - 2)) env.ctors
+  ) scratch.March_errors.Errors.diagnostics
+
 (** Compute the type of a `let`-binding RHS, honouring an optional type
     annotation (`let x : T = e`, finding 16).  When [bind_ty] is present the
     annotation becomes a CHECKING context for the RHS (via [check_expr]) — a
@@ -5299,12 +5340,15 @@ and infer_match env span scrut scrut_ty branches =
     bound at a more specific instance (`let f : (Int) -> Int = fn x -> x`)
     still typechecks.
 
-    The annotation is resolved into a scratch error context first: if
-    [surface_ty] cannot resolve it (e.g. a phantom/typestate tag used in type
-    position, `let h : Handle(Open) = …`, which is a data constructor, not a
-    type name), we discard the scratch errors and fall back to plain inference
-    — exactly the pre-finding-16 behaviour for annotations the type grammar
-    can't express, so no legitimate program starts being rejected. *)
+    The annotation is resolved into a scratch error context first.  If
+    [surface_ty] fails ONLY because of a phantom/typestate tag used in type
+    position (`let h : Handle(Open) = …`), we discard the scratch errors and
+    fall back to plain inference — the pre-finding-16 behaviour for
+    annotations the type grammar can't express.  But if any failure is a
+    genuinely unresolvable name (unknown module, typo'd/renamed type — see
+    the `RRB`/`Vec(Int) = "not a vec"` soundness hole), the annotation is
+    real and broken: surface the scratch diagnostics as real errors instead
+    of silently ignoring the annotation. *)
 and infer_let_annotated env sp bind_ty bind_expr =
   match bind_ty with
   | None -> infer_expr env bind_expr
@@ -5312,11 +5356,16 @@ and infer_let_annotated env sp bind_ty bind_expr =
     let scratch = March_errors.Errors.create () in
     let tvars = ref [] in
     let ann_ty = surface_ty { env with errors = scratch } ~tvars ann in
-    if March_errors.Errors.has_errors scratch then
-      (* Annotation not expressible as a resolvable type — ignore it (legacy
-         behaviour) and infer from the RHS alone. *)
+    if March_errors.Errors.has_errors scratch then begin
+      if not (annotation_errors_are_phantom_tags_only env scratch) then
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          March_errors.Errors.error env.errors ~span:d.March_errors.Errors.span
+            d.March_errors.Errors.message
+        ) scratch.March_errors.Errors.diagnostics;
+      (* Annotation not (fully) expressible as a resolvable type — infer from
+         the RHS alone; any genuine error was already surfaced above. *)
       infer_expr env bind_expr
-    else begin
+    end else begin
       check_expr env bind_expr ann_ty ~reason:(Some (RAnnotation sp));
       ann_ty
     end
