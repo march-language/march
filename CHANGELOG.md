@@ -39,6 +39,14 @@ git log is authoritative for exact commits.
   as the wrong type. These builtins' error types are now pinned to their real
   concrete type, so a mismatched declaration is now a compile-time error
   instead of a runtime panic.
+- `Actor.call`'s reply value was silently corrupted when compiled: an `Int`
+  (or `Bool`/`Unit`) reply came back as its raw tagged-immediate bit pattern
+  instead of the real value (e.g. a handler replying with `5` was observed as
+  `11` by the caller). `int_to_string`/`bool_to_string`/`float_to_string` are
+  the only scalar-consuming builtins that had no dedicated argument coercion,
+  so a value arriving through `Actor.call`'s necessarily type-erased reply
+  channel was passed straight through with a declared-signature mismatch
+  instead of being untagged first.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,
