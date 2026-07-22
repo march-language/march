@@ -4557,9 +4557,7 @@ end
    keys — not the same bare "Thing.Shared" key for both, which is the exact
    mechanism behind the double-collision miscompile: whichever module's
    [TDVariant] happens to register into [ctor_info] LAST silently wins for
-   BOTH constructions. Requires MARCH_DEV_RELAX_CTOR_COHERENCE=1 (Task 0's
-   dev harness) since a shared ctor short name across colliding types is
-   still rejected by the coherence gate this plan hasn't fully replaced. *)
+   BOTH constructions. *)
 let test_colliding_ctor_construction_gets_qualified_key () =
   let src = {|
 mod Top do
@@ -4596,14 +4594,9 @@ mod Top do
   end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
-  let tir =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         March_tir.Lower.lower_module ~type_map m)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
   let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
       tir.March_tir.Tir.tm_fns in
   let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
@@ -4697,14 +4690,9 @@ mod Top do
   end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
-  let tir =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         March_tir.Lower.lower_module ~type_map m)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
   let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
       tir.March_tir.Tir.tm_fns in
   let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
@@ -4813,10 +4801,7 @@ end
 (** Shape 2 (the canonical, more common shape per the task brief): a bare
     `Shared` match arm written directly inside an interface impl method's
     own body — `impl Speak(Thing) do fn speak(self) do match self do
-    Shared -> ... end end end`. Requires MARCH_DEV_RELAX_CTOR_COHERENCE=1
-    (same double-collision-impl bypass as the construction-side impl-method
-    test above), since two colliding `Thing` types both implementing
-    `Speak` still goes through the coherence gate. *)
+    Shared -> ... end end end`. *)
 let test_colliding_pattern_match_impl_method_gets_qualified_tag () =
   let src = {|
 mod Top do
@@ -4853,14 +4838,9 @@ mod Top do
   end
 end
 |} in
-  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
-  let tir =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
-         March_tir.Lower.lower_module ~type_map m)
-  in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
   let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
       tir.March_tir.Tir.tm_fns in
   let shared_tag_of (fn : March_tir.Tir.fn_def) =
