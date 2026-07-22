@@ -2014,6 +2014,17 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
     ("http_parse_response",     poly1 (fun e -> TArrow (t_string,
         t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) e)));
+    (* http_fetch / http_fetch_available: JS-only fetch path used by
+       HttpTransport.request (stdlib/http_transport.march).  On native builds
+       http_fetch_available() always returns false (see runtime/march_http.c),
+       so http_fetch itself is never actually invoked — the tcp_* socket path
+       handles the request instead.  Both are registered here (Bool / a
+       concrete Result(String,String)) so the call sites get a real static
+       type instead of falling through llvm_emit's generic erased-type path,
+       which expects a different (boxed) representation than a raw Bool. *)
+    ("http_fetch_available",    Mono t_bool);
+    ("http_fetch",              Mono (TArrow (t_string, TArrow (t_string,
+        TArrow (t_string, TArrow (t_string, t_result t_string t_string))))));
     (* http_server_listen(port, max_conns, idle_timeout, pipeline_fn) *)
     ("http_server_listen",      poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_unit))))));
     (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
@@ -3268,8 +3279,18 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   match pat with
-  | Ast.PatWild _ ->
-    [], fresh_var env.level
+  | Ast.PatWild sp ->
+    let t = fresh_var env.level in
+    (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
+       up the resolved (possibly-still-polymorphic) type via ty_of_span for
+       constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
+       Without this, a discarded field's synthetic TIR var never resolves to
+       a concrete type through monomorphization (unlike a NAMED field, which
+       gets fixed up the same way) and Perceus conservatively treats it as
+       RC-managed, corrupting compiled programs when the concrete type is
+       actually an unboxed scalar (e.g. Float) — see lower_match.ml. *)
+    Hashtbl.replace env.type_map sp t;
+    [], t
 
   | Ast.PatVar name ->
     let t = fresh_var env.level in

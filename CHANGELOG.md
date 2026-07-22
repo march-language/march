@@ -88,6 +88,16 @@ git log is authoritative for exact commits.
   missing diagnostic. Now correctly rejected at `--check` and `--compile`
   with the same "is private to module" error other privacy violations
   already produced.
+- `RRB.push`/`Array.push` crashed compiled on the second `Float` element
+  pushed (`RRB.push(RRB.push(RRB.empty(), 1.5), 2.5)`). A discarded
+  (wildcard-matched) field of a list cell never got the special-casing a
+  *named* field already had, so the compiler treated it as reference-counted
+  even when the concrete element type (`Float`) doesn't need that — freeing
+  memory that was never actually heap-allocated. Also fixes the same class of
+  bug in `Array.get`/`RRB.get`: reading back a pushed `Float` previously
+  returned a silently wrong value (e.g. `0.` instead of `1.5`) rather than the
+  correct one. Verified with a 100-element round trip (push then read back
+  every index) at both optimization levels, no mismatches.
 - `task_spawn`/`Task.async` with a `Float`-returning callback, followed by
   `task_await_unwrap`/`Task.await_unwrap`/`Task.await`, failed to compile
   with an internal LLVM type error. Affects `Parallel.preduce`/`psum_float`,
@@ -122,6 +132,11 @@ git log is authoritative for exact commits.
   WebSocket servers had a milder version of the same bug: an idle connection
   would be dropped after 10 seconds instead of staying open. Both are fixed;
   idle WebSocket connections now stay open as expected in both backends.
+- `Vault.update` crashed (segfault) in compiled programs, for both an inline
+  lambda and a named function callback — e.g.
+  `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
+  Affects the documented atomic-update pattern and the rate-limiter cookbook
+  example.
 
 ### Documentation
 

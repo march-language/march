@@ -2459,3 +2459,35 @@ void *march_http_parse_response(void *raw_ptr) {
     *(void **)((char *)ok_obj + 16) = tup;
     return ok_obj;
 }
+
+/* http_fetch / http_fetch_available — native link-time stubs.
+ *
+ * These two names are called unqualified from stdlib/http_transport.march
+ * but before typecheck.ml registered them (see the "http_fetch_available /
+ * http_fetch" builtin_bindings entry), the call sites had no static type and
+ * fell through llvm_emit's generic "unresolved global call -> declare + call
+ * an extern C symbol of the same name" fallback, which still requires these
+ * symbols to resolve at link time for every compiled program that pulls in
+ * HttpTransport (i.e. HttpClient) even though http_fetch_available() being
+ * false makes request_via_fetch/http_fetch dead code on native — native
+ * requests go through the tcp_* socket path below instead.
+ *
+ * Now that http_fetch_available is registered with a concrete Bool return
+ * type, the call site uses the raw-i64 Bool ABI (0/1 — see
+ * lib/tir/llvm_emit.ml's `Tir.TBool -> "i64"`), NOT the tagged-immediate
+ * `(v<<1)|1` ptr representation used for erased/boxed values. */
+int64_t http_fetch_available(void) {
+    return 0;
+}
+
+void *http_fetch(void *method, void *url, void *header_block, void *body) {
+    (void)method; (void)url; (void)header_block; (void)body;
+    static const char msg[] =
+        "http_fetch: not available on native builds; guarded by "
+        "http_fetch_available() at the March call site";
+    void *s = march_string_lit(msg, (int64_t)(sizeof(msg) - 1));
+    void *r = march_alloc(24);
+    ((march_hdr *)r)->tag = 1; /* Err */
+    *(void **)((char *)r + 16) = s;
+    return r;
+}
