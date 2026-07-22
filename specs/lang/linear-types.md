@@ -269,14 +269,29 @@ the protocol.
 
 ## Capabilities as Linear Types
 
-Capabilities (see [capabilities]({{ site.baseurl }}/docs/capabilities/)) use linear types to ensure a capability token cannot be forged or duplicated:
+`Cap(X)` is, by default, an **ordinary unrestricted type** — `cap_narrow` is
+free and side-effect-free, and a plain `Cap(X)` value can be passed to as
+many callees as you like (see `core-march-types.md` §2.8, and
+[Capabilities]({{ site.baseurl }}/docs/capabilities/)). Preventing a
+capability from being *forged* is a separate mechanism — proof capabilities
+are minted only through the gated `mint_cap` primitive, not through
+linearity (see `core-march-types.md` §2.8.13). What you *can* do is apply the
+ordinary `linear` qualifier to a capability parameter, exactly as to any
+other value, when a function should force its caller to give up the
+capability for good:
 
 ```march
-fn read_secret(linear cap : Cap(Vault)) : String do
-  Vault.read(cap, "secret_key")
-  -- cap is consumed; caller must obtain a new one for further operations
+fn narrow_once(linear cap : Cap(IO)) : Cap(IO.FileRead) do
+  cap_narrow(cap)   -- consumes cap; the caller cannot reuse it afterward
 end
 ```
+
+(Verified live, 2026-07-22. An earlier version of this section used a
+`Cap(Vault)`/`Vault.read` example and claimed linearity is what stops
+capability forging — neither held up: `Vault` is a stdlib module, not a
+capability namespace, `Vault`'s real API is `Vault.get`/`Vault.set`, not
+`read`, and `Cap(Vault)` is rejected with `` `Cap(Vault)` used in module
+`Main` but `Vault` is not declared in `needs` ``.)
 
 Capability narrowing attenuates a capability to a sub-capability:
 
@@ -289,18 +304,38 @@ end
 
 ---
 
-## FFI and Linear Pointers
+## FFI and Native Resources
 
-When calling C code, raw pointers are typed as `linear Ptr(a)`:
+There is no `Ptr` type in March, and no `linear Ptr(a)` spelling. The actual
+mechanism for safe manual memory management across the FFI boundary is the
+`resource` declaration together with the `consume` parameter mode. A
+`resource` type is an opaque native handle that Perceus reference-counts like
+any other value, invoking its destructor automatically when the last
+reference is dropped; `consume` on an extern parameter transfers ownership
+into that call so the compiler does not *also* auto-drop the binding
+afterward (which would double-free):
 
 ```march
-extern "libc": Cap(LibC) do
-  fn malloc(n : Int) : linear Ptr(a)
-  fn free(linear ptr : Ptr(a)) : ()
+mod Bindings do
+  needs IO.Foreign
+  needs IO.FileSystem
+
+  resource Buffer
+
+  extern "libc": Cap(IO.FileSystem) do
+    fn buffer_alloc(n : Int) : Buffer
+    fn buffer_free(consume buf : Buffer) : ()
+  end
 end
 ```
 
-This makes memory management explicit in the type — you cannot forget to `free` a `linear Ptr`, and you cannot `free` it twice. (Illustrative sketch — see the FFI reference for the verified extern-block surface; the linearity mechanics are the same `linear`-qualifier tracking described above.)
+This makes the ownership transfer explicit in the type — `buffer_free`
+consumes `buf`, so a later use of `buf` in the same scope is a compile
+error, the same double-use rejection this chapter has covered throughout.
+(Verified live, 2026-07-22 — corrects an earlier sketch that used a
+fictitious `Ptr(a)` type and a `Cap(LibC)` capability namespace; neither
+exists. See `test/native/ffi_resource.march` for a full worked example with
+the `consume` mode.)
 
 ---
 

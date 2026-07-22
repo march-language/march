@@ -116,13 +116,17 @@ learns the condition; the else-branch learns its negation:
 
 ```march
 fn get(xs : List(Int), i : Int) : Int do
-  if i >= 0 && i < len(xs) do
+  if i >= 0 && i < List.length(xs) do
     at(xs, i)          -- ok: the guard proves the precondition here
   else
     0
   end
 end
 ```
+
+(`len` is a measure name usable only inside a `{...}` refinement predicate,
+not a callable in ordinary code — verified live, 2026-07-22; use
+`List.length` in a plain guard expression like the one above.)
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -317,6 +321,6 @@ compiled, since neither backend inserts any runtime predicate check.
 
 ## Next Steps
 
-- [Type System](types.md) — the types refinements attach to
+- [Type System](type-system.md) — the types refinements attach to
 - [Linear Types](linear-types.md) — the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md) — `match` guards feed path sensitivity

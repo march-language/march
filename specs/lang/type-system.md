@@ -116,8 +116,8 @@ type Config =
 Update fields with `{ base with field: value }` — this creates a new record; the original is unchanged:
 
 ```march
-let p2 = { p with x: 5.0 }       -- new Point, y unchanged
-let u2 = { u with active: false } -- deactivate user
+let p2 = { p with x: 5.0 }  -- new Point, y unchanged
+let u2 = { u with age: 31 } -- new User, name/email unchanged
 ```
 
 **Record patterns are not yet supported by the parser** (`{ x, y } -> ...` in
@@ -137,15 +137,18 @@ An atom is a named constant whose value is its own name. Atoms are written with 
 :one_for_one
 ```
 
-Atoms are commonly used as tags in sum types, supervision strategies, HTTP methods, and protocol states:
+Atoms are commonly used as tags in supervision strategies, HTTP methods, and
+protocol states — an `Atom`-typed value that carries one of a few expected
+names:
 
 ```march
-type Status = :ok | :error | :pending
-
-match status do
-  :ok      -> "success"
-  :error   -> "failure"
-  :pending -> "in progress"
+fn describe(status : Atom) : String do
+  match status do
+    :ok      -> "success"
+    :error   -> "failure"
+    :pending -> "in progress"
+    _        -> "unknown"
+  end
 end
 ```
 
@@ -155,6 +158,19 @@ type level (unlike a misspelled ADT constructor, which is a compile error).
 See `core-march-types.md` §2.2 (P-Atom) for the formal rule: an atom pattern's
 type is the bare, tag-erased `Atom` regardless of the atom's name or payload
 arity.
+
+The grammar also accepts atoms as variant-constructor names in a `type`
+declaration (`type Status = :ok | :error | :pending`, parsed the same as
+`:ok(String)`-style payload variants) — but, verified live 2026-07-22, this
+does not build a nominal sum type the way an `UPPER_IDENT`-constructor
+`type` does: a binding annotated `: Status` cannot be constructed or matched
+with `:ok`-style syntax (`` expected `Status` but got `Atom` ``), because
+`:ok` in expression/pattern position always denotes the one ambient `Atom`
+type, and match exhaustiveness against such a `type` declaration is not
+enforced — a `match` over an atom value still needs its own `_` catch-all
+regardless of what `type` declarations exist. Prefer plain ADTs
+(capitalized constructors) when you want an actual closed, exhaustively-
+checked sum type; reserve atoms for open-ended tags as shown above.
 
 ---
 
@@ -185,8 +201,8 @@ end
 The compiler infers type parameter instantiations at call sites:
 
 ```march
-map_option(Some(42), fn x -> x * 2)  -- Option(Int)
-map_option(Some("hi"), String.length) -- Option(Int)
+map_option(Some(42), fn x -> x * 2)     -- Option(Int)
+map_option(Some("hi"), String.byte_size) -- Option(Int) — there is no `String.length`
 ```
 
 ---
@@ -240,7 +256,7 @@ From `Option` module:
 
 ```march
 Option.map(Some(5), fn x -> x + 1)  -- Some(6)
-Option.and_then(opt, fn x -> ...)   -- flatMap
+Option.flat_map(opt, fn x -> ...)   -- flatMap (not `and_then` — no such function)
 Option.unwrap_or_else(opt, fn () -> compute_default())
 Option.is_some(opt)
 Option.is_none(opt)
@@ -261,7 +277,7 @@ Functions that can fail return `Result`:
 ```march
 fn parse_int(s : String) : Result(Int, String) do
   -- returns Ok(n) or Err("not a valid integer")
-  parse_int_builtin(s)
+  Option.to_result(string_to_int(s), "not a valid integer")
 end
 ```
 
@@ -290,8 +306,8 @@ Stdlib helpers:
 
 ```march
 Result.map(Ok(5), fn x -> x + 1)     -- Ok(6)
-Result.map_err(Err("x"), String.upcase)
-Result.and_then(res, fn v -> ...)      -- flatMap
+Result.map_err(Err("x"), String.to_uppercase)
+Result.flat_map(res, fn v -> ...)      -- flatMap (not `and_then` — no such function)
 Result.unwrap(Ok(42))                  -- 42
 Result.unwrap_or(Err("e"), 0)          -- 0
 Result.is_ok(res)
@@ -306,9 +322,8 @@ Result.is_err(res)
 
 ```march
 fn load_config(path : String) : Result(Config, String) do
-  let? raw  = File.read(path)         -- unwrap or propagate Err
-  let? text = Utf8.decode(raw)        -- unwrap or propagate Err
-  let? cfg  = Config.parse(text)      -- unwrap or propagate Err
+  let? raw = File.read(path)          -- unwrap or propagate Err
+  let? cfg = parse_config(raw)        -- unwrap or propagate Err (your own parser)
   Ok(cfg)
 end
 ```
@@ -398,8 +413,8 @@ end
 Types from modules are accessed with `.`:
 
 ```march
-Http.Request
-Map.Entry(String, Int)
+Http.Request(String)  -- Request is generic over its body type
+Http.Method
 ```
 
 ---
@@ -539,19 +554,26 @@ ptype Internal = Foo | Bar(Int)
 
 | Operator | Types | Description |
 |----------|-------|-------------|
-| `+` `-` `*` `/` `%` | `Int` | Integer arithmetic |
-| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (dot suffix required) |
+| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic — polymorphic, works on either |
+| `%` | `Int` | Integer modulo (monomorphic — `Int` only) |
+| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic — `Float` only) |
 | `==` `!=` | any `Eq` | Equality / inequality |
-| `<` `>` `<=` `>=` | any `Ord` | Ordering |
+| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
 | `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
 | `++` | `String` | String concatenation |
 | `\|>` | any | Pipe: `x \|> f` is `f(x)` |
 
-**Float operators require the dot suffix.** Mixing `Int` operators with `Float` values is a type error:
+**`+` `-` `*` `/` are `Num`-polymorphic — they work on both `Int` and `Float`
+without a dot suffix.** The dot-suffixed forms (`+.` etc.) are the
+*monomorphic* Float-only versions, useful when you want to pin a type down;
+they reject an `Int` operand rather than converting it. `%` has no dot form
+and is `Int`-only in both directions:
 
 ```march
-let a = 1.5 +. 2.5   -- Float: correct
-let b = 1.5 + 2.5    -- type error: + is Int-only
+let a = 1.5 +. 2.5   -- Float: correct (monomorphic +.)
+let b = 1.5 + 2.5    -- Float: also correct — + is Num-polymorphic, not Int-only
+let c = 1 +. 2       -- type error: +. is Float-only, rejects Int operands
+let d = 1.5 % 2.0     -- type error: % is Int-only, rejects Float operands
 ```
 
 The pipe operator chains transformations left-to-right:
@@ -560,7 +582,7 @@ The pipe operator chains transformations left-to-right:
 [1, 2, 3, 4, 5]
   |> List.filter(fn x -> x % 2 == 0)
   |> List.map(fn x -> x * x)
-  |> List.fold_left(0, fn acc x -> acc + x)
+  |> List.fold_left(0, fn (acc, x) -> acc + x)
 -- evaluates to 20
 ```
 
