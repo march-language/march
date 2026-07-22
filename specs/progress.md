@@ -283,6 +283,39 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, native `HttpClient` link failure fixed)
+
+Every compiled program using `HttpClient` (any program pulling in
+`HttpTransport`) failed to link natively with `Undefined symbols: _http_fetch,
+_http_fetch_available` — found auditing `docs/cookbook/http.md`/
+`docs/cookbook/concurrency.md` against the compiler. Reproduced at every
+`--opt` level, not just `--no-opt`: `http_fetch_available()` is a real runtime
+call, not a compile-time constant, so DCE can never prove the guarded
+`http_fetch` call in `HttpTransport.request` (`stdlib/http_transport.march`)
+dead. **Root cause:** `http_fetch`/`http_fetch_available` had no typecheck
+builtin binding — they existed only as an interpreter builtin
+(`lib/eval/eval.ml`) and a js_of_ocaml global — so the call sites fell through
+`llvm_emit`'s generic "unresolved global call → declare + call an extern C
+symbol of the same name" fallback, which native builds can never satisfy.
+**Fix:** registered both in `typecheck.ml`'s `builtin_bindings`
+(`http_fetch_available : Bool`, `http_fetch : String -> String -> String ->
+String -> Result(String, String)`) and added native stub implementations in
+`runtime/march_http.c` — `http_fetch_available` always returns raw-Bool
+`false` (so native requests take the existing `tcp_*` socket path instead;
+`http_fetch` itself is unreachable in practice), `http_fetch` returns an
+`Err(...)` for defense-in-depth. **Gotcha:** giving `http_fetch_available` a
+concrete `Bool` typecheck binding flips its native ABI from the
+tagged-immediate `(v<<1)|1` ptr representation used for erased/unknown-type
+calls to a raw `i64` 0/1 — a stub written for the wrong convention either
+SIGSEGVs (dereferences the tagged immediate as a heap pointer, `[x0, #0x8]`)
+or silently inverts true/false; caught via `lldb` backtrace on the first
+attempt. Verified end-to-end: compiled a program calling `HttpClient.get`
+against a real local HTTP server and got the response body back. `specs/c-ffi-gaps.md`'s
+stale "Unrelated pre-existing (not FFI)" entry (which mis-described this as
+`--no-opt`-only) updated to reflect the real scope and the fix. **451 compiler
+/ 231 eval / 396 codegen / 53 stdlib_march pass; stdlib full suite pending
+(quick subset 779/779 green).**
+
 ## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
 
 Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
@@ -331,6 +364,7 @@ trip (every index checked, spanning both the tail buffer and the >32-element
 trie path) reports 0 mismatches at both `--opt 0` and `--opt 2`. So this fix
 is necessary — not merely sufficient — for `Array`/`RRB` `Float` correctness
 even after `origin/main`'s independent representation fix.
+
 ## Current State (as of 2026-07-21, TCO self-call freed a freshly-allocated forwarded argument)
 
 Compiled-only miscompile: `stdlib/toml.march`'s `string_to_int_digits` (a
