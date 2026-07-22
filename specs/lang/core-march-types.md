@@ -50,26 +50,27 @@ covers superclass/`requires` and `when`-clause discharge (both MANDATORY
 enforcement, not conditional gaps) and names the `impl_matches_ty` structural
 match as its own rule, `(T-ImplMatch)` — the judgment both discharge paths
 share, and the reason generic/parameterized impls work at all. §2.4 covers
-`derive`/`satisfy` as `DImpl` *generators*. The coherence/overlap story (what
-happens when TWO impls both match the same target, per `(T-ImplMatch)`'s lack
-of specificity resolution) is documented in full as an open, filed
-interpreter/compiled divergence in `core-march.md` §4.4.3 (the operational
-companion, since a `--check`-only harness cannot witness a runtime
-interp-vs-compiled split) — §2.3 notes it inline at the point the gap arises
-(item 1 of `(T-Impl)`'s ordered checks) and cross-references that subsection
-rather than repeating it here.
+`derive`/`satisfy` as `DImpl` *generators*. **STALE (2026-07-06) →
+CORRECTED (2026-07-22):** the coherence/overlap story (what happens when TWO
+impls both match the same target) used to be documented here as an open,
+filed interpreter/compiled runtime-selection divergence, cross-referenced to
+`core-march.md` §4.4.3. That divergence was **closed 2026-07-17**: a
+coherence check (`register_impl_shape`, `lib/typecheck/typecheck.ml`) now
+REJECTS overlapping impls of the same interface/type-head at typecheck, so
+the question "which of two matching impls runs" no longer arises for a
+program that passes `--check` (mod the built-in-overlap and
+same-short-name-different-module carve-outs — see §2.3 item 1 and
+`core-march.md` §4.4.3, both rewritten 2026-07-22 with live-reproduced
+current behavior).
 
 **Deferred to later phases** (the roadmap's Phase-2b/3 queue, §6): refinements
 (z3-discharged), effects, and most of the capability lattice (`lib/caps/`) —
 see §6 for the full deferred-set breakdown and its roadmap citations; §2.8
 (added 2026-07-07) lands the capability lattice's first layer (IO permission
 hierarchy, `needs`, `Cap(X)` signature enforcement), with the rest of the
-system still queued. Coherence/
-overlap resolution between impls is NOT in this deferred set — it is a known,
-intentionally OPEN divergence (documented in `core-march.md` §4.4.3 and filed
-in `specs/todos.md`), not a documentation gap awaiting a later widening slice;
-resolving the divergence itself (a language-design decision — add a coherence
-check, or pick a shared deterministic selection policy) is what's deferred.
+system still queued. Impl-coherence is no longer in scope as a queued
+design decision either — it was made (Rust-style: reject overlap outright)
+and landed 2026-07-17, per the correction above.
 
 **Widening slice 2 (2026-07-06, modules):** §2.5 adds **module visibility as
 a typecheck concept** — `pub_set`-filtered export, the cross-file
@@ -1319,22 +1320,48 @@ discharge shape (both search `env.impls` via the `(T-ImplMatch)` judgment,
 named and detailed below) — they are documented together immediately after
 item 1.
 
-1. **Instantiate the impl head, then register — unconditionally, no dedup, no
-   uniqueness check.** `env.impls : ty list StrMap.t` is keyed only by
-   interface name; the value is a **list** of impl head types, and
-   registration is always `inst_ty :: existing_list` (typecheck.ml:7081–7084).
-   There is no "is this type already present" lookup anywhere in this step —
-   `env.impls` is built to be *searched* (via `impl_matches_ty`, a structural,
-   non-unifying, wildcard-tolerant shape match — its own named rule,
-   `(T-ImplMatch)`, detailed just below) rather than *inserted into with a
-   conflict check*. **Overlapping impls of the same interface for the same
-   type are NOT rejected at typecheck** — a second `impl Speak(Dog)` typechecks
-   exactly like the first, with no duplicate/coherence diagnostic of any kind;
-   `core-march.md` §4.4.3 documents this fully as an open, filed divergence
-   (the interpreter and compiled backend disagree at RUNTIME on which
-   overlapping impl's method body actually runs — last-registered vs.
-   first-registered, respectively), cross-referenced here rather than
-   restated.
+1. **Instantiate the impl head, then register — WITH a coherence
+   lookup-before-insert as of 2026-07-17 (STALE → CORRECTED, 2026-07-22).**
+   This item originally described `env.impls : ty list StrMap.t` registration
+   (`typecheck.ml:7081`–`7084`, still `inst_ty :: existing_list`, a list keyed
+   by interface name and searched via `impl_matches_ty`) as unconditional —
+   "no dedup, no uniqueness check," with overlapping impls of the same
+   interface for the same type NOT rejected at typecheck, deferring to
+   `core-march.md` §4.4.3's then-open interp-vs-compiled runtime-selection
+   divergence. **That is no longer accurate.** `register_impl_shape`
+   (`lib/typecheck/typecheck.ml:6164`–`6323`, called from the Pass-1 folds
+   that walk every `DImpl`, e.g. `:9882`, `:9936`, `:10173`) now runs a
+   coherence check BEFORE the registration step above: it searches the
+   existing-impls list for a DIFFERENT-span entry (same-span = a harmless
+   Pass-1 re-registration of the same `DImpl`, not a duplicate) whose head
+   **overlaps** the new one via `types_overlap` (unifiability-based — this
+   subsumes exact duplicates AND generic-vs-specific overlap, e.g. `List(a)`
+   vs `List(Int)`), and — unless the two heads resolve to two distinct
+   DECLARING MODULES of a same-short-name type with disjoint constructor sets
+   (the FQN dispatch-identity relaxation, `:6279`–`6290`, sound because the
+   native/interp backends now route same-short-name-but-different-module
+   types through globally-unique runtime tags and a qualified dispatch table)
+   — REJECTS the program:
+   ```
+   Overlapping implementation: `impl Speak(Dog)` conflicts with the
+   implementation at <file>:8:7 — their heads overlap.
+   A type may implement an interface at most once (coherence). If you meant
+   a different behavior, wrap the type in a newtype and implement the
+   interface on that.
+   ```
+   confirmed live this task, `--check` exit 1, for the exact repro
+   `core-march.md` §4.4.3 originally used to demonstrate the divergence — that
+   repro no longer typechecks on either backend, so the runtime split it
+   demonstrated cannot arise. See `core-march.md` §4.4.3 (rewritten
+   2026-07-22) for the full current account, live-reproduced evidence for the
+   generic-vs-specific and derive-vs-manual overlap cases too, and the
+   `specs/todos.md` closeout entries ("impl-coherence" Stage 1+2,
+   2026-07-17). **One scoped exception, unchanged from before and NOT a
+   residual divergence:** a user impl overlapping a BUILT-IN seeded impl
+   (`env.impls` seeds built-ins with `Ast.dummy_span`, `:6302`–`6306`) is
+   still skipped by the check — `impl Eq(Int)` alongside the built-in `Eq`
+   still typechecks, deliberately deferred as its own follow-on (DECIDE-1)
+   since several interface-machinery test fixtures rely on it.
 
 **`(T-ImplMatch)` — the impl-head-matching judgment (typecheck.ml:4964–4984).**
 Both the `when`-clause check and the superclass check above (and, at the use
@@ -1379,22 +1406,34 @@ March's impl system:
   as "must unify with." There is no separate "instantiate the impl head at
   the target type" step; matching and instantiation are conflated into one
   permissive boolean check.
-- **It is also why coherence does not exist.** `impl_matches_ty` only answers
-  "does impl I cover target T," never "which impl, of possibly several
-  covering candidates, is the most specific." Nothing about the judgment (or
-  its call sites) compares two matching impls against each other — `env.impls`
-  is walked with `List.exists`, which stops at the first structural match and
-  discards the rest, so **there is no specificity resolution**: a fully
-  generic `impl Iface(a)` and a fully concrete `impl Iface(Dog)` can both
-  match a `Dog` target simultaneously, and nothing in `(T-ImplMatch)` itself
-  (or the discharge sites that call it) picks the more specific one — which
-  one actually runs is decided entirely by registration order in the
-  interpreter/codegen backends respectively, not by matching logic.
-  `core-march.md` §4.4.3 documents this overlap/coherence divergence in full
-  (the two-backend runtime disagreement over which of several matching impls is
-  selected);
-  this section's job is only to name and pin the matching judgment itself,
-  since it is the single mechanism both stories flow from.
+- **STALE (2026-07-06) → CORRECTED (2026-07-22): "why coherence does not
+  exist" is no longer true — coherence is now enforced UPSTREAM of this
+  judgment, at registration time, not by `impl_matches_ty` itself.**
+  `impl_matches_ty` still only ever answers "does impl I cover target T,"
+  never "which of several covering impls is most specific" — that part of
+  the description is accurate and unchanged: `(T-ImplMatch)` itself has no
+  specificity ordering, and `env.impls`'s discharge-time search (`List.exists`,
+  stopping at the first structural match) still has none either. **But** the
+  scenario this bullet used to illustrate — "a fully generic `impl Iface(a)`
+  and a fully concrete `impl Iface(Dog)` can both match a `Dog` target
+  simultaneously, decided by registration order per backend" — can no longer
+  arise for a program that passes `--check`: `register_impl_shape` (item 1
+  above, corrected 2026-07-22) now rejects a second impl whose head OVERLAPS
+  an already-registered one via `types_overlap` (unifiability-based) BEFORE
+  either impl reaches `env.impls`'s searchable list — confirmed live, `impl
+  Speak(Box(a))` followed by `impl Speak(Box(Int))` fails `--check` with an
+  `Overlapping implementation` error citing the generic impl as the
+  conflict. So by the time a well-typed program's `env.impls` is searched at
+  a discharge site, at most one registered impl can cover any given concrete
+  target (mod the built-in-overlap and FQN-cross-module carve-outs item 1
+  names) — `impl_matches_ty`'s lack of specificity resolution is therefore no
+  longer separately load-bearing for "which impl runs": coherence upstream
+  already guarantees there is only ever (at most) one candidate to find.
+  `core-march.md` §4.4.3 (rewritten 2026-07-22) has the full current account
+  and live evidence; this bullet is kept, corrected, because the matching
+  judgment itself is still worth naming and its lack of specificity ordering
+  is still a true fact about `(T-ImplMatch)` — it just no longer implies a
+  live cross-backend divergence the way it used to.
 - **Linearity qualifiers are ignored for matching purposes**
   (`TLin (_, t1), TLin (_, t2) -> impl_matches_ty t1 t2`, typecheck.ml:4982):
   an impl declared for `linear T` matches a search for plain `T` and vice
@@ -1554,6 +1593,20 @@ not a value from the impl (which never defined `greeting` at all).
   interface shape, but `impl Greet(Dog)` with no `impl Speak(Dog)` anywhere
   in scope — the superclass bound UNSATISFIED (mandatory rejection, not a
   conditional gap).
+
+**Added 2026-07-17/2026-07-22 (not part of the original Task-3 corpus
+above, but directly relevant to item 1's correction):** `reject/
+t79_impl_coherence_duplicate` (two `impl Speak(Dog)` blocks — exact-head
+overlap), `reject/t80_impl_parametric_overlap` (`impl Speak(Box(a))` then
+`impl Speak(Box(Int))` — generic-vs-specific overlap via `types_overlap`),
+`accept/t83_impl_distinct_types`/`t84_impl_distinct_ifaces` (impls that do
+NOT overlap: different concrete types, or different interfaces, still
+coexist freely), and `reject/t82_impl_coherence_shared_ctor_double_collision`
+/ `accept/t88_impl_distinct_modules`/`t89_impl_general_iface_collision` (the
+FQN dispatch-identity same-short-name-different-module carve-out and its own
+residual double-collision stopgap — see `specs/todos.md`'s "FQN dispatch
+identity" entries for the full staged story, out of this subsection's scope
+to restate).
 
 ### 2.4 `derive` and `satisfy`: two ways to get a `DImpl` without writing one
 
@@ -2361,7 +2414,13 @@ The parser (`lib/parser/parser.mly:606–627`) mirrors this one-for-one:
 ... END` → `ProtoLoop`, and `CHOOSE BY chooser COLON ... branches ... END` →
 `ProtoChoice` (branches via `choose_branch: option(PIPE) label ARROW
 list(protocol_step)`, `:627–629`). Example (the parser's own doc comment,
-`parser.mly:606–614`):
+`parser.mly:606–614`; **corrected here** — the doc comment itself writes
+`Ack()`, but `ty`'s grammar has no zero-argument-parens type-application
+production (`Name()` is a parse error, "I got stuck here", confirmed live
+against both this exact protocol step and a plain `Ack()` return-type
+annotation; only a bare `Name` or an at-least-one-arg `Name(t, …)` parses) —
+so the payload type below is written `Ack`, matching what the grammar
+actually accepts:
 
 ```march
 protocol Transfer do
@@ -2369,7 +2428,7 @@ protocol Transfer do
   Server -> Client : Response(Int)
   loop do
     Client -> Server : More(String)
-    Server -> Client : Ack()
+    Server -> Client : Ack
   end
 end
 ```
@@ -5044,9 +5103,18 @@ typechecker that this document exists to pin down, not defects:
     path is `accept/t40_actor_send_typed_payload`. Cross-ref §2.6.4 and finding
     18.
 
-20. **[OPEN — filed, not fixed] F4 — the MPST merge rule leaks into binary
-    duality: a `choose` with two structurally-identical-type branches is
-    wrongly rejected as "not duals of each other."** Found while building §2.7
+20. **[FIXED 2026-07-07 — STALE "[OPEN — filed, not fixed]" tag corrected
+    2026-07-22, was inconsistent with this document's own §2.7.5, which
+    already recorded the fix] F4 — the MPST merge rule leaked into binary
+    duality: a `choose` with two structurally-identical-type branches used to
+    be wrongly rejected as "not duals of each other."** Re-verified live this
+    task: the exact repro below now typechecks (`--check` exit **0**), not
+    exit 1 — the merge-rule branch in `project_steps`'s `ProtoChoice` arm is
+    now gated on `multiparty`, so a binary protocol's non-chooser always
+    projects to `SOffer{…}` and the spurious rejection does not fire (witness
+    `accept/t44_binary_choice_identical_branches`). The repro and root-cause
+    analysis below are kept as the historical description of the bug. Found
+    while building §2.7
     (session-types widening, this task). `project_steps`'s `ProtoChoice` arm
     (`typecheck.ml:5906–5919`) applies the standard MPST "merge branches that
     project to the exact same local type for a non-participating role" rule
@@ -5066,18 +5134,18 @@ typechecker that this document exists to pin down, not defects:
       end
     end
     ```
-    `--check` exits **1**: `` Protocol `Decision`: the projection onto `Client`
+    `--check` USED TO exit **1** (now exits **0**, confirmed live this task):
+    `` Protocol `Decision`: the projection onto `Client`
     and the projection onto `Server` are not duals of each other.\ndual(Client)
     = Offer{ok: Send(Int, End), err: Send(Int, End)}\nbut Server has:
-    Send(Int, End) `` — note the printed `Server` projection is already the
-    MERGED `Send(Int, End)`, not a `Choose{...}`, which is the tell. Making the
-    branches type-distinct (`err -> Server -> Client : String`) typechecks
-    clean (exit 0) with no other change. See §2.7.5 for the full writeup. Not
-    a corpus `reject/` program (it typechecks incorrectly today; a `reject/`
-    witness would codify the bug as intended behavior) — filed in
-    `specs/todos.md` under "Compiler: Type System" with this exact repro, not
-    fixed (docs-only slice; the fix direction is gating the merge branch on
-    `multiparty` in `ProtoChoice`).
+    Send(Int, End) `` — note the printed `Server` projection was already the
+    MERGED `Send(Int, End)`, not a `Choose{...}`, which was the tell. Making
+    the branches type-distinct (`err -> Server -> Client : String`) also
+    typechecks clean (exit 0), as it always did. See §2.7.5 for the full
+    writeup and the fix citation. Correctly NOT a corpus `reject/` program —
+    since the fix, it is also not an `accept/` witness for THIS exact repro
+    under this finding number, but the equivalent shape is pinned by
+    `accept/t44_binary_choice_identical_branches`.
 21. **[OPEN — filed, not fixed] F5 — `Chan.offer` always returns the FIRST
     branch's continuation type, regardless of which branch the peer actually
     chose at runtime.** Found while extending §2.7 with per-op channel typing

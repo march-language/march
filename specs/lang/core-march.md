@@ -1262,67 +1262,89 @@ Without `derive Eq for Color`, `Red == Blue` is rejected at typecheck time
 `impl_tbl` entry, not an incidental structural-equality fallback that would
 apply regardless.
 
-**User-defined interfaces get NO runtime dispatch table at all — a call
-resolves through ordinary lexical `env` binding, exactly the §4.1 mechanism
-already specified for every other name in the language.** `DImpl`'s eval
-handler (there are two copies, kept in lockstep — the top-level/module path
-at `eval.ml:8278`–`8337` and the `make_recursive_env` / letrec-style path at
-`eval.ml:8599`–`8654`; both share the identical `is_dispatched` guard) does:
+**STALE (2026-07-06) → CORRECTED (2026-07-22): user-defined interfaces do NOT
+resolve through bare lexical `env` shadowing any more — a second runtime
+table, `iface_method_tbl`, now dispatches a general interface method by its
+FIRST argument's runtime type.** An earlier revision of this reference
+documented general (non-`Show`/`Eq`/`Ord`/`Hash`) interface methods as
+resolving through ordinary `EVar` lookup, so that two `impl`s of the same
+interface — even for two DIFFERENT types — would have whichever one was
+registered LAST silently clobber the earlier binding in `ρ`, with no
+reference at all to the call's actual argument type. That was accurate for
+the interpreter as it stood on 2026-07-06, but it was subsequently identified
+as a real correctness bug (`specs/plans/2026-07-17-interface-impl-coherence.md`)
+and fixed as part of the impl-coherence / FQN-dispatch-identity work
+(2026-07-17 → 2026-07-21, `specs/todos.md`'s "impl-coherence" and "FQN
+dispatch-identity" entries). `DImpl`'s eval handler (still two copies kept in
+lockstep — the top-level/module path around `eval.ml:8969`–`9069` and the
+`make_recursive_env`/letrec-style path around `eval.ml:9345`–`9440`; re-grep,
+these drift) now does:
 
 ```
 (E-DImpl)
-    is_dispatched = is_type_dispatched_method(iface, meth)          eval.ml:8296–8298 (8613–8615)
+    is_dispatched = is_type_dispatched_method(iface, meth)      eval.ml:8990 (9365)
     case is_dispatched of
     | true  → build a PLAIN, non-self-referential closure for the method
-              value, bind it ONLY in impl_tbl (NOT in the returned env)   eval.ml:8303–8308, 8335 (8620–8624, 8650)
-    | false → eval the method as an ordinary DFn, PREPEND (meth ↦ v) onto
-              the returned env — ordinary env-binding, same shape as any
-              `let`/top-level `fn`                                       eval.ml:8309–8311, 8336 (8625–8627, 8651)
+              value, bind it ONLY in impl_tbl (NOT in the returned env)
+              — unchanged from before, see (E-Dispatch-Builtin) above
+    | false → register the CONCRETE method value in iface_method_tbl under
+              (iface, meth, dispatch_type_name) — a THIRD runtime table,
+              keyed (iface_name, method_name, type_name) so a multi-method
+              interface's methods don't overwrite each other        eval.ml:9024 (9396)
+              — then bind mname ONCE in the returned env to a TYPE-DISPATCHER
+              VBuiltin (tagged "$dispatch$Iface$method", idempotent across
+              sibling impls of the same method) that reads its FIRST
+              argument's runtime type via dispatch_type_name_of_value and
+              looks the concrete method up in iface_method_tbl by
+              (iface, meth, that type), erroring "no implementation of
+              interface `%s` for type `%s`" if none is registered   eval.ml:9046–9067 (9418–9439)
     ────────────────────────────────────────────────────────────────
-    a later `impl` of the SAME (iface, method) name simply prepends a NEW
-    (meth ↦ v') binding in front of the OLD one — ordinary §4.1 shadowing,
-    not a designed dispatch policy
+    a later `impl` of the SAME (iface, method, type) triple still overwrites
+    the iface_method_tbl entry for that exact type (see §4.4.3 — this exact
+    shape is now REJECTED at typecheck by a coherence check before eval ever
+    runs); a later `impl` of the SAME interface/method for a DIFFERENT type
+    adds a SIBLING entry under a different type key and does not disturb the
+    first — the dispatcher routes to whichever entry matches the call's
+    actual argument type
 ```
 
 Concretely: `interface Speak(a) do fn speak : a -> String end` is not on the
 `is_type_dispatched_method` allowlist, so `impl Speak(Dog) do fn speak(self)
-do ... end end`'s eval arm takes the `false` branch — it evaluates `speak`'s
-body as an ordinary function value and PREPENDS `("speak", v)` onto the
-environment threading through the rest of module evaluation, precisely like
-a bare top-level `fn speak(self) do ... end` would. A later call to
-`speak(d)` anywhere in scope is an ordinary `EVar "speak"` lookup
-(§4.1: "lookup returns the **first** binding") — it finds whichever `impl
-Speak(...)`'s method was registered LAST (closest to the front of `ρ`), with
-**no reference at all to `d`'s dynamic type**. If only one `impl Speak(T)`
-is ever in scope for a given type, this is invisible — the single binding IS
-the right one, and `t27_user_iface_lexical_dispatch.march`
-(`specs/lang/types/accept/`) witnesses exactly that unambiguous case: one
-`interface Speak(a)`, one `impl Speak(Dog)`, `speak(Dog("Rex"))` finds the
-one `speak` binding in `ρ` and evaluates to `"Rex says Woof"` (confirmed live,
-interpreted, exit 0).
+do ... end end`'s eval arm takes the `false` branch — but rather than binding
+`speak` directly to Dog's method body, it registers Dog's body in
+`iface_method_tbl` under `("Speak", "speak", "Dog")` and binds the bare name
+`speak` to a type-dispatcher closure. A later `impl Speak(Cat) do fn
+speak(self) do ... end end` registers Cat's body under `("Speak", "speak",
+"Cat")` and finds the dispatcher already bound (`already = true`,
+`eval.ml:9051`/`9422`), so it leaves the existing binding alone — it does
+**not** overwrite `speak` with a second concrete closure. A later call
+`speak(d)` therefore is NOT a plain `EVar "speak"` lookup that "finds
+whichever impl was registered last" (`d`'s dynamic type is now exactly what
+selects the right method): `speak(Dog("Rex"))` and `speak(Cat("Tom")))` both
+correctly resolve to their own type's method, confirmed live (interpreted
+AND compiled — the compiled backend resolves each call site via
+monomorphization on the call's statically-known argument type, so it was
+never subject to the lexical-shadowing bug this table describes for the
+interpreter). `t27_user_iface_lexical_dispatch.march`
+(`specs/lang/types/accept/`) still witnesses the single-impl case (one
+`interface Speak(a)`, one `impl Speak(Dog)`, `speak(Dog("Rex"))` → `"Rex says
+Woof"`) but its committed comment's framing — that this is "the unambiguous
+case" because "there is only one impl in scope for this call" — is now
+outdated commentary, not a live restriction: a second impl for a different
+type no longer makes the call ambiguous. (The file itself was not edited by
+this docs-only task; flagged here as a corpus-comment staleness, not a
+corpus-correctness bug — the program still typechecks, runs, and prints the
+documented output.)
 
-**This is precisely why interface-method-call overlap for user interfaces is
-"just shadowing," not a designed coherence policy** (the full divergence
-story — including how the COMPILED backend's TIR lowering resolves the same
-overlap differently, first-registered-wins instead of last-registered-wins —
-is §4.4.3's subject, immediately below; this subsection forward-references it
-and does not restate or duplicate its analysis here).
-The mechanism demonstrated live while drafting this section: extending
-`t27`'s program with a SECOND `impl Speak(Cat) do fn speak(self) do ... end
-end` block (same interface, different type) makes `speak(Dog("Rex"))` PANIC
-at runtime — `Non-exhaustive pattern match: no branch matched the value
-Dog("Rex")` — because the second impl's `fn speak(self)` clause (matching
-only `Cat(...)`) shadows the first impl's `speak` binding in `ρ`, and the
-lexically-nearest `speak` is now Cat's, regardless of the argument's actual
-type. This is not a hypothetical: it is the direct, mechanical consequence
-of §4.1's "lookup returns the first binding" rule applied to two `DImpl`
-blocks that both bind the same bare name — there is no special-casing
-anywhere in the `false`-branch of (E-DImpl) that would make it behave
-otherwise. (This two-impl shape is deliberately NOT committed as a corpus
-program here — an interpreter-only PANIC is exactly the coherence
-divergence §4.4.3, immediately below, documents formally with both backends'
-outputs side by side, so it belongs there, not duplicated as a bare crash in
-this section.)
+**Coherence — not shadowing — is now what governs overlap.** §4.4.3,
+immediately below, was rewritten (2026-07-22) to reflect that overlapping
+impls of the same interface for the same type (or for types whose heads
+unify) are REJECTED at typecheck time by a dedicated coherence check, not
+silently accepted and resolved differently per backend. The "just shadowing,
+not a designed coherence policy" framing this subsection used to carry here
+no longer describes current behavior for either same-type or
+generic-vs-specific overlap; see §4.4.3 for the current rule and its
+evidence.
 
 **Context, not a rule: the `is_type_dispatched_iface` guard defends against a
 same-key collision that today never actually fires.** The doc comment at
@@ -1350,34 +1372,30 @@ widened), but the specific `Eq`/`neq` collision its comment narrates cannot
 occur today, because the typechecker's own extra-method rejection forecloses
 it first.
 
-### 4.4.3 Known divergence: impl coherence — overlapping impls, and the interp/compiled selection split
+### 4.4.3 Impl coherence — overlap is now REJECTED at typecheck (was an open divergence; CLOSED 2026-07-17)
 
-§4.4.2 ended by noting that overlap for a user interface is "just shadowing,
-not a designed coherence policy," and `core-march-types.md` §2.3's
-`(T-ImplMatch)` discussion independently arrived at the same conclusion from
-the typing side: `impl_matches_ty` only ever answers "does this impl cover
-that target," never "which of several covering impls is most specific." This
-subsection is where those two threads meet and get pinned with live-captured
-runtime evidence: **March has no impl-coherence check anywhere in the
-pipeline, and the two backends disagree — deterministically, but
-differently — about which of several overlapping impls actually runs.**
+**STALE (2026-07-06) → CORRECTED (2026-07-22): this subsection used to
+document an open, deliberately-unfixed cross-backend divergence — two
+overlapping impls both typechecked silently, and the interpreter and
+compiled backend picked different winners at runtime. That divergence was
+resolved by adding a genuine impl-coherence check, landed in two stages
+(`specs/plans/2026-07-17-interface-impl-coherence.md`, Stage 1+2, 2026-07-17;
+`specs/todos.md`'s "impl-coherence" entries).** The design decision
+`core-march-types.md` §2.3's `(T-ImplMatch)` discussion and the original
+version of this subsection both flagged as unmade — "add a coherence check
+that rejects overlap outright, à la Rust; pick one deterministic selection
+policy; or formally embrace overlapping instances" — has been made: March
+took the **Rust-style coherence** branch. `register_impl_shape`
+(`lib/typecheck/typecheck.ml`) now does a **lookup-before-insert** keyed on
+an alpha-normalized structural key of the impl head (`canonical_impl_key`)
+before the `(T-Impl)` prepend that used to be unconditional, and rejects a
+second impl whose head overlaps an already-registered one — for an EXACT
+same-type collision, and (Stage 2, unifiability-based) for a
+**generic-vs-specific** overlap too (`List(a)` vs `List(Int)`-shaped heads).
 
-**The fact: two impls of the same interface for the same type both
-typecheck, with no diagnostic of any kind.** `env.impls : ty list
-StrMap.t` (`typecheck.ml:455`) is a **list**, and registration
-(`typecheck.ml:7081`–`7084`, `(T-Impl)` step 1, `core-march-types.md` §2.3) is
-always `inst_ty :: existing_list` — an unconditional prepend, never a
-lookup-before-insert. There is no step anywhere in `(T-Impl)`'s ordered
-checks that asks "is a covering impl already registered for this type" — the
-existing checks (interface-existence, missing-method, extra-method,
-signature-match) are all about validating ONE impl declaration in isolation;
-none of them looks sideways at sibling impls of the same `(iface, type)`
-pair. Confirmed live, re-grepped in this worktree at the cited line, and
-reproduced concretely below.
-
-**Reproduction (live, this task).** The minimal repro is two `impl
-Speak(Dog)` blocks for the same interface and the same concrete type, whose
-`speak` bodies return different literals:
+**The current fact, reproduced live in this worktree (2026-07-22): two
+`impl Speak(Dog)` blocks for the same interface and the same concrete type
+no longer both typecheck.** The exact program the original repro used:
 
 ```march
 mod M do
@@ -1405,131 +1423,81 @@ mod M do
 end
 ```
 
-`--check` on this program exits **0** on both backends' shared typechecker —
-only two "unused variable `self`" warnings, no error, no hint that a second
-`impl Speak(Dog)` even collided with the first. Running it:
+`--check` now exits **1** on both backends' shared typechecker, with:
 
 ```
-$ march file.march                         # interpreted
-SECOND
-
-$ march --compile --opt 2 -o /tmp/ovl file.march && /tmp/ovl   # compiled
-FIRST
+Overlapping implementation: `impl Speak(Dog)` conflicts with the
+implementation at <file>:8:7 — their heads overlap.
+A type may implement an interface at most once (coherence). If you meant a
+different behavior, wrap the type in a newtype and implement the interface
+on that.
 ```
 
-Both outputs are **deterministic** across repeated runs (confirmed 2x each,
-this task) — this is not flakiness or an uninitialized-memory artifact, it is
-two different, reproducible, principled selection rules:
+pointing at the second `impl Speak(Dog)`'s span and citing the first's. The
+program never reaches either runtime, so the old "interpreted prints
+`SECOND`, compiled prints `FIRST`" split described here previously can no
+longer arise for this program — it is now caught before either backend runs
+it, exactly the outcome the original open-divergence framing named as one
+possible (but then-unimplemented) resolution. Pinned by the types corpus:
+`reject/t79_impl_coherence_duplicate` (`specs/lang/types/reject/`).
 
-- **The interpreter selects the LAST-registered impl.** `DImpl`'s eval
-  handler (`eval.ml:8324`, mirrored at the letrec-style path `eval.ml:8640`)
-  does `Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val` —
-  but per §4.4.2, `Speak` is not one of the four type-dispatched interfaces
-  (`Show`/`Eq`/`Ord`/`Hash`), so a user-interface method never actually
-  touches `impl_tbl` at the call site; the real mechanism is the ordinary
-  `env`-binding branch immediately beside it (`eval.ml:8309`–`8311`,
-  `:8625`–`8627`, `core-march.md` §4.4.2's `(E-DImpl)` `false` case): each
-  `impl Speak(Dog)` PREPENDS a fresh `("speak", v)` binding onto the
-  environment threading through the rest of module evaluation. The SECOND
-  impl's binding ends up closer to the front of `ρ`, so ordinary §4.1
-  "lookup returns the first binding" lexical scoping resolves `speak` to it
-  — last-registered wins, but only as an artifact of shadowing, exactly as
-  §4.4.2 already flagged.
-- **The compiled backend selects the FIRST-registered impl.** TIR lowering's
-  `collect_iface_impls` (`lib/tir/lower.ml:1005`–`1014`) reads an `already`
-  guard BEFORE registering: `already = List.mem_assoc type_name l` against
-  the accumulating `_iface_methods` table (`lib/tir/lower.ml:1008`–`1011`),
-  and only lowers/registers the method `if not already` (`lib/tir/lower.ml:
-  1014`). The first `impl Speak(Dog)` walked populates the `(type_name,
-  mangled)` entry; the second `impl Speak(Dog)` for the identical
-  `(iface, type)` pair sees `already = true` and is silently skipped —
-  first-registered wins, unconditionally.
+**The generic-vs-specific and derive-vs-manual overlap probes this
+subsection used to document as separate confirmed divergence instances are
+ALSO now rejected, not merely the exact-duplicate case.** Re-probed live,
+same methodology as the original finding:
 
-Both citations re-grepped live in this worktree for this task
-(`eval.ml:8324`/`:8640`; `lib/tir/lower.ml:1005`–`1014`) — line numbers may
-drift with future edits, but the mechanism (last-write-wins `Hashtbl.replace`
-vs. first-write-wins `List.mem_assoc` guard) is the structural fact, not an
-artifact of a specific line number.
+- **Generic-vs-specific:** `impl Speak(Box(a))` (blanket over every `Box`)
+  followed by `impl Speak(Box(Int))` (a concrete specialization) — the
+  program that used to print `"int box"` interpreted and `"generic box"`
+  compiled now fails `--check` with the same `Overlapping implementation …
+  their heads overlap` diagnostic, citing the `Box(a)` impl as the
+  conflicting declaration. This is Stage 2's parametric-overlap check
+  (`types_overlap`, unifiability-based — `List(a)` vs `List(Int)`-shaped
+  heads are treated as overlapping even though neither is a literal
+  duplicate of the other). Pinned by `reject/t80_impl_parametric_overlap`.
+- **Derive-vs-manual:** `derive Show, Eq for Color` followed by a
+  hand-written `impl Eq(Color) do fn eq(a, b) do true end end` — the program
+  that used to print `true` interpreted (hand-written wins) and `false`
+  compiled (derive-generated structural comparison wins) now ALSO fails
+  `--check` with an `Overlapping implementation` diagnostic (confirmed live
+  this task, citing the derive-expansion's synthesized span as the
+  conflicting declaration) — `derive`'s generated `DImpl` registers through
+  the identical `register_impl_shape` path as a hand-written one, so it is
+  not exempted from the coherence check.
 
-**The same divergence holds for generic-vs-specific overlap, and for
-derive-vs-manual overlap — it is not specific to two textually identical
-impls.** Two further probes, same methodology, both confirmed live this task:
+**What is deliberately still allowed (not a residual divergence, a scoping
+decision).** Per `specs/todos.md`'s Stage-1+2 closeout note, a user impl
+overlapping a *built-in* seeded impl (e.g. a hand-written `impl Eq(Int)`) is
+still accepted — built-ins are seeded into `env.impls` with a `dummy_span`
+and skipped by the check, because several interface-machinery test fixtures
+legitimately re-impl a builtin on a primitive; tightening that is filed as
+its own follow-on, not a live cross-backend selection divergence (both
+backends still agree once a program passes typecheck, since a single
+`register_impl_shape` gate now runs before either backend's `DImpl` handler
+ever sees the program). Two DISTINCT types each implementing the same
+interface (§4.4.2's `Speak(Dog)` + `Speak(Cat)` case), and same-short-name
+types in DIFFERENT declaring modules (the "FQN dispatch-identity" work,
+`specs/todos.md`, 2026-07-20/21), are correctly NOT treated as overlap —
+coherence is scoped to "the same type implements the same interface twice,"
+not "an interface has more than one impl in the program."
 
-- **Generic-vs-specific:** `impl Speak(Box(a))` (a blanket/generic impl over
-  every `Box`) declared BEFORE `impl Speak(Box(Int))` (a concrete,
-  intuitively "more specific" impl), called on `Box(42)`. Interpreted prints
-  `"int box"` (the later, more-specific impl — by registration order, not by
-  any specificity reasoning: `impl_matches_ty` never compares "how many
-  wildcards," §2.3's `(T-ImplMatch)`); compiled prints `"generic box"` (the
-  FIRST-declared, less-specific impl). **Whichever backend "looks right" for
-  a given overlap is accidental, not designed** — there is no specificity
-  resolution in either path, so the interpreter only happens to look
-  specificity-aware here because the more-specific impl was written second.
-- **Derive-vs-manual:** `derive Show, Eq for Color` (expanding, at desugar
-  time, to an ordinary `DImpl Eq(Color)` — `core-march-types.md` §2.3 /
-  `interface-impl-survey.md` §5) followed by a hand-written `impl Eq(Color)
-  do fn eq(a, b) do true end end` that unconditionally returns `true`.
-  Interpreted `Red == Blue` prints `true` (the hand-written impl, registered
-  textually after the derive-expanded one); compiled prints `false` (the
-  derive-generated structural comparison, registered first). This confirms
-  the SAME root cause — last-registered-wins vs. first-registered-wins — also
-  governs collisions between a `derive`-generated impl and a hand-written
-  one, not only two hand-written impls of the same shape.
-
-**This is an OPEN, deliberately-left-unfixed divergence — NOT the same
-situation as §4.2.1's `ERecordUpdate` case.** §4.2.1 documents a divergence
-that this reference project **adjudicated and converged**: the compiled
-panic-on-unknown-field behavior was declared normative, the interpreter was
-changed to match it, both backends now agree, and its `specs/todos.md` entry
-is closed. The impl-coherence divergence documented here is different in
-kind: there is no "obviously correct" backend to converge on (first-wins and
-last-wins are both defensible policies, and neither implements real
-specificity-based resolution — see the generic-vs-specific probe above), and
-choosing one is a genuine language-design decision (add a coherence check
-that rejects overlap outright, à la Rust; pick and document one deterministic
-selection policy shared by both backends; or formally embrace "incoherent
-instances" the way Haskell's `OverlappingInstances` extension does, with an
-explicit specificity order) — not something this documentation slice is
-scoped to adjudicate. The correct precedent for this shape of finding is the
-codebase's genuinely-open filed divergences, not the closed one: `specs/
-todos.md`'s open `- [ ]` entries for cross-backend behavior differences that
-are *documented and tracked, not fixed* — e.g. "Compiled and interpreted
-`hash()` use different, backend-specific algorithms with no cross-backend
-value equality for RECORD types" and "`to_string` on any non-primitive type
-… is broken compiled" — and `test/test_oracle.ml`'s `known_divergence` list
-(`test/test_oracle.ml:138`–`174`), which exists precisely to let an
-already-filed, open compiler bug reproduce in the `@oracle` conformance sweep
-as a loud `KNOWN_DIVERGENCE` (not a silent skip, not a hard failure) until it
-is either fixed or the design question above is resolved. This finding is
-filed in that same spirit — see `specs/todos.md`'s new entry (filed by this
-task) — deliberately left open, not folded into a false convergence the way
-§4.2.1 was.
-
-**Why this cannot be a `check_types.sh` corpus `accept`/`reject` program.**
-Every program in `specs/lang/types/{accept,reject}/` is judged by a SINGLE
-`march --check` invocation's exit code and (for `reject/`) message substring
-— it never runs the program, and it never invokes a second backend. The
-divergence documented here is invisible to that harness by construction:
-`--check` on the repro above exits 0 on both backends' shared typechecker (it
-is not a type error at all — both backends' front ends fully agree that the
-program is well-typed), and the entire disagreement only appears once the
-program is actually RUN, once on each of two different backends
-(`march file.march` vs. `march --compile … && ./a.out`), which `check_types.sh`
-never does. This is structurally identical to the limitation §5's golden
-corpus already documents for the (now-converged) `ERecordUpdate` case: "a
-program that is supposed to error on both sides can never register as a
-golden `MATCH` regardless of backend agreement" (§4.2.1/§5) — except here the
-harness gap is even more fundamental, since `check_types.sh` was never
-designed to run programs or compare two backends at all, only to classify a
-single `--check` invocation's accept/reject verdict. A conformance corpus
-entry that could witness "both backends accept the SAME program yet disagree
-at runtime" would need a third bucket alongside `accept`/`reject` — exactly
-the "divergence, not a clean accept/reject" bucket
-`.superpowers/sdd/interface-impl-survey.md` §4/§9 already names and
-recommends deferring rather than forcing into the existing two-bucket
-harness. This documentation slice therefore pins the divergence in prose
-(this subsection) and in `specs/todos.md` (the filed bug, with the repro and
-both outputs), not as a new corpus file.
+**Historical note, kept for provenance.** Before this fix, the interpreter
+picked the LAST-registered impl (an artifact of `Hashtbl.replace`/lexical
+env-prepend ordering) and the compiled backend's TIR lowering picked the
+FIRST-registered impl (`collect_iface_impls`'s `already`-guarded
+`List.mem_assoc` check, `lib/tir/lower.ml`) — two different, both
+non-specificity-aware, deterministic-but-disagreeing selection rules. That
+mechanism no longer runs on any program that reaches either runtime, because
+`register_impl_shape` now rejects the overlapping-impl shape at typecheck
+before either backend's `DImpl`/lowering handler is invoked. This is the
+same kind of resolution §4.2.1 documents for the (unrelated) `ERecordUpdate`
+missing-field case — a genuinely OPEN divergence that got ADJUDICATED AND
+CONVERGED, not a divergence quietly left in place. `specs/todos.md`'s
+impl-coherence entries are the closeout record; `core-march-types.md` §2.3's
+`(T-Impl)`/`(T-ImplMatch)` sections should be read alongside this one for
+the typing-side mechanics of the new check (re-verify that section's own
+staleness independently — it was written from the same 2026-07-06 vintage
+this subsection was).
 
 ### 4.4.4 `derive`/`satisfy`-generated impls run through the SAME dispatch rules as hand-written ones
 
@@ -1544,18 +1512,24 @@ interface names, so — being `Eq`/`Show` — they register into `impl_tbl`
 exactly as `t28_derive_impl_tbl_dispatch` already witnesses (§4.4.2); a
 `satisfy Named for Person` produces an `impl Named(Person)` block for a
 user-defined interface, so — `Named` not being on the four-name allowlist —
-it takes the ordinary lexical `env`-binding path, exactly like any
-hand-written `impl Named(Person)` would (`accept/t30_satisfy_wiring`,
+it takes the general-interface `iface_method_tbl` type-dispatcher path
+(§4.4.2, corrected 2026-07-22), exactly like any hand-written
+`impl Named(Person)` would (`accept/t30_satisfy_wiring`,
 `specs/lang/types/accept/`, run-witnessed: `name(Person("Ada"))` prints
-`Ada`). This is precisely WHY §4.4.3's coherence divergence explicitly
-includes a derive-vs-manual-impl overlap probe as a THIRD confirmed instance
-of the same root cause, not a separate mechanism: `derive`'s generated
-`DImpl` and a hand-written `impl` of the same `(interface, type)` pair are
-indistinguishable by the time either backend's `DImpl` eval/lowering handler
-sees them, so they collide, and get resolved (differently, per backend), by
-the identical last-registered-wins / first-registered-wins split already
-documented there — nothing about being `derive`-generated makes an impl
-"more special" or exempt from the overlap story.
+`Ada`). **STALE → CORRECTED:** this subsection used to point at §4.4.3's
+"coherence divergence" and cite a derive-vs-manual-impl overlap probe as a
+third confirmed instance of a last-registered-wins/first-registered-wins
+split. §4.4.3 was rewritten 2026-07-22: that split no longer exists — a
+`derive`-generated impl and a hand-written impl of the same `(interface,
+type)` pair are indeed indistinguishable by the time either backend's
+`DImpl` eval/lowering handler sees them, but they are now caught and
+REJECTED by `register_impl_shape`'s coherence check before either handler
+runs (confirmed live: `derive Eq for Color` followed by a hand-written
+`impl Eq(Color)` fails `--check` with `Overlapping implementation`, citing
+the derive-expansion's synthesized span) — see §4.4.3 for the current rule
+and evidence. Being `derive`-generated still doesn't exempt an impl from the
+overlap rule; the rule itself changed from "silently diverges per backend"
+to "rejected at typecheck."
 
 The one operationally-relevant special case is `Json`'s pseudo-interfaces,
 and it does NOT fit either of the two clean patterns above — it is a genuine
@@ -3125,15 +3099,20 @@ both backends (`typecheck.ml:3869`–`3875`) before either backend's runtime
 around this, since none of them update through an erased base.
 
 **A known, already-filed divergence encountered again while drafting `g22`,
-reached through a second path — routed around, not hidden.** `println` on a
-bare atom value (e.g. `println(:ok)`) is a known, filed compiler bug: it
-interprets fine (`VAtom` prints as `:ok`, exit 0) but fails to **compile** —
-the linker rejects the emitted object with `Undefined symbols … "_show" …
-_println$Atom`, i.e. `Atom` has no compiled `_show` implementation (this bug
-is being fixed in a separate session, tracked as chip `task_6bee4d07`, and is
-explicitly out of this task's scope per its brief's guardrail). Confirmed by
-hand before drafting `g22`: `println(:ok)` prints `:ok` interpreted (exit 0)
-but fails to link compiled with exactly that `_show`/`Atom` error. The FIRST
+reached through a second path — routed around, not hidden.** *(**FIXED
+2026-07-08, commit `76d4001b` "fix(codegen): make Atom Showable so compiled
+println(:atom) links" — verified live in this worktree: `println(:ok)` now
+compiles and prints `:ok` on both backends. The paragraph below is kept as
+historical record of why `g22` was written the way it was; it no longer
+describes current compiler behavior.)* `println` on a bare atom value (e.g.
+`println(:ok)`) was a known, filed compiler bug: it interpreted fine (`VAtom`
+prints as `:ok`, exit 0) but failed to **compile** — the linker rejected the
+emitted object with `Undefined symbols … "_show" … _println$Atom`, i.e.
+`Atom` had no compiled `_show` implementation (this bug was tracked as chip
+`task_6bee4d07`, explicitly out of this task's scope per its brief's
+guardrail, at the time this section was written). Confirmed by hand before
+drafting `g22`: `println(:ok)` printed `:ok` interpreted (exit 0) but failed
+to link compiled with exactly that `_show`/`Atom` error. The FIRST
 draft of `g22` did not print a bare atom directly, but hit the *same* bug via
 a second, less obvious path: `match result do :error(msg) -> println(msg) …
 end` — printing `msg`, a `String` value bound out of a payload atom's
@@ -3191,21 +3170,27 @@ Phase-1 tasks did):**
 
 - strings as first-class data (beyond their appearance in the value grammar);
 - `to_string`/`show` and the interface-dispatch machinery — **LANDED
-  (§4.4.2–§4.4.4, 2026-07-06).** §4.4.2 documents the runtime METHOD DISPATCH
-  mechanism itself: the four-name `impl_tbl` type-directed lookup for
-  `Show`/`Eq`/`Ord`/`Hash`, and the ordinary lexical `env`-binding path every
-  user-defined interface takes instead. §4.4.3 documents the coherence/overlap
-  divergence between the two backends when the SAME `(iface, type)` has more
-  than one impl in scope (last-registered-wins interpreted vs.
-  first-registered-wins compiled — an OPEN, deliberately-left-unfixed
-  divergence, filed in `specs/todos.md`, not a corpus accept/reject). §4.4.4
+  (§4.4.2–§4.4.4, 2026-07-06; §4.4.2/§4.4.3 UPDATED 2026-07-22).** §4.4.2
+  documents the runtime METHOD DISPATCH mechanism: the four-name `impl_tbl`
+  type-directed lookup for `Show`/`Eq`/`Ord`/`Hash`, and — as of the
+  2026-07-22 correction — a SECOND type-directed table (`iface_method_tbl`)
+  every general user-defined interface now dispatches through by its first
+  argument's runtime type, replacing the plain lexical `env`-binding path
+  this reference originally described. §4.4.3 documents the impl-coherence
+  rule: overlapping impls of the SAME `(iface, type)` — including
+  generic-vs-specific and derive-vs-manual overlap — are REJECTED at
+  typecheck by `register_impl_shape` (landed 2026-07-17, `specs/todos.md`),
+  closing what this reference originally filed as an open,
+  deliberately-left-unfixed cross-backend selection divergence. §4.4.4
   documents `derive`/`satisfy`'s operational consequence — a generated impl
   runs through the identical dispatch rules as a hand-written one, plus
   `Json`'s `JsonTo`/`JsonFrom` pseudo-interface special case
   (`core-march-types.md` §2.3/§2.4 cover the typing/desugar side of all of
-  this). The known container-`to_string`/`hash`/atom-`_show` divergences §5
-  routes around are UNCHANGED by this landing — those are bugs in the fallback
-  arms §4.4.2 explicitly does not re-litigate, not in the dispatch mechanism
+  this). The known container-`to_string`/`hash` divergences §5 routes around
+  are UNCHANGED by any of this — those are bugs in the fallback arms §4.4.2
+  explicitly does not re-litigate, not in the dispatch mechanism (the
+  atom-`_show` divergence §5 also routes around WAS separately fixed,
+  2026-07-08, commit `76d4001b` — see the §5 g22 note)
   §4.4.2 newly specifies;
 - effects and IO ordering;
 - actors;
