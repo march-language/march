@@ -316,6 +316,55 @@ stale "Unrelated pre-existing (not FFI)" entry (which mis-described this as
 / 231 eval / 396 codegen / 53 stdlib_march pass; stdlib full suite pending
 (quick subset 779/779 green).**
 
+## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
+
+Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
+`RRB`/`Array`) no longer SIGSEGVs on the second push of a `Float` element. Root
+cause: `Array.push` calls `lst_len(tail)`, whose inner `go` discards the
+list-head field via a wildcard pattern (`Cons(_, t) -> go(t, acc + 1)`).
+`lower_match.ml`'s pattern-matrix compiler gave every constructor-field
+synthetic variable the `TVar "_"` placeholder type at creation; a NAMED field
+gets rebound to its real (trackable) type downstream and flows through
+`mono.ml`'s monomorphization normally, but a WILDCARD-discarded field never
+gets rebound, so it kept `TVar "_"` forever. `Rc_types.needs_rc (TVar "_")`
+conservatively answers `true`, so Perceus emitted a `dec_rc` on it — and for a
+concretely-Float instantiation, the field's actual runtime representation is
+an unboxed double bit-reinterpreted as `ptr` (no heap box), so that `dec_rc`
+read a tag field out of a raw float bit pattern and crashed.
+
+- `lib/typecheck/typecheck.ml`'s `infer_pattern`, `PatWild` arm now records its
+  inferred type into `env.type_map` (mirroring `PatVar`), so the wildcard's
+  span has a resolvable entry.
+- `lib/tir/lower_match.ml`'s `compile_matrix_impl` now looks up every
+  constructor field's type via `Lower_state.ty_of_span` on the sub-pattern's
+  own span, instead of defaulting unconditionally to the unknown-type
+  placeholder — so a discarded field flows through monomorphization exactly
+  like a named one.
+
+New compiled native golden `test/native/rrb_push_float.march` (+ `.expected` +
+`test/dune` rule).
+
+**Update after rebasing onto `origin/main` (343 commits, same day):**
+`origin/main` independently landed "float-boxing Stage 2" — `Llvm_ctx.coerce`'s
+`("double","ptr")`/`("ptr","double")` arms now call `march_alloc_float`/
+`march_unbox_float` (a genuine heap box) instead of a raw bitcast, so every
+Float crossing an erased/generic `"ptr"` slot is a real, valid, RC-manageable
+heap object regardless of monomorphization level. That alone makes the
+originally-reported crash (and a related `Array.get`/`RRB.get` crash found
+while stress-testing this fix — `Array.get` never monomorphizes to a concrete
+element type at all, unlike `Array.push`) disappear — but it does NOT fix the
+underlying RC-classification bug this entry describes, and left a silent
+WRONG-VALUE regression in its place: on `origin/main` alone (this fix
+reverted), `RRB.get` on a pushed Float returns `0.` instead of `1.5` — a real
+premature-free, because `lst_len`'s wildcard-discarded field is now a
+genuinely-owned boxed Float cell, so Perceus's still-spurious `dec_rc` on it
+frees a cell `Array.get` reads moments later. **With this fix applied on top
+of the merge, verified end-to-end:** a 100-element push-then-read-back round
+trip (every index checked, spanning both the tail buffer and the >32-element
+trie path) reports 0 mismatches at both `--opt 0` and `--opt 2`. So this fix
+is necessary — not merely sufficient — for `Array`/`RRB` `Float` correctness
+even after `origin/main`'s independent representation fix.
+
 ## Current State (as of 2026-07-21, TCO self-call freed a freshly-allocated forwarded argument)
 
 Compiled-only miscompile: `stdlib/toml.march`'s `string_to_int_digits` (a
