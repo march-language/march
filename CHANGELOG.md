@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A qualified call to a real module's genuinely nonexistent member (e.g.
+  `String.length(...)` — `String` has no `length`; the real API is
+  `byte_size`/`codepoint_count`/`grapheme_count`) silently fell through to an
+  unrelated same-named binding elsewhere (e.g. the prelude's generic
+  `List.length`) instead of reporting "Module `String` does not export
+  `length`". The EVar dot-suffix fallback — meant only to resolve
+  multi-component local/app-module paths like `Conduit.Storage.workflow_load`
+  down to `Storage.workflow_load` — didn't distinguish that case from a
+  qualifier that is already a confirmed, loaded stdlib module. Now, once the
+  qualifier's first component resolves to a real registered module, a missing
+  member always reports the clean "does not export" diagnostic instead of
+  falling through to the bare-name search.
 - A user-defined interface impl with a compositional `when` constraint (e.g.
   `impl MyEq(Wrap(a)) when MyEq(a) do fn eq(w1, w2) do ... eq(x, y) ... end
   end` — the same shape as the stdlib's own `Eq(List(a)) when Eq(a)`) whose

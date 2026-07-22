@@ -4194,6 +4194,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
               `Hash` interface), bypassing the visibility check entirely. *)
            Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
+         | _ when (match split_qualified name.txt with
+                   | Some (mod_name, _) -> March_modules.Module_registry.ensure_loaded mod_name <> None
+                   | None -> false) ->
+           (* The qualifier's first component IS a genuinely known module (a
+              real, loaded stdlib module — [ensure_loaded] succeeded) and
+              [resolve_qualified_var] just confirmed it does not export this
+              member. That is decisive: fall straight through to the
+              dot-suffix fallback below would let e.g. `String.length` (no
+              such export; the real API is `byte_size`/`codepoint_count`)
+              silently resolve to the unrelated `List.length` bare binding,
+              producing a baffling `expected List(u2) but got String` instead
+              of "Module `String` does not export `length`". The dot-suffix
+              fallback exists for a DIFFERENT case — multi-component paths
+              like "Conduit.Storage.workflow_load" whose first component
+              ("Conduit") is a local/app module never registered in
+              [Module_registry] (only the REPL calls [register]; compiled
+              builds only lazily populate the registry with real stdlib
+              modules) — so this guard cannot misfire on that case. *)
+           Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
