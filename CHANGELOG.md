@@ -13,6 +13,29 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- An all-caps acronym stdlib module name (e.g. `RRB`, declared in
+  `rrb_vec.march`) failed to resolve in a type annotation with "Unknown module
+  `RRB`", even though its functions worked fine as values. The lazy
+  qualified-name resolver guessed a module's filename by inserting `_` before
+  every uppercase letter (`ConsistentHash` -> `consistent_hash.march`), which
+  mangles an acronym into a filename that doesn't exist (`r_r_b.march`).
+  Falls back to a lazily-built index of the stdlib directory keyed by each
+  file's real declared module name when the naming-convention guess misses.
+  Fixing this exposed a second, related bug: a qualified reference to an
+  opaque type (`RRB.Vec(Int)`) failed to unify with real values of that type
+  (`expected 'RRB.Vec(Int)' but got 'Vec(r3)'`) because the qualified name
+  wasn't canonicalized to its bare form when the type's module was being
+  loaded for the first time. Both are fixed together.
+- `let x : T = e` type annotations silently accepted ANY resolution failure
+  in `T` and fell back to inferring the type from `e` alone with zero
+  diagnostics — e.g. `let e : Vec(Int) = "not a vec"` typechecked cleanly.
+  This was meant to tolerate a phantom/typestate tag used in type position
+  (`let h : Handle(Open) = ...`, where `Open` is a data constructor, not a
+  type name) but was too broad, silently discarding genuinely broken
+  annotations (an unresolvable module, a typo'd or renamed type) too.
+  Narrowed to only tolerate the phantom-tag case (an unresolved name that IS
+  a known data constructor); any other resolution failure now surfaces as a
+  real diagnostic.
 - An inline lambda passed directly as a call argument (e.g. `Dom.on_frame(fn _
   -> ...)`) failed to parse if its body had a plain statement (not a `let`
   binding) immediately followed by another expression — e.g. a function call
@@ -73,6 +96,33 @@ git log is authoritative for exact commits.
   missing diagnostic. Now correctly rejected at `--check` and `--compile`
   with the same "is private to module" error other privacy violations
   already produced.
+- `RRB.push`/`Array.push` crashed compiled on the second `Float` element
+  pushed (`RRB.push(RRB.push(RRB.empty(), 1.5), 2.5)`). A discarded
+  (wildcard-matched) field of a list cell never got the special-casing a
+  *named* field already had, so the compiler treated it as reference-counted
+  even when the concrete element type (`Float`) doesn't need that — freeing
+  memory that was never actually heap-allocated. (Reading a pushed `Float`
+  back out — `Array.get`/`RRB.get` — had a separate, sibling bug; see below.)
+- `task_spawn`/`Task.async` with a `Float`-returning callback, followed by
+  `task_await_unwrap`/`Task.await_unwrap`/`Task.await`, failed to compile
+  with an internal LLVM type error. Affects `Parallel.preduce`/`psum_float`,
+  which spawn one task per worker chunk.
+- A tail-recursive function combining a `Float` accumulator with a
+  heap-value parameter (e.g. an `Array`/`List`) — the shape `RRB.fold`'s
+  internal loop uses — returned a wrong answer or crashed
+  (`RC underflow (rc was 0)`) in compiled programs, blocking
+  `Parallel.preduce`/`psum_float`'s worked example
+  (`docs/cookbook/parallel-data.md`) end-to-end even after the task-boundary
+  fix above. Two independent causes: a constructor field discarded via a
+  wildcard pattern (`Cons(_, t)`) kept an internal type placeholder that
+  made the compiler treat an unboxed `Float` as a heap pointer needing
+  reference counting, corrupting memory; and a value read out of a generic
+  container field was passed to some function calls without converting it
+  to that function's expected native representation, so the callee silently
+  read `0.0` instead of the real value. Both fixed. Affects any compiled
+  program building or reading a `List`/`Array` of `Float` through a generic
+  helper (`Array.from_list`, `Array.get`, and therefore `RRB`'s `Float`
+  operations) or wildcard-discarding an element of a `Float` container.
 
 ### Fixed
 
@@ -80,6 +130,30 @@ git log is authoritative for exact commits.
   extern runtime builtins but never got a public stdlib wrapper, like every
   other DOM function — so they were unreachable from March code
   ("Module `Dom` does not export ...") despite being documented.
+- `fn main(cap : Cap(IO)) : ()` — the documented pattern for receiving the
+  initial IO capability — never actually worked: in the interpreter it
+  silently no-oped (the program appeared to exit successfully having done
+  nothing), and compiled programs crashed (SIGBUS) on startup. Both backends
+  now run it correctly; any other `main` arity or parameter type is now
+  rejected at compile time with a clear error instead of misbehaving.
+- WebSocket connections in the interpreter (`forge run`, plain `march
+  file.march`, and any tool built on it, including `forge scroll.serve`)
+  disconnected almost immediately whenever the client went quiet — an open
+  connection would flip to closed within milliseconds of the server having
+  nothing to read, sometimes before the client's very first message was even
+  processed. A raw handshake with no further traffic got an instant
+  server-initiated close. The server's WebSocket handler was reading from a
+  socket still configured for the (unrelated) HTTP accept loop's internal
+  bookkeeping, which made an ordinary "no data yet" condition look
+  indistinguishable from the client disconnecting. Compiled (`--compile`)
+  WebSocket servers had a milder version of the same bug: an idle connection
+  would be dropped after 10 seconds instead of staying open. Both are fixed;
+  idle WebSocket connections now stay open as expected in both backends.
+- `Vault.update` crashed (segfault) in compiled programs, for both an inline
+  lambda and a named function callback — e.g.
+  `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
+  Affects the documented atomic-update pattern and the rate-limiter cookbook
+  example.
 
 ### Documentation
 

@@ -2954,7 +2954,15 @@ let http_run_pipeline_and_respond
        in
        (* The handshake + subsequent WS frames are written/read with the
           same blocking helpers the old implementation used: this one
-          connection becomes WS-owned for its lifetime, same as before. *)
+          connection becomes WS-owned for its lifetime, same as before.
+          The accept loop above put this socket in non-blocking mode for
+          its own multiplexed select() bookkeeping; that flag is still set
+          here and must be cleared before handing off, or ws_recv_frame's
+          blocking-style Unix.recv calls raise EAGAIN/EWOULDBLOCK the
+          moment the client goes idle (even on the very first read, if it
+          races ahead of the client's next frame), which ws_recv_frame's
+          catch-all then misreports as the peer closing the connection. *)
+       (try Unix.clear_nonblock sock with _ -> ());
        tcp_send_all sock handshake;
        let fd_int = (Obj.magic sock : int) in
        let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
@@ -9598,7 +9606,27 @@ let run_module (m : module_) : unit =
     match List.assoc_opt "main" env with
     | None   -> ()
     | Some v ->
-      let _ = apply v [] in
+      (* [main] may be declared 0-arity or take a single [Cap(IO)] parameter
+         (checked at desugar time by [Desugar.check_main_signature]); the
+         latter receives the erased root capability, matching [root_cap]'s
+         own runtime representation ([VUnit], see the initial env binding
+         above). Top-level functions are bound to a [VBuiltin] recursion
+         wrapper (see the [DFn] case of [eval_decl], the "<rec:name/arity>"
+         closure), not directly to a [VClosure], so arity can't be read off
+         [v] itself — read it from the entry module's own AST instead. *)
+      let main_arity = List.find_map (function
+          | DFn (def, _) when def.fn_name.txt = "main" ->
+            (match def.fn_clauses with
+             | [clause] -> Some (List.length (clause_params clause))
+             | _ -> None)
+          | _ -> None
+        ) m.mod_decls
+      in
+      let args = match main_arity with
+        | Some 1 -> [VUnit]
+        | _ -> []
+      in
+      let _ = apply v args in
       run_scheduler ()
 
 (* ------------------------------------------------------------------ *)

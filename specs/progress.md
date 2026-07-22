@@ -283,6 +283,145 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, WebSocket connection-stability fix — non-blocking socket mode no longer leaks into the blocking WS handler)
+
+- **`lib/eval/eval.ml`'s interpreter WebSocket server (`http_server_listen`/`run_http_event_loop`) no longer disconnects idle WS clients.** The 2026-07-07 event-loop fix above put every accepted socket in non-blocking mode for its multiplexed HTTP accept loop but never cleared that flag before handing the fd to the WS handler closure, despite its own comment claiming the handoff was "blocking, exactly as before this fix." `ws_recv_frame`'s catch-all exception handler then silently turned the resulting `EAGAIN`/`EWOULDBLOCK` (raised by `Unix.recv` racing an idle/still-in-flight client) into a synthesized `Close(1001, "going away")` — observed as `forge scroll.serve` notebooks flipping to "disconnected" almost immediately after loading. Fix: `Unix.clear_nonblock sock` right before the WS handshake response is written (`http_run_pipeline_and_respond`). The compiled runtime (`runtime/march_http.c` `connection_thread`) had the same bug class with a different trigger: the 10s keep-alive `SO_RCVTIMEO` set at connection-thread startup was never cleared before the WS handoff, so an idle compiled WS connection would time out and get the same spurious synthesized close after 10s; fixed by resetting `SO_RCVTIMEO` to `{0,0}` at the same handoff point, matching the evloop server variant's existing `ws_handler_thread`, which already explicitly clears `O_NONBLOCK` there. Verified with a controlled WS client: idle connections now stay open 60s+ (previously died near-instantly), and a full `load`→`run`→`poll_run` round trip completes with the connection still open afterward. See `specs/todos.md` "Recently fixed" for the full writeup, including a separately-noticed (not fixed here) RFC 6455 Pong-payload-echo gap.
+
+## Current State (as of 2026-07-21, native `HttpClient` link failure fixed)
+
+Every compiled program using `HttpClient` (any program pulling in
+`HttpTransport`) failed to link natively with `Undefined symbols: _http_fetch,
+_http_fetch_available` — found auditing `docs/cookbook/http.md`/
+`docs/cookbook/concurrency.md` against the compiler. Reproduced at every
+`--opt` level, not just `--no-opt`: `http_fetch_available()` is a real runtime
+call, not a compile-time constant, so DCE can never prove the guarded
+`http_fetch` call in `HttpTransport.request` (`stdlib/http_transport.march`)
+dead. **Root cause:** `http_fetch`/`http_fetch_available` had no typecheck
+builtin binding — they existed only as an interpreter builtin
+(`lib/eval/eval.ml`) and a js_of_ocaml global — so the call sites fell through
+`llvm_emit`'s generic "unresolved global call → declare + call an extern C
+symbol of the same name" fallback, which native builds can never satisfy.
+**Fix:** registered both in `typecheck.ml`'s `builtin_bindings`
+(`http_fetch_available : Bool`, `http_fetch : String -> String -> String ->
+String -> Result(String, String)`) and added native stub implementations in
+`runtime/march_http.c` — `http_fetch_available` always returns raw-Bool
+`false` (so native requests take the existing `tcp_*` socket path instead;
+`http_fetch` itself is unreachable in practice), `http_fetch` returns an
+`Err(...)` for defense-in-depth. **Gotcha:** giving `http_fetch_available` a
+concrete `Bool` typecheck binding flips its native ABI from the
+tagged-immediate `(v<<1)|1` ptr representation used for erased/unknown-type
+calls to a raw `i64` 0/1 — a stub written for the wrong convention either
+SIGSEGVs (dereferences the tagged immediate as a heap pointer, `[x0, #0x8]`)
+or silently inverts true/false; caught via `lldb` backtrace on the first
+attempt. Verified end-to-end: compiled a program calling `HttpClient.get`
+against a real local HTTP server and got the response body back. `specs/c-ffi-gaps.md`'s
+stale "Unrelated pre-existing (not FFI)" entry (which mis-described this as
+`--no-opt`-only) updated to reflect the real scope and the fix. **451 compiler
+/ 231 eval / 396 codegen / 53 stdlib_march pass; stdlib full suite pending
+(quick subset 779/779 green).**
+
+## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
+
+Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
+`RRB`/`Array`) no longer SIGSEGVs on the second push of a `Float` element. Root
+cause: `Array.push` calls `lst_len(tail)`, whose inner `go` discards the
+list-head field via a wildcard pattern (`Cons(_, t) -> go(t, acc + 1)`).
+`lower_match.ml`'s pattern-matrix compiler gave every constructor-field
+synthetic variable the `TVar "_"` placeholder type at creation; a NAMED field
+gets rebound to its real (trackable) type downstream and flows through
+`mono.ml`'s monomorphization normally, but a WILDCARD-discarded field never
+gets rebound, so it kept `TVar "_"` forever. `Rc_types.needs_rc (TVar "_")`
+conservatively answers `true`, so Perceus emitted a `dec_rc` on it — and for a
+concretely-Float instantiation, the field's actual runtime representation is
+an unboxed double bit-reinterpreted as `ptr` (no heap box), so that `dec_rc`
+read a tag field out of a raw float bit pattern and crashed.
+
+- `lib/typecheck/typecheck.ml`'s `infer_pattern`, `PatWild` arm now records its
+  inferred type into `env.type_map` (mirroring `PatVar`), so the wildcard's
+  span has a resolvable entry.
+- `lib/tir/lower_match.ml`'s `compile_matrix_impl` now looks up every
+  constructor field's type via `Lower_state.ty_of_span` on the sub-pattern's
+  own span, instead of defaulting unconditionally to the unknown-type
+  placeholder — so a discarded field flows through monomorphization exactly
+  like a named one.
+
+New compiled native golden `test/native/rrb_push_float.march` (+ `.expected` +
+`test/dune` rule).
+
+**CORRECTION (2026-07-21, same day):** this entry originally claimed, after
+rebasing onto `origin/main`, that `origin/main`'s independent "float-boxing
+Stage 2" work alone also resolved a sibling `Array.get`/`RRB.get` wrong-value
+bug found while stress-testing this fix. **That claim was wrong** — a scratch
+`git worktree` build of `origin/main` HEAD reproducibly printed `0.` instead
+of the real value for `Array.get`/`RRB.fold` on a `Float` array/vector, with
+none of the fix described below applied. See the next entry (below) for the
+real root cause and fix, and for full end-to-end verification (a 100-element
+push-then-read-back round trip, both optimization levels, 0 mismatches).
+
+## Current State (as of 2026-07-21, Float-accumulator TCO+heap-ptr RC underflow / Array.from_list wrong-value fix)
+
+**A tail-recursive `Float` accumulator co-resident with a heap-pointer
+(`Array`/`List`) parameter no longer returns a wrong value or aborts with
+`march: RC underflow (rc was 0)` when compiled.** This was blocking
+`RRB.fold` (and therefore all of `Parallel`'s reduce family over `Float`)
+and `docs/cookbook/parallel-data.md`'s worked example. Root-caused with
+`superpowers:systematic-debugging`; the originally-suspected cause (the
+Stage-2 float-boxing ABI leaking a wrong RC target into the TCO
+loop-back-edge, `lib/tir/llvm_tco.ml`/`lib/tir/perceus.ml`) did not hold —
+the crash backtrace pointed into `Array`'s own stdlib-internal `lst_len`
+helper (reached via `Array.get`), not the user's TCO loop, which was
+innocent. Two independent bugs, both required for the end-to-end repro to
+work correctly:
+
+1. **RC corruption/crash:** `lib/tir/lower_match.ml`'s constructor-pattern
+   field binders always started at the `unknown_ty` (`TVar "_"`)
+   lowering-fallback placeholder, and a wildcard-discarded field
+   (`Cons(_, t)`) never got re-typed — unlike a named field, which
+   `bind_trivial_pat`'s `PatVar` case resolves via `Lower_state.ty_of_span`
+   — because `lib/typecheck/typecheck.ml`'s `infer_pattern` never recorded
+   a `PatWild`'s span in `env.type_map` in the first place. Perceus's
+   `needs_rc(TVar "_") = true` (a deliberately conservative "might be a
+   heap pointer" default) then emitted a spurious `dec_rc` on what is
+   actually an unboxed native `double` for a monomorphized `List(Float)`.
+   The runtime's `IS_HEAP_PTR(p) = ((uintptr_t)p >= 4096)` guard accepts
+   almost any nonzero double's raw bit pattern as "plausibly a pointer" (an
+   ordinary float's magnitude as an unsigned integer is astronomically
+   large), so the spurious decrc dereferenced garbage — silent corruption
+   at first, `RC underflow`/SIGSEGV once later exercised. `List(Int)` was
+   unaffected: small tagged ints stay under 4096 and the same spurious
+   decrc is a harmless no-op. Fix: `typecheck.ml`'s `PatWild` now records
+   its type into `env.type_map` (mirroring `PatVar`); `lower_match.ml`
+   resolves each constructor field's type via `ty_of_span` (scanning the
+   group's rows for a resolvable span at that position) instead of
+   hardcoding `unknown_ty`.
+2. **Wrong-value symptom (surfaced once bug 1 was fixed):**
+   `lib/tir/llvm_emit.ml`'s `EApp` direct-call emission never coerced an
+   argument's actual emitted LLVM representation to the callee's declared
+   parameter type. A value extracted from a generic/polymorphic ADT field
+   is always `ptr` (boxed for scalars) under the compiler's uniform-slot
+   convention, regardless of its concrete monomorphic type; flowing
+   directly into a monomorphic callee's native scalar parameter (e.g.
+   `Array.push$..$Float`'s `elem : Float` → LLVM `double`) produced a call
+   site/callee representation mismatch (`call ptr @f(ptr, ptr)` against a
+   callee declared `(ptr, double)`) that LLVM's parser did not reject but
+   that made the callee always read `0.0`. `Array.from_list`'s internal
+   fold hit this on every pushed element. Fix: new
+   `Llvm_ctx.top_fn_param_tys` table (populated alongside the existing
+   `top_fn_ret_ty`/`top_fn_nparams`); `EApp`'s non-apply-fn argument path
+   now coerces each argument to the callee's declared parameter type when
+   known — a no-op for the already-correct common case.
+
+Verified: both originally reported repros now print the correct `7.`;
+~15 isolated repros (bare `Array.get`, `Array.push` chains,
+`Array.from_list`, standalone `List(Float)` wildcard-discard traversals,
+an `Int` control) all match interpreted output. Full suite clean except
+one pre-existing, load-dependent ASAN-initialization livelock unrelated to
+this change (confirmed via `lldb`: hangs inside
+`__asan::AsanInitInternal` before any March code runs, reproduces in
+isolation under heavy concurrent machine load). New regression test:
+`test/native/float_generic_field_abi.march` (+ `.expected`), wired into
+`test/dune`.
+
 ## Current State (as of 2026-07-21, TCO self-call freed a freshly-allocated forwarded argument)
 
 Compiled-only miscompile: `stdlib/toml.march`'s `string_to_int_digits` (a
@@ -325,6 +464,51 @@ compiled while the interpreter got `9000` right, no crash or error.
   `scripts/run-tests.sh -q` (779 tests) and a full `dune build @runtest`
   (native golden corpus, including the two new tests) both green.
 
+## Current State (as of 2026-07-21, `Parallel` Float-accumulator task-boundary fix)
+
+`Parallel.preduce`/`preduce_n` (and the `psum_float` convenience wrapper) now
+compile with a `Float` accumulator — previously an LLVM type mismatch
+(`'%cvN' defined with type 'i64' but expected 'double'`, or, post-rebase onto
+the float-boxing stage-2 work below, the same mismatch surfacing one call
+site later at `march_alloc_float`) at `--compile` time, isolated to `Float`;
+`Int` accumulators (`preduce`, `psum`, `pcount`, `pany`, `pall`) always
+worked. Root cause: `task_await_unwrap`/`task_await`'s codegen (`lib/tir/
+llvm_emit.ml`) had no `"double"` case at all for a `Task(Float)`'s inner
+type — it fell into the generic fallback branch, mislabeling a raw i64-typed
+SSA value as `"double"` without converting it, so whatever downstream code
+consumed the mislabeled value as an actual `double` hit an LLVM type error.
+Fix: both builtins gained a `"double"` branch that recovers the task
+result's heap pointer exactly like the existing `"ptr"` case (the spawning
+closure's apply fn already boxes a `Float` return value via the generic
+`"double"->"ptr"` coerce — `march_alloc_float`, float-boxing stage 2, see
+that work's own progress entry — before handing it to the trampoline, so the
+pointer is genuine and the tag/untag round trip through `task[3]` is already
+lossless; no new runtime entry point needed) and then unboxes it with the
+paired `march_unbox_float`. `task_await`'s big comment block had already
+flagged `"double"` as "ABI-broken through the void*-returning trampoline,
+separate follow-up" when the sibling i64/ptr bugs were fixed — this closes
+that follow-up. Verified: the reported repro
+(`Parallel.psum_float(RRB.from_list([1.5, 2.5, 3.0]))`) compiles cleanly; a
+raw `task_spawn`/`task_await_unwrap` round trip over values that would trip
+the pre-float-boxing lossy bit-shift (`2.75`, `100000000.25`) prints and sums
+correctly. (An earlier version of this fix, written before rebasing onto the
+float-boxing stage-2 work, added its own dedicated
+`march_task_spawn_thunk_float`/`march_float_task_box` boxing mechanism — that
+turned out to duplicate the now-canonical `march_alloc_float`/
+`march_unbox_float`/`MARCH_FLOAT_TAG` machinery already merged to `main`, so
+it was dropped in favor of reusing it.) Separately verified:
+`RRB.push`/`Array.push` on `Float` elements — which crashed compiled on the
+second push while this fix was being developed — is *also* already fixed by
+the same float-boxing stage-2 work. **`Parallel.psum_float`'s actual repro and
+`docs/cookbook/parallel-data.md`'s example are still broken compiled,
+however:** verifying end-to-end surfaced a third, pre-existing, more severe
+bug (independent of this fix and of the two above — reproduces on unmodified
+`main`) in `RRB.fold`'s own TCO'd loop, where a tail-recursive function with
+a `Float` accumulator that also carries a heap-pointer parameter either
+returns a wrong value or aborts with an RC underflow compiled. **FIXED
+2026-07-21** — see this file's "Float-accumulator TCO+heap-ptr RC underflow
+/ Array.from_list wrong-value fix" entry above (and `specs/todos.md`'s Done
+section) for the two-bug root cause and fix.
 
 ## Current State (as of 2026-07-21, `Option.or_else`/`unwrap_or_else` zero-arg callback crash fix)
 
@@ -5117,3 +5301,33 @@ their existing build steps, no manual patching.
 **Cookbook audit (`docs/cookbook/linear-types.md`):** the "Typestate" section and "Complete example: safe socket lifecycle" did not compile as written and were internally inconsistent — `via` transition functions were shown returning `Result(...)` (the compiler requires a `via` function's return type to be *exactly* the bare handle type in its target state, no wrapper, no tuple — verified against `lib/typecheck/typecheck.ml`'s `DTransitions` check), the acquisition function (`open_file`/`connect`, taking a raw `String`) was itself listed as a transition despite not taking a handle at all, and the socket example declared `Socket = Socket(Int)` with no state type parameter while `transitions` treated it as state-tracked. Rewritten to split each resource's lifecycle into an ordinary Result-returning acquisition function (outside `transitions`, since its parameter isn't a handle) plus pure bare `Handle -> Handle` transitions declared in `transitions` — the pattern already used correctly by `specs/lang/capabilities.md`'s `Db`/`Handle` example. An operation that also carries a payload (`read_chunk`, `recv_bytes`) can't be declared as a `via` transition (its return type is a tuple), but is still typestate-checked for free by its argument type; the doc now says so explicitly rather than glossing over it. Every code block in the rewritten page — including the `let?` and `with` forms of the `FileHandle` state machine and the full `Socket` example — was mechanically verified against the real compiler (parses, typechecks, runs), and a deliberately wrong-order variant of each (calling a state-`Open`-only function on a `Closed`/`Disconnected` handle) was separately verified to be rejected with the expected "expected `Open` but got `Closed`"-style diagnostic. Also found and fixed in passing: the page's very first example used non-existent `linear type FileHandle = ...` declaration syntax (a parse error) — the language only has `type` (unrestricted by default) and `always_linear type` (auto-promotes every binding); rewritten to show the real per-binding-site mechanism (`linear let`, `linear` parameter annotation), and the `with`-section example (which — coincidentally — depended on exactly the double-use gap fixed above to "work") rewritten so its handle is genuinely consumed exactly once.
 
 **Verification:** `test/test_compiler.ml`'s three new linearity tests pass (454 compiler tests total). Confirmed via a before/after diff (temporarily reverting just `lib/typecheck/typecheck.ml` via a file-copy swap) that this change has no effect on the pre-existing, unrelated `llvm_ir_validity_gate` corpus failures (distributed/CRDT-module fixtures) — identical failure set before and after.
+
+**Same session — `int_mod_euclid` native codegen was silently wrong for a negative divisor, now fixed.** Its runtime helper had lowered to genuinely-*unsigned* `%` (`march_checked_umod`), which matches the interpreter's Euclidean remainder only for a positive divisor; a negative divisor diverged (`int_mod_euclid(-7, -3)` → `-7` compiled vs. `2` interpreted). Replaced with signed Euclidean semantics (`r = a % b; if r < 0 then r + abs b else r`) and renamed the symbol `march_checked_umod` → `march_checked_emod` (the mod-side pair of `march_checked_ediv`; the "u"-for-unsigned prefix was misleading once the body became signed). New parity test `test_compiled_int_mod_euclid_parity` pins all four sign quadrants (`[1, 2, 2, 1]`).
+
+## Current State (as of 2026-07-21, `Vault.update` SIGSEGV fixed — closure-invocation + niche-Option decoding bugs)
+
+**`Vault.update` no longer crashes compiled.** Found while auditing `docs/cookbook/vault.md`: `Vault.update(store, key, fn n -> n + 1)` SIGSEGV'd (exit 139, no output) for both an inline lambda and a named top-level fn callback, compiled-only — interpreted was always correct. Two bugs in `march_vault_update` (`runtime/march_extras.c`): (1) `march_vault_get` returns a **niche-encoded** `Option(ptr)` (`None = NULL`, `Some(v) = v` itself — see `make_some`/`make_none`), but `vault_update` decoded it as a **boxed** Option (tag word at `cur+8`, payload at `cur+16`), reading 8 bytes past a scalar value's own machine word — an out-of-bounds read landing on an unmapped page, before the closure was ever invoked. (2) The closure-invocation call itself had called `fn(env, v)` with `env` read from a bogus `f+24` field instead of the actual convention (matching `call_closure_1`/`march_http_internal.h`'s `closure_fn_t`) of passing the closure struct pointer itself as the first argument: `fn(f, v)`.
+
+**A third wrinkle surfaced only after merging `origin/main`** (several hundred commits, developed on a stale local branch): `specs/plans/2026-07-17-closure-scalar-abi-uniform-ptr.md` had, upstream, moved a closure apply-fn's *parameters* onto the same uniform-ptr ABI its return already used — the apply fn now conditionally untags a tagged scalar itself at entry and re-tags on return, so a value in Vault's uniform representation should be passed straight through unchanged. An earlier version of this fix (correct against the pre-merge ABI, where params were still native/untagged) manually untagged the value before the call; once merged onto the new ABI that extra untag double-processed tagged values and silently produced wrong results (verified: `Vault.update(t, "n", fn n -> n + 1)` applied twice to `1` returned `1` instead of `3`). Fixed by simply passing `cur` through unchanged — the closure now owns the uniform-value conversion entirely.
+
+**Validation:** the minimal repro (inline lambda + named fn) prints the correct values (`2`, `3`) compiled, matching interpreted; a `String`-valued update (`s ++ "!"`) round-trips correctly compiled, guarding the heap-pointer branch; `docs/cookbook/vault.md`'s rate-limiter example runs end-to-end compiled with output identical to interpreted. New permanent regression test `test_compiled_vault_update` (`test/test_stdlib_suite.ml`, `adversarial-regressions` Slow group), reverified post-merge.
+
+## Current State (as of 2026-07-21, `fn main(cap : Cap(IO)) : ()` entry-point fix)
+
+**The documented entry-point pattern for receiving the initial IO capability now actually works, on both backends.** `specs/lang/capabilities.md`'s own canonical `Main` module example — `fn main(cap : Cap(IO)) : ()` — never worked: interpreted, `Eval.run_module` called every `main` with zero arguments regardless of declared arity, so a 1-parameter `main` silently became an unapplied partial closure that never ran (no crash, no output); compiled, `march_spawn_main`'s runtime trampoline invokes the entry point through a bare 0-argument function pointer, but a 1-parameter `main` was emitted with a real (unused) `ptr` parameter in its LLVM signature — an ABI mismatch observed as a SIGBUS. Neither backend had ever special-cased `main`'s arity, so a wrong-arity `main` (e.g. a stray `Int` parameter) was silently accepted and hit the same two failure modes.
+
+**Fix, three sites, all additive:** (1) `Desugar.check_main_signature` (`lib/desugar/desugar.ml`) — a new AST-level check, called from `desugar_module` alongside the existing `check_app_main_exclusivity` — rejects any `main` whose first clause isn't zero parameters or exactly one `Cap(IO)`-typed parameter, with a diagnostic naming the found arity. (2) `Eval.run_module` (`lib/eval/eval.ml`) reads `main`'s arity from the entry module's own `DFn` AST (top-level functions bind to a `VBuiltin` recursion wrapper, not a bare `VClosure`, so arity isn't visible on the bound value) and supplies `VUnit` — matching `root_cap`'s own runtime representation — when arity is 1. (3) `Llvm_toplevel.emit_module`'s native/WASI `@main` (`lib/tir/llvm_toplevel.ml`) emits a thin private 0-arg adapter (`@march_main_entry_thunk`) that calls the real 1-arg mangled main with a literal `ptr null` (the erased `Cap(IO)`) when main's arity is 1, and hands the adapter's address to `march_spawn_main` instead of changing the runtime's ABI. The WASM-island entry point (a separate, non-IO-capability convention for browser components) and the JS backend (tolerant of the arity mismatch already — extra/missing JS args are just `undefined`) were left untouched as out of scope.
+
+**Validation:** `test/test_eval.ml`'s new `main_entry_point` group (3 tests) — `main(cap : Cap(IO))` actually executes its body (verified via the existing `Eval.test_capture_buf` stdout-capture hook), 0-arity `main` is unregressed, wrong-arity `main` is rejected at desugar time. New native compiled golden `test/native/main_cap_io.{march,expected}` + `test/dune` rule pins the codegen thunk — compiles and runs cleanly (no SIGBUS), stdout matches. `specs/lang/capabilities.md` needed no changes: the pattern it already documents is now accurate.
+
+## Current State (as of 2026-07-21, acronym stdlib module resolution + silent let-annotation swallow, three related fixes)
+
+**Found auditing `docs/cookbook/parallel-data.md`: `let words : Vec(String) = ...` failed to typecheck with "Unknown module `RRB`"** even though `RRB.range`/`RRB.from_list`/etc. work fine as values. Root cause: `Module_registry.module_name_to_filename` (`lib/modules/module_registry.ml`) guesses a stdlib filename by inserting `_` before every uppercase letter — designed for CamelCase names (`ConsistentHash` -> `consistent_hash.march`) but mangles an all-caps acronym like `RRB` into `r_r_b.march`, a file that doesn't exist (the real file is `rrb_vec.march`). Only the lazy qualified-TYPE resolution path (`Module_registry.ensure_loaded` -> `find_stdlib_file`, used by `resolve_qualified_type`/`resolve_qualified_var`/`resolve_qualified_ctor`) is affected — value/ctor resolution for modules already present in `bin/main.ml`'s eager `stdlib_file_list` never needs this lazy path at all. **Fix:** `find_stdlib_file` falls back to a lazily-built index of the stdlib directory keyed by each file's real declared module name (scanned from its `mod X do` line, no full parse needed) when the naming-convention guess misses a real file.
+
+**Found while isolating the above: a second, unrelated soundness/diagnostics hole — an unresolvable `let x : T = e` type annotation was silently never checked at all.** `let e : Vec(Int) = "not a vec"` compiled with ZERO diagnostics. `infer_let_annotated` (finding 16, `f0f5299c`) resolves the annotation in a scratch error context and, if `surface_ty` reports ANY error, discards the whole scratch context and falls back to inferring the RHS's bare type instead — intended only to tolerate a phantom/typestate tag used in type position (`let h : Handle(Open) = ...`, where `Open` is a data constructor, not a type name, so `surface_ty` genuinely can't resolve it — pre-finding-16 legacy behavior for annotations the type grammar can't express). The blanket discard also swallowed genuinely broken annotations (unknown module, typo'd/renamed type) with no error at all. **Fix:** narrowed the tolerance via a new `annotation_errors_are_phantom_tags_only` helper — only discard when EVERY unresolved name in the annotation's diagnostics (parsed back out of `qualified_error_msg`'s "I cannot find `X`." message shape) is a known data constructor (`StrMap.mem name env.ctors`), which is the actual, narrow signature of a phantom tag; anything else (the unresolved name isn't even a known constructor) now surfaces as a real diagnostic via `env.errors`.
+
+**Fixing the first bug exposed a third: `surface_ty`'s qualified-name canonicalization (`Mod.Type` -> bare `Type`) missed a type loaded for the first time via `resolve_qualified_type`.** Once `RRB.Vec(Int)` could resolve at all, it failed to UNIFY against real `RRB` values — `expected 'RRB.Vec(Int)' but got 'Vec(r3)'` — because values of an opaque `ptype` always carry the BARE canonical `TCon` name (March's single global type namespace: a type's bare name is its canonical identity, regardless of module or visibility), and the existing canon_name step looked up the bare suffix in the PRE-resolution `env`, which never has it for a module lazily loaded for the first time in this same call. **Fix:** thread through the ENV THAT `resolve_qualified_type` RETURNS (which main's independently-landed `f2f3011d`, "seed bare type names when loading a module from the compiled registry", already populates with the bare name for exactly this reason) and look up the bare suffix there instead of in the original `env` — composes with `f2f3011d` rather than duplicating it.
+
+**Verified:** `let e : Vec(Int) = RRB.empty()` (bare `Vec`, an opaque `ptype`'s bare name never promoted to the outer namespace by design) now correctly ERRORS with "I cannot find `Vec`" — it only ever appeared to work via the second bug's silent swallow, confirmed identical in shape to how a bare `Vec` function-parameter annotation already behaved pre-fix (also errors, unaffected by any of these three changes). The correct, working surface form is qualified — `let words : RRB.Vec(String) = RRB.from_list(...)` — matching the pre-existing `ConsistentHash.HashRing(a)` pattern (`specs/lang/types/accept/t34_opaque_ptype_qualified_annotation.march`, `t31_cross_module_public_and_opaque_ptype.march`), both of which still pass. Full `scripts/run-tests.sh -q` green (post-merge with `origin/main`, 340 commits) except two PRE-EXISTING, unrelated failures confirmed present on an unmodified `origin/main` checkout of the two touched files: `llvm_ir_validity_gate`'s `signal_watch.march`/`signal_term_suppress.march` fixtures ("Unknown module `Signal`") and the `Slow` `MARCH_SANITIZE` ASAN-altstack-teardown test (reproduces as an actual runtime hang on this machine, unrelated to typecheck/module-resolution code).
+
+**Not fixed (flagged separately, out of scope for this change):** `docs/cookbook/parallel-data.md` still has 6 bare `Vec(...)`/`Map(...)` annotations (5 fn param/return + the one `let`) that would now surface real errors if copy-pasted verbatim, plus unrelated pre-existing issues in the same file (a `Float` module referenced that doesn't exist in stdlib, a `Map.merge_with` arity mismatch) — needs a separate docs-focused pass.

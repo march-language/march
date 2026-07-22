@@ -1158,6 +1158,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_bool_field.expected native_closure_bool_field.out)))
 
+; ── Regression: RRB.push (Array's PVec/TrieNode/List(a) trie) with Float ────
+; elements crashed compiled on the SECOND push. lst_len's inner `go` discards
+; the list-head field via a wildcard pattern; the pattern-matrix compiler left
+; that field's synthetic TIR variable at the TVar "_" placeholder forever (a
+; NAMED field gets fixed up via ty_of_span and flows through monomorphization
+; normally — a discarded one never does), so Perceus's needs_rc check
+; conservatively inserted a dec_rc on it. For a concretely-Float
+; instantiation the field is really an unboxed double bit-reinterpreted as
+; ptr (no heap box), so that dec_rc read a tag field out of a raw float bit
+; pattern and SIGSEGV'd. Compile natively, run, diff stdout.
+(rule
+ (targets native_rrb_push_float native_rrb_push_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/rrb_push_float.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_rrb_push_float
+        native/rrb_push_float.march)
+   (with-stdout-to native_rrb_push_float.out
+        (system "./native_rrb_push_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/rrb_push_float.expected native_rrb_push_float.out)))
+
 ; ── Regression: `let (a, b) = rhs` must untag scalar tuple fields ───────────
 ; The match-pattern path bound fields at their concrete element type and untagged
 ; them; the let-destructure path bound them at TVar, so a tagged scalar field was
@@ -1389,6 +1422,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/toml_get_int.expected native_toml_get_int.out)))
+
+; ── Regression: `fn main(cap : Cap(IO)) : ()` compiles and runs (SIGBUS fix) ──
+(rule
+ (targets native_main_cap_io native_main_cap_io.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/main_cap_io.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_main_cap_io
+        native/main_cap_io.march)
+   (with-stdout-to native_main_cap_io.out
+        (system "./native_main_cap_io")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/main_cap_io.expected native_main_cap_io.out)))
 
 ; ── P6 regression: unboxed newtype (Counter(Int)) — construct + match across ──
 ; ── function boundaries with tagged scalar payload.  No heap allocation.     ──
@@ -3034,6 +3091,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/closure_scalar_abi.expected native_closure_scalar_abi.out)))
+
+(rule
+ (targets native_float_generic_field_abi native_float_generic_field_abi.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/float_generic_field_abi.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_float_generic_field_abi
+        native/float_generic_field_abi.march)
+   (with-stdout-to native_float_generic_field_abi.out
+        (system "./native_float_generic_field_abi")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/float_generic_field_abi.expected native_float_generic_field_abi.out)))
 
 (rule
  (targets native_string_to_float_option native_string_to_float_option.out)

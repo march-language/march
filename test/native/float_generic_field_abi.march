@@ -1,0 +1,81 @@
+-- Regression golden for two compiled-only bugs found while fixing
+-- Parallel.psum_float's task-boundary Float bug:
+--
+-- 1. A constructor field discarded via a wildcard pattern (e.g. `Cons(_, t)`)
+--    never got its type resolved past the lowering-fallback placeholder
+--    (lower_match.ml's sub_vars always started as unknown_ty, and PatWild
+--    never re-typed it the way PatVar does via ty_of_span). Perceus's
+--    needs_rc conservatively treated the still-unresolved field as a heap
+--    pointer and emitted a dec_rc on it. For an unboxed scalar in a
+--    monomorphic instantiation this was silently wrong; for a Float
+--    specifically, march_decrc's IS_HEAP_PTR(p >= 4096) guard almost always
+--    accepts a raw double's bit pattern as "plausibly a pointer", so the
+--    runtime dereferenced garbage and either corrupted memory or aborted
+--    with "RC underflow". A tail-recursive Float accumulator running
+--    alongside a co-resident heap-pointer (Array/List) parameter hit this
+--    on every iteration via Array.get's internal length-count helper.
+--
+-- 2. Once (1) was fixed by correctly resolving field types, a second,
+--    independent bug surfaced: a value extracted from a generic ADT field
+--    (always represented as "ptr" — boxed for scalars — under the
+--    compiler's uniform-slot convention, regardless of the field's
+--    concrete monomorphized type) flowing directly into a monomorphic
+--    callee's native parameter (e.g. Array.push$..$Float's `elem : Float`)
+--    was passed to the call UN-coerced. The emitted LLVM call therefore
+--    passed a boxed pointer where the callee expected a native `double`,
+--    so the callee silently read garbage (always 0.0) instead of the real
+--    value — Array.from_list (and therefore RRB.from_list/RRB.fold) built
+--    a structurally correct but value-wrong Float vector.
+--
+-- Both bugs required a List/Array/RRB of Float specifically — the
+-- equivalent Int paths were unaffected (small tagged ints stay under the
+-- IS_HEAP_PTR threshold, and Int arguments already flow through the
+-- uniform "ptr" convention on both ends of a call).
+mod Main do
+  -- Bug 2 (and, via Array.get's internal length-count loop, bug 1): building
+  -- and reading back a Float array/vector through the generic push/get path.
+  fn arr_case() do
+    let arr = Array.from_list([1.5, 2.5, 3.0])
+    println(Array.length(arr))
+    println(Array.get(arr, 0))
+    println(Array.get(arr, 1))
+    println(Array.get(arr, 2))
+  end
+
+  -- The originally reported blocking scenario: RRB.fold over a Float slice.
+  fn rrb_case() do
+    let v = RRB.from_list([1.5, 2.5, 3.0])
+    let s = RRB.slice(v, 0, 3)
+    let r = RRB.fold(s, 0.0, fn (acc, x) -> acc +. x)
+    println(r)
+  end
+
+  -- Bug 1 in isolation: a user-level tail-recursive Float accumulator
+  -- co-resident with a heap-pointer (Array) parameter across the same
+  -- TCO back-edge, reading each element via Array.get.
+  fn go(i: Int, acc: Float, arr): Float do
+    if i >= 3 do acc
+    else go(i + 1, acc +. Array.get(arr, i), arr)
+    end
+  end
+  fn tco_case() do
+    let arr = Array.from_list([1.5, 2.5, 3.0])
+    println(go(0, 0.0, arr))
+  end
+
+  -- Int control: same shapes, unaffected by either bug — pins the fix from
+  -- introducing a regression on the already-working path.
+  fn int_control() do
+    let iarr = Array.from_list([10, 20, 30])
+    println(Array.get(iarr, 0))
+    println(Array.get(iarr, 1))
+    println(Array.get(iarr, 2))
+  end
+
+  fn main() do
+    arr_case()
+    rrb_case()
+    tco_case()
+    int_control()
+  end
+end

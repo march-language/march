@@ -314,8 +314,48 @@ and compile_matrix_impl
       (* For each tag group, compile sub-pattern rows recursively. *)
       let tir_branches =
         List.filter_map (fun (tag, (arity, rows_ref)) ->
-            let sub_vars = List.init arity (fun _ ->
-                { Tir.v_name = Lower_state.fresh_name "f"; v_ty = Lower_types.unknown_ty; v_lin = Tir.Unr }
+            (* Field types default to [unknown_ty] (TVar "_"), but that
+               sentinel is deliberately excluded from mono.ml's substitution
+               (Mono.has_tvar (TVar "_") = false — "lowering fallback
+               placeholder, not a real polymorph"), so it can never resolve
+               to a concrete type. For a NAMED field (`Cons(h, t) -> ...`),
+               that's fixed downstream: bind_trivial_pat rebinds `h` via
+               Lower_state.ty_of_span, which returns the typechecker's real
+               (trackable) unification variable for that pattern occurrence,
+               and mono.ml's substitution resolves it normally. A WILDCARD
+               field (`Cons(_, t) -> ...`) has no such rebinding, so its
+               br_var kept unknown_ty forever — Rc_types.needs_rc (TVar "_")
+               conservatively = true, so Perceus emits a dec_rc on it, and
+               since the field's actual runtime representation (for a
+               concretely-scalar instantiation like List(Float)) is a raw
+               unboxed double bit-reinterpreted as "ptr" (Llvm_ctx.coerce
+               ("double","ptr") — no boxing), that dec_rc dereferences a
+               raw float bit pattern as a heap pointer and crashes.
+               Fix: look up EVERY field's type the same way named fields
+               already do — via ty_of_span on the sub-pattern's own span
+               (typecheck.ml's infer_pattern now records PatWild's fresh_var
+               into type_map too) — so wildcard-discarded fields flow
+               through mono.ml's substitution exactly like named ones.
+               Scans ALL rows in the group (not just the first) for a
+               resolvable span at each position: a shared tag can combine
+               rows whose sub-pattern at position [i] differs in shape
+               (e.g. one row wildcards a field another row names), but they
+               all denote the SAME constructor field, so any row's
+               resolvable span is authoritative. *)
+            let field_ty_at (i : int) : Tir.ty =
+              let rec scan = function
+                | [] -> Lower_types.unknown_ty
+                | (pats, _) :: rest ->
+                  (match List.nth_opt pats i with
+                   | Some p ->
+                     let t = Lower_state.ty_of_span env (span_of_pat p) in
+                     if t = Lower_types.unknown_ty then scan rest else t
+                   | None -> scan rest)
+              in
+              scan !rows_ref
+            in
+            let sub_vars = List.init arity (fun i ->
+                { Tir.v_name = Lower_state.fresh_name "f"; v_ty = field_ty_at i; v_lin = Tir.Unr }
               ) in
             let sub_atoms = List.map (fun v -> Tir.AVar v) sub_vars in
             let combined_scruts = sub_atoms @ rest_scruts in
