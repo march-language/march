@@ -11330,41 +11330,63 @@ let test_compiled_vault_scalar_roundtrip () =
         a heap pointer (e.g. String) passes through unchanged.
    Exercises both an Int (tagged, needs untag) and a String (heap pointer,
    passes through unchanged) update, plus a named top-level fn (not just an
-   inline lambda) since both use the same closure-invocation path. *)
-let test_compiled_vault_update () =
+   inline lambda) since both use the same closure-invocation path.
+
+   Shared by test_compiled_vault_update (default opt) and
+   test_compiled_vault_update_opt0 (--opt 0) below — a third "still broken"
+   report against this same bug turned out to be a stale checkout (a
+   different local branch/worktree that had never actually merged the two
+   landed fixes) reproduced via `--opt 0`, so that opt level gets its own
+   permanent regression test rather than relying on the default-opt one to
+   stand in for it. *)
+let vault_update_src =
+  "mod VaultUpdate do\n\
+  \  fn inc(n) do\n\
+  \    n + 1\n\
+  \  end\n\
+  \  fn main() : Unit do\n\
+  \    let t = Vault.new(\"vu_test\")\n\
+  \    Vault.set(t, \"n\", 1)\n\
+  \    Vault.update(t, \"n\", fn n -> n + 1)\n\
+  \    Vault.update(t, \"n\", inc)\n\
+  \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+  \    Vault.set(t, \"s\", \"ab\")\n\
+  \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
+  \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
+  \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
+  \  end\n\
+   end\n"
+
+let run_compiled_vault_update_test ~extra_args ~check_label =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_vaultupdate" "" in
   Sys.remove tmp;
   Unix.mkdir tmp 0o755;
   let src = Filename.concat tmp "u.march" in
   let oc = open_out src in
-  output_string oc
-    "mod VaultUpdate do\n\
-    \  fn inc(n) do\n\
-    \    n + 1\n\
-    \  end\n\
-    \  fn main() : Unit do\n\
-    \    let t = Vault.new(\"vu_test\")\n\
-    \    Vault.set(t, \"n\", 1)\n\
-    \    Vault.update(t, \"n\", fn n -> n + 1)\n\
-    \    Vault.update(t, \"n\", inc)\n\
-    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
-    \    Vault.set(t, \"s\", \"ab\")\n\
-    \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
-    \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
-    \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
-    \  end\n\
-     end\n";
+  output_string oc vault_update_src;
   close_out oc;
   let bin = Filename.concat tmp "ubin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
-          ~main_exe ~bin ~src () with
+          ~extra_args ~main_exe ~bin ~src () with
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
                                 (Filename.quote bin)) in
-    Alcotest.(check int)
-      "compiled Vault.update applies fn correctly for Int and String, no SIGSEGV" 0 run_rc
+    Alcotest.(check int) check_label 0 run_rc
+
+let test_compiled_vault_update () =
+  run_compiled_vault_update_test ~extra_args:""
+    ~check_label:"compiled Vault.update applies fn correctly for Int and String, no SIGSEGV"
+
+(* Same repro at --opt 0 — the opt level a prior "still broken" report used to
+   reproduce most cleanly (it was actually a stale checkout, not a live bug;
+   see the comment above test_compiled_vault_update). Pinning it here means a
+   future genuine --opt-0-only regression in this area fails loudly instead of
+   hiding behind the default-opt test. *)
+let test_compiled_vault_update_opt0 () =
+  run_compiled_vault_update_test ~extra_args:"--opt 0"
+    ~check_label:"compiled Vault.update applies fn correctly for Int and String at --opt 0, no SIGSEGV"
 
 (* Regression: march_string_to_int niche-tags its strtoll result as (n<<1)|1
    with no range check.  For inputs outside March's 63-bit range (>= 2^62, or
@@ -12610,6 +12632,8 @@ let stdlib_suites =
           test_compiled_vault_scalar_roundtrip;
         Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled)" `Slow
           test_compiled_vault_update;
+        Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled, --opt 0)" `Slow
+          test_compiled_vault_update_opt0;
         Alcotest.test_case "string_to_int out-of-range returns None (niche tag no overflow)" `Slow
           test_compiled_string_to_int_overflow_is_none;
         Alcotest.test_case "aliased owned arg f(x,x) does not double-free (compiled)" `Slow
