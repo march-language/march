@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `root_cap()` — calling the root capability like a function instead of
+  referencing it bare (`root_cap`) — typechecked cleanly with `--check` and
+  then crashed at runtime: `applied non-function value` interpreted, or an
+  `Undefined symbols ... _root_cap` link error compiled. `root_cap` is a
+  plain value, not a function; calling it with `()` is now rejected at
+  check/compile time with a diagnostic explaining why.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,

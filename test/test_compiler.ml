@@ -606,6 +606,98 @@ let test_tc_arity_fn_returning_fn_ok () =
   end|} in
   Alcotest.(check bool) "full app of fn-returning-fn: no error" false (has_errors ctx)
 
+(* ── root_cap: callable-vs-value diagnostic ─────────────────────────────
+   root_cap is a bare ambient value of type Cap(IO) (see docs/capabilities.md
+   and examples/capabilities.march) — NOT a function.  infer_app's
+   `| [], t -> t` base case exists so a zero-param user `fn` (whose type
+   collapses to its bare return type — no TArrow wrapper, since there's no
+   parameter to build one from) can still be invoked as `f()`; before this
+   fix it also silently accepted `root_cap()`, which then crashed at runtime
+   (interpreted: "applied non-function value"; compiled: undefined symbol
+   `_root_cap` at link time — see [noncallable_builtin_values] in
+   typecheck.ml). *)
+
+let test_tc_root_cap_call_rejected () =
+  let ctx = typecheck {|mod Test do
+    needs IO
+    fn f() : () do
+      let c = root_cap()
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "root_cap() is a typecheck error" true (has_errors ctx);
+  let has_clear_message = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+    d.severity = March_errors.Errors.Error &&
+    contains "root_cap" d.message &&
+    contains "not a function" d.message
+  ) ctx.diagnostics in
+  Alcotest.(check bool) "root_cap() error names root_cap and explains it's not a function"
+    true has_clear_message
+
+let test_tc_root_cap_bare_ok () =
+  (* Body returns `c`, not `()` — a bare value reference immediately
+     followed by a paren-led expression on the next line parses as a call
+     on that value (see specs/lang parser note on `let x = V` glomming into
+     `V(...)`), which would spuriously exercise the same diagnostic this
+     test is trying to prove does NOT fire for a genuinely bare reference. *)
+  let ctx = typecheck {|mod Test do
+    needs IO
+    fn f() : Cap(IO) do
+      let c = root_cap
+      c
+    end
+  end|} in
+  Alcotest.(check bool) "bare `root_cap` reference: no errors" false (has_errors ctx)
+
+(* Builtins that, unlike root_cap, genuinely ARE invoked with `()` — the
+   root_cap denylist must not overreach into these. *)
+let test_tc_zero_arg_builtins_still_callable () =
+  let ctx = typecheck {|mod Test do
+    fn f() : () do
+      let _ = pmap_threshold()
+      let _ = get_work_pool()
+      let t = task_cancel_token_new()
+      let _ = task_is_cancelled(t)
+      let _ = self()
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "legit zero-arg builtin calls: no errors" false (has_errors ctx)
+
+(* A zero-param user `fn` collapses to its bare return type (same shape as
+   root_cap's `Mono (Cap(IO))`) — calling it with `()` must still work. *)
+let test_tc_zero_arg_user_fn_still_callable () =
+  let ctx = typecheck {|mod Test do
+    fn g() : Int do 42 end
+    fn f() : Int do g() end
+  end|} in
+  Alcotest.(check bool) "zero-arg user fn call: no errors" false (has_errors ctx)
+
+(* KNOWN, SEPARATE GAP (not fixed here): calling an ordinary non-function
+   local value with zero args — e.g. `let x = 5; x()` — is STILL silently
+   accepted by --check today, for the same underlying reason root_cap() was:
+   infer_app's `| [], t -> t` base case can't distinguish "callee is a
+   disguised zero-arg fn" from "callee is a plain value" once no args remain,
+   and a plain `let`-bound value can't safely be told apart from a legitimate
+   bare-imported or qualified cross-module zero-arg function call (neither is
+   tracked in env.fn_arities, which only covers same-module `fn` decls) without
+   deeper env changes tracking local-vs-global binding provenance.  This test
+   pins CURRENT behavior so it doesn't silently regress further, not because
+   it's correct — closing this gap for real is a follow-up, not part of the
+   root_cap fix. *)
+let test_tc_nonfunction_local_value_call_known_gap () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      let x = 5
+      x()
+    end
+  end|} in
+  Alcotest.(check bool)
+    "KNOWN GAP: plain non-function local value called with 0 args is not \
+     yet rejected at --check (crashes at runtime instead) — separate from \
+     the root_cap fix"
+    false (has_errors ctx)
+
 (* ── Fix 1: Interface constraint discharge ──────────────────────────────── *)
 
 let test_interface_constraint_satisfied () =
@@ -8063,6 +8155,11 @@ let compiler_suites =
           Alcotest.test_case "arity: over-application is error"    `Quick test_tc_arity_over_application;
           Alcotest.test_case "arity: correct call is ok"           `Quick test_tc_arity_correct_ok;
           Alcotest.test_case "arity: fn returning fn is ok"        `Quick test_tc_arity_fn_returning_fn_ok;
+          Alcotest.test_case "root_cap() is rejected"              `Quick test_tc_root_cap_call_rejected;
+          Alcotest.test_case "bare root_cap is ok"                 `Quick test_tc_root_cap_bare_ok;
+          Alcotest.test_case "legit zero-arg builtins still callable" `Quick test_tc_zero_arg_builtins_still_callable;
+          Alcotest.test_case "zero-arg user fn still callable"     `Quick test_tc_zero_arg_user_fn_still_callable;
+          Alcotest.test_case "KNOWN GAP: non-fn local value call"  `Quick test_tc_nonfunction_local_value_call_known_gap;
           Alcotest.test_case "actor handler extra field"   `Quick test_actor_handler_extra_field;
           Alcotest.test_case "actor handler missing field" `Quick test_actor_handler_missing_field;
           Alcotest.test_case "actor handler correct"       `Quick test_actor_handler_correct;

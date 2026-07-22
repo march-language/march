@@ -1912,7 +1912,8 @@ let builtin_bindings : (string * scheme) list =
        declared type directly, so declare as Mono Int (not TArrow unit Int). *)
     ("pmap_threshold",     Mono t_int);
     ("get_work_pool",      Mono (TCon ("WorkPool", [])));
-    (* Capability builtins *)
+    (* Capability builtins.  root_cap is a bare value (use `root_cap`, never
+       `root_cap()`) — see [noncallable_builtin_values]. *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
     ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
     (* mint_cap: the gated proof-cap mint. Same scheme as cap_narrow
@@ -2330,6 +2331,17 @@ let builtin_bindings : (string * scheme) list =
     ("remote_invoke", Mono (TArrow (t_string, TArrow (TCon ("List", [t_int]),
                         TCon ("Option", [TCon ("Result", [TCon ("List", [t_int]); t_string])])))));
   ]
+
+(** Builtins declared with a bare (non-[TArrow]) scheme that must NOT be
+    called with [()] — unlike [pmap_threshold], [get_work_pool],
+    [task_cancel_token_new], the [logger_*]/[process_*] readers, [self], and
+    [remote_count] (all genuinely invoked as [name()], exactly like a
+    zero-param user [fn] — see the [pmap_threshold] comment above), [root_cap]
+    is a plain ambient value: reference it bare ([let c = root_cap]).
+    [infer_app]'s [| [], t -> t] base case cannot tell these apart from its
+    types alone (both look like "call site with 0 args, callee type is
+    non-arrow"), so [Ast.EApp]'s handler special-cases names in this set. *)
+let noncallable_builtin_values = StringSet.of_list [ "root_cap" ]
 
 let builtin_types : (string * int) list =
   [ ("Int",    0); ("Float",  0); ("Bool",  0); ("String", 0);
@@ -4630,8 +4642,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | None -> None)
         | _ -> None
       in
-      (match arity_error with
-       | Some (name, arity, n_args, def_span) ->
+      (* Reject a zero-arg call of a builtin that is a plain ambient VALUE,
+         not a function (e.g. `root_cap()`).  infer_app's `| [], t -> t` base
+         case exists so a zero-param user `fn` (whose type collapses to its
+         bare return type — see the [pmap_threshold] comment) can still be
+         invoked as `f()`; without this check it also silently accepts
+         calling any non-function value with `()`, since a plain value and a
+         "disguised" zero-arg function are indistinguishable by type alone
+         once no arguments remain to unify against. *)
+      let noncallable_error =
+        match f, args with
+        | Ast.EVar name, [] when StringSet.mem name.txt noncallable_builtin_values ->
+          Some name
+        | _ -> None
+      in
+      (match arity_error, noncallable_error with
+       | Some (name, arity, n_args, def_span), _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
          Err.report env.errors
            { Err.severity = Err.Error; span = sp;
@@ -4648,7 +4674,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
            if n <= 0 then t
            else match repr t with TArrow (_, r) -> peel (n - 1) r | other -> other in
          peel arity f_ty
-       | None ->
+       | None, Some name ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "`%s` is not a function — it has type `%s`.\n\
+               Remove the `()` and use `%s` directly."
+              name.txt (pp_ty (repr f_ty)) name.txt);
+         TError
+       | None, None ->
          let res = infer_app env sp f_ty args 0 in
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify

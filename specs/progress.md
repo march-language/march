@@ -283,6 +283,32 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, `root_cap()` callable-vs-value diagnostic fix)
+
+**`root_cap()` (calling the root capability like a zero-arg function) now
+rejects at `--check`/`--compile` instead of silently typechecking and
+crashing at runtime.** Found auditing `docs/capabilities.md` against the
+compiler. `root_cap` is registered `Mono (Cap(IO))` in
+`lib/typecheck/typecheck.ml` — a bare ambient value, referenced without
+parens (`let c = root_cap`) — but `infer_app`'s `| [], t -> t` base case
+(needed so the many builtins genuinely invoked as `name()` while declared
+`Mono <non-arrow>`, e.g. `pmap_threshold`/`self`/`task_cancel_token_new`, and
+zero-param user `fn`s, still typecheck) can't distinguish those from
+`root_cap` by type alone, so `root_cap()` also silently typechecked, then
+crashed interpreted (`applied non-function value`) or failed to link compiled
+(`Undefined symbols ... _root_cap`). Fix: a new `noncallable_builtin_values`
+set plus a check in `EApp`'s handler (parallel to the existing `arity_error`
+check) rejects a zero-arg call of a name in that set with a diagnostic naming
+the value and its type. A related, broader gap was found but deliberately
+left open (see `specs/todos.md`): calling an ordinary non-function *local*
+value with zero args (`let x = 5; x()`) is not yet rejected either, and
+closing it safely needs local-vs-global binding provenance tracking that
+this fix's small denylist doesn't attempt — a naive "reject unless
+known-callable" gate would false-positive on legitimate bare-imported/
+qualified cross-module zero-arg calls (verified). 5 new tests in
+`test/test_compiler.ml`'s `typecheck` group. Full suite green: compiler 532 /
+eval 238 / codegen 438 / stdlib 780 (`-q`).
+
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 
 **`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
