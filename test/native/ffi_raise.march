@@ -1,11 +1,20 @@
 -- FFI env-routed error protocol: a `raises` binding takes a hidden march_env*
 -- and returns the bare Ok payload, calling march_raise(env, e) to fail. The
 -- compiler-emitted wrapper materializes Ok(payload) / Err(e). Both arms match.
+--
+-- The extern is named `raise_parse` (NOT `parse`) on purpose: ffi_result.march
+-- declares `mod Test`'s `fn parse = "ffi_test_parse"`, and when both fixtures
+-- are in scope together (module discovery in the shared build dir) a bare
+-- `parse` in BOTH modules collides — extern resolution then picks one binding by
+-- hash order, which differs by platform (macOS→ffi_test_parse, Linux→
+-- ffi_raise_parse). That was the root cause of the intermittent GH-Actions-only
+-- `ffi_result` "bad int" flake. Distinct names (cf. ffi_interp2.march's
+-- test_parse/raise_parse) keep the binding unambiguous.
 mod Test do
   needs Ffi
   needs IO.Foreign
   extern "rt" : Cap(Ffi) do
-    raises fn parse(s: String): Result(Int, String) = "ffi_raise_parse"
+    raises fn raise_parse(s: String): Result(Int, String) = "ffi_raise_parse"
   end
   fn shown(r: Result(Int, String)) : String do
     match r do
@@ -14,7 +23,7 @@ mod Test do
     end
   end
   fn main() : Unit do
-    println(shown(parse("7")))     -- Ok(7)   -> 7
-    println(shown(parse("zz")))    -- raised  -> bad int
+    println(shown(raise_parse("7")))     -- Ok(7)   -> 7
+    println(shown(raise_parse("zz")))    -- raised  -> bad int
   end
 end
