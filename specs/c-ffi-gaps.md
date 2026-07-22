@@ -188,5 +188,17 @@ Option/Result + the RC-leak gauge + borrow-default ownership, resources +
 
 ## Unrelated pre-existing (not FFI)
 
-- `--no-opt` builds fail to link (`_http_fetch` undefined; DCE removes the dead
-  caller at `--opt`). Tracked separately.
+- **FIXED.** `_http_fetch`/`_http_fetch_available` undefined at link time —
+  reproduced at every `--opt` level (not just `--no-opt`; `http_fetch_available()`
+  is a real runtime call, not a compile-time constant, so DCE can never prove
+  the guarded `http_fetch` call in `HttpTransport.request` dead). Root cause:
+  neither name had a typecheck builtin binding, so the call sites fell through
+  `llvm_emit`'s generic "unresolved global -> declare + call extern C symbol of
+  the same name" path with no matching C symbol. Fixed by registering both in
+  `typecheck.ml`'s `builtin_bindings` (`http_fetch_available : Bool`,
+  `http_fetch : String -> String -> String -> String -> Result(String, String)`)
+  and adding native stub implementations in `runtime/march_http.c`
+  (`http_fetch_available` always returns raw-Bool `false`; `http_fetch` returns
+  an `Err(...)` that's unreachable in practice since the native call site never
+  takes the `http_fetch_available()` branch — native requests go through the
+  `tcp_*` socket path instead).

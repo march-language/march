@@ -1611,6 +1611,19 @@ static void *connection_thread(void *arg) {
                         void *ws_key =
                             find_ws_key_header(*(void **)(rc_p + 56));
                         if (ws_key) {
+                            /* The keep-alive SO_RCVTIMEO set at connection-thread
+                               startup (10s) still applies to this fd. Left in
+                               place, an idle WS connection's next recv() times
+                               out with EAGAIN/EWOULDBLOCK, which recv_exact()
+                               can't tell apart from a real close — the socket
+                               gets dropped with a spurious Close(1001, "going
+                               away") the moment the client goes quiet. Clear it
+                               so WS reads block indefinitely, same as the
+                               evloop server's ws_handler_thread does via
+                               fcntl(~O_NONBLOCK) before its handoff. */
+                            struct timeval ws_tv = { .tv_sec = 0, .tv_usec = 0 };
+                            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                                       &ws_tv, sizeof(ws_tv));
                             march_ws_handshake((int64_t)fd, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
                             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
@@ -2445,4 +2458,36 @@ void *march_http_parse_response(void *raw_ptr) {
     /* tag stays 0 = Ok */
     *(void **)((char *)ok_obj + 16) = tup;
     return ok_obj;
+}
+
+/* http_fetch / http_fetch_available — native link-time stubs.
+ *
+ * These two names are called unqualified from stdlib/http_transport.march
+ * but before typecheck.ml registered them (see the "http_fetch_available /
+ * http_fetch" builtin_bindings entry), the call sites had no static type and
+ * fell through llvm_emit's generic "unresolved global call -> declare + call
+ * an extern C symbol of the same name" fallback, which still requires these
+ * symbols to resolve at link time for every compiled program that pulls in
+ * HttpTransport (i.e. HttpClient) even though http_fetch_available() being
+ * false makes request_via_fetch/http_fetch dead code on native — native
+ * requests go through the tcp_* socket path below instead.
+ *
+ * Now that http_fetch_available is registered with a concrete Bool return
+ * type, the call site uses the raw-i64 Bool ABI (0/1 — see
+ * lib/tir/llvm_emit.ml's `Tir.TBool -> "i64"`), NOT the tagged-immediate
+ * `(v<<1)|1` ptr representation used for erased/boxed values. */
+int64_t http_fetch_available(void) {
+    return 0;
+}
+
+void *http_fetch(void *method, void *url, void *header_block, void *body) {
+    (void)method; (void)url; (void)header_block; (void)body;
+    static const char msg[] =
+        "http_fetch: not available on native builds; guarded by "
+        "http_fetch_available() at the March call site";
+    void *s = march_string_lit(msg, (int64_t)(sizeof(msg) - 1));
+    void *r = march_alloc(24);
+    ((march_hdr *)r)->tag = 1; /* Err */
+    *(void **)((char *)r + 16) = s;
+    return r;
 }

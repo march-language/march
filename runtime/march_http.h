@@ -56,6 +56,14 @@ void *march_http_serialize_request(void *method, void *host, void *path,
  * Ok=tag0, Err=tag1. */
 void *march_http_parse_response(void *raw);
 
+/* Native link-time stubs for the JS-only fetch path referenced (unqualified,
+ * un-prefixed) by stdlib/http_transport.march — see march_http.c for why
+ * these exact names (no march_ prefix) are required.  http_fetch_available()
+ * always returns raw-Bool false (0), so http_fetch() is never actually
+ * invoked on a native build; the tcp_* socket path is used instead. */
+int64_t http_fetch_available(void);
+void *http_fetch(void *method, void *url, void *header_block, void *body);
+
 /* ── HTTP server builtins ──────────────────────────────────────────── */
 
 /* Parse a raw HTTP request string.

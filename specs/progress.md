@@ -283,6 +283,43 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-21, WebSocket connection-stability fix — non-blocking socket mode no longer leaks into the blocking WS handler)
+
+- **`lib/eval/eval.ml`'s interpreter WebSocket server (`http_server_listen`/`run_http_event_loop`) no longer disconnects idle WS clients.** The 2026-07-07 event-loop fix above put every accepted socket in non-blocking mode for its multiplexed HTTP accept loop but never cleared that flag before handing the fd to the WS handler closure, despite its own comment claiming the handoff was "blocking, exactly as before this fix." `ws_recv_frame`'s catch-all exception handler then silently turned the resulting `EAGAIN`/`EWOULDBLOCK` (raised by `Unix.recv` racing an idle/still-in-flight client) into a synthesized `Close(1001, "going away")` — observed as `forge scroll.serve` notebooks flipping to "disconnected" almost immediately after loading. Fix: `Unix.clear_nonblock sock` right before the WS handshake response is written (`http_run_pipeline_and_respond`). The compiled runtime (`runtime/march_http.c` `connection_thread`) had the same bug class with a different trigger: the 10s keep-alive `SO_RCVTIMEO` set at connection-thread startup was never cleared before the WS handoff, so an idle compiled WS connection would time out and get the same spurious synthesized close after 10s; fixed by resetting `SO_RCVTIMEO` to `{0,0}` at the same handoff point, matching the evloop server variant's existing `ws_handler_thread`, which already explicitly clears `O_NONBLOCK` there. Verified with a controlled WS client: idle connections now stay open 60s+ (previously died near-instantly), and a full `load`→`run`→`poll_run` round trip completes with the connection still open afterward. See `specs/todos.md` "Recently fixed" for the full writeup, including a separately-noticed (not fixed here) RFC 6455 Pong-payload-echo gap.
+
+## Current State (as of 2026-07-21, native `HttpClient` link failure fixed)
+
+Every compiled program using `HttpClient` (any program pulling in
+`HttpTransport`) failed to link natively with `Undefined symbols: _http_fetch,
+_http_fetch_available` — found auditing `docs/cookbook/http.md`/
+`docs/cookbook/concurrency.md` against the compiler. Reproduced at every
+`--opt` level, not just `--no-opt`: `http_fetch_available()` is a real runtime
+call, not a compile-time constant, so DCE can never prove the guarded
+`http_fetch` call in `HttpTransport.request` (`stdlib/http_transport.march`)
+dead. **Root cause:** `http_fetch`/`http_fetch_available` had no typecheck
+builtin binding — they existed only as an interpreter builtin
+(`lib/eval/eval.ml`) and a js_of_ocaml global — so the call sites fell through
+`llvm_emit`'s generic "unresolved global call → declare + call an extern C
+symbol of the same name" fallback, which native builds can never satisfy.
+**Fix:** registered both in `typecheck.ml`'s `builtin_bindings`
+(`http_fetch_available : Bool`, `http_fetch : String -> String -> String ->
+String -> Result(String, String)`) and added native stub implementations in
+`runtime/march_http.c` — `http_fetch_available` always returns raw-Bool
+`false` (so native requests take the existing `tcp_*` socket path instead;
+`http_fetch` itself is unreachable in practice), `http_fetch` returns an
+`Err(...)` for defense-in-depth. **Gotcha:** giving `http_fetch_available` a
+concrete `Bool` typecheck binding flips its native ABI from the
+tagged-immediate `(v<<1)|1` ptr representation used for erased/unknown-type
+calls to a raw `i64` 0/1 — a stub written for the wrong convention either
+SIGSEGVs (dereferences the tagged immediate as a heap pointer, `[x0, #0x8]`)
+or silently inverts true/false; caught via `lldb` backtrace on the first
+attempt. Verified end-to-end: compiled a program calling `HttpClient.get`
+against a real local HTTP server and got the response body back. `specs/c-ffi-gaps.md`'s
+stale "Unrelated pre-existing (not FFI)" entry (which mis-described this as
+`--no-opt`-only) updated to reflect the real scope and the fix. **451 compiler
+/ 231 eval / 396 codegen / 53 stdlib_march pass; stdlib full suite pending
+(quick subset 779/779 green).**
+
 ## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
 
 Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
@@ -5258,6 +5295,14 @@ their existing build steps, no manual patching.
 **Fix:** new `is_confirmed_private_qualified` helper (shares its detection logic with `qualified_error_msg`: `env.local_mods` for an in-file nested module, the module registry's `ex_public` for a cross-file one) runs before the dot-suffix fallback; a confirmed-private qualified reference now reports the same `` is private to module `X`. `` diagnostic immediately, at both `--check` and `--compile`. The legitimate interface-method suffix case is unaffected (a genuine cross-module interface method is never a confirmed-private local/registry entry, so the fallback still runs for it). New regression test `test_tc_private_nested_member_name_collides_with_builtin` (`test/test_compiler.ml`). Verified: **452 compiler / 231 eval / 779 stdlib (quick)** pass; the pre-existing `run_codegen` `llvm_ir_validity_gate` failure (`task_await_ptr`/`task_await_int`/`rpc_hash_live` + a distributed-program non-pointer-scrutinee ICE) was confirmed present on an unmodified checkout of the two touched files (`git checkout` + rebuild) before this fix was reapplied — predates and is unrelated to this change. See `specs/todos.md`'s Done section for the full root-cause writeup.
 
 **Same session — `int_mod_euclid` native codegen was silently wrong for a negative divisor, now fixed.** Its runtime helper had lowered to genuinely-*unsigned* `%` (`march_checked_umod`), which matches the interpreter's Euclidean remainder only for a positive divisor; a negative divisor diverged (`int_mod_euclid(-7, -3)` → `-7` compiled vs. `2` interpreted). Replaced with signed Euclidean semantics (`r = a % b; if r < 0 then r + abs b else r`) and renamed the symbol `march_checked_umod` → `march_checked_emod` (the mod-side pair of `march_checked_ediv`; the "u"-for-unsigned prefix was misleading once the body became signed). New parity test `test_compiled_int_mod_euclid_parity` pins all four sign quadrants (`[1, 2, 2, 1]`).
+
+## Current State (as of 2026-07-21, `Vault.update` SIGSEGV fixed — closure-invocation + niche-Option decoding bugs)
+
+**`Vault.update` no longer crashes compiled.** Found while auditing `docs/cookbook/vault.md`: `Vault.update(store, key, fn n -> n + 1)` SIGSEGV'd (exit 139, no output) for both an inline lambda and a named top-level fn callback, compiled-only — interpreted was always correct. Two bugs in `march_vault_update` (`runtime/march_extras.c`): (1) `march_vault_get` returns a **niche-encoded** `Option(ptr)` (`None = NULL`, `Some(v) = v` itself — see `make_some`/`make_none`), but `vault_update` decoded it as a **boxed** Option (tag word at `cur+8`, payload at `cur+16`), reading 8 bytes past a scalar value's own machine word — an out-of-bounds read landing on an unmapped page, before the closure was ever invoked. (2) The closure-invocation call itself had called `fn(env, v)` with `env` read from a bogus `f+24` field instead of the actual convention (matching `call_closure_1`/`march_http_internal.h`'s `closure_fn_t`) of passing the closure struct pointer itself as the first argument: `fn(f, v)`.
+
+**A third wrinkle surfaced only after merging `origin/main`** (several hundred commits, developed on a stale local branch): `specs/plans/2026-07-17-closure-scalar-abi-uniform-ptr.md` had, upstream, moved a closure apply-fn's *parameters* onto the same uniform-ptr ABI its return already used — the apply fn now conditionally untags a tagged scalar itself at entry and re-tags on return, so a value in Vault's uniform representation should be passed straight through unchanged. An earlier version of this fix (correct against the pre-merge ABI, where params were still native/untagged) manually untagged the value before the call; once merged onto the new ABI that extra untag double-processed tagged values and silently produced wrong results (verified: `Vault.update(t, "n", fn n -> n + 1)` applied twice to `1` returned `1` instead of `3`). Fixed by simply passing `cur` through unchanged — the closure now owns the uniform-value conversion entirely.
+
+**Validation:** the minimal repro (inline lambda + named fn) prints the correct values (`2`, `3`) compiled, matching interpreted; a `String`-valued update (`s ++ "!"`) round-trips correctly compiled, guarding the heap-pointer branch; `docs/cookbook/vault.md`'s rate-limiter example runs end-to-end compiled with output identical to interpreted. New permanent regression test `test_compiled_vault_update` (`test/test_stdlib_suite.ml`, `adversarial-regressions` Slow group), reverified post-merge.
 
 ## Current State (as of 2026-07-21, `fn main(cap : Cap(IO)) : ()` entry-point fix)
 
