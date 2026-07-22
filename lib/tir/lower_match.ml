@@ -131,22 +131,51 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
        suffix resolver rather than qualifying to two DIFFERENT modules. A
        non-colliding (or non-public / impl-less colliding) type's tag is
        unconditionally the old bare form, so ordinary programs are
-       byte-identical. A QUALIFIED tag the user wrote directly (already
-       contains '.') is left completely alone — it carries its own
-       disambiguating qualifier already. *)
+       byte-identical.
+
+       A QUALIFIED tag the user wrote directly (already contains '.') is
+       NOT necessarily already in the "Mod.Type.Ctor" form [qualified_br_key]
+       exact-matches: the documented qualified-pattern syntax
+       (specs/lang/pattern-matching.md "Qualified Constructor Patterns",
+       `Http.Ok(resp)` / `Json.Ok(data)`) writes a MODULE prefix, i.e. TWO
+       segments ("B.Ok"), while construction above produces THREE
+       ("B.Result.Ok") — a bare string compare between those never
+       succeeds, so a spec-legal qualified pattern on a public, impl-bearing
+       double collision silently mismatched every arm (P0:
+       builtin-ctor-collision-gap, 2026-07-22). Try the qualifier
+       (everything before the LAST '.') as a MODULE prefix the same way the
+       bare branch below does; only when that resolves via
+       [Lower_state.shared_ctor_collision_type] is the tag re-expanded to
+       the 3-segment form. This is safe for the two cases that must stay
+       untouched: an already-3-segment tag's qualifier is "Mod.Type." (not
+       a real module prefix key), so the lookup misses and the tag passes
+       through verbatim — already an exact [ctor_info] hit; and a genuine
+       `Type.Ctor` reference (e.g. `List.Cons`, "List" a type, not a
+       module) likewise has no [shared_ctor_collision_type] entry and is
+       unchanged. *)
     let tag =
-      if String.contains tag '.' then tag
-      else
-        match scrut with
-        | Tir.AVar v ->
-          (match v.Tir.v_ty with
-           | Tir.TCon (type_name, _)
-             when env.Lower_state.mod_prefix <> ""
-                  && Lower_state.shared_ctor_collision_type
-                       env.Lower_state.mod_prefix tag <> None ->
-             env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
-           | _ -> tag)
-        | _ -> tag
+      match String.rindex_opt tag '.' with
+      | None ->
+        (match scrut with
+         | Tir.AVar v ->
+           (match v.Tir.v_ty with
+            | Tir.TCon (type_name, _)
+              when env.Lower_state.mod_prefix <> ""
+                   && Lower_state.shared_ctor_collision_type
+                        env.Lower_state.mod_prefix tag <> None ->
+              env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
+            | _ -> tag)
+         | _ -> tag)
+      | Some i ->
+        let qual = String.sub tag 0 (i + 1) in
+        let short_tag = String.sub tag (i + 1) (String.length tag - i - 1) in
+        (match Lower_state.shared_ctor_collision_type qual short_tag with
+         | Some _ ->
+           (match scrut with
+            | Tir.AVar { Tir.v_ty = Tir.TCon (type_name, _); _ } ->
+              qual ^ type_name ^ "." ^ short_tag
+            | _ -> tag)
+         | None -> tag)
     in
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->

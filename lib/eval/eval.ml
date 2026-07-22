@@ -434,6 +434,23 @@ let compute_type_collision_set (decls : decl list) : unit =
      program (any interface, any candidate) — see [colliding_ctor_type_by_module]'s
      doc comment for why this second filter exists. *)
   let types_with_any_impl : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (* The compiler's own always-injected prelude ADTs (Option/Result/List —
+     see the native mirror [Lower.builtin_type_defs]) are seeded as a
+     bare-prefix ("") PUBLIC candidate up front, and unconditionally marked
+     impl-bearing. Unlike the Seq/Server false positives the impl-presence
+     filter above exists to exclude (a deliberate same-shape structural
+     handoff, or a raw-string-key marker type), a user type reusing one of
+     these three exact bare names is NEVER a legitimate alias of the
+     interpreter's own builtin ctor table (registered separately, never as
+     a [DType] AST node, so it was otherwise invisible to this walk) — it is
+     always a genuine nominal collision that must be qualified. Without this
+     seed, a no-`impl` user `type Result = Ok(...) | Err(...)` collided with
+     the builtin Result/Ok/Err with no qualification ever applied on either
+     backend (P0: builtin-ctor-collision-gap, 2026-07-22). *)
+  List.iter (fun (name, ctors) ->
+      Hashtbl.replace by_short name [("", name, Public, ctors)];
+      Hashtbl.replace types_with_any_impl name ()
+    ) ["Option", ["None"; "Some"]; "Result", ["Ok"; "Err"]; "List", ["Nil"; "Cons"]];
   let add_qualified prefix qualified vis ctor_names =
     let short = match String.rindex_opt qualified '.' with
       | None   -> qualified
@@ -1110,13 +1127,30 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
        `Shared` arm inside DcA's own `impl Speak(Thing)` body — compares
        correctly against a `VCon("DcA.Thing.Shared", …)` value, while a
        non-colliding bare pattern anywhere else stays byte-identical to
-       before this table existed. Only reached for a BARE (dot-free)
-       written name: an explicit `Type.Ctor` pattern already resolves to
-       [bare_pat] via the stripping above and is left alone, exactly as for
-       `Result.Ok`. *)
+       before this table existed.
+
+       A DOTTED written name is NOT necessarily already resolved: the
+       documented, spec'd qualified-pattern syntax (specs/lang/pattern-
+       matching.md "Qualified Constructor Patterns", `Http.Ok(resp)` /
+       `Json.Ok(data)`) writes a MODULE prefix, not the declaring TYPE's own
+       name — construction-side qualification produces a 3-segment
+       "module.Type.Ctor" tag (see the `Some short_type_name` arm just
+       below), so a 2-segment "module.Ctor" pattern can never equal it via a
+       bare string comparison (P0: builtin-ctor-collision-gap, 2026-07-22).
+       Try the pattern's own qualifier as a MODULE prefix first (mirrors
+       construction exactly); only fall back to the old "already a plain
+       Type.Ctor reference, no such module" behavior when that lookup
+       misses — e.g. `List.Cons` (List is a type, not a module: no
+       [colliding_shared_ctor_type] entry keyed by prefix "List." exists)
+       stays byte-identical. *)
     let qualified_pat =
-      if String.contains n.txt '.' then bare_pat
-      else
+      match String.rindex_opt n.txt '.' with
+      | Some i ->
+        let qual = String.sub n.txt 0 i ^ "." in
+        (match colliding_shared_ctor_type qual bare_pat with
+         | Some short_type_name -> qual ^ short_type_name ^ "." ^ bare_pat
+         | None -> bare_pat)
+      | None ->
         let prefix = effective_module_prefix () in
         match colliding_shared_ctor_type prefix bare_pat with
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_pat
@@ -7854,14 +7888,29 @@ and eval_expr_inner (env : env) (e : expr) : value =
        separate integer discriminant). [effective_module_prefix] (not the
        raw [current_doc_prefix]) supplies "the module this ECon was
        LEXICALLY written in", correct even when this site is evaluated
-       later as part of a deferred closure body — see its doc comment. An
-       explicitly qualified name (contains '.') is left as today: stripped
-       to bare, exactly like `Result.Ok`. A NON-colliding or non-shared
-       bare ctor (the overwhelming common case) takes the [None] branch and
-       produces the byte-identical bare tag as before this change. *)
+       later as part of a deferred closure body — see its doc comment.
+
+       An explicitly qualified name (contains '.') is NOT necessarily
+       already-resolved: the documented qualified-CONSTRUCTOR-reference
+       syntax writes a MODULE prefix (mirrors the qualified-PATTERN syntax
+       in specs/lang/pattern-matching.md, `Http.Ok(resp)`), so `B.Ok(s)`
+       must resolve the SAME way a bare `Ok(s)` written lexically inside
+       `B` would — see [match_pattern]'s [PatCon] arm, fixed identically
+       (P0: builtin-ctor-collision-gap, 2026-07-22). Falls back to
+       stripped-bare only when the qualifier is not a colliding module
+       prefix (e.g. a plain `Type.Ctor` reference where "Type" is a type
+       name, not a module — no [colliding_shared_ctor_type] entry exists for
+       it). A NON-colliding or non-shared bare ctor (the overwhelming
+       common case) takes the [None] branch and produces the byte-identical
+       bare tag as before this change. *)
     let tag =
-      if String.contains name.txt '.' then bare_tag
-      else
+      match String.rindex_opt name.txt '.' with
+      | Some i ->
+        let qual = String.sub name.txt 0 i ^ "." in
+        (match colliding_shared_ctor_type qual bare_tag with
+         | Some short_type_name -> qual ^ short_type_name ^ "." ^ bare_tag
+         | None -> bare_tag)
+      | None ->
         let prefix = effective_module_prefix () in
         match colliding_shared_ctor_type prefix bare_tag with
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_tag

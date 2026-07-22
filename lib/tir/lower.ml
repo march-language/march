@@ -933,9 +933,19 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      old post-[env] location, so [ECon] lowering deep inside [lower_expr]
      (which only ever sees [env], not [lower_module]'s local lets) can reach
      it too. *)
+  (* [builtin_type_defs] is prepended so this EARLY set actually agrees with
+     the LATER [Collision_set.compute tm_types] as the comment above claims:
+     [tm_types] is [builtin_type_defs @ ...] (below), but [collect_type_names]
+     only walks parsed AST decls — Option/Result/List are never AST nodes (no
+     [stdlib/option.march]-style [DType] backs them), so without this they were
+     invisible here while still being real, globally-tagged collision members
+     at the late/tag-assignment site. A user type bare-named "Result" (etc.)
+     then silently aliased the builtin's OWN ctor_info entry at construction
+     (P0: builtin-ctor-collision-gap, 2026-07-22). *)
   let collision_set =
     Collision_set.compute
-      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
+      (builtin_type_defs @
+       collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
   in
   (* Task 5.5 (docs/superpowers/plans/2026-07-21-ctor-module-identity.md,
      inserted fix): the NARROWER shared-ctor table that gates ONLY Tasks 3/4's
