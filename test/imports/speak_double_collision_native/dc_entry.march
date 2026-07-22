@@ -1,0 +1,44 @@
+-- Entry: general-interface dispatch on two same-short-name types (`Thing`) that
+-- ALSO share a constructor name (`Shared`), declared in different modules — the
+-- cross-backend runtime witness for the constructor module-qualified identity
+-- plan's DOUBLE-collision case (the whole point of that plan). Sibling to
+-- test/imports/speak_collision_native (distinct ctor names, the common case).
+-- Run BOTH compiled (via the test/dune @runtest rule) and interpreted.
+--
+-- Import-ordering coverage: the original bug this plan fixes was registration-
+-- order-dependent (the surviving impl/ctor identity depended on which module was
+-- registered first). This single entry asserts BOTH directions at once —
+-- DcLibA.say() must be "from-A" AND DcLibB.say() must be "from-B". An order-
+-- dependent misdispatch that collapsed both `Shared` values onto ONE impl would
+-- necessarily fail one of the two checks whichever registration order actually
+-- occurred (if everything routed to A's body, the B check fails; if to B's, the
+-- A check fails). So the bidirectional assertion catches the order-dependent bug
+-- regardless of the file-walk order, exactly as speak_collision_native does for
+-- the distinct-ctor case.
+mod DcEntry do
+
+import DcLibA
+import DcLibB
+
+fn check(name, cond) do
+  if cond do
+    println("ok " ++ name)
+    0
+  else
+    println("FAIL " ++ name)
+    1
+  end
+end
+
+fn main() do
+  let failures =
+    check("module A shared-ctor dispatch", DcLibA.say() == "from-A")
+    + check("module B shared-ctor dispatch", DcLibB.say() == "from-B")
+  if failures == 0 do
+    println("all ok")
+  else
+    panic("speak_double_collision_native: " ++ int_to_string(failures) ++ " failures")
+  end
+end
+
+end
