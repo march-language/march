@@ -7728,7 +7728,15 @@ and apply_inner (fn_val : value) (args : value list) : value =
        [VClosure]'s and [effective_module_prefix]'s doc comments.
        Exception-safe (Fun.protect) so a raised exception (Match_failure,
        March panic, …) never leaves a stale override in place for whatever
-       runs next (a supervisor restart, a sibling actor handler, …). *)
+       runs next (a supervisor restart, a sibling actor handler, …).
+       Unconditional (no fast path for [defn_prefix = ""]) even though that
+       is the overwhelmingly common case: [module_stack] can be transiently
+       non-empty here too (on-demand stdlib loading via [module_loader] can
+       recurse into [eval_decl] while a closure body is mid-evaluation), so
+       skipping the override write would let a STALE [current_doc_prefix]
+       leak through instead of this closure's own (correctly empty)
+       declaring prefix. Correctness over the small constant-factor cost on
+       this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
     Fun.protect
