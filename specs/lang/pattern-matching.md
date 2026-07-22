@@ -71,10 +71,12 @@ end
 Nullary constructors match with no parens:
 
 ```march
+-- March has no hexadecimal integer-literal syntax (`0xFF0000` is a lex
+-- error — `0` followed by an unrelated identifier `xFF0000`); use decimal.
 match color do
-  Red   -> 0xFF0000
-  Green -> 0x00FF00
-  Blue  -> 0x0000FF
+  Red   -> 16711680
+  Green -> 65280
+  Blue  -> 255
 end
 ```
 
@@ -152,15 +154,50 @@ end
 
 ### Qualified Constructor Patterns
 
-When multiple modules define constructors with the same name, qualify them:
+When multiple modules define constructors with the same name, qualify them
+(`TypeName.Ctor` also works — the diagnostic below suggests that spelling —
+but the module-qualified form shown here is equally valid). Note a single
+`match` can only ever see ONE of the colliding constructors per scrutinee (a
+scrutinee has one concrete type), so — unlike the sketch above might suggest —
+qualification shows up as two separate matches over two separately-typed
+values, not as alternate arms of the same match:
 
 ```march
-match x do
-  Http.Ok(resp)  -> handle_http(resp)
-  Json.Ok(data)  -> handle_json(data)
-  _              -> ()
+mod Http do
+  type HResult = Ok(String) | Err(String)
+end
+mod Json do
+  type JResult = Ok(String) | Err(String)
+end
+
+fn describe_http(x : Http.HResult) : String do
+  match x do
+    Http.Ok(resp) -> handle_http(resp)
+    Http.Err(_)   -> "http error"
+  end
+end
+
+fn describe_json(x : Json.JResult) : String do
+  match x do
+    Json.Ok(data) -> handle_json(data)
+    Json.Err(_)   -> "json error"
+  end
 end
 ```
+
+> **Compiler bug (verified live, compiled backend only):** the qualified form
+> is only reliably safe here because both colliding `Ok`/`Err` constructors
+> above carry a `String` payload (same runtime representation). If the two
+> colliding types' same-named constructor carries payloads with a *different*
+> representation (e.g. one module's `Ok(Int)` vs another's `Ok(String)`), the
+> compiled backend nondeterministically crashes (`march: out of memory`) or
+> returns garbage data even though every reference is correctly
+> module-qualified and the interpreter is always correct. Minimal repro:
+> nest `mod A do type TA = Ok(Int) | Err(String) end` and
+> `mod B do type TB = Ok(String) | Err(String) end` in one file, then compile
+> and run a function that pattern-matches `B.Ok(data) -> data` on a
+> `B.Ok("hi")` value — the same-shape-payload case (both `Ok(Int)`, or both
+> `Ok(String)`, as above) is unaffected.
 
 ### Negative Integer Patterns
 
@@ -188,10 +225,13 @@ match n do
 end
 ```
 
-> **Note:** parenthesize a guard expression that uses `==`/`!=`/`>=`/`<=`/
-> `&&`/`||`/`++` when it's followed by another guarded arm — a known parser
-> limitation (the same newline-handling gap noted under "Cond" above) can
-> otherwise mis-glom the next arm into this one's body.
+> **Note (resolved):** an earlier version of this document warned that a
+> guard expression using `==`/`!=`/`>=`/`<=`/`&&`/`||`/`++` needed
+> parenthesizing when followed by another guarded arm, due to a parser
+> arm-boundary-lookahead limitation. Verified live: this no longer
+> reproduces — chained guards using any of these operators, with no
+> parens, parse and evaluate correctly. The parens in the example above
+> are harmless but no longer necessary.
 
 Guards on function heads work the same way:
 
@@ -205,12 +245,16 @@ fn classify(n)              do "positive" end
 
 ## Exhaustiveness Checking
 
-The compiler verifies that every possible value is matched. If you miss a case, you get a compile-time error:
+The compiler verifies that every possible value is matched. If you miss a
+case, you get a diagnostic pointing at exactly what's missing — verified
+live, it is currently a **warning**, not a hard compile error (the program
+still typechecks at exit 0 and still runs; a value that actually hits the
+missing case panics at runtime, same as any other non-exhaustive match):
 
 ```march
 type Color = Red | Green | Blue
 
--- compile error: pattern match not exhaustive — missing case: Blue
+-- WARNING: Non-exhaustive pattern match — missing case: Blue
 match color do
   Red   -> "red"
   Green -> "green"
@@ -232,10 +276,11 @@ Exhaustiveness extends to nested patterns. The compiler understands which combin
 **Why this matters — refactoring safety.** Exhaustiveness turns "add a variant"
 from a silent hazard into a guided checklist. Add a `Blue` case to a `Color` that
 already had `Red` and `Green`, and the compiler flags **every** `match` in the
-codebase that forgot to handle it — each one a precise compile error pointing at
-the spot to update. (The LSP even offers an "Add all N missing cases" quick fix.)
-You can't ship a stale match arm by accident; the type that changed pulls every
-dependent decision back into review.
+codebase that forgot to handle it — each one a precise diagnostic (currently a
+warning, not a hard error — see above) pointing at the spot to update. (The LSP
+even offers an "Add all N missing cases" quick fix.) A stale match arm doesn't
+fail the build, but it also can't hide silently; the type that changed pulls
+every dependent decision back into view.
 
 ---
 
@@ -250,7 +295,7 @@ fn depth(t : Tree(a)) : Int do
   match t do
     Leaf             -> 0
     Node(Leaf, _, Leaf) -> 1
-    Node(l, _, r)    -> 1 + max(depth(l), depth(r))
+    Node(l, _, r)    -> 1 + Math.max_int(depth(l), depth(r))
   end
 end
 ```
@@ -313,12 +358,13 @@ match do
 end
 ```
 
-> **Note:** parenthesize each condition when chaining two or more cond arms
-> that use a comparison/logical operator (`>=`, `<=`, `==`, `!=`, `&&`, `||`,
-> `++`). Without parens, the parser's arm-boundary lookahead can mis-glom a
-> later `>=`/`<=`-guarded arm into the previous arm's body — a known
-> limitation of the newline-handling heuristic, not a semantic restriction on
-> cond guards.
+> **Note (resolved):** an earlier version of this document warned that each
+> condition needed parenthesizing when chaining two or more cond arms using
+> a comparison/logical operator (`>=`, `<=`, `==`, `!=`, `&&`, `||`, `++`),
+> citing an arm-boundary-lookahead parser limitation. Verified live: this no
+> longer reproduces for any of these operators, chained or mixed, with or
+> without a trailing wildcard arm. The parens above are harmless but no
+> longer necessary.
 
 This is equivalent to a chain of `if/else` but reads more cleanly.
 
@@ -334,15 +380,18 @@ with Ok(user)    <- authenticate(credentials),
      Ok(data)    <- load_data(profile.key) do
   render(user, profile, data)
 else
-  Err(AuthFailed) -> reply(401, "Unauthorized") | Err(AuthNotFound(kind)) -> reply(404, kind ++ " not found") | Err(AuthTimeout) -> reply(503, "Service unavailable")
+  Err(AuthFailed) -> reply(401, "Unauthorized")
+  Err(AuthNotFound(kind)) -> reply(404, kind ++ " not found")
+  Err(AuthTimeout) -> reply(503, "Service unavailable")
 end
 ```
 
-> **Note:** put all `else` arms on **one line**, separated by `|`, when there
-> are two or more of them. A known parser limitation currently fails to parse
-> a multi-arm `with ... else` when the arms are split across lines (the
-> newline-as-arm-separator handling that `match` gets doesn't yet extend to
-> `with...else`); one arm per line works only when there is exactly one arm.
+> **Note (resolved):** an earlier version of this document warned that
+> multiple `else` arms had to be crammed onto **one line**, separated by
+> `|`, because splitting them across lines (as above) failed to parse.
+> Verified live: multi-line `else` arms parse and dispatch correctly now —
+> each of the three arms above is independently reachable and gives the
+> right reply for its error case.
 
 Each `<-` binding: if the expression matches the pattern, execution continues with the binding in scope. On mismatch, control passes to the `else` block (or the non-matching value propagates if there's no `else`).
 
@@ -350,12 +399,15 @@ Each `<-` binding: if the expression matches the pattern, execution continues wi
 
 ## Patterns in Let Bindings
 
-Patterns work directly in `let`:
+Patterns work directly in `let` — but a bare constructor pattern needs an
+extra pair of parens (`let Some(x) = ...` is a parse error; `let (Some(x)) =
+...` is not — verified live). A tuple pattern doesn't need the extra parens,
+since `let (a, b) = ...` is its own grammar production:
 
 ```march
 let (a, b) = some_pair()
-let Some(x) = might_be_some()    -- panics if None
-let Cons(h, t) = nonempty_list
+let (Some(x)) = might_be_some()    -- panics if None
+let (Cons(h, t)) = nonempty_list
 ```
 
 And in function parameters:
@@ -390,7 +442,10 @@ end
 
 Clauses are checked top to bottom; the first matching clause wins. The compiler warns if later clauses are unreachable.
 
-Multi-head functions work with any pattern in the parameter list — constructors, literals, tuples, records:
+Multi-head functions work with any pattern in the parameter list that `match`
+itself supports — constructors, literals, tuples (record patterns aren't
+supported anywhere in the parser, including here — see "Record Patterns"
+above):
 
 ```march
 fn head(Cons(x, _)) : a do x end
@@ -420,8 +475,8 @@ match score do
 end
 ```
 
-> See the note above — parenthesize `>=`/`<=`/`==`/etc. guards when chaining
-> more than one.
+> See the note under "Guards" above — parenthesizing `>=`/`<=`/`==`/etc.
+> guards when chaining more than one is no longer required (fixed).
 
 A guard that fails causes the clause to be skipped and the next clause is tried. A function with no matching clause (after guards) panics at runtime — make the last clause unconditional or use a wildcard to ensure exhaustiveness.
 

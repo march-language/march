@@ -42,19 +42,19 @@ end
 > collision with the compiler's built-in `Eq` dispatch. That specific bug is
 > FIXED — reverified live (interpreted and compiled): the example above
 > typechecks and runs to completion on both backends with no hang, no stack
-> overflow, and (interpreted) the correct answer. A different, real, still-open
-> compiled-only bug was found while reverifying this callout, though: a default
+> overflow, and the correct answer on both backends. A second, unrelated
+> compiled-only bug was found while reverifying this callout — a default
 > method's body that calls a *sibling* interface method (`neq` calling `eq`,
-> or `Ord`'s `lt`/`gt` calling `cmp`) compiles to a lambda that does not
-> re-evaluate correctly per call — it can return the same answer regardless of
-> the actual arguments — on the COMPILED backend only (the interpreter is
-> correct). This is unrelated to the old `Eq`-name-collision mechanism (it
-> reproduces identically for a user interface with no built-in-name collision
-> at all, and `Ord`'s `cmp`-calling defaults are affected too, contrary to what
-> this callout previously claimed). See `specs/todos.md` ("Compiler:
-> interfaces/impls declaration checking, Task 6 closeout") for the live repro
-> and citations; see `core-march.md` §4.4.2 for how method dispatch actually
-> works operationally.
+> or `Ord`'s `lt`/`gt` calling `cmp`) compiled to a lambda that did not
+> re-evaluate correctly per call, returning the same answer regardless of the
+> actual arguments, on the COMPILED backend only. **That bug is also FIXED**
+> (`lib/desugar/desugar.ml`'s `inject_defaults`, 2026-07-18): reverified live
+> with the exact `MyOrd`/`AppColor` repro from `specs/todos.md` ("Compiler:
+> interfaces/impls declaration checking, Task 6 closeout") — `mylt(Red, Green)`
+> / `mylt(Green, Red)` now print `true` / `false` compiled with `--opt 2`,
+> matching the interpreter, and the `Eq`-shaped `neq`-calling-`eq` case above
+> likewise gives correct, argument-dependent answers compiled. See
+> `core-march.md` §4.4.2 for how method dispatch actually works operationally.
 
 Any type implementing `Eq` automatically gets `neq` for free. It only needs to implement `eq`.
 
@@ -113,26 +113,25 @@ Now you can call `show(Red)` or `eq(Red, Blue)` and the dispatch is resolved by 
 
 ## Conditional Implementations
 
-Implement an interface for a generic type with constraints:
+Implement an interface for a generic type with constraints. (`List(a)` itself
+already has `Show`/`Eq` in the stdlib — writing these exact impls for `List`
+now hits impl coherence, "Overlapping implementation" — so the example below
+wraps a list in a small custom type instead; the mechanics are identical.)
 
 ```march
--- Show for List(a) when a has Show
-impl Show(List(a)) when Show(a) do
-  fn show(xs) do
+type Bag(a) = Bag(List(a))
+
+-- Show for Bag(a) when a has Show
+impl Show(Bag(a)) when Show(a) do
+  fn show(Bag(xs)) do
     let items = List.map(xs, fn x -> show(x))
-    "[" ++ String.join(items, ", ") ++ "]"
+    "Bag[" ++ String.join(items, ", ") ++ "]"
   end
 end
 
--- Eq for List(a) when a has Eq
-impl Eq(List(a)) when Eq(a) do
-  fn eq(xs, ys) do
-    match (xs, ys) do
-      (Nil, Nil)             -> true
-      (Cons(x, xt), Cons(y, yt)) -> eq(x, y) && eq(xt, yt)
-      _                      -> false
-    end
-  end
+-- Eq for Bag(a) when a has Eq
+impl Eq(Bag(a)) when Eq(a) do
+  fn eq(Bag(xs), Bag(ys)) do eq(xs, ys) end
 end
 ```
 
@@ -161,12 +160,28 @@ fn unique(xs : List(a)) : List(a) when Eq(a) do
 end
 ```
 
-Multiple constraints:
+**Multiple constraints on one function are not supported directly.** A
+function's `when`-clause parses as a single expression, and the constraint
+detector only recognizes one bare `Interface(tyvar)` call — `when Ord(a),
+Show(a)` is a parse error (the comma isn't valid outside parens/lists), and
+`when Ord(a) && Show(a)` gets type-checked as an ordinary boolean guard
+expression and fails with `I don't know a constructor called `Show``.
+Verified live: both forms are rejected by the current compiler.
+
+The workaround is to declare a superinterface that `requires` the others —
+`requires` itself *does* accept a comma-separated list — and constrain on
+that instead. This needs an (even empty) `impl` for the umbrella interface on
+each concrete type, but then dispatches correctly, interpreted and compiled:
 
 ```march
-fn sort_and_show(xs : List(a)) : String when Ord(a), Show(a) do
-  let sorted = sort(xs)
-  show(sorted)
+interface OrdShow(a) requires Ord(a), Show(a) do
+end
+
+impl OrdShow(Box) do
+end
+
+fn sort_and_show(x : a) : String when OrdShow(a) do
+  if lt(x, x) do show(x) ++ " lt self??" else show(x) end
 end
 ```
 
@@ -184,12 +199,20 @@ end
 ```
 
 Usage — `eq` is a compiler built-in and works standalone on any `Eq`-comparable
-type; `neq` only exists once the `interface Eq` above (or an equivalent) is in
-scope, and is subject to the known issue noted above:
+type. `neq` is a *default method*: merely declaring `interface Eq` (as above)
+does not make `neq` callable — a type needs a concrete `impl Eq(T)` in scope
+before `neq` resolves for it. Verified live: with the interface declared but
+no `impl Eq(Int)` anywhere, `neq(1, 2)` is `unbound variable: neq` in both
+backends; once an `impl Eq(Int)` exists, it works and gives the right answer
+in both backends:
 ```march
 eq(42, 42)         -- true
 eq("hi", "bye")    -- false
-neq(1, 2)          -- true (once the `interface Eq` above is declared)
+
+impl Eq(Int) do
+  fn eq(a, b) do a == b end
+end
+neq(1, 2)          -- true (once `impl Eq(Int)` above is in scope)
 ```
 
 ### `Ord(a)` — Ordering
@@ -300,6 +323,17 @@ derive Show for AppColor
 
 ## A Complete Example: Implementing a Container
 
+A file may have only one top-level `mod`, so `main` lives inside `MyStack`
+here (a separate entry file could instead `import MyStack` and call the
+qualified names from outside). The `pop` match arm below also binds the
+returned pair with a `let` rather than the nested pattern `Some((top, rest))
+-> ...` directly — a real, verified compiled-only bug: destructuring a tuple
+pattern nested directly inside a constructor pattern silently reads the
+tuple elements' raw tagged representation instead of untagging them (e.g. an
+`Int` `3` comes back as `7`) on the compiled backend only; binding the whole
+payload first and destructuring it with a separate `let` avoids the bug and
+works correctly on both backends.
+
 ```march
 mod MyStack do
 
@@ -329,24 +363,25 @@ mod MyStack do
     fn eq(Stack(xs), Stack(ys)) do eq(xs, ys) end
   end
 
-end
+  -- Using the stack:
+  fn main() do
+    let s0 = MyStack.empty()
+    let s1 = MyStack.push(s0, 1)
+    let s2 = MyStack.push(s1, 2)
+    let s3 = MyStack.push(s2, 3)
 
--- Using the stack:
-fn main() do
-  let s0 = MyStack.empty()
-  let s1 = MyStack.push(s0, 1)
-  let s2 = MyStack.push(s1, 2)
-  let s3 = MyStack.push(s2, 3)
+    println(show(s3))   -- "Stack[3, 2, 1]"
 
-  println(show(s3))   -- "Stack[3, 2, 1]"
-
-  match MyStack.pop(s3) do
-    Some((top, rest)) ->
-      println("popped: " ++ int_to_string(top))
-      println("remaining: " ++ show(rest))
-    None ->
-      println("empty stack")
+    match MyStack.pop(s3) do
+      Some(pair) ->
+        let (top, rest) = pair
+        println("popped: " ++ int_to_string(top))
+        println("remaining: " ++ show(rest))
+      None ->
+        println("empty stack")
+    end
   end
+
 end
 ```
 
@@ -359,7 +394,7 @@ For the **compiled backend**, the compiler resolves most interface dispatch at c
 That compile-time-resolved picture is not the whole story, though — it describes the compiled backend's common case, not a single dispatch mechanism the whole language shares. See `core-march.md` §4.4.2 ("Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding") for the full, precise operational account, which this section summarizes:
 
 - The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a genuine **runtime hashtable** (`impl_tbl`, keyed `(interface, type_name)`) looked up by the argument's dynamic type at the call site — this is real runtime type-directed dispatch, not something resolved ahead of time.
-- **User-defined interfaces** get no dispatch table at all, in either backend — a call resolves through ordinary lexical `env`/name binding (whichever `impl`'s method was bound most recently in scope), which is also why overlapping impls of a user interface are "just shadowing," not a coherence policy (see `core-march.md` §4.4.3 for the known interpreter/compiled divergence this causes when more than one impl of the same interface/type pair is in scope).
+- **User-defined interfaces** used to get no dispatch table at all and overlapping impls were silently "last one wins" — that's no longer the case. **Impl coherence** (checked at declaration) now rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair outright as a compile error ("Overlapping implementation ... A type may implement an interface at most once"), so it's a diagnostic, not silent shadowing. Separately, **FQN dispatch identity** (`specs/todos.md`, "FQN dispatch identity" entries) lets two genuinely distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) each `impl` the same general interface and dispatch correctly by the value's runtime type, in *both* backends, when the collision is present — the interpreter qualifies its dispatch table by declaring module and the compiled backend generates a runtime ctor-tag dispatch function for the ambiguous call sites. One narrow, pre-existing gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can fail to resolve (`unbound variable`) even when the identical call compiles and runs correctly — this reproduces even with no short-name collision at all, so it's a general interpreter scoping limitation, not specific to the collision-dispatch mechanism. See `core-march.md` §4.4.2/§4.4.3 for the full operational account.
 
 So "no vtables or runtime type lookups" is accurate for the compiled backend's statically-resolved calls, but not as a claim about the language or the interpreter in general — treat this section's overhead claims as scoped to the compiled backend's common-case dispatch, not a universal guarantee:
 

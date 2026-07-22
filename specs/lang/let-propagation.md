@@ -46,7 +46,7 @@ So today the *only* way to propagate errors is the verbose explicit form:
 ```march
 with
   Ok(content) <- File.read(path),
-  Ok(json)    <- JSON.parse(content)
+  Ok(json)    <- Json.parse(content)
 do
   Ok(json)
 else
@@ -55,14 +55,27 @@ end
 ```
 
 `let?` is sugar for exactly this common case — bind the `Ok` payload, propagate
-`Err` upward — fitting March's let-chain block style:
+`Err` upward — fitting March's let-chain block style. (The stdlib module is
+`Json`, not `JSON`; `Json.get` returns `Option`, not `Result`, so it needs
+`Option.to_result` per §9.4 below. Also note — a real, verified compiler bug,
+not a `let?`-specific one: `File.read`'s builtin type signature registers its
+error type as an unconstrained type variable rather than the concrete
+`File.FileError` it actually produces at runtime, so `let? content =
+File.read(path)` inside a function declared to return `Result(_, String)`
+**typechecks with no error** and then panics at runtime — `++`ing the bound
+error value fails with `builtin ++: expected two strings`, because the value
+is actually a `FileError` constructor, not a `String`. `Result.map_err`
+converts it explicitly, which also happens to route around the bug):
 
 ```march
 fn load_config(path : String) : Result(Config, String) do
-  let? content = File.read(path)
-  let? json    = JSON.parse(content)
-  let? host    = JSON.get(json, "host")
-  Ok({ host: host, port: 8080 })
+  let? content = Result.map_err(File.read(path), fn _e -> "could not read config file")
+  let? json    = Json.parse(content)
+  let? hostval = Option.to_result(Json.get(json, "host"), "missing host field")
+  match hostval do
+    JsonValue.Str(host) -> Ok({ host: host, port: 8080 })
+    _                   -> Err("host is not a string")
+  end
 end
 ```
 
@@ -300,9 +313,13 @@ typechecker can therefore report the *second* mismatching binding against the
 *first* fixed type:
 
 > `let?` bindings in `load_config` propagate `String` errors (fixed at line 3),
-> but `JSON.parse` here returns `Result(_, ParseError)`. Convert with
-> `Result.map_err(JSON.parse(content), fn e -> parse_err_to_string(e))`, or
+> but `Json.parse` here returns `Result(_, ParseError)`. Convert with
+> `Result.map_err(Json.parse(content), fn e -> parse_err_to_string(e))`, or
 > handle it with `with ... else`.
+
+(Illustrative diagnostic text — the real stdlib `Json.parse`'s error type is
+plain `String`, not a distinct `ParseError`; the sample message just shows the
+diagnostic's shape for a genuinely mismatched error type.)
 
 Implementation: track the first-resolved `E` and its span in the local
 environment while checking a function body (a small field threaded through the
@@ -445,6 +462,10 @@ A `with` *without* `else` is **not** equivalent — it is non-exhaustive and
 panics on `Err`. `let?` always has the passthrough.
 
 ### 9.2 Free mixing with `let`, `match`, `with`
+
+(As in §1 — a literal `File.read(path)` here would hit the same `file_read`
+error-type compiler bug and needs a `Result.map_err` wrapper to be genuinely
+type-safe; omitted here to keep the scoping example focused.)
 
 ```march
 fn process(path : String) : Result(Report, String) do
