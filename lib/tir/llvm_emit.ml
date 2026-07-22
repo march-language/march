@@ -127,6 +127,7 @@ type ctx = Llvm_ctx.ctx = {
   top_fns   : (string, bool) Hashtbl.t;
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
   top_fn_nparams : (string, int) Hashtbl.t;
+  top_fn_param_tys : (string, Tir.ty list) Hashtbl.t;
   zero_arg_fns  : (string, bool) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
@@ -681,10 +682,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       ) ctx.tco_param_info args in
     (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
           old slot values (the consumed container wrappers) which are still valid.
-          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire. *)
+          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire.
+          EXCEPTION: a Dec/IncRC target that is itself one of [args] is not an
+          "old container being released" — it is the SAME value being forwarded
+          into the next iteration's parameter slot. Under real (non-TCO)
+          recursion this DecRC only fires once the whole nested call has fully
+          returned, by which point nothing below still needs that reference; in
+          the flattened loop there is no such delay, so executing it here would
+          drop a freshly-owned, uncompensated value (no matching prior IncRC) to
+          refcount 0 immediately before it is reused as the next iteration's
+          value — a use-after-free. Skip RC ops on these variables; ownership is
+          transferred into the new slot instead. *)
+    let arg_var_names =
+      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+    in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
+        when List.mem v.Tir.v_name arg_var_names ->
+        emit_dec_chain rest
       | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
@@ -730,14 +748,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same
-          ordering rationale as the ELet-wrapped case above. *)
+          ordering rationale as the ELet-wrapped case above.
+          EXCEPTION: a Dec/IncRC target that is itself one of [args] is the
+          SAME value being forwarded into the next iteration's parameter slot,
+          not an old container being released — see the matching guard and
+          explanation in the ELet-wrapped case above. Skip RC ops on these
+          variables so a freshly-owned, uncompensated argument (e.g. the
+          result of a fresh allocation with no prior IncRC, as opposed to a
+          borrowed field promoted via IncRC) isn't dropped to refcount 0 and
+          freed immediately before being reused as the next iteration's value. *)
+    let arg_var_names =
+      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+    in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
+      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
+        when List.mem v.Tir.v_name arg_var_names ->
+        emit_dec_chain rest
       | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
                   | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
+      | (Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+        | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v))
+        when List.mem v.Tir.v_name arg_var_names ->
+        ()
       | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
         | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
         ignore (emit_expr ctx op)
@@ -1156,7 +1193,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      where the runtime expects a tagged ptr; the runtime then treats `42` as a
      heap address and segfaults.  Coerce the argument to a tagged `ptr` first
      (i64→ptr applies the `(n<<1)|1` immediate tag) so the runtime's int path
-     fires correctly. *)
+     fires correctly.
+
+     Html.Safe special case: `Html.Safe(s)` (from `Html.raw`) is a single-ctor
+     ADT with one field, so `Repr.repr_of_ty` puts it on the Boxed path (its
+     lone ctor's tag is 0). IOList's `Empty` ctor is ALSO tag 0 — every Boxed
+     ADT's constructor tags are numbered independently starting at 0, so the
+     runtime has no way to tell a bare tag-0 heap cell apart from the other.
+     `march_html_auto_escape`'s fallback ("Constructor with tag >= 0: treat as
+     IOList") reads a `Safe("...")` value as an empty IOList and silently
+     drops the wrapped string instead of inserting it verbatim. Resolve this
+     here, while the argument's static TIR type is still known (mono has
+     already run): for a statically-known `Html.Safe` atom (and only when
+     "Safe" is not a same-short-name collision with some other module's type
+     — that ambiguous case must fall through to the generic runtime path
+     below), load the wrapped String directly out of the Boxed cell's field 0
+     (offset +16, the standard Boxed-ADT single-field layout) and pass it
+     through unescaped — verbatim insertion is exactly `Html.Safe`'s
+     contract, so no runtime call is needed at all. *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape"
+                            && (match atom_tir_ty a with
+                                | Tir.TCon ("Safe", _) ->
+                                  not (Collision_set.is_colliding ctx.collision_set "Safe")
+                                | _ -> false) ->
+    let vp = emit_atom_as ctx "ptr" a in
+    let fp = fresh ctx "safe_fp" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp vp);
+    let r = fresh ctx "safe_s" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r fp);
+    ("ptr", r)
+
   | Tir.EApp (f, [a]) when f.Tir.v_name = "html_auto_escape" ->
     let v = emit_atom_as ctx "ptr" a in
     let r = fresh ctx "hae" in
@@ -1188,7 +1254,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      with dummy arg 0, boxes result into a Task heap object.
      task_await_unwrap unboxes field 0 from the Task. *)
 
-  (* task_spawn(thunk_closure) → spawn as async green thread via runtime *)
+  (* task_spawn(thunk_closure) → spawn as async green thread via runtime.
+     A Float-returning thunk's apply fn already boxes its result through the
+     generic "double"->"ptr" coerce (march_alloc_float — float-boxing stage
+     2), so the closure hands the trampoline a genuine heap pointer here; no
+     dedicated spawn variant is needed. See task_await_unwrap's "double"
+     branch for the matching unbox. *)
   | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
     let result = fresh ctx "tsres" in
@@ -1247,7 +1318,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       p
     end else if inner_ty = "i64" then
       emit_untag_scalar ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"r" r_i64
-    else r_i64 in
+    else if inner_ty = "double" then begin
+      (* r_i64 is a march_float_box pointer: the closure's apply fn already
+         boxed its double result via the generic "double"->"ptr" coerce
+         (march_alloc_float, float-boxing stage 2) before returning it to the
+         trampoline, so — like the "ptr" case above — the tag/untag round
+         trip through task[3] is over a genuine heap pointer and lossless.
+         Recover the pointer the same way, then unbox with the paired
+         march_unbox_float (mirrors coerce's "ptr"->"double" arm). *)
+      let p = fresh ctx "r" in
+      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
+      let d = fresh ctx "tfv" in
+      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d p);
+      d
+    end else r_i64 in
     (inner_ty, r)
 
   (* task_await(task_ptr) → delegate to march_task_await C runtime.
@@ -1266,10 +1350,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      In BOTH cases the correct field value is apply_ret == task[3] >> 1, and
      task[3] is always odd (trampoline sets the low bit), so a single
      unconditional ashr-1 of the freshly-allocated Ok payload (field 0, offset
-     16) is the exact inverse.  Keyed on the statically-known Task inner type:
-     "double" (Float — ABI-broken through the void*-returning trampoline,
-     separate follow-up) and any other repr are left byte-identical.  The i64
-     half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
+     16) is the exact inverse.  Keyed on the statically-known Task inner type;
+     "double" (Float) additionally unboxes: the closure's apply fn already
+     boxed its double result via the generic "double"->"ptr" coerce
+     (march_alloc_float, float-boxing stage 2) before returning it to the
+     trampoline, so apply_ret here is a march_float_box pointer, not the
+     value itself (see task_spawn / task_await_unwrap's "double" branch).
+     The i64 half mirrors task_await_unwrap (291f6b5f) and the await i64 fix
      (f89b8711); the ptr half fixes the heap-payload crash f89b8711's comment
      wrongly assumed was already correct. *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
@@ -1291,6 +1378,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let v2 = fresh ctx "tawv" in
       emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
       emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp)
+    end else if inner_ty = "double" then begin
+      let fp = fresh ctx "tawf" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
+      let v  = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" v fp);
+      let v2 = fresh ctx "tawv" in
+      emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
+      let bp = fresh ctx "tawbp" in
+      emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
+      let d  = fresh ctx "tawd" in
+      emit ctx (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d bp);
+      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" d fp)
     end;
     ("ptr", r)
 
@@ -1637,7 +1736,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let helper = match f.Tir.v_name with
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_umod"
+      | "int_mod_euclid" -> "march_checked_emod"
       | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in
@@ -1860,7 +1959,28 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           if ty = "i64" || ty = "double" then
             let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
           else ty ^ " " ^ v) arg_pairs
-      else arg_strs in
+      else
+        (* Coerce each argument's ACTUAL emitted representation to the
+           callee's declared parameter type when known and arity matches.
+           A value whose static var type is a generic/polymorphic ADT field
+           (always "ptr" — boxed for scalars — under the uniform-slot
+           convention; see Llvm_case's ce_fields-driven field extraction)
+           flowing directly into a monomorphic callee's native scalar
+           parameter (e.g. Float → "double") otherwise passes through
+           un-coerced, producing an LLVM call with mismatched argument
+           types that reads garbage at the callee (the
+           Array.from_list$..$Float compiled-wrong-value bug: pushing a
+           list element extracted from a generic Cons field into a
+           concrete Array.push$..$Float always read 0.0 for the element). *)
+        match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
+        | Some param_tirs when List.length param_tirs = List.length arg_pairs ->
+          List.map2 (fun param_tir (ty, v) ->
+            let param_ty = llvm_ty param_tir in
+            let v' = coerce ctx ty v param_ty in
+            param_ty ^ " " ^ v'
+          ) param_tirs arg_pairs
+        | _ -> arg_strs
+    in
     let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
@@ -2227,7 +2347,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let helper = match f.Tir.v_name with
       | "int_mod"        -> "march_checked_imod"
       | "int_div"        -> "march_checked_idiv"
-      | "int_mod_euclid" -> "march_checked_umod"
+      | "int_mod_euclid" -> "march_checked_emod"
       | "int_div_euclid" -> "march_checked_ediv"
       | _                -> assert false
     in

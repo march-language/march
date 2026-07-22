@@ -1,0 +1,106 @@
+mod ForeignActorHttp do
+  needs IO.Spawn
+  needs IO.NetListen
+  needs IO.NetConnect
+
+  -- Zero-arg sentinel for Actor.call; tag 0 dispatches to the FIRST handler.
+  type CallGet = CallGet
+
+  actor Counter do
+    state { value : Int }
+    init { value: 0 }
+    -- tag 0: actor_call target. Runtime injects the caller proc as `ref`.
+    on GetValue(ref) do
+      Actor.reply(ref, state.value)
+      state
+    end
+    -- tag 1: fire-and-forget increment.
+    on Increment(n : Int) do
+      { state with value: state.value + n }
+    end
+  end
+
+  -- depot-Pool-style shim: run actor_call on a fresh green thread; the
+  -- caller (an HTTP evloop pthread) only touches task_spawn/task_await.
+  fn call_via_task(c) : Int do
+    let t = task_spawn(fn _ ->
+      match Actor.call(c, CallGet, 5000) do
+      Ok(v)  -> v
+      Err(_) -> 0 - 1
+      end)
+    task_await_unwrap(t)
+  end
+
+  fn run_server() : Unit do
+    let c = spawn(Counter)
+    let _ = send(c, Increment(5))
+    let handler = fn conn ->
+      if HttpServer.path(conn) == "/direct" do
+        -- direct Actor.call from the evloop pthread (Task 4's bridge)
+        match Actor.call(c, CallGet, 5000) do
+        Ok(v)  -> HttpServer.send_resp(conn, 200, "direct=" ++ int_to_string(v))
+        Err(_) -> HttpServer.send_resp(conn, 500, "err")
+        end
+      else
+        -- depot-style task shim from the evloop pthread (Tasks 2+3)
+        HttpServer.send_resp(conn, 200, "task=" ++ int_to_string(call_via_task(c)))
+      end
+    HttpServer.new(29940)
+    |> HttpServer.plug(handler)
+    |> HttpServer.listen()
+  end
+
+  -- NOTE: HttpTransport.simple_get/.request are unusable in native-compiled
+  -- binaries today -- they unconditionally reference the js_of_ocaml-only
+  -- `http_fetch`/`http_fetch_available` builtins (via `request_via_fetch`),
+  -- which have no native runtime implementation and fail to link
+  -- ("_http_fetch"/"_http_fetch_available" undefined symbols). This is a
+  -- pre-existing, documented gap (specs/c-ffi-gaps.md:191, specs/progress.md
+  -- 2026-06-18 entry), unrelated to the foreign-thread actor bridge under
+  -- test here. Minimal adaptation: call the plain-socket path directly
+  -- (HttpTransport.connect + .request_on), which never references
+  -- http_fetch and links cleanly.
+  fn simple_get_native(url : String) do
+    match Http.get(url) do
+    Err(_) -> Err(HttpTransport.ConnParseError("bad url"))
+    Ok(req) -> do
+      let req2 = Http.set_body(req, "")
+      match HttpTransport.connect(req2) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        let result = HttpTransport.request_on(fd, req2)
+        tcp_close(fd)
+        result
+      end
+      end
+    end
+    end
+  end
+
+  pfn get_loop(path : String, want : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else
+      let hit = match simple_get_native("http://127.0.0.1:29940" ++ path) do
+                Ok(Http.Response(Http.Status(code), _, body)) ->
+                  if code == 200 && body == want do 1 else 0 end
+                _ -> 0
+                end
+      get_loop(path, want, i + 1, n, acc + hit)
+    end
+  end
+
+  fn run_client() : Unit do
+    let n = 50
+    println("task_ok="   ++ int_to_string(get_loop("/", "task=5", 0, n, 0))
+            ++ "/" ++ int_to_string(n))
+    println("direct_ok=" ++ int_to_string(get_loop("/direct", "direct=5", 0, n, 0))
+            ++ "/" ++ int_to_string(n))
+  end
+
+  fn main() : Unit do
+    if Env.get("FAH_MODE", "server") == "client" do
+      run_client()
+    else
+      run_server()
+    end
+  end
+end

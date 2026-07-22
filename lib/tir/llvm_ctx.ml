@@ -44,6 +44,16 @@ type ctx = {
      Used when emitting a top-level function as a first-class value (closure
      trampoline) but the AVar's v_ty is TVar _ rather than TFn. *)
   top_fn_nparams : (string, int) Hashtbl.t;
+  (* Maps fn_name → declared parameter types for top-level functions.
+     Used in EApp to coerce each argument's ACTUAL emitted representation
+     (e.g. "ptr" for a value extracted from a generic/polymorphic ADT field
+     under the uniform-slot convention) to the callee's concrete, monomorphic
+     parameter representation (e.g. "double" for a Float param) — without
+     this, a Float value flowing from a generic container field straight
+     into a monomorphic function call is passed as a raw boxed pointer while
+     the callee reads it as a native double, silently corrupting the value
+     (the Array.from_list$..$Float compiled-wrong-value bug). *)
+  top_fn_param_tys : (string, Tir.ty list) Hashtbl.t;
   (* Set of zero-argument top-level functions (module-level `let` constants
      compiled as zero-arg functions).  When emit_atom encounters an AVar
      referencing one of these, it calls the function to obtain the value
@@ -216,6 +226,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   top_fns   = Hashtbl.create 64;
   top_fn_ret_ty = Hashtbl.create 64;
   top_fn_nparams = Hashtbl.create 64;
+  top_fn_param_tys = Hashtbl.create 64;
   zero_arg_fns  = Hashtbl.create 16;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;

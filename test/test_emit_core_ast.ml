@@ -169,6 +169,22 @@ let cases = [
     label = "reject: fatal parse error, module is null (t70_letq_type_annotation)" };
 ]
 
+(* v2 sanity: the envelope must be version 2 and carry annotations+witnesses.
+   This is a lightweight structural check (independent of the byte-for-byte
+   fixture comparison above) so a future accidental downgrade to v1 — or a
+   regression that silently drops the resolved_ty/schemes tables — is caught
+   with an explicit, readable assertion rather than only via an opaque full-
+   string diff. *)
+let assert_v2 (produced : string) =
+  let has s =
+    let hl = String.length produced and nl = String.length s in
+    let rec go i = i + nl <= hl && (String.sub produced i nl = s || go (i+1)) in
+    nl = 0 || go 0
+  in
+  Alcotest.(check bool) "format_version 2" true (has "\"format_version\":2" || has "\"format_version\": 2");
+  Alcotest.(check bool) "has resolved_ty" true (has "resolved_ty");
+  Alcotest.(check bool) "has schemes" true (has "schemes")
+
 let test_case_matches_fixture case () =
   let expected = read_file (fixture_path case.fixture_name) in
   let (actual, exit_code) = run_emit_core_ast case.corpus_rel in
@@ -178,7 +194,8 @@ let test_case_matches_fixture case () =
   Alcotest.(check string)
     (Printf.sprintf "%s: --emit-core-ast stdout matches golden fixture %s"
        case.label case.fixture_name)
-    expected actual
+    expected actual;
+  if case.fixture_name = "t01_literals.expected.json" then assert_v2 actual
 
 let suite =
   List.map

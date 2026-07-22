@@ -3347,6 +3347,134 @@ let test_tc_qualified_sig_type_order_independent () =
   Alcotest.(check bool) "qualified sig type unifies with bare — no errors"
     false (has_errors ctx)
 
+(* Same-module precedence: two sibling modules define DISTINCT types that share
+   a constructor name (`Reg`), with different element types, and NEITHER imports
+   the other.  An UNQUALIFIED reference to `Reg` inside each module must resolve
+   to that module's OWN `Reg` — not to the sibling's same-named one.  Because
+   March keys nominal types by bare name, both `Reg`s are the same `TCon("Reg")`
+   at the type level; only the constructors' argument types (`List(Foo)` vs
+   `List(Bar)`) differ.  Before the fix, the bare-name entry in `env.ctors` held
+   a single global winner shared by both modules, so whichever module lost the
+   head saw the sibling's element type ("expected Bar but got Foo").  A module's
+   own definition must outrank an un-imported sibling's. *)
+let test_tc_same_module_ctor_precedence () =
+  let ctx = typecheck {|mod App do
+    mod AMod do
+      type Foo = Foo(Int)
+      type Reg = Reg(List(Foo))
+      fn a_add(r : Reg, n : Int) : Reg do
+        match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+      end
+      fn a_items(r : Reg) : List(Foo) do
+        match r do Reg(items) -> items end
+      end
+    end
+    mod BMod do
+      type Bar = Bar(String)
+      type Reg = Reg(List(Bar))
+      fn b_add(r : Reg, s : String) : Reg do
+        match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+      end
+      fn b_items(r : Reg) : List(Bar) do
+        match r do Reg(items) -> items end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same-module ctor outranks un-imported sibling — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence must NOT override a KNOWN scrutinee type that uniquely
+   identifies the constructor.  `Consumer` locally defines `Local = Reg(Int)` yet
+   pattern-matches a value of sibling `RemoteMod.Remote = Reg(String)` via bare
+   `Reg(s)` with the scrutinee type annotated.  The two types have DISTINCT names
+   (`Local` vs `Remote`), so the expected type uniquely selects `Remote`'s ctor —
+   it must win over same-module precedence, else `s` binds `Int` and unification
+   against the `String` return spuriously fails ("expected String but got Int").
+   Guards the layered [lookup_ctor_in_type_unique]-before-same-module ordering at
+   the pattern site. *)
+let test_tc_expected_type_beats_same_module () =
+  let ctx = typecheck {|mod App do
+    mod RemoteMod do
+      type Remote = Reg(String)
+      fn wrap(s : String) : Remote do Reg(s) end
+    end
+    mod Consumer do
+      type Local = Reg(Int)
+      fn local_val() : Local do Reg(7) end
+      fn use_remote(x : RemoteMod.Remote) : String do
+        match x do Reg(s) -> s end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unique expected type outranks same-module ctor — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence for a genuinely NESTED module.  `Inner` and `Sib` sit
+   two levels deep under a non-entry `Outer`, so their constructors are seeded
+   under the accumulated path key (`Outer.Inner.Reg` / `Outer.Sib.Reg`), which
+   the leaf `current_module` name does not match — resolution relies on the
+   [cap_qual_prefix] accumulated path.  Each nested module's bare `Reg` must
+   still resolve to its own type. *)
+let test_tc_same_module_ctor_precedence_nested () =
+  let ctx = typecheck {|mod Top do
+    mod Outer do
+      mod Inner do
+        type Foo = Foo(Int)
+        type Reg = Reg(List(Foo))
+        fn i_add(r : Reg, n : Int) : Reg do
+          match r do Reg(items) -> Reg(Cons(Foo(n), items)) end
+        end
+        fn i_items(r : Reg) : List(Foo) do
+          match r do Reg(items) -> items end
+        end
+      end
+      mod Sib do
+        type Bar = Bar(String)
+        type Reg = Reg(List(Bar))
+        fn s_add(r : Reg, s : String) : Reg do
+          match r do Reg(items) -> Reg(Cons(Bar(s), items)) end
+        end
+        fn s_items(r : Reg) : List(Bar) do
+          match r do Reg(items) -> items end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested-module same-module ctor precedence — no errors"
+    false (has_errors ctx)
+
+(* Same-module precedence for an OPAQUE type whose module leaf name coincides
+   with another package's regular type name.  `mod Gate` defines `opaque type
+   Gate = Gate(Int,Int,Int)`; a sibling `OtherPkg` defines a distinct regular
+   `type Gate = Gate(Int×5)`.  The opaque module's own module-qualified key
+   `Gate.Gate` shares its string namespace with OtherPkg's `Type.Ctor`
+   disambiguation key (also `Gate.Gate`), so that bucket holds BOTH ctors —
+   [lookup_ctor_same_module]'s uniqueness guard must decline the ambiguous key
+   and let the module's own bare-`Gate` head (seeded by its Pass-2 check, never
+   displaced because an opaque type's private ctor is not prebind-seeded into
+   the bare key) win.  Without the guard, `Gate.Gate`'s order-dependent head
+   resolves to OtherPkg's 5-arg ctor → "Constructor Gate expects 5 argument(s)
+   but I got 3".  (Real instance: bastion `mod Gate` vs depot `mod Depot.Gate`.) *)
+let test_tc_same_module_opaque_ctor_precedence () =
+  (* `OtherPkg` must be seeded AFTER `mod Gate` so its `Type.Ctor` form is the
+     order-dependent head of the shared `Gate.Gate` bucket — the arrangement
+     that reproduces the pollution (declaration order = prebind seed order). *)
+  let ctx = typecheck {|mod Root do
+    mod Gate do
+      opaque type Gate = Gate(Int, Int, Int)
+      fn make(a : Int, b : Int, c : Int) : Gate do Gate(a, b, c) end
+      fn first(g : Gate) : Int do
+        match g do Gate(a, _, _) -> a end
+      end
+    end
+    mod OtherPkg do
+      type Gate = Gate(Int, Int, Int, Int, Int)
+      fn o_make() : Gate do Gate(1, 2, 3, 4, 5) end
+    end
+  end|} in
+  Alcotest.(check bool) "opaque module ctor outranks same-named regular type — no errors"
+    false (has_errors ctx)
+
 (* Regression (2026-07-10): a module must be able to use its OWN constructor
    when a SIBLING module declares a same-named one with a different payload.
    d95fe942's Pass-1 bare-ctor seeding put the later sibling's `Mk` at the
@@ -11186,6 +11314,58 @@ let test_compiled_vault_scalar_roundtrip () =
     Alcotest.(check int)
       "compiled Vault scalar (Bool/Int) round-trips correctly" 0 run_rc
 
+(* Regression: march_vault_update SIGSEGV'd (exit 139) when compiled — no
+   compiled test exercised Vault.update before this, only Vault.set/get (see
+   test_compiled_vault_scalar_roundtrip above).  Root cause was two stacked
+   bugs in march_vault_update (runtime/march_extras.c):
+     1. march_vault_get returns a niche-encoded Option(ptr) (None=NULL,
+        Some(v)=v itself — no boxed tag/payload struct), but vault_update
+        read a tag word at cur+8 and a payload at cur+16 as if it were a
+        boxed Option, dereferencing past the end of a scalar's allocation.
+     2. The closure's own apply-fn ABI takes its parameter in *native*
+        (untagged) representation while Vault stores values in *uniform*
+        (tagged-scalar-or-raw-pointer) representation — so a tagged Int
+        needs an untag before being handed to the closure (mirrors
+        rec_field_norm_uniform's handling of generic record fields), while
+        a heap pointer (e.g. String) passes through unchanged.
+   Exercises both an Int (tagged, needs untag) and a String (heap pointer,
+   passes through unchanged) update, plus a named top-level fn (not just an
+   inline lambda) since both use the same closure-invocation path. *)
+let test_compiled_vault_update () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_vaultupdate" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "u.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod VaultUpdate do\n\
+    \  fn inc(n) do\n\
+    \    n + 1\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let t = Vault.new(\"vu_test\")\n\
+    \    Vault.set(t, \"n\", 1)\n\
+    \    Vault.update(t, \"n\", fn n -> n + 1)\n\
+    \    Vault.update(t, \"n\", inc)\n\
+    \    let n = Vault.get(t, \"n\") |> unwrap_or(0)\n\
+    \    Vault.set(t, \"s\", \"ab\")\n\
+    \    Vault.update(t, \"s\", fn s -> s ++ \"!\")\n\
+    \    let s = Vault.get(t, \"s\") |> unwrap_or(\"\")\n\
+    \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "ubin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compiled Vault.update applies fn correctly for Int and String, no SIGSEGV" 0 run_rc
+
 (* Regression: march_string_to_int niche-tags its strtoll result as (n<<1)|1
    with no range check.  For inputs outside March's 63-bit range (>= 2^62, or
    beyond int64 where strtoll clamps to LLONG_MAX) the shift overflowed the sign
@@ -11790,6 +11970,10 @@ let stdlib_suites =
         Alcotest.test_case "cyclic bare ctor order-indep" `Quick test_tc_cyclic_bare_ctor_order_independent;
         Alcotest.test_case "sibling ctor: own module wins" `Quick test_tc_sibling_ctor_own_module_wins;
         Alcotest.test_case "qualified sig type order-indep" `Quick test_tc_qualified_sig_type_order_independent;
+        Alcotest.test_case "same-module ctor precedence"  `Quick test_tc_same_module_ctor_precedence;
+        Alcotest.test_case "expected type beats same-module" `Quick test_tc_expected_type_beats_same_module;
+        Alcotest.test_case "nested same-module ctor precedence" `Quick test_tc_same_module_ctor_precedence_nested;
+        Alcotest.test_case "opaque same-module ctor precedence" `Quick test_tc_same_module_opaque_ctor_precedence;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;
@@ -12424,6 +12608,8 @@ let stdlib_suites =
           test_compiled_recursive_closure_capture;
         Alcotest.test_case "Vault scalar (Bool/Int) round-trips correctly when compiled" `Slow
           test_compiled_vault_scalar_roundtrip;
+        Alcotest.test_case "Vault.update applies fn for Int/String, no SIGSEGV (compiled)" `Slow
+          test_compiled_vault_update;
         Alcotest.test_case "string_to_int out-of-range returns None (niche tag no overflow)" `Slow
           test_compiled_string_to_int_overflow_is_none;
         Alcotest.test_case "aliased owned arg f(x,x) does not double-free (compiled)" `Slow

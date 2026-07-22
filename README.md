@@ -23,7 +23,7 @@ end
 - Algebraic data types with pattern matching
 - Records with functional update syntax (`{ r with field: value }`)
 - Polymorphic functions monomorphized at compile time (no boxing overhead)
-- Linear and affine types for ownership and safe mutation (in progress)
+- Linear and affine types for ownership, safe mutation, and actor message-passing isolation
 
 **Syntax**
 - `fn name(x, y) do ... end` — named functions
@@ -47,7 +47,7 @@ end
 - Tree-walking interpreter available for fast iteration
 
 **Concurrency**
-- Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive` (interpreter only)
+- Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive`
 - Actor state updated via record spread: `{ state with count: state.count + 1 }`
 - Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
 - Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
@@ -104,7 +104,7 @@ FBIP fires automatically on any function that:
 
 This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
 
-For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see the language reference umbrella `specs/lang/index.md` (compiler-internals pointer: `specs/impl/index.md`, landing in Task 5 of the spec-consolidation plan).
+For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see the language reference (`specs/lang/index.md`) and the compiler-internals reference (`specs/impl/index.md`).
 
 ## Quick start
 
@@ -410,14 +410,14 @@ end
 ### Higher-order functions
 
 ```march
-fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
+fn double_all(f : Int -> Int, lst : List(Int)) : List(Int) do
   match lst do
     Nil        -> Nil
-    Cons(h, t) -> Cons(f(h), map(f, t))
+    Cons(h, t) -> Cons(f(h), double_all(f, t))
   end
 end
 
-let doubled = map(fn x -> x * 2, my_list)
+let doubled = double_all(fn x -> x * 2, my_list)
 ```
 
 ### Option and Result
@@ -444,7 +444,7 @@ actor Counter do
     { state with value: state.value + n }
   end
 
-  on Get() do
+  on Report() do
     println(int_to_string(state.value))
     state
   end
@@ -454,7 +454,7 @@ fn main() : Unit do
   let c = spawn(Counter)
   send(c, Increment(10))
   send(c, Increment(5))
-  send(c, Get())
+  let _ = send(c, Report())
 end
 ```
 
@@ -483,26 +483,26 @@ let result =
 ## Project layout
 
 ```
-bin/main.ml              compiler entry point
+bin/main.ml              compiler entry point (parse → desugar → typecheck → eval/compile)
 lib/
+  ast/ast.ml             AST types (span, expr, pattern, decl, ...)
   lexer/lexer.mll        ocamllex lexer
   parser/parser.mly      menhir parser
   desugar/desugar.ml     pipe desugar, multi-head fn grouping
   typecheck/typecheck.ml bidirectional HM type inference
   eval/eval.ml           tree-walking interpreter
-  tir/
-    tir.ml               TIR type definitions
-    lower.ml             AST → ANF typed IR
-    mono.ml              monomorphization
-    defun.ml             defunctionalization (closure lifting)
-    perceus.ml           Perceus reference counting analysis
-    borrow.ml            borrow inference (Perceus companion)
-    escape.ml            escape analysis (stack promotion)
-    fusion.ml            loop fusion / FBIP reuse propagation
-    opt.ml               optimization pipeline (cprop, dce, fold, inline, simplify)
-    llvm_emit.ml         TIR → LLVM IR
-runtime/
-  march_runtime.c        C runtime (alloc, RC, strings, I/O)
+  tir/                   typed IR: lower, mono, defun, perceus (+ borrow, fusion),
+                         llvm_emit, and companion passes
+  jit/                   REPL JIT compiler
+  errors/errors.ml       diagnostic type (Error/Warning/Hint + span)
+  search/search.ml       Hoogle-style type/name search engine
+  refine/                refinement-types Z3 bridge
+stdlib/                  111 March stdlib modules (list, map, http, json, crypto,
+                         distributed-OTP actors, DataFrame, ...)
+runtime/                 C runtime (alloc, RC, scheduler, HTTP, TLS, WASM)
+forge/                   build tool (new, build, run, test, deps, publish, ...)
+lsp/                     LSP server (diagnostics, hover, goto-def, completions, code actions)
+test/                    alcotest suites over the compiler, stdlib, and codegen
 examples/
   list_lib.march         map, filter, fold, reverse, find
   actors.march           actor spawning, messaging, kill/restart

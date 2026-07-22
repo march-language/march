@@ -1024,20 +1024,35 @@ void *march_vault_drop(void *handle, void *key_val) {
 
 /* Applies function f to the current value and stores the result. */
 void *march_vault_update(void *handle, void *key_val, void *f) {
-    /* f is a March closure; we need to call it.
-     * Closures in March are heap objects: [rc][tag][pad][fn_ptr][env_ptr...]
-     * fn_ptr is at offset 16, env at offset 24.
-     * Calling convention: fn_ptr(env, arg) */
+    /* march_vault_get returns a niche-encoded Option(ptr) — see make_some/
+     * make_none above: None = NULL, Some(v) = v itself.  There is no boxed
+     * Option wrapper to unpack (no tag word, no separate payload field).
+     *
+     * `cur` is in Vault's *uniform* slot representation: a heap pointer
+     * passes straight through, but a scalar (Int/Bool) is tagged as
+     * (n << 1) | 1 the same way any concrete value is boxed when it
+     * crosses into a type-erased ptr slot (mirrors rec_field_norm_uniform
+     * above for record fields).
+     *
+     * A closure apply fn's params (and return) use the uniform ptr ABI too
+     * (`lib/tir/llvm_toplevel.ml`'s emit_fn: "Apply wrappers use the uniform
+     * ptr ABI for params too... The entry prologue below unboxes such params
+     * back to double/i64 for the body" — the erased-i64 conditional-untag
+     * convention), so `cur` is passed straight through unchanged: the
+     * closure conditionally untags a tagged scalar itself at entry (a bare
+     * heap pointer is unaffected) and re-tags its result the same way on
+     * return, so the value handed back is already in the exact uniform form
+     * march_vault_set expects — no conversion needed on either side here. */
     void *cur = march_vault_get(handle, key_val);
-    /* Check if Some(v) */
-    int32_t tag = *(int32_t *)((char *)cur + 8);
-    if (tag == 1) { /* Some */
-        void *v   = *(void **)((char *)cur + 16);
-        /* Call f(v): f is a closure [rc][tag][pad][fn_ptr][env_ptr] */
+    if (cur != NULL) { /* Some(cur) */
+        /* f is a closure: heap object [rc(8)][tag(4)][pad(4)][fn_ptr@16][captures@24...].
+         * The apply fn's first parameter is the closure pointer itself (not a
+         * separate "env" field) — it loads its own captures from that pointer.
+         * Calling convention: fn_ptr(closure, arg). See call_closure_1 and
+         * march_http_internal.h's closure_fn_t for the same convention. */
         typedef void *(*fn1_t)(void *, void *);
         fn1_t fn  = *(fn1_t *)((char *)f + 16);
-        void *env = *(void **)((char *)f + 24);
-        void *new_val = fn(env, v);
+        void *new_val = fn(f, cur);
         march_vault_set(handle, key_val, new_val);
         march_decrc(new_val);
     }

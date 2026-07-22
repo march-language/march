@@ -4435,11 +4435,75 @@ let test_signal_watch_deferred () =
   March_eval.Eval.signal_pending.(3) <- false;
   Sys.set_signal Sys.sigusr1 Sys.Signal_default
 
+(* ------------------------------------------------------------------ *)
+(* Entry-point (`main`) signature and dispatch                         *)
+(* ------------------------------------------------------------------ *)
+
+(** `fn main(cap : Cap(IO))` — the documented pattern for receiving the
+    initial IO capability (specs/lang/capabilities.md) — is accepted by
+    [Desugar.check_main_signature] and, critically, its body actually runs.
+    Before this fix, [Eval.run_module] called every `main` with zero
+    arguments regardless of declared arity: a 1-parameter `main` became an
+    unapplied partial closure that silently never executed (no crash, no
+    output, exit looked "successful"). *)
+let test_main_cap_io_runs () =
+  let src = {|mod Test do
+    needs IO
+
+    fn main(cap : Cap(IO)) : () do
+      let _console : Cap(IO.Console) = cap_narrow(cap)
+      println("main ran with cap")
+    end
+  end|} in
+  let buf = Buffer.create 64 in
+  March_eval.Eval.test_capture_buf := Some buf;
+  Fun.protect
+    ~finally:(fun () -> March_eval.Eval.test_capture_buf := None)
+    (fun () -> run_module_src src);
+  Alcotest.(check string) "main(cap : Cap(IO)) body executed"
+    "main ran with cap\n" (Buffer.contents buf)
+
+(** 0-arity `main` keeps working unchanged (no regression from the
+    arity-aware dispatch added for the `Cap(IO)` case). *)
+let test_main_zero_arity_still_runs () =
+  let src = {|mod Test do
+    fn main() : () do
+      println("zero-arity main ran")
+    end
+  end|} in
+  let buf = Buffer.create 64 in
+  March_eval.Eval.test_capture_buf := Some buf;
+  Fun.protect
+    ~finally:(fun () -> March_eval.Eval.test_capture_buf := None)
+    (fun () -> run_module_src src);
+  Alcotest.(check string) "main() body executed"
+    "zero-arity main ran\n" (Buffer.contents buf)
+
+(** Any `main` arity/type other than 0 params or a single `Cap(IO)` param is
+    rejected at desugar time with a clear diagnostic, rather than left to
+    silently misbehave downstream (interpreted: silent no-op; compiled: an
+    ABI-mismatched call into `march_spawn_main`, observed as a SIGBUS). *)
+let test_main_wrong_arity_rejected () =
+  let src = {|mod Bad do
+    fn main(x : Int) : () do () end
+  end|} in
+  let lexbuf = Lexing.from_string src in
+  let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors ast);
+  Alcotest.(check bool) "wrong-arity main rejected" true
+    (March_errors.Errors.has_errors errors)
+
 let eval_suites =
   [
       ( "signal_watch", [
           Alcotest.test_case "deferred USR1 drain + coalesce + unwatch" `Quick
             test_signal_watch_deferred;
+        ] );
+      ( "main_entry_point", [
+          Alcotest.test_case "main(cap : Cap(IO)) actually runs" `Quick test_main_cap_io_runs;
+          Alcotest.test_case "main() zero-arity still runs"      `Quick test_main_zero_arity_still_runs;
+          Alcotest.test_case "wrong-arity main rejected"         `Quick test_main_wrong_arity_rejected;
         ] );
       ( "browser http",
         [

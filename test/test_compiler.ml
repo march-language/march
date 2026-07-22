@@ -196,6 +196,30 @@ let test_parse_lambda_multi_param_block () =
   | March_ast.Ast.ELam ([_; _], March_ast.Ast.EBlock ([_; _], _), _) -> ()
   | _ -> Alcotest.fail "expected 2-param ELam with EBlock body"
 
+let test_parse_lambda_bare_stmt_before_if () =
+  (* Regression: an inline lambda call-argument whose body has a `let`
+     binding, then a bare (non-let) call statement, then a final
+     if/else/end used to swallow the bare call as the lambda's final
+     expression and leave `if ... end` as unparsed trailing tokens
+     ("I got stuck here" at `if`). *)
+  let src = "f(fn x -> let a = 1 println(\"hi\") if a > 0 do 1 else 2 end)" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock (stmts, _), _)], _) ->
+    Alcotest.(check int) "3 stmts in lambda body" 3 (List.length stmts)
+  | _ -> Alcotest.fail "expected EApp with ELam argument containing 3-stmt EBlock body"
+
+let test_parse_lambda_consecutive_bare_stmts () =
+  (* Regression: two consecutive bare (non-let) statements in an inline
+     lambda call-argument body used to fail on the second statement. *)
+  let src = "f(fn x -> println(\"hi\") println(\"bye\"))" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.EApp (_, [March_ast.Ast.ELam ([_], March_ast.Ast.EBlock ([_; _], _), _)], _) -> ()
+  | _ -> Alcotest.fail "expected EApp with ELam argument containing 2-stmt EBlock body"
+
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -461,6 +485,39 @@ let test_tc_private_nested_member_diagnostic () =
   in
   Alcotest.(check bool)
     "diagnostic names the private member, not 'Unknown module'" true says_private
+
+let test_tc_private_nested_member_name_collides_with_builtin () =
+  (* Same bug as [test_tc_private_nested_member_diagnostic], but the private
+     member's bare name ("hash") coincides with a globally-bound identifier
+     (the `Hash` interface's bare method scheme, typecheck.ml's default
+     interface-method bindings). Before the fix, `EVar`'s progressive
+     dot-suffix fallback — meant only to resolve multi-component interface
+     method paths like "Conduit.Storage.workflow_load" down to
+     "Storage.workflow_load" — stripped "Auth.hash" all the way to the bare
+     "hash" and silently matched the unrelated global, bypassing the privacy
+     check entirely: `Auth.hash("x")` typechecked clean (and ran to a garbage
+     value when compiled, since codegen still calls the real, private
+     `Auth.hash`, while typecheck's inferred type came from the wrong,
+     unrelated binding). `is_confirmed_private_qualified` now short-circuits
+     that fallback for a name confirmed private via [env.local_mods]. *)
+  let ctx = typecheck {|mod Main do
+    mod Auth do
+      pfn hash(s : String) : String do s end
+      fn verify(plain, stored) do hash(plain) == stored end
+    end
+    fn main() : String do Auth.hash("x") end
+  end|} in
+  Alcotest.(check bool) "private member shadowed by a global name: still rejected"
+    true (has_errors ctx);
+  let says_private =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      try ignore (Str.search_forward
+                    (Str.regexp_string "is private to module `Auth`") d.message 0); true
+      with Not_found -> false)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool)
+    "diagnostic names the private member, not a silent wrong resolution" true says_private
 
 let test_tc_if_bad_cond () =
   (* Condition must be Bool — using Int + 1 should produce an error. *)
@@ -3506,6 +3563,79 @@ let test_linear_let_double_use () =
     end
   end|} in
   Alcotest.(check bool) "linear let used twice: error" true (has_errors ctx)
+
+(* Regression: an always-linear value bound via `let? p = e` (the RHS is a
+   fresh call, not a pre-tracked linear variable) must still be tracked —
+   `bind_pattern_bindings` (shared by `let?`, `with`, and match arms) used to
+   only inherit linearity from a [TLin]-wrapped type or an already-linear
+   scrutinee variable, silently skipping the `always_linear_types`
+   auto-promotion that plain `let` and function params get. Two `let?`
+   bindings each consuming `r` went unflagged as a result. *)
+let test_linear_letq_acquire_double_use () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      let? r = acquire()
+      let? a = consume(r)
+      let? b = consume(r)
+      Ok(a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "let?-acquired linear value used twice: error" true (has_errors ctx)
+
+(* Same gap via a single correct use — must NOT regress to a false positive. *)
+let test_linear_letq_acquire_single_use_ok () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      let? r = acquire()
+      let? a = consume(r)
+      Ok(a)
+    end
+  end|} in
+  Alcotest.(check bool) "let?-acquired linear value used once: no errors" false (has_errors ctx)
+
+(* Same gap through `with`'s desugared nested-match form. *)
+let test_linear_with_acquire_double_use () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      with Ok(r) <- acquire() do
+        with Ok(a) <- consume(r), Ok(b) <- consume(r) do
+          Ok(a + b)
+        else
+          Err(e) -> Err(e)
+        end
+      else
+        Err(e) -> Err(e)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "with-acquired linear value used twice: error" true (has_errors ctx)
 
 (* Track-A: linear type enforcement — using a linear binding twice inside a
    match arm is detected and rejected. *)
@@ -8021,6 +8151,8 @@ let compiler_suites =
           Alcotest.test_case "lambda no-let unchanged" `Quick test_parse_lambda_no_let_unchanged;
           Alcotest.test_case "lambda zero-arg block" `Quick test_parse_lambda_zero_arg_block;
           Alcotest.test_case "lambda multi-param block" `Quick test_parse_lambda_multi_param_block;
+          Alcotest.test_case "lambda bare stmt before if (inline arg)" `Quick test_parse_lambda_bare_stmt_before_if;
+          Alcotest.test_case "lambda consecutive bare stmts (inline arg)" `Quick test_parse_lambda_consecutive_bare_stmts;
           Alcotest.test_case "application" `Quick test_parse_expr_app;
           Alcotest.test_case "refinement node present" `Quick test_parse_refinement_node_present;
           Alcotest.test_case "refined param typechecks as base" `Quick test_refined_param_typechecks_as_base;
@@ -8054,6 +8186,7 @@ let compiler_suites =
           Alcotest.test_case "add fn"              `Quick test_tc_fn_add;
           Alcotest.test_case "dotted sibling module order" `Quick test_tc_dotted_sibling_module_order;
           Alcotest.test_case "private nested member diagnostic" `Quick test_tc_private_nested_member_diagnostic;
+          Alcotest.test_case "private nested member name collides with builtin" `Quick test_tc_private_nested_member_name_collides_with_builtin;
           Alcotest.test_case "bad if condition"    `Quick test_tc_if_bad_cond;
           Alcotest.test_case "annotated return"    `Quick test_tc_annotated_fn;
           Alcotest.test_case "match expression"    `Quick test_tc_match;
@@ -8123,6 +8256,11 @@ let compiler_suites =
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
           Alcotest.test_case "linear let double use"         `Quick test_linear_let_double_use;
+          (* Regression: always-linear value bound via let?/with (not a
+             pre-tracked linear variable) must still be double-use checked *)
+          Alcotest.test_case "let? acquired linear double use"  `Quick test_linear_letq_acquire_double_use;
+          Alcotest.test_case "let? acquired linear single use ok" `Quick test_linear_letq_acquire_single_use_ok;
+          Alcotest.test_case "with acquired linear double use"  `Quick test_linear_with_acquire_double_use;
           (* Fix 2: Linear type enforcement *)
           Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;

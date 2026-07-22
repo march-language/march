@@ -496,6 +496,19 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  scheme_witnesses : (int list, constraint_ list * ty) Hashtbl.t;
+  (** A1 (--emit-core-ast v2): every HM scheme instantiated during checking,
+      deduped by its quantified-id list -> (constraints, body). Populated at
+      the single [instantiate] chokepoint (Poly branch) so user, builtin, and
+      stdlib schemes are all uniformly captured. Read by the emitter to
+      serialize which schemes were generalized. *)
+  inst_witnesses : (Ast.span, int list * ty list) Hashtbl.t;
+  (** A1 (--emit-core-ast v2): for every polymorphic use site that supplied a
+      [~use_span] to [instantiate] (EVar/EField inference), the scheme's
+      quantified-id list paired positionally with the freshly-substituted
+      (post-solve, [repr]-resolvable) type-argument vector. Keyed by the
+      use-site span so the emitter can look up "how did THIS occurrence
+      instantiate its scheme." *)
   interfaces : Ast.interface_def StrMap.t; (** Registered interfaces *)
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
@@ -673,6 +686,8 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
+  scheme_witnesses = Hashtbl.create 64;
+  inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
   mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
@@ -845,6 +860,62 @@ let lookup_ctor name env =
      | Some _ as preferred -> preferred
      | None -> Some first)
 
+(** Same-module precedence for an UNQUALIFIED constructor reference.
+
+    When two sibling modules in the same package define distinct types that
+    share a constructor name (e.g. `IslandSocket.Registry(List(IslandHandler))`
+    and `Islands.Registry(List(Descriptor))`), the bare-name entry in
+    [env.ctors] holds BOTH candidates and [lookup_ctor] returns whichever was
+    registered last — a single global winner shared by every module, regardless
+    of which module's body is being checked.  Since March keys nominal types by
+    bare name, both `Registry`s look identical at the type level; only the
+    constructors' argument types differ, so the wrong candidate silently unifies
+    the sibling's element type in (the observed "expected Descriptor but got
+    IslandHandler").
+
+    A module's own top-level definition must outrank a same-named one from a
+    module it does not even import.  [prebind_mod_members] seeds a
+    module-qualified key `Module.Ctor` (bare [ci_type]) for every module's
+    public constructors, keyed by the ACCUMULATED, entry-unwrapped module path
+    (e.g. a sibling `Islands` seeds `Islands.Registry`; a nested `mod Outer do
+    mod Inner` under the unwrapped entry seeds `Inner.Registry`; a nested
+    module under a non-entry `Outer` seeds `Outer.Inner.Registry`).  We look the
+    bare name up under the current module's own such key first.
+
+    The key must exactly match prebind's accumulated path.  [cap_qual_prefix]
+    tracks precisely that path (accumulated across enclosing [DMod]s, empty at
+    the TIR-unwrapped entry level — see its field doc).  At the unwrapped entry
+    level [cap_qual_prefix] is "" while prebind still seeds under the entry
+    module name, which [current_module] holds — so use [cap_qual_prefix] when
+    set and fall back to [current_module] at the entry level.  This makes
+    same-module precedence work for top-level siblings, dotted single-decl
+    module names, AND arbitrarily nested modules.
+
+    If the current module does not define [name] the key is absent and we fall
+    through to the existing resolution — preserving imported names and
+    d95fe942's order-independence for genuinely cross-module bare references,
+    whose module path does not match the definer's.
+
+    Ambiguity guard: the `Module.Ctor` key shares its STRING namespace with the
+    `Type.Ctor` disambiguation form prebind also seeds (see the `bare_type_qctor`
+    site).  When a module's leaf name coincides with a DIFFERENT package's TYPE
+    name (real case: bastion `mod Gate` with an opaque `type Gate`, vs depot's
+    `mod Depot.Gate` whose regular `type Gate` seeds the disambiguation key
+    `Gate.Gate`), the `Gate.Gate` bucket holds BOTH ctors and the head is
+    order-dependent — exactly the pollution same-module precedence is meant to
+    avoid.  So only trust this key when it resolves UNAMBIGUOUSLY to one ctor;
+    otherwise return None and let the caller fall through.  For an opaque type
+    the module's own bare-`Ctor` key wins the head during its Pass-2 check (its
+    private ctor is never prebind-seeded into the bare key, so nothing displaces
+    it), making the bare fallback correct there. *)
+let lookup_ctor_same_module name env =
+  let self = if env.cap_qual_prefix <> "" then env.cap_qual_prefix
+             else env.current_module in
+  if self = "" || String.contains name '.' then None
+  else match StrMap.find_opt (self ^ "." ^ name) env.ctors with
+    | Some [ci] -> Some ci
+    | _ -> None
+
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
     several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); when more than
@@ -861,6 +932,24 @@ let lookup_ctor_in_type name type_name env =
     (match List.find_opt (fun ci -> ci.ci_module = env.current_module) matching with
      | Some _ as preferred -> preferred
      | None -> (match matching with [] -> None | first :: _ -> Some first))
+
+(** Like [lookup_ctor_in_type] but returns a candidate ONLY when it is the sole
+    one whose parent type matches [type_name].  When two DISTINCT types in the
+    same package share a constructor name (e.g. `IslandSocket.Registry` and
+    `Islands.Registry`, both with bare [ci_type] "Registry"), an expected type
+    of `Registry` matches BOTH candidates — [lookup_ctor_in_type] would return
+    the order-dependent head, silently defeating same-module precedence.  This
+    variant reports no match in that ambiguous case so the caller falls through
+    to same-module resolution, while a KNOWN scrutinee type whose name is unique
+    among the candidates (the Finding-1 case: local `Local = Reg(Int)` vs
+    imported `Remote = Reg(String)`) still wins outright. *)
+let lookup_ctor_in_type_unique name type_name env =
+  match StrMap.find_opt name env.ctors with
+  | Some cis ->
+    (match List.filter (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+     | [ci] -> Some ci
+     | _ -> None)
+  | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
     Deduplicates STRUCTURALLY (same ci_type, ci_module, ci_params, and
@@ -1098,6 +1187,26 @@ let suggest_var_in_scope (name : string) (env : env) : string option =
   ) env.vars;
   !best
 
+(** True if [name] is a dotted qualified reference (`Mod.member`) whose
+    `member` is CONFIRMED private — either an in-file nested module's `pfn` /
+    private `let` (via [env.local_mods]) or a private export of a module
+    reachable through the registry.  Used to stop [EVar]'s progressive
+    dot-suffix fallback (see its use site) from silently resolving a privacy
+    violation to an unrelated same-named global (e.g. a bare interface
+    method or builtin) instead of reporting the violation. *)
+let is_confirmed_private_qualified (name : string) (env : env) : bool =
+  match split_qualified name with
+  | None -> false
+  | Some (mod_name, member) ->
+    (match StrMap.find_opt mod_name env.local_mods with
+     | Some priv when List.mem member priv -> true
+     | _ ->
+       match March_modules.Module_registry.ensure_loaded mod_name with
+       | None -> false
+       | Some exports ->
+         let open March_modules.Module_registry in
+         List.exists (fun e -> e.ex_name = member && not e.ex_public) exports.me_entries)
+
 (** Produce an error message for a qualified name that failed to resolve. *)
 let qualified_error_msg (name : string) (env : env) : string =
   match split_qualified name with
@@ -1297,7 +1406,7 @@ let generalize level ty =
     with a fresh unification variable at [level].  Any class constraints
     carried by [sch] are instantiated and appended to [env.pending_constraints]
     so they can be discharged at the enclosing declaration boundary. *)
-let instantiate level env = function
+let instantiate ?use_span level env = function
   | Mono ty -> ty
   | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
@@ -1344,6 +1453,15 @@ let instantiate level env = function
         | CTNatBound t -> CTNatBound (inst t)) cs
     in
     env.pending_constraints := inst_cs @ !(env.pending_constraints);
+    (* A1 witnesses: record the scheme (deduped by ids) and, if this call
+       site supplied a span, the instantiation's type-argument vector. The
+       fresh vars in `subst` are ordinary unification vars; they resolve
+       through repr after the module solves, so store them as-is and let the
+       emitter deep-repr them at serialization time. *)
+    Hashtbl.replace env.scheme_witnesses ids (cs, ty);
+    (match use_span with
+     | Some sp -> Hashtbl.replace env.inst_witnesses sp (ids, List.map snd subst)
+     | None -> ());
     inst ty
 
 (* =================================================================
@@ -1913,9 +2031,17 @@ let builtin_bindings : (string * scheme) list =
     ("try_finally",
       poly2 (fun a b -> TArrow (TArrow (t_int, a),
                                 TArrow (TArrow (t_int, b), a))));
-    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march) *)
+    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march).
+       The TIR registers user ptypes under their module-qualified name
+       ("Csv.CsvRow"), so this MUST match that qualification: a bare
+       "CsvRow" here makes Repr.niche_repr_of_concrete's find_variant miss
+       the type definition and silently fall back to Boxed, even though
+       CsvRow is niche-shaped (CsvEof nullary + Row single-payload). Under
+       Boxed the compiled match reads a heap object's tag byte, but the C
+       runtime returns raw NULL for EOF (a Niche-only convention) — so every
+       row is misread against an uninitialized tag. *)
     ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
-    ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));
+    ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
     (* TCP/HTTP transport builtins *)
     (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)
@@ -1942,6 +2068,17 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
     ("http_parse_response",     poly1 (fun e -> TArrow (t_string,
         t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) e)));
+    (* http_fetch / http_fetch_available: JS-only fetch path used by
+       HttpTransport.request (stdlib/http_transport.march).  On native builds
+       http_fetch_available() always returns false (see runtime/march_http.c),
+       so http_fetch itself is never actually invoked — the tcp_* socket path
+       handles the request instead.  Both are registered here (Bool / a
+       concrete Result(String,String)) so the call sites get a real static
+       type instead of falling through llvm_emit's generic erased-type path,
+       which expects a different (boxed) representation than a raw Bool. *)
+    ("http_fetch_available",    Mono t_bool);
+    ("http_fetch",              Mono (TArrow (t_string, TArrow (t_string,
+        TArrow (t_string, TArrow (t_string, t_result t_string t_string))))));
     (* http_server_listen(port, max_conns, idle_timeout, pipeline_fn) *)
     ("http_server_listen",      poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_unit))))));
     (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
@@ -2768,16 +2905,16 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
        TChan (ref SError)
      | _ ->
-    let arity = match lookup_type name.txt env with
-      | Some a -> a
+    let env_loaded, arity = match lookup_type name.txt env with
+      | Some a -> env, a
       | None   ->
         (* Try qualified module resolution: "Mod.Type" *)
         match resolve_qualified_type name.txt env with
-        | _, Some a -> a
+        | env', Some a -> env', a
         | _ ->
           Err.error env.errors ~span:name.span
             (qualified_error_msg name.txt env);
-          0
+          env, 0
     in
     (* March uses a single global type namespace: a type declared inside a
        module has its *bare* name as its canonical identity.  Both the type's
@@ -2794,11 +2931,22 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
       (* The bare suffix is the component after the LAST '.' (the type's own
          name); everything before is the module path.  Using rindex rather than
          [split_qualified] (which splits at the FIRST dot for module-load
-         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`. *)
+         purposes) also canonicalizes arbitrarily-nested refs like `A.B.Type`.
+         Look up the bare suffix in [env_loaded] (not the pre-resolution
+         [env]): when [name.txt] needed [resolve_qualified_type] to lazily
+         load its module, [load_module_into_env]'s [ExType]/[ExRecord] arms
+         seed the BARE name too (first-wins — see their doc comment), so an
+         opaque `ptype` seen for the first time via qualification (e.g.
+         `RRB.Vec`, never promoted to the outer bare namespace since it's
+         never `Public`) still canonicalizes correctly.  Looking this up in
+         the original [env] would always miss for such a type, silently
+         skipping canonicalization and leaving a real value (whose actual
+         type uses the bare `TCon`) unable to unify against the qualified
+         annotation. *)
       match String.rindex_opt name.txt '.' with
       | Some i ->
         let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
-        (match lookup_type bare env with Some a when a = arity -> bare | _ -> name.txt)
+        (match lookup_type bare env_loaded with Some a when a = arity -> bare | _ -> name.txt)
       | None -> name.txt
     in
     let args' = List.map (surface_ty env ~tvars) args in
@@ -3137,6 +3285,20 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
        | _ -> None)
     | _ -> None
   in
+  (* A binding whose resolved type names an `always_linear type` must be
+     tracked as Linear even when it carries no [TLin] wrapper and the
+     scrutinee isn't itself a pre-tracked linear variable to inherit from —
+     e.g. `let? sock = connect(addr)` or `with Ok(sock) <- connect(addr)`
+     bind `sock` straight from a fresh call's result type, with no prior
+     linear tracking to propagate. Mirrors the auto-promotion that [ELet]'s
+     `auto_lin` and [bind_lam_param]'s `effective_lin` already perform for
+     plain lets and function params — without it, `sock` is bound as an
+     ordinary variable and its uses are never checked for double-consumption. *)
+  let always_linear_of t =
+    match repr t with
+    | TCon (name, _) when List.mem name env.always_linear_types -> Some Ast.Linear
+    | _ -> None
+  in
   List.fold_left (fun acc_env (name, sch) ->
       match sch with
       | Mono t ->
@@ -3150,13 +3312,19 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
               bind_linear name lin t' acc_env
             | None ->
-              let env1 = bind_var name (Mono t') acc_env in
-              bind_linear_field_sentinels name t' env1))
+              (match always_linear_of t' with
+               | Some lin -> bind_linear name lin t' acc_env
+               | None ->
+                 let env1 = bind_var name (Mono t') acc_env in
+                 bind_linear_field_sentinels name t' env1)))
       | Poly (_, _, t) ->
-        (* Generalised binding: bind normally but also add field sentinels for
-           any linear fields in the underlying type. *)
-        let env1 = bind_var name sch acc_env in
-        bind_linear_field_sentinels name (repr t) env1
+        (match always_linear_of t with
+         | Some lin -> bind_linear name lin t acc_env
+         | None ->
+           (* Generalised binding: bind normally but also add field sentinels for
+              any linear fields in the underlying type. *)
+           let env1 = bind_var name sch acc_env in
+           bind_linear_field_sentinels name (repr t) env1)
     ) env bindings
 
 (** After a scope closes, check that every in-scope linear var was used. *)
@@ -3185,8 +3353,18 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   match pat with
-  | Ast.PatWild _ ->
-    [], fresh_var env.level
+  | Ast.PatWild sp ->
+    let t = fresh_var env.level in
+    (* Record in type_map so lower_match.ml's pattern-matrix compiler can look
+       up the resolved (possibly-still-polymorphic) type via ty_of_span for
+       constructor-field sub-patterns it discards — e.g. `Cons(_, t) -> ...`.
+       Without this, a discarded field's synthetic TIR var never resolves to
+       a concrete type through monomorphization (unlike a NAMED field, which
+       gets fixed up the same way) and Perceus conservatively treats it as
+       RC-managed, corrupting compiled programs when the concrete type is
+       actually an unboxed scalar (e.g. Float) — see lower_match.ml. *)
+    Hashtbl.replace env.type_map sp t;
+    [], t
 
   | Ast.PatVar name ->
     let t = fresh_var env.level in
@@ -3210,15 +3388,38 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        prefer the candidate whose parent type matches, instead of relying on
        [lookup_ctor]'s order-dependent "most recently registered wins". *)
     (let ci_opt =
-       let by_expected =
+       (* Resolution precedence for a bare (unqualified) pattern constructor:
+          1. A KNOWN scrutinee type that UNIQUELY identifies the constructor
+             wins first — matching a value of an imported type
+             `N.Remote = Reg(String)` via bare `Reg(s)` must resolve to
+             `N.Remote`'s ctor even when the current module locally defines a
+             same-named `Reg` on a different type (Finding-1).
+          2. Otherwise same-module precedence: a module's own constructor
+             outranks a same-named sibling's.  This is what wins when the
+             expected type name is itself shared by several candidates (two
+             sibling `Registry` types) so step 1 is ambiguous.
+          3. Then the order-dependent expected-type head (legacy behaviour for
+             a genuinely ambiguous cross-module name with no same-module match).
+          4. Then the raw head / qualified resolution. *)
+       let expected_tn =
          if String.contains name.txt '.' then None
-         else
-           match expected with
-           | Some t ->
-             (match repr t with
-              | TCon (tn, _) -> lookup_ctor_in_type name.txt tn env
-              | _ -> None)
+         else match expected with
+           | Some t -> (match repr t with TCon (tn, _) -> Some tn | _ -> None)
            | None -> None
+       in
+       let by_expected_unique = match expected_tn with
+         | Some tn -> lookup_ctor_in_type_unique name.txt tn env
+         | None -> None
+       in
+       match by_expected_unique with
+       | Some _ as r -> r
+       | None ->
+       match lookup_ctor_same_module name.txt env with
+       | Some _ as r -> r
+       | None ->
+       let by_expected = match expected_tn with
+         | Some tn -> lookup_ctor_in_type name.txt tn env
+         | None -> None
        in
        match by_expected with
        | Some _ as r -> r
@@ -3948,11 +4149,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EVar name ->
       record_use name.txt name.span env;
       (match lookup_var name.txt env with
-       | Some sch -> instantiate env.level env sch
+       | Some sch -> instantiate ~use_span:name.span env.level env sch
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
-         | _, Some sch -> instantiate env.level env sch
+         | _, Some sch -> instantiate ~use_span:name.span env.level env sch
+         | _ when is_confirmed_private_qualified name.txt env ->
+           (* A confirmed privacy violation (`Mod.priv_fn`) must be reported
+              as such — falling through to the dot-suffix fallback below would
+              let it silently resolve to an unrelated global of the same bare
+              name (e.g. `Auth.hash` matching the builtin `hash` from the
+              `Hash` interface), bypassing the visibility check entirely. *)
+           Err.error env.errors ~span:name.span (qualified_error_msg name.txt env);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -3968,7 +4177,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                 | None -> try_suffix rest)
            in
            (match try_suffix name.txt with
-            | Some sch -> instantiate env.level env sch
+            | Some sch -> instantiate ~use_span:name.span env.level env sch
             | None ->
               let msg =
                 if String.contains name.txt '.' then
@@ -4529,7 +4738,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
-      (let ci_opt = match lookup_ctor name.txt env with
+      (let ci_opt = match lookup_ctor_same_module name.txt env with
+         | Some _ as r -> r
+         | None ->
+         match lookup_ctor name.txt env with
          | Some _ as r -> r
          | None ->
            (* Try qualified module resolution: "Mod.Ctor" *)
@@ -4727,7 +4939,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some prefix ->
           let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
-           | Some sch -> Some (instantiate env.level env sch)
+           | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
            | None ->
              (* For multi-component paths like Conduit.Storage.workflow_load,
                 the interface method may be registered as just "Storage.workflow_load"
@@ -4741,7 +4953,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                  let rest = String.sub p (i + 1) (String.length p - i - 1) in
                  let candidate = rest ^ "." ^ member in
                  (match lookup_var candidate env with
-                  | Some sch -> Some (instantiate env.level env sch)
+                  | Some sch -> Some (instantiate ~use_span:sp env.level env sch)
                   | None -> try_suffix rest)
              in
              try_suffix prefix)
@@ -5225,6 +5437,26 @@ and infer_match env span scrut scrut_ty branches =
   check_redundant_arms env scrut_ty branches;
   result_ty
 
+(** Whether every diagnostic in [scratch] stems from a data constructor used
+    in type position — a phantom/typestate tag like `Handle(Open)`, where
+    `Open` is a constructor of some ADT rather than a type name, which
+    [surface_ty] legitimately cannot resolve (it emits [qualified_error_msg]'s
+    unqualified-name form, "I cannot find `Open`.", for the ctor name).
+    Recognised by checking that the unresolved name IS a known constructor
+    ([env.ctors]) — genuinely bogus names (typo'd/renamed types, unknown
+    modules) are never registered there, so this returns [false] for those
+    and the caller must surface the error instead of discarding it. *)
+and annotation_errors_are_phantom_tags_only env (scratch : March_errors.Errors.ctx) =
+  let prefix = "I cannot find `" in
+  let plen = String.length prefix in
+  List.for_all (fun (d : March_errors.Errors.diagnostic) ->
+    let msg = d.March_errors.Errors.message in
+    String.length msg >= plen + 2
+    && String.sub msg 0 plen = prefix
+    && String.sub msg (String.length msg - 2) 2 = "`."
+    && StrMap.mem (String.sub msg plen (String.length msg - plen - 2)) env.ctors
+  ) scratch.March_errors.Errors.diagnostics
+
 (** Compute the type of a `let`-binding RHS, honouring an optional type
     annotation (`let x : T = e`, finding 16).  When [bind_ty] is present the
     annotation becomes a CHECKING context for the RHS (via [check_expr]) — a
@@ -5232,12 +5464,15 @@ and infer_match env span scrut scrut_ty branches =
     bound at a more specific instance (`let f : (Int) -> Int = fn x -> x`)
     still typechecks.
 
-    The annotation is resolved into a scratch error context first: if
-    [surface_ty] cannot resolve it (e.g. a phantom/typestate tag used in type
-    position, `let h : Handle(Open) = …`, which is a data constructor, not a
-    type name), we discard the scratch errors and fall back to plain inference
-    — exactly the pre-finding-16 behaviour for annotations the type grammar
-    can't express, so no legitimate program starts being rejected. *)
+    The annotation is resolved into a scratch error context first.  If
+    [surface_ty] fails ONLY because of a phantom/typestate tag used in type
+    position (`let h : Handle(Open) = …`), we discard the scratch errors and
+    fall back to plain inference — the pre-finding-16 behaviour for
+    annotations the type grammar can't express.  But if any failure is a
+    genuinely unresolvable name (unknown module, typo'd/renamed type — see
+    the `RRB`/`Vec(Int) = "not a vec"` soundness hole), the annotation is
+    real and broken: surface the scratch diagnostics as real errors instead
+    of silently ignoring the annotation. *)
 and infer_let_annotated env sp bind_ty bind_expr =
   match bind_ty with
   | None -> infer_expr env bind_expr
@@ -5245,11 +5480,16 @@ and infer_let_annotated env sp bind_ty bind_expr =
     let scratch = March_errors.Errors.create () in
     let tvars = ref [] in
     let ann_ty = surface_ty { env with errors = scratch } ~tvars ann in
-    if March_errors.Errors.has_errors scratch then
-      (* Annotation not expressible as a resolvable type — ignore it (legacy
-         behaviour) and infer from the RHS alone. *)
+    if March_errors.Errors.has_errors scratch then begin
+      if not (annotation_errors_are_phantom_tags_only env scratch) then
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          March_errors.Errors.error env.errors ~span:d.March_errors.Errors.span
+            d.March_errors.Errors.message
+        ) scratch.March_errors.Errors.diagnostics;
+      (* Annotation not (fully) expressible as a resolvable type — infer from
+         the RHS alone; any genuine error was already surfaced above. *)
       infer_expr env bind_expr
-    else begin
+    end else begin
       check_expr env bind_expr ann_ty ~reason:(Some (RAnnotation sp));
       ann_ty
     end

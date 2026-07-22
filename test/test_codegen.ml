@@ -4615,6 +4615,70 @@ end
     (let re = Str.regexp_string "DcB" in
      try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
 
+(** Bug: [Lower_state.resolve_iface_method] resolved an ambiguous
+    general-interface call using [List.assoc_opt tname impls] — first-match,
+    NOT collision-aware. When two modules declare same-short-name types
+    (here both called [Thing]) that both implement [Speak], [impls] under the
+    bare key "Thing" holds both candidates and [List.assoc_opt] silently
+    returns whichever was registered first, for EVERY ambiguous call site —
+    not just the ones that actually target that module. This resolution runs
+    at LOWER time, fully baking one static impl symbol into the EApp callee
+    BEFORE Mono.monomorphize's collision-aware [try_collision_dispatch] (which
+    generates a correct runtime tag-switch) ever sees the call.
+    [env.type_map] (the typechecker's own type representation, consulted
+    here) only knows the type by its BARE name ("Thing") — the
+    module-qualified identity ("NA.Thing" vs "NB.Thing") is attached later,
+    in the TIR/Mono layer — so this layer has no sound way to pick a winner
+    and MUST defer (return [None]) whenever the bare name is ambiguous.
+    Both `speak(NA.mk())` and `speak(NB.mk())` must therefore stay
+    UNRESOLVED (bare "speak" callee) after [Lower.lower_module] — not
+    prematurely (and identically) resolved to one impl symbol. Note: for this
+    exact program shape the wrong resolution happens to be masked
+    END-TO-END by an unrelated Mono guard (the interface-method-name-collision
+    check, mono.ml ~line 608) that re-verifies the call's actual argument type
+    against the picked impl's declared parameter type — but that guard exists
+    for a different bug (a user fn sharing a name with an interface method)
+    and is not a substitute for correct behavior at this layer; see
+    [test_mono_ecallptr_collision_dispatch]'s doc comment for a call shape
+    (ECallPtr, no fn_table entry) where no such guard exists. *)
+let test_ambiguous_iface_call_stays_unresolved_at_lower_time () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+    fn mk() do TA end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+    fn mk() do TB end
+  end
+  fn main() do
+    println(speak(NA.mk()))
+    println(speak(NB.mk()))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
+  let main_fn = List.find
+      (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = "main")
+      tir_module.March_tir.Tir.tm_fns in
+  let body_str = March_tir.Pp.string_of_fn_def main_fn in
+  Alcotest.(check bool) "no premature resolution to a concrete Speak impl" false
+    (ir_contains body_str "Speak$");
+  Alcotest.(check int) "both ambiguous calls stay bare `speak(...)`" 2
+    (ir_count body_str "speak(")
+
 (** Non-colliding types (the common case: a single declaring module per
     short name) must construct the exact same bare ctor key as before this
     task — highest-risk byte-identity guarantee. *)
@@ -8055,6 +8119,23 @@ let test_compiled_int_div_euclid_parity () =
     ~expected:"[3, -4, 4, -3]"
     ()
 
+(** int_mod_euclid: the Euclidean remainder must be non-negative in all four
+    sign quadrants. The runtime helper (march_checked_emod) previously used
+    unsigned `%`, which agrees with the interpreter only for a positive divisor;
+    for a NEGATIVE divisor it diverged (int_mod_euclid(-7, -3) → -7 compiled vs.
+    2 interpreted). This pins the fixed signed-Euclidean semantics. *)
+let test_compiled_int_mod_euclid_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_mod_euclid"
+    ~src:"mod IntModEuclidParity do\n\
+         \  fn main() do\n\
+         \    println([int_mod_euclid(7, 3), int_mod_euclid(-7, 3), \
+                        int_mod_euclid(-7, -3), int_mod_euclid(7, -3)])\n\
+         \  end\n\
+          end\n"
+    ~expected:"[1, 2, 2, 1]"
+    ()
+
 (** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
     the same value the interpreter produces. Pre-fix, `Cprop`'s `ELet` arm
     left the outer binding's literal mapping (`x -> 10`) in scope when the
@@ -8877,7 +8958,7 @@ declare double @march_checked_fdiv(double %a, double %b)
 ; Checked integer division/remainder — panic on a zero divisor (matches interpreter)
 declare i64    @march_checked_idiv(i64 %a, i64 %b)
 declare i64    @march_checked_imod(i64 %a, i64 %b)
-declare i64    @march_checked_umod(i64 %a, i64 %b)
+declare i64    @march_checked_emod(i64 %a, i64 %b)
 declare i64    @march_checked_ediv(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
@@ -9776,6 +9857,8 @@ let codegen_suites =
           test_colliding_impls_get_distinct_symbols;
         Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
           test_noncolliding_impl_symbol_stays_bare;
+        Alcotest.test_case "ambiguous iface call stays unresolved at lower time" `Quick
+          test_ambiguous_iface_call_stays_unresolved_at_lower_time;
       ]);
       ("dispatch: collision-conditional ctor construction key", [
         Alcotest.test_case "colliding ctor construction gets qualified key" `Quick
@@ -10051,6 +10134,8 @@ let codegen_suites =
             test_compiled_no_opt_prunes_unreachable;
           Alcotest.test_case "compiled int_div_euclid parity (all sign quadrants)" `Quick
             test_compiled_int_div_euclid_parity;
+          Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
+            test_compiled_int_mod_euclid_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
           Alcotest.test_case "compiled entry-module self-qualification parity" `Quick

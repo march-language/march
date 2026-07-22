@@ -543,6 +543,18 @@
  (modules test_ast_json)
  (libraries march_lexer march_parser march_ast march_desugar march_dump alcotest))
 
+; ── Internal-ty -> JSON encoder tests (emit-core-ast-v2 A1 Task 1) ────────
+(test
+ (name test_ty_json)
+ (modules test_ty_json)
+ (libraries march_test_helpers march_dump march_typecheck march_desugar alcotest))
+
+; ── HM scheme + instantiation witness tests (emit-core-ast-v2 A1 Task 2) ──
+(test
+ (name test_witnesses)
+ (modules test_witnesses)
+ (libraries march_test_helpers march_typecheck alcotest))
+
 ; ── `--emit-core-ast` golden test (emit-core-ast-a0 Task 3) ───────────────
 ; Subprocess-based (models test_oracle.ml's idiom): invokes the REAL built
 ; `march` binary's `--emit-core-ast` CLI flag against 4 corpus files from
@@ -1146,6 +1158,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_bool_field.expected native_closure_bool_field.out)))
 
+; ── Regression: RRB.push (Array's PVec/TrieNode/List(a) trie) with Float ────
+; elements crashed compiled on the SECOND push. lst_len's inner `go` discards
+; the list-head field via a wildcard pattern; the pattern-matrix compiler left
+; that field's synthetic TIR variable at the TVar "_" placeholder forever (a
+; NAMED field gets fixed up via ty_of_span and flows through monomorphization
+; normally — a discarded one never does), so Perceus's needs_rc check
+; conservatively inserted a dec_rc on it. For a concretely-Float
+; instantiation the field is really an unboxed double bit-reinterpreted as
+; ptr (no heap box), so that dec_rc read a tag field out of a raw float bit
+; pattern and SIGSEGV'd. Compile natively, run, diff stdout.
+(rule
+ (targets native_rrb_push_float native_rrb_push_float.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/rrb_push_float.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_rrb_push_float
+        native/rrb_push_float.march)
+   (with-stdout-to native_rrb_push_float.out
+        (system "./native_rrb_push_float")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/rrb_push_float.expected native_rrb_push_float.out)))
+
 ; ── Regression: `let (a, b) = rhs` must untag scalar tuple fields ───────────
 ; The match-pattern path bound fields at their concrete element type and untagged
 ; them; the let-destructure path bound them at TVar, so a tagged scalar field was
@@ -1322,6 +1367,85 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/atom_ctor_field.expected native_atom_ctor_field.out)))
+
+; ── Regression: TCO self-call must not free a freshly-allocated argument it ──
+; is itself forwarding into the next iteration (stdlib/toml.march
+; string_to_int_digits: String.split/String.join accumulator recursion
+; compiled 9000 -> 9). See test/native/tco_fresh_arg_decrc.march for the
+; full analysis. Compile natively, run, diff stdout.
+(rule
+ (targets native_tco_fresh_arg_decrc native_tco_fresh_arg_decrc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/tco_fresh_arg_decrc.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_tco_fresh_arg_decrc
+        native/tco_fresh_arg_decrc.march)
+   (with-stdout-to native_tco_fresh_arg_decrc.out
+        (system "./native_tco_fresh_arg_decrc")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tco_fresh_arg_decrc.expected native_tco_fresh_arg_decrc.out)))
+
+; ── Regression: stdlib/toml.march integer parsing compiled natively. No ──
+; compiled/native Toml coverage existed before this (test_toml.march via
+; test_stdlib_march.ml only runs interpreted). Compile natively, run, diff
+; stdout. See test/native/tco_fresh_arg_decrc.march for the underlying bug.
+(rule
+ (targets native_toml_get_int native_toml_get_int.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/toml_get_int.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_toml_get_int
+        native/toml_get_int.march)
+   (with-stdout-to native_toml_get_int.out
+        (system "./native_toml_get_int")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/toml_get_int.expected native_toml_get_int.out)))
+
+; ── Regression: `fn main(cap : Cap(IO)) : ()` compiles and runs (SIGBUS fix) ──
+(rule
+ (targets native_main_cap_io native_main_cap_io.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/main_cap_io.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_main_cap_io
+        native/main_cap_io.march)
+   (with-stdout-to native_main_cap_io.out
+        (system "./native_main_cap_io")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/main_cap_io.expected native_main_cap_io.out)))
 
 ; ── P6 regression: unboxed newtype (Counter(Int)) — construct + match across ──
 ; ── function boundaries with tagged scalar payload.  No heap allocation.     ──
@@ -1920,6 +2044,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))
+
+; ── Regression: an ambiguous general-interface call (same-short-name colliding
+; ── types) must not be silently resolved to whichever impl was registered
+; ── first at LOWER time — test_ambiguous_iface_call_stays_unresolved_at_lower_time
+; ── (test_codegen.ml) pins the TIR-level fix; this fixture is the end-to-end
+; ── runtime witness. Companion to test/imports/speak_collision_native.
+(rule
+ (targets native_iface_collision_ambiguous_call native_iface_collision_ambiguous_call.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/iface_collision_ambiguous_call.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_iface_collision_ambiguous_call
+        native/iface_collision_ambiguous_call.march)
+   (with-stdout-to native_iface_collision_ambiguous_call.out
+        (system "./native_iface_collision_ambiguous_call")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/iface_collision_ambiguous_call.expected native_iface_collision_ambiguous_call.out)))
 
 ; ── Regression: FFI Option return must use the compiler niche representation ─
 (rule
@@ -2996,3 +3148,106 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/closure_scalar_abi.expected native_closure_scalar_abi.out)))
+
+(rule
+ (targets native_float_generic_field_abi native_float_generic_field_abi.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/float_generic_field_abi.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_float_generic_field_abi
+        native/float_generic_field_abi.march)
+   (with-stdout-to native_float_generic_field_abi.out
+        (system "./native_float_generic_field_abi")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/float_generic_field_abi.expected native_float_generic_field_abi.out)))
+
+(rule
+ (targets native_string_to_float_option native_string_to_float_option.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/string_to_float_option.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_to_float_option
+        native/string_to_float_option.march)
+   (with-stdout-to native_string_to_float_option.out
+        (system "./native_string_to_float_option")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_option.expected native_string_to_float_option.out)))
+
+(rule
+ (targets native_html_safe_raw native_html_safe_raw.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/html_safe_raw.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_html_safe_raw
+        native/html_safe_raw.march)
+   (with-stdout-to native_html_safe_raw.out
+        (system "./native_html_safe_raw")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/html_safe_raw.expected native_html_safe_raw.out)))
+
+; ── Regression: Csv.read_all / each_row_with_header must not silently
+; return zero rows compiled — see test/native/csv_niche_row.march's header
+; comment for the full root cause (typecheck.ml declared csv_next_row's
+; return type as bare `CsvRow`, but the TIR registers the module-qualified
+; "Csv.CsvRow"; the name mismatch made niche classification silently fall
+; back to Boxed, which is incompatible with the runtime's NULL-for-EOF
+; convention). Compile, run, diff. ──
+(rule
+ (targets native_csv_niche_row native_csv_niche_row.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file ../stdlib/csv.march) (file ../stdlib/file.march)
+       (file native/csv_niche_row.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_csv_niche_row
+        native/csv_niche_row.march)
+   (with-stdout-to native_csv_niche_row.out
+        (system "./native_csv_niche_row")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))

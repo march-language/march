@@ -82,8 +82,8 @@ port = 5432
 ```march
 let db_host =
   match Toml.get_in(tv, ["database", "host"]) do
-    Some(TomlValue.Str(h)) -> h
-    _                      -> "localhost"
+    Some(TomlValue.TStr(h)) -> h
+    _                       -> "localhost"
   end
 ```
 
