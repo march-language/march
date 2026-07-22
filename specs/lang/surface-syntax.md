@@ -185,7 +185,7 @@ Rules:
 Works in function bodies, match arms, and lambda bodies:
 
 ```march
-fn process(items: List(String)): Result(List(Int), String) do
+fn process(items: List(String)): List(Result(Int, String)) do
   List.map(items, fn s ->
     let? n = parse(s)
     Ok(n * 2))
@@ -594,7 +594,7 @@ Functional update:
 
 ```march
 List.map(xs, fn x -> x + 1)   -- module-qualified call
-String.length(s)
+String.byte_size(s)
 p.x                            -- field access
 a.b.c                          -- chained field/module access
 ```
@@ -654,7 +654,7 @@ fn old_api() do ... end
 interface Eq(a) do
   fn eq: a -> a -> Bool
   fn neq: a -> a -> Bool do  -- default implementation
-    !eq(x, y)
+    fn (x, y) -> !eq(x, y)  -- default body's type is the FULL arrow type, not the return type
   end
 end
 
@@ -728,6 +728,8 @@ end
 ## FFI (Extern)
 
 ```march
+needs LibC, IO.Foreign
+
 extern "libc": Cap(LibC) do
   fn malloc(n: Int): Int
   fn free(ptr: Int): ()
@@ -775,8 +777,8 @@ Supervision block inside an actor:
 
 ```march
 actor App do
-  state {}
-  init {}
+  state { w : Int }
+  init { w: 0 }
   supervise do
     strategy one_for_one
     max_restarts 3 within 60
@@ -797,7 +799,7 @@ app MyApp do
   on_stop do
     Logger.info("stopping")
   end
-  Supervisor.spec(:one_for_one, [Worker])
+  Supervisor.spec(:one_for_one, [worker(Worker)])
 end
 ```
 
@@ -859,18 +861,18 @@ task_cancel_by_id(t)
 
 ```march
 protocol Transfer do
-  Client -> Server : Request(String)
-  Server -> Client : Response(Int)
+  Client -> Server : String
+  Server -> Client : Int
   loop do
-    Client -> Server : More(String)
-    Server -> Client : Ack()
+    Client -> Server : String
+    Server -> Client : Bool
   end
 end
 
 protocol Negotiation do
   choose by Client:
-    | accept -> Client -> Server : Accept()
-    | reject -> Client -> Server : Reject()
+    | accept -> Client -> Server : Bool
+    | reject -> Client -> Server : Bool
   end
 end
 ```
@@ -896,15 +898,18 @@ test "addition works" do
   assert (1 + 1 == 2)
 end
 
+-- setup/setup_all are module-level declarations, not nested inside describe
+setup do
+  -- runs before each test
+  ()
+end
+
+setup_all do
+  -- runs once before all tests
+  ()
+end
+
 describe "arithmetic" do
-  setup do
-    -- runs before each test in this describe block
-  end
-
-  setup_all do
-    -- runs once before all tests
-  end
-
   test "multiply" do
     assert (2 * 3 == 6)
   end
@@ -1075,20 +1080,18 @@ field-by-field as expected. Do not rely on derived `Ord`/`Hash` for any
 variant type whose constructors carry payload data that should affect
 ordering or hashing — write a manual `impl` instead.
 
-### Nested-module default-arg functions silently drop default values
+### Nested-module default-arg functions (fixed 2026-07-15)
 
-A `fn f(x, y \\ default)` defined at the top level of a module gets expanded
-by `expand_defaults_decl` (`lib/desugar/desugar.ml`) into mangled full-arity
-and short-arity wrapper decls, so calling with fewer arguments dispatches to
-a variant that supplies the default. That expansion only runs on top-level
-`DFn` decls. A default-arg function declared inside a *nested*
-`mod ... do ... end` never reaches `expand_defaults_decl`; instead it takes
-the `desugar_fn_def` fast path (same file) that just strips every
-`FPDefault` down to a required `FPNamed` — its own comment reads *"Default
-values are dropped here ... nested default-arg dispatch was never wired
-up"*. The nested function's real signature ends up requiring **all**
-parameters — the default expression is discarded entirely, not deferred or
-evaluated.
+Nested default-arg functions used to silently drop their default values (a
+`fn f(x, y \\ default)` inside a nested `mod ... do ... end` took a fast
+desugar path that stripped every default down to a required parameter), and
+separately, a default-arg function's own bare name couldn't be resolved from
+source at any arity (`I cannot find `add`` under `--check`). Both were fixed
+in the same slice (`specs/todos.md`, 2026-07-15, open-items plan Phase 7.1):
+`expand_defaults_decl` now recurses into nested modules, and the typechecker
+redirects an unbound `foo(args)` call to its arity-specific variant. Nested
+default-arg functions now behave identically to top-level ones, on both
+backends:
 
 ```march
 mod Main do
@@ -1097,36 +1100,12 @@ mod Main do
   end
 
   fn main() do
-    let partial = Inner.add(1)      -- typechecks as a partial application
-    println(int_to_string(partial(2, 3)))
+    println(int_to_string(Inner.add(1)))         -- 31
+    println(int_to_string(Inner.add(1, 5)))       -- 26
+    println(int_to_string(Inner.add(1, 5, 6)))    -- 12
   end
 end
 ```
-
-Calling `Inner.add(1)` alone in a context expecting `Int` fails typecheck
-(`expected Int but got Int -> Int -> Int`); calling it as a genuine partial
-application (as above) typechecks but crashes at runtime with `arity
-mismatch: expected 3 args, got 1` — there is no 1-arg or 2-arg overload for a
-nested default-arg function, unlike its top-level counterpart. (This
-replaced an earlier, worse bug — commit `92dadd92` — where the nested
-function boxed all parameters into a synthesized tuple and could
-use-after-free an erased closure parameter; the current behavior is safe but
-still incomplete.) Give nested default-arg functions all their arguments
-explicitly, or hoist them to the top level of the module.
-
-Note: this campaign also found — orthogonally — that even a *top-level*
-default-arg function's short name cannot be resolved from March source: the
-typechecker binds `DFn` declarations by their post-desugar name only (the
-mangled `f$N`), and never reconstructs the arity-dispatch overload set that
-the interpreter's env-builder and the TIR's `_default_dispatch` table build
-for themselves later in the pipeline. A source-level call like `add(1)` to a
-default-arg top-level function fails with `I cannot find `add`` under
-`--check`, `--compile`, and plain interpretation alike — at ANY arity,
-including full arity; only OCaml-level test harnesses that call
-`call_fn env "add" [...]` directly (bypassing name resolution) exercise the
-arity-dispatch machinery today. Filed as a P1 compiler bug in
-`specs/todos.md` (typecheck-level default-arg name resolution + the test
-gap).
 
 ### Reserved soft-keyword asymmetry: bindable but not referenceable
 
