@@ -422,10 +422,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
             ms.ms_in_arm_body <- false;
             dispatch after lexbuf
           | Parser.PIPE ->
-            (* Explicit pipe arm separator — emit NL as arm boundary *)
-            push_buf after lexbuf;
+            (* Explicit pipe arm separator, on its own line (`\n  | pat -> ...`):
+               the NL and PIPE together are ONE logical arm boundary, so the
+               PIPE itself becomes the (single) arm_sep token delivered to the
+               parser — it must NOT also be re-queued, or the parser sees a
+               second, unconsumed PIPE right after this NL/PIPE arm_sep and
+               gets stuck (`branch` has no production for a leading PIPE). *)
             ms.ms_in_arm_body <- false;
-            Parser.NL
+            Parser.PIPE
           | tok_after when is_pattern_start tok_after ->
             (* Could be a new arm or a body continuation.
                Use lookahead: pass tok_after as the first token, then
@@ -455,6 +459,12 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           (match after with
           | Parser.END ->
             dispatch after lexbuf
+          | Parser.PIPE ->
+            (* Leading pipe before the very first arm, on its own line
+               (`match x do\n  | pat -> ...`): same fix as the in-arm-body
+               PIPE case above — the PIPE is the arm_sep, not a token to
+               re-queue after a separately-emitted NL. *)
+            Parser.PIPE
           | other ->
             push_buf other lexbuf;
             Parser.NL)

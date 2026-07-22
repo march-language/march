@@ -1088,7 +1088,18 @@ expr:
         $startpos($3) }
   | MATCH; e = expr; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, branch); END
     { EMatch (e, bs, mk_span ($loc)) }
-  | MATCH; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, cond_branch); END
+  (* Split rather than `MATCH; DO; option(arm_sep); ...`: the shared
+     [option(arm_sep)] nonterminal (also used by [branch]'s and
+     [choose_branch]'s leading separator) merges, via LALR state sharing, the
+     epsilon (no-separator) case here with an unrelated derivation elsewhere
+     in the automaton — silently losing the epsilon-reduce to a shift for
+     nearly every lookahead token and rejecting the single-line, no-separator
+     cond form (`match do expr -> body end`). Spelling out both alternatives
+     explicitly keeps this production's states out of that shared automaton
+     path. See specs/lang/grammar.md §5.3 for the full trace. *)
+  | MATCH; DO; bs = separated_nonempty_list(arm_sep, cond_branch); END
+    { ECond (bs, mk_span ($loc)) }
+  | MATCH; DO; arm_sep; bs = separated_nonempty_list(arm_sep, cond_branch); END
     { ECond (bs, mk_span ($loc)) }
   | MATCH; _e = expr; DO; option(arm_sep); _bs = separated_nonempty_list(arm_sep, branch); error
     { error_raise
@@ -1247,7 +1258,18 @@ expr_no_bare_lambda:
         $startpos($3) }
   | MATCH; e = expr; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, branch); END
     { EMatch (e, bs, mk_span ($loc)) }
-  | MATCH; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, cond_branch); END
+  (* Split rather than `MATCH; DO; option(arm_sep); ...`: the shared
+     [option(arm_sep)] nonterminal (also used by [branch]'s and
+     [choose_branch]'s leading separator) merges, via LALR state sharing, the
+     epsilon (no-separator) case here with an unrelated derivation elsewhere
+     in the automaton — silently losing the epsilon-reduce to a shift for
+     nearly every lookahead token and rejecting the single-line, no-separator
+     cond form (`match do expr -> body end`). Spelling out both alternatives
+     explicitly keeps this production's states out of that shared automaton
+     path. See specs/lang/grammar.md §5.3 for the full trace. *)
+  | MATCH; DO; bs = separated_nonempty_list(arm_sep, cond_branch); END
+    { ECond (bs, mk_span ($loc)) }
+  | MATCH; DO; arm_sep; bs = separated_nonempty_list(arm_sep, cond_branch); END
     { ECond (bs, mk_span ($loc)) }
   | MATCH; _e = expr; DO; option(arm_sep); _bs = separated_nonempty_list(arm_sep, branch); error
     { error_raise

@@ -1,0 +1,24 @@
+mod P28CondSingleLineNoSeparator do
+  -- §5.3 cond form (`match do ... end`, no scrutinee): a single arm written
+  -- entirely on the SAME physical line as `match do` (no leading NL/PIPE
+  -- arm_sep before the first `cond_branch`) previously failed to parse,
+  -- always getting stuck exactly at the arm's `->`, regardless of the guard
+  -- expression's shape (bare bool, comparison, wildcard sugar all failed
+  -- identically). Root cause: not token_filter, but a genuine menhir
+  -- shift/reduce conflict — the shared `option(arm_sep)` nonterminal's
+  -- epsilon (no-separator) reduce at `MATCH DO .` was merged, via LALR state
+  -- sharing, with an unrelated derivation elsewhere in the automaton and lost
+  -- to a shift for nearly every lookahead token. Fixed in parser.mly by
+  -- spelling out the cond form's two `MATCH; DO; ...` alternatives (with and
+  -- without a leading arm_sep) explicitly instead of routing through
+  -- `option(arm_sep)`, which took the conflict count from 90 down to 9.
+  -- The identical arm moved to its own line already parsed fine before this
+  -- fix (see p26); this fixture is the single-line case specifically.
+  fn classify(x) do
+    match do x > 0 -> "pos" end
+  end
+
+  fn main() do
+    println(classify(1))
+  end
+end
