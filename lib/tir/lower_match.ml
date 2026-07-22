@@ -120,12 +120,20 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
        Once qualified upstream (here, before this pattern ever becomes a
        TIR [branch.br_tag]), [llvm_case.ml]'s [qualified_br_key] takes its
        exact-match [Hashtbl.mem ctx.Llvm_ctx.ctor_info br_tag] branch —
-       already correct, no change needed there. Only gated on
-       [Collision_set.is_colliding] (mirrors Task 3's gate exactly): a
-       non-colliding type's tag is unconditionally the old bare form, so
-       ordinary programs are byte-identical. A QUALIFIED tag the user
-       wrote directly (already contains '.') is left completely alone —
-       it carries its own disambiguating qualifier already. *)
+       already correct, no change needed there. Gated on membership in the
+       NARROW [Lower_state.shared_ctor_collision_tbl] (Task 5.5 — public,
+       impl-bearing collisions only, mirrors Task 3's [ECon] gate exactly),
+       NOT the broad [Collision_set.is_colliding]: a stdlib structural-interop
+       [ptype] (two [ptype Seq(a) = Seq(a)] declarations relied on for a
+       cross-module hand-off) collides by [Collision_set]'s measure but must
+       NOT be qualified here — construction (in the producing module) and this
+       consuming pattern must both stay bare so they agree via [ctor_entry]'s
+       suffix resolver rather than qualifying to two DIFFERENT modules. A
+       non-colliding (or non-public / impl-less colliding) type's tag is
+       unconditionally the old bare form, so ordinary programs are
+       byte-identical. A QUALIFIED tag the user wrote directly (already
+       contains '.') is left completely alone — it carries its own
+       disambiguating qualifier already. *)
     let tag =
       if String.contains tag '.' then tag
       else
@@ -134,7 +142,8 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
           (match v.Tir.v_ty with
            | Tir.TCon (type_name, _)
              when env.Lower_state.mod_prefix <> ""
-                  && Collision_set.is_colliding env.Lower_state.collision_set type_name ->
+                  && Lower_state.shared_ctor_collision_type
+                       env.Lower_state.mod_prefix tag <> None ->
              env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
            | _ -> tag)
         | _ -> tag

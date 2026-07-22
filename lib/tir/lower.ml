@@ -615,13 +615,21 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          enclosing module of THIS construction) produces the same
          qualified key [build_ctor_info] (llvm_toplevel.ml) already
          computes from [tm_types]' module-qualified type names — so the
-         two agree without a second collision-set computation. Only
-         gated on [Collision_set.is_colliding] (not on "is this ECon read
-         through a module"): a non-colliding type's key is unconditionally
-         the old bare form, so ordinary programs are byte-identical. *)
+         two agree without a second collision-set computation. Gated on
+         membership in the NARROW [Lower_state.shared_ctor_collision_tbl]
+         (Task 5.5 — public, impl-bearing collisions only), NOT the broad
+         [Collision_set.is_colliding]: a stdlib structural-interop [ptype]
+         (e.g. two [ptype Seq(a) = Seq(a)] declarations relied on for a
+         cross-module hand-off) collides by [Collision_set]'s measure but must
+         NOT be qualified — its construction and consuming pattern must both
+         stay bare so they agree via [ctor_entry]'s suffix resolver. A
+         non-colliding (or non-public / impl-less colliding) type's key is
+         unconditionally the old bare form, so ordinary programs are
+         byte-identical. The [env.mod_prefix <> ""] half of the gate stays. *)
       let ctor_key = match ty_of_span env span with
         | Tir.TCon (type_name, _) ->
-          if env.mod_prefix <> "" && Collision_set.is_colliding env.collision_set type_name
+          if env.mod_prefix <> ""
+             && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
           then env.mod_prefix ^ type_name ^ "." ^ short_tag
           else type_name ^ "." ^ short_tag
         | _ -> short_tag
@@ -929,6 +937,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     Collision_set.compute
       (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
   in
+  (* Task 5.5 (docs/superpowers/plans/2026-07-21-ctor-module-identity.md,
+     inserted fix): the NARROWER shared-ctor table that gates ONLY Tasks 3/4's
+     [ECon]/[br_tag] qualification (public + impl-bearing collisions), leaving
+     the broad [collision_set] above untouched for Task 1/2 and the earlier
+     plan's impl-symbol qualification. Computed from the SAME raw AST decls that
+     feed [collect_type_names]/[collision_set] (stdlib_context then m.mod_decls,
+     both at the top-level prefix), so the two stay in agreement about which
+     modules are in scope. See [Lower_state.compute_shared_ctor_collisions]. *)
+  Lower_state.compute_shared_ctor_collisions (stdlib_context @ m.mod_decls);
   (* env is constructed fresh here (module-scoped fields only — the
      reset-at-entry set, per the plan's landmine classification): [type_map]
      is set once from the caller's argument and never mutated again this

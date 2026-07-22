@@ -456,6 +456,47 @@ tests) / compiler 527 / codegen 441 / stdlib 810 (1 pre-existing
 environmental flake, `test_compiled_sanitize_clean_exit`, same as Task 2's) /
 snapshots 31, `git status test/snapshots/` empty.
 
+**Constructor module-qualified identity plan, Task 5.5 (2026-07-22,
+`lib/tir/lower_state.ml` + `lower.ml` + `lower_match.ml`) landed — the native
+mirror of Task 5's two-gate narrowing.** Native's Tasks 3/4 (ECon construction
+key + pattern `br_tag` qualification) had the SAME over-broad bug the
+interpreter's Task 5 fixed: they qualified ANY `Collision_set.is_colliding`
+short name with NO visibility / impl-presence filter, breaking the
+`stdlib/seq.march` + `stdlib/file.march` `ptype Seq(a) = Seq(a)`
+structural-interop pattern. **Confirmed end-to-end, not theorized:** a
+church-encoded two-module `ptype Seq` repro (`Producer.make` hands a `Seq` to
+`Consumer.sum`, exactly how `File.with_lines` feeds `Seq.map`/`Seq.to_list`)
+compiled with the HEAD compiler → `panic: non-exhaustive pattern match`
+(construction qualified to `Producer.Seq.Seq`, the consuming pattern to
+`Consumer.Seq.Seq` — divergent codegen tags); with the fix → prints `6`,
+matching the interpreter. **Fix:** a NEW narrow module-level table
+(`Lower_state.shared_ctor_collision_tbl`, `(module_prefix, ctor_name) ->
+short_type_name`), populated by `compute_shared_ctor_collisions` from the SAME
+AST decls that feed `Collision_set.compute`, applying the identical two filters
+as `eval.ml`'s `compute_type_collision_set` (PUBLIC-only + short name must have
+an `impl` anywhere). ONLY Tasks 3/4's two gates consult it; the broad
+`env.collision_set` (Task 1 global tags, Task 2 forced-Boxed repr, the earlier
+FQN-impl plan's impl-symbol qualification in `collect_iface_impls`) is
+UNTOUCHED. **Native mechanism differs from the interpreter's:** a `ptype`'s
+construction and consuming pattern now both stay bare and re-converge on ONE
+`ctor_info` entry via `llvm_data.ctor_entry`'s deterministic suffix resolver
+(the non-shared ctor `OnlyA` already relied on that resolver, unique-match), so
+no `build_ctor_info` change was needed. The impl-presence filter DID change one
+existing native test: `test_colliding_pattern_match_module_level_fn_gets_qualified_tag`
+(Shape 1, two PUBLIC colliding `Thing`s with NO `impl`) now correctly stays
+bare — updated + renamed to `..._impl_less_stays_bare` (matches the interpreter,
+whose every colliding-ctor test carries an `impl`; harmless because with no
+`impl` there is no dispatch ambiguity and well-typed code never mixes the two
+types). The plan-target shape (Shape 2, both `impl Speak(Thing)`) still
+qualifies. `test_compiled_mpst_relay_parity`/`..._distinct_parity` still pass
+(native was already immune — role tokens lower to bare string literals, never
+reaching a ctor-tag gate — so the impl filter is defensive there). **1 new
+`test/test_codegen.ml` test** (`test_ptype_structural_interop_ctor_key_stays_bare`,
+TDD RED→GREEN). Suite: eval 237 / compiler 527 / **codegen 442** (+1) / stdlib
+810 (same 1 pre-existing `test_compiled_sanitize_clean_exit` ASAN-teardown
+environmental flake as Tasks 2/5 — a no-type/no-ctor program my change cannot
+affect) / snapshots 31, `git status test/snapshots/` empty.
+
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
 **`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the

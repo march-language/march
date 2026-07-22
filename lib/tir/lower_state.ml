@@ -175,6 +175,136 @@ let empty_env : env = {
   collision_set = Hashtbl.create 0;
 }
 
+(* ── Task 5.5 (docs/superpowers/plans/2026-07-21-ctor-module-identity.md,
+   inserted fix): narrow shared-ctor collision table for native ctor-key
+   qualification ────────────────────────────────────────────────────────────
+
+   Tasks 3/4 of this plan qualified ctor identity ([Lower.lower_expr]'s [ECon]
+   → [EAlloc] key, [Lower_match.pat_tag_and_subs]'s pattern [br_tag]) for ANY
+   two same-short-name TIR types — gated only on [Collision_set.is_colliding],
+   with NO filter for visibility ([type] vs [ptype]) or for whether either
+   candidate is ever the subject of an [impl]. That broke a real, deliberate
+   stdlib structural-interop pattern: [stdlib/seq.march] and [stdlib/file.march]
+   EACH independently declare [ptype Seq(a) = Seq(a)] — same short name, same
+   sole ctor — on purpose. [File.with_lines]'s callback constructs a [File.Seq]
+   value the CALLER then feeds through [Seq.map]/[Seq.to_list] (a DIFFERENT
+   module's functions), relying on STRUCTURAL shape, not nominal identity.
+   Tasks 3/4's lexical qualification split the hand-off: construction qualified
+   to "File.Seq.Seq", the consuming pattern (inside seq.march's own functions)
+   to "Seq.Seq.Seq" — a genuine tag mismatch → "panic: non-exhaustive pattern
+   match" when compiled.
+
+   This is the native mirror of the interpreter's own Task 5 fix
+   ([lib/eval/eval.ml]'s [compute_type_collision_set] /
+   [colliding_ctor_type_by_module] / [colliding_shared_ctor_type]): a NEW,
+   narrower table gated on two filters — PUBLIC candidates only (a [ptype] is
+   module-internal by construction, only ever used via its shape, never
+   nominally identified from outside its own module), AND the short name must
+   have at least one [impl] block anywhere in the program (the shape that
+   creates observable dispatch ambiguity; excludes plain marker/sentinel types
+   like MPST role tokens that merely share a name with an unrelated stdlib
+   type). Only [ECon]/[br_tag] qualification consults this table.
+   [Collision_set.compute] itself, and every OTHER consumer of [env.collision_set]
+   (Task 1's global runtime tags, Task 2's forced-Boxed repr, the earlier
+   FQN-impl plan's impl-symbol qualification in [collect_iface_impls]) see ZERO
+   behavior change — they still key on the broader [collision_set]. *)
+
+(** [(module_prefix, ctor_name)] → declaring type's short name, for SHARED
+    constructors of PUBLIC, impl-bearing same-short-name collisions ONLY.
+    Module-level (like [_iface_methods]/[_use_aliases]): reset + repopulated
+    once per [lower_module] call by [compute_shared_ctor_collisions] from the
+    SAME AST decls that feed [Collision_set.compute], never touched by the lazy
+    stdlib loader (which reuses the top-level [env]). *)
+let shared_ctor_collision_tbl : (string * string, string) Hashtbl.t =
+  Hashtbl.create 16
+
+(** [Some short_type_name] iff [ctor_name] constructed / matched BARE from
+    module [module_prefix] should be collision-qualified — see
+    [shared_ctor_collision_tbl]. *)
+let shared_ctor_collision_type (module_prefix : string) (ctor_name : string)
+  : string option =
+  Hashtbl.find_opt shared_ctor_collision_tbl (module_prefix, ctor_name)
+
+(** Populate [shared_ctor_collision_tbl] from [decls], mirroring
+    [lib/eval/eval.ml]'s [compute_type_collision_set] exactly (descend into
+    [DMod], accumulating a "Sub.Sub2." prefix; collect each
+    [DType]/[DAlwaysLinearType]'s declaring-module-qualified name, visibility,
+    and (for [TDVariant]s) its ctor names; collect the short names that are the
+    target of any [DImpl]). For each short name with >= 2 distinct declarations:
+    if it has NO impl anywhere, skip; else keep only PUBLIC candidates, count
+    how many DISTINCT public candidates declare each ctor name, and register
+    [(module_prefix, ctor_name) -> short] for every ctor shared by >= 2 public
+    candidates. Deliberately does NOT walk [DActor] (mirroring the interpreter,
+    which does not either): actor-generated message types never participate in
+    the public+impl shared-ctor pattern. NOTE: like the interpreter, a
+    module-qualified impl target ([impl Foo(DcA.Thing)]) is keyed by its written
+    name ("DcA.Thing"), not stripped to "Thing" — a disclosed shared limitation;
+    the in-scope [impl Speak(Thing)] shape (bare target) is handled. *)
+let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
+  Hashtbl.reset shared_ctor_collision_tbl;
+  (* short type name -> (module_prefix, qualified_name, visibility, ctor_names)
+     list, one entry per distinct qualified declaration seen. *)
+  let by_short : (string, (string * string * Ast.visibility * string list) list) Hashtbl.t =
+    Hashtbl.create 16 in
+  (* Short type names with at least one `impl` block anywhere in the program. *)
+  let types_with_any_impl : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let add_qualified prefix qualified vis ctor_names =
+    let short = match String.rindex_opt qualified '.' with
+      | None   -> qualified
+      | Some i -> String.sub qualified (i + 1) (String.length qualified - i - 1)
+    in
+    let existing = match Hashtbl.find_opt by_short short with Some l -> l | None -> [] in
+    if not (List.exists (fun (_, q, _, _) -> q = qualified) existing) then
+      Hashtbl.replace by_short short ((prefix, qualified, vis, ctor_names) :: existing)
+  in
+  let rec walk prefix ds =
+    List.iter (function
+        | Ast.DType (vis, name, _, type_def, _)
+        | Ast.DAlwaysLinearType (vis, name, _, type_def, _) ->
+          let ctor_names = match type_def with
+            | Ast.TDVariant variants ->
+              List.map (fun (v : Ast.variant) -> v.Ast.var_name.txt) variants
+            | _ -> []
+          in
+          add_qualified prefix (prefix ^ name.txt) vis ctor_names
+        | Ast.DImpl (idef, _) ->
+          let impl_short = match idef.Ast.impl_ty with
+            | Ast.TyCon (n, _) -> n.txt
+            | Ast.TyVar n      -> n.txt
+            | _                -> ""
+          in
+          if impl_short <> "" then Hashtbl.replace types_with_any_impl impl_short ()
+        | Ast.DMod (sub, _, inner, _) -> walk (prefix ^ sub.txt ^ ".") inner
+        | _ -> ()
+      ) ds
+  in
+  walk "" decls;
+  Hashtbl.iter (fun short candidates ->
+      if List.length candidates >= 2 then begin
+        let public_candidates =
+          if not (Hashtbl.mem types_with_any_impl short) then []
+          else List.filter (fun (_, _, vis, _) -> vis = Ast.Public) candidates
+        in
+        (* How many DISTINCT public candidates declare each ctor name (dedup
+           within one candidate's own list first). *)
+        let ctor_counts : (string, int) Hashtbl.t = Hashtbl.create 8 in
+        List.iter (fun (_, _, _, ctors) ->
+            List.iter (fun c ->
+                let n = match Hashtbl.find_opt ctor_counts c with Some n -> n | None -> 0 in
+                Hashtbl.replace ctor_counts c (n + 1)
+              ) (List.sort_uniq String.compare ctors)
+          ) public_candidates;
+        List.iter (fun (prefix, _, _, ctors) ->
+            List.iter (fun c ->
+                match Hashtbl.find_opt ctor_counts c with
+                | Some n when n >= 2 ->
+                  Hashtbl.replace shared_ctor_collision_tbl (prefix, c) short
+                | _ -> ()
+              ) ctors
+          ) public_candidates
+      end
+    ) by_short
+
 (** Look up the TIR type for an expression from the env's type_map.
     Falls back to [unknown_ty] when no type_map is set or the span
     is not present (e.g. spans introduced by desugaring). *)
