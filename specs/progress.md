@@ -283,6 +283,77 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, compositional general-interface self-dispatch fix — `impl Iface(Wrap(a)) when Iface(a)`-shaped bodies now dispatch recursive same-name calls by runtime type on both backends)
+
+**Found auditing `specs/lang/surface-syntax.md`'s Implementations section against
+the compiler.** The doc's own example shape (`impl Eq(List(a)) when Eq(a) do
+... end`) is the natural, idiomatic pattern for ANY compositional interface
+impl, but a minimal repro using a NEW user interface (`MyEq`, deliberately
+distinct from the four builtin-dispatched interfaces Show/Eq/Ord/Hash) with
+that same shape exposed two independent, real bugs — one per backend, neither
+a sub-case of the FQN impl-dispatch-identity work despite the compiler-side
+ICE surfacing in the SAME `llvm_case.ml` dispatch-fn codegen that work added.
+
+**Interpreted (`lib/eval/eval.ml`):** `impl MyEq(Wrap(a)) when MyEq(a))`'s
+`eq` calling `eq(x, y)` on the unwrapped element re-entered `Wrap`'s OWN `eq`
+(a non-exhaustive-match panic once `x`/`y` are plain `Int`s) instead of
+dispatching by their runtime type. Root cause: `DImpl` handling built every
+non-zero-param impl method as a SELF-RECURSIVE closure UNLESS the interface
+was one of the four builtin-dispatched ones (Show/Eq/Ord/Hash — which already
+got a non-self-referential closure so recursive calls route through the
+builtin `eq`/`compare`/`show`/`hash` dispatch), so a general user interface's
+compositional body silently shadowed its own per-method dispatcher. Compounded
+by an undiscovered DUPLICATE of this exact logic: a source file's single
+top-level `mod X do ... end` is unwrapped by the PARSER (`lib/parser/parser.mly`),
+so its decls are processed by `make_recursive_env`'s own byte-for-byte copy of
+`DImpl` handling, not via `eval_decl`'s `DMod` recursion — a prior fix for the
+same self-recursion hazard (the Show/Eq/Ord/Hash non-self-referential-closure
+special case) had evidently been applied to both copies by hand, but keeping
+two copies in sync is exactly the kind of thing that silently drifts. Fixed by
+(1) giving every GENERAL (non-builtin-named) interface method the same
+non-self-referential-closure treatment, over an environment where the method
+name is bound to its per-(iface,method) dispatcher — created idempotently, so
+this is independent of impl declaration order — and (2) deleting the
+`make_recursive_env` duplicate outright in favor of delegating to `eval_decl`.
+
+**Compiled (`lib/tir/llvm_case.ml`/`lib/tir/mono.ml`/`lib/tir/lower.ml`):**
+`internal compiler error: Failure("interface dispatch fn
+__march_ifdispatch$MyEq$eq$Int has no runtime-tag rows")`. Root cause:
+`Lower_state`'s `_iface_methods` dispatch table keys rows by BARE method name
+only, never by interface — so a user interface's method sharing a literal
+name with an unrelated interface (here: the compiler's own synthesized
+primitive `Eq$Int.eq`/`Eq$Float.eq`/… rows that `lower.ml`'s builtin-iface
+injection block registers under bare `"eq"` so stdlib's `Eq(List(a)) when
+Eq(a))` etc. can dispatch to primitives) lands in the SAME bucket.
+`Mono.try_collision_dispatch` — built for a DIFFERENT ambiguity (one
+interface's impl colliding across two SAME-SHORT-NAME types declared by
+different modules, the FQN dispatch-identity work) — then mistook the two
+DIFFERENT interfaces' `Int` rows for competing impls of one ambiguous type and
+tried to build a runtime constructor-tag switch over a bare `Int` (no ADT tags
+to switch on), producing "has no runtime-tag rows" instead of a wrong answer.
+Fixed in `lower.ml`'s `collect_iface_impls`: a GENERAL (non-Show/Eq/Ord/Hash)
+interface impl body now has its bare self-referencing calls qualified to
+`"Iface.method"`, reusing the qualified-key row `collect_iface_impls` already
+registers per impl, so the call resolves only against that interface's own
+rows and never collides with an unrelated interface's same-named method.
+Builtin-named interfaces are deliberately excluded — their primitive rows are
+registered under the bare name only, so qualifying would leave e.g.
+`Eq(List(a))`'s recursive `eq` on an `Int` element unresolved (verified no
+regression post-fix: `[1,2,3] == [1,2,3]` and `Some(1) == Some(1)` both still
+work on both backends).
+
+**Verification beyond the minimal repro** (per-shape, both backends,
+correct-answer verified, not just "doesn't crash"): declaration-order
+reversal (`Wrap`'s impl declared BEFORE `Int`'s — the interpreter fix's
+dispatcher-idempotency and the compiler fix's two-pass `collect_iface_impls`
+are both order-independent by construction), three-level nesting
+(`Wrap(Wrap(Wrap(Int)))`), and a two-constraint `when` clause
+(`impl MyEq(Pair(a,b)) when MyEq(a), MyEq(b)`). Full suite: compiler 527 /
+eval 238 / codegen 438 / stdlib 780 (quick) — all green; snapshots 31 (2
+pre-existing failures — `tuple_atom_string_arms`/`scrutinee_borrowed_conservatism`
+at the perceus stage — confirmed present on an unmodified baseline via a
+file-copy A/B swap, unrelated to this fix, not introduced by it).
+
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 
 **`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
