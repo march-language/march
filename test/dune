@@ -2016,6 +2016,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/iface_method_collision.expected native_iface_method_collision.out)))
 
+; ── Regression: an ambiguous general-interface call (same-short-name colliding
+; ── types) must not be silently resolved to whichever impl was registered
+; ── first at LOWER time — test_ambiguous_iface_call_stays_unresolved_at_lower_time
+; ── (test_codegen.ml) pins the TIR-level fix; this fixture is the end-to-end
+; ── runtime witness. Companion to test/imports/speak_collision_native.
+(rule
+ (targets native_iface_collision_ambiguous_call native_iface_collision_ambiguous_call.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/iface_collision_ambiguous_call.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_iface_collision_ambiguous_call
+        native/iface_collision_ambiguous_call.march)
+   (with-stdout-to native_iface_collision_ambiguous_call.out
+        (system "./native_iface_collision_ambiguous_call")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/iface_collision_ambiguous_call.expected native_iface_collision_ambiguous_call.out)))
+
 ; ── Regression: FFI Option return must use the compiler niche representation ─
 (rule
  (targets native_ffi_option native_ffi_option.out)

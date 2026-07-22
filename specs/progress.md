@@ -283,6 +283,43 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
+
+**`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
+Mono's collision-aware runtime dispatch instead of silently picking a
+first-registered impl.** Found as a side effect of a follow-on constructor
+module-qualified-identity investigation, but independent of and already
+present before that work — part of the FQN dispatch-identity Stages 1-3 PR
+(see the 2026-07-21/2026-07-20 entries below). When two modules declare
+same-short-name types (e.g. `NA.Thing`/`NB.Thing`) that both `impl` the same
+general interface, `resolve_iface_method` resolved the call's concrete type
+via `List.assoc_opt tname impls` — first-match, not collision-aware — so
+`impls` under the bare key `"Thing"` held both candidates and every ambiguous
+call site got baked, at LOWER time, to whichever impl happened to be
+registered first, before `Mono.monomorphize`'s collision-aware
+`try_collision_dispatch` (which generates a correct runtime tag-switch) ever
+ran. `env.type_map`, the only type information available at this layer, only
+carries the type's BARE name — the module-qualified identity is attached
+later, in the TIR/Mono layer — so this layer has no sound way to pick a
+winner and must defer. For the reported repro shape, the wrong resolution
+happened to be masked end-to-end by an unrelated Mono guard (the
+interface-method-name-collision check, added for a different bug), so this
+was a real but latent miscompile risk rather than an observed wrong answer in
+every call shape (e.g. `ECallPtr` sites with no `fn_table` entry have no such
+guard). Fix: `resolve_iface_method` now dedups `impls` by mangled symbol
+under the queried type name and returns `Some` only when exactly one distinct
+impl remains, `None` (deferring to Mono) when ≥2 — mirroring the `uniq >= 2`
+gate `Mono.try_collision_dispatch` already uses. Collision-conditional only;
+non-colliding call sites are byte-identical. New coverage: lower-only unit
+test `test_ambiguous_iface_call_stays_unresolved_at_lower_time`
+(`test/test_codegen.ml`) proving both calls stay as a bare, unresolved
+`speak(...)` callee post-lowering; end-to-end runtime witness
+`test/native/iface_collision_ambiguous_call.march` (compile-and-run golden).
+Full suite green: compiler 524 / eval 238 / codegen 438 / stdlib 814 (one
+pre-existing, unrelated `MARCH_SANITIZE` ASAN-altstack-teardown environmental
+hang, confirmed present before this change via zombie processes dated hours
+prior). Details: `specs/todos.md` "Recently fixed"; design context:
+`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`.
 ## Current State (as of 2026-07-21, WebSocket connection-stability fix — non-blocking socket mode no longer leaks into the blocking WS handler)
 
 - **`lib/eval/eval.ml`'s interpreter WebSocket server (`http_server_listen`/`run_http_event_loop`) no longer disconnects idle WS clients.** The 2026-07-07 event-loop fix above put every accepted socket in non-blocking mode for its multiplexed HTTP accept loop but never cleared that flag before handing the fd to the WS handler closure, despite its own comment claiming the handoff was "blocking, exactly as before this fix." `ws_recv_frame`'s catch-all exception handler then silently turned the resulting `EAGAIN`/`EWOULDBLOCK` (raised by `Unix.recv` racing an idle/still-in-flight client) into a synthesized `Close(1001, "going away")` — observed as `forge scroll.serve` notebooks flipping to "disconnected" almost immediately after loading. Fix: `Unix.clear_nonblock sock` right before the WS handshake response is written (`http_run_pipeline_and_respond`). The compiled runtime (`runtime/march_http.c` `connection_thread`) had the same bug class with a different trigger: the 10s keep-alive `SO_RCVTIMEO` set at connection-thread startup was never cleared before the WS handoff, so an idle compiled WS connection would time out and get the same spurious synthesized close after 10s; fixed by resetting `SO_RCVTIMEO` to `{0,0}` at the same handoff point, matching the evloop server variant's existing `ws_handler_thread`, which already explicitly clears `O_NONBLOCK` there. Verified with a controlled WS client: idle connections now stay open 60s+ (previously died near-instantly), and a full `load`→`run`→`poll_run` round trip completes with the connection still open afterward. See `specs/todos.md` "Recently fixed" for the full writeup, including a separately-noticed (not fixed here) RFC 6455 Pong-payload-echo gap.

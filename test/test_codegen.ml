@@ -4545,6 +4545,70 @@ end
   Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
     (List.mem "Speak$Thing.speak" fn_names)
 
+(** Bug: [Lower_state.resolve_iface_method] resolved an ambiguous
+    general-interface call using [List.assoc_opt tname impls] — first-match,
+    NOT collision-aware. When two modules declare same-short-name types
+    (here both called [Thing]) that both implement [Speak], [impls] under the
+    bare key "Thing" holds both candidates and [List.assoc_opt] silently
+    returns whichever was registered first, for EVERY ambiguous call site —
+    not just the ones that actually target that module. This resolution runs
+    at LOWER time, fully baking one static impl symbol into the EApp callee
+    BEFORE Mono.monomorphize's collision-aware [try_collision_dispatch] (which
+    generates a correct runtime tag-switch) ever sees the call.
+    [env.type_map] (the typechecker's own type representation, consulted
+    here) only knows the type by its BARE name ("Thing") — the
+    module-qualified identity ("NA.Thing" vs "NB.Thing") is attached later,
+    in the TIR/Mono layer — so this layer has no sound way to pick a winner
+    and MUST defer (return [None]) whenever the bare name is ambiguous.
+    Both `speak(NA.mk())` and `speak(NB.mk())` must therefore stay
+    UNRESOLVED (bare "speak" callee) after [Lower.lower_module] — not
+    prematurely (and identically) resolved to one impl symbol. Note: for this
+    exact program shape the wrong resolution happens to be masked
+    END-TO-END by an unrelated Mono guard (the interface-method-name-collision
+    check, mono.ml ~line 608) that re-verifies the call's actual argument type
+    against the picked impl's declared parameter type — but that guard exists
+    for a different bug (a user fn sharing a name with an interface method)
+    and is not a substitute for correct behavior at this layer; see
+    [test_mono_ecallptr_collision_dispatch]'s doc comment for a call shape
+    (ECallPtr, no fn_table entry) where no such guard exists. *)
+let test_ambiguous_iface_call_stays_unresolved_at_lower_time () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = TA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+    fn mk() do TA end
+  end
+  mod NB do
+    type Thing = TB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+    fn mk() do TB end
+  end
+  fn main() do
+    println(speak(NA.mk()))
+    println(speak(NB.mk()))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir_module = March_tir.Lower.lower_module ~type_map m in
+  let main_fn = List.find
+      (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = "main")
+      tir_module.March_tir.Tir.tm_fns in
+  let body_str = March_tir.Pp.string_of_fn_def main_fn in
+  Alcotest.(check bool) "no premature resolution to a concrete Speak impl" false
+    (ir_contains body_str "Speak$");
+  Alcotest.(check int) "both ambiguous calls stay bare `speak(...)`" 2
+    (ir_count body_str "speak(")
+
 (** Task 4: two same-short-name colliding types implementing one GENERAL
     interface must, at a call site whose static (bare) argument type is
     ambiguous, dispatch on the value's RUNTIME constructor tag — not
@@ -9355,6 +9419,8 @@ let codegen_suites =
           test_colliding_impls_get_distinct_symbols;
         Alcotest.test_case "non-colliding impl symbol stays bare" `Quick
           test_noncolliding_impl_symbol_stays_bare;
+        Alcotest.test_case "ambiguous iface call stays unresolved at lower time" `Quick
+          test_ambiguous_iface_call_stays_unresolved_at_lower_time;
       ]);
       ("dispatch: colliding general-iface runtime tag switch", [
         Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick
