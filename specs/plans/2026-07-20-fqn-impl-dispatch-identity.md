@@ -8,14 +8,25 @@ module-qualified impl symbols (bd… Task 3), runtime tag-switch dispatch
 flag-day that drops the builtin-only coherence gate so ALL interfaces get the
 declaring-module relaxation (this commit). Witnesses: `accept/t89`
 (typecheck) and `test/imports/speak_collision_native` (cross-backend runtime,
-interpreted + compiled). **Narrowed residual gap (Task 6b, 2026-07-21; tracked
-separately):** when two colliding same-short-name types ALSO share a CONSTRUCTOR
-name (a "double collision"), this specific shape is now REJECTED at typecheck (a
-safe compile error) rather than silently misdispatching — `register_impl_shape`
-only relaxes coherence when the two colliding types' constructor NAME sets are
-disjoint (reject witness `reject/t82_impl_coherence_shared_ctor_double_collision`).
-Making these programs actually WORK still needs the `ci_module.Type.Ctor` extra
-qualification layer described below, which was NOT built in this slice. Implementation companion to
+interpreted + compiled). **Residual gap NOW CLOSED (constructor module-qualified
+identity plan, flag-day 2026-07-22):** the "double collision" — two colliding
+same-short-name types that ALSO share a CONSTRUCTOR name (e.g. both
+`type Thing = Shared | …`) — was interim-REJECTED at typecheck by a Task-6b
+stopgap (`register_impl_shape`'s `ctor_sets_disjoint` check) while dispatch still
+routed on the BARE ctor tag. The follow-on constructor module-qualified identity
+plan (see `docs/superpowers/specs/2026-07-21-ctor-module-identity-design.md`)
+gave constructors a `ci_module.Type.Ctor`-qualified identity threaded through
+native `ECon`/pattern-match lowering (`lib/tir/lower.ml`, Tasks 3-4) and the
+interpreter's `VCon` tag (Task 5), collision-conditional and narrowed to PUBLIC
+impl-bearing collisions (Task 5.5). Its flag-day (Task 6) dropped BOTH the
+Task-6b `ctor_sets_disjoint` stopgap AND Task 0's `MARCH_DEV_RELAX_CTOR_COHERENCE`
+dev harness, so `register_impl_shape` now relaxes coherence unconditionally.
+Fixture `reject/t82_impl_coherence_shared_ctor_double_collision` flipped to
+`accept/t90`; new cross-backend runtime witness
+`test/imports/speak_double_collision_native` (interpreted + compiled). Landing
+commits: `d6687c7c` (T0), `56ebc5bb` (T1), `75e210ef`/`3a131622` (T2),
+`fca15e69`/`02fa0cba` (T3), `9d41078e` (T4), `e907ad1d`/`344d942b` (T5),
+`ed7893a7` (T5.5), plus the T6 flag-day commit. Implementation companion to
 `specs/plans/2026-07-17-fqn-type-ctor-identity.md` (the umbrella FQN overhaul)
 and `specs/plans/2026-07-17-interface-impl-coherence.md` (the coherence check
 itself). This doc resolves the specific slice the umbrella doc names as

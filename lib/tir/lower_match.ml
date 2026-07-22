@@ -94,7 +94,8 @@ let span_of_pat : Ast.pattern -> Ast.span = function
       - Atom literal / pattern     → ":name"             (leading ':')
       - Float literal (NEW)        → "#<hex-float>"      (leading '#') —
         see below. *)
-let pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
+let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.pattern)
+  : (string * Ast.pattern list) option =
   match pat with
   | Ast.PatCon ({ txt = tag; _ }, subs) ->
     (* Keep the constructor pattern's FULL text (e.g. "Inline.Text", "T.B").
@@ -103,7 +104,50 @@ let pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
        Stripping to the bare name here loses that qualifier, so a bare ctor name
        that collides with another type's constructor (e.g. stdlib Xml.XmlNode.Text)
        resolves ambiguously to the wrong tag when the scrutinee type was not
-       propagated to codegen. *)
+       propagated to codegen.
+
+       Collision-conditional module qualification (Task 4 of
+       docs/superpowers/plans/2026-07-21-ctor-module-identity.md — the
+       pattern-side counterpart of Task 3's [ECon]/[EAlloc] fix in
+       [Lower.lower_expr]): a BARE tag (no '.' — the user wrote a plain
+       `Shared`, not a qualified `DcA.Thing.Shared`) matched against a
+       scrutinee whose [Tir.ty] is a colliding [TCon(type_name, _)] (per
+       the whole plan's "TCon stays bare" invariant, [type_name] alone
+       cannot distinguish DcA.Thing from DcB.Thing) is qualified here by
+       [env.mod_prefix] — the LEXICAL enclosing module of the match
+       expression THIS pattern belongs to — into the SAME
+       "Mod.Type.Ctor" form Task 3 already produces for construction.
+       Once qualified upstream (here, before this pattern ever becomes a
+       TIR [branch.br_tag]), [llvm_case.ml]'s [qualified_br_key] takes its
+       exact-match [Hashtbl.mem ctx.Llvm_ctx.ctor_info br_tag] branch —
+       already correct, no change needed there. Gated on membership in the
+       NARROW [Lower_state.shared_ctor_collision_tbl] (Task 5.5 — public,
+       impl-bearing collisions only, mirrors Task 3's [ECon] gate exactly),
+       NOT the broad [Collision_set.is_colliding]: a stdlib structural-interop
+       [ptype] (two [ptype Seq(a) = Seq(a)] declarations relied on for a
+       cross-module hand-off) collides by [Collision_set]'s measure but must
+       NOT be qualified here — construction (in the producing module) and this
+       consuming pattern must both stay bare so they agree via [ctor_entry]'s
+       suffix resolver rather than qualifying to two DIFFERENT modules. A
+       non-colliding (or non-public / impl-less colliding) type's tag is
+       unconditionally the old bare form, so ordinary programs are
+       byte-identical. A QUALIFIED tag the user wrote directly (already
+       contains '.') is left completely alone — it carries its own
+       disambiguating qualifier already. *)
+    let tag =
+      if String.contains tag '.' then tag
+      else
+        match scrut with
+        | Tir.AVar v ->
+          (match v.Tir.v_ty with
+           | Tir.TCon (type_name, _)
+             when env.Lower_state.mod_prefix <> ""
+                  && Lower_state.shared_ctor_collision_type
+                       env.Lower_state.mod_prefix tag <> None ->
+             env.Lower_state.mod_prefix ^ type_name ^ "." ^ tag
+           | _ -> tag)
+        | _ -> tag
+    in
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->
     Some (Tir_names.tuple_tag (List.length subs), subs)
@@ -285,7 +329,7 @@ and compile_matrix_impl
       List.iter (fun (pats, body) ->
           match pats with
           | fp :: rest_pats ->
-            (match pat_tag_and_subs fp with
+            (match pat_tag_and_subs env scrut fp with
              | None ->
                (* [ctor_rows] only ever contains non-trivial first-column
                   patterns (split_at_trivial routed every PatWild/PatVar/PatAs

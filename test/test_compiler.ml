@@ -690,17 +690,21 @@ let test_impl_coherence_same_module_duplicate_err () =
   Alcotest.(check bool) "same-module duplicate impl: error"
     true (has_errors ctx)
 
-let test_impl_coherence_shared_ctor_double_collision_err () =
-  (* Task-6b stopgap: two DISTINCT same-short-name types in sibling modules that
-     ALSO share a constructor name (`Shared`) are a "double collision". The
-     backends and interpreter route dispatch on the BARE constructor tag
-     (ci_module is diagnostic-only), so a general-interface method would silently
-     misdispatch in BOTH backends. Until the full ci_module.Type.Ctor ctor
-     identity lands, this specific shape is REJECTED via the existing overlap
-     path (register_impl_shape's ctor-set-disjointness check) rather than
-     miscompiled. Reject witness: specs/lang/types/reject/t82. Contrast with
-     test_impl_coherence_distinct_modules_general_iface_ok (DISTINCT ctor names,
-     the common case, which MUST still be accepted). *)
+let test_impl_coherence_shared_ctor_double_collision_ok () =
+  (* Constructor module-qualified identity plan, flag-day (Task 6): two DISTINCT
+     same-short-name types in sibling modules that ALSO share a constructor name
+     (`Shared`) — a "double collision" — now typecheck. This shape was rejected
+     under the interim Task-6b stopgap because the backends and interpreter used
+     to route dispatch on the BARE constructor tag (ci_module was diagnostic-
+     only), so a general-interface method would silently misdispatch. The plan
+     resolves ctor identity upstream — native ECon/pattern-match qualify a
+     colliding type's ctor key with its declaring module, and the interpreter
+     qualifies the VCon tag the same way — so `speak` dispatches correctly on the
+     value's real type in BOTH backends, and the declaring-module coherence
+     relaxation is sound unconditionally (no ctor-sharing carve-out). Accept
+     witness: specs/lang/types/accept/t90. Cross-backend runtime witness:
+     test/imports/speak_double_collision_native. Companion (DISTINCT ctor names):
+     test_impl_coherence_distinct_modules_general_iface_ok. *)
   let ctx = typecheck {|mod Top do
     interface Speak(a) do
       fn speak : a -> String
@@ -714,8 +718,138 @@ let test_impl_coherence_shared_ctor_double_collision_err () =
       impl Speak(Thing) do fn speak(_x) do "b" end end
     end
   end|} in
-  Alcotest.(check bool) "shared-ctor-name double collision: error"
+  Alcotest.(check bool) "shared-ctor-name double collision: no error"
+    false (has_errors ctx)
+
+(* FQN dispatch-identity plan, Task 1: add_ctor's structural dedup (same
+   ci_type/ci_params/ci_arg_tys) used to collapse a SECOND module's
+   identically-shaped ctor onto the first, discarding which module the
+   surviving candidate belongs to entirely — env.ctors "Shared" ended up
+   with only ONE ctor_info even though DcA and DcB each declare their own
+   nullary `Shared`. Later tasks in this plan (double-collision resolution)
+   need BOTH candidates retrievable under the bare key, so add_ctor's `same`
+   predicate now also compares ci_module. This fixture has no `impl`s, so it
+   does not touch the Task-6b coherence stopgap (register_impl_shape) at
+   all — it exercises add_ctor in isolation. *)
+let test_add_ctor_keeps_distinct_module_identical_shape_ctors () =
+  let (_errors, env) = typecheck_full {|mod Top do
+    mod DcA do
+      type Thing = Shared | OnlyA
+    end
+    mod DcB do
+      type Thing = Shared | OnlyB
+    end
+    fn main() do () end
+  end|} in
+  let candidates =
+    match March_typecheck.Typecheck.StrMap.find_opt "Shared"
+            env.March_typecheck.Typecheck.ctors with
+    | None -> []
+    | Some cis -> cis
+  in
+  let modules = List.sort_uniq compare
+      (List.map (fun ci -> ci.March_typecheck.Typecheck.ci_module) candidates) in
+  Alcotest.(check int) "two distinct declaring modules survive for `Shared`"
+    2 (List.length modules)
+
+(* FQN dispatch-identity plan, Task 2: now that Task 1's add_ctor keeps BOTH
+   distinct-module candidates for a colliding bare ctor name (e.g. `Shared`),
+   RESOLUTION of a bare reference must prefer the candidate whose ci_module
+   matches the reference's own lexical current module — a bare `Shared`
+   written inside DcA's own code must mean DcA's own `Shared`, not whichever
+   candidate happens to be first in env.ctors's internal list. *)
+let test_ctor_lexical_preference_both_modules () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn mk_a() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    fn mk_b() do Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "both modules' own bare Shared reference typechecks cleanly"
+    false (has_errors ctx)
+
+(* A genuinely ambiguous bare reference — candidates from TWO DIFFERENT
+   declaring modules, and the referencing module (DcC) owns NEITHER — must be
+   a hard error requiring explicit qualification, not the pre-existing soft
+   hint (which stays reserved for the unrelated same-module/cross-type-sharing
+   case; see test_ctor_ambiguity_hint_unaffected_by_cross_module_error below). *)
+let test_ctor_truly_ambiguous_is_error () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+  end
+  mod DcC do
+    fn mk_ambiguous() do Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "third-module bare ambiguous ctor ref is a hard error"
     true (has_errors ctx)
+
+(* The explicit-qualification escape hatch for the above must still work. *)
+let test_ctor_qualified_reference_from_third_module_ok () =
+  let ctx = typecheck {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+  end
+  mod DcC do
+    fn mk_explicit() do DcA.Shared end
+  end
+  fn main() do () end
+end
+|} in
+  Alcotest.(check bool) "explicitly-qualified third-module reference typechecks cleanly"
+    false (has_errors ctx)
+
+(* Review follow-up (Minor finding): test_ctor_lexical_preference_both_modules
+   above only asserts `has_errors = false`, which cannot distinguish "lexical
+   preference picked the CORRECT candidate" from "it picked either candidate,
+   no type error either way" — both DcA's and DcB's `Thing` share the same
+   bare surface type `TCon("Thing", [])` (ci_type is bare pre-Stage-3), so a
+   wrong pick still type-checks cleanly. This test locks in the actual
+   property directly by calling `lookup_ctor` itself with `current_module`
+   set to each module in turn and inspecting which candidate's `ci_module`
+   comes back — mirroring Task 1's own env-inspection technique
+   (test_add_ctor_keeps_distinct_module_identical_shape_ctors above). A
+   regression that reverted `lookup_ctor` back to "first in the list" would
+   fail this test even though it would NOT fail
+   test_ctor_lexical_preference_both_modules. *)
+let test_ctor_lexical_preference_directly_inspects_lookup_ctor () =
+  let (_errors, env) = typecheck_full {|mod Top do
+    mod DcA do
+      type Thing = Shared | OnlyA
+    end
+    mod DcB do
+      type Thing = Shared | OnlyB
+    end
+    fn main() do () end
+  end|} in
+  let module_of_lookup current_module =
+    let env' = { env with March_typecheck.Typecheck.current_module } in
+    match March_typecheck.Typecheck.lookup_ctor "Shared" env' with
+    | Some ci -> ci.March_typecheck.Typecheck.ci_module
+    | None -> "<none>"
+  in
+  Alcotest.(check string) "lookup_ctor with current_module=DcA returns DcA's own Shared"
+    "DcA" (module_of_lookup "DcA");
+  Alcotest.(check string) "lookup_ctor with current_module=DcB returns DcB's own Shared"
+    "DcB" (module_of_lookup "DcB")
 
 let test_impl_when_constraint_satisfied () =
   (* impl with a satisfied 'when' constraint should succeed. *)
@@ -8072,7 +8206,12 @@ let compiler_suites =
           Alcotest.test_case "impl coherence: distinct modules ok (builtin)" `Quick test_impl_coherence_distinct_modules_ok;
           Alcotest.test_case "impl coherence: distinct modules general-iface ok" `Quick test_impl_coherence_distinct_modules_general_iface_ok;
           Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
-          Alcotest.test_case "impl coherence: shared-ctor double collision err" `Quick test_impl_coherence_shared_ctor_double_collision_err;
+          Alcotest.test_case "impl coherence: shared-ctor double collision ok" `Quick test_impl_coherence_shared_ctor_double_collision_ok;
+          Alcotest.test_case "add_ctor keeps distinct-module identical-shape ctors" `Quick test_add_ctor_keeps_distinct_module_identical_shape_ctors;
+          Alcotest.test_case "ctor lexical preference: both modules resolve own bare ref" `Quick test_ctor_lexical_preference_both_modules;
+          Alcotest.test_case "ctor truly cross-module ambiguous: hard error" `Quick test_ctor_truly_ambiguous_is_error;
+          Alcotest.test_case "ctor qualified reference from third module: ok" `Quick test_ctor_qualified_reference_from_third_module_ok;
+          Alcotest.test_case "ctor lexical preference: lookup_ctor returns own-module candidate directly" `Quick test_ctor_lexical_preference_directly_inspects_lookup_ctor;
           Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
           Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
           Alcotest.test_case "cross-module dispatch"        `Quick test_interface_cross_module_dispatch;

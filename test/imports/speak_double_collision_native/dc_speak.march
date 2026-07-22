@@ -1,0 +1,8 @@
+-- Shared interface for the speak_double_collision_native witness. Declared in
+-- its own module so both library modules (and the entry) see the same
+-- `Speak(a)`. Sibling to test/imports/speak_collision_native's sc_speak.march.
+mod DcSpeak do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+end
