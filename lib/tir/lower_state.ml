@@ -481,4 +481,27 @@ let resolve_iface_method (env : env) (method_name : string) (arg_span : Ast.span
         match type_name with
         | None -> None
         | Some tname ->
-          List.assoc_opt tname impls
+          (* Collision-aware: [tname] is the BARE type name — [env.type_map]
+             (the typechecker's own type representation) does not carry the
+             module-qualified identity that distinguishes e.g. [NA.Thing]
+             from [NB.Thing] (that qualification is attached later, in the
+             TIR/Mono layer). So if >=2 DISTINCT impl symbols are registered
+             under [tname] (two modules declaring same-short-name types),
+             this layer has no sound way to pick a winner — defer (return
+             [None]) to [Mono.try_collision_dispatch], which runs after
+             monomorphization has attached the qualified type and generates a
+             correct runtime tag-switch dispatch. Mirrors the [uniq >= 2]
+             gate in [Mono.try_collision_dispatch]. Picking the first match
+             here (the pre-fix behavior) silently routed EVERY ambiguous call
+             site to whichever impl happened to be registered first. *)
+          let uniq =
+            List.fold_left (fun acc (t, m) ->
+                if t <> tname then acc
+                else if List.exists (fun (_, m') -> m' = m) acc then acc
+                else (t, m) :: acc)
+              [] impls
+            |> List.rev
+          in
+          (match uniq with
+           | [(_, m)] -> Some m
+           | _ -> None)

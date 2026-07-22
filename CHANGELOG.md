@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A general user interface implemented by two same-short-name types declared
+  in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
+  Speak(Thing)`) could have an ambiguous call site resolved, at compile time,
+  to whichever impl happened to be declared first — a latent miscompile risk
+  rather than an always-reproducing bug, since an unrelated dispatch guard
+  happened to mask it for most call shapes. Interface dispatch on same-named
+  colliding types is now always deferred to the collision-aware runtime
+  dispatch added for this feature, with no first-match shortcut.
 - An all-caps acronym stdlib module name (e.g. `RRB`, declared in
   `rrb_vec.march`) failed to resolve in a type annotation with "Unknown module
   `RRB`", even though its functions worked fine as values. The lazy

@@ -283,6 +283,44 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
+
+**`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
+Mono's collision-aware runtime dispatch instead of silently picking a
+first-registered impl.** Found as a side effect of a follow-on constructor
+module-qualified-identity investigation, but independent of and already
+present before that work — part of the FQN dispatch-identity Stages 1-3 PR
+(see the 2026-07-21/2026-07-20 entries below). When two modules declare
+same-short-name types (e.g. `NA.Thing`/`NB.Thing`) that both `impl` the same
+general interface, `resolve_iface_method` resolved the call's concrete type
+via `List.assoc_opt tname impls` — first-match, not collision-aware — so
+`impls` under the bare key `"Thing"` held both candidates and every ambiguous
+call site got baked, at LOWER time, to whichever impl happened to be
+registered first, before `Mono.monomorphize`'s collision-aware
+`try_collision_dispatch` (which generates a correct runtime tag-switch) ever
+ran. `env.type_map`, the only type information available at this layer, only
+carries the type's BARE name — the module-qualified identity is attached
+later, in the TIR/Mono layer — so this layer has no sound way to pick a
+winner and must defer. For the reported repro shape, the wrong resolution
+happened to be masked end-to-end by an unrelated Mono guard (the
+interface-method-name-collision check, added for a different bug), so this
+was a real but latent miscompile risk rather than an observed wrong answer in
+every call shape (e.g. `ECallPtr` sites with no `fn_table` entry have no such
+guard). Fix: `resolve_iface_method` now dedups `impls` by mangled symbol
+under the queried type name and returns `Some` only when exactly one distinct
+impl remains, `None` (deferring to Mono) when ≥2 — mirroring the `uniq >= 2`
+gate `Mono.try_collision_dispatch` already uses. Collision-conditional only;
+non-colliding call sites are byte-identical. New coverage: lower-only unit
+test `test_ambiguous_iface_call_stays_unresolved_at_lower_time`
+(`test/test_codegen.ml`) proving both calls stay as a bare, unresolved
+`speak(...)` callee post-lowering; end-to-end runtime witness
+`test/native/iface_collision_ambiguous_call.march` (compile-and-run golden).
+Full suite green: compiler 524 / eval 238 / codegen 438 / stdlib 814 (one
+pre-existing, unrelated `MARCH_SANITIZE` ASAN-altstack-teardown environmental
+hang, confirmed present before this change via zombie processes dated hours
+prior). Details: `specs/todos.md` "Recently fixed"; design context:
+`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`.
+
 ## Current State (as of 2026-07-21, `Array.push`/`RRB.push` Float SIGSEGV fixed — wildcard ctor-field monomorphization)
 
 Compiled `Array.push`/`RRB.push` (the `PVec`/`TrieNode`/`List(a)` trie backing
