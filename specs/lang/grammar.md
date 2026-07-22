@@ -1146,26 +1146,23 @@ lines this arm's body spans" into "one contiguous run of `block_expr`s with
 no interior `NL`, followed by exactly one `arm_sep` `NL`/`PIPE` that
 `branch`/`cond_branch` can trivially consume."
 
-> **Verified gap (found auditing this chapter, 2026-07-22): a `PIPE` arm
-> separator on its own line does NOT work, contradicting "exactly one
-> `arm_sep`" above.** `token_filter.ml`'s `NL`-then-`PIPE` handling (the
-> `Parser.PIPE ->` arm of the `NL` case, next to the `is_pattern_start`
-> branch described above) emits the `NL` itself as the arm boundary but then
-> `push_buf`s the `PIPE` token back onto the queue instead of discarding it,
-> so the literal `PIPE` is re-delivered to the parser as a second, unconsumed
-> token right after the `NL` already served as `arm_sep` — `branch` has no
-> production for a leading `PIPE`, so this is a parse error ("I got stuck
-> here" at the `\|`). Confirmed: `match x do\n  1 -> "one"\n  \| 2 -> "two"\n
-> _ -> "other"\nend` fails to parse; the exact same arms written on one
-> physical line (`match x do 1 -> "one" \| 2 -> "two" \| _ -> "other" end`)
-> parse fine, since there `PIPE` itself is consumed as the `arm_sep` and no
-> `NL` precedes it. So a leading `\|` per arm — the natural style for
-> `PIPE`-separated multi-line matches — is unusable today; only same-line
-> `PIPE` chains and plain `NL`-separated arms (no explicit `\|` at all, as
-> `p02`/`p10` below use) work. No program in the `grammar/parse` or
-> `grammar/reject` corpus exercises `NL`-then-`PIPE`, which is why this
-> gap has no conformance witness. This is a compiler bug, not a docs issue —
-> noted here for follow-up, not fixed in this pass.
+**Fixed gap (found auditing this chapter, 2026-07-22; fixed same day): a
+`PIPE` arm separator on its own line used to fail** — `token_filter.ml`'s
+`NL`-then-`PIPE` handling (the `Parser.PIPE ->` arm of the `NL` case, next to
+the `is_pattern_start` branch described above) emitted the `NL` itself as the
+arm boundary but then `push_buf`'d the `PIPE` token back onto the queue
+instead of discarding it, so the literal `PIPE` was re-delivered to the
+parser as a second, unconsumed token right after the `NL` already served as
+`arm_sep` — `branch` has no production for a leading `PIPE`, so this was a
+parse error ("I got stuck here" at the `|`). This hit both the leading arm
+(before the first `branch`/`cond_branch`, a separate code path in
+`token_filter.ml` with the identical bug) and every subsequent arm. Fixed by
+having both sites consume the `PIPE` and deliver it directly as the single
+`arm_sep` token, rather than re-queuing it after an already-emitted `NL`.
+Witnessed by
+[`parse/p27_leading_pipe_arm_separator.march`](grammar/parse/p27_leading_pipe_arm_separator.march)
+(leading `|` on every arm, including the first, for both the scrutinee'd and
+cond forms).
 
 Value-witnessed end-to-end (parse-and-run, not just parse) by
 [`parse/p10_match_multi_expr_arms_three_way.march`](grammar/parse/p10_match_multi_expr_arms_three_way.march) —

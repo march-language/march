@@ -1,0 +1,38 @@
+mod P27LeadingPipeArmSeparator do
+  -- §3.3/§5.3 arm_sep (NL | PIPE): a leading `|` before each arm, written on
+  -- its OWN line, previously failed to parse ("I got stuck here" at the `|`).
+  -- token_filter.ml's NL-then-PIPE handling emitted the NL as the arm
+  -- boundary but then re-queued the PIPE token instead of consuming it, so
+  -- `branch`/`cond_branch` saw a stray, unconsumed PIPE right after the NL
+  -- already served as arm_sep. Fixed at both the leading-arm site (before the
+  -- first arm) and the between-arms site in token_filter.ml. Exercises a
+  -- leading `|` on every arm, including the first, for both the scrutinee'd
+  -- (`match e do ... end`) and cond (`match do ... end`) forms.
+  type Shape =
+    Circle(Int)
+  | Square(Int)
+  | Triangle(Int)
+
+  fn describe(s) do
+    match s do
+      | Circle(_) -> "circle"
+      | Square(_) -> "square"
+      | Triangle(_) -> "triangle"
+    end
+  end
+
+  fn grade(n) do
+    match do
+      | n >= 90 -> "A"
+      | n >= 80 -> "B"
+      | true -> "F"
+    end
+  end
+
+  fn main() do
+    println(describe(Circle(1)))
+    println(describe(Square(2)))
+    println(grade(95))
+    println(grade(50))
+  end
+end
