@@ -195,6 +195,24 @@ git log is authoritative for exact commits.
   matching the working pattern in `specs/lang/capabilities.md`. Every code
   block was verified against the compiler, including that a wrong-order
   transition call is correctly rejected.
+- Audited every March code example across `specs/lang/` (the authoritative
+  language reference, ~341 code blocks across 21 files) against the current
+  compiler, the same way as the docs/ sweep above. Several sections described
+  an interface-dispatch architecture superseded by the impl-coherence and FQN
+  dispatch-identity work that landed 2026-07-17 through 2026-07-21 (rewritten
+  with live-verified current behavior); the Operator Reference table in
+  `type-system.md` had `+ - * /` and the dotted `+. -. *. /.` operators
+  backwards (the plain operators are the polymorphic Int/Float ones, not the
+  dotted ones); several "known limitation" notes across `pattern-matching.md`
+  and `session-types.md` described parser/linearity gaps already fixed. Around
+  70 real example/prose bugs fixed in total. `specs/lang/grammar.md`'s
+  `parser.mly`/`token_filter.ml` line citations have drifted (~15 of ~294
+  fixed; the rest need a dedicated re-grep pass). Several real compiler bugs
+  surfaced along the way and were filed separately, most notably a
+  currently-live regression where compiled `Actor.call`/`Actor.reply` returns
+  the raw tagged value instead of untagging it — it breaks an existing pinned
+  golden test wired into `dune runtest`, just not caught because the fast
+  test runner bypasses that lane.
 
 ## [0.1.1] - 2026-07-21
 
