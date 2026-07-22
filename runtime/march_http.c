@@ -1611,6 +1611,19 @@ static void *connection_thread(void *arg) {
                         void *ws_key =
                             find_ws_key_header(*(void **)(rc_p + 56));
                         if (ws_key) {
+                            /* The keep-alive SO_RCVTIMEO set at connection-thread
+                               startup (10s) still applies to this fd. Left in
+                               place, an idle WS connection's next recv() times
+                               out with EAGAIN/EWOULDBLOCK, which recv_exact()
+                               can't tell apart from a real close — the socket
+                               gets dropped with a spurious Close(1001, "going
+                               away") the moment the client goes quiet. Clear it
+                               so WS reads block indefinitely, same as the
+                               evloop server's ws_handler_thread does via
+                               fcntl(~O_NONBLOCK) before its handoff. */
+                            struct timeval ws_tv = { .tv_sec = 0, .tv_usec = 0 };
+                            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                                       &ws_tv, sizeof(ws_tv));
                             march_ws_handshake((int64_t)fd, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
                             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;

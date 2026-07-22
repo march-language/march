@@ -119,6 +119,19 @@ git log is authoritative for exact commits.
   nothing), and compiled programs crashed (SIGBUS) on startup. Both backends
   now run it correctly; any other `main` arity or parameter type is now
   rejected at compile time with a clear error instead of misbehaving.
+- WebSocket connections in the interpreter (`forge run`, plain `march
+  file.march`, and any tool built on it, including `forge scroll.serve`)
+  disconnected almost immediately whenever the client went quiet — an open
+  connection would flip to closed within milliseconds of the server having
+  nothing to read, sometimes before the client's very first message was even
+  processed. A raw handshake with no further traffic got an instant
+  server-initiated close. The server's WebSocket handler was reading from a
+  socket still configured for the (unrelated) HTTP accept loop's internal
+  bookkeeping, which made an ordinary "no data yet" condition look
+  indistinguishable from the client disconnecting. Compiled (`--compile`)
+  WebSocket servers had a milder version of the same bug: an idle connection
+  would be dropped after 10 seconds instead of staying open. Both are fixed;
+  idle WebSocket connections now stay open as expected in both backends.
 - `Vault.update` crashed (segfault) in compiled programs, for both an inline
   lambda and a named function callback — e.g.
   `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
