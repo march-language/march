@@ -68,52 +68,19 @@ jobs:
       - name: Build
         run: |
           eval $(opam env)
-          # `dune build` (no target) intermittently wedges at ~0% CPU on the Linux
-          # runner AFTER building everything — a known dune-daemon hang. Cap it so a
-          # wedge fails fast and is retryable instead of hanging until the 6h job
-          # timeout. Compile-only (no test execution) is well under this bound.
-          # macOS has no coreutils `timeout` by default and hasn't wedged, so guard
-          # by OS.
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            timeout 1200 dune build || { echo "::error::dune build wedged or exceeded 20m — re-run the job"; exit 1; }
-          else
-            dune build
-          fi
+          # Build @install (the public exes: march / forge / march-lsp → all of
+          # lib/), NOT a bare `dune build`. A no-target `dune build` intermittently
+          # wedges at ~0% CPU AFTER building everything (a known dune no-target
+          # daemon hang) and redundantly re-runs the native test .out binaries that
+          # the Test step already runs. A targeted build sidesteps the wedge; the
+          # Test step (`dune runtest`) still builds+runs the full test suite, so
+          # test-code compile errors are still caught.
+          dune build @install
 
       - name: Test
         run: |
           eval $(opam env)
           dune runtest
-
-      # Diagnostic for the intermittent, GH-Actions-only `ffi_result` flake
-      # (parse("zz") occasionally prints "bad int" instead of "nan").  The
-      # runtest byte-exact diff is quarantined (test/dune @ffi_result_diff_manual),
-      # so this probe stress-compiles the case ~40x with the CAS + dune caches
-      # cleared each time and reports whether the produced BINARIES differ
-      # (codegen/link non-determinism) or are identical (execution-time UB), plus
-      # a full disassembly of the adjacent shims on any wrong output.  Linux-only
-      # (the flake has never reproduced on macOS) and non-blocking (the evidence
-      # is the point; a red X here must not fail the pipeline).
-      - name: FFI Result flake probe (Linux-only diagnostic; non-blocking)
-        if: ${{ always() && runner.os == 'Linux' }}
-        continue-on-error: true
-        run: |
-          eval $(opam env)
-          scripts/ffi_result_flake_probe.sh 40
-
-      # The flake reproduces deterministically on this runner (the probe above
-      # showed byte-identical binaries => execution-time UB, not codegen).  Pin
-      # the UB down: valgrind --track-origins on the UN-instrumented binary
-      # (preserves the reproducing layout — the original "valgrind clean" ran on
-      # a non-reproducing binary) plus an ASAN/UBSan pass.  Linux-only,
-      # non-blocking; the evidence is the point.
-      - name: FFI Result UB probe — valgrind + ASAN (Linux-only; non-blocking)
-        if: ${{ always() && runner.os == 'Linux' }}
-        continue-on-error: true
-        run: |
-          eval $(opam env)
-          sudo apt-get install -y valgrind
-          scripts/ffi_result_sanitize_probe.sh 6
 
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         run: |

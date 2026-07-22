@@ -381,40 +381,6 @@ int64_t ffi_test_point_sum(march_value p) {
     return march_record_field(p, 0) + march_record_field(p, 1);
 }
 
-/* Self-diagnosing probe for the ffi_result CI flake.  Takes a decoded
- * Result(Int,String) cell (as built by march_ok/march_err — tag@8, payload@16),
- * writes the cell's tag and, for an Err(String) payload, the string's pointer,
- * len and first bytes to stderr, and RETURNS the Err payload length (-1 for Ok)
- * as a plain Int — deliberately not a Result passthrough, to avoid any
- * FFI-return ownership subtlety.  Used by the separate ffi_result_diag.march
- * program (not the pristine ffi_result.march reproducer), which prints the
- * returned length so the call survives DCE.  A CI failure then reveals whether
- * the cell already carries a len-7 "bad int" (=> ffi_test_parse returned the
- * wrong string — the shim miscompiled) or a correct len-3 "nan" (=> the
- * divergence is downstream of the shim). */
-int64_t ffi_result_err_len(march_value r) {
-    int32_t     tag     = march_variant_tag(r);
-    march_value payload = march_variant_field(r, 0);
-    if (tag == 0) {                       /* Ok(Int) */
-        fprintf(stderr, "[ffi_result diag] tag=0 (Ok) payload=%lld\n",
-                (long long)payload);
-        fflush(stderr);
-        return -1;
-    }
-    /* Err(String): payload is a heap march_string pointer. */
-    march_string *ms  = (march_string *)march_as_ptr(payload);
-    long long     len = (long long)ms->len;
-    fprintf(stderr, "[ffi_result diag] tag=%d (Err) payload=%p len=%lld bytes=",
-            (int)tag, (void *)ms, len);
-    for (long long i = 0; i < len && i < 16; i++)
-        fprintf(stderr, "%02x ", (unsigned char)ms->data[i]);
-    fprintf(stderr, "str=\"");
-    fwrite(ms->data, 1, (size_t)(len < 32 ? len : 32), stderr);
-    fprintf(stderr, "\"\n");
-    fflush(stderr);
-    return len;
-}
-
 /* Fallible: a single ASCII digit → Ok(Int), else Err(String). Result built
  * directly via march_ok/march_err (no env needed). */
 march_value ffi_test_parse(march_value s) {
@@ -422,28 +388,6 @@ march_value ffi_test_parse(march_value s) {
     if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
         return march_ok(march_make_int(v.ptr[0] - '0'));
     return march_err(march_str_new((const uint8_t *)"nan", 3));
-}
-
-/* ── CI-flake layout probe (temporary; remove once ffi_result is root-caused) ──
- * The intermittent GH-Actions `ffi_result` flake prints "bad int" — the Err
- * string of the never-called ffi_raise_parse, which sits IMMEDIATELY AFTER
- * ffi_test_parse in this file (and, with source-order layout / no
- * -ffunction-sections, in the linked binary).  march_println is len-bounded, so
- * emitting the 7-byte "bad int" requires a REAL march_string{len=7,"bad int"},
- * which only ffi_raise_parse constructs — i.e. control reaches the adjacent
- * sibling, not a stray-pointer read.  This never-called guard is inserted
- * BETWEEN the two so it becomes ffi_test_parse's adjacent neighbour instead of
- * ffi_raise_parse.  If the flake's wrong string flips from "bad int" to
- * "PROBE_GUARD_FELL_THROUGH", a function-layout/fall-through into the adjacent
- * sibling is proven; if it stays "bad int", adjacency is NOT the cause and the
- * path to ffi_raise_parse is something else (symbol/dispatch).  Mirrors
- * ffi_test_parse's exact shape (same signature/ABI, digit fast-path, Err via
- * march_err) so a layout artifact would hit it the same way. */
-march_value ffi_layout_probe_guard(march_value s) {
-    march_slice v = march_str_borrow(s);
-    if (v.len == 1 && v.ptr[0] >= '0' && v.ptr[0] <= '9')
-        return march_ok(march_make_int(v.ptr[0] - '0'));
-    return march_err(march_str_new((const uint8_t *)"PROBE_GUARD_FELL_THROUGH", 24));
 }
 
 /* `raises` variant: returns the bare Ok payload (Int) on success and raises an

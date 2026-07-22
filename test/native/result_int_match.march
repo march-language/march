@@ -1,0 +1,19 @@
+-- Regression: matching Ok(n) on Result(Int, _) and calling a runtime builtin
+-- (int_to_string) directly inside the arm must UNTAG the payload. A field bound
+-- by name is extracted from the uniform ADT cell in tagged form; codegen must
+-- untag it before handing it to a C-ABI builtin that expects a raw i64. Broke in
+-- 7fdb04f0 (every ctor-field sub_var got its concrete type, so the ELet
+-- source/target types matched and the untag was elided → int_to_string saw the
+-- tagged pointer 15 = 7<<1|1 instead of 7). Compiled-only; interpreter was fine.
+mod ResultIntMatch do
+  fn pick(r: Result(Int, String)): String do
+    match r do
+      Ok(n) -> int_to_string(n)
+      Err(e) -> e
+    end
+  end
+  fn main() : Unit do
+    println(pick(Ok(7)))         -- 7  (was "15" before the fix)
+    println(pick(Err("nope")))   -- nope
+  end
+end

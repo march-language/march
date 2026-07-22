@@ -342,17 +342,41 @@ and compile_matrix_impl
                (e.g. one row wildcards a field another row names), but they
                all denote the SAME constructor field, so any row's
                resolvable span is authoritative. *)
+            (* IMPORTANT: only give a field its concrete type when EVERY row
+               wildcard-discards it.  A wildcard-discarded field is never rebound
+               by name, so it exists only for RC — and needs the concrete type so
+               Rc_types.needs_rc doesn't spuriously dec_rc an unboxed scalar (the
+               List(Float) crash above).  But a field BOUND by name in any row is
+               rebound downstream via bind_trivial_pat as `let n = <sub_var>` with
+               n's real type; if the sub_var ALSO carries that concrete scalar
+               type, the ELet's source and target types match, so codegen elides
+               the uniform→natural untag — and the field's runtime value in the
+               uniform ADT cell is TAGGED.  That regressed `Ok(n) -> int_to_string(n)`
+               on Result(Int): int_to_string received the tagged pointer (15 = 7<<1|1)
+               instead of 7.  Keeping the sub_var at the erased placeholder for any
+               named field preserves the untag at the binding's use sites, while the
+               named rebinding still gives Perceus the real type. *)
             let field_ty_at (i : int) : Tir.ty =
-              let rec scan = function
-                | [] -> Lower_types.unknown_ty
-                | (pats, _) :: rest ->
-                  (match List.nth_opt pats i with
-                   | Some p ->
-                     let t = Lower_state.ty_of_span env (span_of_pat p) in
-                     if t = Lower_types.unknown_ty then scan rest else t
-                   | None -> scan rest)
+              let all_wild =
+                List.for_all (fun (pats, _) ->
+                    match List.nth_opt pats i with
+                    | Some (Ast.PatWild _) -> true
+                    | Some _               -> false
+                    | None                 -> true)
+                  !rows_ref
               in
-              scan !rows_ref
+              if not all_wild then Lower_types.unknown_ty
+              else
+                let rec scan = function
+                  | [] -> Lower_types.unknown_ty
+                  | (pats, _) :: rest ->
+                    (match List.nth_opt pats i with
+                     | Some p ->
+                       let t = Lower_state.ty_of_span env (span_of_pat p) in
+                       if t = Lower_types.unknown_ty then scan rest else t
+                     | None -> scan rest)
+                in
+                scan !rows_ref
             in
             let sub_vars = List.init arity (fun i ->
                 { Tir.v_name = Lower_state.fresh_name "f"; v_ty = field_ty_at i; v_lin = Tir.Unr }
