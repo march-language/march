@@ -248,6 +248,29 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
     Hashtbl.create 16 in
   (* Short type names with at least one `impl` block anywhere in the program. *)
   let types_with_any_impl : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  (* The compiler's own always-injected prelude ADTs (Option/Result/List,
+     [Lower.builtin_type_defs]) are seeded as a bare-prefix ("") PUBLIC
+     candidate up front, and unconditionally marked impl-bearing. Unlike the
+     Seq/Server false positives this impl-presence filter exists to exclude
+     (a deliberate SAME-SHAPE structural handoff, or a raw-string-key marker
+     type), a user type that reuses one of these three exact bare names is
+     NEVER a legitimate alias of the compiler's own prelude type — the
+     builtin is pervasive throughout every compiled module regardless of
+     what the user imports, so shadowing it is always a genuine nominal
+     collision that must be qualified, not a coincidental name clash. Without
+     this seed, a user `type Result = Ok(...) | Err(...)` with no `impl`
+     block collided with the builtin's bare-keyed "Result.Ok"/"Result.Err"
+     ctor_info entries (both real, both globally-tagged as of the collision
+     set every OTHER consumer already sees — see [Lower.builtin_type_defs]'s
+     inclusion in the early [Collision_set.compute] call) with NO qualification
+     ever applied, so an unqualified `Ok(s)` construction landed on the
+     builtin's ctor tag while a qualified match arm resolved a different,
+     arbitrarily-tie-broken candidate — deterministic wrong-tag miscompile
+     (P0: builtin-ctor-collision-gap, 2026-07-22). *)
+  List.iter (fun (name, ctors) ->
+      Hashtbl.replace by_short name [("", name, Ast.Public, ctors)];
+      Hashtbl.replace types_with_any_impl name ()
+    ) ["Option", ["None"; "Some"]; "Result", ["Ok"; "Err"]; "List", ["Nil"; "Cons"]];
   let add_qualified prefix qualified vis ctor_names =
     let short = match String.rindex_opt qualified '.' with
       | None   -> qualified
