@@ -1249,6 +1249,38 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
     ("i64", r)
 
+  (* ── {int,bool,float}_to_string: explicit coerce before the C call ──── *
+     These have no dedicated arg-coercion in the general EApp path (that path
+     only coerces args for user-defined fns registered in top_fn_param_tys —
+     builtins fall through with each arg's NATURAL emitted type). Normally the
+     argument already IS the declared scalar type (Int/Bool/Float locals emit
+     as i64/i64/double directly), so this goes unnoticed — but a value that
+     crossed an erased/generic boundary (e.g. an Actor.call reply, whose Ok
+     payload stays a TVar so the case-match binds it as "ptr") arrives here
+     STILL "ptr"-typed, and the fallback path emits e.g.
+     `call ptr @march_int_to_string(ptr %v)` — a declared-signature mismatch
+     that happens to "work" at the ABI level (ptr and i64 share a register)
+     and so prints the raw tagged bits verbatim (5 -> "11") instead of
+     coercing. Coerce explicitly here, matching every other scalar builtin
+     (int_not, is_int_bitwise, …) in this file. *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_to_string" ->
+    let va = emit_atom_as ctx "i64" a in
+    let r  = fresh ctx "its" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_int_to_string(i64 %s)" r va);
+    ("ptr", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "bool_to_string" ->
+    let va = emit_atom_as ctx "i64" a in
+    let r  = fresh ctx "bts" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r va);
+    ("ptr", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "float_to_string" ->
+    let va = emit_atom_as ctx "double" a in
+    let r  = fresh ctx "fts" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_float_to_string(double %s)" r va);
+    ("ptr", r)
+
   (* ── Task builtins (Phase 1: inline LLVM IR, no C runtime) ────────── *)
   (* Thunks are fn x -> expr (Int -> a).  task_spawn calls the closure
      with dummy arg 0, boxes result into a Task heap object.
