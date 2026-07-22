@@ -42,15 +42,24 @@ DIAG_TGT="test/native_ffi_result_diag"
 MAIN_BIN="_build/default/test/native_ffi_result"
 DIAG_BIN="_build/default/test/native_ffi_result_diag"
 
-# objdump on Linux, otool on macOS (for local dry-runs).
+# objdump on Linux, otool on macOS (for local dry-runs).  Dump both the C shims
+# AND the March-emitted callers (march_main / shown / println) — the miscompile
+# is memory-safe and the shims + IR are provably correct, so the wrong codegen
+# must be in how clang lowers the (correct) IR of these functions.  objdump
+# separates functions with a blank line, so print each matching header block up
+# to the next blank line.
 dump_fn() {  # $1 = binary
+  local fns='ffi_test_parse|ffi_layout_probe_guard|ffi_raise_parse|march_main|shown|println.String|march_int_to_string'
   if command -v objdump >/dev/null 2>&1; then
-    echo "--- nm (shim addresses) ---"
-    nm "$1" 2>/dev/null | grep -iE 'ffi_test_parse|ffi_layout_probe_guard|ffi_raise_parse' | sort
-    echo "--- objdump -d ffi_test_parse .. ffi_raise_parse ---"
-    objdump -d "$1" 2>/dev/null | awk '/<ffi_test_parse>:/{p=1} p{print} /<ffi_raise_fdiv>:/{exit}'
+    echo "--- nm (fn addresses) ---"
+    nm "$1" 2>/dev/null | grep -iE "$fns" | sort
+    echo "--- objdump -d (C shims + March callers) ---"
+    objdump -d "$1" 2>/dev/null | awk -v F="$fns" '
+      $0 ~ ("^[0-9a-f]+ <("F")>:") {p=1}
+      p && /^[[:space:]]*$/ {p=0}
+      p {print}'
   elif command -v otool >/dev/null 2>&1; then
-    nm "$1" 2>/dev/null | grep -iE 'ffi_test_parse|ffi_layout_probe_guard|ffi_raise_parse' | sort
+    nm "$1" 2>/dev/null | grep -iE "$fns" | sort
     otool -tv "$1" 2>/dev/null | awk '/^_ffi_test_parse:/{p=1} p{print} /^_ffi_raise_fdiv:/{exit}'
   fi
 }

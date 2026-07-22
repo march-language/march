@@ -335,14 +335,24 @@ and compile_matrix_impl
                already do — via ty_of_span on the sub-pattern's own span
                (typecheck.ml's infer_pattern now records PatWild's fresh_var
                into type_map too) — so wildcard-discarded fields flow
-               through mono.ml's substitution exactly like named ones. *)
-            let field_ty_at i =
-              match !rows_ref with
-              | (pats, _) :: _ ->
-                (match List.nth_opt pats i with
-                 | Some p -> Lower_state.ty_of_span env (span_of_pat p)
-                 | None   -> Lower_types.unknown_ty)
-              | [] -> Lower_types.unknown_ty
+               through mono.ml's substitution exactly like named ones.
+               Scans ALL rows in the group (not just the first) for a
+               resolvable span at each position: a shared tag can combine
+               rows whose sub-pattern at position [i] differs in shape
+               (e.g. one row wildcards a field another row names), but they
+               all denote the SAME constructor field, so any row's
+               resolvable span is authoritative. *)
+            let field_ty_at (i : int) : Tir.ty =
+              let rec scan = function
+                | [] -> Lower_types.unknown_ty
+                | (pats, _) :: rest ->
+                  (match List.nth_opt pats i with
+                   | Some p ->
+                     let t = Lower_state.ty_of_span env (span_of_pat p) in
+                     if t = Lower_types.unknown_ty then scan rest else t
+                   | None -> scan rest)
+              in
+              scan !rows_ref
             in
             let sub_vars = List.init arity (fun i ->
                 { Tir.v_name = Lower_state.fresh_name "f"; v_ty = field_ty_at i; v_lin = Tir.Unr }

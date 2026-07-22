@@ -3430,6 +3430,79 @@ let test_linear_let_double_use () =
   end|} in
   Alcotest.(check bool) "linear let used twice: error" true (has_errors ctx)
 
+(* Regression: an always-linear value bound via `let? p = e` (the RHS is a
+   fresh call, not a pre-tracked linear variable) must still be tracked —
+   `bind_pattern_bindings` (shared by `let?`, `with`, and match arms) used to
+   only inherit linearity from a [TLin]-wrapped type or an already-linear
+   scrutinee variable, silently skipping the `always_linear_types`
+   auto-promotion that plain `let` and function params get. Two `let?`
+   bindings each consuming `r` went unflagged as a result. *)
+let test_linear_letq_acquire_double_use () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      let? r = acquire()
+      let? a = consume(r)
+      let? b = consume(r)
+      Ok(a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "let?-acquired linear value used twice: error" true (has_errors ctx)
+
+(* Same gap via a single correct use — must NOT regress to a false positive. *)
+let test_linear_letq_acquire_single_use_ok () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      let? r = acquire()
+      let? a = consume(r)
+      Ok(a)
+    end
+  end|} in
+  Alcotest.(check bool) "let?-acquired linear value used once: no errors" false (has_errors ctx)
+
+(* Same gap through `with`'s desugared nested-match form. *)
+let test_linear_with_acquire_double_use () =
+  let ctx = typecheck {|mod Test do
+    always_linear type Res = Res(Int)
+    fn acquire() : Result(Res, String) do
+      Ok(Res(1))
+    end
+    fn consume(r : Res) : Result(Int, String) do
+      match r do
+        Res(n) -> Ok(n)
+      end
+    end
+    fn f() : Result(Int, String) do
+      with Ok(r) <- acquire() do
+        with Ok(a) <- consume(r), Ok(b) <- consume(r) do
+          Ok(a + b)
+        else
+          Err(e) -> Err(e)
+        end
+      else
+        Err(e) -> Err(e)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "with-acquired linear value used twice: error" true (has_errors ctx)
+
 (* Track-A: linear type enforcement — using a linear binding twice inside a
    match arm is detected and rejected. *)
 let test_worker_named_spec () =
@@ -8044,6 +8117,11 @@ let compiler_suites =
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
           Alcotest.test_case "linear let double use"         `Quick test_linear_let_double_use;
+          (* Regression: always-linear value bound via let?/with (not a
+             pre-tracked linear variable) must still be double-use checked *)
+          Alcotest.test_case "let? acquired linear double use"  `Quick test_linear_letq_acquire_double_use;
+          Alcotest.test_case "let? acquired linear single use ok" `Quick test_linear_letq_acquire_single_use_ok;
+          Alcotest.test_case "with acquired linear double use"  `Quick test_linear_with_acquire_double_use;
           (* Fix 2: Linear type enforcement *)
           Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;

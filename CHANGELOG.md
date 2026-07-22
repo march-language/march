@@ -51,6 +51,14 @@ git log is authoritative for exact commits.
   named function or a lambda wrapped in `do...end`. Symptom: `I got stuck here`
   at the following token. Inline lambda call arguments now accept bare
   statements before the final expression, matching `do...end` block bodies.
+- A linear or `always_linear`-typed value *acquired* through `let? p = e` or
+  `with Ok(p) <- e do ... end` — rather than bound by a plain `let` or a
+  function parameter — was never tracked as linear at all, so consuming it
+  twice (e.g. passing the same handle to two separate calls, each behind its
+  own `let?`) went completely undetected. The identical double-use was
+  already correctly rejected when the value came from an ordinary `let` or a
+  function parameter. Affects any code acquiring a linear resource through a
+  Result-returning `let?`/`with` chain.
 - A self-tail-recursive function forwarding a freshly-built value as its own
   next argument (e.g. an accumulator built via `String.join`/`String.split`)
   could silently corrupt that value in compiled programs — freed one
@@ -101,19 +109,28 @@ git log is authoritative for exact commits.
   (wildcard-matched) field of a list cell never got the special-casing a
   *named* field already had, so the compiler treated it as reference-counted
   even when the concrete element type (`Float`) doesn't need that — freeing
-  memory that was never actually heap-allocated. Also fixes the same class of
-  bug in `Array.get`/`RRB.get`: reading back a pushed `Float` previously
-  returned a silently wrong value (e.g. `0.` instead of `1.5`) rather than the
-  correct one. Verified with a 100-element round trip (push then read back
-  every index) at both optimization levels, no mismatches.
+  memory that was never actually heap-allocated. (Reading a pushed `Float`
+  back out — `Array.get`/`RRB.get` — had a separate, sibling bug; see below.)
 - `task_spawn`/`Task.async` with a `Float`-returning callback, followed by
   `task_await_unwrap`/`Task.await_unwrap`/`Task.await`, failed to compile
   with an internal LLVM type error. Affects `Parallel.preduce`/`psum_float`,
-  which spawn one task per worker chunk. Note: fixing this did **not** make
-  `Parallel.psum_float` usable end-to-end — a separate, pre-existing bug in
-  tail-recursive functions that combine a `Float` accumulator with a
-  heap-value parameter (which `RRB.fold`'s internal loop does) still returns
-  wrong answers or crashes compiled; tracked separately.
+  which spawn one task per worker chunk.
+- A tail-recursive function combining a `Float` accumulator with a
+  heap-value parameter (e.g. an `Array`/`List`) — the shape `RRB.fold`'s
+  internal loop uses — returned a wrong answer or crashed
+  (`RC underflow (rc was 0)`) in compiled programs, blocking
+  `Parallel.preduce`/`psum_float`'s worked example
+  (`docs/cookbook/parallel-data.md`) end-to-end even after the task-boundary
+  fix above. Two independent causes: a constructor field discarded via a
+  wildcard pattern (`Cons(_, t)`) kept an internal type placeholder that
+  made the compiler treat an unboxed `Float` as a heap pointer needing
+  reference counting, corrupting memory; and a value read out of a generic
+  container field was passed to some function calls without converting it
+  to that function's expected native representation, so the callee silently
+  read `0.0` instead of the real value. Both fixed. Affects any compiled
+  program building or reading a `List`/`Array` of `Float` through a generic
+  helper (`Array.from_list`, `Array.get`, and therefore `RRB`'s `Float`
+  operations) or wildcard-discarding an element of a `Float` container.
 
 ### Fixed
 
@@ -127,6 +144,24 @@ git log is authoritative for exact commits.
   nothing), and compiled programs crashed (SIGBUS) on startup. Both backends
   now run it correctly; any other `main` arity or parameter type is now
   rejected at compile time with a clear error instead of misbehaving.
+- WebSocket connections in the interpreter (`forge run`, plain `march
+  file.march`, and any tool built on it, including `forge scroll.serve`)
+  disconnected almost immediately whenever the client went quiet — an open
+  connection would flip to closed within milliseconds of the server having
+  nothing to read, sometimes before the client's very first message was even
+  processed. A raw handshake with no further traffic got an instant
+  server-initiated close. The server's WebSocket handler was reading from a
+  socket still configured for the (unrelated) HTTP accept loop's internal
+  bookkeeping, which made an ordinary "no data yet" condition look
+  indistinguishable from the client disconnecting. Compiled (`--compile`)
+  WebSocket servers had a milder version of the same bug: an idle connection
+  would be dropped after 10 seconds instead of staying open. Both are fixed;
+  idle WebSocket connections now stay open as expected in both backends.
+- `Vault.update` crashed (segfault) in compiled programs, for both an inline
+  lambda and a named function callback — e.g.
+  `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
+  Affects the documented atomic-update pattern and the rate-limiter cookbook
+  example.
 
 ### Documentation
 
@@ -149,6 +184,17 @@ git log is authoritative for exact commits.
   (silent wrong answers and crashes, mostly compiled-only) that are outside a
   docs fix's scope and were filed separately rather than papered over in the
   docs.
+- `docs/cookbook/linear-types.md`'s Typestate section and its "safe socket
+  lifecycle" example — left unfixed by the docs audit above pending a design
+  decision — didn't compile as written and were internally inconsistent
+  (`via` transition functions shown returning `Result`/tuples, an acquisition
+  function listed as a transition despite not taking a handle, a socket type
+  missing its state parameter). Rewritten so each resource's lifecycle splits
+  into an ordinary Result-returning acquisition function outside
+  `transitions` plus pure `Handle -> Handle` transitions declared inside it,
+  matching the working pattern in `specs/lang/capabilities.md`. Every code
+  block was verified against the compiler, including that a wrong-order
+  transition call is correctly rejected.
 
 ## [0.1.1] - 2026-07-21
 
