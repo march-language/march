@@ -383,6 +383,79 @@ for codegen/mangling/runtime dispatch — the double-collision `impl` shape
 stays rejected by the Task 6b stopgap until a later task in this plan gives
 constructors the full `ci_module.Type.Ctor`-qualified identity.
 
+**Constructor module-qualified identity plan, Tasks 3/4 (native, `lib/tir/lower.ml`):**
+`ECon` lowering and branch-tag lowering now module-qualify a colliding,
+shared-ctor-name constructor's GLOBAL runtime tag (reusing `Lower_state.env`'s
+`mod_prefix`/`collision_set` fields) at both construction and pattern-match, so
+the double-collision shape actually WORKS natively instead of needing the Task
+6b typecheck stopgap. Dev-only bypass: `MARCH_DEV_RELAX_CTOR_COHERENCE=1`
+(threaded through `Fun.protect`/`Unix.putenv` in tests) lets these fixtures
+compile ahead of Task 6's flag-day.
+
+**Constructor module-qualified identity plan, Task 5 (2026-07-21,
+`lib/eval/eval.ml`) landed — interpreter side.** Architecturally different
+from native: the interpreter's `VCon` tag string IS the value's entire
+runtime identity (no separate integer discriminant), so `ECon` evaluation and
+`match_pattern`'s `PatCon` arm now module-qualify a colliding, shared-ctor-name
+tag to `"<module>.<type>.<ctor>"` (e.g. `"DcA.Thing.Shared"`) — collision-
+conditional, byte-identical bare tag for every non-colliding/non-shared ctor.
+**Design fork resolved:** `match_pattern` is a pure fn with no `env`/module-
+context param, called from 5 external + 3 internal sites. Neither "pre-qualify
+patterns once" nor "thread a context param" — instead, `VClosure` gained a 4th
+field (the lexical declaring-module prefix captured at CLOSURE-CONSTRUCTION
+time), restored as an ambient `closure_prefix_override` global for the
+duration of that closure's body by `apply_inner` (exception-safe via
+`Fun.protect`). This was NECESSARY, not just convenient: `module_stack`/
+`current_doc_prefix` reflect only the single eager upfront `eval_decl` walk,
+stale ("") by the time any DEFERRED closure body (the common case — any
+`fn`/`impl` method actually CALLED later, well after that walk finished)
+runs — a naive `current_doc_prefix()` read inside `ECon`/`match_pattern` would
+have silently used the wrong (caller's, not declaring) module. `match_pattern`
+itself needed NO signature change: it just reads the same global
+`effective_module_prefix ()` any other eval-time site does.
+`register_type_ctors` also registers the qualified tag into
+`ctor_type_tbl`/`ctor_qualified_type_tbl` so `dispatch_type_name_of_value`
+(general-interface dispatch) resolves a qualified-tag value; `value_to_string`
+strips back to the bare ctor name for Show/println display (`display_tag`) so
+user-visible output is unaffected.
+
+**Two additional qualification gates, found via a full-suite regression sweep
+(NOT guessable from the brief alone):** (a) only PUBLIC (`type`, not `ptype`)
+candidates participate — `stdlib/seq.march` and `stdlib/file.march` each
+independently declare `ptype Seq(a) = Seq(a)` as a deliberate structural-
+interop redeclaration (`File.with_lines`'s callback constructs a `File.Seq`
+value the caller then feeds through `Seq.map`/`Seq.to_list`, a DIFFERENT
+module's functions, on purpose); qualifying broke that cross-module hand-off
+(`test_file_with_lines`, RED before this gate). (b) a colliding short name
+must ALSO have at least one `impl` block anywhere in the combined program —
+`bin/main.exe` (the real compiler entry used by `test_codegen.ml`'s
+interp/compiled-parity harness) auto-loads a broad stdlib prelude regardless
+of what the user's own program needs, so an impl-less marker type routinely
+collides BY NAME ALONE with an unrelated stdlib type; a live MPST test's own
+`type Server = Server` (a role token, zero impls) collided with
+`stdlib/http_server.march`'s unrelated, also-public `type Server = Server(...)`,
+and MPST's runtime resolves role names by reading a `VCon` tag as a raw string
+key — qualifying broke it (`test_compiled_mpst_relay_parity`, RED before this
+gate). Both false positives are FIXED (not worked around) by these two gates,
+which the plan's own target shape (two same-short-name types each `impl`-ing
+the SAME interface, like `DcA.Thing`/`DcB.Thing` both `impl Speak`) passes
+through unaffected.
+
+**2 new top-level tests in `test/test_eval.ml`** (`declarations` group),
+together covering all four construction/match × module-level/impl-method
+combinations: the first is module-level ECon construction + impl-method
+PatCon match (the brief's own scenario, `say()` wrapping `speak`); the second
+is impl-method ECon construction + module-level PatCon match, made
+independently discriminating (not just "runs without crashing") by
+cross-feeding — DcC/DcD's `make_shared` impl method each construct `Shared`,
+a module-level `classify_own` pattern-matches it, and DcD's constructed
+`Shared` fed into DcC's OWN `classify_own` must NOT match (RED before the
+fix: bare tags collide, the cross call wrongly matches "C-shared"; GREEN
+after: `Match_failure`, correctly distinct). Suite: **eval 237** (+2 new
+tests) / compiler 527 / codegen 441 / stdlib 810 (1 pre-existing
+environmental flake, `test_compiled_sanitize_clean_exit`, same as Task 2's) /
+snapshots 31, `git status test/snapshots/` empty.
+
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
 **`Signal.watch`/`Signal.raise` (and any stdlib module resolved through the

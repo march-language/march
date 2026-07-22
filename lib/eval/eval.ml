@@ -39,7 +39,23 @@ type value =
   | VTuple  of value list
   | VRecord of (string * value) list
   | VCon    of string * value list      (** Constructor: tag + payload *)
-  | VClosure of env * string list * expr
+  | VClosure of env * string list * expr * string
+      (** Closure: captured env, param names, body, and the lexical
+          declaring-module-QUALIFYING prefix (e.g. "DcA.", "" at top level)
+          in effect when this closure was CONSTRUCTED — see
+          [effective_module_prefix]. Needed because [module_stack]/
+          [current_doc_prefix] alone reflect only the single, eager, upfront
+          [eval_decl] walk over the AST; by the time a deferred closure body
+          actually runs (any call after its containing [DFn]/[DImpl]/[ELam]
+          was first evaluated), that walk has moved on (or finished
+          entirely) and [module_stack] no longer names this closure's own
+          declaring module. [apply_inner]'s [VClosure] arm restores this
+          prefix as the ambient [closure_prefix_override] for the duration
+          of the body's evaluation, so a bare colliding constructor
+          referenced inside the body (construction via [ECon], or a pattern
+          via [match_pattern]'s [PatCon] arm) qualifies against the module
+          it was LEXICALLY written in, not whatever module the CALLER
+          happens to be in. *)
   | VBuiltin of string * (value list -> value)
   | VPid    of int                      (** Actor process id *)
   | VTask         of int                 (** Task handle *)
@@ -326,34 +342,161 @@ let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
 let is_colliding_type_name (short_name : string) : bool =
   Hashtbl.mem type_collision_set short_name
 
-(** Populate [type_collision_set] by walking [decls] recursively (descending
-    into [DMod], accumulating a "Sub.Sub2." prefix the same way
-    [module_stack]/[current_doc_prefix] do at eval time — see the [DMod] arm
-    of [eval_decl] below) and collecting every [DType]/[DAlwaysLinearType]'s
-    declaring-module-qualified name. *)
+(** (module-prefix, bare ctor name) -> declaring type's SHORT name, populated
+    ONLY for a ctor that is BOTH (a) declared PUBLIC by a colliding type (see
+    [type_collision_set]) AND (b) shared by name with another PUBLIC
+    candidate in that SAME collision group — e.g. "Shared" declared `type`
+    (public) by both DcA.Thing and DcB.Thing. Mirrors typecheck.ml's Task-1
+    [ctor_names_of]/[ctor_sets_disjoint] double-collision check, at the AST
+    level instead of [env.ctors]. A ctor unique to exactly one candidate
+    (e.g. "OnlyA", only ever declared by DcA.Thing) is deliberately ABSENT:
+    its bare tag alone already disambiguates at the value level, so
+    [ECon]/[match_pattern] should leave it bare exactly as before this table
+    existed. Keyed by MODULE prefix (not type name) because that's all a
+    bare [ECon]/[PatCon] site has at eval time — see
+    [effective_module_prefix]; the corresponding type name is looked up here
+    so the qualified tag can still embed it (e.g. "DcA.Thing.Shared"),
+    matching [register_type_ctors]'s own qualified-tag registration.
+
+    PRIVATE (`ptype`) candidates are EXCLUDED from this table entirely —
+    not just from counting towards "shared", but never registered as a
+    qualification source even if their own ctor happens to coincide with a
+    PUBLIC candidate elsewhere. Found empirically (regression on the full
+    suite): stdlib/seq.march and stdlib/file.march each independently
+    declare `ptype Seq(a) = Seq(a)` — same short name, same sole ctor name,
+    a textbook "double collision" by this table's naive definition — but
+    this is a DELIBERATE structural-interop pattern (file.march's own
+    comment: redeclaring the shape "avoids dependency" on seq.march), and
+    `File.with_lines`'s callback constructs a `File.Seq` value that the
+    CALLER then feeds through `Seq.map`/`Seq.to_list` (a DIFFERENT
+    module's functions) on purpose — qualifying either side's tag broke
+    this cross-module hand-off (`Seq.map`'s own `Seq(...)` pattern no
+    longer matched a `File`-qualified tag). A `ptype` is module-internal by
+    construction (never nominally identified from outside its own module —
+    only used, as here, via ITS SHAPE), so treating two independent
+    `ptype` redeclarations as a genuinely ambiguous double-collision is the
+    wrong call: only PUBLIC same-short-name types (the plan's actual target
+    — two types each `impl`-ing the same interface) get qualified.
+
+    A SECOND filter, found via the SAME full-suite regression sweep: a
+    short name must ALSO have at least one `impl` block somewhere in the
+    program (any interface, any candidate) to participate — see
+    [compute_type_collision_set]'s [types_with_any_impl]. `bin/main.exe`
+    (the real compiler entry, used by [test_codegen.ml]'s
+    interp/compiled-parity tests) auto-loads a broad stdlib prelude
+    regardless of what the user's own program needs, so a user type's bare
+    short name routinely coincides with an UNRELATED stdlib type's name by
+    pure accident — e.g. an MPST test's own marker `type Server = Server`
+    (a multiparty-session-types ROLE token, zero impls, never dispatched
+    through any interface) collided with `stdlib/http_server.march`'s
+    unrelated, also-public `type Server = Server(...)` purely by name.
+    MPST's own runtime resolves role names by reading a [VCon]'s tag as a
+    raw string key ("has no channel to `Server`") — qualifying it broke
+    that lookup, even though NOTHING about MPST roles is genuinely
+    coherence-ambiguous (no interface, no dispatch). Requiring an `impl`
+    scopes qualification to the plan's actual target — two same-short-name
+    types that are BOTH the subject of at least one `impl` block, the
+    shape that creates observable dispatch ambiguity in the first place —
+    while excluding plain marker/sentinel types that merely happen to
+    share a common name with something elsewhere in the (often much
+    larger, auto-loaded) combined program. *)
+let colliding_ctor_type_by_module : (string * string, string) Hashtbl.t =
+  Hashtbl.create 16
+
+(** [Some short_type_name] iff [ctor_name] referenced bare from module
+    [module_prefix] needs collision qualification — see
+    [colliding_ctor_type_by_module]. *)
+let colliding_shared_ctor_type (module_prefix : string) (ctor_name : string)
+  : string option =
+  Hashtbl.find_opt colliding_ctor_type_by_module (module_prefix, ctor_name)
+
+(** Populate [type_collision_set] AND [colliding_ctor_type_by_module] by
+    walking [decls] recursively (descending into [DMod], accumulating a
+    "Sub.Sub2." prefix the same way [module_stack]/[current_doc_prefix] do
+    at eval time — see the [DMod] arm of [eval_decl] below), collecting
+    every [DType]/[DAlwaysLinearType]'s declaring-module-qualified name,
+    visibility, AND (for [TDVariant]s) its constructor names.
+    [type_collision_set] itself is computed from EVERY candidate regardless
+    of visibility — unchanged from the parent FQN plan's own Task 5, whose
+    existing consumers ([ctor_qualified_type_tbl]/[dispatch_type_name_of_value],
+    general-interface dispatch) already rely on that broader membership and
+    are NOT touched by this task. Only [colliding_ctor_type_by_module] (this
+    task's new, more invasive, VCon-tag-identity-affecting table) applies
+    the additional public-only filter — see its own doc comment. *)
 let compute_type_collision_set (decls : decl list) : unit =
   Hashtbl.reset type_collision_set;
-  let by_short : (string, string list) Hashtbl.t = Hashtbl.create 16 in
-  let add_qualified qualified =
+  Hashtbl.reset colliding_ctor_type_by_module;
+  (* short type name -> (module_prefix, qualified_name, visibility, ctor_names)
+     list, one entry per distinct qualified declaration seen. *)
+  let by_short : (string, (string * string * visibility * string list) list) Hashtbl.t =
+    Hashtbl.create 16 in
+  (* Short type names with at least one `impl` block anywhere in the
+     program (any interface, any candidate) — see [colliding_ctor_type_by_module]'s
+     doc comment for why this second filter exists. *)
+  let types_with_any_impl : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let add_qualified prefix qualified vis ctor_names =
     let short = match String.rindex_opt qualified '.' with
       | None   -> qualified
       | Some i -> String.sub qualified (i + 1) (String.length qualified - i - 1)
     in
     let existing = match Hashtbl.find_opt by_short short with Some l -> l | None -> [] in
-    if not (List.mem qualified existing) then
-      Hashtbl.replace by_short short (qualified :: existing)
+    if not (List.exists (fun (_, q, _, _) -> q = qualified) existing) then
+      Hashtbl.replace by_short short ((prefix, qualified, vis, ctor_names) :: existing)
   in
   let rec walk prefix ds =
     List.iter (function
-        | DType (_, name, _, _, _) | DAlwaysLinearType (_, name, _, _, _) ->
-          add_qualified (prefix ^ name.txt)
+        | DType (vis, name, _, type_def, _) | DAlwaysLinearType (vis, name, _, type_def, _) ->
+          let ctor_names = match type_def with
+            | TDVariant variants -> List.map (fun (v : variant) -> v.var_name.txt) variants
+            | _ -> []
+          in
+          add_qualified prefix (prefix ^ name.txt) vis ctor_names
+        | DImpl (idef, _) ->
+          let impl_short = match idef.impl_ty with
+            | TyCon (n, _) -> n.txt
+            | TyVar n      -> n.txt
+            | _            -> ""
+          in
+          if impl_short <> "" then Hashtbl.replace types_with_any_impl impl_short ()
         | DMod (sub, _, inner, _) -> walk (prefix ^ sub.txt ^ ".") inner
         | _ -> ()
       ) ds
   in
   walk "" decls;
-  Hashtbl.iter (fun short names ->
-      if List.length names >= 2 then Hashtbl.replace type_collision_set short ()
+  Hashtbl.iter (fun short candidates ->
+      if List.length candidates >= 2 then begin
+        Hashtbl.replace type_collision_set short ();
+        (* Only PUBLIC candidates of a short name that ALSO has at least one
+           `impl` block anywhere participate in shared-ctor qualification
+           (see [colliding_ctor_type_by_module]'s doc comment for why —
+           excludes both the stdlib's own `ptype Seq(a) = Seq(a)` duplicate
+           in seq.march/file.march, and impl-less marker types like MPST's
+           `type Server = Server` colliding by pure accident with
+           stdlib/http_server.march's unrelated `Server`). *)
+        let public_candidates =
+          if not (Hashtbl.mem types_with_any_impl short) then []
+          else List.filter (fun (_, _, vis, _) -> vis = Public) candidates
+        in
+        (* How many DISTINCT public candidates in this group declare each
+           ctor name (dedup within one candidate's own list first, so a
+           type that somehow lists a ctor twice doesn't inflate its own
+           count). *)
+        let ctor_counts : (string, int) Hashtbl.t = Hashtbl.create 8 in
+        List.iter (fun (_, _, _, ctors) ->
+            List.iter (fun c ->
+                let n = match Hashtbl.find_opt ctor_counts c with Some n -> n | None -> 0 in
+                Hashtbl.replace ctor_counts c (n + 1)
+              ) (List.sort_uniq String.compare ctors)
+          ) public_candidates;
+        List.iter (fun (prefix, _, _, ctors) ->
+            List.iter (fun c ->
+                match Hashtbl.find_opt ctor_counts c with
+                | Some n when n >= 2 ->
+                  Hashtbl.replace colliding_ctor_type_by_module (prefix, c) short
+                | _ -> ()
+              ) ctors
+          ) public_candidates
+      end
     ) by_short
 
 (** Record field-set → type name mapping.
@@ -421,6 +564,35 @@ let current_doc_prefix () =
   match !module_stack with
   | []    -> ""
   | parts -> String.concat "." (List.rev parts) ^ "."
+
+(** Dynamically-scoped override for [effective_module_prefix]: the lexical
+    declaring-module prefix captured on the currently-executing closure's
+    [VClosure] (its 4th field) when it was CONSTRUCTED, active only while
+    [apply_inner]'s [VClosure] arm is evaluating that closure's body.
+    [None] outside any active closure application (falls back to the real,
+    eager-decl-processing [current_doc_prefix]). [apply_inner] saves the
+    prior value, installs the callee's captured prefix, evaluates the body,
+    and restores the prior value afterward (exception-safe), so nested
+    closure calls correctly layer — an inner closure's own prefix is in
+    effect only for the duration of its own body, and the caller's prefix
+    (or [None]) is back in effect once it returns. See [VClosure]'s doc
+    comment for why this exists (module_stack alone is stale by the time a
+    deferred closure body actually runs). *)
+let closure_prefix_override : string option ref = ref None
+
+(** The module-qualifying prefix to use at THIS evaluation point for
+    constructor-collision qualification: the active closure's own captured
+    lexical prefix if we're currently inside one ([closure_prefix_override]),
+    else the real, eager-decl-processing [current_doc_prefix]. Consulted by
+    [ECon] evaluation, [match_pattern]'s [PatCon] arm, and every [VClosure]
+    construction site (to capture the right prefix at closure-creation
+    time — itself correct whether that creation is eager, e.g. top-level
+    [DFn]/[DImpl] processing, or happens while ALREADY inside another
+    closure's body, e.g. a lambda literal written inside a function). *)
+let effective_module_prefix () =
+  match !closure_prefix_override with
+  | Some p -> p
+  | None -> current_doc_prefix ()
 
 (* ------------------------------------------------------------------ *)
 (* Tap bus — thread-safe value inspector (Clojure tap> model)         *)
@@ -931,7 +1103,26 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
       | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
       | None   -> n.txt
     in
-    if bare_pat <> tag then None
+    (* Apply the SAME collision qualification [ECon] evaluation applies at
+       construction time (see [effective_module_prefix] and
+       [colliding_ctor_type_by_module]'s doc comments), so a bare pattern
+       written inside a colliding type's OWN declaring module — e.g. a
+       `Shared` arm inside DcA's own `impl Speak(Thing)` body — compares
+       correctly against a `VCon("DcA.Thing.Shared", …)` value, while a
+       non-colliding bare pattern anywhere else stays byte-identical to
+       before this table existed. Only reached for a BARE (dot-free)
+       written name: an explicit `Type.Ctor` pattern already resolves to
+       [bare_pat] via the stripping above and is left alone, exactly as for
+       `Result.Ok`. *)
+    let qualified_pat =
+      if String.contains n.txt '.' then bare_pat
+      else
+        let prefix = effective_module_prefix () in
+        match colliding_shared_ctor_type prefix bare_pat with
+        | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_pat
+        | None -> bare_pat
+    in
+    if qualified_pat <> tag then None
     else if List.length pats <> List.length args then None
     else match_list pats args
 
@@ -1048,9 +1239,27 @@ let dispatch_type_name_of_value = function
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
-      if is_colliding_type_name name_txt then
-        Hashtbl.replace ctor_qualified_type_tbl v.var_name.txt
-          (current_doc_prefix () ^ name_txt)
+      if is_colliding_type_name name_txt then begin
+        let module_prefix = current_doc_prefix () in
+        let qualified_type = module_prefix ^ name_txt in
+        Hashtbl.replace ctor_qualified_type_tbl v.var_name.txt qualified_type;
+        (* When this specific ctor is ALSO collision-shared (see
+           [colliding_ctor_type_by_module]), [ECon] construction now
+           produces a VCon carrying the fully-qualified tag
+           "<module>.<type>.<ctor>" instead of the bare ctor name — register
+           that exact tag too, in BOTH tables, so [type_name_of_value] /
+           [dispatch_type_name_of_value] can still resolve a value carrying
+           it (general-interface dispatch, Eq/Ord/Show/Hash, JSON, …). The
+           bare-keyed entries above are left untouched: a NON-shared ctor of
+           this same colliding type (e.g. "OnlyA") stays bare at
+           construction time, so its bare registration is still what gets
+           looked up. *)
+        if colliding_shared_ctor_type module_prefix v.var_name.txt <> None then begin
+          let qualified_tag = qualified_type ^ "." ^ v.var_name.txt in
+          Hashtbl.replace ctor_type_tbl qualified_tag name_txt;
+          Hashtbl.replace ctor_qualified_type_tbl qualified_tag qualified_type
+        end
+      end
     ) variants
 
 (** Forward-reference hook for dispatch in comparison operators.
@@ -1120,6 +1329,20 @@ let rec list_elems acc = function
   | VCon ("Cons", [h; t]) -> list_elems (h :: acc) t
   | v -> List.rev (v :: acc)  (* improper list — shouldn't happen *)
 
+(** The user-facing display name for a [VCon]'s tag: strips any collision
+    qualification (e.g. "DcA.Thing.Shared" -> "Shared") down to the bare
+    ctor name a March programmer actually wrote, the same way [ECon]
+    evaluation already strips an explicit `Type.Ctor` qualifier (e.g.
+    `Result.Ok`) before ever constructing the value. A bare (non-colliding)
+    tag has no '.' and is returned unchanged — byte-identical to before
+    collision-qualified tags existed. Show/print output must never leak the
+    internal qualified identity; only [==]/pattern-match/dispatch consult
+    the raw (possibly-qualified) tag. *)
+let display_tag (tag : string) : string =
+  match String.rindex_opt tag '.' with
+  | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
+  | None -> tag
+
 let rec value_to_string v =
   match v with
   | VInt n    -> string_of_int n
@@ -1140,9 +1363,9 @@ let rec value_to_string v =
   | VCon ("Nil", []) -> "[]"
   | VCon ("Cons", _) as v when is_list_value v ->
     "[" ^ String.concat ", " (List.map value_to_string (list_elems [] v)) ^ "]"
-  | VCon (tag, []) -> tag
+  | VCon (tag, []) -> display_tag tag
   | VCon (tag, args) ->
-    tag ^ "(" ^ String.concat ", " (List.map value_to_string args) ^ ")"
+    display_tag tag ^ "(" ^ String.concat ", " (List.map value_to_string args) ^ ")"
   | VClosure _  -> "<fn>"
   | VBuiltin (n, _) ->
     let is_rec = String.length n >= 5 && String.sub n 0 5 = "<rec:" in
@@ -1243,7 +1466,7 @@ let value_to_string_pretty ?(width=80) ?(max_items=50) ?(max_depth=6) v =
       | VCon (tag, args) when args <> [] ->
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
-        tag ^ "(\n" ^ pad
+        display_tag tag ^ "(\n" ^ pad
         ^ String.concat ("\n" ^ pad ^ ", ") (List.map (pp (depth + 1)) args)
         ^ "\n" ^ close_pad ^ ")"
       | _ -> flat_v
@@ -7479,9 +7702,12 @@ let rec eval_block (env : env) (es : expr list) : value =
     let param_names = List.map (fun p -> p.param_name.txt) params in
     (* Use the env_ref trick so the function can call itself recursively. *)
     let env_ref = ref env in
+    (* Captured NOW (this ELetFn's own construction point), not inside the
+       `fun args -> …` below — see [VClosure]'s doc comment. *)
+    let defn_prefix = effective_module_prefix () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     eval_block env' rest
@@ -7492,12 +7718,22 @@ let rec eval_block (env : env) (es : expr list) : value =
 (** Apply a callable value to a list of argument values. *)
 and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
-  | VClosure (closure_env, params, body) ->
+  | VClosure (closure_env, params, body, defn_prefix) ->
     if List.length params <> List.length args then
       eval_error "arity mismatch: expected %d args, got %d"
         (List.length params) (List.length args);
     let env' = List.combine params args @ closure_env in
-    eval_expr env' body
+    (* Install this closure's own captured lexical prefix as the ambient
+       [closure_prefix_override] for the duration of its body — see
+       [VClosure]'s and [effective_module_prefix]'s doc comments.
+       Exception-safe (Fun.protect) so a raised exception (Match_failure,
+       March panic, …) never leaves a stale override in place for whatever
+       runs next (a supervisor restart, a sibling actor handler, …). *)
+    let saved = !closure_prefix_override in
+    closure_prefix_override := Some defn_prefix;
+    Fun.protect
+      ~finally:(fun () -> closure_prefix_override := saved)
+      (fun () -> eval_expr env' body)
 
   | VBuiltin (_, f) -> f args
 
@@ -7587,15 +7823,39 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let arg_vals = List.map (eval_expr env) args in
     (* Strip any type qualifier from the constructor tag so that
        Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
-    let tag = match String.rindex_opt name.txt '.' with
+    let bare_tag = match String.rindex_opt name.txt '.' with
       | Some i -> String.sub name.txt (i + 1) (String.length name.txt - i - 1)
       | None   -> name.txt
+    in
+    (* Collision-conditional module-qualified tag: when [bare_tag] is
+       BOTH declared by a colliding type AND shares that ctor name with
+       another candidate in the same collision group (see
+       [colliding_ctor_type_by_module]'s doc comment), the tag becomes
+       "<lexical module>.<type>.<ctor>" (e.g. "DcA.Thing.Shared") instead
+       of the bare name — otherwise a same-shape ctor from a same-short-name
+       type declared in a DIFFERENT module would be runtime-indistinguishable
+       ([VCon]'s tag string IS its entire identity, unlike native which has a
+       separate integer discriminant). [effective_module_prefix] (not the
+       raw [current_doc_prefix]) supplies "the module this ECon was
+       LEXICALLY written in", correct even when this site is evaluated
+       later as part of a deferred closure body — see its doc comment. An
+       explicitly qualified name (contains '.') is left as today: stripped
+       to bare, exactly like `Result.Ok`. A NON-colliding or non-shared
+       bare ctor (the overwhelming common case) takes the [None] branch and
+       produces the byte-identical bare tag as before this change. *)
+    let tag =
+      if String.contains name.txt '.' then bare_tag
+      else
+        let prefix = effective_module_prefix () in
+        match colliding_shared_ctor_type prefix bare_tag with
+        | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_tag
+        | None -> bare_tag
     in
     VCon (tag, arg_vals)
 
   | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
-    VClosure (env, param_names, body)
+    VClosure (env, param_names, body, effective_module_prefix ())
 
   | EBlock (es, _) -> eval_block env es
     (* E-Blk-Last / E-Blk-Let / E-LetFn / E-Blk-Seq — core-march.md §4.2, see eval_block below *)
@@ -7878,9 +8138,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (* ELetFn as a standalone expression: return the closure (for e.g. last expr in block) *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
     let env_ref = ref env in
+    let defn_prefix = effective_module_prefix () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     rec_v
@@ -8055,6 +8316,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
   Hashtbl.reset type_collision_set;
+  Hashtbl.reset colliding_ctor_type_by_module;
+  closure_prefix_override := None;
   (* Pre-register builtin constructor → type mappings so Show dispatch works *)
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
@@ -8110,7 +8373,7 @@ let run_scheduler () =
         | Some handler ->
           (try
              ignore (match handler with
-               | VClosure (_, [], _) -> apply handler []
+               | VClosure (_, [], _, _) -> apply handler []
                | _                   -> apply handler [VUnit])
            with exn ->
              Printf.eprintf "signal watcher (code %d) raised: %s\n%!"
@@ -8750,10 +9013,13 @@ let rec eval_decl (env : env) (d : decl) : env =
        function's own name, making self-recursion work in the REPL. *)
     let env_ref = ref env in
     let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+    (* Captured at THIS declaration's processing point (eager, module_stack
+       correct here) — see [VClosure]'s doc comment. *)
+    let defn_prefix = effective_module_prefix () in
     let rec_closure = VBuiltin (rec_name,
                                 fun args ->
                                   let call_env = !env_ref in
-                                  let fn_v = VClosure (call_env, params, clause.fc_body) in
+                                  let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
                                   apply fn_v args) in
     let env' = (def.fn_name.txt, rec_closure)
                :: List.remove_assoc def.fn_name.txt env in
@@ -8828,10 +9094,13 @@ let rec eval_decl (env : env) (d : decl) : env =
         let params = clause_params clause in
         let arity = List.length params in
         let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+        (* Captured here (module_stack is correctly ["name.txt"; …] at this
+           point in the walk) — see [VClosure]'s doc comment. *)
+        let defn_prefix = effective_module_prefix () in
         let rec_closure = VBuiltin (rec_name,
                                     fun args ->
                                       let call_env = !inner_ref in
-                                      let fn_v = VClosure (call_env, params, clause.fc_body) in
+                                      let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
                                       apply fn_v args) in
         let parse_rec_arity n =
           match String.rindex_opt n '/' with
@@ -8989,7 +9258,7 @@ let rec eval_decl (env : env) (d : decl) : env =
             (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env, params, clause.fc_body) in
+            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix ()) in
             (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
@@ -9189,6 +9458,7 @@ and eval_decls (env : env) (decls : decl list) : env =
             fully-populated environment (including all stubs). *)
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
+  closure_prefix_override := None;
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
@@ -9252,10 +9522,11 @@ let eval_module_env (m : module_) : env =
       let arity = List.length params in
       (* Encode arity in the name so we can recover it when combining arities *)
       let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+      let defn_prefix = effective_module_prefix () in
       let rec_closure = VBuiltin (rec_name,
                                   fun args ->
                                     let call_env = !env_ref in
-                                    let fn_v = VClosure (call_env, params, clause.fc_body) in
+                                    let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
                                     apply fn_v args) in
       (* Support default-arg overloading: if a same-named fn already has a real
          closure (VMultiarity or a previous single-arity VBuiltin), combine into
@@ -9363,7 +9634,7 @@ let eval_module_env (m : module_) : env =
             | _ when is_dispatched ->
               let clause = List.hd fn_def.fn_clauses in
               let params = clause_params clause in
-              let clo = VClosure (acc_env, params, clause.fc_body) in
+              let clo = VClosure (acc_env, params, clause.fc_body, effective_module_prefix ()) in
               (mname.txt, clo) :: acc_env
             | _ ->
               eval_decl acc_env (DFn (fn_def, sp))
@@ -9505,10 +9776,11 @@ let eval_stdlib_decls (decls : decl list) : unit =
             | _   -> eval_error "fn %s: expected one clause" def.fn_name.txt
           in
           let params = clause_params clause in
+          let defn_prefix = effective_module_prefix () in
           let rec_clo = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
             fun args ->
               let call_env = !inner_ref in
-              let fn_v = VClosure (call_env, params, clause.fc_body) in
+              let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
               apply fn_v args) in
           let e' = (def.fn_name.txt, rec_clo) :: List.remove_assoc def.fn_name.txt e in
           inner_ref := e';
