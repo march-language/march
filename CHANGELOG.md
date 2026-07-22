@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `File.read` and related I/O builtins (`file_write/append/delete/copy/rename/stat/open`,
+  `Dir.list/mkdir/mkdir_p/rmdir/rm_rf`, `Csv.open`, and the TCP/TLS/HTTP/process
+  builtins) had their `Result` error type registered as fully polymorphic, so a
+  function declaring an incompatible error type (e.g. `Result(_, String)` for
+  `File.read`, whose real error is `FileError`) typechecked with zero
+  diagnostics and then panicked at runtime the moment the error value was used
+  as the wrong type. These builtins' error types are now pinned to their real
+  concrete type, so a mismatched declaration is now a compile-time error
+  instead of a runtime panic.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,
