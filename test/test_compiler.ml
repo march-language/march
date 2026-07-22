@@ -3456,6 +3456,22 @@ let test_letq_mismatched_error_types () =
   end|} in
   Alcotest.(check bool) "let? mixed error types: type error" true (has_errors ctx)
 
+(** file_read's error is always a concrete FileError value at runtime (never
+    an arbitrary String) — its registered type must not let the error type
+    unify with an incompatible concrete type like String.  Regression for a
+    typechecker soundness gap: this used to typecheck with zero errors and
+    then panic at runtime the moment `e` was used as a String. *)
+let test_letq_file_read_wrong_error_type () =
+  let ctx = typecheck {|mod Test do
+    needs IO.FileRead
+    fn run(path) : Result(String, String) do
+      let? content = file_read(path)
+      Ok(content)
+    end
+  end|} in
+  Alcotest.(check bool) "file_read error must not unify with String: type error"
+    true (has_errors ctx)
+
 let test_letq_last_in_block_error () =
   let ctx = typecheck {|mod Test do
     fn run() do
@@ -5142,11 +5158,15 @@ let test_cap_deterministic_unix_time_ms_error () =
    nondeterminism source) must STILL be accepted — no `Error` from the cap
    check. (A WARNING-level Check-1b body-scan diagnostic fires, but `has_errors`
    ignores warnings.) This pins the intended semantics and guards against the
-   fix over-banning deterministic-but-effectful builtins. *)
+   fix over-banning deterministic-but-effectful builtins.
+   No return-type annotation: `file_read`'s error is a concrete `FileError`,
+   not `String` (see the file_read soundness-gap fix), so the return type is
+   left to inference here — annotating it `Result(String, String)` would
+   fail with a genuine (and unrelated to this test) type mismatch. *)
 let test_cap_deterministic_file_read_ok () =
   let ctx = typecheck {|mod Det do
     cap deterministic
-    fn load(path : String) : Result(String, String) do
+    fn load(path : String) do
       file_read(path)
     end
   end|} in
@@ -8456,6 +8476,7 @@ let compiler_suites =
           Alcotest.test_case "let? last in block: error"     `Quick test_letq_last_in_block_error;
           Alcotest.test_case "let? chain typechecks"         `Quick test_letq_chain_typechecks;
           Alcotest.test_case "let? mixed error types: error" `Quick test_letq_mismatched_error_types;
+          Alcotest.test_case "file_read error must not unify with String" `Quick test_letq_file_read_wrong_error_type;
         ] );
       ( "tag_and_typestate", [
           Alcotest.test_case "tag keyword parses"                        `Quick test_tag_parses;

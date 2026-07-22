@@ -2015,16 +2015,22 @@ let builtin_bindings : (string * scheme) list =
         TArrow (TCon ("CancelToken", []),
                 TCon ("Task", [a])))));
     ("task_cancel_by_id",      poly1 (fun a -> TArrow (TCon ("Task", [a]), t_unit)));
-    (* File I/O builtins *)
+    (* File I/O builtins.
+       All of these fail with a concrete `File.FileError` value at runtime
+       (see eval.ml's file_error_of_unix/file_error_of_sys) — never an
+       arbitrary caller-chosen type — so the error type is Mono, not a
+       polymorphic `e`.  Registering it as poly1 previously let a caller
+       declare an incompatible Result(_, T) and typecheck with zero errors,
+       then panic the moment the bound error value was used as T. *)
     ("file_exists",     Mono (TArrow (t_string, t_bool)));
-    ("file_read",       poly1 (fun e -> TArrow (t_string, t_result t_string e)));
-    ("file_write",      poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
-    ("file_append",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
-    ("file_delete",     poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
-    ("file_copy",       poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
-    ("file_rename",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
-    ("file_stat",       poly1 (fun e -> TArrow (t_string, t_result (TCon ("FileStat", [])) e)));
-    ("file_open",       poly1 (fun e -> TArrow (t_string, t_result t_int e)));
+    ("file_read",       Mono (TArrow (t_string, t_result t_string (TCon ("FileError", [])))));
+    ("file_write",      Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_append",     Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_delete",     Mono (TArrow (t_string, t_result t_unit (TCon ("FileError", [])))));
+    ("file_copy",       Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_rename",     Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_stat",       Mono (TArrow (t_string, t_result (TCon ("FileStat", [])) (TCon ("FileError", [])))));
+    ("file_open",       Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     ("file_close",      Mono (TArrow (t_int, t_unit)));
@@ -2041,7 +2047,11 @@ let builtin_bindings : (string * scheme) list =
        Boxed the compiled match reads a heap object's tag byte, but the C
        runtime returns raw NULL for EOF (a Niche-only convention) — so every
        row is misread against an uninitialized tag. *)
-    ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
+    (* csv_open's error is always a concrete Csv.CsvError value at runtime
+       (see eval.ml's csv_open_impl) — Mono, not a polymorphic `e`. CsvError
+       isn't niche-shaped (both variants carry a payload) so, unlike CsvRow
+       above, the bare name is fine here. *)
+    ("csv_open",     Mono (TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int (TCon ("CsvError", [])))))));
     ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
     (* TCP/HTTP transport builtins *)
@@ -2049,9 +2059,12 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
     (* tcp_accept(listen_fd): blocks until a client connects, returns Ok(client_fd) or Err *)
     ("tcp_accept",              Mono (TArrow (t_int, t_result t_int t_string)));
-    ("tcp_connect",             poly1 (fun e -> TArrow (t_string, TArrow (t_int, t_result t_int e))));
-    ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
-    ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
+    (* tcp_connect/send_all/recv_all always fail with a String reason (see
+       eval.ml and runtime/march_http.c) — Mono, matching tcp_listen/tcp_accept
+       above rather than leaving the error type unconstrained. *)
+    ("tcp_connect",             Mono (TArrow (t_string, TArrow (t_int, t_result t_int t_string))));
+    ("tcp_send_all",            Mono (TArrow (t_int, TArrow (t_string, t_result t_unit t_string))));
+    ("tcp_recv_all",            Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string t_string)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
     (* tcp_peer_addr(fd): numeric IP of the connected peer; "" when unavailable *)
     ("tcp_peer_addr",           Mono (TArrow (t_int, t_string)));
@@ -2060,15 +2073,15 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_recv_exact",          Mono (TArrow (t_int, TArrow (t_int, t_result (TCon ("Bytes", [])) t_string))));
     (* md5(s): returns 32-char lowercase hex digest *)
     ("md5",                     Mono (TArrow (t_string, t_string)));
-    ("tcp_recv_http",           poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
-    ("tcp_recv_http_headers",   poly1 (fun e -> TArrow (t_int, t_result (TTuple [t_string; t_int; t_bool]) e)));
-    ("tcp_recv_chunk",          poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
-    ("tcp_recv_chunked_frame",  poly1 (fun e -> TArrow (t_int, t_result t_string e)));
+    ("tcp_recv_http",           Mono (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
+    ("tcp_recv_http_headers",   Mono (TArrow (t_int, t_result (TTuple [t_string; t_int; t_bool]) t_string)));
+    ("tcp_recv_chunk",          Mono (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
+    ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
     (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
         TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
-    ("http_parse_response",     poly1 (fun e -> TArrow (t_string,
-        t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) e)));
+    ("http_parse_response",     Mono (TArrow (t_string,
+        t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) t_string)));
     (* http_fetch / http_fetch_available: JS-only fetch path used by
        HttpTransport.request (stdlib/http_transport.march).  On native builds
        http_fetch_available() always returns false (see runtime/march_http.c),
@@ -2089,13 +2102,14 @@ let builtin_bindings : (string * scheme) list =
     ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
     ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));
     ("ws_select", Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, TCon ("SelectResult", []))))));
-    (* Dir I/O builtins *)
+    (* Dir I/O builtins — same FileError-vs-poly1 gap as the File builtins
+       above (see eval.ml's dir_list/dir_mkdir/dir_mkdir_p/dir_rmdir/dir_rm_rf). *)
     ("dir_exists",      Mono (TArrow (t_string, t_bool)));
-    ("dir_list",        poly1 (fun e -> TArrow (t_string, t_result (t_list t_string) e)));
-    ("dir_mkdir",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
-    ("dir_mkdir_p",     poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
-    ("dir_rmdir",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
-    ("dir_rm_rf",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    ("dir_list",        Mono (TArrow (t_string, t_result (t_list t_string) (TCon ("FileError", [])))));
+    ("dir_mkdir",       Mono (TArrow (t_string, t_result t_unit (TCon ("FileError", [])))));
+    ("dir_mkdir_p",     Mono (TArrow (t_string, t_result t_unit (TCon ("FileError", [])))));
+    ("dir_rmdir",       Mono (TArrow (t_string, t_result t_unit (TCon ("FileError", [])))));
+    ("dir_rm_rf",       Mono (TArrow (t_string, t_result t_unit (TCon ("FileError", [])))));
     (* String extra builtins *)
     ("string_last_index_of", Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
     (* App/Supervisor builtins *)
@@ -2173,16 +2187,20 @@ let builtin_bindings : (string * scheme) list =
     ("process_exit",       Mono (TArrow (t_int, t_unit)));
     ("process_argv",       Mono (t_list t_string));
     ("process_pid",        Mono t_int);
-    ("process_spawn_sync", poly1 (fun e ->
+    (* process_spawn_sync/lines/async always fail with a String reason (see
+       eval.ml and runtime/march_runtime.c) — the error type is Mono, not a
+       polymorphic `e`.  process_spawn_lines keeps its Seq element type `a`
+       polymorphic since that's a generic Seq, unrelated to the error slot. *)
+    ("process_spawn_sync", Mono
+        (TArrow (t_string, TArrow (t_list t_string,
+          t_result (TCon ("ProcessResult", [])) t_string))));
+    ("process_spawn_lines", poly1 (fun a ->
         TArrow (t_string, TArrow (t_list t_string,
-          t_result (TCon ("ProcessResult", [])) e))));
-    ("process_spawn_lines", poly2 (fun a e ->
-        TArrow (t_string, TArrow (t_list t_string,
-          t_result (TCon ("Seq", [a])) e))));
+          t_result (TCon ("Seq", [a])) t_string))));
     (* Async (non-blocking) process spawn *)
-    ("process_spawn_async", poly1 (fun e ->
-        TArrow (t_string, TArrow (t_list t_string,
-          t_result (TCon ("LiveProcess", [])) e))));
+    ("process_spawn_async", Mono
+        (TArrow (t_string, TArrow (t_list t_string,
+          t_result (TCon ("LiveProcess", [])) t_string))));
     ("process_read_line", Mono
         (TArrow (TCon ("LiveProcess", []), t_option t_string)));
     ("process_write", Mono
@@ -2340,21 +2358,23 @@ let builtin_bindings : (string * scheme) list =
         TArrow (TCon ("RingBuf", [a]), t_unit)));
     ("ring_buf_to_list",     poly1 (fun a ->
         TArrow (TCon ("RingBuf", [a]), t_list a)));
-    (* TLS builtins — tls_client_ctx, tls_server_ctx, etc. *)
-    ("tls_client_ctx",       poly1 (fun e ->
-        TArrow (t_string, TArrow (t_list t_string, TArrow (t_int, TArrow (t_int,
-          t_result t_int e))))));
-    ("tls_server_ctx",       poly1 (fun e ->
-        TArrow (t_string, TArrow (t_string, TArrow (t_string, TArrow (t_list t_string,
-          TArrow (t_int, t_result t_int e)))))));
-    ("tls_connect",          poly1 (fun e ->
-        TArrow (t_int, TArrow (t_int, TArrow (t_string, t_result t_int e)))));
-    ("tls_accept",           poly1 (fun e ->
-        TArrow (t_int, TArrow (t_int, t_result t_int e))));
-    ("tls_read",             poly1 (fun e ->
-        TArrow (t_int, TArrow (t_int, t_result t_string e))));
-    ("tls_write",            poly1 (fun e ->
-        TArrow (t_int, TArrow (t_string, t_result t_int e))));
+    (* TLS builtins — tls_client_ctx, tls_server_ctx, etc.  All fail with a
+       String reason (see runtime/march_tls.c's make_err) — Mono, not a
+       polymorphic `e`. *)
+    ("tls_client_ctx",       Mono
+        (TArrow (t_string, TArrow (t_list t_string, TArrow (t_int, TArrow (t_int,
+          t_result t_int t_string))))));
+    ("tls_server_ctx",       Mono
+        (TArrow (t_string, TArrow (t_string, TArrow (t_string, TArrow (t_list t_string,
+          TArrow (t_int, t_result t_int t_string)))))));
+    ("tls_connect",          Mono
+        (TArrow (t_int, TArrow (t_int, TArrow (t_string, t_result t_int t_string)))));
+    ("tls_accept",           Mono
+        (TArrow (t_int, TArrow (t_int, t_result t_int t_string))));
+    ("tls_read",             Mono
+        (TArrow (t_int, TArrow (t_int, t_result t_string t_string))));
+    ("tls_write",            Mono
+        (TArrow (t_int, TArrow (t_string, t_result t_int t_string))));
     ("tls_close",            Mono (TArrow (t_int, t_unit)));
     ("tls_ctx_free",         Mono (TArrow (t_int, t_unit)));
     ("tls_negotiated_alpn",  Mono (TArrow (t_int, t_option t_string)));
