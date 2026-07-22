@@ -633,17 +633,21 @@ let test_impl_coherence_same_module_duplicate_err () =
   Alcotest.(check bool) "same-module duplicate impl: error"
     true (has_errors ctx)
 
-let test_impl_coherence_shared_ctor_double_collision_err () =
-  (* Task-6b stopgap: two DISTINCT same-short-name types in sibling modules that
-     ALSO share a constructor name (`Shared`) are a "double collision". The
-     backends and interpreter route dispatch on the BARE constructor tag
-     (ci_module is diagnostic-only), so a general-interface method would silently
-     misdispatch in BOTH backends. Until the full ci_module.Type.Ctor ctor
-     identity lands, this specific shape is REJECTED via the existing overlap
-     path (register_impl_shape's ctor-set-disjointness check) rather than
-     miscompiled. Reject witness: specs/lang/types/reject/t82. Contrast with
-     test_impl_coherence_distinct_modules_general_iface_ok (DISTINCT ctor names,
-     the common case, which MUST still be accepted). *)
+let test_impl_coherence_shared_ctor_double_collision_ok () =
+  (* Constructor module-qualified identity plan, flag-day (Task 6): two DISTINCT
+     same-short-name types in sibling modules that ALSO share a constructor name
+     (`Shared`) — a "double collision" — now typecheck. This shape was rejected
+     under the interim Task-6b stopgap because the backends and interpreter used
+     to route dispatch on the BARE constructor tag (ci_module was diagnostic-
+     only), so a general-interface method would silently misdispatch. The plan
+     resolves ctor identity upstream — native ECon/pattern-match qualify a
+     colliding type's ctor key with its declaring module, and the interpreter
+     qualifies the VCon tag the same way — so `speak` dispatches correctly on the
+     value's real type in BOTH backends, and the declaring-module coherence
+     relaxation is sound unconditionally (no ctor-sharing carve-out). Accept
+     witness: specs/lang/types/accept/t90. Cross-backend runtime witness:
+     test/imports/speak_double_collision_native. Companion (DISTINCT ctor names):
+     test_impl_coherence_distinct_modules_general_iface_ok. *)
   let ctx = typecheck {|mod Top do
     interface Speak(a) do
       fn speak : a -> String
@@ -657,48 +661,8 @@ let test_impl_coherence_shared_ctor_double_collision_err () =
       impl Speak(Thing) do fn speak(_x) do "b" end end
     end
   end|} in
-  Alcotest.(check bool) "shared-ctor-name double collision: error"
-    true (has_errors ctx)
-
-let test_dev_relax_ctor_coherence_bypasses_stopgap () =
-  (* New plan's Task 0 dev harness: MARCH_DEV_RELAX_CTOR_COHERENCE=1 bypasses
-     the Task-6b ctor_sets_disjoint stopgap so later tasks in THIS plan can
-     compile/run double-collision fixtures under the real fix's development,
-     before Task 6 does the flag-day removal of both the stopgap and this
-     bypass together. Mirrors MARCH_DEV_RELAX_COHERENCE from the prior FQN
-     plan's own Task 0 (already fully removed). Opt-in only: see
-     test_impl_coherence_shared_ctor_double_collision_err just above for the
-     default (env var unset) behavior, which this bypass must not disturb. *)
-  let src = {|
-mod Top do
-  interface Speak(a) do
-    fn speak : a -> String
-  end
-  mod DcA do
-    type Thing = Shared | OnlyA
-    impl Speak(Thing) do
-      fn speak(_self) do "from-A" end
-    end
-  end
-  mod DcB do
-    type Thing = Shared | OnlyB
-    impl Speak(Thing) do
-      fn speak(_self) do "from-B" end
-    end
-  end
-  fn main() do () end
-end
-|} in
-  Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "1";
-  let saw_errors =
-    Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_DEV_RELAX_CTOR_COHERENCE" "0")
-      (fun () ->
-         let m = parse_and_desugar src in
-         let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
-         has_errors errors)
-  in
-  Alcotest.(check bool) "dev-relax bypasses the ctor-disjointness stopgap"
-    false saw_errors
+  Alcotest.(check bool) "shared-ctor-name double collision: no error"
+    false (has_errors ctx)
 
 (* FQN dispatch-identity plan, Task 1: add_ctor's structural dedup (same
    ci_type/ci_params/ci_arg_tys) used to collapse a SECOND module's
@@ -8109,8 +8073,7 @@ let compiler_suites =
           Alcotest.test_case "impl coherence: distinct modules ok (builtin)" `Quick test_impl_coherence_distinct_modules_ok;
           Alcotest.test_case "impl coherence: distinct modules general-iface ok" `Quick test_impl_coherence_distinct_modules_general_iface_ok;
           Alcotest.test_case "impl coherence: same-module dup err" `Quick test_impl_coherence_same_module_duplicate_err;
-          Alcotest.test_case "impl coherence: shared-ctor double collision err" `Quick test_impl_coherence_shared_ctor_double_collision_err;
-          Alcotest.test_case "dev-relax ctor coherence bypasses stopgap" `Quick test_dev_relax_ctor_coherence_bypasses_stopgap;
+          Alcotest.test_case "impl coherence: shared-ctor double collision ok" `Quick test_impl_coherence_shared_ctor_double_collision_ok;
           Alcotest.test_case "add_ctor keeps distinct-module identical-shape ctors" `Quick test_add_ctor_keeps_distinct_module_identical_shape_ctors;
           Alcotest.test_case "ctor lexical preference: both modules resolve own bare ref" `Quick test_ctor_lexical_preference_both_modules;
           Alcotest.test_case "ctor truly cross-module ambiguous: hard error" `Quick test_ctor_truly_ambiguous_is_error;

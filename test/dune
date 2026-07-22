@@ -1459,6 +1459,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (system
    "MARCH_LIB_PATH=\"$PWD/imports/speak_collision_native\" %{exe:../bin/main.exe} --compile -o speak_collision_native_bin \"$PWD/imports/speak_collision_native/sc_entry.march\" && ./speak_collision_native_bin")))
 
+; ── Witness: DOUBLE-collision (shared ctor name) GENERAL-interface dispatch ──
+; Constructor module-qualified identity plan flag-day
+; (specs/plans/2026-07-20-fqn-impl-dispatch-identity.md, Task 6): the sibling of
+; speak_collision_native above, but the two same-short-name `Thing` types ALSO
+; share a constructor NAME (`Shared`) — a "double collision". This shape was
+; rejected by the interim Task-6b coherence stopgap because the backends used to
+; route dispatch on the BARE ctor tag (ci_module diagnostic-only), so `speak`
+; would misdispatch. The plan qualifies each colliding type's ctor identity with
+; its declaring module in native ECon/pattern-match (and the interpreter's VCon
+; tag), so `speak(Shared)` routes to the correct module's impl body. The fixture
+; compiles natively and RUNS the binary, which panics (exit 1) on any misdispatch
+; (`from-A`/`from-B` must each reach their own impl body). The entry asserts BOTH
+; directions at once, so it catches order-dependent misdispatch regardless of the
+; file-walk order (see dc_entry.march). Run interpreted too, manually.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (glob_files imports/speak_double_collision_native/*.march))
+ (action (system
+   "MARCH_LIB_PATH=\"$PWD/imports/speak_double_collision_native\" %{exe:../bin/main.exe} --compile -o speak_double_collision_native_bin \"$PWD/imports/speak_double_collision_native/dc_entry.march\" && ./speak_double_collision_native_bin")))
+
 ; ── Regression: record introspection builtins in native builds ──
 ; record_keys/values/entries/get/put/has_key/from_list were interpreter-only
 ; (no native lowering — bare `call ptr @record_entries` failed at link time).

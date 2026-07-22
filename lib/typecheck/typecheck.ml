@@ -6082,69 +6082,6 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   in
   let modules_distinct m1 m2 =
     match m1, m2 with Some a, Some b -> a <> b | _ -> false in
-  (* Bare short name of the head type (drop any `Mod.` prefix), used by the
-     Task-6b double-collision stopgap below. *)
-  let head_bare_name =
-    match idef.impl_ty with
-    | Ast.TyCon (n, _) ->
-      (match String.rindex_opt n.txt '.' with
-       | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
-       | None -> n.txt)
-    | _ -> ""
-  in
-  (* Task-6b stopgap. The declaring-module relaxation below is sound only when
-     the two same-short-name colliding types have DISJOINT constructor NAME
-     sets. If they share a constructor name (e.g. both `type Thing = Shared |
-     …`), the constructor-tag identity the backends and interpreter route on is
-     ambiguous — [env.ctors] keys on the BARE ctor name, and [ci_module]
-     disambiguation is diagnostic-only (feeds NO dispatch/mangling) — so a
-     general-interface method silently MISDISPATCHES in both backends
-     (registration-order-dependent, interp/compiled can disagree). Until the
-     full `ci_module.Type.Ctor`-qualified ctor identity lands (see
-     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md), REJECT this specific
-     double-collision shape through the EXISTING overlap path rather than
-     miscompile it. Constructor short-names for a (bare type, module) pair are
-     read off [env.ctors]' keys INCLUDING the module-qualified `Mod.Ctor` keys:
-     [add_ctor] structurally dedups the BARE ctor key (dropping the identically-
-     shaped ctor of the OTHER module), so the bare key alone cannot tell the two
-     modules' ctors apart — the qualified keys carry each module's own entry. *)
-  let ctor_names_of bare_type_name declaring_module =
-    StrMap.fold (fun k cis acc ->
-        if List.exists (fun (ci : ctor_info) ->
-               ci.ci_type = bare_type_name && ci.ci_module = declaring_module)
-             cis
-        then
-          let short = match String.rindex_opt k '.' with
-            | Some i -> String.sub k (i + 1) (String.length k - i - 1)
-            | None -> k in
-          if List.mem short acc then acc else short :: acc
-        else acc)
-      env.ctors []
-  in
-  let ctor_sets_disjoint m_old =
-    match head_type_module, m_old with
-    | Some new_mod, Some old_mod ->
-      let new_ctors = ctor_names_of head_bare_name new_mod in
-      let old_ctors = ctor_names_of head_bare_name old_mod in
-      not (List.exists (fun c -> List.mem c old_ctors) new_ctors)
-    | _ -> false  (* can't prove disjoint → don't relax (conservative) *)
-  in
-  (* Task 0 (constructor module-qualified identity plan) dev harness: a
-     TEMPORARY, opt-in-only bypass of the Task-6b ctor_sets_disjoint stopgap
-     above, letting later tasks in this plan compile/run double-collision
-     fixtures while the real ci_module.Type.Ctor-qualified ctor identity is
-     under development. Mirrors MARCH_DEV_RELAX_COHERENCE from the prior FQN
-     dispatch-identity plan's own Task 0 (fully removed once that plan's
-     Stage 3 landed). This plan's Task 6 removes both the stopgap and this
-     bypass together in one flag-day commit — never leave this env var
-     checked without also removing ctor_sets_disjoint's gate at the same
-     time. Default (unset) behavior is byte-identical to before this dev
-     harness existed. *)
-  let dev_relax_ctor_coherence =
-    match Sys.getenv_opt "MARCH_DEV_RELAX_CTOR_COHERENCE" with
-    | Some ("1" | "true") -> true
-    | _ -> false
-  in
   (* Declaring-module coherence relaxation (FQN dispatch, all stages landed):
      two same-short-name types declared in DIFFERENT modules are genuinely
      distinct, so each may implement the SAME interface without overlapping.
@@ -6155,7 +6092,18 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
      sites through a generated runtime tag-switch dispatch fn; the interpreter
      qualifies iface_method_tbl the same way. A general interface therefore
      dispatches on the value's real type in BOTH backends (verified
-     `from-A`/`from-B` — accept/t89, test/imports/speak_collision_native). See
+     `from-A`/`from-B` — accept/t89, test/imports/speak_collision_native).
+
+     This relaxation is now UNCONDITIONAL — no residual ctor-sharing carve-out.
+     Even when the two colliding types ALSO share a constructor NAME (a "double
+     collision", e.g. both `type Thing = Shared | …`), the constructor module-
+     qualified identity plan resolves ctor identity upstream: native
+     ECon/pattern-match qualify a colliding type's ctor key with its declaring
+     module, and the interpreter qualifies the VCon tag the same way, so the
+     backends and interpreter route each module's `Shared` to its OWN impl body
+     (was the interim Task-6b `ctor_sets_disjoint` stopgap, removed at this
+     plan's flag-day; verified accept/t90,
+     test/imports/speak_double_collision_native). See
      specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
@@ -6177,8 +6125,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (modules_distinct m_old head_type_module
-                     && (ctor_sets_disjoint m_old || dev_relax_ctor_coherence)))
+             && not (modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp

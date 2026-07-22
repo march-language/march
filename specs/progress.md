@@ -283,6 +283,58 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, constructor module-qualified identity COMPLETE — shared-ctor-name double collisions dispatch correctly, flag-day)
+
+**Two same-short-name types declared in different modules that ALSO share a
+constructor name (a "double collision", e.g. both `type Thing = Shared | …`)
+may now each implement the same interface, compile, run, and dispatch
+correctly in BOTH backends.** This closes the last residual gap of the FQN
+dispatch-identity effort. Under the earlier Stages 1-3 flag-day (2026-07-21),
+same-short-name types dispatched correctly *only* when their constructor NAME
+sets were disjoint; a shared ctor name was rejected at typecheck by an interim
+Task-6b stopgap (`register_impl_shape`'s `ctor_sets_disjoint` check), because
+the backends and interpreter routed dispatch on the BARE ctor tag (`ci_module`
+was diagnostic-only, feeding no dispatch). The constructor module-qualified
+identity plan (`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`,
+`docs/superpowers/specs/2026-07-21-ctor-module-identity-design.md`) resolves
+ctor identity upstream, **all collision-conditional** (non-colliding programs
+byte-identical):
+- **Typecheck (Tasks 1-2):** `add_ctor` stops collapsing distinct-module
+  identically-shaped ctors (`env.ctors "Shared"` retains both declaring
+  modules' `ctor_info`s); `lookup_ctor`/`lookup_ctor_in_type` prefer the
+  lexical current-module candidate, and a genuinely cross-module-ambiguous
+  bare reference is a hard error.
+- **Native (Tasks 3-4, narrowed by 5.5):** `ECon` construction and
+  pattern-match branch tags qualify a colliding type's ctor key with its
+  lexical declaring module (`lib/tir/lower.ml`, gated by a narrow
+  `shared_ctor_collision_tbl` — PUBLIC + impl-bearing collisions only, so a
+  `ptype` structural-interop duplicate like stdlib's `Seq` or an impl-less
+  marker type is untouched).
+- **Interpreter (Task 5, narrowed by 5.5):** the `VCon` tag (its entire
+  runtime identity) is qualified the same way, via a new `VClosure` 4th field
+  capturing each closure's lexical declaring-module prefix at construction
+  time (so a deferred method body and the context-free `match_pattern` both
+  see the right prefix).
+- **Flag-day (Task 6, this task):** now that both backends resolve and
+  dispatch the double-collision shape correctly, `register_impl_shape`
+  (`lib/typecheck/typecheck.ml`) drops BOTH the Task-6b `ctor_sets_disjoint`
+  stopgap AND Task 0's `MARCH_DEV_RELAX_CTOR_COHERENCE` dev harness together —
+  the declaring-module coherence relaxation is now sound unconditionally, no
+  ctor-sharing carve-out.
+
+Fixture `reject/t82_impl_coherence_shared_ctor_double_collision` flips to
+`accept/t90_impl_coherence_shared_ctor_double_collision` (types corpus now **90
+accept / 81 reject**). New cross-backend runtime witness
+`test/imports/speak_double_collision_native` (4-file import fixture: two modules
+each `type Thing = Shared | …` + `impl Speak(Thing)`, `say()` calling
+`speak(Shared)`; runs `from-A`/`from-B` correctly interpreted AND compiled, and
+asserts both directions at once so it catches order-dependent misdispatch
+regardless of file-walk order). Alcotest
+`test_impl_coherence_shared_ctor_double_collision_ok` (was `_err`) now asserts
+the shape typechecks. Landing commits: Task 0 `d6687c7c`, Task 1 `56ebc5bb`,
+Task 2 `75e210ef`/`3a131622`, Task 3 `fca15e69`/`02fa0cba`, Task 4 `9d41078e`,
+Task 5 `e907ad1d`/`344d942b`, Task 5.5 `ed7893a7`, Task 6 (this commit).
+
 ## Current State (as of 2026-07-21, FQN dispatch-identity Stages 2-3 — native + interpreter collision-conditional dispatch)
 
 **Same-short-name types declared in different modules may now each implement
