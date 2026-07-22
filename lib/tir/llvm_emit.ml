@@ -127,6 +127,7 @@ type ctx = Llvm_ctx.ctx = {
   top_fns   : (string, bool) Hashtbl.t;
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
   top_fn_nparams : (string, int) Hashtbl.t;
+  top_fn_param_tys : (string, Tir.ty list) Hashtbl.t;
   zero_arg_fns  : (string, bool) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
@@ -1958,7 +1959,28 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           if ty = "i64" || ty = "double" then
             let v' = coerce ctx ty v "ptr" in "ptr " ^ v'
           else ty ^ " " ^ v) arg_pairs
-      else arg_strs in
+      else
+        (* Coerce each argument's ACTUAL emitted representation to the
+           callee's declared parameter type when known and arity matches.
+           A value whose static var type is a generic/polymorphic ADT field
+           (always "ptr" — boxed for scalars — under the uniform-slot
+           convention; see Llvm_case's ce_fields-driven field extraction)
+           flowing directly into a monomorphic callee's native scalar
+           parameter (e.g. Float → "double") otherwise passes through
+           un-coerced, producing an LLVM call with mismatched argument
+           types that reads garbage at the callee (the
+           Array.from_list$..$Float compiled-wrong-value bug: pushing a
+           list element extracted from a generic Cons field into a
+           concrete Array.push$..$Float always read 0.0 for the element). *)
+        match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
+        | Some param_tirs when List.length param_tirs = List.length arg_pairs ->
+          List.map2 (fun param_tir (ty, v) ->
+            let param_ty = llvm_ty param_tir in
+            let v' = coerce ctx ty v param_ty in
+            param_ty ^ " " ^ v'
+          ) param_tirs arg_pairs
+        | _ -> arg_strs
+    in
     let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name

@@ -3093,6 +3093,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/closure_scalar_abi.expected native_closure_scalar_abi.out)))
 
 (rule
+ (targets native_float_generic_field_abi native_float_generic_field_abi.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/float_generic_field_abi.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_float_generic_field_abi
+        native/float_generic_field_abi.march)
+   (with-stdout-to native_float_generic_field_abi.out
+        (system "./native_float_generic_field_abi")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/float_generic_field_abi.expected native_float_generic_field_abi.out)))
+
+(rule
  (targets native_string_to_float_option native_string_to_float_option.out)
  (deps (file %{exe:../bin/main.exe})
        (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)

@@ -348,26 +348,79 @@ read a tag field out of a raw float bit pattern and crashed.
 New compiled native golden `test/native/rrb_push_float.march` (+ `.expected` +
 `test/dune` rule).
 
-**Update after rebasing onto `origin/main` (343 commits, same day):**
-`origin/main` independently landed "float-boxing Stage 2" — `Llvm_ctx.coerce`'s
-`("double","ptr")`/`("ptr","double")` arms now call `march_alloc_float`/
-`march_unbox_float` (a genuine heap box) instead of a raw bitcast, so every
-Float crossing an erased/generic `"ptr"` slot is a real, valid, RC-manageable
-heap object regardless of monomorphization level. That alone makes the
-originally-reported crash (and a related `Array.get`/`RRB.get` crash found
-while stress-testing this fix — `Array.get` never monomorphizes to a concrete
-element type at all, unlike `Array.push`) disappear — but it does NOT fix the
-underlying RC-classification bug this entry describes, and left a silent
-WRONG-VALUE regression in its place: on `origin/main` alone (this fix
-reverted), `RRB.get` on a pushed Float returns `0.` instead of `1.5` — a real
-premature-free, because `lst_len`'s wildcard-discarded field is now a
-genuinely-owned boxed Float cell, so Perceus's still-spurious `dec_rc` on it
-frees a cell `Array.get` reads moments later. **With this fix applied on top
-of the merge, verified end-to-end:** a 100-element push-then-read-back round
-trip (every index checked, spanning both the tail buffer and the >32-element
-trie path) reports 0 mismatches at both `--opt 0` and `--opt 2`. So this fix
-is necessary — not merely sufficient — for `Array`/`RRB` `Float` correctness
-even after `origin/main`'s independent representation fix.
+**CORRECTION (2026-07-21, same day):** this entry originally claimed, after
+rebasing onto `origin/main`, that `origin/main`'s independent "float-boxing
+Stage 2" work alone also resolved a sibling `Array.get`/`RRB.get` wrong-value
+bug found while stress-testing this fix. **That claim was wrong** — a scratch
+`git worktree` build of `origin/main` HEAD reproducibly printed `0.` instead
+of the real value for `Array.get`/`RRB.fold` on a `Float` array/vector, with
+none of the fix described below applied. See the next entry (below) for the
+real root cause and fix, and for full end-to-end verification (a 100-element
+push-then-read-back round trip, both optimization levels, 0 mismatches).
+
+## Current State (as of 2026-07-21, Float-accumulator TCO+heap-ptr RC underflow / Array.from_list wrong-value fix)
+
+**A tail-recursive `Float` accumulator co-resident with a heap-pointer
+(`Array`/`List`) parameter no longer returns a wrong value or aborts with
+`march: RC underflow (rc was 0)` when compiled.** This was blocking
+`RRB.fold` (and therefore all of `Parallel`'s reduce family over `Float`)
+and `docs/cookbook/parallel-data.md`'s worked example. Root-caused with
+`superpowers:systematic-debugging`; the originally-suspected cause (the
+Stage-2 float-boxing ABI leaking a wrong RC target into the TCO
+loop-back-edge, `lib/tir/llvm_tco.ml`/`lib/tir/perceus.ml`) did not hold —
+the crash backtrace pointed into `Array`'s own stdlib-internal `lst_len`
+helper (reached via `Array.get`), not the user's TCO loop, which was
+innocent. Two independent bugs, both required for the end-to-end repro to
+work correctly:
+
+1. **RC corruption/crash:** `lib/tir/lower_match.ml`'s constructor-pattern
+   field binders always started at the `unknown_ty` (`TVar "_"`)
+   lowering-fallback placeholder, and a wildcard-discarded field
+   (`Cons(_, t)`) never got re-typed — unlike a named field, which
+   `bind_trivial_pat`'s `PatVar` case resolves via `Lower_state.ty_of_span`
+   — because `lib/typecheck/typecheck.ml`'s `infer_pattern` never recorded
+   a `PatWild`'s span in `env.type_map` in the first place. Perceus's
+   `needs_rc(TVar "_") = true` (a deliberately conservative "might be a
+   heap pointer" default) then emitted a spurious `dec_rc` on what is
+   actually an unboxed native `double` for a monomorphized `List(Float)`.
+   The runtime's `IS_HEAP_PTR(p) = ((uintptr_t)p >= 4096)` guard accepts
+   almost any nonzero double's raw bit pattern as "plausibly a pointer" (an
+   ordinary float's magnitude as an unsigned integer is astronomically
+   large), so the spurious decrc dereferenced garbage — silent corruption
+   at first, `RC underflow`/SIGSEGV once later exercised. `List(Int)` was
+   unaffected: small tagged ints stay under 4096 and the same spurious
+   decrc is a harmless no-op. Fix: `typecheck.ml`'s `PatWild` now records
+   its type into `env.type_map` (mirroring `PatVar`); `lower_match.ml`
+   resolves each constructor field's type via `ty_of_span` (scanning the
+   group's rows for a resolvable span at that position) instead of
+   hardcoding `unknown_ty`.
+2. **Wrong-value symptom (surfaced once bug 1 was fixed):**
+   `lib/tir/llvm_emit.ml`'s `EApp` direct-call emission never coerced an
+   argument's actual emitted LLVM representation to the callee's declared
+   parameter type. A value extracted from a generic/polymorphic ADT field
+   is always `ptr` (boxed for scalars) under the compiler's uniform-slot
+   convention, regardless of its concrete monomorphic type; flowing
+   directly into a monomorphic callee's native scalar parameter (e.g.
+   `Array.push$..$Float`'s `elem : Float` → LLVM `double`) produced a call
+   site/callee representation mismatch (`call ptr @f(ptr, ptr)` against a
+   callee declared `(ptr, double)`) that LLVM's parser did not reject but
+   that made the callee always read `0.0`. `Array.from_list`'s internal
+   fold hit this on every pushed element. Fix: new
+   `Llvm_ctx.top_fn_param_tys` table (populated alongside the existing
+   `top_fn_ret_ty`/`top_fn_nparams`); `EApp`'s non-apply-fn argument path
+   now coerces each argument to the callee's declared parameter type when
+   known — a no-op for the already-correct common case.
+
+Verified: both originally reported repros now print the correct `7.`;
+~15 isolated repros (bare `Array.get`, `Array.push` chains,
+`Array.from_list`, standalone `List(Float)` wildcard-discard traversals,
+an `Int` control) all match interpreted output. Full suite clean except
+one pre-existing, load-dependent ASAN-initialization livelock unrelated to
+this change (confirmed via `lldb`: hangs inside
+`__asan::AsanInitInternal` before any March code runs, reproduces in
+isolation under heavy concurrent machine load). New regression test:
+`test/native/float_generic_field_abi.march` (+ `.expected`), wired into
+`test/dune`.
 
 ## Current State (as of 2026-07-21, TCO self-call freed a freshly-allocated forwarded argument)
 
@@ -452,8 +505,10 @@ however:** verifying end-to-end surfaced a third, pre-existing, more severe
 bug (independent of this fix and of the two above — reproduces on unmodified
 `main`) in `RRB.fold`'s own TCO'd loop, where a tail-recursive function with
 a `Float` accumulator that also carries a heap-pointer parameter either
-returns a wrong value or aborts with an RC underflow compiled. See
-`specs/todos.md`'s P0 section for the two repros and a root-cause hypothesis.
+returns a wrong value or aborts with an RC underflow compiled. **FIXED
+2026-07-21** — see this file's "Float-accumulator TCO+heap-ptr RC underflow
+/ Array.from_list wrong-value fix" entry above (and `specs/todos.md`'s Done
+section) for the two-bug root cause and fix.
 
 ## Current State (as of 2026-07-21, `Option.or_else`/`unwrap_or_else` zero-arg callback crash fix)
 

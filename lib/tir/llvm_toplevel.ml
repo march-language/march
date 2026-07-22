@@ -716,12 +716,15 @@ let emit_module ~emit_expr
       if ed.ed_raises then Hashtbl.replace ctx.Llvm_ctx.raises_externs ed.ed_march_name ();
       Hashtbl.replace ctx.Llvm_ctx.top_fns ed.ed_march_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret;
-      Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params)
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys ed.ed_march_name ed.ed_params
     ) m.Tir.tm_externs;
   List.iter (fun fn ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (v : Tir.var) -> v.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then
         Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true;
       (* Populate unqualified_fns: maps the unqualified suffix (e.g.
