@@ -1207,6 +1207,39 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               String.sub mod_prefix 0 (String.length mod_prefix - 1) ^ "." ^ type_name
             else type_name
           in
+          (* [_iface_methods] keys plain method-dispatch rows (below) by the
+             BARE method name only (never by interface), so two UNRELATED
+             interfaces that happen to declare a same-named method (e.g. a
+             user `interface MyEq do fn eq: a -> a -> Bool end` alongside the
+             builtin `Eq`, both with a method literally named "eq") share one
+             dispatch bucket. A compositional impl body (`impl MyEq(Wrap(a))
+             when MyEq(a)`'s `eq` calling `eq(x, y)` on the unwrapped element)
+             then resolves against BOTH interfaces' "Int" rows and mono's
+             collision-dispatch machinery — built for the unrelated case of
+             one interface's impl colliding across two same-short-name types —
+             mistakes the two DIFFERENT interfaces' impls for competing rows
+             of ONE ambiguous type, and either binds the wrong body (silently
+             re-entering this impl's own `eq`, an infinite/wrong-answer
+             mis-dispatch) or, when a row has no ADT constructor tags to
+             switch on (a bare `Int`), fails outright with "has no
+             runtime-tag rows". Below, self-referencing bare calls inside a
+             GENERAL (non-builtin-named) interface's own impl bodies are
+             qualified to "Iface.method" — the qualified key [collect_iface_impls]
+             already registers per impl (see [qualified_key] below) — so the
+             call resolves only against THIS interface's own rows. Builtin
+             Show/Eq/Ord/Hash impls are excluded: their primitive-type rows
+             (Eq$Int.eq &c., a few lines above) are registered under the bare
+             name only, so qualifying would leave e.g. `Eq(List(a))`'s
+             recursive `eq` on an Int element unresolved. *)
+          let is_builtin_dispatched_iface =
+            match idef.impl_iface.txt with
+            | "Show" | "Eq" | "Ord" | "Hash" -> true
+            | _ -> false
+          in
+          let iface_self_call_names =
+            if is_builtin_dispatched_iface then []
+            else List.map (fun ((m : Ast.name), _) -> m.txt) idef.impl_methods
+          in
           List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
               let mangled = Printf.sprintf "%s$%s.%s"
                 idef.impl_iface.txt declaring_qualified_type_name mname.txt in
@@ -1259,6 +1292,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      prefixed names from lower_stdlib_mod_decls). *)
                   let fn = if mod_prefix <> "" && direct_fn_names <> [] then
                     Lower_decls.rename_tir_vars mod_prefix direct_fn_names fn
+                  else fn in
+                  let fn = if iface_self_call_names <> [] then
+                    Lower_decls.rename_tir_vars (idef.impl_iface.txt ^ ".")
+                      iface_self_call_names fn
                   else fn in
                   fns := { fn with fn_name = mangled } :: !fns
                 end;

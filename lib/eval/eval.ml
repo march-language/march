@@ -9266,6 +9266,49 @@ let rec eval_decl (env : env) (d : decl) : env =
         let is_dispatched =
           is_type_dispatched_method idef.impl_iface.txt mname.txt
         in
+        (* General (non-type-dispatched-builtin, non-JSON) interface: same
+           self-recursion hazard as show/eq/compare/hash above, but the
+           dispatch route is the ad-hoc per-(iface,method) [iface_method_tbl]
+           dispatcher below rather than a baked-in builtin. A compositional
+           impl body (e.g. `MyEq(Wrap(a)) when MyEq(a)`'s `eq` calling `eq` on
+           the unwrapped value) must re-dispatch by the runtime type of THAT
+           call's arguments, not recurse back into this impl — so its closure
+           must be built non-self-referentially too, over an environment
+           where [mname.txt] is bound to the dispatcher. The dispatcher is
+           created here (idempotently — reused if a prior impl of this method
+           already built one) rather than only in the env-threading step
+           below, so this works regardless of impl declaration order: a
+           closure built while processing the FIRST impl of a method must
+           already see the dispatcher, not just closures built afterward. *)
+        let is_general_iface =
+          (not (is_type_dispatched_iface idef.impl_iface.txt)) && not is_json_iface
+        in
+        let disp_tag = "$dispatch$" ^ idef.impl_iface.txt ^ "$" ^ mname.txt in
+        let disp =
+          if not is_general_iface then None
+          else
+            match List.assoc_opt mname.txt env with
+            | Some (VBuiltin (n, _) as d) when n = disp_tag -> Some d
+            | _ ->
+              let iface = idef.impl_iface.txt in
+              Some (VBuiltin (disp_tag, fun args ->
+                  match args with
+                  | arg0 :: _ ->
+                    (match dispatch_type_name_of_value arg0 with
+                     | Some tname ->
+                       (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
+                        | Some m -> !iface_dispatch_hook m args
+                        | None -> eval_error
+                            "no implementation of interface `%s` for type `%s`" iface tname)
+                     | None -> eval_error
+                         "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
+                  | [] -> eval_error
+                      "interface method `%s` called with no arguments" mname.txt))
+        in
+        let env_for_body = match disp with
+          | Some d -> (mname.txt, d) :: List.remove_assoc mname.txt env
+          | None -> env
+        in
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
             let v = eval_expr env fc_body in
@@ -9275,6 +9318,13 @@ let rec eval_decl (env : env) (d : decl) : env =
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
             let clo = VClosure (env, params, clause.fc_body, effective_module_prefix ()) in
+            (mname.txt, clo) :: env
+          | _ when is_general_iface ->
+            (* Plain closure over [env_for_body]: method name in body →
+               dispatcher, not self (see comment above). *)
+            let clause = List.hd fn_def.fn_clauses in
+            let params = clause_params clause in
+            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix ()) in
             (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
@@ -9315,34 +9365,15 @@ let rec eval_decl (env : env) (d : decl) : env =
         else if is_type_dispatched_iface idef.impl_iface.txt then new_env
           (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
              of a builtin-named interface: bind the concrete method by name. *)
-        else begin
-          (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
-             runtime type via iface_method_tbl) instead of the concrete method,
-             so 2+ impls dispatch by type rather than last-binding-wins. Bound
-             once per method name (idempotent across sibling impls). *)
-          let iface = idef.impl_iface.txt in
-          let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
-          let already = match List.assoc_opt mname.txt env with
-            | Some (VBuiltin (n, _)) -> n = disp_tag
-            | _ -> false in
-          if already then env
-          else
-            let disp = VBuiltin (disp_tag, fun args ->
-              match args with
-              | arg0 :: _ ->
-                (match dispatch_type_name_of_value arg0 with
-                 | Some tname ->
-                   (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
-                    | Some m -> !iface_dispatch_hook m args
-                    | None -> eval_error
-                        "no implementation of interface `%s` for type `%s`" iface tname)
-                 | None -> eval_error
-                     "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
-              | [] -> eval_error
-                  "interface method `%s` called with no arguments" mname.txt)
-            in
-            (mname.txt, disp) :: env
-        end
+        else
+          (* General interface method: bind the TYPE-DISPATCHER (computed
+             above — routes by arg0's runtime type via iface_method_tbl)
+             instead of the concrete method, so 2+ impls dispatch by type
+             rather than last-binding-wins. [disp] is reused as-is (not
+             recreated) when a prior impl already bound this exact dispatcher. *)
+          match disp with
+          | Some d -> (mname.txt, d) :: List.remove_assoc mname.txt env
+          | None -> env  (* unreachable: is_general_iface is true on this branch *)
       ) env idef.impl_methods
 
   | DProtocol (name, pdef, _sp) ->
@@ -9618,105 +9649,18 @@ let eval_module_env (m : module_) : env =
       env_ref := env';
       make_recursive_env rest env'
 
-    | DImpl (idef, sp) :: rest ->
-      (* Bind each impl method (including injected defaults) as a function.
-         Zero-param clauses hold a lambda body; eval directly to bind the value.
-         Phase 6b: also populate impl_tbl so the `own` builtin can resolve drop fns. *)
-      let type_name = match idef.impl_ty with
-        | TyCon (n, _) -> n.txt
-        | TyVar n      -> n.txt
-        | _            -> ""
-      in
-      (* See the top-level [DImpl] arm above for why [dispatch_type_name] is
-         a SEPARATE, [iface_method_tbl]-only qualified identity rather than
-         qualifying [type_name] (and thus [impl_tbl]) itself. *)
-      let dispatch_type_name =
-        if type_name <> "" && is_colliding_type_name type_name
-        then current_doc_prefix () ^ type_name
-        else type_name
-      in
-      let is_json_iface =
-        String.length idef.impl_iface.txt >= 4
-        && String.sub idef.impl_iface.txt 0 4 = "Json"
-      in
-      let env' = List.fold_left (fun acc_env (mname, fn_def) ->
-          let is_dispatched =
-            is_type_dispatched_method idef.impl_iface.txt mname.txt
-          in
-          let new_acc = match fn_def.fn_clauses with
-            | [{ fc_params = []; fc_body; _ }] ->
-              let v = eval_expr acc_env fc_body in
-              (mname.txt, v) :: acc_env
-            | _ when is_dispatched ->
-              let clause = List.hd fn_def.fn_clauses in
-              let params = clause_params clause in
-              let clo = VClosure (acc_env, params, clause.fc_body, effective_module_prefix ()) in
-              (mname.txt, clo) :: acc_env
-            | _ ->
-              eval_decl acc_env (DFn (fn_def, sp))
-          in
-          (* Phase 6b: register in impl_tbl for own() resolution, and also
-             register under "InterfaceName.MethodName" in module_registry so
-             that fully-qualified interface calls like "Conduit.Storage.checkpoint_get"
-             can be resolved via the lookup fallback (which strips module prefixes). *)
-          if type_name <> "" then begin
-            match List.assoc_opt mname.txt new_acc with
-            | Some fn_val ->
-              (* For a type-dispatched interface, only its single dispatch method
-                 may claim the shared (iface, type) key; extra methods (e.g. Eq's
-                 default `neq`) must not clobber it, or builtin dispatch invokes
-                 the wrong method and recurses forever (neq → eq → neq). *)
-              if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
-                Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
-              (* General (non-builtin, non-Json) interface methods also go in the
-                 per-method dispatch table so a call routes by the first arg's
-                 runtime type, not the last-bound name. *)
-              if not (is_type_dispatched_iface idef.impl_iface.txt) && not is_json_iface then
-                Hashtbl.replace iface_method_tbl
-                  (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
-              let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
-              Hashtbl.replace module_registry iface_qualified fn_val
-            | None -> ()
-          end;
-          (* For Json derive: to_json only registers in impl_tbl;
-             from_json binds in env (can't dispatch on target type).
-             Type-dispatched methods (show/eq/compare/hash): plain closure
-             above, don't rebind the bare name globally — it would shadow the
-             builtin and break dispatch when 2+ impls of the iface exist. *)
-          if is_json_iface || is_dispatched then acc_env
-          else if is_type_dispatched_iface idef.impl_iface.txt then new_acc
-            (* A NON-dispatch method (e.g. a user `interface Eq`'s default `neq`)
-               of a builtin-named interface: bind the concrete method by name, as
-               before — it's not in iface_method_tbl and is called directly. *)
-          else begin
-            (* General interface method: bind a TYPE-DISPATCHER (routes by arg0's
-               runtime type via iface_method_tbl) instead of the concrete method,
-               so 2+ impls dispatch by type rather than last-binding-wins.
-               Idempotent across sibling impls. *)
-            let iface = idef.impl_iface.txt in
-            let disp_tag = "$dispatch$" ^ iface ^ "$" ^ mname.txt in
-            let already = match List.assoc_opt mname.txt acc_env with
-              | Some (VBuiltin (n, _)) -> n = disp_tag
-              | _ -> false in
-            if already then acc_env
-            else
-              let disp = VBuiltin (disp_tag, fun args ->
-                match args with
-                | arg0 :: _ ->
-                  (match dispatch_type_name_of_value arg0 with
-                   | Some tname ->
-                     (match Hashtbl.find_opt iface_method_tbl (iface, mname.txt, tname) with
-                      | Some m -> !iface_dispatch_hook m args
-                      | None -> eval_error
-                          "no implementation of interface `%s` for type `%s`" iface tname)
-                   | None -> eval_error
-                       "cannot dispatch interface method `%s`: argument has no dispatchable type" mname.txt)
-                | [] -> eval_error
-                    "interface method `%s` called with no arguments" mname.txt)
-              in
-              (mname.txt, disp) :: acc_env
-          end
-        ) env idef.impl_methods in
+    | DImpl _ as d :: rest ->
+      (* Delegate to eval_decl's DImpl arm rather than duplicating its
+         dispatch-construction logic here: this case used to carry its own
+         byte-for-byte copy of that logic (keyed on [acc_env] instead of
+         [env]), and the two copies silently diverged — a fix for
+         self-recursive general-interface dispatch (compositional impls like
+         `MyEq(Wrap(a)) when MyEq(a)` whose `eq` calls `eq` on the unwrapped
+         value) landed in [eval_decl]'s copy but not this one, since a
+         source file's single top-level `mod X do ... end` is unwrapped by
+         the parser so its decls are processed HERE, not via [eval_decl]'s
+         own DMod recursion. Delegating removes the duplicate outright. *)
+      let env' = eval_decl env d in
       env_ref := env';
       make_recursive_env rest env'
 

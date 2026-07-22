@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A user-defined interface impl with a compositional `when` constraint (e.g.
+  `impl MyEq(Wrap(a)) when MyEq(a) do fn eq(w1, w2) do ... eq(x, y) ... end
+  end` — the same shape as the stdlib's own `Eq(List(a)) when Eq(a)`) whose
+  body recursively called its own method name on the constrained inner value
+  dispatched incorrectly. Interpreted, the recursive call re-entered the SAME
+  impl instead of the inner type's impl, producing a wrong answer (or a
+  non-exhaustive-match panic). Compiled, it crashed with an internal compiler
+  error ("has no runtime-tag rows") whenever the constrained type happened to
+  share a method name with an unrelated interface. Both are fixed: the
+  recursive call now dispatches by the runtime type of its own arguments on
+  both backends, regardless of impl declaration order or nesting depth.
 - `root_cap()` — calling the root capability like a function instead of
   referencing it bare (`root_cap`) — typechecked cleanly with `--check` and
   then crashed at runtime: `applied non-function value` interpreted, or an
