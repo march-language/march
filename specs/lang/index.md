@@ -96,7 +96,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
   backing `core-march.md`.
 - [`types/`](types/) — `accept/`/`reject`-split typechecking programs backing
   `core-march-types.md`.
-- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs (27
+- [`grammar/`](grammar/) — `parse/`/`reject`-split parsing programs (41
   total) backing `grammar.md`'s core-grammar chapters (§2–§8: preprocessing
   layers, expressions, blocks, patterns, types, declarations), wired into CI
   as its own `grammar-check` dune alias (`dune build @grammar-check`,

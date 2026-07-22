@@ -252,8 +252,8 @@ confused with the `}` that closes the interpolation.
 
 ## 3. The `token_filter` pre-pass
 
-Source: `lib/parser/token_filter.ml` (398 lines, one entry point `make`,
-`token_filter.ml:38`). This is the layer that makes March's grammar
+Source: `lib/parser/token_filter.ml` (510 lines, one entry point `make`,
+`token_filter.ml:42`). This is the layer that makes March's grammar
 genuinely **not context-free**: it is a stateful automaton with unbounded
 lookahead sitting between the lexer and menhir, and every later section's
 EBNF (§4 onward) describes the grammar **as this layer's output**, not as
@@ -331,9 +331,9 @@ CHOOSE` in `parser.mly:1188`). The filter peeks exactly one token past
   (§3.3), letting each `choose` branch use `NL`/`PIPE` as its separator
   exactly like a match arm. The peeked `BY` token is re-queued
   (`token_filter.ml:284`) so downstream dispatch sees it normally.
-  Grammar-side, `parser.mly:624` (`CHOOSE; BY; chooser = upper_name; COLON;
+  Grammar-side, `parser.mly:626` (`CHOOSE; BY; chooser = upper_name; COLON;
   …; branches = separated_nonempty_list(arm_sep, choose_branch); END`)
-  confirms `arm_sep` (`NL | PIPE`, `parser.mly:1275–1277`) is exactly what
+  confirms `arm_sep` (`NL | PIPE`, `parser.mly:1383–1385`) is exactly what
   this Match-context push is needed to supply.
 - Otherwise (any other next token, e.g. `LPAREN` for `Chan.choose(...)`),
   no context is pushed; `CHOOSE` is re-emitted as an ordinary token feeding
@@ -533,21 +533,21 @@ correct only by discipline.
 
 **Live cross-check performed for this chapter (re-grepped, not assumed):**
 
-- `soft_lower_name` in the current `parser.mly` (`parser.mly:1353–1367`)
+- `soft_lower_name` in the current `parser.mly` (`parser.mly:1461–1475`)
   accepts exactly: `LOWER_IDENT`, `STATE`, `INIT`, `LOOP`, `ON`,
   `PROTOCOL`, `APP`, `AS`, `WITH`, `WHEN`, `USE`, `IN`, `FOR`, `TAG` — 13
   keyword alternatives plus `LOWER_IDENT`.
-- `simple_pattern` (`parser.mly:1322–1341`) accepts: `UNDERSCORE`,
+- `simple_pattern` (`parser.mly:1430–1449`) accepts: `UNDERSCORE`,
   `soft_lower_name`, `INT`, `MINUS INT`, `FLOAT`, `MINUS FLOAT`, `STRING`,
   `BOOL`, `LPAREN … RPAREN` (parenthesized/tuple), `LBRACKET … RBRACKET`
   (list-literal pattern) — so the tokens that can START a `simple_pattern`
   are `UNDERSCORE`, `LOWER_IDENT`+the 13 soft keywords above, `INT`,
   `MINUS`, `FLOAT`, `STRING`, `BOOL`, `LPAREN`, `LBRACKET`.
-- `pattern` (`parser.mly:1311–1320`) adds on top of `simple_pattern`:
+- `pattern` (`parser.mly:1419–1428`) adds on top of `simple_pattern`:
   `qualified_upper` (i.e. `UPPER_IDENT`, possibly `UPPER_IDENT DOT
-  UPPER_IDENT`, `parser.mly:1305–1309`) and `ATOM` (with or without a
+  UPPER_IDENT`, `parser.mly:1413–1417`) and `ATOM` (with or without a
   parenthesized argument list).
-- `is_pattern_start` itself (`token_filter.ml:130–143`) currently lists:
+- `is_pattern_start` itself (`token_filter.ml:165–177`) currently lists:
   `UPPER_IDENT`, `LOWER_IDENT`, `UNDERSCORE`, `INT`, `FLOAT`, `STRING`,
   `BOOL`, `LPAREN`, `LBRACKET`, `MINUS`, `ATOM`, and the 13 soft keywords
   `STATE INIT LOOP ON PROTOCOL APP AS WITH WHEN USE IN FOR TAG`.
@@ -585,8 +585,8 @@ input), never on raw lexer output.
 
 ## 4. Expressions — the precedence ladder
 
-Source: `lib/parser/parser.mly` (1403 lines; the expression rules run
-`parser.mly:1036–1273`, the precedence declarations are at
+Source: `lib/parser/parser.mly` (1511 lines; the expression rules run
+`parser.mly:1052–1289`, the precedence declarations are at
 `parser.mly:214–220`). Everything in this section takes the **filtered**
 token stream (§2–§3) as input: in particular, `NL` has already been deleted
 almost everywhere expressions live (it only ever survives as a match-arm
@@ -611,7 +611,7 @@ which has no row here because it never parses at all).
 | 9 | `expr_or` | `\|\|` | left | `expr_or OR expr_and` |
 | 10 (loosest) | `expr_pipe` | `\|>` | left | `expr_pipe PIPE_ARROW expr_or` |
 
-`expr` itself (`parser.mly:1036–1093`) sits *above* `expr_pipe` — it is not
+`expr` itself (`parser.mly:1052–1109`) sits *above* `expr_pipe` — it is not
 another precedence level so much as the entry point that adds the
 non-operator expression forms that don't participate in the operator ladder
 at all (`ASSERT`, lambdas via bare `FN`, `IF`, `MATCH`/`ECond`, `WITH`) as
@@ -632,20 +632,20 @@ expr ::= expr_pipe
              "else" arm_sep? branch (arm_sep branch)* "end"
 ```
 
-(`parser.mly:1036–1093`.) These alternatives are **not** part of the
+(`parser.mly:1052–1109`.) These alternatives are **not** part of the
 operator precedence ladder — they're keyword-led forms distinguishable by
 their leading token (`ASSERT`/`FN`/`IF`/`MATCH`/`WITH`), so there is no
 shift/reduce ambiguity between them and `expr_pipe`; menhir picks the
 alternative whose first token matches. Two of note:
 
-- **`match do … end` (no scrutinee) is `ECond`** (`parser.mly:1075`), i.e.
-  March's `cond`-equivalent: each `cond_branch` (`parser.mly:1292–1296`) is
+- **`match do … end` (no scrutinee) is `ECond`** (`parser.mly:1091`), i.e.
+  March's `cond`-equivalent: each `cond_branch` (`parser.mly:1400–1404`) is
   a boolean `expr ARROW block_body`, with a bare `_` arm desugaring to
-  `true ARROW block_body` (`parser.mly:1295–1296`). This is why the plan
+  `true ARROW block_body` (`parser.mly:1403–1404`). This is why the plan
   and other chapters refer to "`cond` (scrutinee-less `match do`)" — there
   is no separate `COND` keyword; it's the same `MATCH` token disambiguated
   by the presence/absence of the scrutinee `expr` before `DO`.
-- **`with … do … else … end`** (`parser.mly:1087–1093`) desugars in-parser
+- **`with … do … else … end`** (`parser.mly:1103–1109`) desugars in-parser
   (`build_with`, `parser.mly:161–167`) into nested `EMatch` on each binding
   in turn, so `with Ok(a) <- e1, Ok(b) <- e2 do body else h end` becomes
   `match e1 do Ok(a) -> match e2 do Ok(b) -> body | <else arms> end | <else
@@ -1145,6 +1145,27 @@ five?" question is invisible to `parser.mly`**; it is only visible to
 lines this arm's body spans" into "one contiguous run of `block_expr`s with
 no interior `NL`, followed by exactly one `arm_sep` `NL`/`PIPE` that
 `branch`/`cond_branch` can trivially consume."
+
+> **Verified gap (found auditing this chapter, 2026-07-22): a `PIPE` arm
+> separator on its own line does NOT work, contradicting "exactly one
+> `arm_sep`" above.** `token_filter.ml`'s `NL`-then-`PIPE` handling (the
+> `Parser.PIPE ->` arm of the `NL` case, next to the `is_pattern_start`
+> branch described above) emits the `NL` itself as the arm boundary but then
+> `push_buf`s the `PIPE` token back onto the queue instead of discarding it,
+> so the literal `PIPE` is re-delivered to the parser as a second, unconsumed
+> token right after the `NL` already served as `arm_sep` — `branch` has no
+> production for a leading `PIPE`, so this is a parse error ("I got stuck
+> here" at the `\|`). Confirmed: `match x do\n  1 -> "one"\n  \| 2 -> "two"\n
+> _ -> "other"\nend` fails to parse; the exact same arms written on one
+> physical line (`match x do 1 -> "one" \| 2 -> "two" \| _ -> "other" end`)
+> parse fine, since there `PIPE` itself is consumed as the `arm_sep` and no
+> `NL` precedes it. So a leading `\|` per arm — the natural style for
+> `PIPE`-separated multi-line matches — is unusable today; only same-line
+> `PIPE` chains and plain `NL`-separated arms (no explicit `\|` at all, as
+> `p02`/`p10` below use) work. No program in the `grammar/parse` or
+> `grammar/reject` corpus exercises `NL`-then-`PIPE`, which is why this
+> gap has no conformance witness. This is a compiler bug, not a docs issue —
+> noted here for follow-up, not fixed in this pass.
 
 Value-witnessed end-to-end (parse-and-run, not just parse) by
 [`parse/p10_match_multi_expr_arms_three_way.march`](grammar/parse/p10_match_multi_expr_arms_three_way.march) —
@@ -2102,8 +2123,8 @@ on_start_block ::= "on_start" "do" block_body "end"
 on_stop_block  ::= "on_stop"  "do" block_body "end"
 ```
 
-(`app_decl` at `parser.mly:513–526`; `on_start_block`/`on_stop_block` at
-`parser.mly:528–534`.) `app` is the OTP-style application root: an optional
+(`app_decl` at `parser.mly:515–528`; `on_start_block`/`on_stop_block` at
+`parser.mly:530–536`.) `app` is the OTP-style application root: an optional
 `on_start`/`on_stop` lifecycle-hook block, each independently guarded by
 its own `option(...)` (so `on_start` alone, `on_stop` alone, both, or
 neither are all valid — there is no requirement that one imply the other),
@@ -2152,13 +2173,13 @@ restart_strategy ::= "one_for_one" | "one_for_all" | "rest_for_one"
 supervise_child  ::= upper_name lower_name
 ```
 
-(`supervise_block` at `parser.mly:577–590`; `restart_strategy_tok` at
-`parser.mly:596–599`; `supervise_child` at `parser.mly:592–594`.) Reachable
+(`supervise_block` at `parser.mly:579–592`; `restart_strategy_tok` at
+`parser.mly:598–601`; `supervise_child` at `parser.mly:594–596`.) Reachable
 in the grammar from exactly one place — `actor_decl`'s optional
 `supervise_block?` (§9.1) — this names a fixed restart strategy, a
 restart-budget window (`max_restarts N within SECONDS`), and a list of
 `ChildActorType field_name` children supervised in that declared order
-(`sc_order`, `parser.mly:583, 587`). **`strategy`/`STRATEGY` and
+(`sc_order`, `parser.mly:585, 592`). **`strategy`/`STRATEGY` and
 `max_restarts`/`within` are mandatory, not optional**: none of `STRATEGY`,
 `MAX_RESTARTS`, or `WITHIN` is wrapped in `option(...)` in
 `supervise_block`'s single production, so a `supervise do … end` that

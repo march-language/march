@@ -209,7 +209,7 @@ instead of `List.pmap`.
 ### Quick example
 
 ```march
-let nums  = RRB.range(1, 1_000_001)
+let nums  = RRB.range(1, 1000001)
 let total = Parallel.psum(nums)                        -- 500_000_500_000
 let evens = Parallel.pcount(nums, fn n -> n % 2 == 0) -- 500_000
 let sq    = Parallel.pmap(nums, fn n -> n * n)         -- Vec of squares

@@ -246,7 +246,8 @@ fn main() do
 end
 ```
 
-This program prints `count = 1` compiled. `Actor.call(pid, sentinel, timeout_ms)`
+This program prints `count = 1` interpreted (compiled, it currently prints a wrong value — see
+the note below). `Actor.call(pid, sentinel, timeout_ms)`
 reads the tag from the zero-arg `sentinel`, builds an augmented message (same tag,
 with the caller in field 0), and routes it to the handler at that tag. That handler
 receives the caller as its first argument and must call `Actor.reply(reply_to, result)`
@@ -275,8 +276,17 @@ There is no `Call` wrapper constructor, and the call handler takes exactly one a
 > handler at the same ctor index and binds the caller as the handler's single argument
 > (`lib/eval/eval.ml` `actor_call`). The historical interp-only `on Call(ref, msg)`
 > two-argument form is retired. Both behaviors are pinned by the
-> `test/native/actor_counter` and `test/native/actor_call_timeout` goldens, which pass
-> on both backends.
+> `test/native/actor_counter` and `test/native/actor_call_timeout` goldens, which are
+> intended to pass on both backends.
+>
+> **Newly observed compiled-only regression (found verifying this chapter, 2026-07-22):**
+> the pinned `test/native/actor_counter` golden itself currently fails compiled — it
+> prints `value=11` where `test/native/actor_counter.expected` pins `value=5` (interpreted
+> still prints `value=5` correctly). The wrong value is consistently `2n + 1` for the true
+> `Int` result `n` (e.g. an actor state of `0` reports as `1`, `5` reports as `11`), which
+> looks like the compiled `Actor.call`/`Actor.reply` return path handing back a raw tagged
+> fixnum instead of untagging it before use. This is a compiler/runtime bug, not a docs
+> issue — filed for follow-up investigation rather than fixed here.
 
 `Actor.cast(pid, msg)` is fire-and-forget — equivalent to `send` but goes through the `Actor` module.
 
@@ -362,7 +372,7 @@ actor WebServer do
     last_path:     ""
   }
 
-  on Request(path : String, status : Int) do
+  on Req(path : String, status : Int) do
     let rc = state.request_count + 1
     let ec = if status >= 400 do state.error_count + 1 else state.error_count end
     { state with
@@ -378,6 +388,10 @@ actor WebServer do
   end
 end
 ```
+
+(This example uses the message name `Req` rather than `Request`: `Request` collides with the
+stdlib `Http.Request` constructor in the flat global namespace — see the note under *Sending
+Messages*.)
 
 ---
 
@@ -437,12 +451,26 @@ In long-running applications, the scheduler runs automatically — you do not ca
 Inside a handler, `self()` returns the current actor's `Pid`. Useful for passing yourself as a reply address:
 
 ```march
-on Request(question : String, caller : Pid) do
+on Request(question : String, caller) do
   let answer = compute_answer(question)
   send(caller, Answer(answer, self()))
   state
 end
 ```
+
+(`caller` is left unannotated rather than written `caller : Pid`, and `Answer`'s payload here is
+left untyped rather than declared as carrying a `Pid` field. Two current compiler gaps make
+explicit `Pid` typing around `self()` unreliable: (1) `self()`'s builtin signature is registered
+as plain `Int`, not `Pid(a)` (`lib/typecheck/typecheck.ml` — `("self", Mono t_int)`), so
+`self()`'s result fails to unify anywhere a `Pid`-typed field or argument is expected (e.g.
+`is_alive(self())`, or a message field explicitly annotated `: Pid`) with a confusing `expected
+Pid but got Int`, even though it dynamically **is** a valid Pid; (2) a bare `Pid` annotation (no
+type parameter) is separately unreliable because it can resolve against the unrelated
+`GlobalPid.Pid` record type sharing the same bare name in the flat global namespace, rather than
+the parametric actor `Pid(a)` that `spawn`/`self()` actually produce. Leaving `caller` and the
+reply payload unannotated and letting them infer sidesteps both gaps — the pattern used elsewhere
+in this chapter, e.g. `on GetCount(reply_to)`. These are compiler typing gaps, not docs issues;
+noted here for a follow-up fix.)
 
 ---
 

@@ -110,7 +110,9 @@ Use `rest_for_one` when later children depend on earlier ones.
 
 ## A Full Supervision Example
 
-Adapted from `examples/supervision_basic.march`:
+(Originally adapted from `examples/supervision_basic.march`, since removed
+as a redundant example; this inline copy is now the canonical source and is
+verified directly against the compiler.)
 
 ```march
 mod BasicSupervision do
