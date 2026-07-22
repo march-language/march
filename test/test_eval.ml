@@ -1558,6 +1558,130 @@ let test_interp_colliding_general_iface_dispatch () =
   Alcotest.(check string) "NB.say() dispatches to NB.Thing's Speak impl"
     "from-B" (vstr (call_fn env "NB.say" []))
 
+(** Task 5 (constructor module-qualified identity plan) — interpreter side.
+    Layer 1b's [test_interp_colliding_general_iface_dispatch] above only
+    covers DISJOINT ctor sets (NA.Thing = {TA}, NB.Thing = {TB}): the bare
+    ctor tag alone already disambiguates a value, so [VCon]'s tag was never
+    ambiguous there. This is the DOUBLE-collision shape: two same-short-name
+    types (DcA.Thing, DcB.Thing) each declaring a ctor with the SAME name
+    ("Shared") — before this task, [ECon] always stripped to the bare tag,
+    so `DcA.Thing.Shared` and `DcB.Thing.Shared` produced the LITERALLY
+    IDENTICAL runtime value `VCon("Shared", [])`, and `speak`'s `match self
+    do Shared -> … end` inside EACH impl body dispatched to whichever
+    ctor's registration happened to win, not the actual argument.
+
+    Construction (`Shared` in `say()`, a MODULE-LEVEL fn) and pattern-match
+    (`Shared` inside `speak`'s IMPL-METHOD body) must now each qualify
+    against their own module (`DcA.Thing.Shared` vs `DcB.Thing.Shared`), so
+    DcA's `speak(Shared)` and DcB's `speak(Shared)` reach their own arm.
+
+    `say()` is declared INSIDE each of DcA/DcB (not called from `main`
+    directly) to sidestep the SAME pre-existing, unrelated interpreter
+    scoping gap documented at [test_interp_colliding_general_iface_dispatch]
+    above: a nested module's DImpl-bound interface dispatcher isn't visible
+    from an outer/sibling module. Uses [eval_module]/[call_fn] (bypasses
+    typecheck entirely, like every other test in this file), so the
+    Stage-6b double-collision coherence REJECTION in typecheck.ml (which
+    would otherwise need `MARCH_DEV_RELAX_CTOR_COHERENCE=1` to get past) is
+    never reached — verified empirically: this test fails RED with the
+    pre-fix interpreter and passes GREEN with the fix, with no env var. *)
+let test_interp_colliding_double_collision_ctor_construction_and_match () =
+  let src = {|mod Top do
+    interface Speak(a) do
+      fn speak : a -> String
+    end
+    mod DcA do
+      type Thing = Shared | OnlyA
+      impl Speak(Thing) do
+        fn speak(self) do
+          match self do
+            Shared -> "from-A-shared"
+            OnlyA -> "from-A-only"
+          end
+        end
+      end
+      fn say() do speak(Shared) end
+    end
+    mod DcB do
+      type Thing = Shared | OnlyB
+      impl Speak(Thing) do
+        fn speak(self) do
+          match self do
+            Shared -> "from-B-shared"
+            OnlyB -> "from-B-only"
+          end
+        end
+      end
+      fn say() do speak(Shared) end
+    end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  Alcotest.(check string) "DcA.say() dispatches to DcA.Thing's own Shared arm"
+    "from-A-shared" (vstr (call_fn env "DcA.say" []));
+  Alcotest.(check string) "DcB.say() dispatches to DcB.Thing's own Shared arm"
+    "from-B-shared" (vstr (call_fn env "DcB.say" []))
+
+(** Companion to the test above, covering the OTHER two combinations: ECon
+    construction happening INSIDE an impl-method's own body (not a plain
+    module-level fn — [make_shared]), and PatCon pattern-match happening in
+    a plain MODULE-LEVEL fn (not inside an impl method — [classify_own]).
+    Dispatch to [make_shared] is by the argument's runtime type
+    ([OnlyC]/[OnlyD] — NOT collision-shared ctor names, so unambiguous per
+    the PARENT plan's own Task 5), so this isolates THIS task's fix rather
+    than re-testing that one.
+
+    Made deliberately DISCRIMINATING (not just "does it run without
+    crashing") by cross-feeding: DcC's own impl-method-constructed [Shared]
+    must match DcC's own module-level [classify_own], but DcD's
+    impl-method-constructed [Shared] must NOT — before this task's fix both
+    are the SAME bare `VCon("Shared", [])`, so [DcC.classify_own] would
+    (wrongly) match DcD's value too; after the fix the tags differ
+    ("DcC.Thing.Shared" vs "DcD.Thing.Shared") and the cross call raises
+    [Match_failure] (non-exhaustive: [classify_own] only has Shared/OnlyC
+    arms), which the test asserts. *)
+let test_interp_colliding_double_collision_ctor_impl_construction_and_module_match () =
+  let src = {|mod Top2 do
+    interface Make(a) do
+      fn make_shared : a -> a
+    end
+    mod DcC do
+      type Thing = Shared | OnlyC
+      impl Make(Thing) do
+        fn make_shared(_self) do Shared end
+      end
+      fn make() do make_shared(OnlyC) end
+      fn classify_own(t) do
+        match t do
+          Shared -> "C-shared"
+          OnlyC -> "C-only"
+        end
+      end
+    end
+    mod DcD do
+      type Thing = Shared | OnlyD
+      impl Make(Thing) do
+        fn make_shared(_self) do Shared end
+      end
+      fn make() do make_shared(OnlyD) end
+    end
+  end|} in
+  let env = eval_module src in
+  let vstr v = match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString" in
+  let dc_shared = call_fn env "DcC.make" [] in
+  let dd_shared = call_fn env "DcD.make" [] in
+  Alcotest.(check string) "DcC.classify_own matches DcC's OWN impl-method-constructed Shared"
+    "C-shared" (vstr (call_fn env "DcC.classify_own" [dc_shared]));
+  let cross_matched =
+    try Some (vstr (call_fn env "DcC.classify_own" [dd_shared]))
+    with March_eval.Eval.Match_failure _ -> None
+  in
+  Alcotest.(check bool)
+    "DcC.classify_own must NOT match DcD's impl-method-constructed Shared \
+     (different qualified tag — a match here means the two collided back \
+     into the SAME bare VCon tag)"
+    true (cross_matched = None)
+
 let test_default_method_user_type () =
   (* Regression: a user-declared `interface Eq(a)` (name collides with the
      built-in Eq) with a default `neq` calling `eq`, implemented for a USER
@@ -4525,6 +4649,8 @@ let eval_suites =
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
           Alcotest.test_case "general iface multi-impl dispatch" `Quick test_general_iface_multi_impl_dispatch;
           Alcotest.test_case "interp colliding general iface dispatch (Layer 1b)" `Quick test_interp_colliding_general_iface_dispatch;
+          Alcotest.test_case "interp colliding double-collision ctor construction+match" `Quick test_interp_colliding_double_collision_ctor_construction_and_match;
+          Alcotest.test_case "interp colliding double-collision ctor impl-construction+module-match" `Quick test_interp_colliding_double_collision_ctor_impl_construction_and_module_match;
           Alcotest.test_case "default method user type"`Quick test_default_method_user_type;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;

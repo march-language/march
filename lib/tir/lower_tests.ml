@@ -136,9 +136,17 @@ let run
            [env.current_module_aliases] field doc for the full trace:
            no reader outside [lower_module]'s dynamic extent, and the
            next call's entry preamble reset the ref before any read). *)
-        let inner_env = match Hashtbl.find_opt !Lower_state._module_alias_snapshots new_mod_prefix with
-          | Some snap -> { test_env with Lower_state.current_module_aliases = snap }
-          | None -> test_env
+        let inner_env =
+          let base = match Hashtbl.find_opt !Lower_state._module_alias_snapshots new_mod_prefix with
+            | Some snap -> { test_env with Lower_state.current_module_aliases = snap }
+            | None -> test_env
+          in
+          (* Also update [mod_prefix] so a colliding-type constructor built
+             inside a test/setup body nested in this module gets the same
+             collision-conditional qualification [lower_mod_decls]'s normal
+             (non-test) path gives it — see [env.mod_prefix]'s field doc
+             (Task 3, docs/superpowers/plans/2026-07-21-ctor-module-identity.md). *)
+          { base with Lower_state.mod_prefix = new_mod_prefix }
         in
         collect_tests inner_env prefix
           ~mod_prefix:new_mod_prefix

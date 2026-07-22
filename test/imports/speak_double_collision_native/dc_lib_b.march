@@ -1,0 +1,14 @@
+-- Library module B of the DOUBLE-collision witness: declares its OWN `Thing`
+-- (same short name as DcLibA.Thing) AND its OWN constructor named `Shared` (same
+-- short ctor name as DcLibA.Thing's `Shared`) — a genuinely distinct type and
+-- ctor in a different module. Coherence keys on the declaring module, so both
+-- impls coexist; the constructor module-qualified identity plan gives each
+-- module's `Shared` a distinct runtime identity, so `say`'s `speak(Shared)`
+-- routes to module B's own impl body ("from-B"), NOT module A's.
+mod DcLibB do
+  type Thing = Shared | OnlyB
+  impl Speak(Thing) do
+    fn speak(_self) do "from-B" end
+  end
+  fn say() do speak(Shared) end
+end

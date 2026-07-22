@@ -49,6 +49,8 @@ module Typecheck = March_typecheck.Typecheck
 type env = Lower_state.env = {
   type_map : (Ast.span, Typecheck.ty) Hashtbl.t option;
   current_module_aliases : (string, string) Hashtbl.t;
+  mod_prefix : string;
+  collision_set : (string, string list) Hashtbl.t;
 }
 
 let empty_env = Lower_state.empty_env
@@ -600,8 +602,36 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         | Some i -> String.sub tag (i + 1) (String.length tag - i - 1)
         | None -> tag
       in
+      (* Collision-conditional module qualification (Task 3 of
+         docs/superpowers/plans/2026-07-21-ctor-module-identity.md): a
+         same-short-name type declared by >= 2 modules stays a BARE
+         [TCon(type_name, _)] in the static [Tir.ty] (the whole plan's
+         "TCon stays bare" invariant — see [Collision_set]'s module doc),
+         so bare `type_name ^ "." ^ short_tag` collapses two different
+         modules' identically-named constructors (e.g. both declaring a
+         nullary `Shared`) onto ONE ctor_info key at codegen time —
+         whichever [TDVariant] registers last silently wins for BOTH
+         constructions. Qualifying by [env.mod_prefix] (the LEXICAL
+         enclosing module of THIS construction) produces the same
+         qualified key [build_ctor_info] (llvm_toplevel.ml) already
+         computes from [tm_types]' module-qualified type names — so the
+         two agree without a second collision-set computation. Gated on
+         membership in the NARROW [Lower_state.shared_ctor_collision_tbl]
+         (Task 5.5 — public, impl-bearing collisions only), NOT the broad
+         [Collision_set.is_colliding]: a stdlib structural-interop [ptype]
+         (e.g. two [ptype Seq(a) = Seq(a)] declarations relied on for a
+         cross-module hand-off) collides by [Collision_set]'s measure but must
+         NOT be qualified — its construction and consuming pattern must both
+         stay bare so they agree via [ctor_entry]'s suffix resolver. A
+         non-colliding (or non-public / impl-less colliding) type's key is
+         unconditionally the old bare form, so ordinary programs are
+         byte-identical. The [env.mod_prefix <> ""] half of the gate stays. *)
       let ctor_key = match ty_of_span env span with
-        | Tir.TCon (type_name, _) -> type_name ^ "." ^ short_tag
+        | Tir.TCon (type_name, _) ->
+          if env.mod_prefix <> ""
+             && Lower_state.shared_ctor_collision_type env.mod_prefix short_tag <> None
+          then env.mod_prefix ^ type_name ^ "." ^ short_tag
+          else type_name ^ "." ^ short_tag
         | _ -> short_tag
       in
       (* For a NULLARY constructor (e.g. [None]) thread the enclosing type's
@@ -889,12 +919,43 @@ let rec collect_type_names ~prefix acc decls =
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
+  (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
+     fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of
+     docs/superpowers/plans/2026-07-21-ctor-module-identity.md to ECon
+     construction below) needs the collision set BEFORE [collect_iface_impls]
+     (Pass 1) and BEFORE any function body is lowered (Pass 1's stdlib_context
+     bodies, Pass 2's user bodies) — but the [types] ref Pass 2 fills is still
+     empty at this point. [collect_type_names] (top-level, above) walks the
+     AST directly, producing the SAME set of qualified/bare TIR type names
+     Pass 2 will eventually put into [tm_types] (including actor-generated
+     types) — see its doc comment. Computed here (before [env] itself, so it
+     can be folded directly into [env.collision_set] below) rather than at its
+     old post-[env] location, so [ECon] lowering deep inside [lower_expr]
+     (which only ever sees [env], not [lower_module]'s local lets) can reach
+     it too. *)
+  let collision_set =
+    Collision_set.compute
+      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
+  in
+  (* Task 5.5 (docs/superpowers/plans/2026-07-21-ctor-module-identity.md,
+     inserted fix): the NARROWER shared-ctor table that gates ONLY Tasks 3/4's
+     [ECon]/[br_tag] qualification (public + impl-bearing collisions), leaving
+     the broad [collision_set] above untouched for Task 1/2 and the earlier
+     plan's impl-symbol qualification. Computed from the SAME raw AST decls that
+     feed [collect_type_names]/[collision_set] (stdlib_context then m.mod_decls,
+     both at the top-level prefix), so the two stay in agreement about which
+     modules are in scope. See [Lower_state.compute_shared_ctor_collisions]. *)
+  Lower_state.compute_shared_ctor_collisions (stdlib_context @ m.mod_decls);
   (* env is constructed fresh here (module-scoped fields only — the
      reset-at-entry set, per the plan's landmine classification): [type_map]
      is set once from the caller's argument and never mutated again this
      call; [current_module_aliases] starts as a fresh empty table exactly
-     like the old [_current_module_aliases := Hashtbl.create 16] did. *)
-  let env = { type_map; current_module_aliases = Hashtbl.create 16 } in
+     like the old [_current_module_aliases := Hashtbl.create 16] did;
+     [mod_prefix] starts bare ("" — no module scope entered yet, updated by
+     [lower_mod_decls]'s [mod_env] at each [DMod] descent); [collision_set]
+     is the module-scoped constant computed just above. *)
+  let env = { type_map; current_module_aliases = Hashtbl.create 16;
+              mod_prefix = ""; collision_set } in
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
   _module_aliases := Hashtbl.create 16;
@@ -1081,13 +1142,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      specs/plans/2026-07-20-fqn-impl-dispatch-identity.md) needs the collision
      set BEFORE [collect_iface_impls] (Pass 1, directly below) runs, but the
      [types] ref above is populated only by Pass 2 — so we can't reuse it.
-     [collect_type_names] (top-level, above) walks the AST directly, producing
-     the SAME set of qualified/bare TIR type names Pass 2 will eventually put
-     into [tm_types] (including actor-generated types) — see its doc comment. *)
-  let collision_set =
-    Collision_set.compute
-      (collect_type_names ~prefix:"" (collect_type_names ~prefix:"" [] stdlib_context) m.mod_decls)
-  in
+     Now computed up front (before [env] itself) and folded into
+     [env.collision_set] so [ECon] lowering (in [lower_expr], which only
+     sees [env]) can reach the SAME set too — see [env.collision_set]'s
+     field doc in [Lower_state] for the full rationale. Re-bound to a bare
+     local here purely so the rest of this Pass-1 closure (written before
+     that move) keeps referencing the short name [collision_set] unchanged. *)
+  let collision_set = env.collision_set in
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies.
      Recursively processes DMod contents so that impls declared inside
@@ -1172,7 +1233,26 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the dispatch entry — the function is already precompiled. *)
                 ignore mdef;
                 if lower_bodies then begin
-                  let fn = Lower_decls.lower_fn_def env mdef in
+                  (* [env] is closed over from [lower_module]'s top level and
+                     never carries THIS impl's declaring-module prefix on its
+                     own — [mod_prefix] above (the recursion parameter) was,
+                     pre-fix, only used for the mangled SYMBOL name and
+                     [rename_tir_vars] a few lines below, never folded into
+                     the [env] that [lower_fn_def] threads down into
+                     [lower_expr]'s [ECon] gate. Without [mod_env], a bare
+                     colliding-type constructor written directly inside an
+                     impl method's OWN body (e.g. `fn again(_self) do Shared
+                     end`) would lower with [env.mod_prefix = ""], so the
+                     collision-conditional qualification in [lower_expr]
+                     never fires and the ctor key stays bare — reproducing
+                     the same double-collision bug this task exists to fix,
+                     just for THIS construction site instead of a
+                     module-level `fn mk()`. [mod_env] mirrors
+                     [lower_mod_decls]'s own [mod_env] (Pass 2, below) using
+                     the SAME [mod_prefix] value already used for [mangled]
+                     a few lines above — no new prefix computation. *)
+                  let mod_env = { env with mod_prefix } in
+                  let fn = Lower_decls.lower_fn_def mod_env mdef in
                   (* If this impl is inside a module, qualify any references to
                      module-local functions (e.g. bigint_eq_impl → BigInt.bigint_eq_impl)
                      so that mono can find them in fn_table (which uses the
@@ -1332,9 +1412,18 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              function returns — [env] itself is never mutated, so "restore"
              is automatic (the caller's own binding is untouched), the exact
              behavior the old code's [Fun.protect]-guarded [:=]/restore dance
-             produced. *)
+             produced.
+
+             [mod_prefix] is set to THIS module's own accumulated [prefix]
+             (e.g. "DcA." at the first level, "A.B." if doubly-nested) —
+             the same value [prefix] already carries for the
+             [rename_tir_vars]/qualified-fn-name uses below, now also
+             reachable from [ECon] lowering deep inside [lower_fn_def]'s
+             call into [lower_expr] (Task 3 of
+             docs/superpowers/plans/2026-07-21-ctor-module-identity.md). *)
           let mod_env = { env with
-            current_module_aliases = Hashtbl.copy env.current_module_aliases } in
+            current_module_aliases = Hashtbl.copy env.current_module_aliases;
+            mod_prefix = prefix } in
           with_current_module_fns direct_fn_names (fun () ->
           List.iter (fun d ->
               match d with

@@ -1,0 +1,18 @@
+-- Library module A of the DOUBLE-collision witness: declares `Thing` (short
+-- name shared with DcLibB.Thing) AND a constructor named `Shared` (also shared
+-- with DcLibB.Thing's `Shared`) — a "double collision" (same short type name
+-- AND a shared ctor name). This is the shape the interim Task-6b stopgap
+-- rejected; the constructor module-qualified identity plan makes it dispatch
+-- correctly. `say` constructs via the SHARED ctor `Shared` and calls `speak` on
+-- it from INSIDE this module — the interpreter dispatches a nested/imported-
+-- module interface method only when the call originates in the impl's own module
+-- (a pre-existing scoping limitation, same as sc_lib_a.march), so the cross-
+-- backend witness triggers dispatch this way. Correct dispatch must route this
+-- module's `Shared` value to module A's own impl body ("from-A").
+mod DcLibA do
+  type Thing = Shared | OnlyA
+  impl Speak(Thing) do
+    fn speak(_self) do "from-A" end
+  end
+  fn say() do speak(Shared) end
+end

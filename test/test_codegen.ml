@@ -1088,13 +1088,15 @@ let test_qualified_alias_no_cross_module_hijack () =
   with_current_module_fns [] (fun () ->
     (* A module that did NOT import Bastion — empty current_module_aliases. *)
     let non_importer =
-      { type_map = None; current_module_aliases = Hashtbl.create 0 } in
+      { type_map = None; current_module_aliases = Hashtbl.create 0;
+        mod_prefix = ""; collision_set = Hashtbl.create 0 } in
     Alcotest.(check string)
       "qualified `Logger.debug` NOT hijacked by another module's global import"
       "Logger.debug" (resolve_use_alias non_importer "Logger.debug");
     (* The importing module itself still resolves its own qualified alias. *)
     let importer =
-      { type_map = None; current_module_aliases = Hashtbl.create 8 } in
+      { type_map = None; current_module_aliases = Hashtbl.create 8;
+        mod_prefix = ""; collision_set = Hashtbl.create 0 } in
     Hashtbl.replace importer.current_module_aliases
       "Logger.debug" "Bastion.Logger.debug";
     Alcotest.(check string)
@@ -4545,6 +4547,74 @@ end
   Alcotest.(check bool) "bare (unqualified) Speak impl symbol" true
     (List.mem "Speak$Thing.speak" fn_names)
 
+(* ── lower.ml: collision-conditional module-qualified ctor CONSTRUCTION
+   (Task 3, docs/superpowers/plans/2026-07-21-ctor-module-identity.md — the
+   "native construction" task) ───────────────────────────────────────────
+
+   Two DISTINCT same-short-name types (declared in different modules) that
+   ALSO share a constructor short name (both declare a nullary `Shared`)
+   must construct DISTINCT, module-qualified [EAlloc(TCon(key,_),_)] ctor
+   keys — not the same bare "Thing.Shared" key for both, which is the exact
+   mechanism behind the double-collision miscompile: whichever module's
+   [TDVariant] happens to register into [ctor_info] LAST silently wins for
+   BOTH constructions. *)
+let test_colliding_ctor_construction_gets_qualified_key () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) -> k
+    | _ -> Alcotest.fail (Printf.sprintf "expected EAlloc body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_key = ctor_key_of_alloc (find_fn "DcA.mk") in
+  let b_key = ctor_key_of_alloc (find_fn "DcB.mk") in
+  Alcotest.(check bool) "DcA's and DcB's Shared construction get distinct qualified keys"
+    true (a_key <> b_key);
+  Alcotest.(check bool) "DcA's key mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_key 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's key mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
+
 (** Bug: [Lower_state.resolve_iface_method] resolved an ambiguous
     general-interface call using [List.assoc_opt tname impls] — first-match,
     NOT collision-aware. When two modules declare same-short-name types
@@ -4608,6 +4678,374 @@ end
     (ir_contains body_str "Speak$");
   Alcotest.(check int) "both ambiguous calls stay bare `speak(...)`" 2
     (ir_count body_str "speak(")
+
+(** Non-colliding types (the common case: a single declaring module per
+    short name) must construct the exact same bare ctor key as before this
+    task — highest-risk byte-identity guarantee. *)
+let test_noncolliding_ctor_construction_stays_bare () =
+  let src = {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn mk() do Shared end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let fn = find_fn "DcA.mk" in
+  (match fn.March_tir.Tir.fn_body with
+   | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) ->
+     Alcotest.(check string) "bare (unqualified) ctor key" "Thing.Shared" k
+   | _ -> Alcotest.fail "expected EAlloc body in DcA.mk")
+
+(* ── Final-review finding: ctor construction INSIDE an impl method body
+   (not just a module-level `fn mk()`) must ALSO get the qualified key.
+   [collect_iface_impls] (Pass 1) lowers impl method bodies via
+   [Lower_decls.lower_fn_def env mdef] — closing over the TOP-LEVEL [env]
+   (whose [mod_prefix] is always "") rather than a module-scoped [mod_env]
+   like Pass 2's [lower_mod_decls] builds. Its own [mod_prefix] recursion
+   parameter was only used for the impl SYMBOL name and [rename_tir_vars],
+   never folded into the [env] that actually reaches the [ECon] gate — so a
+   bare `Shared` constructed directly inside an impl method's OWN body
+   stayed unqualified even after this task's first fix, silently
+   reproducing the exact double-collision bug for this one construction
+   site. *)
+let test_colliding_ctor_construction_inside_impl_method_gets_qualified_key () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+    fn again : a -> a
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+      fn again(_self) do Shared end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+      fn again(_self) do Shared end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let ctor_key_of_alloc (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (k, _), _) -> k
+    | _ -> Alcotest.fail (Printf.sprintf "expected EAlloc body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_key = ctor_key_of_alloc (find_fn "Speak$DcA.Thing.again") in
+  let b_key = ctor_key_of_alloc (find_fn "Speak$DcB.Thing.again") in
+  Alcotest.(check bool)
+    "DcA's and DcB's impl-method-body Shared construction get distinct qualified keys"
+    true (a_key <> b_key);
+  Alcotest.(check bool) "DcA's impl-method key mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_key 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's impl-method key mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_key 0); true with Not_found -> false)
+
+(* ── lower_match.ml: collision-conditional module-qualified PATTERN tag
+   (Task 4, docs/superpowers/plans/2026-07-21-ctor-module-identity.md — the
+   "native pattern-match" task) ───────────────────────────────────────────
+
+   Mirrors the ctor-CONSTRUCTION tests directly above, but for the pattern
+   side: a bare `Shared` pattern arm inside a colliding type's own match must
+   lower to a br_tag qualified by the pattern's LEXICAL enclosing module
+   (e.g. "DcA.Thing.Shared"), not the bare "Shared"/"Thing.Shared" that would
+   ambiguously match either colliding type's constructor at codegen time
+   (llvm_case.ml's [qualified_br_key], for a BARE incoming tag, qualifies
+   using only the scrutinee's — necessarily bare, per this whole plan's
+   "TCon stays bare" invariant — static type name, so both DcA's and DcB's
+   `Shared` arm would produce the SAME "Thing.Shared" key without this fix).
+
+   Two shapes, per the brief's explicit instruction to cover both from the
+   start (learned from this same plan's Task 3, whose first round missed the
+   impl-method-body construction site): a pattern match inside a plain
+   module-level function, and — the more common, canonical shape — a pattern
+   match inside an interface impl method's own body. *)
+
+(** Shape 1 (narrowed by Task 5.5): a bare `Shared`/`OnlyA` match inside a
+    plain module-level function where NEITHER `Thing` is the subject of any
+    interface `impl`. Before Task 5.5 this qualified to distinct per-module
+    tags (like Shape 2 below); after the impl-presence filter it stays BARE —
+    with no `impl` there is no interface dispatch, so the two types' `Shared`
+    values are never mixed in well-typed code and need no runtime
+    disambiguation (mirrors the interpreter's Task 5 gating, whose
+    `types_with_any_impl` filter excludes impl-less collisions identically —
+    every eval colliding-ctor test carries an `impl`). Construction of
+    `DcA.Shared`/`DcB.Shared` (in `main`) stays bare too, so each type's own
+    construction and match still agree via `ctor_entry`'s suffix resolver. The
+    genuinely-ambiguous, dispatch-bearing shape is covered by Shape 2. *)
+let test_colliding_pattern_match_impl_less_stays_bare () =
+  let src = {|
+mod Top do
+  mod DcA do
+    type Thing = Shared | OnlyA
+    fn describe(t: Thing) do
+      match t do
+        Shared -> "from-A-shared"
+        OnlyA -> "from-A-only"
+      end
+    end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    fn describe(t: Thing) do
+      match t do
+        Shared -> "from-B-shared"
+        OnlyB -> "from-B-only"
+      end
+    end
+  end
+  fn main() do
+    println(DcA.describe(DcA.Shared))
+    println(DcB.describe(DcB.Shared))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  (* Each `describe` body lowers straight to an ECase (the match IS the whole
+     fn body); find the "Shared" arm's br_tag (search by content, not
+     position, to stay robust to compile_matrix's internal grouping order). *)
+  let shared_tag_of (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branches, _) ->
+      let br = List.find (fun (b : March_tir.Tir.branch) ->
+          (* bare "Shared" or a qualified "....Shared" — never "OnlyA"/"OnlyB" *)
+          let t = b.March_tir.Tir.br_tag in
+          (t = "Shared"
+           || (String.length t >= 7
+               && String.sub t (String.length t - 7) 7 = ".Shared")))
+        branches in
+      br.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail (Printf.sprintf "expected ECase body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_tag = shared_tag_of (find_fn "DcA.describe") in
+  let b_tag = shared_tag_of (find_fn "DcB.describe") in
+  (* Impl-less collision: both Shared arms stay bare, unqualified. *)
+  Alcotest.(check string) "DcA's impl-less Shared pattern arm stays bare" "Shared" a_tag;
+  Alcotest.(check string) "DcB's impl-less Shared pattern arm stays bare" "Shared" b_tag
+
+(** Shape 2 (the canonical, more common shape per the task brief): a bare
+    `Shared` match arm written directly inside an interface impl method's
+    own body — `impl Speak(Thing) do fn speak(self) do match self do
+    Shared -> ... end end end`. *)
+let test_colliding_pattern_match_impl_method_gets_qualified_tag () =
+  let src = {|
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod DcA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-A-shared"
+          OnlyA -> "from-A-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  mod DcB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(self) do
+        match self do
+          Shared -> "from-B-shared"
+          OnlyB -> "from-B-only"
+        end
+      end
+    end
+    fn mk() do Shared end
+  end
+  fn main() do
+    println(speak(DcA.mk()))
+    println(speak(DcB.mk()))
+  end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  let shared_tag_of (fn : March_tir.Tir.fn_def) =
+    match fn.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, branches, _) ->
+      let br = List.find (fun (b : March_tir.Tir.branch) ->
+          let t = b.March_tir.Tir.br_tag in
+          (t = "Shared"
+           || (String.length t >= 7
+               && String.sub t (String.length t - 7) 7 = ".Shared")))
+        branches in
+      br.March_tir.Tir.br_tag
+    | _ -> Alcotest.fail (Printf.sprintf "expected ECase body in %s" fn.March_tir.Tir.fn_name)
+  in
+  let a_tag = shared_tag_of (find_fn "Speak$DcA.Thing.speak") in
+  let b_tag = shared_tag_of (find_fn "Speak$DcB.Thing.speak") in
+  Alcotest.(check bool) "DcA's and DcB's impl-method Shared pattern arms get distinct qualified tags"
+    true (a_tag <> b_tag);
+  Alcotest.(check bool) "DcA's impl-method tag mentions DcA" true
+    (let re = Str.regexp_string "DcA" in
+     try ignore (Str.search_forward re a_tag 0); true with Not_found -> false);
+  Alcotest.(check bool) "DcB's impl-method tag mentions DcB" true
+    (let re = Str.regexp_string "DcB" in
+     try ignore (Str.search_forward re b_tag 0); true with Not_found -> false)
+
+(* ── Task 5.5 (inserted fix): narrow native ctor-key qualification to
+   PUBLIC, impl-bearing collisions ─────────────────────────────────────────
+   Tasks 3/4 (above) qualified the ctor identity of ANY two same-short-name
+   TIR types, with no filter for visibility (`type` vs `ptype`) or for whether
+   either candidate is ever the subject of an `impl`. That broke a real,
+   deliberate stdlib structural-interop pattern: stdlib/seq.march and
+   stdlib/file.march EACH independently declare `ptype Seq(a) = Seq(a)` — same
+   short name, same sole ctor — on purpose. `File.with_lines`'s callback
+   constructs a `File.Seq` value that the CALLER then feeds through
+   `Seq.map`/`Seq.to_list` (a DIFFERENT module's functions), relying on
+   STRUCTURAL shape, not nominal identity. Tasks 3/4's lexical qualification
+   split the hand-off: construction qualified to "File.Seq.Seq", the consuming
+   pattern (inside Seq.march's own functions) qualified to "Seq.Seq.Seq" — a
+   genuine tag mismatch → `panic: non-exhaustive pattern match` when compiled.
+
+   This mirrors the interpreter's own Task 5 fix (eval.ml's
+   compute_type_collision_set / colliding_ctor_type_by_module): a NEW, narrower
+   table (Lower_state.shared_ctor_collision_tbl) gated on two filters
+   (public-only AND the short name must have an `impl` block anywhere), applied
+   ONLY to Tasks 3/4's ECon/pattern-tag qualification gates — the pre-existing
+   broad env.collision_set (Task 1 global tags, Task 2 forced-Boxed repr, the
+   earlier plan's impl-symbol qualification) is untouched. *)
+
+(** Regression: two modules each declaring `ptype Seq(a) = Seq(a)` — same short
+    name, same sole ctor, NEITHER the subject of any interface `impl` — model
+    the stdlib seq.march/file.march structural-interop pattern. One module
+    CONSTRUCTS the value, the other CONSUMES it through a structural pattern
+    match. After the fix, NEITHER side's ctor key is qualified to its declaring
+    module (both stay bare, agreeing on the same ctor_info entry via
+    llvm_data.ctor_entry's suffix resolver); before the fix, construction
+    qualified to "Producer.Seq.Seq" and the pattern to "Consumer.Seq.Seq" — a
+    silent runtime mismatch. *)
+let test_ptype_structural_interop_ctor_key_stays_bare () =
+  let src = {|
+mod Top do
+  mod Producer do
+    ptype Seq(a) = Seq(a)
+    fn mk(x: Int): Seq(Int) do Seq(x) end
+  end
+  mod Consumer do
+    ptype Seq(a) = Seq(a)
+    fn consume(s: Seq(Int)): Int do
+      match s do
+        Seq(x) -> x
+      end
+    end
+  end
+  fn main() do 0 end
+end
+|} in
+  let m = parse_and_desugar src in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let find_fn name = List.find (fun (fn : March_tir.Tir.fn_def) -> fn.March_tir.Tir.fn_name = name)
+      tir.March_tir.Tir.tm_fns in
+  (* Recursive collectors, robust to ELet/ESeq/ELetRec wrapping. *)
+  let rec alloc_keys (e : March_tir.Tir.expr) acc =
+    let open March_tir.Tir in
+    match e with
+    | EAlloc (TCon (k, _), _) -> k :: acc
+    | EAlloc (_, _) -> acc
+    | ELet (_, e1, e2) -> alloc_keys e2 (alloc_keys e1 acc)
+    | ELetRec (fns, body) ->
+      alloc_keys body
+        (List.fold_left (fun a (fn : fn_def) -> alloc_keys fn.fn_body a) acc fns)
+    | ECase (_, brs, def) ->
+      let acc = List.fold_left (fun a (b : branch) -> alloc_keys b.br_body a) acc brs in
+      (match def with Some d -> alloc_keys d acc | None -> acc)
+    | ESeq (a, b) -> alloc_keys b (alloc_keys a acc)
+    | _ -> acc
+  in
+  let rec case_tags (e : March_tir.Tir.expr) acc =
+    let open March_tir.Tir in
+    match e with
+    | ECase (_, brs, def) ->
+      let acc = List.fold_left (fun a (b : branch) -> case_tags b.br_body (b.br_tag :: a)) acc brs in
+      (match def with Some d -> case_tags d acc | None -> acc)
+    | ELet (_, e1, e2) -> case_tags e2 (case_tags e1 acc)
+    | ELetRec (fns, body) ->
+      case_tags body
+        (List.fold_left (fun a (fn : fn_def) -> case_tags fn.fn_body a) acc fns)
+    | ESeq (a, b) -> case_tags b (case_tags a acc)
+    | _ -> acc
+  in
+  let contains needle hay =
+    let re = Str.regexp_string needle in
+    try ignore (Str.search_forward re hay 0); true with Not_found -> false in
+  let last_seg s = match String.rindex_opt s '.' with
+    | Some i -> String.sub s (i + 1) (String.length s - i - 1) | None -> s in
+  let mk_keys = alloc_keys (find_fn "Producer.mk").March_tir.Tir.fn_body [] in
+  let seq_alloc_key =
+    try List.find (fun k -> last_seg k = "Seq") mk_keys
+    with Not_found ->
+      Alcotest.fail (Printf.sprintf "expected a Seq EAlloc in Producer.mk, found: [%s]"
+                       (String.concat "; " mk_keys)) in
+  let cons_tags = case_tags (find_fn "Consumer.consume").March_tir.Tir.fn_body [] in
+  let seq_pat_tag =
+    try List.find (fun t -> last_seg t = "Seq") cons_tags
+    with Not_found ->
+      Alcotest.fail (Printf.sprintf "expected a Seq pattern arm in Consumer.consume, found: [%s]"
+                       (String.concat "; " cons_tags)) in
+  (* The bug: construction qualified to the CONSTRUCTING module (Producer),
+     pattern to the CONSUMING module (Consumer) — divergent, so their codegen
+     tags never agree. The fix keeps both bare (no declaring-module prefix). *)
+  Alcotest.(check bool) "ptype construction key is NOT qualified to Producer"
+    false (contains "Producer" seq_alloc_key);
+  Alcotest.(check bool) "ptype construction key is NOT qualified to Consumer"
+    false (contains "Consumer" seq_alloc_key);
+  Alcotest.(check bool) "ptype consuming pattern tag is NOT qualified to Consumer"
+    false (contains "Consumer" seq_pat_tag);
+  Alcotest.(check bool) "ptype consuming pattern tag is NOT qualified to Producer"
+    false (contains "Producer" seq_pat_tag);
+  (* Both still name the same shared ctor, so ctor_entry's suffix resolver
+     lands them on ONE ctor_info entry (identical runtime tag). *)
+  Alcotest.(check string) "construction key's ctor is Seq" "Seq" (last_seg seq_alloc_key);
+  Alcotest.(check string) "pattern tag's ctor is Seq" "Seq" (last_seg seq_pat_tag)
 
 (** Task 4: two same-short-name colliding types implementing one GENERAL
     interface must, at a call site whose static (bare) argument type is
@@ -9421,6 +9859,22 @@ let codegen_suites =
           test_noncolliding_impl_symbol_stays_bare;
         Alcotest.test_case "ambiguous iface call stays unresolved at lower time" `Quick
           test_ambiguous_iface_call_stays_unresolved_at_lower_time;
+      ]);
+      ("dispatch: collision-conditional ctor construction key", [
+        Alcotest.test_case "colliding ctor construction gets qualified key" `Quick
+          test_colliding_ctor_construction_gets_qualified_key;
+        Alcotest.test_case "non-colliding ctor construction stays bare" `Quick
+          test_noncolliding_ctor_construction_stays_bare;
+        Alcotest.test_case "colliding ctor construction inside impl method body gets qualified key" `Quick
+          test_colliding_ctor_construction_inside_impl_method_gets_qualified_key;
+      ]);
+      ("lower_match: collision-conditional pattern tag qualification", [
+        Alcotest.test_case "impl-less colliding pattern match stays bare (narrowed)" `Quick
+          test_colliding_pattern_match_impl_less_stays_bare;
+        Alcotest.test_case "colliding pattern match inside impl method body gets qualified tag" `Quick
+          test_colliding_pattern_match_impl_method_gets_qualified_tag;
+        Alcotest.test_case "ptype structural-interop ctor key stays bare (not per-module qualified)" `Quick
+          test_ptype_structural_interop_ctor_key_stays_bare;
       ]);
       ("dispatch: colliding general-iface runtime tag switch", [
         Alcotest.test_case "colliding general-iface dispatches on runtime tag" `Quick

@@ -1,0 +1,35 @@
+-- Coherence accept (FQN dispatch — constructor module-qualified identity):
+-- two DISTINCT same-short-name types (`NA.Thing`/`NB.Thing`, nested modules)
+-- each implement the SAME general interface `Speak` AND each declare a
+-- constructor named `Shared` — a "double collision": same short type name AND a
+-- shared ctor name. This shape was rejected under the interim Task-6b stopgap:
+-- the constructor-tag identity the backends and interpreter route dispatch on
+-- used to key on the BARE ctor name (`ci_module` was diagnostic-only, feeding no
+-- dispatch), so `speak` would silently MISDISPATCH (registration-order-dependent;
+-- interpreted and compiled could disagree). The constructor module-qualified
+-- identity plan resolves ctor identity upstream — native ECon/pattern-match
+-- qualify a colliding type's ctor key with its declaring module, and the
+-- interpreter qualifies the VCon tag the same way — so `speak` dispatches
+-- correctly on the value's real type in BOTH backends. The declaring-module
+-- coherence relaxation is therefore sound unconditionally; no ctor-sharing
+-- carve-out remains. Accept twin with DISTINCT ctor names: accept/t89.
+-- Cross-backend runtime witness: test/imports/speak_double_collision_native.
+-- Design: specs/plans/2026-07-20-fqn-impl-dispatch-identity.md.
+mod Top do
+  interface Speak(a) do
+    fn speak : a -> String
+  end
+  mod NA do
+    type Thing = Shared | OnlyA
+    impl Speak(Thing) do
+      fn speak(_self) do "from-A" end
+    end
+  end
+  mod NB do
+    type Thing = Shared | OnlyB
+    impl Speak(Thing) do
+      fn speak(_self) do "from-B" end
+    end
+  end
+  fn main() do 0 end
+end

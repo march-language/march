@@ -309,6 +309,58 @@ qualified cross-module zero-arg calls (verified). 5 new tests in
 `test/test_compiler.ml`'s `typecheck` group. Full suite green: compiler 532 /
 eval 238 / codegen 438 / stdlib 780 (`-q`).
 
+## Current State (as of 2026-07-22, constructor module-qualified identity COMPLETE — shared-ctor-name double collisions dispatch correctly, flag-day)
+
+**Two same-short-name types declared in different modules that ALSO share a
+constructor name (a "double collision", e.g. both `type Thing = Shared | …`)
+may now each implement the same interface, compile, run, and dispatch
+correctly in BOTH backends.** This closes the last residual gap of the FQN
+dispatch-identity effort. Under the earlier Stages 1-3 flag-day (2026-07-21),
+same-short-name types dispatched correctly *only* when their constructor NAME
+sets were disjoint; a shared ctor name was rejected at typecheck by an interim
+Task-6b stopgap (`register_impl_shape`'s `ctor_sets_disjoint` check), because
+the backends and interpreter routed dispatch on the BARE ctor tag (`ci_module`
+was diagnostic-only, feeding no dispatch). The constructor module-qualified
+identity plan (`specs/plans/2026-07-20-fqn-impl-dispatch-identity.md`,
+`docs/superpowers/specs/2026-07-21-ctor-module-identity-design.md`) resolves
+ctor identity upstream, **all collision-conditional** (non-colliding programs
+byte-identical):
+- **Typecheck (Tasks 1-2):** `add_ctor` stops collapsing distinct-module
+  identically-shaped ctors (`env.ctors "Shared"` retains both declaring
+  modules' `ctor_info`s); `lookup_ctor`/`lookup_ctor_in_type` prefer the
+  lexical current-module candidate, and a genuinely cross-module-ambiguous
+  bare reference is a hard error.
+- **Native (Tasks 3-4, narrowed by 5.5):** `ECon` construction and
+  pattern-match branch tags qualify a colliding type's ctor key with its
+  lexical declaring module (`lib/tir/lower.ml`, gated by a narrow
+  `shared_ctor_collision_tbl` — PUBLIC + impl-bearing collisions only, so a
+  `ptype` structural-interop duplicate like stdlib's `Seq` or an impl-less
+  marker type is untouched).
+- **Interpreter (Task 5, narrowed by 5.5):** the `VCon` tag (its entire
+  runtime identity) is qualified the same way, via a new `VClosure` 4th field
+  capturing each closure's lexical declaring-module prefix at construction
+  time (so a deferred method body and the context-free `match_pattern` both
+  see the right prefix).
+- **Flag-day (Task 6, this task):** now that both backends resolve and
+  dispatch the double-collision shape correctly, `register_impl_shape`
+  (`lib/typecheck/typecheck.ml`) drops BOTH the Task-6b `ctor_sets_disjoint`
+  stopgap AND Task 0's `MARCH_DEV_RELAX_CTOR_COHERENCE` dev harness together —
+  the declaring-module coherence relaxation is now sound unconditionally, no
+  ctor-sharing carve-out.
+
+Fixture `reject/t82_impl_coherence_shared_ctor_double_collision` flips to
+`accept/t90_impl_coherence_shared_ctor_double_collision` (types corpus now **90
+accept / 81 reject**). New cross-backend runtime witness
+`test/imports/speak_double_collision_native` (4-file import fixture: two modules
+each `type Thing = Shared | …` + `impl Speak(Thing)`, `say()` calling
+`speak(Shared)`; runs `from-A`/`from-B` correctly interpreted AND compiled, and
+asserts both directions at once so it catches order-dependent misdispatch
+regardless of file-walk order). Alcotest
+`test_impl_coherence_shared_ctor_double_collision_ok` (was `_err`) now asserts
+the shape typechecks. Landing commits: Task 0 `d6687c7c`, Task 1 `56ebc5bb`,
+Task 2 `75e210ef`/`3a131622`, Task 3 `fca15e69`/`02fa0cba`, Task 4 `9d41078e`,
+Task 5 `e907ad1d`/`344d942b`, Task 5.5 `ed7893a7`, Task 6 (this commit).
+
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 
 **`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
@@ -705,6 +757,171 @@ test/snapshots/` empty. Design:
 `specs/plans/2026-07-20-fqn-impl-dispatch-identity.md` (status now
 `implemented`); execution plan:
 `docs/superpowers/plans/2026-07-20-fqn-dispatch-stage3-native.md`.
+
+**FQN dispatch-identity constructor-identity plan, Task 1 (2026-07-21, `lib/typecheck/typecheck.ml`
+`add_ctor`):** the real fix's first step. `add_ctor`'s structural dedup (the
+`same` predicate: `ci_type`/`ci_params`/`ci_arg_tys`) did not compare
+`ci_module`, so two DIFFERENT modules' identically-shaped ctors (e.g. both a
+nullary `Shared`) collapsed onto a single `ctor_info` in `env.ctors` — losing
+which module the surviving candidate belonged to entirely. `ci_module` is now
+part of the comparison, so both candidates survive under the bare key (later
+tasks in this plan need both retrievable to resolve a double collision).
+Same-module Pass-1→Pass-2 re-registration (the 2026-07-10 sibling-ctor-
+shadowing move-to-front fix, `3caa0d1b`) is unaffected — a module always
+re-registers its OWN ctors, so `ci_module` always matches on both sides;
+verified its regression test (`test_tc_sibling_ctor_own_module_wins`) still
+passes. Bookkeeping only so far: `ci_module` still feeds no codegen/mangling/
+dispatch. New unit test `test_add_ctor_keeps_distinct_module_identical_shape_ctors`
+(`test/test_compiler.ml`, `typecheck` suite). Suite: **compiler 523**
+(+1 new test) / eval 235 / codegen 436 (+2 from Task 0) / stdlib 810 /
+snapshots 31, `git status test/snapshots/` empty.
+
+**FQN dispatch-identity constructor-identity plan, Task 2 (2026-07-21,
+`lib/typecheck/typecheck.ml`):** constructor RESOLUTION now consumes the two
+distinct-module candidates Task 1 preserved. `lookup_ctor` and
+`lookup_ctor_in_type` no longer take "whichever candidate is first in the
+list" (order-dependent and meaningless once genuinely different candidates
+can share a bare key) — they prefer the candidate whose `ci_module` matches
+the reference's own LEXICAL current module (`env.current_module`), falling
+back to the first candidate only when the current module owns none of them.
+A new hard error closes the resolution gap this opens: a bare ctor reference
+whose candidates span more than one DECLARING MODULE, where the current
+module owns none of them, is now a compile `Err.error` demanding explicit
+qualification, instead of silently picking an arbitrary candidate. New helper
+`all_ctor_candidates_named` (deduping by `(ci_type, ci_module)` instead of
+`all_ctors_named`'s bare-type-name dedup) detects this specific shape without
+touching `all_ctors_named`'s existing callers — the PRE-EXISTING soft hint for
+a bare ctor name shared across genuinely unrelated, non-colliding types (e.g.
+two types in the SAME module both defining `Error`, `test_tc_qualified_ctor_
+ambiguity_hint` in `test/test_stdlib_suite.ml`) is untouched, since that shape
+has only one distinct declaring module. Applied identically at both
+resolution sites: the `ECon` check-site (`infer_expr`) and the `PatCon` arm of
+`infer_pattern`. 3 new `test/test_compiler.ml` cases: both modules' own bare
+`Shared` reference typechecks cleanly; a third module's bare, unqualified
+`Shared` reference (no local `Thing`) is a hard error; the same third module's
+explicitly-qualified `DcA.Shared` reference still typechecks. Regression-
+verified unchanged: `test_tc_qualified_ctor_ambiguity_hint` (stdlib suite) and
+`test_ambiguous_ctor_warns` (eval suite). Suite: **compiler 526** (+3 new
+tests) / eval 235 / codegen 436 / stdlib 810 (1 pre-existing environmental
+flake, `test_compiled_sanitize_clean_exit`, unrelated to this change — see its
+own tracking note), `git status test/snapshots/` empty. Still bookkeeping-only
+for codegen/mangling/runtime dispatch — the double-collision `impl` shape
+stays rejected by the Task 6b stopgap until a later task in this plan gives
+constructors the full `ci_module.Type.Ctor`-qualified identity.
+
+**Constructor module-qualified identity plan, Tasks 3/4 (native, `lib/tir/lower.ml`):**
+`ECon` lowering and branch-tag lowering now module-qualify a colliding,
+shared-ctor-name constructor's GLOBAL runtime tag (reusing `Lower_state.env`'s
+`mod_prefix`/`collision_set` fields) at both construction and pattern-match, so
+the double-collision shape actually WORKS natively instead of needing the Task
+6b typecheck stopgap. Dev-only bypass: `MARCH_DEV_RELAX_CTOR_COHERENCE=1`
+(threaded through `Fun.protect`/`Unix.putenv` in tests) lets these fixtures
+compile ahead of Task 6's flag-day.
+
+**Constructor module-qualified identity plan, Task 5 (2026-07-21,
+`lib/eval/eval.ml`) landed — interpreter side.** Architecturally different
+from native: the interpreter's `VCon` tag string IS the value's entire
+runtime identity (no separate integer discriminant), so `ECon` evaluation and
+`match_pattern`'s `PatCon` arm now module-qualify a colliding, shared-ctor-name
+tag to `"<module>.<type>.<ctor>"` (e.g. `"DcA.Thing.Shared"`) — collision-
+conditional, byte-identical bare tag for every non-colliding/non-shared ctor.
+**Design fork resolved:** `match_pattern` is a pure fn with no `env`/module-
+context param, called from 5 external + 3 internal sites. Neither "pre-qualify
+patterns once" nor "thread a context param" — instead, `VClosure` gained a 4th
+field (the lexical declaring-module prefix captured at CLOSURE-CONSTRUCTION
+time), restored as an ambient `closure_prefix_override` global for the
+duration of that closure's body by `apply_inner` (exception-safe via
+`Fun.protect`). This was NECESSARY, not just convenient: `module_stack`/
+`current_doc_prefix` reflect only the single eager upfront `eval_decl` walk,
+stale ("") by the time any DEFERRED closure body (the common case — any
+`fn`/`impl` method actually CALLED later, well after that walk finished)
+runs — a naive `current_doc_prefix()` read inside `ECon`/`match_pattern` would
+have silently used the wrong (caller's, not declaring) module. `match_pattern`
+itself needed NO signature change: it just reads the same global
+`effective_module_prefix ()` any other eval-time site does.
+`register_type_ctors` also registers the qualified tag into
+`ctor_type_tbl`/`ctor_qualified_type_tbl` so `dispatch_type_name_of_value`
+(general-interface dispatch) resolves a qualified-tag value; `value_to_string`
+strips back to the bare ctor name for Show/println display (`display_tag`) so
+user-visible output is unaffected.
+
+**Two additional qualification gates, found via a full-suite regression sweep
+(NOT guessable from the brief alone):** (a) only PUBLIC (`type`, not `ptype`)
+candidates participate — `stdlib/seq.march` and `stdlib/file.march` each
+independently declare `ptype Seq(a) = Seq(a)` as a deliberate structural-
+interop redeclaration (`File.with_lines`'s callback constructs a `File.Seq`
+value the caller then feeds through `Seq.map`/`Seq.to_list`, a DIFFERENT
+module's functions, on purpose); qualifying broke that cross-module hand-off
+(`test_file_with_lines`, RED before this gate). (b) a colliding short name
+must ALSO have at least one `impl` block anywhere in the combined program —
+`bin/main.exe` (the real compiler entry used by `test_codegen.ml`'s
+interp/compiled-parity harness) auto-loads a broad stdlib prelude regardless
+of what the user's own program needs, so an impl-less marker type routinely
+collides BY NAME ALONE with an unrelated stdlib type; a live MPST test's own
+`type Server = Server` (a role token, zero impls) collided with
+`stdlib/http_server.march`'s unrelated, also-public `type Server = Server(...)`,
+and MPST's runtime resolves role names by reading a `VCon` tag as a raw string
+key — qualifying broke it (`test_compiled_mpst_relay_parity`, RED before this
+gate). Both false positives are FIXED (not worked around) by these two gates,
+which the plan's own target shape (two same-short-name types each `impl`-ing
+the SAME interface, like `DcA.Thing`/`DcB.Thing` both `impl Speak`) passes
+through unaffected.
+
+**2 new top-level tests in `test/test_eval.ml`** (`declarations` group),
+together covering all four construction/match × module-level/impl-method
+combinations: the first is module-level ECon construction + impl-method
+PatCon match (the brief's own scenario, `say()` wrapping `speak`); the second
+is impl-method ECon construction + module-level PatCon match, made
+independently discriminating (not just "runs without crashing") by
+cross-feeding — DcC/DcD's `make_shared` impl method each construct `Shared`,
+a module-level `classify_own` pattern-matches it, and DcD's constructed
+`Shared` fed into DcC's OWN `classify_own` must NOT match (RED before the
+fix: bare tags collide, the cross call wrongly matches "C-shared"; GREEN
+after: `Match_failure`, correctly distinct). Suite: **eval 237** (+2 new
+tests) / compiler 527 / codegen 441 / stdlib 810 (1 pre-existing
+environmental flake, `test_compiled_sanitize_clean_exit`, same as Task 2's) /
+snapshots 31, `git status test/snapshots/` empty.
+
+**Constructor module-qualified identity plan, Task 5.5 (2026-07-22,
+`lib/tir/lower_state.ml` + `lower.ml` + `lower_match.ml`) landed — the native
+mirror of Task 5's two-gate narrowing.** Native's Tasks 3/4 (ECon construction
+key + pattern `br_tag` qualification) had the SAME over-broad bug the
+interpreter's Task 5 fixed: they qualified ANY `Collision_set.is_colliding`
+short name with NO visibility / impl-presence filter, breaking the
+`stdlib/seq.march` + `stdlib/file.march` `ptype Seq(a) = Seq(a)`
+structural-interop pattern. **Confirmed end-to-end, not theorized:** a
+church-encoded two-module `ptype Seq` repro (`Producer.make` hands a `Seq` to
+`Consumer.sum`, exactly how `File.with_lines` feeds `Seq.map`/`Seq.to_list`)
+compiled with the HEAD compiler → `panic: non-exhaustive pattern match`
+(construction qualified to `Producer.Seq.Seq`, the consuming pattern to
+`Consumer.Seq.Seq` — divergent codegen tags); with the fix → prints `6`,
+matching the interpreter. **Fix:** a NEW narrow module-level table
+(`Lower_state.shared_ctor_collision_tbl`, `(module_prefix, ctor_name) ->
+short_type_name`), populated by `compute_shared_ctor_collisions` from the SAME
+AST decls that feed `Collision_set.compute`, applying the identical two filters
+as `eval.ml`'s `compute_type_collision_set` (PUBLIC-only + short name must have
+an `impl` anywhere). ONLY Tasks 3/4's two gates consult it; the broad
+`env.collision_set` (Task 1 global tags, Task 2 forced-Boxed repr, the earlier
+FQN-impl plan's impl-symbol qualification in `collect_iface_impls`) is
+UNTOUCHED. **Native mechanism differs from the interpreter's:** a `ptype`'s
+construction and consuming pattern now both stay bare and re-converge on ONE
+`ctor_info` entry via `llvm_data.ctor_entry`'s deterministic suffix resolver
+(the non-shared ctor `OnlyA` already relied on that resolver, unique-match), so
+no `build_ctor_info` change was needed. The impl-presence filter DID change one
+existing native test: `test_colliding_pattern_match_module_level_fn_gets_qualified_tag`
+(Shape 1, two PUBLIC colliding `Thing`s with NO `impl`) now correctly stays
+bare — updated + renamed to `..._impl_less_stays_bare` (matches the interpreter,
+whose every colliding-ctor test carries an `impl`; harmless because with no
+`impl` there is no dispatch ambiguity and well-typed code never mixes the two
+types). The plan-target shape (Shape 2, both `impl Speak(Thing)`) still
+qualifies. `test_compiled_mpst_relay_parity`/`..._distinct_parity` still pass
+(native was already immune — role tokens lower to bare string literals, never
+reaching a ctor-tag gate — so the impl filter is defensive there). **1 new
+`test/test_codegen.ml` test** (`test_ptype_structural_interop_ctor_key_stays_bare`,
+TDD RED→GREEN). Suite: eval 237 / compiler 527 / **codegen 442** (+1) / stdlib
+810 (same 1 pre-existing `test_compiled_sanitize_clean_exit` ASAN-teardown
+environmental flake as Tasks 2/5 — a no-type/no-ctor program my change cannot
+affect) / snapshots 31, `git status test/snapshots/` empty.
 
 ## Current State (as of 2026-07-21, stdlib-directory resolution CWD-collision fix)
 
@@ -5394,3 +5611,11 @@ their existing build steps, no manual patching.
 **Verified:** `let e : Vec(Int) = RRB.empty()` (bare `Vec`, an opaque `ptype`'s bare name never promoted to the outer namespace by design) now correctly ERRORS with "I cannot find `Vec`" — it only ever appeared to work via the second bug's silent swallow, confirmed identical in shape to how a bare `Vec` function-parameter annotation already behaved pre-fix (also errors, unaffected by any of these three changes). The correct, working surface form is qualified — `let words : RRB.Vec(String) = RRB.from_list(...)` — matching the pre-existing `ConsistentHash.HashRing(a)` pattern (`specs/lang/types/accept/t34_opaque_ptype_qualified_annotation.march`, `t31_cross_module_public_and_opaque_ptype.march`), both of which still pass. Full `scripts/run-tests.sh -q` green (post-merge with `origin/main`, 340 commits) except two PRE-EXISTING, unrelated failures confirmed present on an unmodified `origin/main` checkout of the two touched files: `llvm_ir_validity_gate`'s `signal_watch.march`/`signal_term_suppress.march` fixtures ("Unknown module `Signal`") and the `Slow` `MARCH_SANITIZE` ASAN-altstack-teardown test (reproduces as an actual runtime hang on this machine, unrelated to typecheck/module-resolution code).
 
 **Not fixed (flagged separately, out of scope for this change):** `docs/cookbook/parallel-data.md` still has 6 bare `Vec(...)`/`Map(...)` annotations (5 fn param/return + the one `let`) that would now surface real errors if copy-pasted verbatim, plus unrelated pre-existing issues in the same file (a `Float` module referenced that doesn't exist in stdlib, a `Map.merge_with` arity mismatch) — needs a separate docs-focused pass.
+
+## Current State (as of 2026-07-22, `Vault.update` re-investigated — confirmed already fixed, `--opt 0` regression coverage added)
+
+**A third "`Vault.update` still SIGSEGVs" report came in after both landed fixes (`b3508129`, `f9032131`); investigation found no new bug.** On a clean checkout of `origin/main` HEAD (`83846efa`), with the CAS cache cleared and a `DUNE_CACHE=disabled dune build --force`, the minimal repro, the full `test_compiled_vault_update` repro (Int via lambda + named fn, plus String), and the `docs/cookbook/vault.md` rate-limiter example all compile and run correctly — at `--opt 0`, default, and `--opt 2` — stable across 20 repeated runs.
+
+**Root cause of the report: the crash was reproduced against a stale, unrelated checkout, not `origin/main`.** `/Users/80197052/code/march` (the bare repo directory, distinct from any of this machine's ~70 `git worktree` checkouts) was on local feature branch `hcr-dispatch-race` at commit `dc6912e0` — confirmed via `git merge-base --is-ancestor` to contain **neither** `b3508129` nor `f9032131`, and its reflog shows no `origin/main` fetch/merge ever happened on that branch. Building that exact commit in an isolated scratch `git worktree` (so the live directory's ~1,100 lines of unrelated uncommitted WIP — a new TIR recursive-drop-function feature, parser changes, etc. — were never touched) reproduced the SIGSEGV with a backtrace matching the report byte-for-byte: `EXC_BAD_ACCESS (code=1, address=0xb)`, `march_vault_update + 44`, `ldr w8, [x8, #0x8]` — exactly the pre-fix code's `int32_t tag = *(cur+8)` boxed-Option read that `b3508129` removed. No architecture question warranted here (only 2 real fix attempts, both of which hold up); this is the "no root cause in the code — issue was environmental" outcome the debugging process itself anticipates.
+
+**Added anyway, as insurance:** `test_compiled_vault_update_opt0` (`test/test_stdlib_suite.ml`, `adversarial-regressions` Slow group, case 19) — the same repro compiled with `--opt 0` explicitly, since that's the opt level the stale-checkout report used to reproduce most cleanly, so a genuine future `--opt-0`-only regression in this area won't hide behind the default-opt test alone. Both Vault.update test cases (18, 19) pass; `run_stdlib -q` (780 tests) unaffected (both are `Slow`); full `run_stdlib` now 815 cases.

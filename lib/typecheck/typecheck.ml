@@ -418,12 +418,16 @@ type ctor_info = {
       is deliberately kept bare for cross-module unification (see
       [prebind_mod_members]'s reverted qualified-ci_type experiment), so two
       same-named types' constructors are indistinguishable by [ci_type] alone.
-      [ci_module] disambiguates them for DIAGNOSTIC purposes only — currently
-      [ctors_for_type]'s exhaustiveness universe, which otherwise merges a user
-      `Handle`'s ctors with stdlib's same-named `Handle` (linear-L4 ctor
-      cross-talk). It feeds NO codegen/mangling/dispatch, so it is byte-identical
-      at the backend, and it is NOT part of [add_ctor]'s structural dedup key.
-      First metadata slice of the module-qualified ctor identity in
+      [ci_module] disambiguates them for [ctors_for_type]'s exhaustiveness
+      universe, which otherwise merges a user `Handle`'s ctors with stdlib's
+      same-named `Handle` (linear-L4 ctor cross-talk), AND — since the FQN
+      dispatch-identity plan's Task 1 — is part of [add_ctor]'s structural
+      dedup key, so two DIFFERENT modules' identically-shaped ctors (e.g. both
+      a nullary `Shared`) are kept as distinct candidates instead of the
+      second collapsing onto the first. It still feeds NO codegen/mangling/
+      dispatch, so this is byte-identical at the backend for any program that
+      does not hit this exact double-collision shape.  First metadata slice of
+      the module-qualified ctor identity in
       specs/plans/2026-07-17-fqn-type-ctor-identity.md (Stage 4). *)
 }
 
@@ -835,10 +839,26 @@ let resolves_always_linear name env =
   then List.mem (env.current_module ^ "." ^ name) env.always_linear_types
   else List.mem name env.always_linear_types
 
+(** Resolve a bare constructor name to a candidate [ctor_info].  When several
+    candidates share the bare name (e.g. two DIFFERENT modules each declaring
+    their own `Shared`, kept distinct by [add_ctor] since Task 1 of the FQN
+    dispatch-identity plan), prefer the candidate whose [ci_module] matches
+    the reference's own LEXICAL current module — a bare `Shared` written
+    inside `DcA`'s own code should mean `DcA`'s own `Shared`, not whichever
+    candidate happens to be first in the internal list (order- and
+    module-arrangement-dependent, and meaningless now that multiple genuinely
+    different candidates can survive under one key). Falls back to the first
+    candidate when the current module owns none of them (the caller is
+    responsible for flagging that fallback as ambiguous when appropriate —
+    see the `ECon`/`PatCon` cross-module hard-error check). *)
 let lookup_ctor name env =
   match StrMap.find_opt name env.ctors with
-  | Some (ci :: _) -> Some ci
-  | _ -> None
+  | None -> None
+  | Some [] -> None
+  | Some (first :: _ as cis) ->
+    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) cis with
+     | Some _ as preferred -> preferred
+     | None -> Some first)
 
 (** Same-module precedence for an UNQUALIFIED constructor reference.
 
@@ -898,14 +918,20 @@ let lookup_ctor_same_module name env =
 
 (** Find the constructor [name] that belongs to [type_name] among the candidates
     registered under that bare name.  A bare constructor name can be shared by
-    several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); [lookup_ctor]
-    returns only the most-recently-registered candidate, which is order- and
-    module-arrangement-dependent.  When the expected/scrutinee type is known,
-    this lets us pick the candidate that actually matches it. *)
+    several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); when more than
+    one candidate matches [type_name] (the same-short-name cross-module
+    collision case), prefer the one whose [ci_module] matches the reference's
+    own lexical current module, same as [lookup_ctor] above. When the
+    expected/scrutinee type is known, this lets us pick the candidate that
+    actually matches it. *)
 let lookup_ctor_in_type name type_name env =
   match StrMap.find_opt name env.ctors with
-  | Some cis -> List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis
   | None -> None
+  | Some cis ->
+    let matching = List.filter (fun (ci : ctor_info) -> ci.ci_type = type_name) cis in
+    (match List.find_opt (fun ci -> ci.ci_module = env.current_module) matching with
+     | Some _ as preferred -> preferred
+     | None -> (match matching with [] -> None | first :: _ -> Some first))
 
 (** Like [lookup_ctor_in_type] but returns a candidate ONLY when it is the sole
     one whose parent type matches [type_name].  When two DISTINCT types in the
@@ -926,10 +952,15 @@ let lookup_ctor_in_type_unique name type_name env =
   | None -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
-    Deduplicates STRUCTURALLY (same ci_type, ci_params, and ci_arg_tys) —
-    but by MOVING the existing entry to the FRONT rather than no-op'ing.
-    Two types with the same short name but different arity (e.g. stdlib's
-    `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+    Deduplicates STRUCTURALLY (same ci_type, ci_module, ci_params, and
+    ci_arg_tys) — but by MOVING the existing entry to the FRONT rather than
+    no-op'ing.  Two types with the same short name but different arity (e.g.
+    stdlib's `Tree(a)` and a user's `Tree`) are kept as distinct candidates.
+    So are two DIFFERENT modules' identically-shaped ctors (e.g. both a
+    nullary `Shared` on a type named `Thing`) — [ci_module] is part of the
+    comparison (FQN dispatch-identity plan, Task 1) precisely so this case
+    is no longer treated as "the same ctor" and does not collapse the
+    second registration onto the first.
 
     Why move-to-front matters (sibling-ctor shadowing regression,
     2026-07-10): Pass-1 prebind seeds every nested module's bare ctor keys
@@ -937,18 +968,24 @@ let lookup_ctor_in_type_unique name type_name env =
     declaration order — so a later sibling `mod B`'s `Mk` sits AHEAD of
     `mod A`'s same-named `Mk`.  Pass-2 then re-registers each module's own
     ctors (check_decl DType) right before checking that module's bodies —
-    but the re-registration is structurally identical to the Pass-1 seed,
-    so a no-op dedup left B's candidate at the head and A's OWN body
+    but the re-registration is structurally identical to the Pass-1 seed
+    (SAME ci_module both times, since a module always re-registers its OWN
+    ctors), so a no-op dedup left B's candidate at the head and A's OWN body
     resolved `Mk(1)` against B's `Mk(String)` ("expected String but got
     Int" pointing inside A).  Moving the re-registered entry to the front
     restores the declaring module's recency for its own body check (the
     pre-d95fe942 semantics) while keeping the Pass-1 seeds — and therefore
     the cross-module order-independence — intact.  A singleton list is
-    unaffected; only genuinely shared names reorder. *)
+    unaffected; only genuinely shared names reorder.  Adding [ci_module] to
+    the comparison does not disturb this: same-module re-registration always
+    has matching [ci_module] on both sides, so it is unaffected; only
+    cross-module identically-shaped ctors (previously wrongly deduped) now
+    stay distinct. *)
 let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
   let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
   let same c =
     c.ci_type = ci.ci_type
+    && c.ci_module = ci.ci_module
     && c.ci_params = ci.ci_params
     && c.ci_arg_tys = ci.ci_arg_tys
   in
@@ -1223,6 +1260,23 @@ let all_ctors_named (name : string) (env : env) : string list =
       if Hashtbl.mem seen ci.ci_type then None
       else begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
     ) cis
+
+(** Like [all_ctors_named], but returns (type_name, declaring_module) pairs
+    without deduping by type_name alone — so two DIFFERENT modules' same-
+    short-name colliding types (which share [ci_type]) are counted as
+    distinct candidates. Used only by the genuinely-ambiguous-reference
+    hard-error check below; [all_ctors_named]'s existing bare-type-name
+    callers are untouched. *)
+let all_ctor_candidates_named (name : string) (env : env) : (string * string) list =
+  match StrMap.find_opt name env.ctors with
+  | None -> []
+  | Some cis ->
+    let seen = Hashtbl.create 4 in
+    List.filter_map (fun ci ->
+        let key = (ci.ci_type, ci.ci_module) in
+        if Hashtbl.mem seen key then None
+        else begin Hashtbl.add seen key (); Some key end
+      ) cis
 
 (** Suggest constructors close to [name]: case-insensitive match or first-2-char
     prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
@@ -3406,17 +3460,38 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
-       (* Emit a hint when the bare constructor name is ambiguous across types. *)
-       let all_types = all_ctors_named name.txt env in
-       (if List.length all_types > 1 && not (String.contains name.txt '.') then
-         Err.hint env.errors ~span:name.span
-           (Printf.sprintf
-              "Constructor `%s` is defined by multiple types (%s). \
-               Use a qualified form to disambiguate, e.g. `%s.%s`."
-              name.txt
-              (String.concat ", " all_types)
-              (List.hd all_types)
-              name.txt));
+       (* A bare, unqualified reference whose candidates span more than one
+          DECLARING MODULE (not just more than one bare type name — two
+          candidates from the SAME module sharing a ctor name across
+          unrelated types is the pre-existing, harmless case below) is
+          genuinely ambiguous when the current module owns none of them. *)
+       (if not (String.contains name.txt '.') then begin
+         let candidates = all_ctor_candidates_named name.txt env in
+         let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
+         let local_owns_one =
+           List.exists (fun (_, m) -> m = env.current_module) candidates in
+         if List.length distinct_modules > 1 && not local_owns_one then begin
+           let lines = List.map (fun (t, m) ->
+               Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
+                 m name.txt t m) candidates in
+           Err.error env.errors ~span:name.span
+             (Printf.sprintf
+                "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
+                 Use a qualified form to disambiguate."
+                name.txt (String.concat "\n" lines))
+         end else begin
+           let all_types = all_ctors_named name.txt env in
+           if List.length all_types > 1 then
+             Err.hint env.errors ~span:name.span
+               (Printf.sprintf
+                  "Constructor `%s` is defined by multiple types (%s). \
+                   Use a qualified form to disambiguate, e.g. `%s.%s`."
+                  name.txt
+                  (String.concat ", " all_types)
+                  (List.hd all_types)
+                  name.txt)
+         end
+       end);
        let arg_tys, result_ty = instantiate_ctor env ci in
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
@@ -4724,19 +4799,37 @@ let rec infer_expr env (e : Ast.expr) : ty =
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
-         (* Warn if a bare constructor name is ambiguous across multiple types.
-            Qualified names (containing '.') are already disambiguated — skip. *)
+         (* A bare, unqualified reference whose candidates span more than one
+            DECLARING MODULE (not just more than one bare type name — two
+            candidates from the SAME module sharing a ctor name across
+            unrelated types is the pre-existing, harmless case below) is
+            genuinely ambiguous when the current module owns none of them. *)
          (if not (String.contains name.txt '.') then begin
-           let all_types = all_ctors_named name.txt env in
-           if List.length all_types > 1 then
-             Err.hint env.errors ~span:name.span
+           let candidates = all_ctor_candidates_named name.txt env in
+           let distinct_modules = List.sort_uniq compare (List.map snd candidates) in
+           let local_owns_one =
+             List.exists (fun (_, m) -> m = env.current_module) candidates in
+           if List.length distinct_modules > 1 && not local_owns_one then begin
+             let lines = List.map (fun (t, m) ->
+                 Printf.sprintf "  • `%s.%s` — from type `%s` in module `%s`"
+                   m name.txt t m) candidates in
+             Err.error env.errors ~span:name.span
                (Printf.sprintf
-                  "Constructor `%s` is defined by multiple types (%s). \
-                   Use a qualified form to disambiguate, e.g. `%s.%s`."
-                  name.txt
-                  (String.concat ", " all_types)
-                  (List.hd all_types)
-                  name.txt)
+                  "Constructor `%s` is ambiguous between multiple modules:\n%s\n\
+                   Use a qualified form to disambiguate."
+                  name.txt (String.concat "\n" lines))
+           end else begin
+             let all_types = all_ctors_named name.txt env in
+             if List.length all_types > 1 then
+               Err.hint env.errors ~span:name.span
+                 (Printf.sprintf
+                    "Constructor `%s` is defined by multiple types (%s). \
+                     Use a qualified form to disambiguate, e.g. `%s.%s`."
+                    name.txt
+                    (String.concat ", " all_types)
+                    (List.hd all_types)
+                    name.txt)
+           end
          end);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
@@ -6262,53 +6355,6 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
   in
   let modules_distinct m1 m2 =
     match m1, m2 with Some a, Some b -> a <> b | _ -> false in
-  (* Bare short name of the head type (drop any `Mod.` prefix), used by the
-     Task-6b double-collision stopgap below. *)
-  let head_bare_name =
-    match idef.impl_ty with
-    | Ast.TyCon (n, _) ->
-      (match String.rindex_opt n.txt '.' with
-       | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
-       | None -> n.txt)
-    | _ -> ""
-  in
-  (* Task-6b stopgap. The declaring-module relaxation below is sound only when
-     the two same-short-name colliding types have DISJOINT constructor NAME
-     sets. If they share a constructor name (e.g. both `type Thing = Shared |
-     …`), the constructor-tag identity the backends and interpreter route on is
-     ambiguous — [env.ctors] keys on the BARE ctor name, and [ci_module]
-     disambiguation is diagnostic-only (feeds NO dispatch/mangling) — so a
-     general-interface method silently MISDISPATCHES in both backends
-     (registration-order-dependent, interp/compiled can disagree). Until the
-     full `ci_module.Type.Ctor`-qualified ctor identity lands (see
-     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md), REJECT this specific
-     double-collision shape through the EXISTING overlap path rather than
-     miscompile it. Constructor short-names for a (bare type, module) pair are
-     read off [env.ctors]' keys INCLUDING the module-qualified `Mod.Ctor` keys:
-     [add_ctor] structurally dedups the BARE ctor key (dropping the identically-
-     shaped ctor of the OTHER module), so the bare key alone cannot tell the two
-     modules' ctors apart — the qualified keys carry each module's own entry. *)
-  let ctor_names_of bare_type_name declaring_module =
-    StrMap.fold (fun k cis acc ->
-        if List.exists (fun (ci : ctor_info) ->
-               ci.ci_type = bare_type_name && ci.ci_module = declaring_module)
-             cis
-        then
-          let short = match String.rindex_opt k '.' with
-            | Some i -> String.sub k (i + 1) (String.length k - i - 1)
-            | None -> k in
-          if List.mem short acc then acc else short :: acc
-        else acc)
-      env.ctors []
-  in
-  let ctor_sets_disjoint m_old =
-    match head_type_module, m_old with
-    | Some new_mod, Some old_mod ->
-      let new_ctors = ctor_names_of head_bare_name new_mod in
-      let old_ctors = ctor_names_of head_bare_name old_mod in
-      not (List.exists (fun c -> List.mem c old_ctors) new_ctors)
-    | _ -> false  (* can't prove disjoint → don't relax (conservative) *)
-  in
   (* Declaring-module coherence relaxation (FQN dispatch, all stages landed):
      two same-short-name types declared in DIFFERENT modules are genuinely
      distinct, so each may implement the SAME interface without overlapping.
@@ -6319,7 +6365,18 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
      sites through a generated runtime tag-switch dispatch fn; the interpreter
      qualifies iface_method_tbl the same way. A general interface therefore
      dispatches on the value's real type in BOTH backends (verified
-     `from-A`/`from-B` — accept/t89, test/imports/speak_collision_native). See
+     `from-A`/`from-B` — accept/t89, test/imports/speak_collision_native).
+
+     This relaxation is now UNCONDITIONAL — no residual ctor-sharing carve-out.
+     Even when the two colliding types ALSO share a constructor NAME (a "double
+     collision", e.g. both `type Thing = Shared | …`), the constructor module-
+     qualified identity plan resolves ctor identity upstream: native
+     ECon/pattern-match qualify a colliding type's ctor key with its declaring
+     module, and the interpreter qualifies the VCon tag the same way, so the
+     backends and interpreter route each module's `Shared` to its OWN impl body
+     (was the interim Task-6b `ctor_sets_disjoint` stopgap, removed at this
+     plan's flag-day; verified accept/t90,
+     test/imports/speak_double_collision_native). See
      specs/plans/2026-07-20-fqn-impl-dispatch-identity.md. *)
   (* Coherence (T-ImplCoherent), Stage 1 exact overlap: at most ONE impl per
      (interface, type-head).  A second impl whose head is alpha-equal to an
@@ -6341,8 +6398,7 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
           (fun (t, s, m_old) ->
              s <> sp && s <> Ast.dummy_span
              && types_overlap t inst_ty
-             && not (modules_distinct m_old head_type_module
-                     && ctor_sets_disjoint m_old))
+             && not (modules_distinct m_old head_type_module))
           lst with
   | Some (_, prev_sp, _) ->
     Err.error env.errors ~span:sp
