@@ -68,7 +68,17 @@ jobs:
       - name: Build
         run: |
           eval $(opam env)
-          dune build
+          # `dune build` (no target) intermittently wedges at ~0% CPU on the Linux
+          # runner AFTER building everything — a known dune-daemon hang. Cap it so a
+          # wedge fails fast and is retryable instead of hanging until the 6h job
+          # timeout. Compile-only (no test execution) is well under this bound.
+          # macOS has no coreutils `timeout` by default and hasn't wedged, so guard
+          # by OS.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            timeout 1200 dune build || { echo "::error::dune build wedged or exceeded 20m — re-run the job"; exit 1; }
+          else
+            dune build
+          fi
 
       - name: Test
         run: |
@@ -85,11 +95,25 @@ jobs:
       # (the flake has never reproduced on macOS) and non-blocking (the evidence
       # is the point; a red X here must not fail the pipeline).
       - name: FFI Result flake probe (Linux-only diagnostic; non-blocking)
-        if: runner.os == 'Linux'
+        if: ${{ always() && runner.os == 'Linux' }}
         continue-on-error: true
         run: |
           eval $(opam env)
           scripts/ffi_result_flake_probe.sh 40
+
+      # The flake reproduces deterministically on this runner (the probe above
+      # showed byte-identical binaries => execution-time UB, not codegen).  Pin
+      # the UB down: valgrind --track-origins on the UN-instrumented binary
+      # (preserves the reproducing layout — the original "valgrind clean" ran on
+      # a non-reproducing binary) plus an ASAN/UBSan pass.  Linux-only,
+      # non-blocking; the evidence is the point.
+      - name: FFI Result UB probe — valgrind + ASAN (Linux-only; non-blocking)
+        if: ${{ always() && runner.os == 'Linux' }}
+        continue-on-error: true
+        run: |
+          eval $(opam env)
+          sudo apt-get install -y valgrind
+          scripts/ffi_result_sanitize_probe.sh 6
 
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         run: |
