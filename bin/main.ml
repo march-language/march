@@ -1547,13 +1547,14 @@ let compile filename =
     if !emit_core_ast_file <> None then begin
       let doc =
         March_dump.Dump.json_obj [
-          ("format_version", "2");
+          ("format_version", "3");
           ("verdict", March_dump.Dump.json_string "reject");
           ("diagnostics",
            March_dump.Dump.json_list [March_errors.Errors.render_diagnostic_json diag]);
           ("module", "null");
           ("schemes", "[]");
           ("instantiations", "[]");
+          ("module_caps", "[]");
         ]
       in
       print_string doc
@@ -1780,14 +1781,32 @@ let compile filename =
               ("body", March_dump.Ast_json.resolved_ty_to_json ty) ])
         schemes_sorted
     in
+    (* A3: the (module_name, declared_needs) table the typechecker builds as
+       each nested DMod finishes (typecheck.ml:8736). The Lean conformance
+       checker consumes this for Check 4 (transitive `use` coverage): a module
+       that `use`s another inherits an obligation to cover that module's
+       declared needs. Sorted by module name — module_caps is built by consing
+       in checking order, which is not stable across unrelated edits, and an
+       unsorted envelope would make the golden test spuriously fragile. *)
+    let module_caps_json =
+      typecheck_env.March_typecheck.Typecheck.module_caps
+      |> List.sort (fun (a, _) (b, _) -> String.compare a b)
+      |> List.map (fun (m, needs) ->
+           March_dump.Dump.json_obj
+             [ ("module", March_dump.Dump.json_string m);
+               ("needs",
+                March_dump.Dump.json_list
+                  (List.map March_dump.Dump.json_string needs)) ])
+    in
     let doc =
       March_dump.Dump.json_obj [
-        ("format_version", "2");
+        ("format_version", "3");
         ("verdict", March_dump.Dump.json_string verdict);
         ("diagnostics", diagnostics_json);
         ("module", module_json);
         ("schemes", March_dump.Dump.json_list schemes_json);
         ("instantiations", March_dump.Dump.json_list insts_json);
+        ("module_caps", March_dump.Dump.json_list module_caps_json);
       ]
     in
     print_string doc;

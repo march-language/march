@@ -185,6 +185,71 @@ let assert_v2 (produced : string) =
   Alcotest.(check bool) "has resolved_ty" true (has "resolved_ty");
   Alcotest.(check bool) "has schemes" true (has "schemes")
 
+(* A3: the envelope must carry module_caps for the Lean checker's Check 4
+   (transitive `use` coverage), and must declare format_version 3. This
+   exercises a synthetic one-module source (not a fixture) rather than the
+   byte-for-byte golden fixtures above, so it needs its own subprocess
+   plumbing: write the source to a scratch .march file under project_root
+   (so it can be passed to run_emit_core_ast as a project-relative path,
+   matching this file's cwd-fixed subprocess idiom), run --emit-core-ast on
+   it, and check the resulting JSON for the expected substrings. *)
+let emit_core_ast_of_source source =
+  let tmp = Filename.temp_file ~temp_dir:project_root "march_a3_module_caps_" ".march" in
+  let oc = open_out tmp in
+  output_string oc source;
+  close_out oc;
+  let rel = Filename.basename tmp in
+  let (output, _exit_code) = run_emit_core_ast rel in
+  (try Sys.remove tmp with _ -> ());
+  output
+
+(* Same free-standing substring search assert_v2 above already uses inline;
+   factored out here since this test needs it multiple times. *)
+let has_substring haystack needle =
+  let hl = String.length haystack and nl = String.length needle in
+  let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+let assert_contains produced needle =
+  Alcotest.(check bool)
+    (Printf.sprintf "output contains %s" needle) true (has_substring produced needle)
+
+let test_module_caps_and_v3 () =
+  (* module_caps is populated only when a DMod is checked as a NESTED
+     sub-module (typecheck.ml:8736) -- confirmed empirically: a bare
+     top-level `mod Store do ... end` (the brief's original Step 1 example)
+     never appears in module_caps, because the file's own entry module is
+     the thing being checked, not a sub-module of anything. This mirrors
+     the real corpus shape module_caps is meant to serve (t39: `Main` uses
+     the stdlib module `Vault`, and `Vault` -- not `Main` -- is what shows
+     up in module_caps). So `Store` is nested inside a wrapper `Outer`
+     module here to actually exercise that path. *)
+  let json = emit_core_ast_of_source
+    {|mod Outer do
+  mod Store do
+    needs IO.FileRead
+
+    fn load(cap : Cap(IO.FileRead), path : String) : String do
+      let _ = cap
+      path
+    end
+  end
+
+  fn main() do
+    ()
+  end
+end|}
+  in
+  (* format_version is inserted as a raw (unquoted) JSON value, same as the
+     existing "2" literal it replaces -- see assert_v2 above and
+     lib/dump/dump.ml's json_obj, which does not quote already-encoded
+     values. *)
+  assert_contains json "\"format_version\":3";
+  assert_contains json "\"module_caps\"";
+  (* Store declared `needs IO.FileRead`, so it must appear with that cap. *)
+  assert_contains json "\"module\":\"Store\"";
+  assert_contains json "\"IO.FileRead\""
+
 let test_case_matches_fixture case () =
   let expected = read_file (fixture_path case.fixture_name) in
   let (actual, exit_code) = run_emit_core_ast case.corpus_rel in
@@ -201,5 +266,7 @@ let suite =
   List.map
     (fun case -> Alcotest.test_case case.label `Quick (test_case_matches_fixture case))
     cases
+  @ [ Alcotest.test_case
+        "module_caps present + format_version 3 (A3)" `Quick test_module_caps_and_v3 ]
 
 let () = Alcotest.run "march-emit-core-ast-golden" [ ("emit_core_ast", suite) ]
