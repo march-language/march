@@ -86,6 +86,6 @@ The browser playground runs the March **interpreter** (tree-walking eval), not t
   whole (non-streaming) responses only, and each request briefly blocks the page.
 - No LLVM compilation / native performance
 - Actor `spawn` runs synchronously (no scheduler); `Task` runs eagerly at spawn time (no real concurrency)
-- Standard library modules loaded: prelude, option, result, list, task, map, set, array, math, string, sort, seq, enum, random, json, http, http_transport, http_client, and a few others
+- Standard library modules loaded: prelude, option, result, list, task, map, set, array, math, string, sort, seq, enum, random, json, http, http_transport, http_client, vault, and a few others
 
 For the full language including actors, supervision trees, session types, and native compilation, see [Installation]({{ site.baseurl }}/docs/installation/).
