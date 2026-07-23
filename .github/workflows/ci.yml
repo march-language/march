@@ -65,6 +65,14 @@ jobs:
       - name: Install dependencies
         run: opam install --deps-only --with-test -y .
 
+      - name: Install zig (cross-compile driver for the linux/amd64 TLS+gzip test)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Fetch cross-compile sysroot cache (linux/amd64)
+        run: scripts/fetch-cross-sysroot.sh amd64
+
       - name: Build
         run: |
           eval $(opam env)
