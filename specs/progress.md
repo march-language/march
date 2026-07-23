@@ -283,6 +283,50 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, compiled-only builtin call-argument coercion fix — tuple/constructor-bound scalars passed to compiler builtins)
+
+**A compiled-only wrong-value bug: a scalar bound by a tuple or constructor
+pattern and passed directly to a compiler builtin printed the raw tagged
+integer encoding instead of the real value.** Found auditing
+`specs/lang/pattern-matching.md`. Minimal repro: `match f() do Some((top,
+rest)) -> println(int_to_string(top)) ... end` with `f() : Option((Int,Int))`
+returning `Some((3,9))` — interpreted prints `3` (correct), compiled printed
+`7` (`(3<<1)|1`, the raw low-bit-tagged immediate). Not specific to
+constructor nesting: a plain top-level `match f() do (top, rest) ->
+int_to_string(top) end` hit the identical bug; a `let (top, rest) = f()`
+destructuring-let was unaffected (different lowering path). **Root cause:**
+every `ECase`-bound field (tuple or ADT constructor) is loaded via the
+uniform ptr-slot convention (`llvm_case.ml`) — scalars are tagged
+`(n<<1)|1` at construction and read back as generic `ptr`, meant to be
+conditionally untagged at the point of use. The generic `EApp`
+call-argument-coercion path (`llvm_emit.ml`) only coerced against
+`ctx.top_fn_param_tys`, populated for user-defined fns/externs only —
+compiler builtins with a native `i64`/`double` C parameter (`int_to_string`,
+`math_sqrt`, `float_abs`, ~50 more per `lib/tir/llvm_builtins.ml`'s
+`declare_sig` table) were never in that table, so a `ptr`-typed argument
+flowed uncoerced into the native parameter; the raw tag bits landed in the
+argument register unchanged (verified in the emitted LLVM: `call ptr
+@march_int_to_string(ptr %ld31)` against a `declare ptr
+@march_int_to_string(i64 %n)` — a type-mismatched call LLVM/clang accepted
+rather than rejected, since both types are pointer-width). **Fix:**
+`lib/tir/llvm_builtins.ml` adds `builtin_param_llvm_tys`, deriving each
+builtin's parameter LLVM types by parsing its own `declare_sig` text — the
+same string already used for the preamble `declare` line, so there is no new
+hand-maintained table to drift out of sync. `lib/tir/llvm_emit.ml`'s `EApp`
+argument-coercion fallback now also consults this when `top_fn_param_tys` has
+no entry, coercing each arg to the builtin's declared param type exactly as
+it already does for user fns. Verified: original repro, plain top-level
+tuple match, 3-tuple payload, 2-level-nested tuple payload, and a
+`Float`/`Int` tuple flowing into `math_sqrt`/`float_to_string`/
+`int_to_string` all match interpreted output compiled. Full suite: compiler
+527 / eval 238 / codegen 438 (1 unrelated tool-skip: cross TLS+gzip
+linux/amd64, no sysroot) / stdlib 780 quick, all green; 2 pre-existing TIR
+snapshot failures (`tuple_atom_string_arms`, `scrutinee_borrowed_
+conservatism`) confirmed present on unmodified `main` via a file-copy-swap
+baseline (this fix touches only post-Perceus LLVM codegen, never TIR).
+Benchmarks (`tree_transform`, `list_ops`, `binary_trees`) compile and run
+with unchanged output. Details: `specs/todos.md` "Recently fixed".
+
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 
 **`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to

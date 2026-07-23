@@ -1979,7 +1979,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
             let v' = coerce ctx ty v param_ty in
             param_ty ^ " " ^ v'
           ) param_tirs arg_pairs
-        | _ -> arg_strs
+        | _ ->
+          (* Compiler builtins (int_to_string, math_sqrt, ...) are never
+             registered in top_fn_param_tys — that table only covers
+             user-defined fns/externs.  Without this, a builtin whose C
+             signature takes a native scalar (i64/double) called with an
+             argument bound via the uniform ptr-slot convention (e.g. a
+             tuple or ADT field, always "ptr", tagged/boxed) passes through
+             un-coerced: the raw tagged bits (e.g. (3<<1)|1 = 7) land in the
+             native param verbatim instead of being untagged, so
+             `Some((top, _)) -> int_to_string(top)` printed "7" instead of
+             "3" compiled-only (interpreter unaffected — no such repr
+             split there). Reuse the builtin's own declare_sig (single
+             source of truth, already used for the preamble) rather than a
+             second hand-maintained param-type table that could drift. *)
+          (match Llvm_builtins.builtin_param_llvm_tys resolved_name with
+           | Some param_llvm_tys when List.length param_llvm_tys = List.length arg_pairs ->
+             List.map2 (fun param_ty (ty, v) ->
+               let v' = coerce ctx ty v param_ty in
+               param_ty ^ " " ^ v'
+             ) param_llvm_tys arg_pairs
+           | _ -> arg_strs)
     in
     let args_str = String.concat ", " arg_strs in
     let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with

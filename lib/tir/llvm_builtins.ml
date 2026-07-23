@@ -1344,6 +1344,50 @@ let builtin_ret_ty_tbl : (string, Tir.ty) Hashtbl.t =
 let builtin_ret_ty (name : string) : Tir.ty option =
   Hashtbl.find_opt builtin_ret_ty_tbl name
 
+(** name → declare_sig text, built once (keyed by march_name, unlike
+    [emit_preamble]'s by-c_name lookup — several march_names alias one
+    c_name and each carries its own identical copy of the text, so a
+    march_name-keyed table is just as sound and is what call-site argument
+    coercion needs). *)
+let builtin_declare_sig_tbl : (string, string) Hashtbl.t =
+  let tbl = Hashtbl.create 512 in
+  List.iter (fun b -> match b.declare_sig with
+      | Some sig_ -> Hashtbl.replace tbl b.march_name sig_
+      | None -> ())
+    builtins;
+  tbl
+
+(** name → parameter LLVM types (bare tokens: "ptr", "i64", "double", ...),
+    in declaration order, parsed from [declare_sig].  [None] when the
+    builtin has no recorded [declare_sig].
+
+    This is the single source of truth for what a builtin's C signature
+    actually expects, reused (rather than duplicated into a second,
+    hand-maintained table) so it can never drift from the preamble text.
+    Every param token in the table today is "ptr", "i64", or "double" (no
+    varargs, no i32/i1) — the exact set [Llvm_ctx.coerce] already handles
+    bidirectionally (untag/tag, box/unbox), so a mismatched arg
+    representation (e.g. a tuple/ADT scalar field's uniform "ptr" slot)
+    flowing into a builtin call can be coerced to the declared type just
+    like it already is for user-defined functions via
+    [top_fn_param_tys]. *)
+let builtin_param_llvm_tys (name : string) : string list option =
+  match Hashtbl.find_opt builtin_declare_sig_tbl name with
+  | None -> None
+  | Some sig_text ->
+    (match String.index_opt sig_text '(', String.rindex_opt sig_text ')' with
+     | Some i, Some j when j > i ->
+       let params_str = String.trim (String.sub sig_text (i + 1) (j - i - 1)) in
+       if params_str = "" then Some []
+       else
+         Some (List.map (fun p ->
+             let p = String.trim p in
+             match String.index_opt p ' ' with
+             | Some k -> String.sub p 0 k
+             | None -> p)
+           (String.split_on_char ',' params_str))
+     | _ -> None)
+
 (** March builtin name → C runtime symbol, built once. Replaces the
     historical [mangle_extern : string -> string] pattern-match function,
     including its identity-fallthrough default (`| other -> other`) for

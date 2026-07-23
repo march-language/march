@@ -13,6 +13,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled-only wrong value: a scalar bound by a tuple or constructor pattern
+  (e.g. `Some((top, rest)) -> int_to_string(top)`, or even a plain top-level
+  `(top, rest) -> int_to_string(top)`) passed to a compiler builtin
+  (`int_to_string`, `math_sqrt`, `float_abs`, and similar) printed the raw
+  internal tagged-integer encoding instead of the real value (`7` instead of
+  `3` for the example above). Pattern-bound fields are read as a generic
+  tagged pointer that must be untagged at the point of use; call-argument
+  coercion only did this for user-defined functions, never for the compiler's
+  own builtins, so the raw tag bits flowed straight into the builtin's native
+  parameter. Interpreted output was always correct; only compiled output was
+  affected.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,
