@@ -283,6 +283,33 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, `self()` typed as `Pid[state]` instead of plain `Int`)
+
+**`self()` (`lib/typecheck/typecheck.ml`) now resolves to the enclosing
+actor's own `Pid[state_ty]` inside a handler body, instead of the global
+builtin's placeholder `Mono t_int`.** Found auditing `specs/lang/actors.md`
+against the compiler: any use of `self()` where a `Pid`-typed value was
+expected (e.g. `is_alive(self())`, or passing it as a message field another
+handler expects to call back on) failed with a confusing "expected `Pid` but
+got `Int`" — purely a typechecker registration gap, since `self()` is
+dynamically a perfectly valid `Pid` at runtime (`eval.ml`'s builtin already
+returns `VPid`, erroring only if called outside a handler). The global `self`
+entry (`("self", Mono t_int)`) has no way to know which actor it's inside, so
+it can only be a placeholder; the fix mirrors how `state` is already scoped —
+`DActor`'s handler-checking loop now additionally binds `self` in
+`handler_env` to `Pid(state_ty)`, the same type `spawn(name)` produces for
+this actor elsewhere (both reach the same `Pid[state_ty]` `env.vars` binding
+the `DActor` arm registers under the actor's own name). Shadowing is local to
+the handler body, matching `self()`'s runtime scope exactly — the global
+entry is untouched. Verified with two repros: `is_alive(self())` inside a
+handler, and `self()` flowing unannotated through a message field to another
+handler that calls `is_alive` on it (`send(caller, Reply(self()))` /
+`on Reply(who) do is_alive(who) end`) — both now typecheck and run cleanly,
+printing `true`. `scripts/run-tests.sh -q` (780 tests) green, no regressions.
+`specs/lang/actors.md`'s `self()` section had a documented workaround (leaving
+`caller`/reply fields unannotated to sidestep this exact gap) — restored to
+the explicit-annotation example now that it typechecks.
+
 ## Current State (as of 2026-07-22, `Actor.call` compiled reply-value corruption fixed — a scalar reply came back as its raw tagged bit pattern)
 
 **`Actor.call`'s reply value was silently corrupted compiled: an `Int`/`Bool`/`Unit` reply came back as its raw tagged-immediate bit pattern instead of the real value** (`lib/tir/llvm_emit.ml`). Found auditing `specs/lang/actors.md`'s "Synchronous request/response" example against its own pinned golden: `test/native/actor_counter.march` compiled printed `value=11` where the interpreter and `test/native/actor_counter.expected` both say `value=5` — `11 = (5<<1)|1`, the tagged-immediate encoding of `5`, read back verbatim instead of untagged. `Actor.call`'s `Result('a, String)` return type is deliberately left as an unresolved type variable in TIR (the reply payload's type genuinely can't be known statically), so pattern-matching `Ok(v)` correctly extracts the field generically as `ptr`, and `march_actor_reply`'s call site (already special-cased) correctly tags a scalar reply before it crosses the mailbox's `void*` boundary — the bug was one step further downstream. The general `EApp` call-emission path only coerces an argument to its callee's declared LLVM parameter type for user-defined functions (via `ctx.top_fn_param_tys`); every other scalar-consuming builtin already works around this with its own dedicated match arm calling `emit_atom_as` explicitly (`int_not`, the bitwise ops, …), but `int_to_string`/`bool_to_string`/`float_to_string` had none, so the `ptr`-typed extracted reply flowed straight into `call ptr @march_int_to_string(ptr %v)` against a `declare ... (i64 %n)` signature — a declared-type mismatch LLVM's parser doesn't reject and that "works" at the ABI level (`ptr`/`i64` share a register), silently handing the raw tagged bits to the C function. Confirmed via `--emit-llvm` on the failing golden. **Fix:** dedicated `EApp` arms for `int_to_string`/`bool_to_string`/`float_to_string`, each coercing via `emit_atom_as` before the C call — mirroring `int_not`'s existing pattern; scoped to these three (the only scalar-consuming builtins with no existing dedicated arm). Verified: `test/native/actor_counter` now matches `.expected` (`value=5`); the sibling `test/native/actor_call_timeout` golden unaffected; normal (non-erased) `int_to_string`/`bool_to_string`/`float_to_string` call sites unchanged (smoke-tested). Full suite green: compiler 527 / eval 238 / codegen 438 (incl. the LLVM IR validity gate over the full native corpus) / stdlib clean. **CI gap note:** this was a live, already-wired `dune runtest` failure that the fast `scripts/run-tests.sh` path cannot catch — it invokes the four Alcotest driver binaries directly and bypasses dune's ~57 native compile-and-run rules entirely (see `specs/todos.md`'s "Recently fixed" and the release-CI-verification-gaps note); a real `dune build && dune runtest` would have failed on this golden the whole time it was broken.
