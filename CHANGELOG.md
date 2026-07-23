@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Two unbounded busy-spin waits in the actor scheduler runtime could peg an
+  OS thread at ~100% CPU forever with no possibility of self-recovery: the
+  in-scheduler wait behind `task_await`/`task_await_unwrap`, and the
+  scheduler's internal wake-on-parked-proc spin. Both now fall back to a
+  cheap sleep-based poll after a generous grace period instead of spinning
+  indefinitely — wait-forever semantics are unchanged, only how the wait is
+  performed. Suspected cause of multi-hour CPU-pegged compiled-program hangs
+  under heavy host load (many more runnable OS threads than cores).
+
 - The browser cookbook/playground REPL's bundled stdlib was missing
   `Vault` — the docs/cookbook/vault.md examples errored with `no member
   'new' in module 'Vault'` because `vault.march` wasn't in either
