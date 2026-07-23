@@ -97,6 +97,96 @@ let project_root =
      | None   -> Sys.getcwd ())
 
 (* ------------------------------------------------------------------ *)
+(* Canonical metavar-ID renumbering.                                     *)
+(*
+   Type-variable IDs are allocated from a single global counter (see
+   lib/dump/ast_json.ml and bin/main.ml's schemes/instantiations
+   emission) that carries no semantic meaning on its own -- only WHICH
+   occurrences share the same ID matters. That counter's absolute values
+   drift whenever anything upstream of --emit-core-ast allocates a
+   different number of metavariables (e.g. a stdlib change), and may
+   also differ across platforms. Comparing raw fixture bytes against
+   that counter's current values is what made t01_literals and
+   t07_generic_option_two_types fail on main independent of any real
+   content change -- the drift is pre-existing, not caused by this
+   branch.
+
+   Verified against the serializer (lib/dump/ast_json.ml's TVar case and
+   bin/main.ml's schemes_json/insts_json construction) that "id" and
+   "ids" appear in EXACTLY these two JSON shapes and nowhere else in the
+   emitted document:
+     - {"kind":"TVar","id":N}
+     - "ids":[N,N,...]              (in schemes[] and instantiations[])
+
+   [canonicalize] walks the document left-to-right and renumbers every
+   ID found in one of those two shapes: the first distinct raw ID seen
+   becomes canonical 0, the next new raw ID becomes 1, etc.; every later
+   occurrence of an already-seen raw ID is rewritten to that same
+   canonical number. Applying this identically to both the produced
+   output and the expected fixture, then comparing the canonical forms
+   byte-for-byte, keeps the comparison exact about structure and ID
+   SHARING (if two occurrences that used to share an ID diverge, or vice
+   versa, the canonical forms differ and the test fails) while making
+   the absolute numbering -- which carries no information -- irrelevant.
+   This is deliberately NOT erasure: distinct IDs still become distinct
+   canonical numbers, so sharing patterns are still checked exactly. *)
+let canonicalize (s : string) : string =
+  let n = String.length s in
+  let buf = Buffer.create n in
+  let table : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let next = ref 0 in
+  let canon raw =
+    match Hashtbl.find_opt table raw with
+    | Some c -> c
+    | None ->
+      let c = !next in
+      Hashtbl.add table raw c;
+      incr next;
+      c
+  in
+  let is_digit c = c >= '0' && c <= '9' in
+  let tvar_marker = "\"kind\":\"TVar\",\"id\":" in
+  let tvar_len = String.length tvar_marker in
+  let ids_marker = "\"ids\":[" in
+  let ids_len = String.length ids_marker in
+  let matches marker marker_len i =
+    i + marker_len <= n && String.sub s i marker_len = marker
+  in
+  let i = ref 0 in
+  while !i < n do
+    if matches tvar_marker tvar_len !i then begin
+      Buffer.add_string buf tvar_marker;
+      i := !i + tvar_len;
+      let start = !i in
+      while !i < n && is_digit s.[!i] do incr i done;
+      let raw = String.sub s start (!i - start) in
+      Buffer.add_string buf (string_of_int (canon raw))
+    end else if matches ids_marker ids_len !i then begin
+      Buffer.add_string buf ids_marker;
+      i := !i + ids_len;
+      let continue_ = ref true in
+      while !continue_ do
+        let start = !i in
+        while !i < n && is_digit s.[!i] do incr i done;
+        if !i > start then begin
+          let raw = String.sub s start (!i - start) in
+          Buffer.add_string buf (string_of_int (canon raw))
+        end;
+        if !i < n && s.[!i] = ',' then begin
+          Buffer.add_char buf ',';
+          incr i
+        end else
+          continue_ := false
+      done
+      (* closing ']' is left for the outer loop to copy verbatim *)
+    end else begin
+      Buffer.add_char buf s.[!i];
+      incr i
+    end
+  done;
+  Buffer.contents buf
+
+(* ------------------------------------------------------------------ *)
 (* Subprocess runner: run march --emit-core-ast <rel_path>, cwd =        *)
 (* project_root, capture stdout and exit code.                          *)
 (* ------------------------------------------------------------------ *)
@@ -169,19 +259,19 @@ let cases = [
     label = "reject: fatal parse error, module is null (t70_letq_type_annotation)" };
 ]
 
-(* v2 sanity: the envelope must be version 2 and carry annotations+witnesses.
+(* v3 sanity: the envelope must be version 3 and carry annotations+witnesses.
    This is a lightweight structural check (independent of the byte-for-byte
-   fixture comparison above) so a future accidental downgrade to v1 — or a
+   fixture comparison above) so a future accidental downgrade to v1/v2 — or a
    regression that silently drops the resolved_ty/schemes tables — is caught
    with an explicit, readable assertion rather than only via an opaque full-
    string diff. *)
-let assert_v2 (produced : string) =
+let assert_v3 (produced : string) =
   let has s =
     let hl = String.length produced and nl = String.length s in
     let rec go i = i + nl <= hl && (String.sub produced i nl = s || go (i+1)) in
     nl = 0 || go 0
   in
-  Alcotest.(check bool) "format_version 2" true (has "\"format_version\":2" || has "\"format_version\": 2");
+  Alcotest.(check bool) "format_version 3" true (has "\"format_version\":3" || has "\"format_version\": 3");
   Alcotest.(check bool) "has resolved_ty" true (has "resolved_ty");
   Alcotest.(check bool) "has schemes" true (has "schemes")
 
@@ -203,7 +293,7 @@ let emit_core_ast_of_source source =
   (try Sys.remove tmp with _ -> ());
   output
 
-(* Same free-standing substring search assert_v2 above already uses inline;
+(* Same free-standing substring search assert_v3 above already uses inline;
    factored out here since this test needs it multiple times. *)
 let has_substring haystack needle =
   let hl = String.length haystack and nl = String.length needle in
@@ -241,7 +331,7 @@ let test_module_caps_and_v3 () =
 end|}
   in
   (* format_version is inserted as a raw (unquoted) JSON value, same as the
-     existing "2" literal it replaces -- see assert_v2 above and
+     existing "2" literal it replaces -- see assert_v3 above and
      lib/dump/dump.ml's json_obj, which does not quote already-encoded
      values. *)
   assert_contains json "\"format_version\":3";
@@ -257,10 +347,12 @@ let test_case_matches_fixture case () =
     (Printf.sprintf "%s: exit code" case.label)
     case.expected_exit exit_code;
   Alcotest.(check string)
-    (Printf.sprintf "%s: --emit-core-ast stdout matches golden fixture %s"
+    (Printf.sprintf
+       "%s: --emit-core-ast stdout matches golden fixture %s (metavar IDs \
+        compared via canonical renumbering, see canonicalize above)"
        case.label case.fixture_name)
-    expected actual;
-  if case.fixture_name = "t01_literals.expected.json" then assert_v2 actual
+    (canonicalize expected) (canonicalize actual);
+  if case.fixture_name = "t01_literals.expected.json" then assert_v3 actual
 
 let suite =
   List.map
