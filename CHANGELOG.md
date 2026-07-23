@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Two unbounded busy-spin waits in the actor scheduler runtime could peg an
+  OS thread at ~100% CPU forever with no possibility of self-recovery: the
+  in-scheduler wait behind `task_await`/`task_await_unwrap`, and the
+  scheduler's internal wake-on-parked-proc spin. Both now fall back to a
+  cheap sleep-based poll after a generous grace period instead of spinning
+  indefinitely — wait-forever semantics are unchanged, only how the wait is
+  performed. Suspected cause of multi-hour CPU-pegged compiled-program hangs
+  under heavy host load (many more runnable OS threads than cores).
+
 - Compiled `Csv.read_all`/`Csv.each_row_with_header` could crash
   (nondeterministic SIGBUS/SIGSEGV) or silently return zero rows. A
   builtin-call argument coercion added to fix an unrelated tagging bug

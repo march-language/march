@@ -1982,11 +1982,61 @@ typedef struct {
 static pthread_mutex_t g_task_done_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_task_done_cv = PTHREAD_COND_INITIALIZER;
 
+/* task_wait_done's in-scheduler wait: how long to spin-yield before backing
+ * off to sleeping between polls.  This MUST be a wall-clock bound, not an
+ * iteration count — under legitimate heavy parallelism each
+ * march_sched_yield() round trip already takes longer because the scheduler
+ * is genuinely busy juggling many ready procs, so a fixed iteration count
+ * elapses in far less wall-clock time than intended and would start backing
+ * off during completely healthy execution (confirmed via A/B benchmarking
+ * against a task_spawn/task_await-heavy workload: an iteration-count grace
+ * dropped CPU utilization from ~390% to ~15%).  A generous multi-second
+ * bound avoids that: every existing test and benchmark below March's
+ * current task-count scaling limits completes in well under a second per
+ * wait, so this never fires for real workloads, while still turning a
+ * would-be-forever 100%-CPU spin into a bounded one.  The clock is only
+ * sampled every TASK_WAIT_DONE_CLOCK_CHECK_STRIDE rounds after an initial
+ * pure-spin warmup, so the common near-instant case never touches it. */
+#define TASK_WAIT_DONE_WARMUP_SPINS        64
+#define TASK_WAIT_DONE_CLOCK_CHECK_STRIDE  256
+#define TASK_WAIT_DONE_GRACE_MS            5000
+
 static void task_wait_done(int64_t *task) {
     if (march_sched_in_scheduler()) {
+        /* Fast path: spin-yield without touching the clock at all, since
+         * the task usually completes within a handful of reschedules.
+         * Only once TASK_WAIT_DONE_GRACE_MS of *wall-clock* time has
+         * genuinely elapsed without completion — most plausibly because the
+         * spawned task's owning OS thread is itself starved under host
+         * oversubscription — do we back off to a cheap sleep-based poll
+         * instead of spinning at 100% CPU forever.  This never gives up:
+         * task_await's wait-forever semantics are unchanged, only how the
+         * wait is performed (mirrors the 1ms idle-sleep already used by
+         * sched_loop, and the wall-clock-bounded poll march_actor_call uses
+         * for its own timed wait). */
+        int64_t spins = 0;
+        struct timespec start;
+        int backoff = 0;
         while (atomic_load_explicit((_Atomic int64_t *)&task[4],
                                     memory_order_acquire) == 0) {
+            if (backoff) {
+                struct timespec ts = { 0, 1000000 }; /* 1ms */
+                nanosleep(&ts, NULL);
+                march_sched_yield();
+                continue;
+            }
             march_sched_yield();
+            spins++;
+            if (spins == TASK_WAIT_DONE_WARMUP_SPINS) {
+                clock_gettime(CLOCK_MONOTONIC, &start);
+            } else if (spins > TASK_WAIT_DONE_WARMUP_SPINS &&
+                       spins % TASK_WAIT_DONE_CLOCK_CHECK_STRIDE == 0) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                int64_t elapsed_ms = (now.tv_sec - start.tv_sec) * 1000
+                                    + (now.tv_nsec - start.tv_nsec) / 1000000;
+                if (elapsed_ms >= TASK_WAIT_DONE_GRACE_MS) backoff = 1;
+            }
         }
         return;
     }

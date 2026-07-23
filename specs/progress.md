@@ -283,6 +283,47 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-23, two unbounded scheduler busy-spins fixed — `task_wait_done` + `march_sched_wake`)
+
+**Two busy-spin waits in the actor scheduler runtime (`runtime/march_runtime.c`,
+`runtime/march_scheduler.c`) that had no deadline/fallback now bound their
+worst case instead of spinning at ~100% CPU forever.** `task_wait_done`'s
+in-scheduler branch (the wait path behind `task_await`/`task_await_unwrap`)
+and `march_sched_wake`'s `PROC_PARKED`-wait spin both previously assumed their
+condition would resolve near-instantly and had zero possibility of
+self-recovery if it didn't — the suspected cause of multi-hour CPU-pegged
+compiled-test hangs observed under host oversubscription (see the
+`project_scheduler_unbounded_spin_hangs` memory for the full investigation).
+Both now spin-yield for a generous grace period, then fall back to a cheap
+`nanosleep(1ms)`-based poll — `task_await`'s wait-forever semantics are
+unchanged, only the mechanics of the wait. `task_wait_done`'s grace period is
+measured in *wall-clock* time (`CLOCK_MONOTONIC`, checked periodically to
+keep the fast path cheap, 5s bound) rather than a spin-iteration count: an
+iteration-count version was tried first and A/B-benchmarked to silently
+collapse legitimate heavy-parallelism throughput on a `bench/par_fib.march`-
+shaped fork-join workload (~390% CPU → ~15% CPU), because each
+`march_sched_yield()` round trip takes measurably longer once the scheduler
+is genuinely busy dispatching many ready procs, so a fixed iteration count
+elapses in far less wall-clock time than intended and the backoff fired
+during completely healthy execution. `march_sched_wake`'s spin stays
+iteration-count-based — its PARKED→WAITING transition is a small, bounded,
+wait-free-ish critical section that doesn't depend on arbitrary user-code
+progress, and the same A/B benchmark confirmed it's unaffected either way.
+Verified: full suite (`run_compiler` 538 / `run_eval` 240 / `run_codegen` 444
+— includes the actual originally-hung test — / `run_stdlib` 816 with one
+pre-existing failure independently root-caused as a 100%-reproducible
+macOS/ASAN dyld-init livelock, unrelated to March: a bare `clang
+-fsanitize=address` hello-world hangs identically), `bench/list_ops.march` +
+`bench/parallel.march` no regression, and a `par_fib`-shaped fork-join
+workload below March's current task-count scaling limits restored to full
+parallel CPU utilization matching the unpatched baseline. **Known follow-up
+(separate, not fixed here):** profiling a fork-join workload that crosses
+March's task-count scaling cliff (~14K→22K concurrent `task_spawn`s) found
+this CPU-backoff patch alone doesn't fix that cliff — CPU usage drops as
+designed but the workload still doesn't complete, revealing a distinct,
+deeper LIFO-starvation bug in `sched_loop`'s local-deque dispatch policy. See
+the memory's "second follow-up" section for the live-profiled evidence.
+
 ## Current State (as of 2026-07-22, `self()` typed as `Pid[state]` instead of plain `Int`)
 
 **`self()` (`lib/typecheck/typecheck.ml`) now resolves to the enclosing

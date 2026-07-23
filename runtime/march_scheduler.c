@@ -1303,6 +1303,11 @@ int march_sched_try_recv2(void **out) {
     return 1;
 }
 
+/* Grace period (in plain load-spins) before march_sched_wake's PARKED-wait
+ * loop backs off to sleeping between polls.  See the comment inside
+ * march_sched_wake for why this can't just call march_sched_yield(). */
+#define SCHED_WAKE_SPIN_GRACE 4096
+
 void march_sched_wake(march_proc *target) {
     if (!target) return;
 
@@ -1310,13 +1315,32 @@ void march_sched_wake(march_proc *target) {
      * swapcontext.  We must wait until the scheduler transitions it to
      * PROC_WAITING before we can push it to a deque; otherwise two
      * scheduler threads would try to resume the same process simultaneously.
-     * The transition is O(1) so this spin is extremely short. */
+     * The transition is normally O(1) so this spin is extremely short — but
+     * only if the target's owning OS thread actually gets CPU time from the
+     * OS promptly.  Under host oversubscription (more runnable OS threads
+     * than cores) that thread can itself be starved for an extended
+     * stretch, and this call may run on a scheduler thread (blocking
+     * whatever proc it's currently running) or a foreign thread, so we
+     * can't cooperatively march_sched_yield() here.  After a grace period
+     * of plain spinning, back off to a cheap sleep-based poll (same 1ms
+     * idle-sleep sched_loop already uses) instead of spinning at 100% CPU
+     * forever — we still cannot give up, since the CAS below requires the
+     * target to reach WAITING first. */
     march_proc_status cur;
+    int64_t spins = 0;
     do {
         cur = atomic_load_explicit(&target->status, memory_order_acquire);
         if (cur == PROC_DEAD || cur == PROC_RUNNABLE || cur == PROC_RUNNING)
             return; /* Not WAITING — no need to wake. */
         /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
+        if (cur == PROC_PARKED) {
+            if (spins < SCHED_WAKE_SPIN_GRACE) {
+                spins++;
+            } else {
+                struct timespec ts = { 0, 1000000 }; /* 1ms */
+                nanosleep(&ts, NULL);
+            }
+        }
     } while (cur == PROC_PARKED);
 
     /* Use CAS to atomically transition WAITING→RUNNABLE so that concurrent
