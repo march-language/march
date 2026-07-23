@@ -437,6 +437,49 @@ Task 5 `e907ad1d`/`344d942b`, Task 5.5 `ed7893a7`, Task 6 (this commit).
 ## Current State (as of 2026-07-22, I/O builtin Result error-type soundness fix)
 
 - **`lib/typecheck/typecheck.ml` — File/Dir/Csv/Tcp/Tls/Process builtins now register their real concrete `Result` error type instead of an unconstrained polymorphic `e`.** `file_read` was `poly1 (fun e -> TArrow (t_string, t_result t_string e))`: since `e` was a free type variable, a function declared `Result(_, String)` doing `let? content = File.read(path)` typechecked with zero diagnostics and then panicked at runtime the moment the bound error value (always a `File.FileError` constructor per `eval.ml`'s `file_error_of_unix`/`file_error_of_sys`) was used as a `String`. Swept the rest of `typecheck.ml` for the same `poly1 (fun e -> ...)`-around-`t_result` shape and found it repeated across ~20 builtins. Fixed to `Mono` with the real error type: `file_read/write/append/delete/copy/rename/stat/open` and `dir_list/mkdir/mkdir_p/rmdir/rm_rf` → `TCon ("FileError", [])`; `csv_open` → `TCon ("CsvError", [])` (confirmed not niche-shaped, unlike `CsvRow`, so the bare name is fine); `tcp_connect/send_all/recv_all/recv_http/recv_http_headers/recv_chunk/recv_chunked_frame`, `http_parse_response`, `process_spawn_sync/lines/async`, `tls_client_ctx/server_ctx/connect/accept/read/write` → `t_string` (confirmed via `eval.ml` AND the runtime C — `runtime/march_tls.c`'s `make_err`, `runtime/march_http.c`, `runtime/march_runtime.c` — that these always fail with a bare String in both backends; `tcp_listen`/`tcp_accept`/`dns_resolve`/`tcp_recv_exact` were already `Mono t_string`, so this was an inconsistently-applied fix, not a new pattern). Verified via `bin/main.exe` that the reported repro now produces a labeled type-mismatch diagnostic, and that normal `File.read` usage (unannotated return type, or a wildcard `Err(e)` binding) still compiles and runs correctly. **Uncovered a pre-existing test that had baked in the exact bug:** `test_cap_deterministic_file_read_ok` declared `fn load(path : String) : Result(String, String) do file_read(path) end` — fixed by dropping the now-invalid `Result(String, String)` annotation (the test is about the `cap deterministic` capability check, not `file_read`'s error shape). **Side-finding (not fixed, out of scope):** `stdlib/dns.march`'s `DnsError` shares the bare constructor name `NotFound` with `File.FileError` — code that pattern-matched the ambiguous bare `NotFound(p)` against a `file_read` result previously "worked" only because the free `e` silently absorbed whichever type won the ambiguous ctor lookup; with `e` now concrete, that same code correctly fails to typecheck (a genuine global-namespace ctor collision, pre-existing, now surfaced instead of silently mis-resolved). **Deeper divergence found but not fixed (separate, larger undertaking):** the compiled backend's runtime C for these File/Dir builtins (`mk_err_errno`/`mk_err_cstr` in `runtime/march_runtime.c`) always constructs a bare String error, never a `FileError`-tagged value — `lib/tir/llvm_emit.ml`'s hardcoded `native_result_ty` table independently pins `file_read` etc. to `Result(_, String)` for codegen. So the structured `FileError` constructor is currently interpreter-only; no test or benchmark exercises File/Dir/Csv compiled today (confirmed via corpus grep), so this typecheck fix causes no compiled regression, but the interpreter/compiled parity gap remains for future work. Regression test `test_letq_file_read_wrong_error_type` in `test/test_compiler.ml` (TDD: confirmed RED against the original signature, GREEN after the fix). **527 compiler (was 526, +1 regression test) / 238 eval / 438 codegen / 780 stdlib / 53 stdlib_march pass** — full suite green, no pre-existing failures in this worktree.
+## Current State (as of 2026-07-22, compiled-only builtin call-argument coercion fix — tuple/constructor-bound scalars passed to compiler builtins)
+
+**A compiled-only wrong-value bug: a scalar bound by a tuple or constructor
+pattern and passed directly to a compiler builtin printed the raw tagged
+integer encoding instead of the real value.** Found auditing
+`specs/lang/pattern-matching.md`. Minimal repro: `match f() do Some((top,
+rest)) -> println(int_to_string(top)) ... end` with `f() : Option((Int,Int))`
+returning `Some((3,9))` — interpreted prints `3` (correct), compiled printed
+`7` (`(3<<1)|1`, the raw low-bit-tagged immediate). Not specific to
+constructor nesting: a plain top-level `match f() do (top, rest) ->
+int_to_string(top) end` hit the identical bug; a `let (top, rest) = f()`
+destructuring-let was unaffected (different lowering path). **Root cause:**
+every `ECase`-bound field (tuple or ADT constructor) is loaded via the
+uniform ptr-slot convention (`llvm_case.ml`) — scalars are tagged
+`(n<<1)|1` at construction and read back as generic `ptr`, meant to be
+conditionally untagged at the point of use. The generic `EApp`
+call-argument-coercion path (`llvm_emit.ml`) only coerced against
+`ctx.top_fn_param_tys`, populated for user-defined fns/externs only —
+compiler builtins with a native `i64`/`double` C parameter (`int_to_string`,
+`math_sqrt`, `float_abs`, ~50 more per `lib/tir/llvm_builtins.ml`'s
+`declare_sig` table) were never in that table, so a `ptr`-typed argument
+flowed uncoerced into the native parameter; the raw tag bits landed in the
+argument register unchanged (verified in the emitted LLVM: `call ptr
+@march_int_to_string(ptr %ld31)` against a `declare ptr
+@march_int_to_string(i64 %n)` — a type-mismatched call LLVM/clang accepted
+rather than rejected, since both types are pointer-width). **Fix:**
+`lib/tir/llvm_builtins.ml` adds `builtin_param_llvm_tys`, deriving each
+builtin's parameter LLVM types by parsing its own `declare_sig` text — the
+same string already used for the preamble `declare` line, so there is no new
+hand-maintained table to drift out of sync. `lib/tir/llvm_emit.ml`'s `EApp`
+argument-coercion fallback now also consults this when `top_fn_param_tys` has
+no entry, coercing each arg to the builtin's declared param type exactly as
+it already does for user fns. Verified: original repro, plain top-level
+tuple match, 3-tuple payload, 2-level-nested tuple payload, and a
+`Float`/`Int` tuple flowing into `math_sqrt`/`float_to_string`/
+`int_to_string` all match interpreted output compiled. Full suite: compiler
+527 / eval 238 / codegen 438 (1 unrelated tool-skip: cross TLS+gzip
+linux/amd64, no sysroot) / stdlib 780 quick, all green; 2 pre-existing TIR
+snapshot failures (`tuple_atom_string_arms`, `scrutinee_borrowed_
+conservatism`) confirmed present on unmodified `main` via a file-copy-swap
+baseline (this fix touches only post-Perceus LLVM codegen, never TIR).
+Benchmarks (`tree_transform`, `list_ops`, `binary_trees`) compile and run
+with unchanged output. Details: `specs/todos.md` "Recently fixed".
 
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 

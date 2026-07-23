@@ -59,6 +59,19 @@ git log is authoritative for exact commits.
   so a value arriving through `Actor.call`'s necessarily type-erased reply
   channel was passed straight through with a declared-signature mismatch
   instead of being untagged first.
+- The same underlying gap — builtin call arguments never coerced to the
+  builtin's own declared native parameter type, only to a user-defined
+  function's — also reached compiled output through an unrelated path: a
+  scalar bound by a tuple or constructor pattern (e.g. `Some((top, rest)) ->
+  int_to_string(top)`, or even a plain top-level `(top, rest) ->
+  int_to_string(top)`) passed to any compiler builtin with a native scalar
+  parameter (`math_sqrt`, `float_abs`, and ~50 more beyond the three fixed
+  above) printed the raw internal tagged-integer encoding instead of the real
+  value (`7` instead of `3` for the example above). Call-argument coercion
+  now also derives each builtin's declared parameter types directly from its
+  own preamble `declare` signature, so every builtin gets the same coercion
+  user-defined functions already had — not just the three fixed individually
+  above.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,
