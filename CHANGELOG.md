@@ -13,6 +13,34 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled `Csv.read_all`/`Csv.each_row_with_header` could crash
+  (nondeterministic SIGBUS/SIGSEGV) or silently return zero rows. A
+  builtin-call argument coercion added to fix an unrelated tagging bug
+  (`Some((top, _)) -> int_to_string(top)` printing `7` instead of `3`) was
+  incorrectly tagging opaque native-pointer handles — Csv/File/Tcp handles
+  are represented as plain `Int` in March's type system by convention, but
+  are raw C pointers at runtime — whenever they were passed to a builtin
+  whose C signature declares the parameter as `ptr`. Restricted the
+  coercion to the direction it was actually meant for.
+
+- The browser cookbook/playground REPL's bundled stdlib was missing
+  `Vault` — the docs/cookbook/vault.md examples errored with `no member
+  'new' in module 'Vault'` because `vault.march` wasn't in either
+  `js/march_browser.ml`'s `browser_stdlib_files` load-list or
+  `scripts/gen-browser-stdlib.py`'s `FILES` list used to generate
+  `docs/assets/march_stdlib.js`. Added it to both and regenerated the
+  bundled assets.
+
+### Documentation
+
+- The "sandboxed plugin runner" example in docs/cookbook/capabilities.md
+  called a `sandbox_eval` function that never existed anywhere in the
+  compiler or stdlib — it was illustrative pseudocode, so running the
+  example in the cookbook REPL errored with `unbound variable:
+  sandbox_eval`. Replaced it with a trivial inline stub so the snippet
+  actually compiles and runs; the example's real point (the `PluginCap`
+  gate) is unaffected.
+
 - A qualified call to a real module's genuinely nonexistent member (e.g.
   `String.length(...)` — `String` has no `length`; the real API is
   `byte_size`/`codepoint_count`/`grapheme_count`) silently fell through to an

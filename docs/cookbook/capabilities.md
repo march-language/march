@@ -77,6 +77,12 @@ mod PluginDemo do
       mint_cap(io)
     end
 
+    -- Stand-in for a real sandboxed evaluator — the point of this example is
+    -- the capability gate around `run`, not the evaluation strategy itself.
+    fn sandbox_eval(code : String) : Result(String, String) do
+      Ok("evaluated: " ++ code)
+    end
+
     fn run(_cap : Cap(Plugin.PluginCap), code : String) : Result(String, String) do
       sandbox_eval(code)
     end
