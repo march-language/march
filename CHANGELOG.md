@@ -13,6 +13,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `self()` inside an actor handler was typechecked as a plain `Int` instead
+  of that actor's own `Pid`, so passing it anywhere a `Pid` was expected
+  (`is_alive(self())`, a typed `Pid` message field) failed to typecheck with
+  "expected `Pid` but got `Int`" even though it is a valid `Pid` at runtime.
+  `self()` now resolves to the same `Pid[state]` type `spawn` produces for
+  that actor.
 - A general user interface implemented by two same-short-name types declared
   in different modules (e.g. `NA.Thing` and `NB.Thing` both `impl
   Speak(Thing)`) could have an ambiguous call site resolved, at compile time,

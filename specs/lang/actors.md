@@ -458,19 +458,15 @@ on Request(question : String, caller) do
 end
 ```
 
-(`caller` is left unannotated rather than written `caller : Pid`, and `Answer`'s payload here is
-left untyped rather than declared as carrying a `Pid` field. Two current compiler gaps make
-explicit `Pid` typing around `self()` unreliable: (1) `self()`'s builtin signature is registered
-as plain `Int`, not `Pid(a)` (`lib/typecheck/typecheck.ml` — `("self", Mono t_int)`), so
-`self()`'s result fails to unify anywhere a `Pid`-typed field or argument is expected (e.g.
-`is_alive(self())`, or a message field explicitly annotated `: Pid`) with a confusing `expected
-Pid but got Int`, even though it dynamically **is** a valid Pid; (2) a bare `Pid` annotation (no
-type parameter) is separately unreliable because it can resolve against the unrelated
-`GlobalPid.Pid` record type sharing the same bare name in the flat global namespace, rather than
-the parametric actor `Pid(a)` that `spawn`/`self()` actually produce. Leaving `caller` and the
-reply payload unannotated and letting them infer sidesteps both gaps — the pattern used elsewhere
-in this chapter, e.g. `on GetCount(reply_to)`. These are compiler typing gaps, not docs issues;
-noted here for a follow-up fix.)
+(As of 2026-07-22, `self()` typechecks as this actor's own `Pid[state]` — the
+same type `spawn` produces for it — so `is_alive(self())` and a message field
+explicitly annotated `: Pid` both unify cleanly; previously `self()` was
+registered as plain `Int`, causing a confusing `expected Pid but got Int`
+error. A separate, still-open gap: a bare `Pid` annotation with no type
+parameter can resolve against the unrelated `GlobalPid.Pid` record type
+sharing the same bare name in the flat global namespace, rather than the
+parametric actor `Pid(a)` that `spawn`/`self()` actually produce — leaving
+`caller` and reply payloads unannotated, as above, still sidesteps that one.)
 
 ---
 

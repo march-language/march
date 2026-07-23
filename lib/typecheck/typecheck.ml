@@ -8380,6 +8380,12 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
+        (* Shadow the global `self` builtin (registered as plain Int — see
+           its definition above) with this actor's own Pid[state_ty], the
+           same type `spawn(name)` produces for this actor elsewhere.  Only
+           valid inside a handler body, exactly like `state` above. *)
+        let handler_env =
+          bind_var "self" (Mono (TCon ("Pid", [state_ty]))) handler_env in
         let handler_env =
           List.fold_left (fun e p ->
               bind_var p.Ast.param_name.txt

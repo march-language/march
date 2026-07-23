@@ -283,6 +283,33 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-22, `self()` typed as `Pid[state]` instead of plain `Int`)
+
+**`self()` (`lib/typecheck/typecheck.ml`) now resolves to the enclosing
+actor's own `Pid[state_ty]` inside a handler body, instead of the global
+builtin's placeholder `Mono t_int`.** Found auditing `specs/lang/actors.md`
+against the compiler: any use of `self()` where a `Pid`-typed value was
+expected (e.g. `is_alive(self())`, or passing it as a message field another
+handler expects to call back on) failed with a confusing "expected `Pid` but
+got `Int`" — purely a typechecker registration gap, since `self()` is
+dynamically a perfectly valid `Pid` at runtime (`eval.ml`'s builtin already
+returns `VPid`, erroring only if called outside a handler). The global `self`
+entry (`("self", Mono t_int)`) has no way to know which actor it's inside, so
+it can only be a placeholder; the fix mirrors how `state` is already scoped —
+`DActor`'s handler-checking loop now additionally binds `self` in
+`handler_env` to `Pid(state_ty)`, the same type `spawn(name)` produces for
+this actor elsewhere (both reach the same `Pid[state_ty]` `env.vars` binding
+the `DActor` arm registers under the actor's own name). Shadowing is local to
+the handler body, matching `self()`'s runtime scope exactly — the global
+entry is untouched. Verified with two repros: `is_alive(self())` inside a
+handler, and `self()` flowing unannotated through a message field to another
+handler that calls `is_alive` on it (`send(caller, Reply(self()))` /
+`on Reply(who) do is_alive(who) end`) — both now typecheck and run cleanly,
+printing `true`. `scripts/run-tests.sh -q` (780 tests) green, no regressions.
+`specs/lang/actors.md`'s `self()` section had a documented workaround (leaving
+`caller`/reply fields unannotated to sidestep this exact gap) — restored to
+the explicit-annotation example now that it typechecks.
+
 ## Current State (as of 2026-07-22, `resolve_iface_method` collision-aware fix — ambiguous general-interface calls no longer bake in a first-match impl at lower time)
 
 **`Lower_state.resolve_iface_method` (`lib/tir/lower_state.ml`) now defers to
