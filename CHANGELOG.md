@@ -13,6 +13,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Fork-join workloads using `task_spawn`/`task_await`/`task_await_unwrap`
+  under high task concurrency (thousands of simultaneously in-flight tasks)
+  could hit a severe performance cliff — `bench/par_fib.march`
+  (`par_fib(40, 20)`) went from a fraction of a second to 54+ minutes past a
+  certain task-count threshold. `task_await` busy-spun waiting for
+  completion instead of parking; the scheduler now parks the awaiting green
+  thread and wakes it explicitly on completion (mirroring the existing
+  actor-mailbox park/wake pattern), eliminating both the wasted
+  context-switch overhead and a LIFO dispatch-starvation interaction that
+  compounded it. Compiled `--compile` programs only; the interpreter was
+  unaffected.
+
 - Compiled `Csv.read_all`/`Csv.each_row_with_header` could crash
   (nondeterministic SIGBUS/SIGSEGV) or silently return zero rows. A
   builtin-call argument coercion added to fix an unrelated tagging bug

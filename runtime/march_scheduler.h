@@ -312,6 +312,21 @@ int          march_sched_try_recv2(void **out);
  * Safe to call from any context. */
 void         march_sched_wake(march_proc *target);
 
+/* Park the calling green thread: set PROC_PARKED and swapcontext back to its
+ * owning scheduler, returning only once some other context has woken it via
+ * march_sched_wake(march_sched_current()) (which transitions it back through
+ * RUNNABLE -> RUNNING before resuming here).  A no-op if called outside the
+ * scheduler (march_sched_current() == NULL).
+ *
+ * Unlike march_sched_recv, this does not touch the mailbox and registers no
+ * wake condition itself — the caller is responsible for arranging, BEFORE
+ * calling this, that something will eventually call march_sched_wake on the
+ * current proc, and must re-check its own wait condition after this returns
+ * (wakeups may be delayed by the PARKED->WAITING handshake but are never
+ * spurious in current callers; still, don't assume the condition changed
+ * without checking). */
+void         march_sched_park_self(void);
+
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);

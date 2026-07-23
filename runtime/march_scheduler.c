@@ -1341,6 +1341,29 @@ void march_sched_wake(march_proc *target) {
     global_runq_push(target);
 }
 
+/* Park the calling green thread until woken.  See the header doc comment
+ * for the contract; this mirrors march_sched_recv's park sequence (status
+ * PARKED, swapcontext to the owning scheduler) minus the mailbox lock,
+ * which recv needs and this generic version does not. */
+void march_sched_park_self(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p) return; /* not running inside the scheduler: nothing to park */
+
+    /* PROC_PARKED: about to swapcontext but haven't yet saved our context.
+     * A waker that sees PROC_PARKED must spin-wait until sched_loop
+     * transitions us to PROC_WAITING (context saved) before re-enqueuing
+     * us — march_sched_wake already implements exactly that handshake. */
+    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
+
+    MARCH_ASAN_SWITCH_TO_SCHED(p);
+    MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
+    swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    MARCH_ASAN_SWITCH_DONE(p);
+    /* Resumed: some waker called march_sched_wake(p), which CAS'd us
+     * WAITING->RUNNABLE; sched_loop's dispatch CAS'd RUNNABLE->RUNNING
+     * before swapping back into our context.  Status is now RUNNING. */
+}
+
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
 
 /*

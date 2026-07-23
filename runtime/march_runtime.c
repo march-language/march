@@ -1962,18 +1962,21 @@ typedef struct {
  *
  * Called from the green-thread entry via march_sched_spawn.
  *
- * The Task object layout (40 bytes):
+ * The Task object layout (48 bytes):
  *   word 0 (offset  0): ref count  (i64)
  *   word 1 (offset  8): tag+pad    (i32+i32)
  *   word 2 (offset 16): march_proc* handle  (field 0, for cancel)
  *   word 3 (offset 24): result ptr  (field 1, written on completion)
  *   word 4 (offset 32): done flag   (_Atomic int64_t, 0=running, 1=done)
+ *   word 5 (offset 40): in-scheduler waiter (_Atomic march_proc*, 0=none) —
+ *                        see task_wait_done / march_thunk_trampoline below.
  *
  * Completion signalling: we write result to word 3 then release-store 1
- * into word 4.  march_task_await acquire-loads word 4, never dereferencing
+ * into word 4, then wake any registered waiter (word 5).
+ * march_task_await acquire-loads word 4, never dereferencing
  * the proc ptr (word 2) after the proc may have been freed by sched_loop.
  */
-/* Foreign-thread task_await support: green threads yield-wait (they must
+/* Foreign-thread task_await support: green threads park-and-wait (they must
  * never block an OS scheduler thread), but foreign threads (evloop pthreads)
  * previously busy-spun with sched_yield, burning a core per in-flight
  * request.  A single global condvar is broadcast on every task completion;
@@ -1984,11 +1987,33 @@ static pthread_cond_t  g_task_done_cv = PTHREAD_COND_INITIALIZER;
 
 static void task_wait_done(int64_t *task) {
     if (march_sched_in_scheduler()) {
-        while (atomic_load_explicit((_Atomic int64_t *)&task[4],
-                                    memory_order_acquire) == 0) {
-            march_sched_yield();
+        /* Register ourselves as the task's waiter (word 5), then re-check
+         * the done flag before parking — the standard check/register/
+         * recheck sequence that closes the lost-wakeup race against
+         * march_thunk_trampoline's completion store (see its comment).
+         * Without the fast-path check up front, an already-done task would
+         * still pay a park/wake round trip; without the recheck after
+         * registering, a task that completes between our first check and
+         * registering would park us with nobody left to wake us. */
+        march_proc *self = march_sched_current();
+        for (;;) {
+            if (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                     memory_order_acquire) != 0)
+                return;
+            atomic_store_explicit((_Atomic int64_t *)&task[5],
+                                  (int64_t)(uintptr_t)self,
+                                  memory_order_release);
+            if (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                                     memory_order_acquire) != 0) {
+                atomic_store_explicit((_Atomic int64_t *)&task[5], 0,
+                                      memory_order_relaxed);
+                return;
+            }
+            march_sched_park_self();
+            /* Resumed via march_sched_wake from the trampoline (or, in
+             * principle, a spurious wake) — loop back and recheck rather
+             * than assuming completion. */
         }
-        return;
     }
     pthread_mutex_lock(&g_task_done_mu);
     while (atomic_load_explicit((_Atomic int64_t *)&task[4],
@@ -2030,11 +2055,22 @@ static void march_thunk_trampoline(void *arg) {
         /* Release-store: ensures task[3] is visible before the done flag. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_release);
+        /* Wake an in-scheduler waiter parked in task_wait_done, if one
+         * registered (word 5).  Must happen after the done-store above, so
+         * a waiter that wakes and rechecks task[4] always sees it set —
+         * task_wait_done's own check/register/recheck sequence is what
+         * actually closes the race on the OTHER side (a waiter that
+         * registers between our done-store and this read still catches
+         * done=1 itself on its recheck, so a missed wake here is harmless).
+         * march_sched_wake is a safe no-op if the waiter isn't PARKED/
+         * WAITING yet (e.g. genuinely raced us) or already NULL. */
+        march_proc *waiter = (march_proc *)(uintptr_t)atomic_load_explicit(
+            (_Atomic int64_t *)&task[5], memory_order_acquire);
+        if (waiter) march_sched_wake(waiter);
         /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
-         * timed wait.  Must happen after the done-store above (so waiters that
-         * wake see done=1) and touches no task fields, so it is safe to do
-         * before or after the decrc below; placed here to keep the "signal
-         * completion" steps together. */
+         * timed wait.  Touches no task fields, so it is safe to do before or
+         * after the decrc below; placed here to keep the "signal completion"
+         * steps together. */
         pthread_mutex_lock(&g_task_done_mu);
         pthread_cond_broadcast(&g_task_done_cv);
         pthread_mutex_unlock(&g_task_done_mu);
@@ -2050,13 +2086,14 @@ static void march_thunk_trampoline(void *arg) {
 
 /* Spawn a thunk closure (fn () -> T) as an async green thread.
  *
- * Layout of the returned Task object (40 bytes):
+ * Layout of the returned Task object (48 bytes):
  *   offset  0..7 : ref count (i64)
  *   offset  8..11: tag = 0 (i32)
  *   offset 12..15: padding
  *   offset 16..23: field 0 = march_proc* (green thread handle, for cancel)
  *   offset 24..31: field 1 = result ptr (written by trampoline on exit)
  *   offset 32..39: done flag (atomic, 0=running, 1=done)
+ *   offset 40..47: in-scheduler waiter (atomic march_proc*, 0=none)
  *
  * The caller can pass this to task_await / kill. */
 void *march_task_spawn_thunk(void *clo_ptr) {
@@ -2070,8 +2107,9 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * reference to the task.  No IncRC needed here; the closure's existing
      * rc=1 is the task's reference, released by march_decrc in the trampoline. */
     march_ensure_sched_started();   /* start background scheduler if needed */
-    /* Allocate Task at 40 bytes (header + proc ptr + result ptr + done flag). */
-    int64_t *task = (int64_t *)march_alloc(40);
+    /* Allocate Task at 48 bytes (header + proc ptr + result ptr + done flag
+     * + in-scheduler waiter — see task_wait_done). */
+    int64_t *task = (int64_t *)march_alloc(48);
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -2131,7 +2169,7 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
         march_sched_init();
     }
     march_ensure_sched_started();
-    int64_t *task = (int64_t *)march_alloc(40);
+    int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
