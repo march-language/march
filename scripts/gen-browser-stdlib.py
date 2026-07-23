@@ -19,7 +19,7 @@ FILES = [
     "range.march", "enum.march", "random.march", "json.march",
     "http.march", "http_transport.march", "http_client.march",
     "crypto.march", "deque.march", "vector_clock.march", "merkle.march",
-    "crdt.march", "consistent_hash.march",
+    "crdt.march", "consistent_hash.march", "vault.march",
     # dom.march, hash_map.march: needed by js/march_browser_compile.ml (the
     # live-compile playground entry point), not by march_browser.ml's
     # interpreter.

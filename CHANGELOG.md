@@ -13,6 +13,24 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- The browser cookbook/playground REPL's bundled stdlib was missing
+  `Vault` — the docs/cookbook/vault.md examples errored with `no member
+  'new' in module 'Vault'` because `vault.march` wasn't in either
+  `js/march_browser.ml`'s `browser_stdlib_files` load-list or
+  `scripts/gen-browser-stdlib.py`'s `FILES` list used to generate
+  `docs/assets/march_stdlib.js`. Added it to both and regenerated the
+  bundled assets.
+
+### Documentation
+
+- The "sandboxed plugin runner" example in docs/cookbook/capabilities.md
+  called a `sandbox_eval` function that never existed anywhere in the
+  compiler or stdlib — it was illustrative pseudocode, so running the
+  example in the cookbook REPL errored with `unbound variable:
+  sandbox_eval`. Replaced it with a trivial inline stub so the snippet
+  actually compiles and runs; the example's real point (the `PluginCap`
+  gate) is unaffected.
+
 - A qualified call to a real module's genuinely nonexistent member (e.g.
   `String.length(...)` — `String` has no `length`; the real API is
   `byte_size`/`codepoint_count`/`grapheme_count`) silently fell through to an
