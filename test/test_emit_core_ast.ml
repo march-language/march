@@ -184,7 +184,41 @@ let canonicalize (s : string) : string =
       incr i
     end
   done;
-  Buffer.contents buf
+  let result = Buffer.contents buf in
+  (* Cheap hardening for the whitespace-free-JSON assumption above: the only
+     shape this function treats specially is `"kind":"TVar","id":N` (matched
+     as one fixed marker string with no whitespace between the key and its
+     value). If the emitter ever inserted whitespace, or a NEW node/field
+     also spelled its key "id" outside that exact `"kind":"TVar",` prefix,
+     the digit-scan above would silently fail to canonicalize it and this
+     function would degrade to (partial) identity -- which fails safe today
+     (the byte comparison just fails loudly instead of silently passing),
+     but is worth flagging explicitly rather than relying on that as an
+     accident. So: every "id": occurrence in the OUTPUT must be immediately
+     preceded by the `"kind":"TVar",` marker; anything else means this
+     compact-JSON assumption no longer holds and canonicalize needs a look. *)
+  let id_marker = "\"id\":" in
+  let id_len = String.length id_marker in
+  let kind_prefix = "\"kind\":\"TVar\"," in
+  let kind_len = String.length kind_prefix in
+  let rlen = String.length result in
+  let j = ref 0 in
+  while !j + id_len <= rlen do
+    if String.sub result !j id_len = id_marker then begin
+      if not (!j >= kind_len && String.sub result (!j - kind_len) kind_len = kind_prefix)
+      then
+        failwith
+          (Printf.sprintf
+             "canonicalize: found \"id\": at offset %d not immediately \
+              preceded by \"kind\":\"TVar\", -- canonicalize assumes \
+              whitespace-free JSON where \"id\" only ever appears as part \
+              of that exact TVar shape; if the emitter's output format \
+              changed, canonicalize (and this check) need updating."
+             !j);
+      j := !j + id_len
+    end else incr j
+  done;
+  result
 
 (* ------------------------------------------------------------------ *)
 (* Subprocess runner: run march --emit-core-ast <rel_path>, cwd =        *)
@@ -285,13 +319,15 @@ let assert_v3 (produced : string) =
    it, and check the resulting JSON for the expected substrings. *)
 let emit_core_ast_of_source source =
   let tmp = Filename.temp_file ~temp_dir:project_root "march_a3_module_caps_" ".march" in
-  let oc = open_out tmp in
-  output_string oc source;
-  close_out oc;
-  let rel = Filename.basename tmp in
-  let (output, _exit_code) = run_emit_core_ast rel in
-  (try Sys.remove tmp with _ -> ());
-  output
+  Fun.protect
+    ~finally:(fun () -> try Sys.remove tmp with _ -> ())
+    (fun () ->
+      let oc = open_out tmp in
+      output_string oc source;
+      close_out oc;
+      let rel = Filename.basename tmp in
+      let (output, _exit_code) = run_emit_core_ast rel in
+      output)
 
 (* Same free-standing substring search assert_v3 above already uses inline;
    factored out here since this test needs it multiple times. *)
@@ -336,9 +372,15 @@ end|}
      values. *)
   assert_contains json "\"format_version\":3";
   assert_contains json "\"module_caps\"";
-  (* Store declared `needs IO.FileRead`, so it must appear with that cap. *)
-  assert_contains json "\"module\":\"Store\"";
-  assert_contains json "\"IO.FileRead\""
+  (* Store declared `needs IO.FileRead`, so it must appear with that cap.
+     Assert the joined literal exactly as the emitter formats it (compact,
+     no spaces -- see lib/dump/dump.ml's json_obj/json_list), not just the
+     two substrings independently: `IO.FileRead` also appears elsewhere in
+     the emitted document (inside the `module` tree's DNeeds node), so
+     checking "module":"Store" and "IO.FileRead" as separate substrings
+     would still pass even if module_caps regressed to emitting an empty
+     `needs` array for Store. *)
+  assert_contains json "{\"module\":\"Store\",\"needs\":[\"IO.FileRead\"]}"
 
 let test_case_matches_fixture case () =
   let expected = read_file (fixture_path case.fixture_name) in

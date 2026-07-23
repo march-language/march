@@ -1785,12 +1785,46 @@ let compile filename =
        each nested DMod finishes (typecheck.ml:8736). The Lean conformance
        checker consumes this for Check 4 (transitive `use` coverage): a module
        that `use`s another inherits an obligation to cover that module's
-       declared needs. Sorted by module name — module_caps is built by consing
-       in checking order, which is not stable across unrelated edits, and an
-       unsorted envelope would make the golden test spuriously fragile. *)
+       declared needs.
+
+       module_caps is keyed by BARE module name and is consed onto the head
+       as each DMod finishes, so it can (and, with a nested user module that
+       shadows a stdlib name, does) contain duplicate keys. march's own
+       Check 4 resolves this same table via [List.assoc_opt imported
+       env.module_caps] (typecheck.ml:6832, :7068) on the unsorted, cons-order
+       list — [List.assoc_opt] returns the FIRST match it finds scanning from
+       the head, i.e. the most-recently-consed entry for that name. To keep
+       this emitted table a genuine function of module name (so a downstream
+       decoder folding the array into a map has nothing to guess), we
+       de-duplicate BEFORE sorting, keeping exactly the first occurrence in
+       the original cons-order list — the same entry [List.assoc_opt] would
+       resolve to. Only after de-duplication is sorting order-preserving in
+       the sense that matters: with unique keys, [List.stable_sort] (NOT
+       plain [List.sort], which OCaml's stdlib does not document as stable)
+       just reorders those already-resolved entries by name for a
+       deterministic, diff-stable envelope.
+
+       This table is emitted IN FULL (every module the typechecker ever
+       recorded a nested DMod for, including all of stdlib — currently ~99
+       modules), not filtered down to the set reachable from this file's own
+       `use`s. That is a conscious tradeoff, not an oversight: filtering to
+       `use`-reachable modules risks under-emitting if the reachability
+       computation here ever disagrees with march's own, and a missing entry
+       would silently make Check 4 pass downstream (no entry to violate) —
+       a false accept, which is the exact failure this key exists to
+       prevent. The cost is that golden fixtures are sensitive to unrelated
+       stdlib `needs` edits; that coupling is accepted deliberately in
+       exchange for never under-emitting. *)
+    let module_caps_dedup =
+      let seen = Hashtbl.create 16 in
+      List.filter (fun (m, _) ->
+        if Hashtbl.mem seen m then false
+        else begin Hashtbl.add seen m (); true end)
+        typecheck_env.March_typecheck.Typecheck.module_caps
+    in
     let module_caps_json =
-      typecheck_env.March_typecheck.Typecheck.module_caps
-      |> List.sort (fun (a, _) (b, _) -> String.compare a b)
+      module_caps_dedup
+      |> List.stable_sort (fun (a, _) (b, _) -> String.compare a b)
       |> List.map (fun (m, needs) ->
            March_dump.Dump.json_obj
              [ ("module", March_dump.Dump.json_string m);
