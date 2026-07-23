@@ -848,6 +848,51 @@ let compile_march_or_skip ?(cmd_prefix = "") ?(extra_args = "") ~main_exe ~bin ~
   | `Ok bin -> Some bin
   | `Skipped -> None
 
+(** Runs [argv] (argv.(0) is looked up on PATH like execvp) with stdout
+    redirected to [stdout_file] and stderr discarded, waiting up to
+    [timeout_secs] for it to exit. Returns [`Exited rc] on a normal exit, or
+    [`Timeout] if the deadline passes first -- in which case the child is
+    SIGKILLed and reaped so it can never outlive the test process.
+
+    Exists to close a real gap: [Sys.command] (used everywhere else in this
+    file to run a compiled binary) has no way to bound how long it waits, so
+    a genuinely hung child blocks the calling test -- and therefore the
+    entire suite -- indefinitely, with no way to recover short of an
+    operator manually finding and killing the process. A hang found this way
+    is always worth surfacing (it's real signal, possibly a genuine
+    regression, possibly an external tool/environment issue -- e.g. ASAN's
+    own shadow-memory init has been observed to wedge machine-wide under
+    extreme concurrent load, independent of March's own code, verifiable by
+    running a trivial unrelated `clang -fsanitize=address` program), so this
+    deliberately does NOT fold a timeout into the existing tool-absence skip
+    ledger -- callers should fail loudly, not silently pass. *)
+let run_with_timeout ~timeout_secs ~stdout_file argv =
+  let out_fd = Unix.openfile stdout_file [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644 in
+  let devnull = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0o644 in
+  let pid =
+    match Unix.create_process argv.(0) argv Unix.stdin out_fd devnull with
+    | pid -> pid
+    | exception e -> Unix.close out_fd; Unix.close devnull; raise e
+  in
+  Unix.close out_fd;
+  Unix.close devnull;
+  let deadline = Unix.gettimeofday () +. timeout_secs in
+  let rec wait_loop () =
+    match Unix.waitpid [ Unix.WNOHANG ] pid with
+    | 0, _ ->
+      if Unix.gettimeofday () >= deadline then begin
+        (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+        ignore (Unix.waitpid [] pid);
+        `Timeout
+      end else begin
+        ignore (Unix.select [] [] [] 0.05);
+        wait_loop ()
+      end
+    | _, Unix.WEXITED rc -> `Exited rc
+    | _, (Unix.WSIGNALED _ | Unix.WSTOPPED _) -> `Exited (-1)
+  in
+  wait_loop ()
+
 (* ── LLVM IR validity gate infra (W2 Task 3 / W2.1) ──────────────────────
    Policy mirrors setup_jit_runtime / compile_march above: a skip is
    legitimate ONLY when no LLVM verifier tool is reachable on this machine
