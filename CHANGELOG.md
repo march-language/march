@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Compiled `Csv.read_all`/`Csv.each_row_with_header` could crash
+  (nondeterministic SIGBUS/SIGSEGV) or silently return zero rows. A
+  builtin-call argument coercion added to fix an unrelated tagging bug
+  (`Some((top, _)) -> int_to_string(top)` printing `7` instead of `3`) was
+  incorrectly tagging opaque native-pointer handles — Csv/File/Tcp handles
+  are represented as plain `Int` in March's type system by convention, but
+  are raw C pointers at runtime — whenever they were passed to a builtin
+  whose C signature declares the parameter as `ptr`. Restricted the
+  coercion to the direction it was actually meant for.
+
 - The browser cookbook/playground REPL's bundled stdlib was missing
   `Vault` — the docs/cookbook/vault.md examples errored with `no member
   'new' in module 'Vault'` because `vault.march` wasn't in either
