@@ -285,11 +285,54 @@ march/
 
 ## Current State (as of 2026-07-23, fork-join `task_await` busy-spin/LIFO-starvation perf cliff fixed — park/wake replaces spin-yield)
 
-**Fixed a severe superlinear performance cliff in fork-join workloads using `task_spawn`/`task_await_unwrap`.** `bench/par_fib.march` (`par_fib(40, 20)`) took 3269s (54.5 min) to complete; `par_fib(39, 20)` — only 1.6x fewer tasks — failed to complete in 120s+. Profiling a stuck run (`sample`) showed ~100% of CPU in `task_wait_done`'s busy-spin (`runtime/march_runtime.c`), a bare `while(!done){march_sched_yield();}`: each yield does a full `swapcontext`, and on macOS `getcontext`/`swapcontext` invoke real `sigaltstack`/`sigprocmask`/`getrlimit` syscalls per call, with zero samples in the actual `fib()` work. A pure CPU-cost fix (spin-then-`nanosleep` backoff) cut CPU from ~394% to ~9% but still failed to complete in 120s+, exposing a second bug: `sched_loop`'s local Chase-Lev deque pop is LIFO (`runtime/march_scheduler.c`), so a proc that yields while awaiting is re-pushed to its own queue's bottom and keeps getting re-dispatched ahead of a sibling task sitting underneath it — the sibling can only escape via another scheduler's top-of-queue `steal()`, which requires its older sibling to fully drain first, a starvation pattern that compounds with fork-join depth.
+**Fixed the "Known follow-up" left open by the busy-spin fix immediately below: a severe superlinear performance cliff in fork-join workloads using `task_spawn`/`task_await_unwrap`, which the spin-then-sleep backoff cut CPU usage on but did not actually fix.** `bench/par_fib.march` (`par_fib(40, 20)`) took 3269s (54.5 min) to complete; `par_fib(39, 20)` — only 1.6x fewer tasks — failed to complete in 120s+, even after the backoff patch (cut CPU from ~394% to ~9%, still didn't finish). Profiling a stuck run (`sample`) with the *pre-backoff* code showed ~100% of CPU in `task_wait_done`'s busy-spin (`runtime/march_runtime.c`), a bare `while(!done){march_sched_yield();}`: each yield does a full `swapcontext`, and on macOS `getcontext`/`swapcontext` invoke real `sigaltstack`/`sigprocmask`/`getrlimit` syscalls per call, with zero samples in the actual `fib()` work. The backoff patch's A/B test then exposed a second, independent bug: `sched_loop`'s local Chase-Lev deque pop is LIFO (`runtime/march_scheduler.c`), so a proc that yields while awaiting is re-pushed to its own queue's bottom and keeps getting re-dispatched ahead of a sibling task sitting underneath it — the sibling can only escape via another scheduler's top-of-queue `steal()`, which requires its older sibling to fully drain first, a starvation pattern that compounds with fork-join depth.
 
-**Fix:** replaced the spin with a real park/wake, mirroring the actor-mailbox `march_sched_recv`/`march_sched_wake` pattern already used elsewhere. New `march_sched_park_self()` (`runtime/march_scheduler.{c,h}`): sets `PROC_PARKED`, `swapcontext`s back to the owning scheduler, resumes only when explicitly woken. The Task heap object grew 40→48 bytes (new word: in-scheduler waiter `march_proc*`). `task_wait_done`'s in-scheduler branch does the standard check/register/recheck sequence (closes the lost-wakeup race) then parks; `march_thunk_trampoline` wakes the registered waiter right after setting the done flag. Foreign-thread (non-scheduler) `task_await` callers are unchanged (already condvar-based).
+**Fix:** replaced the spin (and its wall-clock backoff) entirely with a real park/wake, mirroring the actor-mailbox `march_sched_recv`/`march_sched_wake` pattern already used elsewhere. New `march_sched_park_self()` (`runtime/march_scheduler.{c,h}`): sets `PROC_PARKED`, `swapcontext`s back to the owning scheduler, resumes only when explicitly woken. The Task heap object grew 40→48 bytes (new word: in-scheduler waiter `march_proc*`). `task_wait_done`'s in-scheduler branch does the standard check/register/recheck sequence (closes the lost-wakeup race) then parks; `march_thunk_trampoline` wakes the registered waiter right after setting the done flag. Foreign-thread (non-scheduler) `task_await` callers are unchanged (already condvar-based). `march_sched_wake`'s own `PROC_PARKED`-wait spin (fixed just below) is untouched and still applies to this new caller.
 
 Result: `par_fib(39, 20)` now completes in 0.39s, `bench/par_fib.march` (`par_fib(40, 20)`) in 0.73-0.80s with correct output `102334155` — roughly a **4500x** speedup. Verified zero regressions: `run_compiler` 538/538, `run_eval` 240/240, `run_codegen` 444/444 (includes all compiled actor/scheduler tests), `run_stdlib -q` 780/780, plus the `repl_compiler_parity` (JIT/interpreter parity), `vault stdlib` (concurrency test), and `crypto builtins` (pbkdf2) Slow groups all pass. The full (non-`-q`) `run_stdlib` run shows 17 `adversarial-regressions` Slow-group failures at indices 14-23/25/30-32/35-37 — confirmed **byte-identical** on an unpatched control run (file-swap revert, same indices fail with the same `march: cannot find runtime/march_runtime.c` / ASAN-dyld-livelock signatures), i.e. 100% pre-existing and environmental, not caused by this change.
+
+## Current State (as of 2026-07-23, two unbounded scheduler busy-spins fixed — `task_wait_done` + `march_sched_wake`)
+
+**Two busy-spin waits in the actor scheduler runtime (`runtime/march_runtime.c`,
+`runtime/march_scheduler.c`) that had no deadline/fallback now bound their
+worst case instead of spinning at ~100% CPU forever.** `task_wait_done`'s
+in-scheduler branch (the wait path behind `task_await`/`task_await_unwrap`)
+and `march_sched_wake`'s `PROC_PARKED`-wait spin both previously assumed their
+condition would resolve near-instantly and had zero possibility of
+self-recovery if it didn't — the suspected cause of multi-hour CPU-pegged
+compiled-test hangs observed under host oversubscription (see the
+`project_scheduler_unbounded_spin_hangs` memory for the full investigation).
+Both now spin-yield for a generous grace period, then fall back to a cheap
+`nanosleep(1ms)`-based poll — `task_await`'s wait-forever semantics are
+unchanged, only the mechanics of the wait. `task_wait_done`'s grace period is
+measured in *wall-clock* time (`CLOCK_MONOTONIC`, checked periodically to
+keep the fast path cheap, 5s bound) rather than a spin-iteration count: an
+iteration-count version was tried first and A/B-benchmarked to silently
+collapse legitimate heavy-parallelism throughput on a `bench/par_fib.march`-
+shaped fork-join workload (~390% CPU → ~15% CPU), because each
+`march_sched_yield()` round trip takes measurably longer once the scheduler
+is genuinely busy dispatching many ready procs, so a fixed iteration count
+elapses in far less wall-clock time than intended and the backoff fired
+during completely healthy execution. `march_sched_wake`'s spin stays
+iteration-count-based — its PARKED→WAITING transition is a small, bounded,
+wait-free-ish critical section that doesn't depend on arbitrary user-code
+progress, and the same A/B benchmark confirmed it's unaffected either way.
+Verified: full suite (`run_compiler` 538 / `run_eval` 240 / `run_codegen` 444
+— includes the actual originally-hung test — / `run_stdlib` 816 with one
+pre-existing failure independently root-caused as a 100%-reproducible
+macOS/ASAN dyld-init livelock, unrelated to March: a bare `clang
+-fsanitize=address` hello-world hangs identically), `bench/list_ops.march` +
+`bench/parallel.march` no regression, and a `par_fib`-shaped fork-join
+workload below March's current task-count scaling limits restored to full
+parallel CPU utilization matching the unpatched baseline. **Known follow-up
+(separate, not fixed here):** profiling a fork-join workload that crosses
+March's task-count scaling cliff (~14K→22K concurrent `task_spawn`s) found
+this CPU-backoff patch alone doesn't fix that cliff — CPU usage drops as
+designed but the workload still doesn't complete, revealing a distinct,
+deeper LIFO-starvation bug in `sched_loop`'s local-deque dispatch policy. See
+the memory's "second follow-up" section for the live-profiled evidence.
+**Resolved by the entry directly above** (park/wake replaces the spin
+entirely, fixing both the CPU cost and the LIFO starvation together).
 
 ## Current State (as of 2026-07-22, `self()` typed as `Pid[state]` instead of plain `Int`)
 

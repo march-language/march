@@ -220,6 +220,62 @@ let canonicalize (s : string) : string =
   done;
   result
 
+(* Replace the `module_caps` array's contents with a fixed placeholder, on
+   both sides of the comparison.
+
+   `module_caps` is a WHOLE-PROGRAM table: for these corpus files (none of
+   which define a capability-bearing user module) it is just a snapshot of
+   every stdlib module's declared `needs` — currently ~95 entries, the large
+   majority of each fixture's bytes. That snapshot legitimately changes
+   whenever anyone edits a stdlib module's `needs`, adds a stdlib module, or
+   removes one — none of which has anything to do with the per-file AST these
+   fixtures exist to pin. Left in the byte comparison it made three fixtures
+   fail the moment unrelated stdlib commits landed on main.
+
+   The emitter deliberately emits the FULL table (a missing entry would
+   silently disable the Lean checker's Check 4 — a false accept), so the fix
+   is here, not in the emitter: drop `module_caps` from the per-file byte
+   comparison. Its structure and content are covered separately and precisely
+   by `test_module_caps_and_v3`, which asserts the exact
+   `{"module":"Store","needs":["IO.FileRead"]}` shape for a user module plus
+   `format_version` 3. Applied to BOTH sides, so it is robust to a future
+   regeneration re-introducing the key into a fixture. *)
+let strip_module_caps (s : string) : string =
+  let marker = "\"module_caps\":[" in
+  let mlen = String.length marker in
+  match
+    (let n = String.length s in
+     let rec find i = if i + mlen > n then None
+       else if String.sub s i mlen = marker then Some i else find (i + 1)
+     in find 0)
+  with
+  | None -> s  (* no module_caps (e.g. a hand-built string) — leave untouched *)
+  | Some start ->
+    (* find the matching close ']' — module_caps entries contain no nested
+       arrays in the `needs` position beyond one level, so track bracket depth
+       from the opening '[' the marker ends on. *)
+    let n = String.length s in
+    let depth = ref 0 in
+    let i = ref (start + mlen - 1) in  (* the '[' of the marker *)
+    let stop = ref (-1) in
+    while !stop < 0 && !i < n do
+      (match s.[!i] with
+       | '[' -> incr depth
+       | ']' -> decr depth; if !depth = 0 then stop := !i
+       | _ -> ());
+      incr i
+    done;
+    if !stop < 0 then s
+    else
+      String.sub s 0 start
+      ^ "\"module_caps\":[<stripped>]"
+      ^ String.sub s (!stop + 1) (n - !stop - 1)
+
+(* The normalisation applied to both sides of every fixture comparison:
+   canonical metavar-ID renumbering, then module_caps stripping. *)
+let normalize_for_compare (s : string) : string =
+  strip_module_caps (canonicalize s)
+
 (* ------------------------------------------------------------------ *)
 (* Subprocess runner: run march --emit-core-ast <rel_path>, cwd =        *)
 (* project_root, capture stdout and exit code.                          *)
@@ -391,9 +447,10 @@ let test_case_matches_fixture case () =
   Alcotest.(check string)
     (Printf.sprintf
        "%s: --emit-core-ast stdout matches golden fixture %s (metavar IDs \
-        compared via canonical renumbering, see canonicalize above)"
+        compared via canonical renumbering, module_caps stripped — see \
+        normalize_for_compare above)"
        case.label case.fixture_name)
-    (canonicalize expected) (canonicalize actual);
+    (normalize_for_compare expected) (normalize_for_compare actual);
   if case.fixture_name = "t01_literals.expected.json" then assert_v3 actual
 
 let suite =

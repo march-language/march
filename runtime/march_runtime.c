@@ -1994,7 +1994,18 @@ static void task_wait_done(int64_t *task) {
          * Without the fast-path check up front, an already-done task would
          * still pay a park/wake round trip; without the recheck after
          * registering, a task that completes between our first check and
-         * registering would park us with nobody left to wake us. */
+         * registering would park us with nobody left to wake us.
+         *
+         * Supersedes an earlier spin-then-sleep backoff here (wall-clock
+         * CLOCK_MONOTONIC grace period before falling back to nanosleep):
+         * that cut wasted CPU on a stalled wait but, A/B-tested against a
+         * fork-join workload that crosses March's task-count scaling cliff
+         * (~14K-22K concurrent task_spawns), didn't fix the underlying
+         * throughput collapse — a LIFO local-deque starvation bug in
+         * sched_loop kept genuine sibling work from ever being dispatched.
+         * Parking properly (rather than periodically re-polling) removes
+         * this proc from the dispatch loop entirely until there's an actual
+         * reason to run it again, which addresses both issues at once. */
         march_proc *self = march_sched_current();
         for (;;) {
             if (atomic_load_explicit((_Atomic int64_t *)&task[4],
