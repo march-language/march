@@ -2024,12 +2024,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
              "3" compiled-only (interpreter unaffected — no such repr
              split there). Reuse the builtin's own declare_sig (single
              source of truth, already used for the preamble) rather than a
-             second hand-maintained param-type table that could drift. *)
+             second hand-maintained param-type table that could drift.
+
+             Only the "ptr" (generic/erased slot) -> "i64"/"double" (native
+             scalar) direction is coerced — the one the bug above needs.
+             The REVERSE direction ("i64"/"double" arg -> a declared "ptr"
+             param) must NOT go through [coerce]: several builtins
+             (csv_next_row/csv_close, file_close, ...) declare a "ptr" C
+             parameter for an opaque native handle whose March-level type
+             is plain Int, purely as a typechecking convention — the value
+             already IS a raw pointer, not a generic scalar needing the
+             boxed-slot tag.  [coerce]'s ("i64","ptr") case unconditionally
+             applies (v<<1)|1 (the boxing convention for a genuine Int
+             entering a generic slot), which corrupts such handles: passed
+             to their own runtime accessor, the tagged/shifted bit pattern
+             no longer resolves to the handle's real heap address (found
+             via bisection to this commit — Csv.read_all read every row's
+             fields off a bogus tagged "handle", nondeterministically
+             misreading it as EOF or as a wild pointer, exit 138/139).
+             LLVM's opaque-pointer calls don't require the call-site's
+             argument types to match the callee's declared prototype
+             (i64 and ptr share the same register/ABI class), so leaving
+             the value's own type/representation untouched here reproduces
+             the pre-regression, correct behavior exactly. *)
           (match Llvm_builtins.builtin_param_llvm_tys resolved_name with
            | Some param_llvm_tys when List.length param_llvm_tys = List.length arg_pairs ->
              List.map2 (fun param_ty (ty, v) ->
-               let v' = coerce ctx ty v param_ty in
-               param_ty ^ " " ^ v'
+               if ty = "ptr" && (param_ty = "i64" || param_ty = "double") then
+                 let v' = coerce ctx ty v param_ty in
+                 param_ty ^ " " ^ v'
+               else ty ^ " " ^ v
              ) param_llvm_tys arg_pairs
            | _ -> arg_strs)
     in
