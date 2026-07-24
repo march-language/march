@@ -30,6 +30,11 @@ let is_int_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> true
   | _ -> false
 
+let is_string_base : A.ty -> bool = function
+  | A.TyCon ({ A.txt = "String"; _ }, []) -> true
+  | _ -> false
+[@@warning "-32"]
+
 (* A function's declared return refinement, when its base type is Int.
    Defined here (rather than beside the other postcondition helpers) because
    [collect_all_defs] records it into every fn_sig. *)
@@ -96,6 +101,27 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
 let measure_nonneg : string list ref = ref []
 let is_nonneg_measure (m : string) : bool = m = "len" || List.mem m !measure_nonneg
 
+(* ── The predicate vocabulary ──────────────────────────────────────────────
+   Which names carry meaning inside a refinement predicate.  Previously this
+   knowledge was implicit: spread across [is_measure], [is_nonneg_measure] and
+   inline "len" comparisons at four sites, and otherwise encoded only in
+   [smt_of]'s match arms.  Naming it lets us (a) warn about a predicate the
+   checker will silently ignore, and (b) give the ADT feature one place to
+   register its constructor testers. *)
+
+(* Operators [smt_of] translates.  Kept in sync with its match arms by the
+   `every operator is known vocabulary` test in test_refinecheck.ml. *)
+let predicate_operators =
+  [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
+  ; "=="; "!="; "<"; "<="; ">"; ">=" ]
+
+let is_predicate_operator (m : string) : bool = List.mem m predicate_operators
+
+(* True iff the checker attaches meaning to [m] applied inside a predicate.
+   Extended by the ADT-tag feature with its constructor testers. *)
+let known_predicate_fn (m : string) : bool =
+  is_predicate_operator m || is_measure m
+
 (* Conservative syntactic non-negativity of a measure body: every return path is
    a non-negative literal, a sum/product of non-negatives, or a call to a measure
    already known non-negative (incl. the measure itself, inductively). *)
@@ -161,6 +187,15 @@ let is_record_base (t : A.ty) : bool =
      | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
      | _ -> false)
   | _ -> false
+
+(* True when [t] is a bare TyCon naming any registered ADT — variant or
+   record, and (unlike [is_record_base]) whether or not it is applied to type
+   arguments, e.g. `Option(Int)`.  The ADT-tag feature dispatches on this. *)
+let is_adt_base (t : A.ty) : bool =
+  match t with
+  | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
+  | _ -> false
+[@@warning "-32"]
 
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,

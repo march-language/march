@@ -880,6 +880,37 @@ let tier0_suite =
              \  end\n\
               end\n")) ]
 
+(* ── Shared predicate-vocabulary foundation ────────────────────────────────
+   Task 1 is pure plumbing: it adds the registry without wiring it to
+   anything, so these must pass both before AND after. *)
+let vocab_suite =
+  [ gated "an unrecognized predicate name still compiles (no error)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "ordinary Int predicates are unaffected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn main() : Int do take_n(-3) end\n\
+              end\n"));
+
+    gated "every operator smt_of handles is known vocabulary" (fun () ->
+        (* If smt_of gains an operator, add it to predicate_operators too, or
+           a predicate using it will draw a spurious "no effect" warning. *)
+        List.iter
+          (fun op ->
+            Alcotest.(check bool)
+              (Printf.sprintf "%s is known" op) true
+              (March_refinecheck.Refine_check.known_predicate_fn op))
+          [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
+          ; "=="; "!="; "<"; "<="; ">"; ">=" ]) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -897,5 +928,6 @@ let () =
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
       ("guard-path-sensitivity", guard_suite);
-      ("tier0-postcond", tier0_suite) ]
+      ("tier0-postcond", tier0_suite);
+      ("predicate-vocab", vocab_suite) ]
 
