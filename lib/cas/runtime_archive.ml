@@ -21,10 +21,15 @@
       - [Cas.runtime_identity] — content digest of every runtime/*.{c,h}
         (reused verbatim, so editing any runtime source invalidates this the
         same way it already invalidates the whole-binary CAS);
-      - the C toolchain's own [--version] output — deliberately NOT covered by
+      - [Cas.compiler_identity] — the march executable's own bytes.  Needed
+        because [runtime_identity] resolves the runtime directory cwd-first
+        and so can end up digesting an unrelated ./runtime/ rather than the
+        sources actually compiled; this component makes a march upgrade
+        invalidate the entry regardless;
+      - the C toolchain's own [--version] output — NOT covered by
         [Cas.compiler_identity], which hashes only the march executable's
         bytes.  A runner-image clang bump with an unchanged march binary must
-        invalidate these objects, and today would not;
+        invalidate these objects, and otherwise would not;
       - the exact compile flag string (opt level, -g, sanitizers, -march,
         and the -D/-I bearing openssl/zlib/blake3 discovery flags).
 
@@ -38,12 +43,18 @@
     ───────────
     [dune runtest] compiles many rules in parallel, so a cold cache has
     several march processes racing to build the same entry.  Each builds into
-    a private temp directory and then [Unix.rename]s it into place, which is
-    atomic on POSIX; a loser sees [ENOTEMPTY]/[EEXIST], discards its temp
-    copy, and uses the winner's.  (Note that [Cas.store_artifact] does NOT do
-    this — it writes its pointer file directly — which is a latent gap there,
-    tolerable today only because whole-binary entries are keyed per-source and
-    so rarely contended.) *)
+    a private temp directory, then publishes each object with its own
+    [Unix.rename], which is atomic on POSIX.  Racers write byte-equivalent
+    content for a given key, so whoever lands last is equally correct, and a
+    reader either sees a complete set (uses it) or does not (falls back).
+    Publishing per-file rather than renaming the directory also makes the
+    cache self-healing: an entry missing one [.o] — a pruning script, a
+    partial cache restore — gets exactly that object rebuilt, where a
+    whole-directory rename would fail [ENOTEMPTY] against the incomplete
+    directory and silently fall back on every future build forever.  (Note
+    that [Cas.store_artifact] does NOT do this — it writes its pointer file
+    directly — which is a latent gap there, tolerable today only because
+    whole-binary entries are keyed per-source and so rarely contended.) *)
 
 let read_file path =
   try
@@ -74,35 +85,42 @@ let rm_rf path =
    compile path would otherwise pay it on every invocation. *)
 let cc_identity_tbl : (string, string) Hashtbl.t = Hashtbl.create 4
 
-let cc_identity (cc : string) : string =
+(* [None] when `cc --version` can't be read.  Deliberately NOT degraded to
+   hashing the driver string: that would silently drop the toolchain out of
+   the key, so a later compiler upgrade would serve stale objects.  Losing
+   the cache (falling back to the full recompile) is the safe failure. *)
+let cc_identity (cc : string) : string option =
   match Hashtbl.find_opt cc_identity_tbl cc with
-  | Some h -> h
+  | Some h -> Some h
   | None ->
-    let tmp = Filename.temp_file "march_ccver" ".txt" in
-    let rc =
-      Sys.command (Printf.sprintf "%s --version > %s 2>&1" cc (Filename.quote tmp)) in
-    let raw = match (if rc = 0 then read_file tmp else None) with
-      | Some s -> s
-      (* Unreadable/failed --version: fall back to the driver string itself.
-         That still separates clang from zig cc, just not two clang builds —
-         acceptable, and the runtime digest below is the load-bearing part. *)
-      | None -> cc
-    in
-    (try Sys.remove tmp with Sys_error _ -> ());
-    let h = Blake3.hash_string raw in
-    Hashtbl.replace cc_identity_tbl cc h;
-    h
+    let tmp = try Some (Filename.temp_file "march_ccver" ".txt")
+              with Sys_error _ -> None in
+    (match tmp with
+     | None -> None
+     | Some tmp ->
+       let rc =
+         Sys.command (Printf.sprintf "%s --version > %s 2>&1" cc (Filename.quote tmp)) in
+       let raw = if rc = 0 then read_file tmp else None in
+       (try Sys.remove tmp with Sys_error _ -> ());
+       (match raw with
+        | None -> None
+        | Some raw ->
+          let h = Blake3.hash_string raw in
+          Hashtbl.replace cc_identity_tbl cc h;
+          Some h))
 
 (* Runtime objects depend only on the runtime sources + toolchain + flags —
    nothing project-specific — so they live under $HOME rather than in a
    project's .march/, which also keeps them out of dune's build sandboxes.
-   Falls back to the cwd when HOME is unset (CI containers, some sandboxes). *)
+
+   [None] when HOME is unset.  Deliberately NOT falling back to the cwd: that
+   drops a .march/ directory wherever march happens to run — into a user's
+   project root, or into a dune sandbox / test CWD, where a stray .march/ is
+   a known hazard for the readdir in test/native's IR-validity gate. *)
 let cache_root () =
-  let base = match Sys.getenv_opt "HOME" with
-    | Some h -> h
-    | None -> Sys.getcwd ()
-  in
-  Filename.concat base ".march/cache/runtime-objs"
+  match Sys.getenv_opt "HOME" with
+  | Some h when h <> "" -> Some (Filename.concat h ".march/cache/runtime-objs")
+  | _ -> None
 
 let obj_name (src : string) =
   Filename.remove_extension (Filename.basename src) ^ ".o"
@@ -118,40 +136,52 @@ let obj_name (src : string) =
 
     Returns [Error] rather than raising if anything goes wrong, so the caller
     can fall back to the original single-command compile. *)
-let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
+let ensure_exn ~(cc : string) ~(cflags : string) ~(sources : string list)
   : (string list, string) result =
   if sources = [] then Ok []
-  else begin
+  else match cache_root (), cc_identity cc with
+  | None, _ -> Error "HOME unset"
+  | _, None -> Error (Printf.sprintf "could not read `%s --version`" cc)
+  | Some root, Some cc_id ->
     let key =
       Blake3.hash_string
         (String.concat "\x00"
-           ([ "march-runtime-objs-v1";
+           ([ "march-runtime-objs-v2";
               Lazy.force Cas.runtime_identity;
-              cc_identity cc;
+              (* The march executable's own identity.  [runtime_identity]
+                 resolves the runtime dir cwd-first, so it can digest an
+                 unrelated ./runtime/ instead of the one actually compiled;
+                 without this component, upgrading march (new runtime/*.c)
+                 would then NOT change the key and stale objects would be
+                 linked against the new IR.  The whole-binary CAS already
+                 folds this in (see Cas.compilation_hash) — match it. *)
+              Lazy.force Cas.compiler_identity;
+              cc_id;
               cflags ]
             @ List.map Filename.basename sources))
     in
-    let root = cache_root () in
     let dir =
       Filename.concat root
         (String.sub key 0 2 ^ "/" ^ String.sub key 2 (String.length key - 2))
     in
     let objs = List.map (fun s -> Filename.concat dir (obj_name s)) sources in
     let all_present () = List.for_all Sys.file_exists objs in
-    (* The rename below is atomic, so an existing directory is a complete one.
-       [all_present] additionally guards against a partially-deleted entry
-       (e.g. a hand-pruned cache) rather than trusting the directory alone. *)
     if all_present () then Ok objs
     else begin
-      let parent = Filename.dirname dir in
-      mkdir_p parent;
+      mkdir_p dir;
       let tmp =
-        Filename.concat parent
+        Filename.concat (Filename.dirname dir)
           (Printf.sprintf "tmp-%d-%d" (Unix.getpid ())
              (int_of_float (Unix.gettimeofday () *. 1000.)))
       in
       rm_rf tmp;
       mkdir_p tmp;
+      (* Only build what's actually missing, so a partially-pruned entry
+         repairs itself instead of being rebuilt-then-discarded forever. *)
+      let missing =
+        List.filter (fun s -> not (Sys.file_exists (Filename.concat dir (obj_name s))))
+          sources
+      in
       let failure =
         List.fold_left (fun acc src ->
           match acc with
@@ -163,20 +193,39 @@ let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
                 cc cflags (Filename.quote src) (Filename.quote out) in
             if Sys.command cmd = 0 then None
             else Some cmd
-        ) None sources
+        ) None missing
       in
       match failure with
       | Some cmd ->
         rm_rf tmp;
         Error (Printf.sprintf "object compile failed: %s" cmd)
       | None ->
-        (* Publish atomically.  A lost race (another process already renamed
-           its own build into place) fails with ENOTEMPTY/EEXIST/EACCES —
-           that is success as far as we're concerned: the winner's objects
-           are byte-equivalent, built from the same key. *)
-        (try Unix.rename tmp dir
-         with Unix.Unix_error _ -> rm_rf tmp);
+        (* Publish each object with its own rename, which is atomic on POSIX.
+           Per-file (rather than renaming the whole directory into place)
+           makes this self-healing: an entry missing one .o gets exactly that
+           .o restored, where a directory rename would fail ENOTEMPTY against
+           the existing incomplete dir and fall back on every future build.
+           Racing processes are writing byte-equivalent content for this key,
+           so whoever lands last is equally correct. *)
+        List.iter (fun src ->
+          let from = Filename.concat tmp (obj_name src) in
+          let into = Filename.concat dir (obj_name src) in
+          if Sys.file_exists from then
+            (try Unix.rename from into with Unix.Unix_error _ -> ())
+        ) missing;
+        rm_rf tmp;
         if all_present () then Ok objs
         else Error "objects missing after build (cache raced or was pruned)"
     end
-  end
+
+(** Wrapper guaranteeing the [Error]-not-raise contract above.  [mkdir_p],
+    [Filename.temp_file] and friends raise on EACCES/EROFS/ENOSPC/ENOTDIR
+    (e.g. HOME set to an unwritable or non-existent path, as in `docker run
+    --read-only`, nix builds, or systemd's ProtectHome), and the caller does
+    a bare match on the result — so without this, a compile that previously
+    succeeded dies with an internal-compiler-error exit 3 instead of quietly
+    falling back to the full recompile. *)
+let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
+  : (string list, string) result =
+  try ensure_exn ~cc ~cflags ~sources
+  with e -> Error (Printexc.to_string e)
