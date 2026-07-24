@@ -27,9 +27,11 @@ git log is authoritative for exact commits.
   | is_Some(_)})` is a checkable contract: `unwrap(None)` is a compile error,
   and so is `unwrap(x)` written inside a `None ->` match arm, where the arm
   narrows the scrutinee's tag. Testers are exact-case (`is_some` is not
-  `is_Some`). Narrowing is skipped for a non-variable scrutinee, for an arm that
-  rebinds the scrutinee's name, and for a constructor name shared by two ADTs —
-  in each case the checker stays silent rather than guessing.
+  `is_Some`). Narrowing is skipped for a non-variable scrutinee, for an `as`
+  pattern, for an arm that rebinds the scrutinee's name, and for a constructor
+  name shared by two ADTs — in each case the checker stays silent rather than
+  guessing. A fact is recorded against a *name*, so any inner `let`, `let?`,
+  lambda parameter or nested `match` binder that rebinds that name retires it.
 - Refinement predicates that call an unknown function now produce a warning
   instead of being silently ignored. `{Int | totally_bogus_fn(_) > 0}` compiled
   clean and enforced nothing; it now says so. The supported vocabulary is the
@@ -37,6 +39,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refinement path fact survived a rebinding of the name it was about**, so
+  correct code could be flagged. After `if x < 0 do`, a `let x = 5` inside the
+  branch left `x < 0` attached to the *new* `x`, and a call needing `{Int | _ >=
+  0}` was reported as a definite violation. Facts are now retired by every
+  binding construct that rebinds a name they mention — `let`, `let?`, lambda and
+  local-`fn` parameters, and `match` arm binders — in both the call-site and the
+  return-position checks.
 - **Perceus FBIP in-place reuse was silently disabled program-wide**, making
   every "functional but in-place" rewrite a heap free + fresh allocation
   instead. `bench/tree_transform.march` (the FBIP showcase) ran at 3842 ms

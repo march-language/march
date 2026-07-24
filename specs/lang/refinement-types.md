@@ -310,9 +310,28 @@ goes quiet rather than guessing:
 - **A rebinding pattern binder ends it.** Matching `y` with `Some(x) ->` says
   nothing about `x` — that `x` is a fresh binder for the payload, not the
   scrutinee — so no fact is recorded against the name it shadows.
+- **An `as` pattern is not narrowed.** `None as z ->` binds the whole scrutinee
+  under a second name, but the arm's head is a `PatAs`, not a bare constructor
+  pattern, so no tag fact is recorded — for `z` or for the scrutinee. Write
+  `None ->` if you want the narrowing.
 - **An ambiguous constructor name is skipped.** If two ADTs in scope both
   declare a constructor `Row`, `is_Row` identifies no particular datatype and is
   not checked.
+- **Rebinding the name retires the fact.** A narrowing is recorded against a
+  *name*, so any construct that rebinds that name inside the arm — a `let`, a
+  `let?`, a lambda parameter, an inner `match` binder — discards it. In
+
+  ```march
+  match x do
+    None ->
+      let x = Some(1)
+      unwrap(x)     -- fine: this `x` is a different value
+    Some(v) -> v
+  end
+  ```
+
+  the fact `is_None(x)` does not survive the `let`. The same rule applies to
+  scalar facts from an `if` guard.
 
 As everywhere else, these are checked under the definite-failure stance: an
 `Option` whose tag isn't known is simply not an error.
