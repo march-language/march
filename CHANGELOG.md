@@ -31,6 +31,67 @@ git log is authoritative for exact commits.
   unproven one stays legal but tells callers nothing, so a stale return
   refinement can never flag correct code. Postconditions that mention a
   parameter (relational) are not yet propagated.
+- Refinement predicates can now constrain an ADT's **constructor tag**. Every
+  constructor of every type — including the built-in `Option`, `Result` and
+  `List` — gains an implicit `is_<Ctor>` tester, so `fn unwrap(o : {Option(Int)
+  | is_Some(_)})` is a checkable contract: `unwrap(None)` is a compile error,
+  and so is `unwrap(x)` written inside a `None ->` match arm, where the arm
+  narrows the scrutinee's tag. Testers are exact-case (`is_some` is not
+  `is_Some`). Narrowing is skipped for a non-variable scrutinee, for an `as`
+  pattern, for an arm that rebinds the scrutinee's name, and for a constructor
+  name shared by two ADTs — in each case the checker stays silent rather than
+  guessing. A fact is recorded against a *name*, so any inner `let`, `let?`,
+  lambda parameter or nested `match` binder that rebinds that name retires it.
+- Refinement predicates that call an unknown function now produce a warning
+  instead of being silently ignored. `{Int | totally_bogus_fn(_) > 0}` compiled
+  clean and enforced nothing; it now says so. The supported vocabulary is the
+  comparison/arithmetic/boolean operators, `len`, and `@[measure]` functions.
+
+### Fixed
+
+- **A refinement path fact survived a rebinding of the name it was about**, so
+  correct code could be flagged. After `if x < 0 do`, a `let x = 5` inside the
+  branch left `x < 0` attached to the *new* `x`, and a call needing `{Int | _ >=
+  0}` was reported as a definite violation. Facts are now retired by every
+  binding construct that rebinds a name they mention — `let`, `let?`, lambda and
+  local-`fn` parameters, and `match` arm binders — in both the call-site and the
+  return-position checks.
+- **Perceus FBIP in-place reuse was silently disabled program-wide**, making
+  every "functional but in-place" rewrite a heap free + fresh allocation
+  instead. `bench/tree_transform.march` (the FBIP showcase) ran at 3842 ms
+  against 513 ms in the last published benchmark table, and
+  `bench/list_ops.march` at 143 ms against 68 ms.
+
+  Cause: once `join_points` began lifting a `match`'s panic default arm into
+  a `$jp_clo` closure, every real arm carried a `dec_rc $jp_clo` between its
+  `let` chain and its tail allocation. `try_fbip_sink` only traversed `ELet`
+  nodes, so the scrutinee's own `dec_rc` could never reach the allocation and
+  no `EReuse` was ever produced. `try_fbip_sink` now also hops `ESeq` heads
+  that are RC operations on a *different* variable — sound because RC ops
+  neither read fields nor observe ordering, delaying a `dec` can only delay
+  (never hasten) a free, and the aliasing corner is caught by `EReuse`'s
+  runtime RC==1 uniqueness branch, which sends shared cells down the
+  fresh-allocation path. A fail-loudly full-overwrite guard at the generic
+  `EReuse` emission site rejects a reuse whose argument count doesn't match
+  the resolved constructor's declared field count, which would otherwise leak
+  the reused cell's stale trailing fields.
+
+  After the fix: tree-transform 852 ms, list-ops 67 ms (the latter exactly
+  matching the pre-regression figure). Note that `fib(40)` — which allocates
+  nothing and is therefore unaffected by FBIP — remains ~2.2x slower than the
+  same published table, an unrelated and still-open regression.
+
+  This restores work that existed and was verified on the
+  `docs/core-march-types-skeleton` line but never reached `main`; the TIR
+  golden snapshot `fbip_dead_binding_reuse` had the starved `dec_rc` + `alloc`
+  shape pinned in as its expected output, so the one test written to catch
+  this regression was certifying it instead.
+
+- `bench/run_benchmarks.sh` invoked `dune exec march` without `--root .`.
+  Run from a git worktree (which lives under the parent checkout), dune
+  resolved its root to the *parent* repository and benchmarked that
+  compiler rather than the one under test — silently reporting the wrong
+  binary's numbers, with no error.
 
 ### Changed
 
