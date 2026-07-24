@@ -367,13 +367,20 @@ Some(x) as whole          -- as-pattern: binds `whole` to the entire value
 { x, y }                  -- punned: shorthand for { x: x, y: y }
 ```
 
-Record patterns must currently name every field of the scrutinee record
-(partial field lists are not yet supported). They work in `match` arms,
-`let` bindings, and function parameters alike:
+In a `match` arm, a record pattern's field list is open: `{ x: a }` matches
+any record with (at least) an `x` field, whatever else it has, and fields it
+doesn't mention are simply not bound. Naming a field the record lacks is a
+compile error. A `let` binding and a bare record-pattern function parameter
+still require naming every field of the scrutinee, since neither has an
+independent expected type to open the pattern against:
 
 ```march
-let { x: px, y: py } = point
-fn area({ w: w, h: h }) do w * h end
+match point do
+  { x: 0 } -> "on y-axis"   -- y need not be named
+  _        -> "elsewhere"
+end
+let { x: px, y: py } = point   -- let: every field still required
+fn area({ w: w, h: h }) do w * h end   -- fn param: every field still required
 ```
 
 ---

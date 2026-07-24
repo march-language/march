@@ -117,10 +117,12 @@ let u2 = { u with age: 31 } -- new User, name/email unchanged
 ```
 
 Records can also be destructured with a record pattern (`{ x, y } -> ...` in
-a `match`, a `let`, or a function parameter) — the field list must currently
-name every field of the record exactly. See
-[Pattern Matching](pattern-matching.md#record-patterns) for the syntax and
-punning rules.
+a `match`, a `let`, or a function parameter). In a `match` arm the field list
+is open — `{ x }` matches any record with an `x` field, whatever else it
+has — while a `let` binding or a bare record-pattern function parameter
+still requires naming every field. See
+[Pattern Matching](pattern-matching.md#record-patterns) for the syntax,
+punning rules, and why those two positions differ.
 
 ---
 

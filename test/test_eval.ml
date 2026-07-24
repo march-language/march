@@ -4606,6 +4606,27 @@ let test_eval_record_pattern_refutable_field () =
     (match call_fn env "h" [] with
      | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
 
+(* Partial record patterns must also RUN, not merely typecheck: the matrix
+   compiler projects the union of mentioned fields across rows, so two arms
+   mentioning different subsets must both work. *)
+let test_eval_record_pattern_partial () =
+  let env = eval_module {|mod T do
+    fn f(r) do
+      match r do
+        { code: 404 } -> "gone"
+        { msg: m }    -> m
+      end
+    end
+    fn g() do f({ code: 404, msg: "unused" }) end
+    fn h() do f({ code: 200, msg: "ok" }) end
+  end|} in
+  Alcotest.(check string) "first arm matches on code alone" "gone"
+    (match call_fn env "g" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "second arm matches on msg alone" "ok"
+    (match call_fn env "h" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
 let eval_suites =
   [
       ( "record_patterns",
@@ -4620,6 +4641,8 @@ let eval_suites =
             test_eval_record_pattern_fn_param;
           Alcotest.test_case "refutable sub-pattern inside a record pattern" `Quick
             test_eval_record_pattern_refutable_field;
+          Alcotest.test_case "partial record patterns across two arms" `Quick
+            test_eval_record_pattern_partial;
         ] );
       ( "as_patterns",
         [

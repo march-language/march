@@ -1019,27 +1019,56 @@ production — see the note after (P-As) below.
           --   addition — the interpreter already implemented this; only the
           --   grammar production was missing)
 
-(P-Record) ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, componentwise recursion,   typecheck.ml:3544–3553
+(P-Record, expected known)
+           expand(expected) = TRecord [(f₁,τ₁)…(fₙ,τₙ)]   (n ≥ k, the         typecheck.ml:3557–3596
+             SCRUTINEE's full field set)
+           ∀(fⱼ,pⱼ) ∈ pattern: Γ ⊢ pⱼ : τⱼ' ⊣ Γⱼ,  τⱼ' ~ τⱼ   (else "no field fⱼ")
+           ──────────────────────────────────────────────────────────────
+           Γ ⊢ PatRecord [(f₁,p₁)…(fₖ,pₖ)] : TRecord [(f₁,τ₁)…(fₙ,τₙ)] ⊣ Γ, Γ₁, …, Γₖ
+           -- OPEN field list: k ≤ n — the pattern names some prefix (in the
+           --   general case, some SUBSET) of the scrutinee's fields, and the
+           --   pattern's type is the scrutinee's FULL (expected) record type,
+           --   not a type synthesized from only the mentioned fields. Fields
+           --   the pattern doesn't mention are simply not bound (no Γᵢ
+           --   contribution), mirroring the operational match(PatRecord)
+           --   rule (core-march.md), which already looked fields up by name
+           --   in the value's full field list rather than requiring an exact
+           --   match.
+           -- `expected` is threaded in from the same places (P-Con)'s
+           --   `arg_ty` is: (P-Tuple)'s per-element expected type (itself
+           --   only available when ITS OWN `expected` resolves to a
+           --   `TTuple`), a `match`'s scrutinee type, or a constructor
+           --   argument's declared type. `expand` is `expand_record`
+           --   (typecheck.ml:3156): it accepts either a structural
+           --   `TRecord` directly or a nominal `TCon` naming one.
+           -- naming a field fⱼ absent from the expected record's field list
+           --   is a hard error (`unknown_record_field`), reported per-field
+           --   at that field name's span — not a unification failure, and
+           --   not silently ignored.
+           -- a bare punned field `f` is parsed as `(f, PatVar f)`
+           --   (parser.mly's `record_field_pat`), so it flows through this
+           --   rule identically to a spelled-out `f: f`.
+
+(P-Record, expected unknown)
+           ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, componentwise recursion,          typecheck.ml:3597–3607
              one field per (name, sub-pattern) pair)
            ──────────────────────────────────────────────────────────────
            Γ ⊢ PatRecord [(f₁,p₁)…(fₖ,pₖ)] : TRecord (sort [(f₁,τ₁)…(fₖ,τₖ)]) ⊣ Γ, Γ₁, …, Γₖ
-           -- structurally the record-analog of (P-Tuple) above: each field's
-           --   sub-pattern is typed independently (no `~expected` threading),
-           --   and the pattern's own type is a FRESH, CLOSED `TRecord` built
-           --   purely from the fields the pattern itself mentions, sorted by
-           --   name (same sort-by-name convention as T-Record's literal
-           --   typing, §2). A bare punned field `f` is parsed as `(f, PatVar
-           --   f)` (parser.mly's `record_field_pat`), so it flows through
-           --   this rule identically to a spelled-out `f: f`.
+           -- fallback when `expected` doesn't resolve to a record at all
+           --   (e.g. an unannotated `let` pattern, or a bare record pattern
+           --   used directly as a function parameter — that grammar position
+           --   has no annotation slot, so the parameter's type has no source
+           --   but the pattern itself): the ORIGINAL rule, unchanged.  The
+           --   pattern's type is a FRESH, CLOSED `TRecord` built purely from
+           --   the fields the pattern mentions, sorted by name (same
+           --   sort-by-name convention as T-Record's literal typing, §2).
            -- because March records require EXACT field-set equality to unify
-           --   (no width subtyping — typecheck.ml:2789), this pattern's
-           --   synthesized `TRecord` only unifies against a scrutinee whose
-           --   own record type has PRECISELY these k fields, no more, no
-           --   fewer. A pattern naming a strict subset of the scrutinee's
-           --   fields (`{ x }` against `{ x : Int, y : Int }`) fails to
-           --   unify — partial field lists are not yet supported; every
-           --   field of the record must be named in the pattern (wildcarded
-           --   if unused), the same restriction (P-Tuple) has for arity.
+           --   (no width subtyping — typecheck.ml:2789), this synthesized
+           --   `TRecord` only unifies against a scrutinee whose own record
+           --   type has PRECISELY these k fields, no more, no fewer — so a
+           --   partial pattern reaching this fallback (rather than the
+           --   expected-known rule above) is still closed, the same
+           --   restriction (P-Tuple) has for arity.
 ```
 
 **`(P-As)` and `(P-Record)` became live rules 2026-07-24** (see both rules
@@ -1061,6 +1090,39 @@ guards as the substitute for the unparseable record pattern — neither
 historical workaround is the only option anymore, though both remain valid
 March and `core-march.md` has not yet been revisited to update that framing
 (out of scope for this pass).
+
+**`(P-Record)` gained an open field list 2026-07-24**, the same day, as a
+follow-on to the note above: the original rule (now "expected unknown"
+above) synthesized a CLOSED `TRecord` from only the fields the pattern
+mentioned, and since March records require exact field-set equality to
+unify, a pattern naming a strict subset of a record's fields (`{ x }`
+against `{ x : Int, y : Int }`) was rejected. `infer_pattern` already threads
+an optional `expected` type through recursive calls — used, before this
+change, only to disambiguate an ambiguous bare constructor name in (P-Con).
+The fix ("expected known" above) drives `PatRecord`'s sub-patterns from that
+expected type instead of synthesizing one, when it resolves (through
+`expand_record`) to a record; naming an absent field is now a dedicated
+`unknown_record_field` error rather than a unification mismatch. (P-Tuple)
+was extended in the same change to thread a per-element expected type to its
+sub-patterns (from its OWN `expected`, when that resolves to a `TTuple`) —
+needed for a record pattern nested inside a tuple pattern with a
+known-in-advance element type, e.g. a tuple built from two independently
+type-annotated bindings (a `let`'s type ascription, or two annotated function
+parameters matched together in one `match`) where one element is destructured
+by a partial record pattern.
+
+Two positions still hit the "expected unknown" fallback, and so remain
+closed to exactly the fields the pattern names, because neither has an
+independent expected type to give the pattern: a `let` pattern (the binding
+IS what establishes the type, so nothing precedes it to drive from) and a
+bare pattern used directly as a function parameter (that grammar position —
+`fn_param: p = pattern { FPPat p }`, parser.mly — has no annotation slot, so
+the desugared match's scrutinee, `EVar __argN`, carries only a fresh
+unconstrained type variable into (P-Record) as `expected`, which
+`expand_record` cannot resolve to anything). The latter is why the
+motivating `fn area({ w, h })`-shaped case only reopens when the record
+parameter is instead given a name and an annotation, and destructured by an
+explicit `match` in the body: `fn f(r : {w:Int, h:Int}) do match r do {w:w} -> w end end`.
 
 `instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
 side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation

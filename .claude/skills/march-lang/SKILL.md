@@ -243,9 +243,11 @@ match opt do
 end
 
 -- Record pattern: destructures fields; `{ x }` is shorthand for `{ x: x }`.
--- The field list must currently name every field of the record exactly
--- (partial field lists are not yet supported). Also works in `let` bindings
--- and function parameters, e.g. `fn area({ w: w, h: h }) do w * h end`.
+-- In a match arm, the field list is OPEN: `{ x: 0 }` alone matches any record
+-- with an x field of 0, whatever else it has; naming a field the record
+-- lacks is a compile error. A `let` binding and a bare record-pattern
+-- function parameter still require every field (no independent expected
+-- type to open against), e.g. `fn area({ w: w, h: h }) do w * h end`.
 match point do
   { x: 0, y: 0 } -> "origin"
   { x: x, y: y } -> "at " ++ int_to_string(x) ++ "," ++ int_to_string(y)

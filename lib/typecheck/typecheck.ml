@@ -3409,7 +3409,20 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     [], ty_of_lit lit
 
   | Ast.PatTuple (ps, _) ->
-    let bs_tys  = List.map (infer_pattern env) ps in
+    (* Thread per-element expected types so a nested record pattern inside a
+       tuple pattern — which is what desugar builds for multi-param fns —
+       still gets an expected type to open its field list against. *)
+    let elem_expected =
+      match expected with
+      | Some t -> (match repr t with TTuple ts -> ts | _ -> [])
+      | None -> []
+    in
+    let bs_tys =
+      List.mapi (fun i p ->
+        match List.nth_opt elem_expected i with
+        | Some et -> infer_pattern ~expected:et env p
+        | None    -> infer_pattern env p) ps
+    in
     let bindings = List.concat_map fst bs_tys in
     let tys      = List.map snd bs_tys in
     bindings, TTuple tys
@@ -3541,16 +3554,57 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     let bindings  = List.concat_map fst bs_tys in
     bindings, t_atom
 
-  | Ast.PatRecord (flds, _) ->
-    let bindings = ref [] in
-    let fld_tys = List.map (fun (name, pat) ->
-        let bs, t = infer_pattern env pat in
-        bindings := bs @ !bindings;
-        (name.Ast.txt, t)
-      ) flds
+  | Ast.PatRecord (flds, sp) ->
+    (* Record patterns have OPEN field lists: `{ x }` matches any record with
+       at least an `x`.  Since [unify] requires exact field-set equality
+       (no width subtyping, no row variables), we cannot synthesize the
+       pattern's type from the mentioned fields and unify — that rejects every
+       partial pattern.  Drive the sub-patterns from the EXPECTED type
+       instead, and return the expected type unchanged so the caller's unify
+       is a no-op.
+
+       With no expected type available (an unannotated scrutinee whose type is
+       still a fresh var), fall back to the old closed-record synthesis: it is
+       the only thing that can constrain the scrutinee at all, and it matches
+       the pre-existing behaviour for full destructures. *)
+    let expected_rec =
+      match expected with
+      | Some t -> expand_record env (repr t)
+      | None -> None
     in
-    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
-    !bindings, TRecord sorted
+    (match expected_rec with
+     | Some (TRecord expected_flds) ->
+       let bindings = ref [] in
+       List.iter (fun ((name : Ast.name), pat) ->
+         match List.assoc_opt name.Ast.txt expected_flds with
+         | Some fty ->
+           let bs, pty = infer_pattern ~expected:fty env pat in
+           unify env ~span:name.Ast.span ~reason:(Some (RMatchArm sp)) fty pty;
+           bindings := bs @ !bindings
+         | None ->
+           Err.report env.errors
+             { Err.severity = Error; span = name.Ast.span;
+               message =
+                 Printf.sprintf "This record has no field `%s`." name.Ast.txt;
+               labels = [];
+               notes  =
+                 [Printf.sprintf "Available fields: %s"
+                    (String.concat ", " (List.map fst expected_flds))];
+               code = Some "unknown_record_field";
+               fix  = None }
+       ) flds;
+       !bindings, TRecord expected_flds
+     | _ ->
+       let bindings = ref [] in
+       let fld_tys = List.map (fun ((name : Ast.name), pat) ->
+           let bs, t = infer_pattern env pat in
+           bindings := bs @ !bindings;
+           (name.Ast.txt, t)
+         ) flds
+       in
+       let sorted =
+         List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
+       !bindings, TRecord sorted)
 
   | Ast.PatAs (inner, name, _) ->
     let bindings, t = infer_pattern env inner in

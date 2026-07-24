@@ -1466,14 +1466,19 @@ pattern_no_as:
 
 simple_pattern:
   (* Record pattern: { x, y: p }.  This production places no restriction on
-     which fields, or how many, appear — but today `infer_pattern`
-     (typecheck.ml) synthesizes a CLOSED `TRecord` from exactly the fields
-     named here, and March records require exact field-set equality to
-     unify (no width subtyping), so in practice a pattern must currently
-     name every field of the record it matches. Partial field lists (`{ x }`
-     against a two-field record) are planned future work, not yet
-     typecheckable. Punned `{ x }` is shorthand for `{ x: x }`, mirroring the
-     record-literal shorthand. *)
+     which fields, or how many, appear.  In a match arm (and, transitively, a
+     function parameter that dispatches through one), `infer_pattern`
+     (typecheck.ml) drives the pattern's field types from the scrutinee's
+     EXPECTED record type when one is known, so the field list is open: `{ x }`
+     matches any record with an `x` field, whatever else it has, and naming a
+     field the record lacks is an `unknown_record_field` error. Without a known
+     expected type (an unannotated `let` pattern, or a bare pattern used
+     directly as a function parameter — this grammar position has no
+     annotation slot) `infer_pattern` falls back to synthesizing a CLOSED
+     `TRecord` from just the fields named here, and since March records
+     require exact field-set equality to unify (no width subtyping), such a
+     pattern must name every field of the record it matches. Punned `{ x }`
+     is shorthand for `{ x: x }`, mirroring the record-literal shorthand. *)
   | LBRACE; fields = separated_nonempty_list(COMMA, record_field_pat); RBRACE
     { PatRecord (fields, mk_span ($loc)) }
   | UNDERSCORE { PatWild (mk_span ($loc)) }

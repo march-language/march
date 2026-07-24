@@ -1,0 +1,29 @@
+mod RecordPatternPartial do
+fn classify(r : { code : Int, msg : String }) : String do
+  match r do
+    { code: 404 } -> "gone"
+    { msg: m }    -> m
+  end
+end
+
+-- `width`'s two ANNOTATED params desugar to a match over their tuple.  The
+-- record pattern `{ w: w }` is nested inside that tuple pattern, so this is
+-- what exercises PatTuple's expected-type threading: without it, the nested
+-- record sub-pattern falls back to closed-record synthesis from `{ w: w }`
+-- alone and rejects the wider `{ w: 8, h: 9 }` argument at the call below.
+-- (A bare, unannotated record-pattern parameter -- `fn width({ w: w })` --
+-- cannot be tested this way: FPPat parameters carry no type annotation in
+-- March's grammar, so such a parameter's type has no source but the pattern
+-- itself and is necessarily closed; see specs/lang/pattern-matching.md.)
+fn width(dims : { w : Int, h : Int }, scale : Int) : Int do
+  match (dims, scale) do
+    ({ w: w }, s) -> w * s
+  end
+end
+
+fn main() : Unit do
+  println(classify({ code: 404, msg: "unused" }))
+  println(classify({ code: 200, msg: "ok" }))
+  println(int_to_string(width({ w: 8, h: 9 }, 1)))
+end
+end

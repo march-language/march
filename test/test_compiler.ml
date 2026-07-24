@@ -8355,6 +8355,31 @@ let test_record_pattern_arm_not_flagged_redundant () =
   Alcotest.(check bool) "record-pattern arm not falsely flagged" false
     has_redundant
 
+(* A record pattern need not mention every field.  infer_pattern used to
+   SYNTHESIZE a closed TRecord from the mentioned fields only, and unify
+   requires exact field-set equality, so `{ x }` against {x, y} was a type
+   error.  Drive the field types from the EXPECTED type instead. *)
+let test_partial_record_pattern_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { x : Int, y : Int }) : Int do
+      match r do
+        { x: a } -> a
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "partial record pattern: no errors" false (has_errors ctx)
+
+(* A field the record does not have must still be an error. *)
+let test_record_pattern_unknown_field_rejected () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { x : Int, y : Int }) : Int do
+      match r do
+        { zzz: a } -> a
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unknown field: error reported" true (has_errors ctx)
+
 let compiler_suites =
   [
       ( "match_diagnostics",
@@ -8365,6 +8390,10 @@ let compiler_suites =
             test_redundant_arm_in_inference_position;
           Alcotest.test_case "record-pattern arm not flagged redundant" `Quick
             test_record_pattern_arm_not_flagged_redundant;
+          Alcotest.test_case "partial record pattern typechecks" `Quick
+            test_partial_record_pattern_typechecks;
+          Alcotest.test_case "record pattern unknown field rejected" `Quick
+            test_record_pattern_unknown_field_rejected;
         ] );
       ( "resolver",
         [

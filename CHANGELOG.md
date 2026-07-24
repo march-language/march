@@ -20,11 +20,13 @@ git log is authoritative for exact commits.
   grammar production.
 
 - Record patterns: `match r do { x, y: b } -> ... end`, `let { x, y } = r`, and
-  `fn area({ w, h })`. `{ x }` is shorthand for `{ x: x }`. The field list must
-  currently name every field of the scrutinee record exactly (partial field
-  lists are planned future work). `PatRecord` had existed in the AST and
-  interpreter since the beginning but had no grammar production, and neither
-  TIR lowering path handled it.
+  `fn area({ w, h })`. `{ x }` is shorthand for `{ x: x }`. `PatRecord` had
+  existed in the AST and interpreter since the beginning but had no grammar
+  production, and neither TIR lowering path handled it.
+
+- Record patterns may mention a subset of a record's fields: `{ code: 404 }`
+  matches any record with a `code` field equal to 404, whatever else it has.
+  Naming a field the record does not have is a compile error.
 
 ### Changed
 

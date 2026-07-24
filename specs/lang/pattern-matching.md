@@ -149,31 +149,59 @@ above could equally be written `{ x: x, y: y } -> ...` or, punned, as
 `fn describe_point({ x, y })` if the whole function dispatched on the
 struct shape rather than matching in the body.
 
-**Field lists currently must exactly match the record's own fields** — a
-pattern that only names a subset of a record's fields (`{ x }` against
-`{ x: Float, y: Float }`) does not yet typecheck. Supporting partial field
-lists is planned future work; until then, name every field the record has,
-even ones you only intend to wildcard:
+**Field lists are open in a `match` arm** — a pattern need only name the
+fields it cares about. `{ x: a }` matches any record with (at least) an `x`
+field, whatever else it has; fields the pattern doesn't mention are simply
+not bound. The y-axis check above, for instance, doesn't need to mention `y`
+at all:
 
 ```march
 match p do
-  { x: 0.0, y: _ } -> "on y-axis"
-  { x: _, y: _ }   -> "elsewhere"
+  { x: 0.0 } -> "on y-axis"
+  _          -> "elsewhere"
 end
 ```
 
-A `let` binding works the same way:
+Naming a field the record does **not** have is a compile error
+(`unknown_record_field`), not a silent no-op — a typo like `{ xx: a }`
+against `{ x: Float, y: Float }` is rejected rather than matching nothing:
 
-```march
-let { x: px, y: py } = p
+```
+This record has no field `xx`.
+  Available fields: x, y
 ```
 
-and so does a function parameter, since a single-clause function whose
-parameter is a non-trivial pattern desugars through the same match-lowering
-path as an explicit `match`:
+A function parameter gets the same openness when it dispatches through an
+explicit `match`, since a single-clause function whose parameter is a
+non-trivial pattern desugars through the same match-lowering path:
 
 ```march
-fn area({ w: w, h: h } : { w : Int, h : Int }) : Int do w * h end
+fn area({ w: w, h: h }) : Int do w * h end   -- full destructure, unaffected
+```
+
+Two positions remain **closed** to exactly the fields named, because neither
+has an independent expected type for the pattern to open against:
+
+- **A `let` binding**: `let { x: px } = p` still requires naming every field
+  of `p`'s type. `infer_pattern` only receives an expected type when the
+  caller already has one to offer (a `match`'s scrutinee, a constructor
+  argument, a tuple element); a `let` pattern's binding is exactly the thing
+  establishing the type, so there is nothing to drive it from yet.
+- **A bare pattern used directly as a function parameter**, e.g.
+  `fn get_w({ w: w }) : Int do w end` — a pattern in that grammar position
+  cannot itself carry a type annotation (only `name : Type` can), so its type
+  has no source but the pattern itself and is inferred as exactly `{ w : Int
+  }`. `get_w` above rejects a wider record such as `{ w: 8, h: 9 }`. To open
+  a parameter's field list, annotate the parameter with a name and
+  destructure it in the body instead, which routes it back through
+  `match`'s open-field-list handling:
+
+```march
+fn get_w2(r : { w : Int, h : Int }) : Int do
+  match r do
+    { w: w } -> w    -- r may have any other fields too
+  end
+end
 ```
 
 ### Atom Patterns
