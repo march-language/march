@@ -11,6 +11,14 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- Refinement checking now propagates a function's declared return refinement to
+  its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
+  parameter is a compile error. Applies to both `takepos(neg())` and
+  `let c = neg()` forms, and resolves across modules via `alias`/`use`.
+  Postconditions that mention a parameter (relational) are not yet propagated.
+
 ### Documentation
 
 - Migrated 14 language-reference chapters (Type System, Pattern Matching,
