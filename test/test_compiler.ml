@@ -8331,6 +8331,30 @@ let test_redundant_arm_in_inference_position () =
   Alcotest.(check bool) "redundant arm reported in inference position" true
     has_redundant
 
+(* Record-pattern arms must NOT be flagged redundant.  [norm_pat] collapses
+   PatRecord to SPWild, so `{ code: 404, msg: m }` normalises to "matches
+   everything" and the arm after it was reported unreachable — on code that
+   plainly runs it (this exact program prints "gone" then "other 200").
+   Surfaced only once record patterns became reachable AND redundancy
+   checking started running in checking position; neither alone showed it. *)
+let test_record_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404, msg: m } -> m
+        { code: c, msg: _ }   -> "other " ++ int_to_string(c)
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "record-pattern arm not falsely flagged" false
+    has_redundant
+
 let compiler_suites =
   [
       ( "match_diagnostics",
@@ -8339,6 +8363,8 @@ let compiler_suites =
             test_redundant_arm_in_checking_position;
           Alcotest.test_case "redundant arm warned in inference position" `Quick
             test_redundant_arm_in_inference_position;
+          Alcotest.test_case "record-pattern arm not flagged redundant" `Quick
+            test_record_pattern_arm_not_flagged_redundant;
         ] );
       ( "resolver",
         [

@@ -1931,6 +1931,8 @@ Deliberately excluded, with reasons:
 
 - **Guards.** Already work end-to-end. Verified.
 - **Guarded matches suppressing the non-exhaustive warning.** A documented policy decision (`typecheck.ml:4056`), not a bug: coverage is computed over guardless branches and the span is recorded so `cap no_panic` modules reject it. Revisiting it is a separate conversation about defaults.
-- **Nested exhaustiveness through record patterns.** `norm_pat` maps `PatRecord` to `SPWild`, so `{ code: 404 }` contributes nothing to coverage analysis. Safe (under-reports rather than over-reports) and orthogonal to everything here.
+- **Nested exhaustiveness through record patterns.** `norm_pat` maps `PatRecord` to `SPWild`, so `{ code: 404 }` contributes nothing to coverage analysis.
+
+  **Correction (found during Task 3, fixed there).** This entry originally claimed the collapse "under-reports rather than over-reports" and was therefore harmless. That is true for *exhaustiveness* — an arm claiming to cover more than it does can only suppress a warning — but exactly backwards for *redundancy*: `{ code: 404, msg: m }` normalises to "matches everything", so the next arm gets reported unreachable even though it runs. The bug needed both Task 1 (redundancy checking restored in checking position) and Task 3 (record patterns reachable) to become visible; neither alone showed it. Fixed by giving record-pattern arms the same treatment guarded arms already get in `check_redundant_arms` — never flagged, excluded from the prefix — which trades some true positives for no false ones. Regression test: `record-pattern arm not flagged redundant`, `match_diagnostics` group.
 - **Or-patterns that bind variables.** Filed as a follow-up in Task 5 Step 15.
 - **Range patterns (`1..5`) and string-prefix patterns.** Neither exists anywhere in the AST or grammar; both are new language features rather than gaps between an implemented AST node and the parser.

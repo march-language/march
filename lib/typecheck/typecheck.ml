@@ -4024,15 +4024,36 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
        let sub_m = spec_lit_mc lit matrix in
        is_useful env rest_tys sub_m row_rest)
 
+(** True if [p] contains a record pattern anywhere.
+
+    [norm_pat] collapses [PatRecord] to [SPWild] because [spat] has no record
+    shape. For EXHAUSTIVENESS that direction is safe — an arm claiming to
+    cover more than it does can only suppress a warning. For REDUNDANCY it is
+    backwards: `{ code: 404, … }` normalises to "matches everything", so the
+    very next arm is reported unreachable even though it plainly runs. Such
+    arms therefore get the same treatment guarded arms already get — never
+    flagged, and excluded from the prefix so later arms aren't judged against
+    a wildcard that isn't really there. Costs some true positives; a false
+    "this can never be reached" on correct code costs more. *)
+let rec pat_has_record (p : Ast.pattern) : bool =
+  match p with
+  | Ast.PatRecord _ -> true
+  | Ast.PatAs (inner, _, _) -> pat_has_record inner
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.exists pat_has_record ps
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
+
 (** Emit Warnings for redundant (unreachable) arms.
     Guarded arms are never flagged, and their patterns are excluded from the
-    prefix so that subsequent arms aren't mistakenly flagged as subsumed. *)
+    prefix so that subsequent arms aren't mistakenly flagged as subsumed.
+    Arms containing a record pattern get the same treatment — see
+    [pat_has_record] for why. *)
 let check_redundant_arms (env : env) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let prefix = ref [] in
   List.iter (fun (br : Ast.branch) ->
     let arm_row = [norm_pat br.branch_pat] in
-    if br.branch_guard = None then begin
+    if br.branch_guard = None && not (pat_has_record br.branch_pat) then begin
       if not (is_useful env [scrut_ty] !prefix arm_row) then begin
         let pat_sp   = span_of_pat br.branch_pat in
         let body_sp  = span_of_expr br.branch_body in
