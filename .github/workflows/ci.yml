@@ -230,12 +230,28 @@ jobs:
         with:
           version: 0.15.2
 
+      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # paths' least common ancestor, which for the three exes is
+      # `_build/default`, so the artifact's own entries are `bin/main.exe` and
+      # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
+      # every reference below (which uses the in-repo _build path, as the
+      # exes' own runtime-dir lookup expects) misses.
       - name: Download prebuilt exes
         uses: actions/download-artifact@v4
         with:
           name: ocaml-build-exes-${{ github.run_id }}
-          path: .
-      - run: chmod +x _build/default/bin/main.exe _build/default/test/test_oracle.exe
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          set -e
+          for f in _build/default/bin/main.exe _build/default/test/test_oracle.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              echo "Artifact layout actually downloaded:"; find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
 
       - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
         timeout-minutes: 20
@@ -310,12 +326,28 @@ jobs:
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
 
+      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # paths' least common ancestor, which for the three exes is
+      # `_build/default`, so the artifact's own entries are `bin/main.exe` and
+      # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
+      # every reference below (which uses the in-repo _build path, as the
+      # exes' own runtime-dir lookup expects) misses.
       - name: Download prebuilt exes
         uses: actions/download-artifact@v4
         with:
           name: ocaml-build-exes-${{ github.run_id }}
-          path: .
-      - run: chmod +x _build/default/bin/main.exe _build/default/test/test_properties.exe
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          set -e
+          for f in _build/default/bin/main.exe _build/default/test/test_properties.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              echo "Artifact layout actually downloaded:"; find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
 
       - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
         timeout-minutes: 25
