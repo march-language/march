@@ -760,6 +760,8 @@ let rec pretty_smt_value (v : string) : string =
     let inner = String.sub v 1 (n - 2) in
     match sexp_tokens inner with
     | "as" :: "nil" :: _ -> "[]"
+    (* SMT-LIB writes a negative integer as `(- 1)`; show it as `-1`. *)
+    | [ "-"; n ] when n <> "" && String.for_all (fun c -> c >= '0' && c <= '9') n -> "-" ^ n
     | ctor :: args ->
       (match Hashtbl.find_opt ctor_field_names ctor with
        | Some fields when List.length fields = List.length args ->
@@ -769,13 +771,28 @@ let rec pretty_smt_value (v : string) : string =
     | _ -> v
   end else v
 
-(* Render one model entry: "m(x) = v" for measure symbols, "k = v" otherwise. *)
+(* True for the "ret<N>" suffix of a propagated-postcondition constant. *)
+let is_ret_suffix (s : string) : bool =
+  String.length s > 3
+  && String.sub s 0 3 = "ret"
+  && String.for_all (fun c -> c >= '0' && c <= '9')
+       (String.sub s 3 (String.length s - 3))
+
+(* Render one model entry.  Internal SMT constants use `$` to join a symbol to
+   its subject:
+     - a measure application, "len$xs"      -> "len(xs) = 3"
+     - a propagated call result, "f$ret1"   -> "f() returns -1"   (the `ret1`
+       part is an internal freshness tag, NOT an argument — rendering it as
+       "f(ret1)" reads as a call to `f` with a variable named `ret1`).
+   Anything else prints as "k = v". *)
 let render_model_entry (k, v) : string =
   let v' = pretty_smt_value v in
   match String.index_opt k '$' with
   | Some i ->
-    Printf.sprintf "%s(%s) = %s"
-      (String.sub k 0 i) (String.sub k (i + 1) (String.length k - i - 1)) v'
+    let head = String.sub k 0 i in
+    let tail = String.sub k (i + 1) (String.length k - i - 1) in
+    if is_ret_suffix tail then Printf.sprintf "%s() returns %s" head v'
+    else Printf.sprintf "%s(%s) = %s" head tail v'
   | None -> Printf.sprintf "%s = %s" k v'
 
 (* Inline counterexample suffix for call-site errors (e.g. precondition checks).
@@ -811,20 +828,42 @@ let refined_scope_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some (adt_sort_name name))
   | _ -> None
 
+(* Names a pattern binds (so a binding construct can shadow them). *)
+let rec pat_binders (p : A.pattern) : string list =
+  match p with
+  | A.PatVar n -> [ n.A.txt ]
+  | A.PatAs (sub, n, _) -> n.A.txt :: pat_binders sub
+  | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) ->
+    List.concat_map pat_binders ps
+  | A.PatRecord (fps, _) -> List.concat_map (fun (_, sub) -> pat_binders sub) fps
+  | A.PatWild _ | A.PatLit _ -> []
+
+(* Drop shadowed entries.  [scope] is an assoc list read with [List.assoc_opt],
+   so an inner binder that is itself UNREFINED would otherwise leave the outer
+   refined entry visible and the checker would attribute the outer value's
+   predicate to the inner binder — a false positive.  Every binding construct
+   must remove its binders' names before adding any refined ones. *)
+let scope_shadow (sc : scope) (names : string list) : scope =
+  if names = [] then sc else List.filter (fun (n, _) -> not (List.mem n names)) sc
+
 let scope_add_param (sc : scope) (p : A.param) : scope =
+  let sc = scope_shadow sc [ p.A.param_name.A.txt ] in
   match refined_scope_ty p.A.param_ty with
   | Some r -> (p.A.param_name.A.txt, r) :: sc
   | None -> sc
 
 let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
-  | A.FPPat _ -> sc
+  | A.FPPat pat -> scope_shadow sc (pat_binders pat)
 
 (* [postcond] resolves a callee name to its closed return refinement.  An
    explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
    direct named call falls back to the callee's declared postcondition. *)
 let scope_add_binding ~(postcond : string -> (string * A.expr) option) (sc : scope)
     (b : A.binding) : scope =
+  (* Shadow first: `let c = neg()` followed by `let c = 5` must not leave the
+     first `c`'s postcondition attached to the second. *)
+  let sc = scope_shadow sc (pat_binders b.A.bind_pat) in
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | A.PatVar n, None ->
@@ -957,7 +996,11 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
 (* Resolve a call name to the callee's *closed* return refinement, or None.
    This is the single place the closedness filter is applied, so both use
    sites (a let-bound local and an inline argument) agree, and Tier 1
-   (relational postconditions) is a change to this one function. *)
+   (relational postconditions) is a change to this one function.
+
+   The other half of the filter is applied earlier: [gate_unverified_posts]
+   has already cleared [ret] on every signature whose postcondition the
+   definition side did not PROVE, so anything reaching here is a fact. *)
 let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
   : (string * A.expr) option =
   match resolve_call ctx defs fname with
@@ -1329,10 +1372,23 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
          else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
   | _ -> None
 
+(* Check one return-position tail against the declared return refinement.
+
+   Returns TRUE only when the tail was POSITIVELY VERIFIED — i.e. the solver
+   proved the predicate holds on this path.  Anything else (an unreflectable
+   tail, an unreflectable predicate, an `unknown` from the solver, a refutation)
+   returns false.  That verdict is what gates postcondition *propagation*
+   (see [postcond_of]): only a proven postcondition is a true fact, so only a
+   proven one may be assumed at call sites.
+
+   [emit] (default true) controls diagnostics.  The verdict pre-pass runs with
+   [~emit:false] so it cannot double-report; the in-walk [check_fn_post] runs
+   with the default and is the single reporting site.  The repeated discharge
+   is served from the content-addressed VC cache. *)
 let check_post ~root errctx ~span ?(record_sort : string option = None)
-    ?(fn_name : string option = None) (sc : scope)
+    ?(fn_name : string option = None) ?(emit = true) (sc : scope)
     (binder : string) (ret_pred : A.expr)
-    ((path, tail_e) : (A.expr * bool) list * A.expr) : unit =
+    ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
   let base_decls, base_assume, scope_has_record = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
   let post_measure_ctr = ref 0 in
@@ -1404,7 +1460,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     | None -> scalar tail_e
   in
   match tail_term_opt with
-  | None -> ()
+  | None -> false
   | Some tail_term ->
     let resolve_field = match record_sort with
       | Some sort_name -> make_field_resolver binder sort_name tail_term
@@ -1418,7 +1474,7 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
         | None -> ())
       path;
     (match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ret_pred with
-     | None -> ()
+     | None -> false
      | Some goal ->
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
@@ -1435,49 +1491,113 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          else ""
        in
        (match Refine.discharge ~root ~preamble vc with
-        | Refine.Verified -> ()
+        | Refine.Verified -> true
         | first ->
           let emit_error () =
-            ignore tail_e;
-            let pred = pred_str ret_pred in
-            let fn_prefix = match fn_name with
-              | Some n -> Printf.sprintf "`%s` does not satisfy" n
-              | None   -> "The return value does not satisfy"
-            in
-            let msg = Printf.sprintf
-              "%s its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s%s"
-              fn_prefix pred (cx_block (model_of first))
-            in
-            let hint = Printf.sprintf
-              "Every branch must produce a return value satisfying `%s`." pred
-            in
-            Err.report errctx
-              { March_errors.Errors.severity = March_errors.Errors.Error
-              ; span; message = msg; labels = []
-              ; notes = [hint]; code = None; fix = None }
+            if emit then begin
+              ignore tail_e;
+              let pred = pred_str ret_pred in
+              let fn_prefix = match fn_name with
+                | Some n -> Printf.sprintf "`%s` does not satisfy" n
+                | None   -> "The return value does not satisfy"
+              in
+              let msg = Printf.sprintf
+                "%s its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s%s"
+                fn_prefix pred (cx_block (model_of first))
+              in
+              let hint = Printf.sprintf
+                "Every branch must produce a return value satisfying `%s`." pred
+              in
+              Err.report errctx
+                { March_errors.Errors.severity = March_errors.Errors.Error
+                ; span; message = msg; labels = []
+                ; notes = [hint]; code = None; fix = None }
+            end
           in
           if scope_has_record then
             (* With concrete record preconditions in scope, a SAT counterexample
                satisfying those preconditions IS a real violation — report it. *)
             (match first with Refine.Refuted _ -> emit_error () | _ -> ())
           else
-            match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
-            | Refine.Verified -> emit_error ()
-            | _ -> ()))
+            (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
+             | Refine.Verified -> emit_error ()
+             | _ -> ());
+          (* Not [Verified] on the positive goal ⇒ not proven, whatever the
+             refutation attempt said. *)
+          false))
+
+(* Check every return-position tail of every clause of [fd] against its declared
+   return refinement.  Returns true iff ALL of them positively verified (a
+   function with no clauses, or a clause with no reachable tail, counts as NOT
+   verified — silence is not proof).  [emit] threads through to [check_post]. *)
+let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
+  match return_refine_ext fd with
+  | None -> false
+  | Some (binder, ret_pred, record_sort) ->
+    let clause_ok (c : A.fn_clause) =
+      let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+      let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
+      let ts = tails base c.A.fc_body in
+      (* Fold (not List.for_all): every tail must be checked so every
+         diagnostic is emitted — short-circuiting would hide errors. *)
+      ts <> []
+      && List.fold_left
+           (fun acc t ->
+             check_post ~root errctx ~span:c.A.fc_span ~record_sort
+               ~fn_name:(Some fd.A.fn_name.A.txt) ~emit sc binder ret_pred t
+             && acc)
+           true ts
+    in
+    fd.A.fn_clauses <> []
+    && List.fold_left (fun acc c -> clause_ok c && acc) true fd.A.fn_clauses
 
 let check_fn_post ~root errctx (fd : A.fn_def) : unit =
-  match return_refine_ext fd with
-  | None -> ()
-  | Some (binder, ret_pred, record_sort) ->
+  ignore (check_fn_post_verdict ~root errctx fd)
+
+(* ── Verification gate on postcondition propagation ────────────────────────
+   A declared postcondition is only a FACT at a call site if the definition side
+   PROVED it.  [check_fn_post] deliberately rejects only a postcondition that can
+   never hold, so a merely *unproven* one is legal at the definition — but
+   propagated facts are ADDED to the assumption set the call-site VC proves
+   against, and a false assumption makes a violation easier to "prove".  An
+   unproven postcondition that travelled would therefore be a false-positive
+   engine (a stale `{Int | _ < 0}` on a function that returns 6 would flag the
+   correct call `takepos(score(5))`).
+
+   So: an unproven postcondition stays legal, it simply does not travel.  This
+   pre-pass runs the definition-side check for every refined-return function
+   (with diagnostics suppressed) and CLEARS [ret] on every signature that did
+   not verify, so [postcond_of] — and hence both propagation sites — see only
+   proven facts.
+
+   Why a pre-pass rather than lazy memoization: [postcond_of] is consulted from
+   arbitrary call sites during the AST walk, including calls that precede their
+   callee's definition and calls that cross module boundaries.  Computing on
+   first use would need a key→fn_def index and would still make the *result*
+   order-independent only by construction of that index; a pre-pass reuses
+   [collect_all_defs]'s own traversal, is order-independent by construction, and
+   keeps [visit] unchanged.  Diagnostics are emitted exactly once, later, by
+   [check_fn_post] during the walk; the repeated discharge hits the VC cache. *)
+let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t)
+    (decls : A.decl list) : unit =
+  let rec go prefix decls =
     List.iter
-      (fun (c : A.fn_clause) ->
-        let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
-        let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-        List.iter
-          (check_post ~root errctx ~span:c.A.fc_span ~record_sort
-             ~fn_name:(Some fd.A.fn_name.A.txt) sc binder ret_pred)
-          (tails base c.A.fc_body))
-      fd.A.fn_clauses
+      (function
+        | A.DFn (fd, _) ->
+          let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
+          (match Hashtbl.find_opt defs key with
+           | Some (Some sg) when Option.is_some sg.ret ->
+             if not (check_fn_post_verdict ~root errctx ~emit:false fd) then
+               (* Keep the entry (it must still shadow an outer same-named
+                  function for [resolve_call]); drop only the postcondition. *)
+               Hashtbl.replace defs key (Some { sg with ret = None })
+           | _ -> ())
+        | A.DMod (name, _, ds, _) ->
+          go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
+        | _ -> ())
+      decls
+  in
+  go "" decls
 
 (* ── Walk expressions, threading the refined-local scope and path context ── *)
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
@@ -1515,14 +1635,17 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
-  | A.ELetFn (_, ps, _, body, _) ->
+  | A.ELetFn (n, ps, _, body, _) ->
+    let sc = scope_shadow sc [ n.A.txt ] in
     visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter
       (fun (br : A.branch) ->
+        (* A pattern binder shadows a same-named refined outer local. *)
+        let sc = scope_shadow sc (pat_binders br.A.branch_pat) in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
-        go_path p br.A.branch_body)
+        visit ~root errctx defs ctx p sc br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
     go c;
@@ -1632,6 +1755,12 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
   Hashtbl.reset measure_preamble_sorts;
   measure_preamble := "";
   type_preamble := "";
+  (* Reset per-module so the SMT constant names a VC is built from are a
+     function of the module alone.  Without this the counter drifts across
+     repeated [check_module] calls in one process (the test binary today; an
+     LSP/REPL embedding tomorrow) and every VC mentioning a propagated
+     postcondition misses the content-addressed VC cache forever. *)
+  ret_ctr := 0;
   if measure_axioms then begin
     register_builtin_adts ();
     register_adt_names m.A.mod_decls;
@@ -1651,6 +1780,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
       mfns
   end;
   let defs = collect_all_defs m.A.mod_decls in
+  (* Only POSITIVELY VERIFIED postconditions may be assumed at call sites. *)
+  gate_unverified_posts ~root errctx defs m.A.mod_decls;
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [defs]. *)
   visit_decls ~root errctx defs rctx0 m.A.mod_decls

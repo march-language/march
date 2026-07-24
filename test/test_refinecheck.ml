@@ -792,6 +792,75 @@ let tier0_suite =
              \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
              \  fn f() : Int do let c = neg()\n    takepos(c) end\n\
               end\n\
+              end\n"));
+
+    gated "an UNVERIFIED postcondition does not propagate (no false positive)" (fun () ->
+        (* `score`'s declared `_ < 0` is stale: `helper(x)` is opaque, so the
+           definition side can neither prove nor refute it.  An unproven
+           postcondition stays legal at the definition and must NOT travel to
+           call sites — believing it here would flag the CORRECT call
+           `takepos(score(5))` (score(5) = 6, which satisfies `_ >= 0`). *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod Stale do\n\
+             \  fn helper(x : Int) : Int do x + 1 end\n\
+             \  fn score(x : Int) : {Int | _ < 0} do helper(x) end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn main() : Int do takepos(score(5)) end\n\
+              end\n"));
+
+    gated "a VERIFIED postcondition still propagates (headline feature)" (fun () ->
+        (* `0 - 1` is reflectable and verifies against `_ < 0`, so the fact is
+           true and may be assumed at the call site. *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod Ok do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do takepos(neg()) end\n\
+              end\n"));
+
+    gated "a lambda parameter shadows a refined outer local" (fun () ->
+        (* The inner `c` is the lambda's own unrefined parameter; the outer
+           refined `c` must not leak into its body. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod Shadow do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do\n\
+             \    let c = neg()\n\
+             \    let g = fn c -> takepos(c)\n\
+             \    g(5)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a match pattern binder shadows a refined outer local" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod ShadowMatch do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f(o : Option(Int)) : Int do\n\
+             \    let c = neg()\n\
+             \    match o do\n\
+             \      Some(c) -> takepos(c)\n\
+             \      None -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "an unrefined let shadows a refined outer local" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod ShadowLet do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do\n\
+             \    let c = neg()\n\
+             \    let c = 5\n\
+             \    takepos(c)\n\
+             \  end\n\
               end\n")) ]
 
 let () =
