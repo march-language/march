@@ -1043,14 +1043,38 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
     in
+    (* Reflection must be stable per binder within one [check_call]: two
+       syntactic occurrences of the same binder (or the same cross-argument
+       parameter name) in a predicate denote the same value, so they must
+       resolve to the same SMT constant.  [reflect_scalar]'s call-argument
+       branch mints a *fresh* constant on every invocation (via [ret_ctr]),
+       so without memoizing here a predicate like [_ != 4] combined with
+       [n > 3 && n < 5] would bind each `_`/`n` occurrence to a different
+       constant and lose the contradiction between them.  Caching the
+       reflection (not just its absorption) fixes that; re-[absorb]ing an
+       identical reflection is harmless (decls are deduplicated before the
+       VC is built, and a repeated assumption is the same term). *)
+    let reflect_cache
+      : (string, (Smt.term * (string * Smt.sort) list * Smt.term list) option) Hashtbl.t =
+      Hashtbl.create 8
+    in
+    let reflect_cached key compute =
+      match Hashtbl.find_opt reflect_cache key with
+      | Some cached -> cached
+      | None ->
+        let result = compute () in
+        Hashtbl.add reflect_cache key result;
+        result
+    in
     (* Resolve a scalar variable.  A predicate references callee parameters;
        a path condition references caller variables — both go through the
        actual caller values so the names line up in SMT. *)
     let resolve_var name =
-      if name = rp.binder || name = "_" then absorb (reflect_scalar ~postcond sc self_actual)
+      if name = rp.binder || name = "_" then
+        absorb (reflect_cached "$self" (fun () -> reflect_scalar ~postcond sc self_actual))
       else
         match actual_of_name name with
-        | Some a -> absorb (reflect_scalar ~postcond sc a)
+        | Some a -> absorb (reflect_cached name (fun () -> reflect_scalar ~postcond sc a))
         | None ->
           (* a caller-scope variable from the path context *)
           decls := (name, Smt.SInt) :: !decls;

@@ -723,7 +723,31 @@ let tier0_suite =
     gated "inline call to a non-refined function is skipped" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
-             (t0 "  fn plain() : Int do 0 - 9 end\n  fn f() : Int do takepos(plain()) end"))) ]
+             (t0 "  fn plain() : Int do 0 - 9 end\n  fn f() : Int do takepos(plain()) end")));
+
+    gated "inline call arg binder used twice must reflect to one constant" (fun () ->
+        (* `four`'s predicate `n > 3 && n < 5` forces n == 4, contradicting
+           `notfour`'s postcondition `_ != 4`.  If the two occurrences of `n`
+           reflect the inline argument `notfour()` to two DIFFERENT fresh
+           SMT constants, the contradiction is lost and this wrongly passes
+           (see the let-bound control just below, which must still fail). *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn notfour() : {Int | _ != 4} do 5 end\n\
+                \  fn four(n : {Int | n > 3 && n < 5}) : Int do n end\n\
+                \  fn f() : Int do four(notfour()) end")));
+
+    gated "let-bound control for the binder-reuse case still fails" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn notfour() : {Int | _ != 4} do 5 end\n\
+                \  fn four(n : {Int | n > 3 && n < 5}) : Int do n end\n\
+                \  fn f() : Int do\n\
+                \    let c = notfour()\n\
+                \    four(c)\n\
+                \  end"))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
