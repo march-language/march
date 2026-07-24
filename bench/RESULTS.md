@@ -39,11 +39,14 @@ No allocation, pure arithmetic. All languages use the same double recursion.
 | **Rust** | **289.0 ms** | 286.3 ms | 291.1 ms |
 | Elixir   | 998.1 ms | 983.2 ms | 1075.5 ms |
 
-**Open regression.** The 2026-03-24 run of this same benchmark recorded March
-at **287.7 ms** — level with Rust. March is now ~2.2x slower on it. This
-benchmark allocates nothing, so it is unaffected by the FBIP fix below and the
-cause is unidentified; recursion/call overhead is the obvious place to look.
-Tracked in `specs/todos.md`.
+**Not a regression — a feature cost, root-caused 2026-07-24.** The 2026-03-24
+run recorded March at 287.7 ms, level with Rust. That table is a
+*pre-preemption* baseline: `66371f3b` ("reduction counting in compiled code")
+landed 2026-03-25, one day later, and every compiled function entry now
+decrements a global reduction counter and conditionally yields. Rebuilding
+`fib` with that emission disabled gives **0.36 s**, back on the historical
+figure. The cost is per *call*, so it falls hardest on call-dense recursion.
+See `specs/todos.md` for the measured A/B and the options for reducing it.
 
 ---
 
@@ -87,8 +90,10 @@ CHANGELOG entry: `try_fbip_sink` could not sink a `dec_rc` past the join-point
 closure cleanup that every match arm carries, so `EReuse` was never emitted and
 every in-place rewrite became free + fresh allocation.
 
-852 ms is still ~1.7x the 513.3 ms recorded on 2026-03-24. That residual gap is
-not explained by FBIP and may share a cause with the `fib` regression above.
+852 ms is still ~1.7x the 513.3 ms recorded on 2026-03-24, and that residual
+has the same cause as `fib` above: with the per-call reduction check disabled
+this benchmark runs at **0.54 s**, essentially its historical figure. Both
+gaps are the unaccounted cost of compiled-code preemption, not a defect.
 
 ---
 
@@ -119,7 +124,11 @@ Perceus RC beats every allocating implementation by a wide margin.
 where a generational GC is structurally better than RC; and tight iterator
 pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched.
 
-**Open:** scalar recursion (fib) used to be level with Rust and no longer is.
+**Feature cost, not a defect:** scalar recursion (fib) and, to a lesser
+degree, tree-transform each carry the per-call reduction check that makes
+compiled green threads preemptible. Disabling it restores both to their
+pre-2026-03-25 figures. The published 2026-03-24 table predates that feature
+by one day and should be re-baselined rather than treated as a target.
 
 ---
 

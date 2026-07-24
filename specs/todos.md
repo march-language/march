@@ -116,17 +116,58 @@ Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
 class, with OCaml/Rust as controls (both within noise of their 2026-03-24
 figures, so the host is not the variable). See `bench/RESULTS.md`.
 
-- [ ] **`fib(40)`: 287.7 ms → 639.6 ms (~2.2x slower).** Level with Rust in
-  March, now ~2.2x behind. **This benchmark allocates nothing**, so it is
-  unaffected by the FBIP fix above and the cause is entirely unidentified.
-  Suspects to rule out in order: per-call scheduler/reduction-counter
-  overhead (compiled `main` is a green thread and `march_sched_tick` is on
-  some call paths), TCO/known-call regressions, lazy-stack-growth guard-page
-  faults, and `--opt 2` flag plumbing through the CAS cache.
-- [ ] **`tree-transform` residual: 513.3 ms (2026-03-24) vs 852.2 ms after the
-  FBIP fix (~1.7x).** FBIP is confirmed firing again (`reuse` nodes present in
-  `--dump-tir`, snapshot regenerated), so this residual is something else and
-  plausibly shares a cause with `fib` — both are recursion-heavy.
+### ROOT-CAUSED 2026-07-24 — both are the per-call reduction check, not a bug
+
+**`66371f3b` (2026-03-25) "feat(sched): Phase 4 — reduction counting in
+compiled code" landed the day AFTER the 2026-03-24 benchmark table was
+recorded.** Every compiled function entry now emits a load / decrement /
+store against the `@march_tls_reductions` global plus a conditional branch to
+`@march_yield_from_compiled` (`Llvm_ctx.emit_reduction_check`, gated only on
+`ctx.repl`). So the published table is a pre-preemption baseline and every
+number since carries this cost. **This is the price of a deliberate feature,
+not a regression to hunt** — but it was never re-baselined, so it has been
+sitting in the table as an unexplained 2.2x.
+
+A/B measured by gating the emission behind a temporary env var, **with
+`.march/cas/artifacts` cleared between every build** (see the warning below):
+
+| benchmark | with check | without check | 2026-03-24 |
+|---|---|---|---|
+| `fib(40)` | 0.63 s | **0.36 s** | 0.288 s |
+| `tree_transform` | 0.85 s | **0.54 s** | 0.513 s |
+| `list_ops` | 0.06 s | 0.08 s | 0.068 s |
+| `binary_trees` | 0.17 s | 0.15 s | 0.265 s |
+
+Removing it lands `fib` and `tree_transform` essentially back on their
+historical figures, which closes both open items. Allocation-bound
+benchmarks are unaffected — the cost is per *call*, so it falls entirely on
+call-dense recursive code.
+
+Ruled out along the way, so nobody re-walks them: the tag/untag round-trip
+through the `case` result slot (`shl`/`or`/`inttoptr` on store, conditional
+`ashr`+`select` on load — present today, a bare `inttoptr` in 2026-03; in
+isolation the tagged form is *marginally faster*), March's clang flags
+(`-fno-strict-aliasing -fwrapv -msse4.2` — no effect), and scheduler thread
+count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
+
+- [ ] **Decide what to do about it.** The check is emitted unconditionally on
+  every function entry. Options, cheapest first: skip it in leaf functions
+  that contain no calls and no loops (they cannot run unboundedly, so they
+  cannot starve the scheduler); hoist it out of a TCO'd loop body to one
+  check per N iterations; or lean on the existing SIGUSR1 timer preemption
+  and drop the per-call counter entirely. Any of these needs a starvation
+  test, not just a benchmark.
+- [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
+  so the table stops implying a regression that is actually a feature cost.
+
+> ⚠️ **Benchmark A/B methodology — the CAS artifact cache will lie to you.**
+> The first run of this experiment concluded "the reduction check costs
+> nothing", because compiled artifacts are content-hash cached in
+> `<project>/.march/cas/artifacts/` and the key covers compiler flags but
+> **not environment variables**. Both arms of the A/B were served the same
+> cached binary. Always `rm -rf .march/cas/artifacts` between arms and
+> confirm the two outputs have *different* hashes before believing a null
+> result. (Same class as the existing `cas_flags` note for CLI flags.)
 - **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
   `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
 
