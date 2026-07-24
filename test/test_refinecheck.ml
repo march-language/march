@@ -1018,6 +1018,61 @@ let adt_suite =
              \  type Shape = Circle(Int) | Square(Int)\n\
              \  fn area(s : {Shape | is_Circle(_)}) : Int do 0 end\n\
              \  fn main() : Int do area(Square(2)) end\n\
+              end\n"));
+
+    gated "unwrap(o) inside a `None ->` arm is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None -> unwrap(x)\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "unwrap(o) inside a `Some(_) ->` arm passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      Some(v) -> unwrap(x)\n\
+             \      None -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "narrowing does not leak past a rebinding pattern binder" (fun () ->
+        (* The arm rebinds `x`, so the outer scrutinee's tag says nothing
+           about the inner `x`.  Correct code — must stay silent. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int), y : Option(Int)) : Int do\n\
+             \    match y do\n\
+             \      Some(x) -> 0\n\
+             \      None -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a complex scrutinee expression is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn mk() : Option(Int) do None end\n\
+             \  fn f() : Int do\n\
+             \    match mk() do\n\
+             \      None -> 0\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
               end\n")) ]
 
 let () =

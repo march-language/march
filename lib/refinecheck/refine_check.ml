@@ -1819,9 +1819,35 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     go subj;
     List.iter
       (fun (br : A.branch) ->
+        let binders = pat_binders br.A.branch_pat in
         (* A pattern binder shadows a same-named refined outer local. *)
-        let sc = scope_shadow sc (pat_binders br.A.branch_pat) in
+        let sc = scope_shadow sc binders in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
+        (* Constructor-tag narrowing.  Inside a `Ctor(…) ->` arm a VARIABLE
+           scrutinee is known to carry that tag, so we push the synthetic path
+           condition `is_Ctor(s)` — an ordinary predicate expression, which
+           reaches the solver through the existing [smt_of] translation with no
+           new plumbing.  Three guards keep it sound:
+             - the scrutinee must be a bare variable (any other expression has
+               no stable name to attach the fact to → no fact),
+             - the pattern head must be an unambiguous registered constructor,
+             - the arm must not REBIND the scrutinee's name: matching `y` with
+               `Some(x) ->` says nothing about the fresh `x`, so a narrowing
+               recorded against a shadowed name would be a false positive. *)
+        let p =
+          match subj, br.A.branch_pat with
+          | A.EVar s, A.PatCon (ctor, _)
+            when sort_of_ctor ctor.A.txt <> None && not (List.mem s.A.txt binders) ->
+            let sp = s.A.span in
+            let tester =
+              A.EApp
+                ( A.EVar { A.txt = "is_" ^ ctor.A.txt; A.span = sp }
+                , [ A.EVar { A.txt = s.A.txt; A.span = sp } ]
+                , sp )
+            in
+            (tester, false) :: p
+          | _ -> p
+        in
         visit ~root errctx defs ctx p sc br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
