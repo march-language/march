@@ -1,4 +1,35 @@
 # .github/workflows/ci.yml
+#
+# Job layout / why it looks like this
+# ───────────────────────────────────
+# This used to be one `build` matrix job running every check serially, which
+# measured 29.7min end-to-end on ubuntu (Test 16.4min, ASAN gate 6.8min,
+# types-check 2.4min, opam install 2.3min, rest small) — the whole workflow's
+# critical path, and unfixable by caching alone since the steps were serial.
+#
+# Now every independent check is its own job, so the critical path is the
+# single slowest one rather than their sum:
+#
+#   doc-lint                            (standalone, ~10s)
+#   test          (ubuntu, macos)       `dune runtest`
+#   conformance   (ubuntu, macos)       @types-check, @grammar-check, docs, fmt
+#   sanitize-gate (ubuntu)              golden-corpus ASAN gate
+#   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
+#                  ubuntu leg only ─┼─ cross-linux-oracle
+#                                   └─ property-oracle × 8
+#
+# Two other changes cut the per-job floor and the per-compile cost:
+#   - .github/actions/opam-deps caches ~/.opam, so `opam install --deps-only`
+#     stops reinstalling all 46 packages (~2.3min) in every job;
+#   - the compiler now caches compiled C-runtime objects
+#     (lib/cas/runtime_archive.ml), so `march --compile` no longer rebuilds
+#     the whole ~20-file runtime per invocation — which is most of what the
+#     Test step and the ASAN gate were actually spending their time on.
+#
+# Every job carries timeout-minutes: a dune build/runtest can wedge on its RPC
+# daemon (see CLAUDE.md/scripts/run-tests.sh), and before these were added a
+# single wedged step silently ate the full 6h GitHub Actions job ceiling.
+
 name: CI
 
 on:
@@ -9,97 +40,49 @@ on:
 jobs:
   doc-lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
-  build:
+  # The long pole. Kept as its own job so nothing else waits behind it.
+  test:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            ocaml-compiler: 5.3.0
-          - os: ubuntu-24.04
-            ocaml-compiler: 5.3.0
-
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    # Backstop for the dune-daemon wedge documented in CLAUDE.md/scripts/run-tests.sh
-    # (a `dune build`/`dune runtest` invocation can hang indefinitely on its RPC
-    # daemon, independent of what's being built/run — confirmed in CI: one run's
-    # `Build` step, and another's `Test` step, each silently ate the full 6h GH
-    # Actions job ceiling instead of failing fast). Per-step timeouts below give a
-    # faster, more precise signal; this is the outer safety net.
-    timeout-minutes: 60
-
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
-        # entry for macos-15 (our minimum macOS target); the older @v3 the tag
-        # resolved to failed with "no matching opam release", and forcing a
-        # prerelease opam fails GPG verification. Pin the fixed version.
-        uses: ocaml/setup-ocaml@v3.7.0
+      # cross-tools: `dune runtest` includes a linux/amd64 TLS+gzip test that
+      # shells out to `zig cc` against the fetched sysroot.
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
         with:
-          ocaml-compiler: ${{ matrix.ocaml-compiler }}
-
-      - name: Install system dependencies
-        run: |
-          # z3: the refinement-type conformance corpus (@types-check) discharges
-          # pre/postcondition + division-safety VCs via the `z3` binary on PATH
-          # (lib/refine/solver.ml). Without it, refinement checks silently no-op
-          # and the reject/t71-t73 witnesses stop being rejected. Install it on
-          # both runners so the corpus is deterministic (macOS previously relied
-          # on the runner image's pre-installed z3).
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 brotli zstd llvm z3
-          else
-            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
-            # libblake3-dev is not available in Ubuntu 24.04; build from source
-            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-            cd /tmp/blake3/c
-            gcc -O2 -shared -fPIC -o libblake3.so \
-              blake3.c blake3_dispatch.c blake3_portable.c \
-              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-            sudo cp libblake3.so /usr/local/lib/libblake3.so
-            sudo cp blake3.h /usr/local/include/blake3.h
-            sudo ldconfig
-          fi
-
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
-
-      - name: Install zig (cross-compile driver for the linux/amd64 TLS+gzip test)
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Fetch cross-compile sysroot cache (linux/amd64)
-        run: scripts/fetch-cross-sysroot.sh amd64
+          cross-tools: "true"
 
       - name: Build
         timeout-minutes: 10
         run: |
           eval $(opam env)
           # Clear any stale daemon state before the first dune invocation of the
-          # job (cheap defense-in-depth against the wedge below; likely a no-op on
-          # a fresh GH-hosted runner, but mirrors scripts/run-tests.sh's
-          # MARCH_DUNE_SHUTDOWN — belt-and-suspenders costs nothing here).
+          # job (cheap defense-in-depth against the wedge noted at the top of
+          # this file; likely a no-op on a fresh GH-hosted runner, but mirrors
+          # scripts/run-tests.sh's MARCH_DUNE_SHUTDOWN).
           dune shutdown 2>/dev/null || true
           # Build the public exe directly (bin/main.exe = `march`), NOT `@install`
           # (which also builds forge/march-lsp — neither is referenced anywhere
           # else in this job) and NOT a bare `dune build`. A no-target `dune build`
-          # intermittently wedges at ~0% CPU AFTER building everything (a known
-          # dune daemon hang, see CLAUDE.md/scripts/run-tests.sh) — even the
+          # intermittently wedges at ~0% CPU AFTER building everything — even the
           # narrower `@install` alias hit this once in CI (a `Build` step silently
           # ate the full 6h job ceiling). A single explicit exe target is the
-          # narrowest safe scope; the Test step (`dune runtest`) still builds+runs
-          # the full test suite (incl. forge/lsp), so those compile errors are
-          # still caught, just one step later.
+          # narrowest safe scope; `dune runtest` below still builds+runs the full
+          # test suite (incl. forge/lsp), so those compile errors are still
+          # caught, just one step later.
           dune build bin/main.exe
 
       - name: Test
@@ -108,10 +91,28 @@ jobs:
           eval $(opam env)
           dune runtest
 
+  # Static-semantics + grammar corpora, doc notebooks and formatting: all
+  # independent of `dune runtest` and of each other, and all short — grouped
+  # into one job rather than four so they don't each pay job-setup overhead.
+  conformance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 10
         run: |
           eval $(opam env)
+          dune shutdown 2>/dev/null || true
           dune build @types-check
 
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
@@ -119,15 +120,6 @@ jobs:
         run: |
           eval $(opam env)
           dune build @grammar-check
-
-      - name: Golden corpus AddressSanitizer gate (Linux only; RC/UAF guard)
-        if: runner.os == 'Linux'
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          dune build bin/main.exe
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            ./specs/lang/golden/sanitize.sh
 
       - name: Check doc notebooks (.scrollmd) compile
         timeout-minutes: 5
@@ -141,6 +133,72 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
+  sanitize-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Golden corpus AddressSanitizer gate (RC/UAF guard)
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            ./specs/lang/golden/sanitize.sh
+
+  # Build once, fan out via same-run artifacts (not a persistent actions/cache):
+  # cross-linux-oracle and all 8 property-oracle shards below each used to
+  # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
+  # instances redoing identical work. Neither of them needs a coherent local
+  # `_build`/incremental dune state the way the `dune runtest`-based test job
+  # does (they just RUN a prebuilt exe), so a single upstream build here is
+  # safe to fan out as plain files rather than a dune-mediated cache —
+  # deliberately NOT `actions/cache` on `~/.cache/dune` for this: this project
+  # already hit a dune shared-cache-poisoning incident (a stale artifact from
+  # a differently-flagged/differently-versioned compiler silently re-served
+  # across worktrees), and a run-scoped artifact can't leak across runs by
+  # construction, which a persistent cache key can't guarantee no matter how
+  # carefully the key is chosen.
+  # Matrixed over both runners because `property-tests` below consumes this,
+  # and its groups must run on macOS too (see that job's comment). The Linux
+  # leg additionally feeds cross-linux-oracle and the 8 property-oracle shards.
+  ocaml-build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Build compiler + oracle binaries
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe test/test_oracle.exe test/test_properties.exe
+
+      - name: Upload built exes
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
+          retention-days: 1
+          path: |
+            _build/default/bin/main.exe
+            _build/default/test/test_oracle.exe
+            _build/default/test/test_properties.exe
+
   # Cross-compilation gate (P1): cross-compile the deterministic examples+golden
   # corpus to Linux via `zig cc` and assert byte-identical output to the native
   # build (native-referenced).  Targets linux/amd64 so the cross binaries run
@@ -151,15 +209,17 @@ jobs:
   # path end to end.
   cross-linux-oracle:
     runs-on: ubuntu-24.04
+    needs: [ocaml-build]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3.7.0
-        with:
-          ocaml-compiler: 5.3.0
-
+      # No OCaml/opam/dune here at all: this job only RUNS a prebuilt exe from
+      # ocaml-build (a standalone native binary needs no OCaml toolchain to
+      # execute) — only the system deps below (needed for the dynamic linker
+      # to resolve libblake3.so at process start) and zig (needed because
+      # test_oracle.exe's own MARCH_ORACLE_CROSS logic shells out to `zig cc`
+      # for the cross-compile) are actually required at runtime.
       - name: Install system dependencies (blake3 for the native reference build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -178,21 +238,33 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
-
-      - name: Build compiler + oracle
-        timeout-minutes: 10
+      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # paths' least common ancestor, which for the three exes is
+      # `_build/default`, so the artifact's own entries are `bin/main.exe` and
+      # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
+      # every reference below (which uses the in-repo _build path, as the
+      # exes' own runtime-dir lookup expects) misses.
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          # ubuntu leg specifically: this job is Linux-only.
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
         run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe test/test_oracle.exe
+          set -e
+          for f in _build/default/bin/main.exe _build/default/test/test_oracle.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              echo "Artifact layout actually downloaded:"; find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
 
       - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
         timeout-minutes: 20
         run: |
-          eval $(opam env)
           MARCH_ORACLE_CROSS=amd64 \
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
           MARCH_ROOT="$PWD" \
@@ -200,26 +272,156 @@ jobs:
 
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
-  # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so all
-  # 1090 checks silently skip today (confirmed identical across every historical
+  # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so
+  # all 1090 checks silently skip (confirmed identical across every historical
   # CI run — "no-march-binary", 0 matched). Wiring MARCH_BIN into that step
   # directly isn't viable either: each unique generated program is a real
-  # `--compile` (no CAS cache hit across distinct sources — measured ~6.5s each
-  # on GH Actions' own runners (slower than a local dev machine), dominated by
-  # clang recompiling the whole C runtime from source every invocation), so all
-  # 1090 would add well over an hour to the fast Test step on every push.
-  # Instead this runs as its own job (parallel to the build matrix and
-  # cross-linux-oracle above, like they already run concurrently), sharded
-  # 8-way via alcotest's own case-number filtering (`test <suite> <cases>`),
-  # hand-balanced by measured per-case cost (not a naive index range) so no
-  # single shard is dominated by the two heavier cases (case 0 = println_arith
-  # at QCheck count 100; case 20 = opt_matrix at count 20 * 2 opt levels).
-  # Follow-up (deliberately not done here, bigger scope): precompiling the C
-  # runtime once instead of per-`--compile` would cut every invocation to a
-  # fraction of a second, making this whole job unnecessary — filed as a
-  # separate compiler build-path improvement in specs/todos.md.
+  # `--compile` that the whole-binary CAS can never hit (distinct sources), so
+  # all 1090 would add well over an hour to the Test job on every push.
+  # Instead this runs as its own job, sharded 8-way via alcotest's own
+  # case-number filtering (`test <suite> <cases>`), hand-balanced by measured
+  # per-case cost (not a naive index range) so no single shard is dominated by
+  # the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
+  # = opt_matrix at count 20 * 2 opt levels).
+  # test_properties.exe's QCheck property groups — everything in that binary
+  # EXCEPT the interp-vs-compiled oracle group (which property-oracle below
+  # runs, sharded, with MARCH_BIN set).
+  #
+  # Why this is its own job: measured on CI, this binary was 652s of the Test
+  # step's 756s — the single dominant cost of `dune runtest` and of the whole
+  # workflow's critical path. alcotest has no parallelism of any kind (no
+  # --jobs/--parallel; cases run sequentially in-process), so the only lever is
+  # running several filtered processes concurrently. test/dune therefore takes
+  # it out of the `runtest` alias and this job runs it instead.
+  #
+  # Selection is by group-name REGEX, which has two sharp edges worth knowing:
+  #   - alcotest's filter is a regex, so `+` and `(` in group names must be
+  #     escaped — an unescaped name silently matches NOTHING and the shard
+  #     "passes" in ~0s having run nothing. The coverage guard below exists
+  #     precisely because that failure mode is invisible.
+  #   - the oracle group must NOT be matched here. It is excluded by omission,
+  #     so a new group added upstream would also be silently skipped — hence
+  #     the guard asserting every listed group is covered by some shard.
+  # Matrixed over BOTH runners, not just Linux. Before this job existed these
+  # groups ran under `dune runtest`, which the `test` job runs on macOS and
+  # Linux alike — making this Linux-only would have silently dropped every
+  # QCheck property from macOS. That matters concretely: `classify_compile`
+  # asserts how the compiler classifies signal deaths and segfault return
+  # codes, precisely the macOS-vs-Linux divergent surface (test_properties.ml
+  # already carries a macOS-only Sys_error special case), so a macOS-only
+  # regression there would ship unseen.
+  property-tests:
+    runs-on: ${{ matrix.os }}
+    needs: [ocaml-build]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # `shard` must be a real matrix dimension, NOT just `include` entries:
+        # with only `os` listed here, each `include` object would be merged
+        # into every os combination and later objects would overwrite earlier
+        # ones' `shard`/`filter` rather than producing the os × shard product
+        # — silently running a subset. Listing both dimensions makes this a
+        # true 2 × 3 = 6, with `include` only attaching each shard's filter.
+        os: [ubuntu-24.04, macos-15]
+        shard: [soundness, tir, rest]
+        include:
+          # `type soundness + eval` is isolated: it evaluates generated
+          # programs against the full stdlib and measured far slower than
+          # every other group combined, with high QCheck-seed variance.
+          - shard: soundness
+            filter: 'type soundness'
+          - shard: tir
+            filter: 'tir pipeline|tir passes|tir pass invariants'
+          - shard: rest
+            filter: 'algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings'
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the C libraries the prebuilt exe dynamically links — no OCaml or
+      # opam here, since this job only RUNS a binary built upstream.
+      - name: Install system dependencies (blake3 for the native build)
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install blake3 brotli zstd llvm
+          else
+            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            cd /tmp/blake3/c
+            gcc -O2 -shared -fPIC -o libblake3.so \
+              blake3.c blake3_dispatch.c blake3_portable.c \
+              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+            sudo cp libblake3.so /usr/local/lib/libblake3.so
+            sudo cp blake3.h /usr/local/include/blake3.h
+            sudo ldconfig
+          fi
+
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
+          path: _build/default
+      # main.exe too, not just the test binary: two of the "(unit)" groups in
+      # the `rest` shard (record-update converged, cli: timings) shell out to
+      # the compiler. They locate it themselves via _build/default/bin/main.exe
+      # relative to cwd, so with the artifact unpacked here they FIND it and
+      # try to run it — a non-executable one fails with rc=126 rather than
+      # being skipped as "no march binary". (Under `dune runtest` these skip,
+      # because the test's cwd is _build/default/test where that path doesn't
+      # resolve; running them here is a small coverage gain.)
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          set -e
+          for f in _build/default/test/test_properties.exe _build/default/bin/main.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
+
+      # Fails if any group in the binary is neither covered by a shard filter
+      # nor the oracle group — so adding a property group upstream can't
+      # silently go unrun by this workflow.
+      - name: Guard — every property group is covered by some shard
+        run: |
+          set -euo pipefail
+          B=_build/default/test/test_properties.exe
+          # `list` prints "<group> <case-index> <description>"; keep the group.
+          $B list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+            | sed -E 's/[[:space:]]+[0-9]+[[:space:]]+.*$//' | sed -E 's/[[:space:]]+$//' \
+            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u > /tmp/groups.txt
+          COVERED='type soundness|tir pipeline|tir passes|tir pass invariants|algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings|oracle: interp = compiled'
+          missing=0
+          while IFS= read -r g; do
+            if ! printf '%s' "$g" | grep -qE "$COVERED"; then
+              echo "::error::property group '$g' is not covered by any property-tests shard nor by property-oracle"
+              missing=1
+            fi
+          done < /tmp/groups.txt
+          echo "--- groups found ---"; cat /tmp/groups.txt
+          exit $missing
+
+      - name: Property tests (shard ${{ matrix.shard }})
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          # No MARCH_BIN: the oracle group is property-oracle's job. (The exe
+          # would otherwise find _build/default/bin/main.exe on its own and
+          # start compiling — the filters below keep it out of these shards.)
+          _build/default/test/test_properties.exe test '${{ matrix.filter }}' -e 2>&1 | tee /tmp/shard.log
+          ran=$(grep -cE '\[(OK|FAIL)\]' /tmp/shard.log || true)
+          echo "cases actually run: $ran"
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::shard '${{ matrix.shard }}' ran 0 cases — its filter regex matched nothing (unescaped + or ( in a group name?)"
+            exit 1
+          fi
+
   property-oracle:
     runs-on: ubuntu-24.04
+    needs: [ocaml-build]
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -228,9 +430,10 @@ jobs:
         # local timing (~4s/compile on a 14-core Apple Silicon dev machine)
         # and failed on real GH Actions hardware, which measured ~6.5s/compile
         # (case 0 alone: 100 iterations in 10m48s) — shard 1 (250 cases) needed
-        # ~27min against a 25min timeout. Re-balanced by measured cost so the
-        # heaviest shard (150 cases) needs ~16min, comfortable margin under
-        # the step timeout below.
+        # ~27min against a 25min timeout. Re-balanced by measured cost. The
+        # runtime-object cache has since cut the per-compile cost roughly in
+        # half again; the shard split is left as-is rather than re-tuned
+        # optimistically, per the same lesson.
         include:
           - shard: 1
             cases: "0,20"
@@ -251,11 +454,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3.7.0
-        with:
-          ocaml-compiler: 5.3.0
-
+      # No OCaml/opam/dune here at all — see cross-linux-oracle's comment
+      # above for why; only the system deps below (dynamic-linker + the
+      # generated-program-link needs of the `march --compile` subprocesses
+      # this binary spawns) are actually required at runtime.
       - name: Install system dependencies (blake3 for the native build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -269,20 +471,53 @@ jobs:
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
 
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
-
-      - name: Build compiler + property-test binary
-        timeout-minutes: 10
+      # path: _build/default, NOT `.` — upload-artifact@v4 strips the uploaded
+      # paths' least common ancestor, which for the three exes is
+      # `_build/default`, so the artifact's own entries are `bin/main.exe` and
+      # `test/*.exe`. Downloading to `.` therefore lands them at ./bin/... and
+      # every reference below (which uses the in-repo _build path, as the
+      # exes' own runtime-dir lookup expects) misses.
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          # ubuntu leg specifically: this job is Linux-only.
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
         run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe test/test_properties.exe
+          set -e
+          for f in _build/default/bin/main.exe _build/default/test/test_properties.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              echo "Artifact layout actually downloaded:"; find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
+
+      # The shards select oracle cases by INDEX, and alcotest silently ignores
+      # an out-of-range index (`test <group> 0,99` runs case 0 and exits 0).
+      # So adding a 22nd oracle property would run it in NO shard, and CI would
+      # stay green; deleting one would shift every later index and silently
+      # re-cover the wrong cases. The property-tests coverage guard cannot
+      # catch either — it checks group NAMES, and this group is named there.
+      # Pin the count instead: the 8 shards' index lists union to exactly
+      # 0..20, so any change to the case count must come with a re-shard here.
+      - name: Guard — oracle case count still matches the shard split
+        run: |
+          set -euo pipefail
+          expected=21
+          actual=$(./_build/default/test/test_properties.exe list 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | grep -c '^oracle: interp = compiled' || true)
+          echo "oracle cases: expected $expected, found $actual"
+          if [ "$actual" -ne "$expected" ]; then
+            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the 8 property-oracle shards cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
+            exit 1
+          fi
 
       - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
         timeout-minutes: 25
         run: |
-          eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e

@@ -2516,7 +2516,11 @@ let compile filename =
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
             let sha1_c2   = Filename.concat runtime_dir "sha1.c" in
             let base64_c2 = Filename.concat runtime_dir "base64.c" in
-            let extra_c_files =
+            (* Runtime-owned C sources, kept separate from the user's own FFI
+               shims below: only these are eligible for the precompiled-object
+               cache (Stage A, see the runtime_objs binding further down) —
+               user shims are per-project and must stay per-invocation. *)
+            let runtime_extra_c =
               (if Sys.file_exists http_c then
                 let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
@@ -2542,9 +2546,11 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
-              (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
-              ^ String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files)
             in
+            (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
+            let user_ffi_c =
+              String.concat "" (List.rev_map (fun f -> " " ^ Filename.quote f) !ffi_c_files) in
+            let extra_c_files = runtime_extra_c ^ user_ffi_c in
             (* OpenSSL flags for TLS *)
             let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
             let openssl_flags2 =
@@ -2739,9 +2745,71 @@ let compile filename =
                a neighboring constant — e.g. an Err("nan") payload surfaced as
                "bad int". The test-runner C rules already pass these; the production
                --compile path must too. *)
+            (* Stage A: reuse precompiled runtime objects when this build's
+               flags admit it, so clang only has to compile the (small)
+               generated .ll instead of the whole ~20-file C runtime.  See
+               lib/cas/runtime_archive.ml for the cache key and why the
+               whole-binary CAS above cannot serve this.
+
+               Deliberately narrow eligibility — every excluded case either
+               bakes a per-invocation -D into the runtime sources or changes
+               how they compile, and none of them is on any CI path (verified
+               by grep over test/dune + ci.yml), so the fallback staying on
+               today's exact monolithic command costs nothing measurable:
+                 - non-Native targets: cross builds swap in a target sysroot
+                   and drop sources (see the is_cross filter above); wasm/js
+                   never reach here at all;
+                 - --compile-so: adds -fPIC to every runtime object;
+                 - MARCH_HTTP_EVLOOP=1: -DMARCH_HTTP_USE_EVLOOP is read from
+                   march_http.h, so it changes more than march_http_evloop.c;
+                 - --hot-reload with --signing-pubkey: bakes
+                   -DMARCH_SIGNING_PUBKEY_HEX into march_reload.c.
+               MARCH_NO_RUNTIME_CACHE=1 forces the fallback for A/B checks. *)
+            let runtime_objs =
+              let eligible =
+                (match xtarget with March_tir.Llvm_emit.Native -> true | _ -> false)
+                && not !compile_so
+                && evloop_flag = ""
+                && signing_define = ""
+                && !hot_reload_prefix = None
+                && Sys.getenv_opt "MARCH_NO_RUNTIME_CACHE" = None
+              in
+              if not eligible then None
+              else begin
+                let srcs =
+                  runtime
+                  :: (String.split_on_char ' ' runtime_extra_c
+                      |> List.filter (fun s -> s <> "")) in
+                (* Byte-identical to the compile half of the command below,
+                   minus link-only/user-FFI pieces: -L/-l are inert under -c
+                   (and -Wno-unused-command-line-argument is already passed),
+                   while the -D/-I inside the openssl/compress/blake3 flags
+                   genuinely affect codegen and so must be in the key. *)
+                let cflags =
+                  Printf.sprintf
+                    "%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s"
+                    opt_flag dbg_flag san_flag arch_cflags
+                    openssl_flags2 compress_flags2 blake3_flags2 in
+                match March_cas.Runtime_archive.ensure ~cc:cc_driver ~cflags ~sources:srcs with
+                | Ok objs ->
+                  Some (String.concat "" (List.map (fun o -> " " ^ Filename.quote o) objs))
+                | Error msg ->
+                  (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
+                     Printf.eprintf
+                       "march: runtime object cache unavailable (%s); \
+                        falling back to full recompile\n%!" msg);
+                  None
+              end
+            in
+            (* Objects go exactly where their sources used to sit, in the same
+               order, so the link is object-for-object identical either way. *)
+            let runtime_inputs = match runtime_objs with
+              | Some objs -> String.trim objs ^ user_ffi_c
+              | None      -> runtime ^ extra_c_files
+            in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s%s %s -o %s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime extra_c_files openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
+              "%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s %s%s%s%s%s %s -o %s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags evloop_flag ffi_inc signing_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag reload_ldl in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in

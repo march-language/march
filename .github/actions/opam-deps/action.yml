@@ -1,0 +1,79 @@
+name: opam-deps
+description: >
+  Set up OCaml and install this project's opam dependencies, caching the
+  installed switch across runs. ocaml/setup-ocaml's own cache only restores
+  the base opam/compiler skeleton (~6s hit) — it never covers the 46 packages
+  `opam install --deps-only` pulls in, so that step was reinstalling from
+  scratch on every single job (measured ~2.3min each, confirmed via job logs
+  always reporting a full "install 46 packages" regardless of the base-cache
+  hit). This wraps setup-ocaml with an explicit ~/.opam cache keyed on the
+  files that actually determine the dependency solve.
+
+inputs:
+  ocaml-compiler:
+    required: true
+    description: OCaml compiler version to install.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up OCaml
+      uses: ocaml/setup-ocaml@v3.7.0
+      with:
+        ocaml-compiler: ${{ inputs.ocaml-compiler }}
+
+    # Cache `_opam`, NOT `~/.opam`. setup-ocaml@v3 creates a LOCAL switch in
+    # the repo working directory (`<repo>/_opam`, confirmed in job logs:
+    # `ocaml:stubsdir /Users/runner/work/march/march/_opam/lib/ocaml/...`);
+    # `~/.opam` is only the opam ROOT (repository metadata + download cache),
+    # which setup-ocaml already caches under its own `v3-setup-ocaml-opam-*`
+    # key. A first attempt here cached `~/.opam` and so cached nothing that
+    # mattered — the cache reported a clean hit while `opam install
+    # --deps-only` still rebuilt all 46 packages for 4+ minutes, because the
+    # packages live in the switch, not the root.
+    #
+    # Key is a pure function of what determines the opam solve: the 3
+    # (generate_opam_files true)-generated *.opam files, plus dune-project
+    # itself (the actual source of truth — a `(depends ...)` edit there that
+    # hasn't been regenerated into the .opam files yet must still bust this).
+    # No branch/config-dimension fallback chain (unlike a typical app-language
+    # dependency cache): opam-installed packages are a pure function of these
+    # files' content only, there's no "close enough" partial-match dimension
+    # to fall back through here — and a PARTIAL match is actively harmful for
+    # a switch (a near-miss switch restored over a fresh one is how you get an
+    # incoherent mix), so there are deliberately no restore-keys at all: it is
+    # an exact hit or a clean rebuild. The `v2` segment is a manual cache-bust
+    # escape hatch — GH Actions cache entries are immutable per key, so a bad
+    # key can never self-heal without one (and `v1` is burned by the
+    # wrong-path attempt above).
+    - name: Restore opam dependency cache
+      id: opam-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: _opam
+        key: ${{ runner.os }}-opam-v2-${{ inputs.ocaml-compiler }}-${{ hashFiles('dune-project', 'march.opam', 'forge.opam', 'march-lsp.opam') }}
+
+    # Always run, even on a full cache hit: idempotent and a fast no-op then
+    # ("Nothing to do"), and it is what actually verifies the restored switch
+    # is coherent with the current *.opam files rather than trusting the key.
+    - name: Install opam dependencies
+      id: opam-install
+      shell: bash
+      run: |
+        set -o pipefail
+        opam install --deps-only --with-test -y . 2>&1 | tee /tmp/opam-install.log
+        if grep -q "Nothing to do" /tmp/opam-install.log; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Save only when the restore missed AND the install actually did work.
+    # Gating on the miss (not just on "changed") keeps this from attempting a
+    # write under a key that already exists, which GH Actions rejects anyway.
+    - name: Save opam dependency cache
+      if: steps.opam-cache.outputs.cache-hit != 'true' && steps.opam-install.outputs.changed == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: _opam
+        key: ${{ steps.opam-cache.outputs.cache-primary-key }}

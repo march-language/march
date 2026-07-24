@@ -522,10 +522,35 @@
  (modules test_refinecheck)
  (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck alcotest))
 
-(test
+; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
+;
+; Measured on CI, this one binary was 652s of the Test step's 756s -- the
+; single dominant cost of `dune runtest`, and by extension of the whole
+; workflow's critical path. Its QCheck property groups (not the oracle group,
+; which skips under runtest since MARCH_BIN is unset and the compiler exe
+; isn't findable from the test's cwd) run generated programs through the full
+; parse -> typecheck -> lower -> mono -> defun -> perceus pipeline hundreds of
+; times each, and alcotest has no parallelism whatsoever -- it runs cases
+; sequentially in-process, with no --jobs/--parallel of any kind -- so the
+; only way to shorten it is to run several filtered processes concurrently.
+;
+; .github/workflows/ci.yml therefore runs it as its own parallel job(s), which
+; also keeps the two halves of this binary from fighting over one timeout: the
+; `property-tests` job runs the property groups, while `property-oracle` runs
+; the interp-vs-compiled oracle group (8 shards, MARCH_BIN set).
+;
+; It is still BUILT by CI (the ocaml-build job builds test/test_properties.exe
+; and fans it out), so a compile error here still fails the build -- just not
+; via `dune runtest`. Run the whole thing locally with:
+;   dune build @test/property_tests
+(executable
  (name test_properties)
  (modules test_properties)
  (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_eval march_tir march_scheduler march_modules alcotest qcheck-core qcheck-alcotest))
+
+(rule
+ (alias property_tests)
+ (action (run %{exe:test_properties.exe})))
 
 (test
  (name test_stdlib_march)
@@ -952,8 +977,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_signal_term_suppress.out
         (system "./native_signal_term_suppress")))))
 
+; QUARANTINED from `runtest` (2026-07-24): reddened `test (ubuntu-24.04)`
+; on a signal-dispatch ordering/content race. Not a simple line-ordering
+; flake — reproduced locally at ~2-5% of runs (looping the compiled binary
+; hundreds to thousands of times), and the majority shape is TORN output
+; (e.g. `survived termterm handler` — a dropped newline / concatenated
+; lines), not a clean 3-line permutation a sorted diff could tolerate (that
+; was only ~1 in 5 of the failures; the rest genuinely corrupt content, so
+; `node_discovery`'s sort-before-diff approach above does not apply here).
+; Ruled out march_println/march_print's unchecked writev(2)/write(2) return
+; value (the scheduler's SIGUSR1 preemption tick can EINTR a syscall — see
+; march_scheduler.c's "Limitations / known EINTR exposure") as the cause: a
+; retry-on-short-write fix was implemented and tested, but a guaranteed-fresh
+; compile (MARCH_NO_RUNTIME_CACHE=1, caches cleared) with that fix still
+; flaked at the same ~5% rate, so the corruption happens before the write
+; syscall — most likely a race between the deferred Signal.watch dispatch
+; (run by an arbitrary scheduler OS thread's per-iteration drain, per
+; march_scheduler.c's march_signal_drain call sites) and the raising
+; thread's own subsequent code, touching overlapping memory (allocator/GC)
+; rather than just interleaving output. Same general class as the open
+; scheduler-deadlock P0 in specs/todos.md (heisenbug: not yet isolated to
+; an exact missing sync edge) but a distinct symptom — tracked as a
+; separate entry there. Un-quarantine (restore `(alias runtest)` below)
+; once the dispatch race is fixed. Runnable manually via
+; `dune build @test/signal_term_suppress_quarantined`.
 (rule
- (alias runtest)
+ (alias signal_term_suppress_quarantined)
  (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
 
 ; ── Phase 2: float-boxing Stage 2 (erased Floats are heap-boxed) ──────

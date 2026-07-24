@@ -10,6 +10,46 @@ permissions:
   contents: write
 
 jobs:
+  # The tests quarantined out of `dune runtest` (scheduler missed-wakeup
+  # deadlock; Signal.watch dispatch race) run in NO other workflow, so nothing
+  # would ever tell us the underlying races got fixed — they'd be effectively
+  # deleted rather than quarantined. Run them here, nightly and
+  # continue-on-error, purely as a signal: a green run is the cue to
+  # un-quarantine (restore `(alias runtest)` in test/dune). Never blocks the
+  # nightly release. See the P0 entries in specs/todos.md.
+  quarantined:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Run quarantined goldens (informational — expected to be flaky)
+        timeout-minutes: 25
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          failed=""
+          for a in task_burst_await signal_term_suppress node_call_loopback \
+                   node_discovery rpc_auto_enroll; do
+            echo "::group::$a"
+            if dune build "@test/${a}_quarantined"; then
+              echo "$a: PASSED"
+            else
+              echo "$a: still failing"
+              failed="$failed $a"
+            fi
+            echo "::endgroup::"
+          done
+          echo "still-failing:${failed:- none}"
+          if [ -z "$failed" ]; then
+            echo "::notice::All quarantined tests passed — consider un-quarantining them in test/dune."
+          fi
+
   version:
     runs-on: ubuntu-24.04
     outputs:
