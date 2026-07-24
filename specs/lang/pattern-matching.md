@@ -204,6 +204,22 @@ fn get_w2(r : { w : Int, h : Int }) : Int do
 end
 ```
 
+**Record arms get no coverage analysis.** Both the exhaustiveness checker
+and the redundancy checker treat *any* arm containing a record pattern as a
+wildcard, because their internal pattern representation has no record shape.
+Two consequences, both deliberate:
+
+- A match whose only arm is `{ code: 404 } -> …` typechecks clean and panics
+  at runtime on any other `code`. Refutable record patterns need a `_` arm
+  (or a total field pattern) that you add yourself; the compiler will not
+  remind you.
+- The arm following a record arm is never reported unreachable, even when it
+  genuinely is. A false *"this pattern can never be reached"* on correct code
+  costs more than the missed true positive, so the checker stays silent.
+
+This applies to a record pattern nested anywhere in the arm — inside a
+constructor payload, a tuple, an alias, or an or-pattern alternative.
+
 ### Atom Patterns
 
 Atoms are named constants written with a leading colon — each atom is its own type (see the Type System page for a full introduction).
