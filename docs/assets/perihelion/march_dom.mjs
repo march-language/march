@@ -207,9 +207,9 @@ export function march_dom_alert(msg) { window.alert(msg); }
 export function march_dom_href() { return window.location.href; }
 export function march_dom_set_href(url) { window.location.href = url; }
 
-// cb : Int -> Unit — called with a dummy 0 argument (ignored). A true
-// zero-arg March closure can't be spelled at the extern boundary; see
-// stdlib/dom.march's module doc.
+// cb : Unit -> Unit — a zero-arg March closure. It is invoked with a dummy
+// trailing 0 argument, which the 0-arg closure simply ignores (extra JS call
+// arguments are dropped). See stdlib/dom.march's Window section.
 export function march_dom_set_timeout(ms, cb) {
   setTimeout(() => { cb._0(cb, 0); }, ms);
 }
