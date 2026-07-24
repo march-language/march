@@ -83,6 +83,16 @@ git log is authoritative for exact commits.
   whose C signature declares the parameter as `ptr`. Restricted the
   coercion to the direction it was actually meant for.
 
+- Refinement checking's return-refinement propagation could false-positive
+  through a `let? p = e` binding: the continuation after `let? c = ok5()`
+  still saw an outer refined local named `c` instead of the newly-bound one,
+  so a subsequent correct use of `c` could be wrongly flagged. `let?` now
+  shadows its bound names before checking its continuation, matching every
+  other binding construct (`let`, lambda params, `match` binders). Also
+  reworded refinement counterexamples from `f() returns v` to
+  `f() can return v` — the solver's model is a witness satisfying `f`'s
+  postcondition, not necessarily `f`'s actual return value.
+
 - The browser cookbook/playground REPL's bundled stdlib was missing
   `Vault` — the docs/cookbook/vault.md examples errored with `no member
   'new' in module 'Vault'` because `vault.march` wasn't in either

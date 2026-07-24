@@ -307,8 +307,10 @@ edges:
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
 - **An unproven postcondition does not reach callers.** If the checker can't
   prove a declared return refinement at the definition (an opaque body, a
-  predicate it can't reflect), the declaration is still accepted but callers
-  learn nothing from it. Only proven postconditions are assumed at call sites.
+  predicate it can't reflect, or a body that routes its value through a local
+  `let` binding rather than returning it directly), the declaration is still
+  accepted but callers learn nothing from it. Only proven postconditions are
+  assumed at call sites.
 - **No relational postconditions yet.** A return refinement that mentions a
   parameter (`{Int | _ == n + 1}`, `{Int | _ < len(xs)}`) is checked at the
   definition but is **not** propagated to call sites — instantiating it there
