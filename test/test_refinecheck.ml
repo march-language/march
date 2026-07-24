@@ -676,6 +676,29 @@ let guard_suite =
                 \    end\n\
                 \  end"))) ]
 
+(* ── Tier 0: postcondition propagation ─────────────────────────────────────
+   A callee's declared return refinement becomes a fact at its call sites. *)
+let t0 body =
+  Printf.sprintf
+    "mod M do\n\
+    \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+    \  fn nonneg() : {Int | _ >= 0} do 1 end\n\
+    \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+     %s\n\
+     end\n"
+    body
+
+let tier0_suite =
+  [ gated "recording a return refinement changes nothing on a compatible call" (fun () ->
+        (* Task 1 records the signature but does not yet consume it.  Both of
+           these must stay silent, before AND after the change. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do let c = nonneg()\n    takepos(c) end")));
+
+    gated "a non-refined function is still resolvable (no regression)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn plain() : Int do 7 end\n  fn f() : Int do takepos(plain()) end"))) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -692,5 +715,6 @@ let () =
       ("flag-gating", flag_suite);
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
-      ("guard-path-sensitivity", guard_suite) ]
+      ("guard-path-sensitivity", guard_suite);
+      ("tier0-postcond", tier0_suite) ]
 

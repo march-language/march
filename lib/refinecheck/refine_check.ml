@@ -22,9 +22,6 @@ module Err = March_errors.Errors
 (* A refined parameter: position, predicate binder, predicate expression. *)
 type rparam = { idx : int; binder : string; pred : A.expr }
 
-(* A function's signature: parameter names by position + its refined params. *)
-type fn_sig = { param_names : string list; refined : rparam list }
-
 let binder_name : A.name option -> string = function
   | None -> "_"
   | Some n -> n.A.txt
@@ -32,6 +29,54 @@ let binder_name : A.name option -> string = function
 let is_int_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> true
   | _ -> false
+
+(* A function's declared return refinement, when its base type is Int.
+   Defined here (rather than beside the other postcondition helpers) because
+   [collect_all_defs] records it into every fn_sig. *)
+let return_refine (fd : A.fn_def) : (string * A.expr) option =
+  match fd.A.fn_ret_ty with
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred)
+  | _ -> None
+
+(* True iff [pred]'s only free variable is the refinement binder — i.e. the
+   predicate constrains the refined value alone and mentions no parameter.
+
+   `{Int | _ >= 0}`      -> closed
+   `{Int | _ == n + 1}`  -> NOT closed (mentions the parameter `n`)
+   `{Int | _ < len(xs)}` -> NOT closed (mentions `xs`)
+
+   A non-closed (relational) postcondition can only be used at a call site by
+   substituting actuals for formals — deliberately out of scope (Tier 1).
+   Unrecognised syntax is conservatively treated as NOT closed, so an
+   unfamiliar predicate is skipped rather than trusted. *)
+let pred_is_closed (binder : string) (pred : A.expr) : bool =
+  let ok = ref true in
+  let rec go (e : A.expr) =
+    match e with
+    | A.EVar { A.txt; _ } -> if txt <> binder && txt <> "_" then ok := false
+    (* The head of an application is a function/operator name, not a value
+       reference: only its arguments can carry free variables. *)
+    | A.EApp (A.EVar _, args, _) -> List.iter go args
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EAnnot (e, _, _) -> go e
+    | A.ELit _ -> ()
+    | _ -> ok := false
+  in
+  go pred;
+  !ok
+
+(* A function's signature: parameter names by position, its refined params, and
+   its declared return refinement (binder + predicate) when the return type is
+   an Int refinement.  [ret] is stored UNFILTERED — the closedness test is
+   applied at the use sites via [postcond_of], so relaxing it for relational
+   postconditions (Tier 1) is a one-place change. *)
+type fn_sig = {
+  param_names : string list;
+  refined : rparam list;
+  ret : (string * A.expr) option;
+}
 
 (* Length of a list literal (a Cons/Nil ECon chain); None if not a literal. *)
 let rec list_len (e : A.expr) : int option =
@@ -797,7 +842,7 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; refined }
+  { param_names; refined; ret = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -812,10 +857,18 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
       (function
         | A.DFn (fd, _) ->
           let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
-          let sg =
-            match fd.A.fn_clauses with c :: _ -> sig_of_clause c | [] -> { param_names = []; refined = [] }
+          let base =
+            match fd.A.fn_clauses with
+            | c :: _ -> sig_of_clause c
+            | [] -> { param_names = []; refined = []; ret = None }
           in
-          Hashtbl.replace tbl key (if sg.refined <> [] then Some sg else None)
+          let sg = { base with ret = return_refine fd } in
+          (* Record the signature when EITHER side carries a refinement: a
+             function with only a refined *return* must be resolvable so its
+             postcondition reaches call sites, even though it has no refined
+             params of its own to check. *)
+          Hashtbl.replace tbl key
+            (if sg.refined <> [] || Option.is_some sg.ret then Some sg else None)
         | A.DMod (name, _, ds, _) ->
           go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
         | _ -> ())
@@ -1046,12 +1099,6 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
 (* ── Postconditions: a function's return value must satisfy its return
    refinement.  We check each *tail* expression (a return position) under the
    path/scope reaching it, with the same definite-failure soundness stance. ── *)
-
-let return_refine (fd : A.fn_def) : (string * A.expr) option =
-  match fd.A.fn_ret_ty with
-  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
-    Some (binder_name binder, pred)
-  | _ -> None
 
 (* Like return_refine but also returns the SMT sort name when the return base
    type is a registered TDRecord, enabling EField reflection in check_post. *)
