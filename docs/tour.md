@@ -563,6 +563,16 @@ Go deeper:
 - [Type System](types.md) — algebraic data types and generics in depth
 - [Pattern Matching](pattern-matching.md) — exhaustiveness, guards, nested patterns
 - [Modules](modules.md) — organizing code across files
-- [Actors](actors.md) — concurrent programming
+- [Actors](actors.md) — concurrent programming, and the jumping-off point for supervision, clustering, and hot code reload
+
+March's compile-time safety goes further than a standard ML-family type system:
+
+- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
+- [Linear Types](linear-types.md) — resources the compiler proves are used exactly once, at zero runtime cost
+- [Refinement Types](refinement-types.md) — value predicates (`{Int | _ >= 0}`) checked by an SMT solver
+- [Capabilities](capabilities.md) — IO permissions tracked in the type system
+- [Safety by Construction](safety-by-construction.md) — how these layers compose on one function
+- [Memory Model](memory-model.md) — why March has no garbage collector or pauses
+- [Sigils & Templating](sigils.md) — `~H` HTML templates and the general `~Name"..."` mechanism
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).
