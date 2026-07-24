@@ -19,8 +19,10 @@ module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
 
-(* A refined parameter: position, predicate binder, predicate expression. *)
-type rparam = { idx : int; binder : string; pred : A.expr }
+(* A refined parameter: position, predicate binder, predicate expression, and
+   whether its base type is String (so the binder reflects into the `Str` sort
+   rather than `Int`). *)
+type rparam = { idx : int; binder : string; pred : A.expr; is_str : bool }
 
 let binder_name : A.name option -> string = function
   | None -> "_"
@@ -29,6 +31,86 @@ let binder_name : A.name option -> string = function
 let is_int_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> true
   | _ -> false
+
+let is_string_base : A.ty -> bool = function
+  | A.TyCon ({ A.txt = "String"; _ }, []) -> true
+  | _ -> false
+
+(* ── The String encoding ───────────────────────────────────────────────────
+   `String` is modelled as an UNINTERPRETED SORT and `len` as an uninterpreted
+   function `Str -> Int` constrained only by non-negativity.  Each distinct
+   string literal appearing in a VC becomes a declared constant with its length
+   pinned and its distinctness from every other literal asserted.
+
+   This deliberately stays inside the EUF + linear-arithmetic fragment that
+   `Smt.render` already emits — structurally the same trick as list `len`.  We
+   do NOT use Z3's string theory (`str.len`, `str.++`, the built-in `String`
+   sort, regex): staying decidable and cheap is the whole point of the scoping.
+
+   The consequence to keep in mind is that `Str` is opaque: knowing a value is
+   DISTINCT from the empty literal does not establish its length (there is no
+   injectivity axiom relating a string to its length).  So an `s == ""` guard
+   proves nothing about `len(s)` in the else-branch, and the checker stays
+   silent there — correct under the definite-failure stance, and documented as
+   a limitation rather than papered over.
+
+   All three SMT names below contain `$`, which is legal in an SMT-LIB simple
+   symbol but CANNOT occur in a March identifier.  That is load-bearing, not
+   cosmetic: a plain `len` symbol collides with any user or stdlib variable
+   named `len`, and a colliding `(declare-const len Int)` next to
+   `(declare-fun len …)` makes z3 emit an error line.  The solver is one
+   long-lived `z3 -in` process shared by the whole compilation and the driver
+   reads exactly one verdict line per query, so a single such error
+   DESYNCHRONISES the channel and corrupts every subsequent VC in the run. *)
+let str_sort = "$Str"
+let strlen_fn = "$strlen"
+
+let string_preamble =
+  Printf.sprintf
+    "(declare-sort %s 0)\n\
+     (declare-fun %s (%s) Int)\n\
+     (assert (forall ((s %s)) (! (>= (%s s) 0) :pattern ((%s s)))))\n"
+    str_sort strlen_fn str_sort str_sort strlen_fn strlen_fn
+
+(* ── Well-sortedness guard ────────────────────────────────────────────────
+   `$Str` is a sort apart, and the rest of the VC language is Int/Bool.  A term
+   that mixes them (`(= caller_var $str0)` where the caller variable was
+   reflected as an Int) is not merely useless — z3 REJECTS it, with the
+   channel-desynchronising consequence described above.  So a term mentioning a
+   string is admitted only where it is genuinely well-sorted: as the argument of
+   [strlen_fn], or with both sides of an =/≠ being string constants.
+
+   [mentions_str] deliberately stops at [strlen_fn]: `($strlen c)` is an Int and
+   may be added, compared and multiplied like any other. *)
+let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
+  let m = mentions_str is_str in
+  match t with
+  | Smt.App (f, [ _ ]) when f = strlen_fn -> false
+  | Smt.Const c -> is_str c
+  | Smt.App (_, args) -> List.exists m args
+  | Smt.IntLit _ | Smt.BoolLit _ -> false
+  | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+  | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
+  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> m a || m b
+
+let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
+  let w = wellsorted is_str and m = mentions_str is_str in
+  let int_side a = (not (m a)) && w a in
+  match t with
+  | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ -> true
+  | Smt.App (f, [ a ]) when f = strlen_fn ->
+    (match a with Smt.Const c -> is_str c | _ -> false)
+  | Smt.App (_, args) -> List.for_all int_side args
+  | Smt.Eq (a, b) | Smt.Ne (a, b) ->
+    (match a, b with
+     | Smt.Const x, Smt.Const y when is_str x && is_str y -> true
+     | _ -> int_side a && int_side b)
+  | Smt.Not a -> w a
+  | Smt.Neg a | Smt.MulLit (_, a) -> int_side a
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
+  | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
 
 (* A function's declared return refinement, when its base type is Int.
    Defined here (rather than beside the other postcondition helpers) because
@@ -74,6 +156,10 @@ let pred_is_closed (binder : string) (pred : A.expr) : bool =
    postconditions (Tier 1) is a one-place change. *)
 type fn_sig = {
   param_names : string list;
+  (* Parallel to [param_names]: true where the parameter's declared base type is
+     String (bare or refined).  This is what makes the `len` OVERLOAD safe — the
+     string meaning is chosen only from a declared type, never guessed. *)
+  param_str : bool list;
   refined : rparam list;
   ret : (string * A.expr) option;
 }
@@ -95,6 +181,14 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
    always; a user measure when its body is syntactically non-negative. *)
 let measure_nonneg : string list ref = ref []
 let is_nonneg_measure (m : string) : bool = m = "len" || List.mem m !measure_nonneg
+
+(* `len` over strings is only safe to encode while `len` still MEANS the builtin
+   measure.  A user `@[measure] fn len(…)` would be axiomatised over its own ADT
+   sort, and declaring a second `len : Str -> Int` in the same VC would either
+   collide or silently assert a fact about the wrong function.  When the name is
+   taken, we disable the string meaning entirely and skip — a wrong resolution
+   asserts a wrong fact, which is the one thing that must never happen. *)
+let string_len_available () : bool = not (List.mem "len" !registered_measures)
 
 (* Conservative syntactic non-negativity of a measure body: every return path is
    a non-negative literal, a sum/product of non-negatives, or a call to a measure
@@ -666,12 +760,18 @@ let measure_gate_errors (fd : A.fn_def) : string list =
    maps a (measure-name, argument-name) to its measure term.  None => outside
    the supported Int/Bool linear fragment. *)
 let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
-    ?(resolve_measure_app = fun _ _ -> None) (e : A.expr) : Smt.term option =
-  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app in
+    ?(resolve_measure_app = fun _ _ -> None) ?(resolve_str_lit = fun _ -> None)
+    (e : A.expr) : Smt.term option =
+  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+            ~resolve_str_lit in
   let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Some (Smt.BoolLit b)
+  (* A string literal reflects to its per-VC constant, when the caller supplies
+     a table.  Callers that cannot model strings leave [resolve_str_lit] at its
+     default and the literal stays untranslatable — i.e. skipped. *)
+  | A.ELit (A.LitString s, _) -> resolve_str_lit s
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
@@ -797,14 +897,31 @@ let render_model_entry (k, v) : string =
     else Printf.sprintf "%s(%s) = %s" head tail v'
   | None -> Printf.sprintf "%s = %s" k v'
 
+(* Drop model entries whose value is an uninterpreted-sort witness such as
+   `Str!val!0`.  Z3 invents those names for elements of a sort it knows nothing
+   about; printing one tells the reader nothing about their program and reads
+   like internal noise.  The useful facts about a string (its length) come
+   through as ordinary `(len c)` entries and survive this filter. *)
+let is_opaque_witness (v : string) : bool =
+  match String.index_opt v '!' with
+  | None -> false
+  | Some i ->
+    let rest = String.sub v i (String.length v - i) in
+    String.length rest > 5 && String.sub rest 0 5 = "!val!"
+
+let visible_model (model : (string * string) list) : (string * string) list =
+  List.filter (fun (_, v) -> not (is_opaque_witness v)) model
+
 (* Inline counterexample suffix for call-site errors (e.g. precondition checks).
    Returns "" when the model is empty. *)
 let format_cx (model : (string * string) list) : string =
+  let model = visible_model model in
   if model = [] then ""
   else " (e.g. " ^ String.concat ", " (List.map render_model_entry model) ^ ")"
 
 (* Multi-line counterexample block for return-type constraint errors. Returns "" when empty. *)
 let cx_block (model : (string * string) list) : string =
+  let model = visible_model model in
   if model = [] then ""
   else
     "\n\nA counterexample was found:\n\n    " ^
@@ -815,16 +932,30 @@ let model_of = function Refine.Refuted m -> m | _ -> []
 (* ── Scope of refined locals/params: name -> (binder, predicate) ─────────── *)
 type scope = (string * (string * A.expr * string option)) list
 
-let refined_int_ty : A.ty option -> (string * A.expr) option = function
+(* A refined parameter's (binder, predicate, is_string).  Admits Int and String
+   base types; anything else is not a checkable parameter refinement. *)
+let refined_param_ty : A.ty option -> (string * A.expr * bool) option = function
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
-    Some (binder_name binder, pred)
+    Some (binder_name binder, pred, false)
+  | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
+    Some (binder_name binder, pred, true)
   | _ -> None
 
-(* Like refined_int_ty but also admits record TyCon params.
-   Returns (binder, pred, sort_opt) where sort_opt = Some "M_…" for record params. *)
+(* True when a parameter's declared type is String, refined or not. *)
+let is_string_param_ty : A.ty option -> bool = function
+  | Some (A.TyRefine (base, _, _)) -> is_string_base base
+  | Some t -> is_string_base t
+  | None -> false
+
+(* Like refined_param_ty but also admits record TyCon params, and reports the
+   SMT sort name: Some "M_…" for a record, Some "Str" for a String, None for an
+   Int.  NOTE for consumers: `Some _` does NOT mean "record" — check against
+   [str_sort] before taking a record-specific path. *)
 let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
+  | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
+    Some (binder_name binder, pred, Some str_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -882,19 +1013,24 @@ let param_name_of : A.fn_param -> string = function
   | A.FPNamed p | A.FPDefault (p, _) -> p.A.param_name.A.txt
   | A.FPPat _ -> "_"
 
+let param_ty_of : A.fn_param -> A.ty option = function
+  | A.FPNamed p | A.FPDefault (p, _) -> p.A.param_ty
+  | A.FPPat _ -> None
+
 let sig_of_clause (c : A.fn_clause) : fn_sig =
   let param_names = List.map param_name_of c.A.fc_params in
+  let param_str = List.map (fun fp -> is_string_param_ty (param_ty_of fp)) c.A.fc_params in
   let refined =
     List.mapi (fun idx fp -> (idx, fp)) c.A.fc_params
     |> List.filter_map (fun (idx, fp) ->
            match fp with
            | A.FPNamed p | A.FPDefault (p, _) ->
-             (match refined_int_ty p.A.param_ty with
-              | Some (binder, pred) -> Some { idx; binder; pred }
+             (match refined_param_ty p.A.param_ty with
+              | Some (binder, pred, is_str) -> Some { idx; binder; pred; is_str }
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; refined; ret = None }
+  { param_names; param_str; refined; ret = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -912,7 +1048,7 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
           let base =
             match fd.A.fn_clauses with
             | c :: _ -> sig_of_clause c
-            | [] -> { param_names = []; refined = []; ret = None }
+            | [] -> { param_names = []; param_str = []; refined = []; ret = None }
           in
           let sg = { base with ret = return_refine fd } in
           (* Record the signature when EITHER side carries a refinement: a
@@ -1076,6 +1212,13 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
     | Some i -> List.nth_opt args i
     | None -> None
   in
+  (* Is the callee parameter called [name] declared String? *)
+  let str_pos = List.mapi (fun i b -> (i, b)) sg.param_str in
+  let name_is_str name =
+    match List.assoc_opt name name_pos with
+    | Some i -> (match List.assoc_opt i str_pos with Some b -> b | None -> false)
+    | None -> false
+  in
   match List.nth_opt args rp.idx with
   | None -> ()
   | Some self_actual ->
@@ -1084,6 +1227,91 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
        axiom cost.  Set when [resolve_measure] reflects an axiom measure. *)
     let uses_axiom = ref false in
+    (* ── Per-VC string state ────────────────────────────────────────────────
+       [str_names] records every constant declared into the `Str` sort, so a
+       later reflection of the same March variable agrees on its sort and
+       [resolve_measure_app] can tell a string term from a list term.
+       [str_lit_tbl] maps each DISTINCT literal to its constant, so the same
+       literal reflects to the same symbol and distinct literals are asserted
+       distinct.  [uses_string] decides whether this VC gets the string
+       preamble — the same "attach only when actually used" discipline the
+       measure preamble follows. *)
+    let str_lit_tbl : (string, string) Hashtbl.t = Hashtbl.create 4 in
+    let str_names : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let uses_string = ref false in
+    let declare_str_const c =
+      if not (Hashtbl.mem str_names c) then begin
+        Hashtbl.replace str_names c ();
+        uses_string := true;
+        decls := (c, Smt.SData str_sort) :: !decls
+      end
+    in
+    (* A string literal's constant, minted on first sight.  Literal text is NOT
+       embedded in the symbol (arbitrary text is not a legal SMT-LIB symbol); an
+       index is used instead.  Two facts are asserted: the pinned length, and
+       distinctness from every literal already seen.
+
+       LENGTH IS IN BYTES.  March's `string_length` builtin is `String.length`
+       in the interpreter and an alias for `march_string_byte_length` in native
+       codegen — the language has no codepoint-length primitive at all, so bytes
+       is not a conservative guess, it is the definition.  OCaml's
+       [String.length] over the already-unescaped literal is exactly that. *)
+    let str_lit_const (s : string) : Smt.term option =
+      if not (string_len_available ()) then None
+      else
+        match Hashtbl.find_opt str_lit_tbl s with
+        | Some c -> Some (Smt.Const c)
+        | None ->
+          let c = Printf.sprintf "$str%d" (Hashtbl.length str_lit_tbl) in
+          Hashtbl.replace str_lit_tbl s c;
+          declare_str_const c;
+          assume :=
+            Smt.Eq (Smt.App (strlen_fn, [ Smt.Const c ]), Smt.IntLit (String.length s))
+            :: !assume;
+          Hashtbl.iter
+            (fun s' c' ->
+              if s' <> s then assume := Smt.Ne (Smt.Const c, Smt.Const c') :: !assume)
+            str_lit_tbl;
+          Some (Smt.Const c)
+    in
+    (* Reflect a STRING-typed actual.  Side effects (declarations, assumptions)
+       must happen once per key, hence the memo table.  A refined string local
+       carries its own predicate in as an assumption — that is what makes
+       `fn f(s : {String | len(_) > 0}) … nonempty(s)` provable rather than
+       merely unprovable-and-skipped. *)
+    let str_reflected : (string, Smt.term option) Hashtbl.t = Hashtbl.create 4 in
+    let reflect_str (key : string) (e : A.expr) : Smt.term option =
+      match Hashtbl.find_opt str_reflected key with
+      | Some cached -> cached
+      | None ->
+        let result =
+          if not (string_len_available ()) then None
+          else
+            match e with
+            | A.ELit (A.LitString s, _) -> str_lit_const s
+            | A.EVar { A.txt = x; _ } ->
+              declare_str_const x;
+              let xc = Smt.Const x in
+              (match List.assoc_opt x sc with
+               | Some (b, q, Some srt) when srt = str_sort ->
+                 let rv n = if n = b || n = "_" then Some xc else None in
+                 let rm m n =
+                   if m = "len" && (n = b || n = "_") then Some (Smt.App (strlen_fn, [ xc ]))
+                   else None
+                 in
+                 (match smt_of ~resolve_var:rv ~resolve_measure:rm
+                          ~resolve_str_lit:str_lit_const q with
+                  | Some qa -> assume := qa :: !assume
+                  | None -> ())
+               | _ -> ());
+              Some xc
+            (* Any other string-producing expression (a concatenation, a call)
+               is opaque to this encoding — skip rather than guess. *)
+            | _ -> None
+        in
+        Hashtbl.replace str_reflected key result;
+        result
+    in
     let absorb = function
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
@@ -1114,16 +1342,27 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
     (* Resolve a scalar variable.  A predicate references callee parameters;
        a path condition references caller variables — both go through the
        actual caller values so the names line up in SMT. *)
+    let is_self name = name = rp.binder || name = "_" in
     let resolve_var name =
-      if name = rp.binder || name = "_" then
+      (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
+         choice is driven by a DECLARED type (the refinement's own base type for
+         the binder, the callee's parameter type otherwise), never inferred from
+         the actual — so an unknown stays unknown instead of being guessed. *)
+      if is_self name && rp.is_str then reflect_str "$self" self_actual
+      else if (not (is_self name)) && name_is_str name then
+        (match actual_of_name name with Some a -> reflect_str name a | None -> None)
+      else if is_self name then
         absorb (reflect_cached "$self" (fun () -> reflect_scalar ~postcond sc self_actual))
       else
         match actual_of_name name with
         | Some a -> absorb (reflect_cached name (fun () -> reflect_scalar ~postcond sc a))
         | None ->
           (* a caller-scope variable from the path context *)
-          decls := (name, Smt.SInt) :: !decls;
-          Some (Smt.Const name)
+          if Hashtbl.mem str_names name then Some (Smt.Const name)
+          else begin
+            decls := (name, Smt.SInt) :: !decls;
+            Some (Smt.Const name)
+          end
     in
     let measure_of_var m x =
       let c = Smt.Const (m ^ "$" ^ x) in
@@ -1161,7 +1400,20 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         Some (Smt.Const nm)
     in
     let resolve_measure m name =
-      if is_axiom_measure m then (
+      (* `len` OVERLOAD RESOLUTION.  The string meaning is taken only when the
+         subject's DECLARED base type is String — the refinement's own base type
+         for the binder, the callee's parameter type for a cross-argument name.
+         Everything else falls through to the existing list handling unchanged,
+         so list `len` keeps its meaning exactly. *)
+      if m = "len" && string_len_available ()
+         && ((is_self name && rp.is_str) || ((not (is_self name)) && name_is_str name))
+      then
+        let key = if is_self name then "$self" else name in
+        let actual = if is_self name then Some self_actual else actual_of_name name in
+        (match actual with
+         | Some a -> Option.map (fun t -> Smt.App (strlen_fn, [ t ])) (reflect_str key a)
+         | None -> None)
+      else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
         match actual_of_name name with
@@ -1177,16 +1429,33 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
             | None -> (match a with A.EVar { A.txt = x; _ } -> measure_of_var m x | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
+    (* `len(<expr>)` where the expression itself reflected to a term: the string
+       meaning applies exactly when that term is one of OUR declared `Str`
+       constants (e.g. an inline `len("abc")`).  Anything else stays None, which
+       is what the default was, so no existing behaviour changes. *)
+    let resolve_measure_app m arg =
+      match m, arg with
+      | "len", Smt.Const c when string_len_available () && Hashtbl.mem str_names c ->
+        Some (Smt.App (strlen_fn, [ arg ]))
+      | _ -> None
+    in
+    (* Pre-reflect a String binder before the path conditions are translated, so
+       a caller variable mentioned by a guard is already known to be `Str`-sorted
+       and both occurrences agree on a sort. *)
+    if rp.is_str then ignore (resolve_var rp.binder);
     (* Translate the path conditions into assumptions (dropping any that fall
        outside the supported fragment — sound, just weaker). *)
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_measure cond with
+        match smt_of ~resolve_var ~resolve_measure ~resolve_measure_app
+                ~resolve_str_lit:str_lit_const cond with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure rp.pred with
+    (match smt_of ~resolve_var ~resolve_measure ~resolve_measure_app
+             ~resolve_str_lit:str_lit_const rp.pred with
      | None -> ()
+     | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) -> ()
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
        let decls =
@@ -1194,8 +1463,15 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
            (fun acc d -> if List.mem d acc then acc else d :: acc)
            [] !decls
        in
-       let vc = { Smt.decls; assumptions = !assume; goal } in
-       let preamble = if !uses_axiom then !measure_preamble else "" in
+       (* Drop ill-sorted assumptions.  Weakening the hypothesis set can only
+          make BOTH discharges harder, so this can only turn a report into a
+          skip — never the reverse. *)
+       let assumptions = List.filter (wellsorted (Hashtbl.mem str_names)) !assume in
+       let vc = { Smt.decls; assumptions; goal } in
+       let preamble =
+         (if !uses_axiom then !measure_preamble else "")
+         ^ (if !uses_string then string_preamble else "")
+       in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail
           (e.g. a symbolic, unknown length), that is unprovable either way and
@@ -1275,7 +1551,11 @@ let make_field_resolver (binder : string) (sort_name : string) (binder_term : Sm
    predicate with a field resolver so `s.field` becomes the SMT selector
    applied to the opaque const.  `has_record` is true when any record entry
    is present — signals check_post to include the datatype preamble. *)
-let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool =
+let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool * bool =
+  let has_string =
+    List.exists (fun (_, (_, _, sort)) -> sort = Some str_sort) sc
+  in
+  let ds, asm, has_rec =
   List.fold_left
     (fun (ds, asm, has_rec) (name, (b, q, sort)) ->
       match sort with
@@ -1284,6 +1564,23 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool =
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
         let ds = (name, Smt.SInt) :: ds in
         (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         | Some qa -> (ds, qa :: asm, has_rec)
+         | None -> (ds, asm, has_rec))
+      (* A String-refined entry declares a `Str` constant and loads its
+         predicate, but MUST NOT set [has_rec]: that flag switches check_post
+         onto the "a SAT model is a definite violation" path, which is only
+         justified when the scope pins a concrete record.  An opaque `Str` pins
+         nothing, so flipping it there would be a false-positive engine. *)
+      | Some sort_name when sort_name = str_sort ->
+        let c = Smt.Const name in
+        let ds = (name, Smt.SData str_sort) :: ds in
+        let rv n = if n = b || n = "_" then Some c else None in
+        let rm m n =
+          if m = "len" && string_len_available () && (n = b || n = "_") then
+            Some (Smt.App (strlen_fn, [ c ]))
+          else None
+        in
+        (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
          | Some qa -> (ds, qa :: asm, has_rec)
          | None -> (ds, asm, has_rec))
       | Some sort_name ->
@@ -1302,6 +1599,8 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool =
             "SAT = definite error" path with an unconstrained cex — unsound. *)
          | None -> (ds, asm, has_rec)))
     ([], [], false) sc
+  in
+  (ds, asm, has_rec, has_string)
 
 (* Evaluate a field-selector application on a concrete constructor term.
    <ctor>_<idx>(App(ctor, args)) → args[idx] — enables concrete len evaluation
@@ -1391,19 +1690,34 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     ?(fn_name : string option = None) ?(emit = true) (sc : scope)
     (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
-  let base_decls, base_assume, scope_has_record = scope_facts sc in
+  let base_decls, base_assume, scope_has_record, scope_has_string = scope_facts sc in
   let decls = ref base_decls and assume = ref base_assume in
+  (* Scope names already declared into the `Str` sort by [scope_facts].  Both
+     [var_const] and [resolve_measure] must agree with that sort, or the VC
+     declares one symbol at two sorts and Z3 rejects the whole query. *)
+  let is_str_scope name =
+    List.exists (fun (n, (_, _, sort)) -> n = name && sort = Some str_sort) sc
+  in
   let post_measure_ctr = ref 0 in
   (* Set when resolve_measure_app emits App(m, arg) — the VC then needs the full
      measure preamble (axioms + datatypes).  False => type_preamble only suffices
      (no quantified axioms → Z3 answers sat/unsat without returning `unknown`). *)
   let needs_axiom_preamble = ref false in
-  let var_const name = decls := (name, Smt.SInt) :: !decls; Some (Smt.Const name) in
+  let var_const name =
+    if is_str_scope name then Some (Smt.Const name)
+    else begin decls := (name, Smt.SInt) :: !decls; Some (Smt.Const name) end
+  in
   let resolve_measure m name =
-    let c = Smt.Const (m ^ "$" ^ name) in
-    decls := (m ^ "$" ^ name, Smt.SInt) :: !decls;
-    if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
-    Some c
+    (* `len` over a String-sorted scope name is the string `len`, applied to the
+       very constant scope_facts declared — so the param's own predicate and the
+       return predicate talk about the same length. *)
+    if m = "len" && string_len_available () && is_str_scope name then
+      Some (Smt.App (strlen_fn, [ Smt.Const name ]))
+    else
+      let c = Smt.Const (m ^ "$" ^ name) in
+      decls := (m ^ "$" ^ name, Smt.SInt) :: !decls;
+      if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+      Some c
   in
   (* Handle measure applications where the argument is a non-variable expression
      (e.g. len(v.history) where v.history resolves to a concrete list term).
@@ -1443,7 +1757,9 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     List.fold_left
       (fun rf (name, (_b, _q, sort)) ->
         match sort with
+        (* `Str` is opaque — it has no fields and no selectors. *)
         | None -> rf
+        | Some s when s = str_sort -> rf
         | Some sort_name ->
           let rf_param = make_field_resolver name sort_name (Smt.Const name) in
           fun varname fname ->
@@ -1482,7 +1798,8 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
-       let preamble =
+       let str_pre = if scope_has_string then string_preamble else "" in
+       let preamble = str_pre ^
          if record_sort <> None || scope_has_record then
            (* When all measure apps were evaluated concretely (needs_axiom_preamble=false),
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
