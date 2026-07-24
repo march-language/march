@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p28 parse, r01–r15 reject; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28)
+# Grammar corpus index (p01–p29 parse, 14 reject — r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 43/43 — 28 parse, 15
+Exit 0 iff every program behaves as declared (currently 43/43 — 29 parse, 14
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -66,7 +66,6 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p13_rich_type_annotation.march`](parse/p13_rich_type_annotation.march) | §7.1 `ty` ladder — arrow right-associativity, tuple types, record types, generic `ty_app` | `mk: Int -> (Int, Int) -> { x: Int, y: Int }` parses as `Int -> ((Int, Int) -> {x,y})` per §7.1's right-recursive `ty` production; `type Pair(a, b) = MkPair(a, b)` exercises `type_params` + `ty_app` with type-variable arguments. Prints `10`, `20`, `one` — the curried arrow, tuple/record types, and generic instantiation all resolved as documented. |
 | [`parse/p14_list_and_atom_payload_patterns.march`](parse/p14_list_and_atom_payload_patterns.march) | §6.2 `pattern` — atom patterns (`PatAtom`) and §6.1 list-literal pattern sugar (`PatCon(Cons/Nil, …)`) | `:ok(n)`/`:error(_msg)` atom-payload patterns and `[a, b]`/`[a, b, c]`/`[]` list-literal patterns in the same program. Prints `70`, `-1`, `3`, `6`, `0` — each value only obtainable if the corresponding atom/list-arity arm matched. |
 | [`reject/r07_record_pattern_in_let_unreachable.march`](reject/r07_record_pattern_in_let_unreachable.march) | §6.3 reachability — `PatRecord` unreachable, witnessed at a second call site (`let`, not `match`) | `let { x } = r` — `simple_pattern` (what `let` accepts, §6.2) has no `LBRACE`-led alternative, same as full `pattern`. Captured live: `I got stuck here`. |
-| [`reject/r08_as_pattern_unreachable.march`](reject/r08_as_pattern_unreachable.march) | §6.3 reachability — `PatAs` unreachable | `match 1 do x as y -> y end` — `x` fully reduces to `pattern` via the ordinary route, so `branch`'s dedicated error-recovery alternative fires wanting `ARROW`, not menhir's generic fallback. Captured live: `` I was expecting `->` in the match arm here ``. |
 | [`parse/p15_multi_head_fn_merge.march`](parse/p15_multi_head_fn_merge.march) | §8.2 `fn_decl` — `group_fn_clauses` multi-head merging | Three textually separate `fn fib(0) do … end` / `fn fib(1) do … end` / `fn fib(n) do … end` declarations. Each parses as its own single-clause `DFn`; `group_fn_clauses` (invoked once over the module's `decl_list_r`) merges the three adjacent same-name `DFn`s into one 3-clause function. Run (non-`--check`), `println(fib(10))` prints `55` — only obtainable if all three heads really did merge into one dispatching function (a lone recursive clause with no base cases would never terminate). |
 | [`parse/p16_interface_impl_pair.march`](parse/p16_interface_impl_pair.march) | §8.6 `interface_decl` / `impl_decl` | A one-method `interface Describable(a)` and its `impl Describable(Shape) do … end`, dispatching on a two-constructor `type Shape = Circle(Int) \| Square(Int)`. Prints `circle:5` then `square:3` — proves the interface signature and the impl's method body parsed and wired together, dispatching correctly on both constructors. |
 | [`parse/p17_generic_type_record_variant.march`](parse/p17_generic_type_record_variant.march) | §8.4 `type_decl` — generic parameters + record body + self-referential variant | `type Box(a) = { value: a, label: String }` (one-parameter generic record type) and `type Tree(a) = Leaf \| Node(Tree(a), a, Tree(a))` (a self-referential generic variant, `Tree(a)` appearing in its own constructor's argument types) in one program, alongside a `pfn` (private function) computing tree depth. Prints `42`, `answer`, `2` — the record-field values and the recursive depth computation only come out right if both generic type declarations parsed with their type parameter correctly threaded through. |
@@ -87,6 +86,7 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p26_cond_arm_ge_le.march`](parse/p26_cond_arm_ge_le.march) | §3.3/§3.4 arm-boundary lookahead — the `->`-scan across a TWO-CHAR comparison operator (item 110 regression) | An ECond (scrutinee-less `match do cond -> body end` chain) whose arm conditions use `>=` (two arms) and `<=` (one arm). Previously the token filter's arm-boundary `->`-scan got stuck on the two-char `>=`/`<=` before reaching the next arm's `->`, so `s >= 90 -> ...` was a parse error while `s > 89 -> ...` parsed (the reason `golden/g31` uses `>` as a workaround). Now parses; value-witness prints `A`/`B`/`Z`/`F` (interp == compiled). |
 | [`parse/p27_leading_pipe_arm_separator.march`](parse/p27_leading_pipe_arm_separator.march) | §3.3/§5.3 `arm_sep` (`NL \| PIPE`) — a leading `\|` on its own line before every arm | Previously failed to parse ("I got stuck here" at the `\|`): `token_filter.ml`'s NL-then-PIPE handling emitted the `NL` as the arm boundary but then re-queued the `PIPE` token instead of consuming it, leaving a stray unconsumed `PIPE`. Fixed at both the leading-arm site and the between-arms site. Exercises a leading `\|` on every arm for both the scrutinee'd and cond match forms. |
 | [`parse/p28_cond_single_line_no_separator.march`](parse/p28_cond_single_line_no_separator.march) | §5.3 cond form (`match do ... end`) — a single arm entirely on the SAME line as `match do` | Previously always failed exactly at the arm's `->`, regardless of the guard shape. Root cause was a genuine menhir shift/reduce conflict: the shared `option(arm_sep)` nonterminal's epsilon (no-separator) reduce at `MATCH DO .` was merged via LALR state sharing with an unrelated derivation and lost to a shift for nearly every lookahead. Fixed by spelling out the cond form's two `MATCH; DO; ...` alternatives explicitly instead of routing through `option(arm_sep)` (took the conflict count from 90 down to 9). |
+| [`parse/p29_as_pattern.march`](parse/p29_as_pattern.march) | §6.2 — `pattern`'s as-pattern layer | `match 1 do x as y -> y end` — `pattern: pattern_no_as AS lower_name` builds `PatAs`. Was `reject/r08` until as-patterns were implemented (2026-07-24); the reachability gap it documented is closed. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -97,8 +97,12 @@ pins a parse-stage diagnostic). Task 4 (§6 Patterns, §7 Types) added
 p12–p14/r07–r08: a nested constructor+tuple pattern, a rich curried/tuple/
 record/generic type annotation, atom- and list-literal patterns, and the
 two new `PatRecord`/`PatAs` reachability witnesses (`r02` from Task 1 is
-the third, promoted to primary status in §6.3). Task 5 (§8 Declarations, §9
-DSL appendix) added p15–p17/r09–r10: the multi-head-`fn`-merge value-witness,
+the third, promoted to primary status in §6.3). The `PatAs` witness (`r08`)
+was later retired: as-patterns became reachable (2026-07-24, `pattern:
+pattern_no_as AS lower_name`), and `r08` was replaced by the parse-corpus
+witness `p29`; only the `PatRecord` reachability gap remains open. Task 5
+(§8 Declarations, §9 DSL appendix) added p15–p17/r09–r10: the
+multi-head-`fn`-merge value-witness,
 an `interface`/`impl` pair, a generic record+self-referential-variant `type`
 declaration, and the obsolete-`pub`-keyword and one-`mod`-per-file rejection
 findings. A later pass fully resolving §9's DSL declaration forms added
@@ -109,7 +113,9 @@ finding added r14/p23/p24: the curried-call-juxtaposition reject and the
 IIFE + two-line witnesses the newline-sensitive guard must still accept.
 A later fix (2026-07-22) resolving the leading-`|` arm-separator and
 single-line cond-form parser gaps added p27/p28 —
-43 programs total (28 `parse/`, 15 `reject/`). See
+a later pass (2026-07-24) closing the as-pattern reachability gap added
+p29 and retired r08 —
+43 programs total (29 `parse/`, 14 `reject/`). See
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan

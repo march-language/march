@@ -361,6 +361,8 @@ Cons(h, t)                -- nested constructor
 :error(msg)               -- atom with args
 Mod.Con(x)                -- qualified constructor (disambiguation)
 -5                        -- negative int literal
+Some(x) as whole          -- as-pattern: binds `whole` to the entire value
+                          --   while `x` destructures it
 ```
 
 ---

@@ -217,6 +217,38 @@ end
 
 ---
 
+## As Patterns
+
+`p as name` binds `name` to the **entire** matched value while `p` still
+destructures it, so a branch can use both the whole value and pieces of it
+without matching it twice:
+
+```march
+match o do
+  Some(x) as whole ->
+    -- `x` is the payload; `whole` is the entire `Some(x)` value
+    println(whole)
+    x
+  None -> 0
+end
+```
+
+The inner pattern can be anything — a bare variable (`x as y` binds both `x`
+and `y` to the same value), a literal, a tuple, or an arbitrarily nested
+constructor pattern. As-patterns work in `match` arms, `let` bindings (`let
+(n as whole) = compute()`), and function parameters, since all three desugar
+through the same pattern grammar.
+
+Chaining aliases directly (`p as a as b`) is a parse error. Parenthesize to
+bind two names to the same value — `(x as a) as b` is accepted — though one
+alias per pattern is almost always what you want.
+
+Note the parentheses in the `let` example above: `let` takes a *simple*
+pattern, so `let n as whole = ...` does not parse. `let (n as whole) = ...`
+does.
+
+---
+
 ## Guards
 
 Guards add a boolean condition to a pattern arm with `when`:

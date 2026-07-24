@@ -4494,8 +4494,51 @@ let test_main_wrong_arity_rejected () =
   Alcotest.(check bool) "wrong-arity main rejected" true
     (March_errors.Errors.has_errors errors)
 
+(* As-patterns: `p as n` binds n to the whole matched value while p continues
+   to destructure it.  PatAs existed in the AST, interpreter, and typechecker
+   from the start but had no grammar production. *)
+let test_eval_as_pattern_binds_whole () =
+  let env = eval_module {|mod T do
+    fn f(o) do
+      match o do
+        Some(x) as whole ->
+          match whole do
+            Some(y) -> x + y
+            None -> 0
+          end
+        None -> 0
+      end
+    end
+  end|} in
+  let v = call_fn env "f"
+      [March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt 21])] in
+  Alcotest.(check int) "Some(21) as whole -> 21 + 21" 42
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* An as-pattern over a TRIVIAL inner pattern takes lower_match's
+   bind_trivial_pat path; over a NON-TRIVIAL inner it takes the new
+   strip_as_column path.  Cover the trivial one too. *)
+let test_eval_as_pattern_trivial_inner () =
+  let env = eval_module {|mod T do
+    fn f(n) do
+      match n do
+        x as y -> x + y
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "x as y -> x + y" 10
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
 let eval_suites =
   [
+      ( "as_patterns",
+        [
+          Alcotest.test_case "as-pattern binds the whole value" `Quick
+            test_eval_as_pattern_binds_whole;
+          Alcotest.test_case "as-pattern over a trivial inner pattern" `Quick
+            test_eval_as_pattern_trivial_inner;
+        ] );
       ( "signal_watch", [
           Alcotest.test_case "deferred USR1 drain + coalesce + unwatch" `Quick
             test_signal_watch_deferred;

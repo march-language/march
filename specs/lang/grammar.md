@@ -5,8 +5,8 @@
 **v2 · 2026-07-06 · core grammar AND DSL declaration forms resolved.** The
 three-layer parse pipeline (lexer → `token_filter` → menhir, §1–§3), the
 expression precedence ladder (§4), blocks/statements/significant-newline
-semantics (§5), patterns/types — including the `PatRecord`/`PatAs`
-reachability finding — (§6–§7), the core declaration forms — including
+semantics (§5), patterns/types — including the `PatRecord` reachability
+finding (`PatAs` became reachable 2026-07-24; see §6.3) — (§6–§7), the core declaration forms — including
 the multi-head-`fn`-merge mechanism and the one-`mod`-per-file rule — (§8),
 and the DSL-heavy declaration forms (actors and their message handlers,
 `app`/`on_start`/`on_stop`, `supervise` trees, `protocol`/`choose` binary
@@ -56,7 +56,8 @@ note at the end of §1).
   three source files leave implicit: which of menhir's shift/reduce
   resolutions is actually taken, why a token exists but can never appear in
   a valid program (`THEN`, §4), which AST constructors have no surface
-  syntax that reaches them (`PatRecord`/`PatAs`, §6.3), and —
+  syntax that reaches them (`PatRecord`, §6.3 — `PatAs` became reachable
+  2026-07-24, also §6.3), and —
   the hardest part — the exact algorithm `token_filter.ml` uses to decide
   where a block expression ends. A line-by-line copy of `parser.mly`'s
   productions would not be worth a separate chapter; this is not that.
@@ -1259,9 +1260,13 @@ the same twelve grammar alternatives):
   spelling (e.g. `STATE` → `PatVar "state"`). This is what makes `fn (state,
   event, payload) -> …`-shaped actor-DSL code parse: without this widening,
   `state` used as an ordinary parameter/binding name would collide with the
-  `STATE` keyword. Note `AS` is in this list — a bare `as` is a legal
-  variable name in binding position (`let as = 5` parses; there is no
-  dedicated as-pattern syntax competing for the token, see §6.3).
+  `STATE` keyword. Note `AS` is in this list — a bare `as` is still a legal
+  variable name in binding position (`let as = 5` parses via
+  `simple_pattern`'s `soft_lower_name`). As of 2026-07-24 there IS a
+  dedicated as-pattern production, but it lives one level up, on `pattern`
+  (`pattern_no_as AS lower_name`, §6.2), and deliberately uses `lower_name`
+  rather than `soft_lower_name` for the name after `AS` — so the two never
+  compete for the same token position; see §6.3.
 - `INT` / `MINUS INT` → `PatLit (LitInt …)` — plain and negative integer
   literals. The negative form is its own two-token alternative (`MINUS`
   immediately followed by `INT`), not a unary-minus *expression* embedded in
@@ -1361,38 +1366,35 @@ is exactly the practical consequence of the `simple_pattern`/`pattern`
 split, and the reason idiomatic March destructures constructors via `match`
 rather than `let` whenever the scrutinee isn't already known-exhaustive.
 
-### 6.3 Reachability: `PatRecord` and `PatAs` are implemented but unreachable
+### 6.3 Reachability: `PatRecord` is implemented but unreachable (`PatAs` no longer is)
 
-The AST (`lib/ast/ast.ml:47–48`) defines two more pattern constructors that
-**never appear anywhere in `parser.mly`**:
+The AST (`lib/ast/ast.ml:47–48`) defines two pattern constructors,
+`PatRecord` and `PatAs`. As of 2026-07-24 only `PatRecord` is unreachable
+from surface syntax — `PatAs` gained a grammar production and is covered
+below under "`PatAs` became reachable" rather than as a reachability gap.
 
 ```
-grep -c 'PatRecord\|PatAs' lib/parser/parser.mly
+grep -c 'PatRecord' lib/parser/parser.mly
 ```
 
 returns **`0`** — confirmed live for this pass. Neither `simple_pattern`
-(6.1) nor `pattern` (6.2) has a production that builds a `PatRecord` (`{
-f, … }`, the record-destructuring pattern — note `LBRACE` starts **no**
-pattern alternative at all, consistent with §3.4's cross-check that
-`is_pattern_start` correctly omits `LBRACE`) or a `PatAs` (`p as x`, an
-as-pattern — `AS` is consumed only by `soft_lower_name` as an ordinary
-variable-name spelling, §6.1, and by the module-alias form `alias P as Q`,
-never by a pattern-level `AS` production). Both constructors are fully
-implemented downstream — `eval.ml`'s `match_pattern` has working
-`PatRecord`/`PatAs` arms, `typecheck.ml`'s `infer_pattern` has working arms
-for both, and `desugar.ml` has arms that recurse into an *already
-constructed* `PatRecord`/`PatAs` (respanning, collecting bound names) — but
-nothing in `parser.mly` ever constructs one fresh from surface syntax. This
-is the same fact
-[`core-march.md`](core-march.md) (§2, §4.3, and the dedicated §4.3.1
+(6.1) nor `pattern`/`pattern_no_as` (6.2) has a production that builds a
+`PatRecord` (`{ f, … }`, the record-destructuring pattern — note `LBRACE`
+starts **no** pattern alternative at all, consistent with §3.4's
+cross-check that `is_pattern_start` correctly omits `LBRACE`). `PatRecord`
+is fully implemented downstream — `eval.ml`'s `match_pattern` has a working
+`PatRecord` arm, `typecheck.ml`'s `infer_pattern` has a working arm, and
+`desugar.ml` has an arm that recurses into an *already constructed*
+`PatRecord` (respanning, collecting bound names) — but nothing in
+`parser.mly` ever constructs one fresh from surface syntax. This is the same
+fact [`core-march.md`](core-march.md) (§2, §4.3, and the dedicated §4.3.1
 "Implemented-but-unreachable pattern forms") and
-[`core-march-types.md`](core-march-types.md) (§ around line 781: "`PatRecord`
-and `PatAs` are each documented as unreachable from surface syntax") already
+[`core-march-types.md`](core-march-types.md) (§ around line 781) already
 document from the operational/typing side; this chapter adds the
 **grammar-level** half of that story — exactly which productions are
 missing and why no combination of existing alternatives can reach them.
 
-**Live witnesses (both new to this pass's corpus):**
+**Live witnesses:**
 
 - [`reject/r02_record_pattern_in_arm_unreachable.march`](grammar/reject/r02_record_pattern_in_arm_unreachable.march)
   (seeded in Task 1 as a §3.4 corollary, promoted here to the primary §6
@@ -1406,28 +1408,50 @@ missing and why no combination of existing alternatives can reach them.
   call site (`block_expr`'s `let`, §6.2's `simple_pattern`-only
   restriction) rather than re-testing the match-arm position. Captured
   live: `` I got stuck here ``, pointing at the `{`.
-- [`reject/r08_as_pattern_unreachable.march`](grammar/reject/r08_as_pattern_unreachable.march)
-  (new) — `match 1 do x as y -> y end` witnesses `PatAs`-unreachability.
-  Unlike the two `PatRecord` witnesses above, this one does **not** hit
-  menhir's generic fallback: `x` fully reduces to `simple_pattern`/`pattern`
-  (`PatVar "x"`) via the ordinary route, so `branch`'s first alternative is
-  one token from completing — it wants `ARROW` next — and seeing `AS`
-  instead trips `branch`'s own dedicated error-recovery alternative
-  (`_p = pattern; _guard = option(when_guard); error`, `parser.mly:1282–
-  1286`), producing the bespoke message `` I was expecting `->` in the match
-  arm here: `` (not generic-fallback text) — because there genuinely is no
-  production that continues past a fully-reduced `pattern` other than
-  `ARROW`, an as-pattern can never be assembled no matter which token
-  follows the base pattern. `core-march.md`'s own live cross-check
-  (`core-march.md:895–899`) independently confirms both the match-arm
-  message (`x as y -> y`, `n as whole -> …`) and a `let`-position variant
-  (`let (n as whole) = 5` → `` I got stuck here ``) — this chapter's `r08`
-  corroborates the match-arm case the reference already pinned, from the
-  grammar side.
 
-Both `reject/r07` and `reject/r08` were captured live against the
+Both `reject/r02` and `reject/r07` were captured live against the
 pre-built compiler for this pass, and neither unexpectedly parsed — the
-reachability claim holds as stated, no parser finding to file for either.
+reachability claim holds as stated for `PatRecord`, no parser finding to
+file.
+
+#### `PatAs` became reachable (2026-07-24)
+
+`PatAs` (`p as name`) was implemented in the AST, interpreter
+(`eval.ml:1193`), and typechecker (`typecheck.ml:3554`) from the start, but
+`parser.mly` had no production that ever built one — the exact situation
+`PatRecord` above is still in. That gap is now closed: `pattern` gained an
+as-pattern layer wrapping the ordinary pattern forms, which were renamed
+`pattern_no_as`:
+
+```
+pattern:
+  | p = pattern_no_as; AS; n = lower_name
+    { PatAs (p, n, mk_span ($loc)) }
+  | p = pattern_no_as { p }
+
+pattern_no_as:
+  | con = qualified_upper; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
+    { PatCon (con, ps) }
+  | …  (* the rest of the former `pattern` alternatives, unchanged *)
+```
+
+This is written as `pattern_no_as AS lower_name` rather than
+left-recursively on `pattern` itself, for two reasons: `p as a as b` is
+then a parse error instead of silently nesting, and no menhir precedence
+declaration is needed for `AS`. The name after `AS` is parsed with
+`lower_name`, not `soft_lower_name` (§6.1) — `soft_lower_name` accepts `AS`
+itself as an identifier spelling, and allowing `x as as` buys nothing.
+Adding this production introduces **zero** new shift/reduce conflicts
+(still 9, the pre-existing baseline — confirmed with `menhir --explain`).
+
+The former reachability witness, `reject/r08_as_pattern_unreachable.march`,
+is retired; the replacement parse-corpus witness is
+[`parse/p29_as_pattern.march`](grammar/parse/p29_as_pattern.march)
+(`match 1 do x as y -> y end`, now well-typed and parses/runs to
+completion). `core-march-types.md`'s reachability note is updated in step
+(§ around line 1021, its own `(P-As)` rule). `core-march.md`'s §4.3/§4.3.1
+still describe `PatAs` as dead code as of this pass — out of this task's
+scope; that file needs its own pass to catch up.
 
 ## 7. Types
 
@@ -2449,10 +2473,11 @@ leaving scattered across the sections that happened to surface them:
   `token_filter.ml` itself having an informal, driftable copy of part of
   the grammar living outside `parser.mly`.
 
-Both `PatRecord`/`PatAs` unreachability (§6.3) and `then`'s
-no-accepting-production status (§4.10) are reachability *claims this
-chapter makes and witnesses live*, not open findings requiring follow-up —
-they are listed here only for completeness of cross-reference, not because
-either is unresolved. The `f(1)(2)` entry in `specs/todos.md`'s "Grammar /
-lint contradictions (2026-07-03)" section is now closed (moved to Done,
-2026-07-06) — see §7.3 for the fix.
+Both `PatRecord` unreachability (§6.3) and `then`'s no-accepting-production
+status (§4.10) are reachability *claims this chapter makes and witnesses
+live*, not open findings requiring follow-up — they are listed here only
+for completeness of cross-reference, not because either is unresolved.
+(`PatAs` was the same kind of claim through 2026-07-23; it became reachable
+2026-07-24 and is no longer in this category — see §6.3.) The `f(1)(2)`
+entry in `specs/todos.md`'s "Grammar / lint contradictions (2026-07-03)"
+section is now closed (moved to Done, 2026-07-06) — see §7.3 for the fix.

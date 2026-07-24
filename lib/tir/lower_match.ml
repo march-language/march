@@ -233,6 +233,30 @@ let is_atomic_fallback : Tir.expr -> bool = function
   | Tir.EAtom _ -> true
   | _ -> false
 
+(** Strip a first-column as-pattern: bind the alias to the current scrutinee
+    and continue matching on the inner pattern.
+
+    [is_trivial_pat] already routes an as-pattern over a TRIVIAL inner
+    (`x as y`) into the default rows, where [bind_trivial_pat] binds both
+    names.  Only a NON-TRIVIAL inner (`Some(x) as s`) reaches the ctor-row
+    path, where [pat_tag_and_subs] returns None for PatAs and the row would
+    hit the fail-loudly "unhandled pattern kind" branch.  Rewriting the row
+    here keeps the alias binding and lets the inner pattern dispatch
+    normally. *)
+let strip_as_column (env : Lower_state.env) (scrut : Tir.atom)
+    (rows : (Ast.pattern list * Tir.expr) list)
+  : (Ast.pattern list * Tir.expr) list =
+  List.map (fun (pats, body) ->
+    match pats with
+    | Ast.PatAs (inner, n, _) :: rest when not (is_trivial_pat inner) ->
+      let v : Tir.var = {
+        v_name = n.Ast.txt;
+        v_ty   = Lower_state.ty_of_span env n.Ast.span;
+        v_lin  = Tir.Unr;
+      } in
+      (inner :: rest, Tir.ELet (v, Tir.EAtom scrut, body))
+    | _ -> (pats, body)) rows
+
 (** Hoist a (non-atomic) fallback expression [fb] into a fresh 0-arg join
     point.  Returns [(clo_var, lambda_expr)] where:
       - [lambda_expr] is the lambda-creation site
@@ -314,6 +338,7 @@ and compile_matrix_impl
       (match rows with (_, body) :: _ -> body | [] ->
         (match fallback with Some f -> f | None -> Lower_state.nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
+      let rows = strip_as_column env scrut rows in
       (* Split rows into a front block of non-trivial first-column rows and
          a (possibly empty) suffix starting at the first trivial first-column
          row.  The suffix becomes the default for all ECase branches. *)

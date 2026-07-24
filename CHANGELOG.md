@@ -11,6 +11,14 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- As-patterns: `Some(x) as whole -> ...` binds a name to the entire matched
+  value while the inner pattern continues to destructure it. Works in match
+  arms, `let` bindings, and function parameters. `PatAs` had been implemented
+  in the AST, interpreter, and typechecker since the beginning but had no
+  grammar production.
+
 ### Changed
 
 - `dune runtest` no longer runs `test/test_properties.exe`. That one binary

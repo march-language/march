@@ -1438,7 +1438,18 @@ qualified_upper:
   | con1 = UPPER_IDENT; DOT; con2 = UPPER_IDENT
     { mk_name (con1 ^ "." ^ con2) $loc }
 
+(* An as-pattern layer wrapping the ordinary pattern forms.  Written as
+   `pattern_no_as AS lower_name` rather than left-recursively on `pattern`
+   so that `p as a as b` is a parse error rather than a silent nesting, and
+   so no precedence declaration is needed for AS.  Uses `lower_name`, not
+   `soft_lower_name`: `soft_lower_name` accepts AS itself as an identifier
+   (parser.mly:1491), and allowing `x as as` buys nothing. *)
 pattern:
+  | p = pattern_no_as; AS; n = lower_name
+    { PatAs (p, n, mk_span ($loc)) }
+  | p = pattern_no_as { p }
+
+pattern_no_as:
   | con = qualified_upper; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatCon (con, ps) }
   | con = qualified_upper

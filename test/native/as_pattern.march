@@ -1,0 +1,17 @@
+mod AsPattern do
+fn describe(o : Option(Int)) : String do
+  match o do
+    Some(x) as whole ->
+      match whole do
+        Some(y) -> "some " ++ int_to_string(x + y)
+        None -> "impossible"
+      end
+    None -> "none"
+  end
+end
+
+fn main() : Unit do
+  println(describe(Some(21)))
+  println(describe(None))
+end
+end

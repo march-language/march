@@ -233,6 +233,14 @@ match pair do
   (Some(x), None)    -> x
   (None,    _)       -> 0
 end
+
+-- As-pattern: bind a name to the whole matched value while destructuring it
+match opt do
+  Some(x) as whole ->
+    println(whole)
+    x
+  None -> 0
+end
 ```
 
 ### If / Else

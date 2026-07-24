@@ -1191,7 +1191,7 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
 
   | PatRecord _, _ -> None  (* match(PatRecord) — §4.3 *)
 
-  | PatAs (inner, alias, _), _ ->  (* match(PatAs) — §4.3, unreachable from surface syntax per §4.3.1 *)
+  | PatAs (inner, alias, _), _ ->  (* match(PatAs) — §4.3 *)
     (match match_pattern v inner with
      | None -> None
      | Some bs -> Some ((alias.txt, v) :: bs))
