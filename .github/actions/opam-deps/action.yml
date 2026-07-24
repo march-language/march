@@ -1,0 +1,69 @@
+name: opam-deps
+description: >
+  Set up OCaml and install this project's opam dependencies, caching the
+  installed switch across runs. ocaml/setup-ocaml's own cache only restores
+  the base opam/compiler skeleton (~6s hit) — it never covers the 46 packages
+  `opam install --deps-only` pulls in, so that step was reinstalling from
+  scratch on every single job (measured ~2.3min each, confirmed via job logs
+  always reporting a full "install 46 packages" regardless of the base-cache
+  hit). This wraps setup-ocaml with an explicit ~/.opam cache keyed on the
+  files that actually determine the dependency solve.
+
+inputs:
+  ocaml-compiler:
+    required: true
+    description: OCaml compiler version to install.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up OCaml
+      uses: ocaml/setup-ocaml@v3.7.0
+      with:
+        ocaml-compiler: ${{ inputs.ocaml-compiler }}
+
+    # Key is a pure function of what determines the opam solve: the 3
+    # (generate_opam_files true)-generated *.opam files, plus dune-project
+    # itself (the actual source of truth — a `(depends ...)` edit there that
+    # hasn't been regenerated into the .opam files yet must still bust this).
+    # No branch/config-dimension fallback chain (unlike a typical app-language
+    # dependency cache): opam-installed packages are a pure function of these
+    # files' content only, there's no "close enough" partial-match dimension
+    # to fall back through here. The `v1` segment is a manual cache-bust
+    # escape hatch — GH Actions cache entries are immutable per key, so a bad
+    # key can never self-heal without one.
+    - name: Restore opam dependency cache
+      id: opam-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.opam
+        key: ${{ runner.os }}-opam-v1-${{ inputs.ocaml-compiler }}-${{ hashFiles('dune-project', 'march.opam', 'forge.opam', 'march-lsp.opam') }}
+        restore-keys: |
+          ${{ runner.os }}-opam-v1-${{ inputs.ocaml-compiler }}-
+
+    # Always run, even on a full cache hit: idempotent and a fast no-op then
+    # ("Nothing to do"), and it's the only thing that actually verifies the
+    # restored switch is coherent with the current *.opam files (a
+    # restore-keys fallback hit restores a NEAR match, not necessarily exact).
+    - name: Install opam dependencies
+      id: opam-install
+      shell: bash
+      run: |
+        set -o pipefail
+        opam install --deps-only --with-test -y . 2>&1 | tee /tmp/opam-install.log
+        if grep -q "Nothing to do" /tmp/opam-install.log; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Gated on "did anything actually install": avoids a pointless save
+    # attempt under a key that already exists (cache writes are immutable
+    # per key on GH Actions, so re-saving an unchanged switch is dead work,
+    # not just slow — it will silently no-op every time regardless).
+    - name: Save opam dependency cache
+      if: steps.opam-install.outputs.changed == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.opam
+        key: ${{ steps.opam-cache.outputs.cache-primary-key }}

@@ -36,12 +36,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
-        # entry for macos-15 (our minimum macOS target); the older @v3 the tag
-        # resolved to failed with "no matching opam release", and forcing a
-        # prerelease opam fails GPG verification. Pin the fixed version.
-        uses: ocaml/setup-ocaml@v3.7.0
+      # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
+      # entry for macos-15 (our minimum macOS target); the older @v3 the tag
+      # resolved to failed with "no matching opam release", and forcing a
+      # prerelease opam fails GPG verification. Pin the fixed version — the
+      # opam-deps composite action always uses it.
+      - name: Set up OCaml + install opam dependencies (cached)
+        timeout-minutes: 10
+        uses: ./.github/actions/opam-deps
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
@@ -68,10 +70,6 @@ jobs:
             sudo cp blake3.h /usr/local/include/blake3.h
             sudo ldconfig
           fi
-
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
 
       - name: Install zig (cross-compile driver for the linux/amd64 TLS+gzip test)
         uses: mlugg/setup-zig@v2
@@ -141,6 +139,61 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
+  # Build once, fan out via same-run artifacts (not a persistent actions/cache):
+  # cross-linux-oracle and all 8 property-oracle shards below each used to
+  # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
+  # instances redoing identical work. Neither of them needs a coherent local
+  # `_build`/incremental dune state the way the `dune runtest`-based `build`
+  # job does (they just RUN a prebuilt exe), so a single upstream build here
+  # is safe to fan out as plain files rather than a dune-mediated cache —
+  # deliberately NOT `actions/cache` on `~/.cache/dune` for this: this project
+  # already hit a dune shared-cache-poisoning incident (a stale artifact from
+  # a differently-flagged/differently-versioned compiler silently re-served
+  # across worktrees), and a run-scoped artifact can't leak across runs by
+  # construction, which a persistent cache key can't guarantee no matter how
+  # carefully the key is chosen.
+  ocaml-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml + install opam dependencies (cached)
+        timeout-minutes: 10
+        uses: ./.github/actions/opam-deps
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies (blake3 for the native build)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Build compiler + oracle binaries
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe test/test_oracle.exe test/test_properties.exe
+
+      - name: Upload built exes
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ github.run_id }}
+          retention-days: 1
+          path: |
+            _build/default/bin/main.exe
+            _build/default/test/test_oracle.exe
+            _build/default/test/test_properties.exe
+
   # Cross-compilation gate (P1): cross-compile the deterministic examples+golden
   # corpus to Linux via `zig cc` and assert byte-identical output to the native
   # build (native-referenced).  Targets linux/amd64 so the cross binaries run
@@ -151,15 +204,17 @@ jobs:
   # path end to end.
   cross-linux-oracle:
     runs-on: ubuntu-24.04
+    needs: [ocaml-build]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3.7.0
-        with:
-          ocaml-compiler: 5.3.0
-
+      # No OCaml/opam/dune here at all: this job only RUNS a prebuilt exe from
+      # ocaml-build (a standalone native binary needs no OCaml toolchain to
+      # execute) — only the system deps below (needed for the dynamic linker
+      # to resolve libblake3.so at process start) and zig (needed because
+      # test_oracle.exe's own MARCH_ORACLE_CROSS logic shells out to `zig cc`
+      # for the cross-compile) are actually required at runtime.
       - name: Install system dependencies (blake3 for the native reference build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -178,21 +233,16 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
-
-      - name: Build compiler + oracle
-        timeout-minutes: 10
-        run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe test/test_oracle.exe
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ github.run_id }}
+          path: .
+      - run: chmod +x _build/default/bin/main.exe _build/default/test/test_oracle.exe
 
       - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
         timeout-minutes: 20
         run: |
-          eval $(opam env)
           MARCH_ORACLE_CROSS=amd64 \
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
           MARCH_ROOT="$PWD" \
@@ -220,6 +270,7 @@ jobs:
   # separate compiler build-path improvement in specs/todos.md.
   property-oracle:
     runs-on: ubuntu-24.04
+    needs: [ocaml-build]
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -251,11 +302,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3.7.0
-        with:
-          ocaml-compiler: 5.3.0
-
+      # No OCaml/opam/dune here at all — see cross-linux-oracle's comment
+      # above for why; only the system deps below (dynamic-linker + the
+      # generated-program-link needs of the `march --compile` subprocesses
+      # this binary spawns) are actually required at runtime.
       - name: Install system dependencies (blake3 for the native build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -269,20 +319,15 @@ jobs:
           sudo cp blake3.h /usr/local/include/blake3.h
           sudo ldconfig
 
-      - name: Install dependencies
-        timeout-minutes: 10
-        run: opam install --deps-only --with-test -y .
-
-      - name: Build compiler + property-test binary
-        timeout-minutes: 10
-        run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe test/test_properties.exe
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ github.run_id }}
+          path: .
+      - run: chmod +x _build/default/bin/main.exe _build/default/test/test_properties.exe
 
       - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
         timeout-minutes: 25
         run: |
-          eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e
