@@ -323,6 +323,16 @@ edges:
   content-addressed and cached (warm rebuilds are fast), and the cost is
   isolated to call sites that actually mention a measure — but a cold build of
   measure-heavy code pays for it. See the flag below.
+- **A predicate can call a name the checker doesn't understand — it now says
+  so.** Predicate bodies aren't typechecked, so `{Int | totally_bogus_fn(_) >
+  0}` used to compile clean and enforce nothing. The checker now warns when a
+  predicate applies a function outside its known vocabulary: the comparison,
+  arithmetic, and boolean operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `+`,
+  `-`, `*`, `negate`, `not`, `&&`, `||`), the built-in `len`, and any function
+  annotated `@[measure]`. This is a Warning, not an Error — the program still
+  compiles — but it tells you the refinement it's attached to is not actually
+  checked, so you can annotate the function `@[measure]` or switch to a
+  supported predicate.
 
 ---
 

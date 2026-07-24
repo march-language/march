@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
   unproven one stays legal but tells callers nothing, so a stale return
   refinement can never flag correct code. Postconditions that mention a
   parameter (relational) are not yet propagated.
+- Refinement predicates that call an unknown function now produce a warning
+  instead of being silently ignored. `{Int | totally_bogus_fn(_) > 0}` compiled
+  clean and enforced nothing; it now says so. The supported vocabulary is the
+  comparison/arithmetic/boolean operators, `len`, and `@[measure]` functions.
 
 ### Fixed
 
