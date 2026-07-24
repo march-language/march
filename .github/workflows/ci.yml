@@ -14,8 +14,9 @@
 #   test          (ubuntu, macos)       `dune runtest`
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, docs, fmt
 #   sanitize-gate (ubuntu)              golden-corpus ASAN gate
-#   ocaml-build   (ubuntu) ─┬─ cross-linux-oracle
-#                           └─ property-oracle × 8
+#   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
+#                  ubuntu leg only ─┼─ cross-linux-oracle
+#                                   └─ property-oracle × 8
 #
 # Two other changes cut the per-job floor and the per-compile cost:
 #   - .github/actions/opam-deps caches ~/.opam, so `opam install --deps-only`
@@ -164,9 +165,16 @@ jobs:
   # across worktrees), and a run-scoped artifact can't leak across runs by
   # construction, which a persistent cache key can't guarantee no matter how
   # carefully the key is chosen.
+  # Matrixed over both runners because `property-tests` below consumes this,
+  # and its groups must run on macOS too (see that job's comment). The Linux
+  # leg additionally feeds cross-linux-oracle and the 8 property-oracle shards.
   ocaml-build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
 
@@ -184,7 +192,7 @@ jobs:
       - name: Upload built exes
         uses: actions/upload-artifact@v4
         with:
-          name: ocaml-build-exes-${{ github.run_id }}
+          name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
           retention-days: 1
           path: |
             _build/default/bin/main.exe
@@ -239,7 +247,8 @@ jobs:
       - name: Download prebuilt exes
         uses: actions/download-artifact@v4
         with:
-          name: ocaml-build-exes-${{ github.run_id }}
+          # ubuntu leg specifically: this job is Linux-only.
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
           path: _build/default
       - name: Restore exec bits (the artifact zip does not preserve them)
         run: |
@@ -293,13 +302,29 @@ jobs:
   #   - the oracle group must NOT be matched here. It is excluded by omission,
   #     so a new group added upstream would also be silently skipped — hence
   #     the guard asserting every listed group is covered by some shard.
+  # Matrixed over BOTH runners, not just Linux. Before this job existed these
+  # groups ran under `dune runtest`, which the `test` job runs on macOS and
+  # Linux alike — making this Linux-only would have silently dropped every
+  # QCheck property from macOS. That matters concretely: `classify_compile`
+  # asserts how the compiler classifies signal deaths and segfault return
+  # codes, precisely the macOS-vs-Linux divergent surface (test_properties.ml
+  # already carries a macOS-only Sys_error special case), so a macOS-only
+  # regression there would ship unseen.
   property-tests:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     needs: [ocaml-build]
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # `shard` must be a real matrix dimension, NOT just `include` entries:
+        # with only `os` listed here, each `include` object would be merged
+        # into every os combination and later objects would overwrite earlier
+        # ones' `shard`/`filter` rather than producing the os × shard product
+        # — silently running a subset. Listing both dimensions makes this a
+        # true 2 × 3 = 6, with `include` only attaching each shard's filter.
+        os: [ubuntu-24.04, macos-15]
+        shard: [soundness, tir, rest]
         include:
           # `type soundness + eval` is isolated: it evaluates generated
           # programs against the full stdlib and measured far slower than
@@ -313,23 +338,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only the C libraries the prebuilt exe dynamically links — no OCaml or
+      # opam here, since this job only RUNS a binary built upstream.
       - name: Install system dependencies (blake3 for the native build)
         run: |
-          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
-          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-          cd /tmp/blake3/c
-          gcc -O2 -shared -fPIC -o libblake3.so \
-            blake3.c blake3_dispatch.c blake3_portable.c \
-            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-          sudo cp libblake3.so /usr/local/lib/libblake3.so
-          sudo cp blake3.h /usr/local/include/blake3.h
-          sudo ldconfig
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install blake3 brotli zstd llvm
+          else
+            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            cd /tmp/blake3/c
+            gcc -O2 -shared -fPIC -o libblake3.so \
+              blake3.c blake3_dispatch.c blake3_portable.c \
+              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+            sudo cp libblake3.so /usr/local/lib/libblake3.so
+            sudo cp blake3.h /usr/local/include/blake3.h
+            sudo ldconfig
+          fi
 
       - name: Download prebuilt exes
         uses: actions/download-artifact@v4
         with:
-          name: ocaml-build-exes-${{ github.run_id }}
+          name: ocaml-build-exes-${{ matrix.os }}-${{ github.run_id }}
           path: _build/default
       # main.exe too, not just the test binary: two of the "(unit)" groups in
       # the `rest` shard (record-update converged, cli: timings) shell out to
@@ -449,7 +480,8 @@ jobs:
       - name: Download prebuilt exes
         uses: actions/download-artifact@v4
         with:
-          name: ocaml-build-exes-${{ github.run_id }}
+          # ubuntu leg specifically: this job is Linux-only.
+          name: ocaml-build-exes-ubuntu-24.04-${{ github.run_id }}
           path: _build/default
       - name: Restore exec bits (the artifact zip does not preserve them)
         run: |
@@ -462,6 +494,27 @@ jobs:
             fi
             chmod +x "$f"
           done
+
+      # The shards select oracle cases by INDEX, and alcotest silently ignores
+      # an out-of-range index (`test <group> 0,99` runs case 0 and exits 0).
+      # So adding a 22nd oracle property would run it in NO shard, and CI would
+      # stay green; deleting one would shift every later index and silently
+      # re-cover the wrong cases. The property-tests coverage guard cannot
+      # catch either — it checks group NAMES, and this group is named there.
+      # Pin the count instead: the 8 shards' index lists union to exactly
+      # 0..20, so any change to the case count must come with a re-shard here.
+      - name: Guard — oracle case count still matches the shard split
+        run: |
+          set -euo pipefail
+          expected=21
+          actual=$(./_build/default/test/test_properties.exe list 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | grep -c '^oracle: interp = compiled' || true)
+          echo "oracle cases: expected $expected, found $actual"
+          if [ "$actual" -ne "$expected" ]; then
+            echo "::error::the 'oracle: interp = compiled' group has $actual cases but the 8 property-oracle shards cover exactly $expected (indices 0..$((expected-1))). Re-balance the shard 'cases' lists in this workflow and update this guard, or the new/removed cases will silently run in no shard at all."
+            exit 1
+          fi
 
       - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
         timeout-minutes: 25
