@@ -49,6 +49,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A single malformed verification condition no longer disables refinement
+  checking for the rest of a compilation. z3 emits an `(error …)` line and then
+  still answers the query, but that line was read as the verdict; the solver was
+  killed, respawned, hit the same error, and z3 was then marked unavailable for
+  the whole run — so every later call site was silently left unchecked with no
+  diagnostic. Error lines are now skipped, and a query that produced one is
+  reported as unproven rather than trusted.
+
 - **A refinement path fact survived a rebinding of the name it was about**, so
   correct code could be flagged. After `if x < 0 do`, a `let x = 5` inside the
   branch left `x < 0` attached to the *new* `x`, and a call needing `{Int | _ >=
