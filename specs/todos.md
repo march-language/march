@@ -116,7 +116,7 @@ Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
 class, with OCaml/Rust as controls (both within noise of their 2026-03-24
 figures, so the host is not the variable). See `bench/RESULTS.md`.
 
-### ROOT-CAUSED 2026-07-24 — both are the per-call reduction check, not a bug
+### ROOT-CAUSED AND FIXED 2026-07-24 — the per-call check was a TLS resolver call
 
 **`66371f3b` (2026-03-25) "feat(sched): Phase 4 — reduction counting in
 compiled code" landed the day AFTER the 2026-03-24 benchmark table was
@@ -131,12 +131,15 @@ sitting in the table as an unexplained 2.2x.
 A/B measured by gating the emission behind a temporary env var, **with
 `.march/cas/artifacts` cleared between every build** (see the warning below):
 
-| benchmark | with check | without check | 2026-03-24 |
-|---|---|---|---|
-| `fib(40)` | 0.63 s | **0.36 s** | 0.288 s |
-| `tree_transform` | 0.85 s | **0.54 s** | 0.513 s |
-| `list_ops` | 0.06 s | 0.08 s | 0.068 s |
-| `binary_trees` | 0.17 s | 0.15 s | 0.265 s |
+| benchmark | TLS check (before) | plain-flag check (now) | no check at all | 2026-03-24 |
+|---|---|---|---|---|
+| `fib(40)` | 640 ms | **465 ms** | 360 ms | 288 ms |
+| `tree_transform` | 852 ms | **579 ms** | 540 ms | 513 ms |
+| `list_ops` | 67 ms | **64 ms** | 80 ms* | 68 ms |
+| `binary_trees` | 177 ms | **165 ms** | 150 ms | 265 ms |
+
+\* the allocation-bound benchmarks are within noise of each other; the check
+cost falls almost entirely on call-dense code.
 
 Removing it lands `fib` and `tree_transform` essentially back on their
 historical figures, which closes both open items. Allocation-bound
@@ -150,13 +153,36 @@ isolation the tagged form is *marginally faster*), March's clang flags
 (`-fno-strict-aliasing -fwrapv -msse4.2` — no effect), and scheduler thread
 count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
 
-- [ ] **Decide what to do about it.** The check is emitted unconditionally on
-  every function entry. Options, cheapest first: skip it in leaf functions
-  that contain no calls and no loops (they cannot run unboundedly, so they
-  cannot starve the scheduler); hoist it out of a TCO'd loop body to one
-  check per N iterations; or lean on the existing SIGUSR1 timer preemption
-  and drop the per-call counter entirely. Any of these needs a starvation
-  test, not just a benchmark.
+- ✅ **FIXED — the cost was never the check's arithmetic, it was TLS.**
+  `march_tls_reductions` is `_Thread_local`, and thread-local access is an
+  indirect resolver call on both supported platforms: Darwin/arm64 emits
+  `adrp; ldr; blr` through the TLV descriptor, Linux/arm64 PIE goes through
+  TLSDESC. Confirmed by disassembly (`blr x8` at the top of every `_fib`
+  call) and by isolating the same IR against a plain global, where the check
+  measured as free. Compiled code now reads a plain, process-wide
+  `march_preempt_request` flag set by the preemption handler once per
+  quantum. Measured: `fib(40)` 640→465 ms, `tree-transform` 852→579 ms,
+  `binary-trees` 177→165 ms, `list-ops` 67→64 ms.
+  - **The load must be `volatile`.** A plain load of a global that nothing in
+    the loop writes is loop-invariant, so LLVM hoists it straight out of a
+    TCO loop body and the loop never re-reads it — preemption silently stops
+    for exactly the tail-recursive loops that need it most. The old
+    load/decrement/**store** sequence could not be hoisted, which is why this
+    hazard never existed before.
+  - **Also fixed a pre-existing hole this exposed:** `march_sched_run`'s
+    single-scheduler fast path returned without ever calling
+    `march_sched_preempt_start()`, so `MARCH_NUM_SCHEDULERS=1` had no timer
+    preemption whatsoever and depended entirely on the reduction counter.
+  - **Pinned by `test/native/preempt_starvation.march`** (new): a CPU-bound
+    TCO loop and a short task on ONE scheduler thread, asserting the short
+    one prints first. `MARCH_NUM_SCHEDULERS=1` is essential — with the
+    default 4 threads the sibling runs on another OS thread and prints first
+    even with preemption completely broken, so the obvious version of this
+    test would have passed against both bugs.
+- [ ] **Residual, still unexplained: ~72 ms on `fib`.** With the check removed
+  entirely the benchmark measures 0.36 s against the 2026-03-24 figure of
+  0.288 s, so something outside the preemption check accounts for the last
+  ~25%. Not investigated.
 - [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
   so the table stops implying a regression that is actually a feature cost.
 

@@ -543,6 +543,11 @@ void march_panic(void *s) {
 /* ── Scheduler stubs ────────────────────────────────────────────────── */
 
 int64_t march_tls_reductions = 0;
+/* Always 0 in WASM: there is no preemption daemon and no signals, so compiled
+ * code's entry check never branches to the yield stub.  (Under the previous
+ * decrement-and-test scheme this global went negative on the first call and
+ * every subsequent entry took the yield branch into the no-op below.) */
+volatile int64_t march_preempt_request = 0;
 void march_yield_from_compiled(void) {}
 void march_run_scheduler(void) {}
 

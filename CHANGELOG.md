@@ -28,6 +28,39 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled code no longer pays a thread-local-storage resolver call on every
+  function entry.** Each compiled function began by loading, decrementing and
+  storing the `_Thread_local` scheduler reduction counter. Thread-local access
+  is not a plain load on either supported platform: on Darwin/arm64 the symbol
+  is a TLV descriptor and each access compiles to `adrp; ldr; blr` — an
+  indirect call into the resolver — and on Linux/arm64 PIE it goes through a
+  TLSDESC call. A non-inlinable call on every entry also forces a stack frame
+  and register spills. Compiled code now reads a plain (non-thread-local)
+  `march_preempt_request` flag instead, which the preemption handler sets once
+  per quantum; the hot path is a single load and a predictable branch, and it
+  is read-only, so the cache line stays shared across scheduler threads rather
+  than ping-ponging on a per-call store.
+
+  `fib(40)` 640 ms → 465 ms, `tree-transform` 852 ms → 579 ms, `binary-trees`
+  177 ms → 165 ms. Preemption latency is unchanged in wall-clock terms (still
+  driven by the 1 ms quantum); what is gone is the *count*-based trigger that
+  also fired every 4000 calls, which on call-dense code fired within
+  microseconds — far more often than the quantum required, for no benefit.
+  Because the flag is process-wide rather than per-thread, a given scheduler
+  thread is now preempted on average every (threads × quantum) rather than
+  every quantum.
+
+- **`MARCH_NUM_SCHEDULERS=1` had no timer preemption at all.**
+  `march_sched_run`'s single-scheduler fast path returned without ever
+  starting the preemption daemon, so in the configuration used for
+  deterministic, race-free runs the *only* thing that ever preempted a
+  CPU-bound green thread was the per-call reduction counter. A tail-recursive
+  loop could otherwise monopolise the scheduler indefinitely. The daemon is
+  now started (and stopped) on that path too. Found by a new starvation test
+  that runs a CPU-bound task alongside a short one on a single scheduler
+  thread — the only configuration in which such a test measures preemption
+  rather than parallelism.
+
 - **Perceus FBIP in-place reuse was silently disabled program-wide**, making
   every "functional but in-place" rewrite a heap free + fresh allocation
   instead. `bench/tree_transform.march` (the FBIP showcase) ran at 3842 ms

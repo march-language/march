@@ -1262,7 +1262,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
 ]
 
 let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op scheduler + plain global *)
-  PComment "; WASM: plain global (no TLS), no-op scheduler stub";
+  PComment "; WASM: plain globals (no TLS), no-op scheduler stub";
+  POther "@march_preempt_request = external global i64";
   POther "@march_tls_reductions = external global i64";
   PDeclare "march_yield_from_compiled";
   PDeclare "march_run_scheduler";
@@ -1305,7 +1306,15 @@ let emit_preamble ~(is_wasm : bool) ~(triple : string) ?(repl = false) (buf : Bu
        the emutls symbol-not-found error from ORC JIT on macOS. *)
     if not repl then
       Buffer.add_string buf
-        "@march_tls_reductions = external thread_local global i64\n\
+        (* march_preempt_request is deliberately a PLAIN external global, not
+           thread_local: TLS access is an indirect resolver call per function
+           entry on both Darwin/arm64 (TLV) and Linux/arm64 PIE (TLSDESC),
+           which cost 1.75x on call-dense code.  See emit_reduction_check and
+           the rationale on the declaration in runtime/march_scheduler.h.
+           march_tls_reductions stays thread_local and is still declared here
+           because the task_reductions() builtin loads it. *)
+        "@march_preempt_request = external global i64\n\
+         @march_tls_reductions = external thread_local global i64\n\
          declare void @march_yield_from_compiled()\n";
     render_items buf native_net_io_items
   end else
