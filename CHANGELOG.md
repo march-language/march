@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
   unproven one stays legal but tells callers nothing, so a stale return
   refinement can never flag correct code. Postconditions that mention a
   parameter (relational) are not yet propagated.
+- Refinement predicates can now constrain an ADT's **constructor tag**. Every
+  constructor of every type — including the built-in `Option`, `Result` and
+  `List` — gains an implicit `is_<Ctor>` tester, so `fn unwrap(o : {Option(Int)
+  | is_Some(_)})` is a checkable contract: `unwrap(None)` is a compile error,
+  and so is `unwrap(x)` written inside a `None ->` match arm, where the arm
+  narrows the scrutinee's tag. Testers are exact-case (`is_some` is not
+  `is_Some`). Narrowing is skipped for a non-variable scrutinee, for an arm that
+  rebinds the scrutinee's name, and for a constructor name shared by two ADTs —
+  in each case the checker stays silent rather than guessing.
 - Refinement predicates that call an unknown function now produce a warning
   instead of being silently ignored. `{Int | totally_bogus_fn(_) > 0}` compiled
   clean and enforced nothing; it now says so. The supported vocabulary is the
