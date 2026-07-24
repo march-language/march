@@ -2191,14 +2191,47 @@ let qualify_module_refs ?(entry_prefix = "") (decls : decl list) : decl list =
     definition's still-qualified emitted name). A dotted name can never be a
     local binding, so no scope tracking is needed; constructor names ([ECon])
     live in a separate namespace and are left untouched. Applied only to the
-    entry module, before [qualify_module_refs]. *)
+    entry module, before [qualify_module_refs].
+
+    GUARD (must-name-something-of-ours): [mod_name] is only a genuine
+    self-qualification prefix when the segment right after it names
+    something this entry module ITSELF declares — a direct fn/let member
+    (bare form, e.g. [Foo.bar]) or a nested [DMod] (dotted form, e.g.
+    [Outer.Inner.wrapped]). Without this check, a MULTI-FILE project whose
+    entry module's name is also a PREFIX of an unrelated sibling top-level
+    module's dotted name — e.g. entry [mod MyApp] alongside a sibling file
+    declaring top-level [mod MyApp.Router do ... end] (the documented
+    "one mod per file" multi-file convention, see specs/lang/modules.md) —
+    had its fully-qualified [MyApp.Router.dispatch] silently mangled to
+    [Router.dispatch], which resolves to nothing (`Unknown module
+    \`Router\``): "Router" is not a member OF the entry module, it is a
+    DIFFERENT top-level module that merely happens to share a name prefix.
+    Checking only the immediate next segment (not the whole remainder)
+    correctly leaves such a reference fully qualified while still stripping
+    genuine self-references, including nested ones like
+    [Outer.Inner.wrapped] whose next segment ("Inner") IS a nested DMod
+    declared directly in the entry's own [decls]. *)
 let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
   let prefix = mod_name ^ "." in
   let plen = String.length prefix in
+  let direct_names = collect_direct_names decls in
+  let nested_mod_names =
+    List.filter_map (function DMod (n, _, _, _) -> Some n.txt | _ -> None) decls
+  in
+  let names_something_of_ours (suffix : string) : bool =
+    let head = match String.index_opt suffix '.' with
+      | Some i -> String.sub suffix 0 i
+      | None -> suffix
+    in
+    List.mem head direct_names || List.mem head nested_mod_names
+  in
   let rename (n : name) : name =
     let len = String.length n.txt in
-    if len > plen && String.sub n.txt 0 plen = prefix
-    then { n with txt = String.sub n.txt plen (len - plen) }
+    if len > plen && String.sub n.txt 0 plen = prefix then
+      let suffix = String.sub n.txt plen (len - plen) in
+      if names_something_of_ours suffix
+      then { n with txt = suffix }
+      else n
     else n
   in
   let rec rw e =

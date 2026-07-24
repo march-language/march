@@ -50,19 +50,47 @@ let stdlib_module_names =
   ; "DepotQuery"; "DepotMigration"; "DepotTest"
   ; "Tuple"; "Char"; "OrderedMap"; "SortedSet"; "Range" ]
 
-(** Collect [(mod_name, span)] for each DUse/DAlias in [decls],
+(** All non-empty dotted prefixes of [names], LONGEST first, down to the
+    single leading segment. E.g. [["A"; "B"; "C"]] -> [["A.B.C"; "A.B"; "A"]].
+    Used to disambiguate a dotted [use]/[alias] path (see [import_refs]). *)
+let dotted_prefixes (names : string list) : string list =
+  let rec aux acc = function
+    | [] -> List.rev acc
+    | l -> aux (String.concat "." l :: acc) (List.rev (List.tl (List.rev l)))
+  in
+  aux [] names
+
+(** Collect [(candidate_names, span)] for each DUse/DAlias in [decls],
     recursing into nested DMod blocks so that imports written inside
-    `mod Foo do import Bar ... end` are also resolved. *)
+    `mod Foo do import Bar ... end` are also resolved.
+
+    [candidate_names] lists every dotted prefix of the written path, longest
+    first: a dotted path like `use A.B` is syntactically ambiguous between
+    TWO distinct multi-file patterns that both use the same `Outer.Inner`
+    spelling —
+    (1) a top-level module literally named "A.B", living in its own file per
+        the "one mod per file" convention (`module_name_to_filename` maps it
+        to `a/b.march`), or
+    (2) a submodule `B` nested inside a single file's `mod A do mod B do
+        ... end end`, where only "A" is an actual file on disk.
+    [load_refs] tries each candidate against the search path and loads the
+    first one that resolves to a real file, so both patterns work without
+    the writer having to know (or the parser being able to tell) which one
+    a given `use`/`alias` path is. *)
 let rec import_refs decls =
   List.concat_map (function
     | March_ast.Ast.DUse (ud, sp) ->
       (match ud.March_ast.Ast.use_path with
-       | n :: _ -> [(n.March_ast.Ast.txt, sp)]
-       | [] -> [])
+       | [] -> []
+       | segs ->
+         let names = List.map (fun (n : March_ast.Ast.name) -> n.March_ast.Ast.txt) segs in
+         [(dotted_prefixes names, sp)])
     | March_ast.Ast.DAlias (ad, sp) ->
       (match ad.March_ast.Ast.alias_path with
-       | n :: _ -> [(n.March_ast.Ast.txt, sp)]
-       | [] -> [])
+       | [] -> []
+       | segs ->
+         let names = List.map (fun (n : March_ast.Ast.name) -> n.March_ast.Ast.txt) segs in
+         [(dotted_prefixes names, sp)])
     | March_ast.Ast.DMod (_, _, inner_decls, _) ->
       import_refs inner_decls
     | _ -> []
@@ -331,14 +359,29 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
   and load_refs decls =
     let refs = import_refs decls in
     let seen : (string, unit) Hashtbl.t = Hashtbl.create 4 in
-    List.concat_map (fun (mod_name, span) ->
-        if Hashtbl.mem seen mod_name
-           || List.mem mod_name stdlib_module_names
-        then []
-        else begin
-          Hashtbl.add seen mod_name ();
-          load mod_name ~from_span:span
-        end
+    List.concat_map (fun (candidates, span) ->
+        (* Drop any candidate that names a stdlib module outright — matches
+           the pre-existing behavior of skipping a bare stdlib [use] (deferred
+           to lazy stdlib loading, never routed through this file resolver). *)
+        match List.filter (fun c -> not (List.mem c stdlib_module_names)) candidates with
+        | [] -> []
+        | filtered ->
+          (* Try candidates longest (most specific) first — see
+             [import_refs]'s doc comment for why a dotted path is ambiguous
+             between a same-named top-level file and a nested submodule.
+             The first candidate that maps to a REAL file on the search path
+             wins; if none do, fall through to the longest candidate so the
+             "not found" diagnostic names the actual path that was written. *)
+          let target =
+            match List.find_opt (fun c -> find_file c <> None) filtered with
+            | Some c -> c
+            | None -> List.hd filtered
+          in
+          if Hashtbl.mem seen target then []
+          else begin
+            Hashtbl.add seen target ();
+            load target ~from_span:span
+          end
       ) refs
   in
 

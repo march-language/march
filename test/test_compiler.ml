@@ -4280,6 +4280,138 @@ end
     "public qualified ctor still resolves cross-module"
     false errored
 
+(* ── self-name-prefixed dotted sibling module (multi-file) ──────────────── *)
+
+(* A module could not reference a same-name-prefixed sibling dotted submodule
+   in a multi-file (MARCH_LIB_PATH) project -- exactly the layout
+   specs/lang/modules.md's "Multi-File Projects" section documents: entry
+   `mod MyApp do ... end` in one file, sibling `mod MyApp.Router do ... end`
+   in another, `MyApp.Router.dispatch(...)` called from `MyApp.main`.
+   `lib/desugar/desugar.ml`'s `strip_entry_self_qual` matched by STRING
+   PREFIX ONLY -- `MyApp.Router.dispatch` starts with `MyApp.` so it got
+   mangled to `Router.dispatch`, which resolves to nothing ("Unknown module
+   `Router`"): `Router` is a DIFFERENT top-level module, not a member of
+   `MyApp`. Referencing an unrelated-named sibling (`Other.Router`) always
+   worked, isolating the trigger to the entry's own name being a PREFIX of
+   the sibling's dotted name. *)
+let router_sibling_src = {|mod MyApp.Router do
+  fn dispatch(a : Int, b : Int) : Int do a + b end
+end
+|}
+
+let test_self_prefix_sibling_fully_qualified () =
+  let entry_src = {|mod MyApp do
+  fn main() : Int do
+    MyApp.Router.dispatch(1, 2)
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("router.march", router_sibling_src)] entry_src in
+  Alcotest.(check bool)
+    "fully-qualified call into a same-name-prefixed sibling dotted module resolves"
+    false errored
+
+(* An explicit `use`/`alias MyApp.Router` resolves by the one-mod-per-file
+   NAMING CONVENTION ("MyApp.Router" -> "my_app/router.march"), unlike the
+   fully-qualified case above (auto-discovery walks every .march file
+   regardless of name/location) -- so unlike [check_entry_with_lib_dir],
+   which writes files flat, this builds the nested dir the convention
+   expects. Returns whether typechecking the entry produced any error. *)
+let check_entry_with_nested_lib_dir ~(rel_path : string) ~(contents : string)
+    (entry_src : string) : bool =
+  let dir = Filename.temp_file "march_self_prefix_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let rec mkdir_p d =
+    if d <> "" && d <> "." && d <> Filename.dir_sep && not (Sys.file_exists d) then begin
+      mkdir_p (Filename.dirname d);
+      Unix.mkdir d 0o755
+    end
+  in
+  mkdir_p (Filename.concat dir (Filename.dirname rel_path));
+  Fun.protect ~finally:(fun () ->
+      try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+      with _ -> ())
+    (fun () ->
+      let oc = open_out (Filename.concat dir rel_path) in
+      output_string oc contents;
+      close_out oc;
+      Unix.putenv "MARCH_LIB_PATH" dir;
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+        let m = parse_and_desugar entry_src in
+        let (resolve_errors, extra_decls, _user_files) =
+          March_resolver.Resolver.resolve_imports ~source_file:"entry.march" m in
+        Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+        let m = { m with March_ast.Ast.mod_decls = extra_decls @ m.March_ast.Ast.mod_decls } in
+        let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+        has_errors errors))
+
+let test_self_prefix_sibling_use_bare () =
+  let entry_src = {|mod MyApp do
+  use MyApp.Router
+
+  fn main() : Int do
+    Router.dispatch(1, 2)
+  end
+end
+|} in
+  let errored = check_entry_with_nested_lib_dir
+      ~rel_path:"my_app/router.march" ~contents:router_sibling_src entry_src in
+  Alcotest.(check bool)
+    "`use MyApp.Router` + bare `Router.dispatch` resolves"
+    false errored
+
+let test_self_prefix_sibling_alias_still_works () =
+  (* The pre-fix-only-working spelling; must keep working post-fix. *)
+  let entry_src = {|mod MyApp do
+  alias MyApp.Router as R
+
+  fn main() : Int do
+    R.dispatch(1, 2)
+  end
+end
+|} in
+  let errored = check_entry_with_nested_lib_dir
+      ~rel_path:"my_app/router.march" ~contents:router_sibling_src entry_src in
+  Alcotest.(check bool)
+    "`alias MyApp.Router as R` + `R.dispatch` still resolves"
+    false errored
+
+let test_unrelated_name_sibling_still_works () =
+  (* Regression control: a sibling dotted module whose name does NOT share
+     the entry's own name as a prefix must keep working exactly as before. *)
+  let sibling_src = {|mod Other.Router do
+  fn dispatch(a : Int, b : Int) : Int do a + b end
+end
+|} in
+  let entry_src = {|mod MyApp do
+  fn main() : Int do
+    Other.Router.dispatch(1, 2)
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("router.march", sibling_src)] entry_src in
+  Alcotest.(check bool)
+    "unrelated-named sibling dotted module still resolves (regression control)"
+    false errored
+
+let test_self_prefix_nested_submodule_still_strips () =
+  (* Control for the [strip_entry_self_qual] fix itself: a GENUINE nested
+     submodule (declared directly inside the entry, not a separate sibling
+     file) must still have its self-qualifying prefix stripped so the
+     reference converges on TIR's unwrapped-entry emission. *)
+  let ctx = typecheck {|mod Outer do
+    mod Inner do
+      fn wrapped(x : Int) : Int do x * 2 end
+    end
+    fn main() : Int do
+      Outer.Inner.wrapped(5)
+    end
+  end|} in
+  Alcotest.(check bool)
+    "nested submodule self-qualification still strips correctly"
+    false (has_errors ctx)
+
 (** Regression: MARCH_LIB_PATH auto-discovery used to parse+typecheck EVERY
     .march file on the search path regardless of reachability, so ONE broken,
     UNRELATED library module failed an entry that never references it.  The
@@ -8178,6 +8310,21 @@ let compiler_suites =
           Alcotest.test_case
             "public qualified ctor still resolves cross-module"
             `Quick test_public_ctor_qualified_still_resolves;
+          Alcotest.test_case
+            "self-name-prefixed dotted sibling module: fully-qualified call resolves"
+            `Quick test_self_prefix_sibling_fully_qualified;
+          Alcotest.test_case
+            "self-name-prefixed dotted sibling module: `use` + bare call resolves"
+            `Quick test_self_prefix_sibling_use_bare;
+          Alcotest.test_case
+            "self-name-prefixed dotted sibling module: `alias` workaround still resolves"
+            `Quick test_self_prefix_sibling_alias_still_works;
+          Alcotest.test_case
+            "unrelated-named sibling dotted module still resolves (regression control)"
+            `Quick test_unrelated_name_sibling_still_works;
+          Alcotest.test_case
+            "genuine nested submodule self-qualification still strips"
+            `Quick test_self_prefix_nested_submodule_still_strips;
         ] );
       ( "diagnostic dedup",
         [

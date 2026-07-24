@@ -13,6 +13,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A module could not reference a same-name-prefixed sibling module in a
+  multi-file project — e.g. entry `mod MyApp` calling into a sibling
+  `mod MyApp.Router` declared in its own file (the documented
+  "one mod per file" multi-file convention), via `MyApp.Router.dispatch(...)`,
+  `use MyApp.Router` + bare `Router.dispatch(...)`, or (previously the only
+  working spelling) `alias MyApp.Router as R`. The first two failed with
+  `Unknown module \`Router\`.` — the entry-module-self-qualification stripping
+  pass matched by string prefix only, so `MyApp.Router.dispatch` (which
+  merely starts with the entry's own name, `MyApp.`) was wrongly mangled to
+  `Router.dispatch` as if `Router` were one of the entry's own members. A
+  related gap in `use`/`alias` resolution (taking only the first segment of a
+  dotted import path) and in `use`'s bare-name binding for dotted paths are
+  also fixed. Referencing an unrelated-named sibling module always worked and
+  still does.
+
 - Fork-join workloads using `task_spawn`/`task_await`/`task_await_unwrap`
   under high task concurrency (thousands of simultaneously in-flight tasks)
   could hit a severe performance cliff — `bench/par_fib.march`
