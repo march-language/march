@@ -3593,6 +3593,16 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
                code = Some "unknown_record_field";
                fix  = None }
        ) flds;
+       (* Record the PATTERN's own type under its span.  lower_match's
+          [expand_record_column] emits [EField] on the column's scrutinee, and
+          llvm_emit can only compute a static GEP when that scrutinee's TIR
+          type is the record's — otherwise it falls back to the by-name
+          dynamic accessor and decodes the result with the FIELD's type, which
+          dereferences an inline unboxed Float as a pointer (SIGSEGV).  A
+          NESTED record column (a record inside a constructor payload) has a
+          synthetic sub-var deliberately left at the lowering placeholder, so
+          this span is the only place the record type can be recovered from. *)
+       Hashtbl.replace env.type_map sp (TRecord expected_flds);
        !bindings, TRecord expected_flds
      | _ ->
        let bindings = ref [] in
@@ -3604,6 +3614,8 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        in
        let sorted =
          List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
+       (* Same reason as the expected-driven branch above. *)
+       Hashtbl.replace env.type_map sp (TRecord sorted);
        !bindings, TRecord sorted)
 
   | Ast.PatOr (alts, sp) ->

@@ -581,7 +581,22 @@ and compile_matrix_impl
     Perceus treat an unboxed scalar as RC-managed (the same hazard documented
     on [infer_pattern]'s PatWild arm in typecheck.ml).  Prefer the scrutinee's
     own structural [TRecord] type; fall back to the typechecker's recorded
-    type for the sub-pattern's span; only then give up and use [unknown_ty]. *)
+    type for the sub-pattern's span; only then give up and use [unknown_ty].
+
+    The SCRUTINEE's type matters just as much, and for a different reason:
+    [llvm_emit]'s [EField] arm computes a static GEP only when the object
+    atom's [Tir.ty] is the record's.  Otherwise it emits the by-name dynamic
+    accessor [march_record_field_dyn] and then decodes the returned word with
+    the FIELD's type — and a statically-laid-out record stores a [Float] as a
+    raw inline double, so [march_unbox_float] dereferences a double's bit
+    pattern as a pointer and the program SIGSEGVs.  Only the TOP-LEVEL column
+    carries a real record type: a record nested in a constructor payload is
+    matched against a synthetic sub-var that [compile_matrix_impl] leaves at
+    [unknown_ty] on purpose (see [field_ty_at]'s comment).  [retyped_scrut]
+    below recovers the record type from the typechecker's entry for the
+    record PATTERN's own span and re-annotates the atom in place — same
+    variable, same binding, no extra [ELet] and so no change to reference
+    counting; the annotation exists purely so codegen can lay out the GEP. *)
 and expand_record_column
     (env         : Lower_state.env)
     (scrut       : Tir.atom)
@@ -590,6 +605,28 @@ and expand_record_column
     (rows        : (Ast.pattern list * Tir.expr) list)
     (fallback    : Tir.expr option)
   : Tir.expr =
+  (* The record type the typechecker recorded for a first-column record
+     pattern in this column, if any row has one. *)
+  let pattern_record_ty () =
+    let rec search = function
+      | [] -> None
+      | (Ast.PatRecord (_, sp) :: _, _) :: more ->
+        (match Lower_state.ty_of_span env sp with
+         | Tir.TRecord _ as t -> Some t
+         | _ -> search more)
+      | _ :: more -> search more
+    in
+    search rows
+  in
+  let scrut =
+    match scrut with
+    | Tir.AVar ({ Tir.v_ty = Tir.TRecord _; _ }) -> scrut
+    | Tir.AVar v ->
+      (match pattern_record_ty () with
+       | Some rt -> Tir.AVar { v with Tir.v_ty = rt }
+       | None    -> scrut)
+    | _ -> scrut
+  in
   let scrut_field_ty name =
     match scrut with
     | Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ } -> List.assoc_opt name fs

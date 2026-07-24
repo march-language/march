@@ -990,6 +990,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; leave x/y as undefined global fn references.  Covers all three entry points
 ; (match arm, `let`, fn param) plus a refutable sub-pattern that forces real
 ; dispatch on a projected field.
+; `boxed` / `wrapped` additionally pin a record pattern NESTED in a
+; constructor payload with a Float field: the column's scrutinee has no
+; record type there, so EField fell back to march_record_field_dyn and
+; march_unbox_float dereferenced a raw inline double — SIGSEGV, compiled
+; only (the interpreter and every Int/String field were unaffected).
 (rule
  (targets native_record_pattern native_record_pattern.out)
  (deps (file %{exe:../bin/main.exe})
