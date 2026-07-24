@@ -820,9 +820,20 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
   | A.FPPat _ -> sc
 
-let scope_add_binding (sc : scope) (b : A.binding) : scope =
+(* [postcond] resolves a callee name to its closed return refinement.  An
+   explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
+   direct named call falls back to the callee's declared postcondition. *)
+let scope_add_binding ~(postcond : string -> (string * A.expr) option) (sc : scope)
+    (b : A.binding) : scope =
   match b.A.bind_pat, refined_scope_ty b.A.bind_ty with
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
+  | A.PatVar n, None ->
+    (match b.A.bind_expr with
+     | A.EApp (A.EVar { A.txt = fname; _ }, _, _) ->
+       (match postcond fname with
+        | Some (binder, pred) -> (n.A.txt, (binder, pred, None)) :: sc
+        | None -> sc)
+     | _ -> sc)
   | _ -> sc
 
 (* ── Collect signatures, keyed by bare + qualified name ──────────────────── *)
@@ -942,6 +953,19 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
              in
              if imported then lookup (qualify m fname) else None)
            ctx.uses)
+
+(* Resolve a call name to the callee's *closed* return refinement, or None.
+   This is the single place the closedness filter is applied, so both use
+   sites (a let-bound local and an inline argument) agree, and Tier 1
+   (relational postconditions) is a change to this one function. *)
+let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
+  : (string * A.expr) option =
+  match resolve_call ctx defs fname with
+  | Some (Some sg) ->
+    (match sg.ret with
+     | Some (b, p) when pred_is_closed b p -> Some (b, p)
+     | _ -> None)
+  | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
 let reflect_scalar (sc : scope) (actual : A.expr)
@@ -1429,7 +1453,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
            let path' =
              match e with A.EAssert (p, _) -> (p, false) :: path | _ -> path
            in
-           let sc' = match e with A.ELet (b, _) -> scope_add_binding sc b | _ -> sc in
+           let sc' =
+             match e with
+             | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ctx defs) sc b
+             | _ -> sc
+           in
            (path', sc'))
          (path, sc) es)
   | A.ELet (b, _) -> go b.A.bind_expr

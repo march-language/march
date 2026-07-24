@@ -697,7 +697,20 @@ let tier0_suite =
 
     gated "a non-refined function is still resolvable (no regression)" (fun () ->
         Alcotest.(check bool) "no error" false
-          (has_refine_error (t0 "  fn plain() : Int do 7 end\n  fn f() : Int do takepos(plain()) end"))) ]
+          (has_refine_error (t0 "  fn plain() : Int do 7 end\n  fn f() : Int do takepos(plain()) end")));
+
+    gated "let-bound postcondition `_ < 0` contradicts `_ >= 0`" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (t0 "  fn f() : Int do let c = neg()\n    takepos(c) end")));
+
+    gated "let-bound compatible postcondition passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do let c = nonneg()\n    takepos(c) end")));
+
+    gated "explicit annotation still wins over the inferred postcondition" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (t0 "  fn f() : Int do let c : {Int | _ < 0} = neg()\n    takepos(c) end"))) ]
 
 let () =
   Alcotest.run "march-refinecheck"
