@@ -3715,36 +3715,96 @@ type spat =
   | SPLit  of Ast.literal           (** Literal: 0, true, "hi" *)
   | SPTup  of spat list             (** Tuple: (a, b) *)
 
-(** Normalize an AST pattern to a [spat]. *)
+(** Qualified constructor patterns ("MarchType.TBool", "Ast.Query") carry
+    their full dotted text; exhaustiveness compares against the scrutinee
+    type's BARE ctor names, so keep only the last segment. *)
+let bare_ctor_name (txt : string) : string =
+  match String.rindex_opt txt '.' with
+  | Some i -> String.sub txt (i + 1) (String.length txt - i - 1)
+  | None -> txt
+
+(** Normalize an AST pattern to a SINGLE [spat], widening anything [spat]
+    cannot represent to [SPWild].
+
+    Only used as the fallback for a pattern whose or-expansion exceeds
+    [or_expansion_cap]; [norm_pat_rows] is the entry point everything else
+    goes through.  Note that [SPWild] in a coverage matrix means "matches
+    everything", i.e. it OVER-reports what the arm covers: safe for
+    exhaustiveness (it can only suppress a warning), wrong for redundancy
+    (the next arm looks subsumed), which is why the callers that use this
+    fallback also skip redundancy checking for the arm. *)
 let rec norm_pat (p : Ast.pattern) : spat =
   match p with
   | Ast.PatWild _            -> SPWild
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
-  | Ast.PatRecord _          -> SPWild   (* conservative *)
+  | Ast.PatRecord _          -> SPWild   (* conservative: [spat] has no record shape *)
   | Ast.PatOr _              -> SPWild   (* conservative: see norm_pat_rows *)
-  | Ast.PatCon  (n, args)    ->
-    (* Qualified constructor patterns ("MarchType.TBool", "Ast.Query")
-       carry their full dotted text; exhaustiveness compares against the
-       scrutinee type's BARE ctor names, so keep only the last segment. *)
-    let bare = match String.rindex_opt n.txt '.' with
-      | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
-      | None -> n.txt
-    in
-    SPCon (bare, List.map norm_pat args)
+  | Ast.PatCon  (n, args)    -> SPCon (bare_ctor_name n.txt, List.map norm_pat args)
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
 
-(** Expand a pattern into the set of [spat] rows it covers.  An or-pattern
-    contributes one row per alternative; every other pattern contributes
-    exactly one.  Nested or-patterns (inside a constructor argument or tuple
-    element) are normalised to [SPWild] by [norm_pat] — conservative, so
-    coverage is under-reported rather than over-reported. *)
-let norm_pat_rows (p : Ast.pattern) : spat list =
+(** Upper bound on the number of [spat] rows one arm may expand to.  Nested
+    or-patterns multiply — `C(1 | 2, 3 | 4)` denotes four concrete shapes —
+    so the cross-product is capped and a pattern beyond it falls back to the
+    widening [norm_pat]. *)
+let or_expansion_cap = 256
+
+(** How many [spat] rows [p] expands to, saturating at [or_expansion_cap + 1]
+    so a pathological pattern is rejected by the cap instead of overflowing
+    (or building the list to find out). *)
+let rec or_expansion_size (p : Ast.pattern) : int =
+  let sat n = min n (or_expansion_cap + 1) in
   match p with
-  | Ast.PatOr (alts, _) -> List.map norm_pat alts
-  | _ -> [norm_pat p]
+  | Ast.PatOr (alts, _) ->
+    sat (List.fold_left (fun acc a -> sat (acc + or_expansion_size a)) 0 alts)
+  | Ast.PatAs (p', _, _) -> or_expansion_size p'
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    sat (List.fold_left (fun acc p -> sat (acc * or_expansion_size p)) 1 ps)
+  (* PatRecord collapses to SPWild whatever it contains. *)
+  | Ast.PatRecord _ | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> 1
+
+(** Every [spat] row [p] covers, distributing or-patterns at ANY depth into
+    the cross-product of their alternatives. *)
+let rec norm_pat_all (p : Ast.pattern) : spat list =
+  match p with
+  | Ast.PatWild _ | Ast.PatVar _ -> [SPWild]
+  | Ast.PatAs (p', _, _)         -> norm_pat_all p'
+  | Ast.PatRecord _              -> [SPWild]
+  | Ast.PatOr (alts, _)          -> List.concat_map norm_pat_all alts
+  | Ast.PatCon (n, args)         ->
+    List.map (fun a -> SPCon (bare_ctor_name n.txt, a)) (norm_pat_args args)
+  | Ast.PatAtom (n, args, _)     ->
+    List.map (fun a -> SPCon (":" ^ n, a)) (norm_pat_args args)
+  | Ast.PatTuple (ps, _)         -> List.map (fun a -> SPTup a) (norm_pat_args ps)
+  | Ast.PatLit (l, _)            -> [SPLit l]
+
+and norm_pat_args (ps : Ast.pattern list) : spat list list =
+  List.fold_right (fun p acc ->
+      let heads = norm_pat_all p in
+      List.concat_map (fun h -> List.map (fun t -> h :: t) acc) heads)
+    ps [[]]
+
+(** True when [p]'s or-expansion is too large to enumerate, so [norm_pat_rows]
+    falls back to the widening [norm_pat].  Redundancy checking must skip such
+    an arm — see [check_redundant_arms]. *)
+let pat_or_expansion_capped (p : Ast.pattern) : bool =
+  or_expansion_size p > or_expansion_cap
+
+(** Expand a pattern into the set of [spat] rows it covers.  Or-patterns are
+    expanded at EVERY depth, not just the top level: nesting one inside a
+    constructor argument or tuple element used to normalise it to [SPWild],
+    which in a coverage matrix means "matches everything" — so `Some(1 | 2)`
+    silently claimed to cover all of `Some(_)`, suppressing a real
+    non-exhaustiveness warning AND reporting the following arm unreachable.
+    (The old comment here claimed the widening was conservative; [SPWild] is
+    an over-report, not an under-report, in both consumers.)
+
+    Beyond [or_expansion_cap] rows the enumeration is abandoned and the
+    widening [norm_pat] is used instead — see [pat_or_expansion_capped]. *)
+let norm_pat_rows (p : Ast.pattern) : spat list =
+  if pat_or_expansion_capped p then [norm_pat p] else norm_pat_all p
 
 (** All [(ctor_name, arity)] pairs for a type name, in declaration order.
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
@@ -4160,16 +4220,20 @@ let rec pat_has_record (p : Ast.pattern) : bool =
     Guarded arms are never flagged, and their patterns are excluded from the
     prefix so that subsequent arms aren't mistakenly flagged as subsumed.
     Arms containing a record pattern get the same treatment — see
-    [pat_has_record] for why. *)
+    [pat_has_record] for why — as do arms whose or-expansion exceeded
+    [or_expansion_cap], since those fall back to the same widening
+    [norm_pat] and would mis-subsume the following arm for the same reason. *)
 let check_redundant_arms (env : env) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let prefix = ref [] in
   List.iter (fun (br : Ast.branch) ->
-    (* An or-pattern contributes one row per alternative; the arm is
-       redundant only if EVERY alternative is already subsumed by the
+    (* An or-pattern contributes one row per alternative (at every depth); the
+       arm is redundant only if EVERY alternative is already subsumed by the
        prefix — a single live alternative keeps the whole arm reachable. *)
     let arm_rows = List.map (fun r -> [r]) (norm_pat_rows br.branch_pat) in
-    if br.branch_guard = None && not (pat_has_record br.branch_pat) then begin
+    if br.branch_guard = None
+       && not (pat_has_record br.branch_pat)
+       && not (pat_or_expansion_capped br.branch_pat) then begin
       if not (List.exists (fun row -> is_useful env [scrut_ty] !prefix row) arm_rows) then begin
         let pat_sp   = span_of_pat br.branch_pat in
         let body_sp  = span_of_expr br.branch_body in

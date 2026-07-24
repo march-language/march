@@ -338,7 +338,9 @@ end
 This is rejected, not silently mishandled, because all alternatives share
 ONE arm body: if `A(x)` matched, `x` is bound; if `B(x)` matched instead, a
 *different* `x` would need to be bound, and there is nowhere to put a
-per-alternative binding when the body is shared between alternatives.
+per-alternative binding when the body is shared between alternatives. Names
+the arm binds *outside* the or-pattern are unaffected — `P(x, 1 | 2) -> x +
+100` is fine; only a name bound *inside* an alternative is rejected.
 
 If you need per-alternative bindings, either split into separate arms:
 
@@ -357,11 +359,16 @@ match e do
 end
 ```
 
-Exhaustiveness and redundancy checking see through or-patterns: `Red |
-Green` followed by a `Blue` arm is exhaustive for a three-constructor
-`Color`, and an arm that only repeats alternatives already covered by an
-earlier arm is flagged as unreachable exactly as any other redundant arm
-would be.
+Exhaustiveness and redundancy checking see through or-patterns at **any**
+nesting depth: `Red | Green` followed by a `Blue` arm is exhaustive for a
+three-constructor `Color`, `Some(1 | 2)` covers exactly `Some(1)` and
+`Some(2)` (so a match with only that arm and `None` is still reported
+non-exhaustive), and an arm that only repeats alternatives already covered
+by an earlier arm is flagged as unreachable exactly as any other redundant
+arm would be. An arm whose nested alternatives multiply out to a
+pathologically large number of shapes (more than a few hundred) falls back
+to being treated as a wildcard for coverage purposes, which can only
+suppress a diagnostic, never invent one.
 
 An or-pattern nests beneath `as`: `1 | 2 as n` parses as `(1 | 2) as n`
 (binding `n` to the whole matched value is fine — only the alternatives

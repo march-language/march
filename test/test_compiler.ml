@@ -8428,12 +8428,77 @@ let test_or_pattern_exhaustiveness () =
       end
     end
   end|} in
+  (* Assert on the MESSAGE, not merely "some warning exists": a false
+     redundancy warning on the same program would otherwise keep this green.
+     The non-exhaustiveness warning carries no [code], so the missing
+     constructor's name in the message is the only distinguishing signal. *)
   let missing_blue =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.severity = March_errors.Errors.Warning)
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match"
+        && _contains_substr d.message "Blue")
       ctx_partial.March_errors.Errors.diagnostics
   in
   Alcotest.(check bool) "missing Blue still warns" true missing_blue
+
+(* Or-patterns must be seen through at EVERY depth, not just the top level.
+   [norm_pat] used to collapse a NESTED PatOr to SPWild, which in a coverage
+   matrix means "matches everything" — so `Some(1 | 2)` claimed to cover all
+   of `Some(_)`.  That both suppressed a real non-exhaustiveness warning and
+   made the next arm look unreachable. *)
+let test_nested_or_pattern_exhaustiveness () =
+  let ctx = typecheck {|mod T do
+    fn f(o : Option(Int)) : Int do
+      match o do
+        Some(1 | 2) -> 10
+        None        -> 0
+      end
+    end
+  end|} in
+  let warns_nonexhaustive =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "Some(1 | 2) does not cover Some(_)" true
+    warns_nonexhaustive
+
+let test_nested_or_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    type P = P(Int, Int)
+    fn f(p : P) : Int do
+      match p do
+        P(x, 1 | 2) -> x + 100
+        P(x, _)     -> x
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "arm after a nested or-pattern is reachable" false
+    has_redundant
+
+(* Same false positive reached through an as-pattern over an or-pattern. *)
+let test_as_over_or_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    fn f(n : Int) : Int do
+      match n do
+        (1 | 2) as k -> k + 100
+        _            -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "arm after `(1 | 2) as k` is reachable" false
+    has_redundant
 
 let compiler_suites =
   [
@@ -8455,6 +8520,12 @@ let compiler_suites =
             test_or_pattern_nonbinding_accepted;
           Alcotest.test_case "or-pattern exhaustiveness sees through alternatives" `Quick
             test_or_pattern_exhaustiveness;
+          Alcotest.test_case "nested or-pattern does not widen coverage" `Quick
+            test_nested_or_pattern_exhaustiveness;
+          Alcotest.test_case "arm after a nested or-pattern not flagged redundant" `Quick
+            test_nested_or_pattern_arm_not_flagged_redundant;
+          Alcotest.test_case "arm after `(p | q) as n` not flagged redundant" `Quick
+            test_as_over_or_pattern_arm_not_flagged_redundant;
         ] );
       ( "resolver",
         [
