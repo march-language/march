@@ -255,9 +255,6 @@ git log is authoritative for exact commits.
   program building or reading a `List`/`Array` of `Float` through a generic
   helper (`Array.from_list`, `Array.get`, and therefore `RRB`'s `Float`
   operations) or wildcard-discarding an element of a `Float` container.
-
-### Fixed
-
 - `Dom.clone`, `Dom.first_child`, and `Dom.last_child` were declared as
   extern runtime builtins but never got a public stdlib wrapper, like every
   other DOM function — so they were unreachable from March code
@@ -286,9 +283,6 @@ git log is authoritative for exact commits.
   `Vault.update(store, "hits", fn n -> n + 1)`. Fine in the interpreter.
   Affects the documented atomic-update pattern and the rate-limiter cookbook
   example.
-
-### Documentation
-
 - Corrected stale claims and two tutorial code blocks in the top-level
   `README.md` that no longer matched the compiler: linear/affine types and
   `kill`/`is_alive` are fully supported (were marked "in progress" /
