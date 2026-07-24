@@ -1,4 +1,34 @@
 # .github/workflows/ci.yml
+#
+# Job layout / why it looks like this
+# ───────────────────────────────────
+# This used to be one `build` matrix job running every check serially, which
+# measured 29.7min end-to-end on ubuntu (Test 16.4min, ASAN gate 6.8min,
+# types-check 2.4min, opam install 2.3min, rest small) — the whole workflow's
+# critical path, and unfixable by caching alone since the steps were serial.
+#
+# Now every independent check is its own job, so the critical path is the
+# single slowest one rather than their sum:
+#
+#   doc-lint                            (standalone, ~10s)
+#   test          (ubuntu, macos)       `dune runtest`
+#   conformance   (ubuntu, macos)       @types-check, @grammar-check, docs, fmt
+#   sanitize-gate (ubuntu)              golden-corpus ASAN gate
+#   ocaml-build   (ubuntu) ─┬─ cross-linux-oracle
+#                           └─ property-oracle × 8
+#
+# Two other changes cut the per-job floor and the per-compile cost:
+#   - .github/actions/opam-deps caches ~/.opam, so `opam install --deps-only`
+#     stops reinstalling all 46 packages (~2.3min) in every job;
+#   - the compiler now caches compiled C-runtime objects
+#     (lib/cas/runtime_archive.ml), so `march --compile` no longer rebuilds
+#     the whole ~20-file runtime per invocation — which is most of what the
+#     Test step and the ASAN gate were actually spending their time on.
+#
+# Every job carries timeout-minutes: a dune build/runtest can wedge on its RPC
+# daemon (see CLAUDE.md/scripts/run-tests.sh), and before these were added a
+# single wedged step silently ate the full 6h GitHub Actions job ceiling.
+
 name: CI
 
 on:
@@ -9,95 +39,49 @@ on:
 jobs:
   doc-lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
-  build:
+  # The long pole. Kept as its own job so nothing else waits behind it.
+  test:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            ocaml-compiler: 5.3.0
-          - os: ubuntu-24.04
-            ocaml-compiler: 5.3.0
-
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    # Backstop for the dune-daemon wedge documented in CLAUDE.md/scripts/run-tests.sh
-    # (a `dune build`/`dune runtest` invocation can hang indefinitely on its RPC
-    # daemon, independent of what's being built/run — confirmed in CI: one run's
-    # `Build` step, and another's `Test` step, each silently ate the full 6h GH
-    # Actions job ceiling instead of failing fast). Per-step timeouts below give a
-    # faster, more precise signal; this is the outer safety net.
-    timeout-minutes: 60
-
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
-      # entry for macos-15 (our minimum macOS target); the older @v3 the tag
-      # resolved to failed with "no matching opam release", and forcing a
-      # prerelease opam fails GPG verification. Pin the fixed version — the
-      # opam-deps composite action always uses it.
-      - name: Set up OCaml + install opam dependencies (cached)
-        timeout-minutes: 10
-        uses: ./.github/actions/opam-deps
+      # cross-tools: `dune runtest` includes a linux/amd64 TLS+gzip test that
+      # shells out to `zig cc` against the fetched sysroot.
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
         with:
-          ocaml-compiler: ${{ matrix.ocaml-compiler }}
-
-      - name: Install system dependencies
-        run: |
-          # z3: the refinement-type conformance corpus (@types-check) discharges
-          # pre/postcondition + division-safety VCs via the `z3` binary on PATH
-          # (lib/refine/solver.ml). Without it, refinement checks silently no-op
-          # and the reject/t71-t73 witnesses stop being rejected. Install it on
-          # both runners so the corpus is deterministic (macOS previously relied
-          # on the runner image's pre-installed z3).
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 brotli zstd llvm z3
-          else
-            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
-            # libblake3-dev is not available in Ubuntu 24.04; build from source
-            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-            cd /tmp/blake3/c
-            gcc -O2 -shared -fPIC -o libblake3.so \
-              blake3.c blake3_dispatch.c blake3_portable.c \
-              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-            sudo cp libblake3.so /usr/local/lib/libblake3.so
-            sudo cp blake3.h /usr/local/include/blake3.h
-            sudo ldconfig
-          fi
-
-      - name: Install zig (cross-compile driver for the linux/amd64 TLS+gzip test)
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Fetch cross-compile sysroot cache (linux/amd64)
-        run: scripts/fetch-cross-sysroot.sh amd64
+          cross-tools: "true"
 
       - name: Build
         timeout-minutes: 10
         run: |
           eval $(opam env)
           # Clear any stale daemon state before the first dune invocation of the
-          # job (cheap defense-in-depth against the wedge below; likely a no-op on
-          # a fresh GH-hosted runner, but mirrors scripts/run-tests.sh's
-          # MARCH_DUNE_SHUTDOWN — belt-and-suspenders costs nothing here).
+          # job (cheap defense-in-depth against the wedge noted at the top of
+          # this file; likely a no-op on a fresh GH-hosted runner, but mirrors
+          # scripts/run-tests.sh's MARCH_DUNE_SHUTDOWN).
           dune shutdown 2>/dev/null || true
           # Build the public exe directly (bin/main.exe = `march`), NOT `@install`
           # (which also builds forge/march-lsp — neither is referenced anywhere
           # else in this job) and NOT a bare `dune build`. A no-target `dune build`
-          # intermittently wedges at ~0% CPU AFTER building everything (a known
-          # dune daemon hang, see CLAUDE.md/scripts/run-tests.sh) — even the
+          # intermittently wedges at ~0% CPU AFTER building everything — even the
           # narrower `@install` alias hit this once in CI (a `Build` step silently
           # ate the full 6h job ceiling). A single explicit exe target is the
-          # narrowest safe scope; the Test step (`dune runtest`) still builds+runs
-          # the full test suite (incl. forge/lsp), so those compile errors are
-          # still caught, just one step later.
+          # narrowest safe scope; `dune runtest` below still builds+runs the full
+          # test suite (incl. forge/lsp), so those compile errors are still
+          # caught, just one step later.
           dune build bin/main.exe
 
       - name: Test
@@ -106,10 +90,28 @@ jobs:
           eval $(opam env)
           dune runtest
 
+  # Static-semantics + grammar corpora, doc notebooks and formatting: all
+  # independent of `dune runtest` and of each other, and all short — grouped
+  # into one job rather than four so they don't each pay job-setup overhead.
+  conformance:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 10
         run: |
           eval $(opam env)
+          dune shutdown 2>/dev/null || true
           dune build @types-check
 
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
@@ -117,15 +119,6 @@ jobs:
         run: |
           eval $(opam env)
           dune build @grammar-check
-
-      - name: Golden corpus AddressSanitizer gate (Linux only; RC/UAF guard)
-        if: runner.os == 'Linux'
-        timeout-minutes: 15
-        run: |
-          eval $(opam env)
-          dune build bin/main.exe
-          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
-            ./specs/lang/golden/sanitize.sh
 
       - name: Check doc notebooks (.scrollmd) compile
         timeout-minutes: 5
@@ -139,13 +132,32 @@ jobs:
           eval $(opam env)
           dune fmt 2>&1 || true
 
+  sanitize-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Golden corpus AddressSanitizer gate (RC/UAF guard)
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            ./specs/lang/golden/sanitize.sh
+
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
   # independently pay ~2.3min opam-install + a fresh `dune build` — 9 job
   # instances redoing identical work. Neither of them needs a coherent local
-  # `_build`/incremental dune state the way the `dune runtest`-based `build`
-  # job does (they just RUN a prebuilt exe), so a single upstream build here
-  # is safe to fan out as plain files rather than a dune-mediated cache —
+  # `_build`/incremental dune state the way the `dune runtest`-based test job
+  # does (they just RUN a prebuilt exe), so a single upstream build here is
+  # safe to fan out as plain files rather than a dune-mediated cache —
   # deliberately NOT `actions/cache` on `~/.cache/dune` for this: this project
   # already hit a dune shared-cache-poisoning incident (a stale artifact from
   # a differently-flagged/differently-versioned compiler silently re-served
@@ -158,24 +170,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml + install opam dependencies (cached)
-        timeout-minutes: 10
-        uses: ./.github/actions/opam-deps
-        with:
-          ocaml-compiler: 5.3.0
-
-      - name: Install system dependencies (blake3 for the native build)
-        run: |
-          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
-          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-          cd /tmp/blake3/c
-          gcc -O2 -shared -fPIC -o libblake3.so \
-            blake3.c blake3_dispatch.c blake3_portable.c \
-            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-          sudo cp libblake3.so /usr/local/lib/libblake3.so
-          sudo cp blake3.h /usr/local/include/blake3.h
-          sudo ldconfig
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
 
       - name: Build compiler + oracle binaries
         timeout-minutes: 10
@@ -250,24 +247,17 @@ jobs:
 
   # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
   # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
-  # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so all
-  # 1090 checks silently skip today (confirmed identical across every historical
+  # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so
+  # all 1090 checks silently skip (confirmed identical across every historical
   # CI run — "no-march-binary", 0 matched). Wiring MARCH_BIN into that step
   # directly isn't viable either: each unique generated program is a real
-  # `--compile` (no CAS cache hit across distinct sources — measured ~6.5s each
-  # on GH Actions' own runners (slower than a local dev machine), dominated by
-  # clang recompiling the whole C runtime from source every invocation), so all
-  # 1090 would add well over an hour to the fast Test step on every push.
-  # Instead this runs as its own job (parallel to the build matrix and
-  # cross-linux-oracle above, like they already run concurrently), sharded
-  # 8-way via alcotest's own case-number filtering (`test <suite> <cases>`),
-  # hand-balanced by measured per-case cost (not a naive index range) so no
-  # single shard is dominated by the two heavier cases (case 0 = println_arith
-  # at QCheck count 100; case 20 = opt_matrix at count 20 * 2 opt levels).
-  # Follow-up (deliberately not done here, bigger scope): precompiling the C
-  # runtime once instead of per-`--compile` would cut every invocation to a
-  # fraction of a second, making this whole job unnecessary — filed as a
-  # separate compiler build-path improvement in specs/todos.md.
+  # `--compile` that the whole-binary CAS can never hit (distinct sources), so
+  # all 1090 would add well over an hour to the Test job on every push.
+  # Instead this runs as its own job, sharded 8-way via alcotest's own
+  # case-number filtering (`test <suite> <cases>`), hand-balanced by measured
+  # per-case cost (not a naive index range) so no single shard is dominated by
+  # the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
+  # = opt_matrix at count 20 * 2 opt levels).
   property-oracle:
     runs-on: ubuntu-24.04
     needs: [ocaml-build]
@@ -279,9 +269,10 @@ jobs:
         # local timing (~4s/compile on a 14-core Apple Silicon dev machine)
         # and failed on real GH Actions hardware, which measured ~6.5s/compile
         # (case 0 alone: 100 iterations in 10m48s) — shard 1 (250 cases) needed
-        # ~27min against a 25min timeout. Re-balanced by measured cost so the
-        # heaviest shard (150 cases) needs ~16min, comfortable margin under
-        # the step timeout below.
+        # ~27min against a 25min timeout. Re-balanced by measured cost. The
+        # runtime-object cache has since cut the per-compile cost roughly in
+        # half again; the shard split is left as-is rather than re-tuned
+        # optimistically, per the same lesson.
         include:
           - shard: 1
             cases: "0,20"

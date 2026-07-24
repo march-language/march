@@ -11,6 +11,28 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- `march --compile` no longer recompiles the whole C runtime from source on
+  every invocation. The ~20 `runtime/*.c` files are now compiled once per
+  (runtime-source, C-toolchain, compile-flags) combination, cached under
+  `~/.march/cache/runtime-objs/`, and reused on subsequent builds — only the
+  generated LLVM IR for your own program is compiled per invocation. Measured
+  locally, this cuts the clang portion of a small program's build from ~1.5s
+  to ~0.3s (a ~5x reduction on that step; ~45% off end-to-end, the remainder
+  now being March's own frontend). The saving compounds anywhere many
+  programs are compiled in sequence — test suites, the differential oracle,
+  `forge build` over a multi-file project.
+
+  The cache key covers the runtime sources' content, the C compiler's own
+  version, and the full compile-flag string, so editing a runtime `.c`/`.h`,
+  bumping clang, or switching optimization/sanitizer/debug flags each get
+  their own object set rather than silently reusing a stale one. Builds that
+  bake per-invocation defines into the runtime — cross-compilation,
+  `--compile-so`, `--hot-reload` with `--signing-pubkey`, and
+  `MARCH_HTTP_EVLOOP=1` — automatically fall back to the previous
+  single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
+
 ## [0.2.0] - 2026-07-23
 
 ### Fixed

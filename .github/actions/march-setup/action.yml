@@ -1,0 +1,66 @@
+name: march-setup
+description: >
+  One-stop toolchain setup for a March CI job: OCaml + cached opam
+  dependencies, the C system libraries the runtime links against, and
+  (optionally) the zig cross-compiler plus the linux/amd64 sysroot.
+
+  Exists because the jobs below were split apart to run in parallel — every
+  one of them needs the same ~30 lines of setup, and duplicating that across
+  seven jobs is how the blake3/z3 dependency lists drift out of sync.
+
+inputs:
+  ocaml-compiler:
+    required: false
+    default: "5.3.0"
+    description: OCaml compiler version to install.
+  cross-tools:
+    required: false
+    default: "false"
+    description: >
+      Also install zig and fetch the linux/amd64 cross sysroot. Needed by any
+      job that cross-compiles: `dune runtest` (its linux/amd64 TLS+gzip test)
+      and the cross oracle. Skipped elsewhere to save ~10s per job.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up OCaml + install opam dependencies (cached)
+      uses: ./.github/actions/opam-deps
+      with:
+        ocaml-compiler: ${{ inputs.ocaml-compiler }}
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        # z3: the refinement-type conformance corpus (@types-check) discharges
+        # pre/postcondition + division-safety VCs via the `z3` binary on PATH
+        # (lib/refine/solver.ml). Without it, refinement checks silently no-op
+        # and the reject/t71-t73 witnesses stop being rejected. Install it on
+        # both runners so the corpus is deterministic (macOS previously relied
+        # on the runner image's pre-installed z3).
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          brew install blake3 brotli zstd llvm z3
+        else
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev z3
+          # libblake3-dev is not available in Ubuntu 24.04; build from source
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+        fi
+
+    - name: Install zig (the C cross-compiler)
+      if: inputs.cross-tools == 'true'
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Fetch cross-compile sysroot cache (linux/amd64)
+      if: inputs.cross-tools == 'true'
+      shell: bash
+      run: scripts/fetch-cross-sysroot.sh amd64
