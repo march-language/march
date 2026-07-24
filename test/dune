@@ -983,6 +983,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/as_pattern.expected native_as_pattern.out)))
 
+; ── Record patterns must compile ─────────────────────────────────────
+; PatRecord had no grammar production, so neither lowering path handled it:
+; lower_match.ml:205 failed loudly, and lower.ml's bind_subpat catch-all
+; returned the body unchanged — SILENTLY dropping every binding, which would
+; leave x/y as undefined global fn references.  Covers all three entry points
+; (match arm, `let`, fn param) plus a refutable sub-pattern that forces real
+; dispatch on a projected field.
+(rule
+ (targets native_record_pattern native_record_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_pattern
+        native/record_pattern.march)
+   (with-stdout-to native_record_pattern.out
+        (system "./native_record_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_pattern.expected native_record_pattern.out)))
+
 ; A WATCHED SIGTERM must NOT terminate the process (default graceful-shutdown is
 ; suppressed on the first delivery): the program runs its handler and survives to
 ; exit 0.  An unwatched SIGTERM still kills the process (that half is verified

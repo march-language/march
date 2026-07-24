@@ -241,6 +241,15 @@ match opt do
     x
   None -> 0
 end
+
+-- Record pattern: destructures fields; `{ x }` is shorthand for `{ x: x }`.
+-- The field list must currently name every field of the record exactly
+-- (partial field lists are not yet supported). Also works in `let` bindings
+-- and function parameters, e.g. `fn area({ w: w, h: h }) do w * h end`.
+match point do
+  { x: 0, y: 0 } -> "origin"
+  { x: x, y: y } -> "at " ++ int_to_string(x) ++ "," ++ int_to_string(y)
+end
 ```
 
 ### If / Else

@@ -1,0 +1,7 @@
+mod P31RecordPatternInLet do
+  fn main() do
+    let r = { x: 1 }
+    let { x } = r
+    x
+  end
+end

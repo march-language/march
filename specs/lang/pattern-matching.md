@@ -127,24 +127,53 @@ end
 
 ### Record Patterns
 
-Record patterns are not yet supported in the parser. Use field access in guards instead:
+A record pattern destructures a record's fields directly in a `match` arm,
+a `let` binding, or a function parameter:
 
 ```march
 type Point = { x : Float, y : Float }
 
--- Use if/do with field access rather than record patterns:
--- (March has no `else if` chaining, so nest the follow-up `if` inside `else`)
 fn describe_point(p : Point) : String do
-  if p.x == 0.0 && p.y == 0.0 do
-    "origin"
-  else
-    if p.y == 0.0 do
-      "on x-axis at " ++ float_to_string(p.x)
-    else
-      "at " ++ float_to_string(p.x) ++ ", " ++ float_to_string(p.y)
-    end
+  match p do
+    { x: 0.0, y: 0.0 } -> "origin"
+    { x: x, y: 0.0 }   -> "on x-axis at " ++ float_to_string(x)
+    { x: x, y: y }     -> "at " ++ float_to_string(x) ++ ", " ++ float_to_string(y)
   end
 end
+```
+
+A field written as a bare name is shorthand — punning — for `name: name`,
+mirroring record-literal punning: `{ x, y }` binds `x` and `y` to the
+record's `x` and `y` fields, exactly like `{ x: x, y: y }`. The example
+above could equally be written `{ x: x, y: y } -> ...` or, punned, as
+`fn describe_point({ x, y })` if the whole function dispatched on the
+struct shape rather than matching in the body.
+
+**Field lists currently must exactly match the record's own fields** — a
+pattern that only names a subset of a record's fields (`{ x }` against
+`{ x: Float, y: Float }`) does not yet typecheck. Supporting partial field
+lists is planned future work; until then, name every field the record has,
+even ones you only intend to wildcard:
+
+```march
+match p do
+  { x: 0.0, y: _ } -> "on y-axis"
+  { x: _, y: _ }   -> "elsewhere"
+end
+```
+
+A `let` binding works the same way:
+
+```march
+let { x: px, y: py } = p
+```
+
+and so does a function parameter, since a single-clause function whose
+parameter is a non-trivial pattern desugars through the same match-lowering
+path as an explicit `match`:
+
+```march
+fn area({ w: w, h: h } : { w : Int, h : Int }) : Int do w * h end
 ```
 
 ### Atom Patterns
@@ -483,9 +512,8 @@ end
 Clauses are checked top to bottom; the first matching clause wins. The compiler warns if later clauses are unreachable.
 
 Multi-head functions work with any pattern in the parameter list that `match`
-itself supports — constructors, literals, tuples (record patterns aren't
-supported anywhere in the parser, including here — see "Record Patterns"
-above):
+itself supports — constructors, literals, tuples, and record patterns
+(see "Record Patterns" above):
 
 ```march
 fn head(Cons(x, _)) : a do x end

@@ -1394,6 +1394,10 @@ expr_atom:
   (* Contextual keywords usable as variable names in expressions *)
   | STATE { EVar (mk_name "state" $loc) }
 
+record_field_pat:
+  | name = lower_name; COLON; p = pattern { (name, p) }
+  | name = lower_name                     { (name, PatVar name) }
+
 record_field_expr:
   | name = lower_name; COLON; e = expr { (name, e) }
 
@@ -1461,6 +1465,12 @@ pattern_no_as:
   | p = simple_pattern { p }
 
 simple_pattern:
+  (* Record pattern: { x, y: p }.  Field lists are OPEN — a pattern need not
+     mention every field of the record it matches (see typecheck's
+     expected-type-driven field lookup).  Punned `{ x }` is shorthand for
+     `{ x: x }`, mirroring the record-literal shorthand. *)
+  | LBRACE; fields = separated_nonempty_list(COMMA, record_field_pat); RBRACE
+    { PatRecord (fields, mk_span ($loc)) }
   | UNDERSCORE { PatWild (mk_span ($loc)) }
   | id = soft_lower_name { PatVar id }
   | n = INT { PatLit (LitInt n, mk_span ($loc)) }

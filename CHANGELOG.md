@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
   in the AST, interpreter, and typechecker since the beginning but had no
   grammar production.
 
+- Record patterns: `match r do { x, y: b } -> ... end`, `let { x, y } = r`, and
+  `fn area({ w, h })`. `{ x }` is shorthand for `{ x: x }`. The field list must
+  currently name every field of the scrutinee record exactly (partial field
+  lists are planned future work). `PatRecord` had existed in the AST and
+  interpreter since the beginning but had no grammar production, and neither
+  TIR lowering path handled it.
+
 ### Changed
 
 - `dune runtest` no longer runs `test/test_properties.exe`. That one binary

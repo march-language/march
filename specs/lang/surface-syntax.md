@@ -363,6 +363,17 @@ Mod.Con(x)                -- qualified constructor (disambiguation)
 -5                        -- negative int literal
 Some(x) as whole          -- as-pattern: binds `whole` to the entire value
                           --   while `x` destructures it
+{ x: a, y: b }            -- record pattern: destructures fields x, y
+{ x, y }                  -- punned: shorthand for { x: x, y: y }
+```
+
+Record patterns must currently name every field of the scrutinee record
+(partial field lists are not yet supported). They work in `match` arms,
+`let` bindings, and function parameters alike:
+
+```march
+let { x: px, y: py } = point
+fn area({ w: w, h: h }) do w * h end
 ```
 
 ---

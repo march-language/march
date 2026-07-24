@@ -1,0 +1,24 @@
+mod RecordPattern do
+fn area({ w: w, h: h }) : Int do w * h end
+
+fn classify(r : { code : Int, msg : String }) : String do
+  match r do
+    { code: 404, msg: m } -> m
+    { code: c, msg: _ }   -> "other " ++ int_to_string(c)
+  end
+end
+
+fn main() : Unit do
+  let r = { x: 3, y: 4 }
+  match r do
+    { x: a, y: b } -> println(int_to_string(a * b))
+  end
+
+  let { x: p, y: q } = r
+  println(int_to_string(p + q))
+
+  println(int_to_string(area({ w: 6, h: 7 })))
+  println(classify({ code: 404, msg: "gone" }))
+  println(classify({ code: 200, msg: "ok" }))
+end
+end

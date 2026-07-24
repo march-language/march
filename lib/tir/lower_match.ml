@@ -202,14 +202,10 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
      by the parser; it would only appear if constructed directly in tests. *)
   | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
   | Ast.PatAtom (a, subs, _) -> Some (a, subs)
-  | Ast.PatRecord (_, sp) ->
-    failwith (Printf.sprintf
-      "lower: record patterns are not yet compilable (%s) — PatRecord has no \
-       {...} pattern production in the grammar today, so this indicates a \
-       pattern constructed directly rather than parsed; implement record \
-       destructuring in pat_tag_and_subs before enabling it"
-      (string_of_pat_span sp))
-  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ -> None
+  (* Records carry no tag — they are expanded into per-field columns by
+     [expand_record_column] before tag dispatch is ever reached, so
+     [pat_tag_and_subs] never sees one. *)
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ | Ast.PatRecord _ -> None
 
 (* Compile a pattern matrix to a TIR expression (decision tree).
 
@@ -256,6 +252,22 @@ let strip_as_column (env : Lower_state.env) (scrut : Tir.atom)
       } in
       (inner :: rest, Tir.ELet (v, Tir.EAtom scrut, body))
     | _ -> (pats, body)) rows
+
+(** The sorted union of field names mentioned by every [PatRecord] in the
+    first column, or [None] if no row has a record pattern there.
+
+    The union (not any single row's list) is what makes every row expand to
+    the same arity, which the matrix invariant requires. *)
+let record_fields_in_column (rows : (Ast.pattern list * Tir.expr) list)
+  : string list option =
+  let names =
+    List.concat_map (function
+      | (Ast.PatRecord (fs, _) :: _, _) ->
+        List.map (fun ((n : Ast.name), _) -> n.Ast.txt) fs
+      | _ -> []) rows
+  in
+  if names = [] then None
+  else Some (List.sort_uniq String.compare names)
 
 (** Hoist a (non-atomic) fallback expression [fb] into a fresh 0-arg join
     point.  Returns [(clo_var, lambda_expr)] where:
@@ -339,6 +351,10 @@ and compile_matrix_impl
         (match fallback with Some f -> f | None -> Lower_state.nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
       let rows = strip_as_column env scrut rows in
+      (match record_fields_in_column rows with
+       | Some fields ->
+         expand_record_column env scrut rest_scruts fields rows fallback
+       | None ->
       (* Split rows into a front block of non-trivial first-column rows and
          a (possibly empty) suffix starting at the first trivial first-column
          row.  The suffix becomes the default for all ECase branches. *)
@@ -511,7 +527,86 @@ and compile_matrix_impl
           | Some _ -> default
           | None -> Some (Lower_state.nonexhaustive_panic ())
         in
-        Tir.ECase (scrut, tir_branches, default)
+        Tir.ECase (scrut, tir_branches, default))
+
+(** Replace a first-column record pattern with one column per field.
+
+    Binds [ELet(f_<name>, EField(scrut, name), …)] around the recursive call
+    so each field is projected exactly once and shared by every row.
+
+    Field types matter: a field var left at [Lower_types.unknown_ty] makes
+    Perceus treat an unboxed scalar as RC-managed (the same hazard documented
+    on [infer_pattern]'s PatWild arm in typecheck.ml).  Prefer the scrutinee's
+    own structural [TRecord] type; fall back to the typechecker's recorded
+    type for the sub-pattern's span; only then give up and use [unknown_ty]. *)
+and expand_record_column
+    (env         : Lower_state.env)
+    (scrut       : Tir.atom)
+    (rest_scruts : Tir.atom list)
+    (fields      : string list)
+    (rows        : (Ast.pattern list * Tir.expr) list)
+    (fallback    : Tir.expr option)
+  : Tir.expr =
+  let scrut_field_ty name =
+    match scrut with
+    | Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ } -> List.assoc_opt name fs
+    | _ -> None
+  in
+  (* First span the typechecker recorded for a sub-pattern of this field. *)
+  let span_field_ty name =
+    let rec search = function
+      | [] -> None
+      | (Ast.PatRecord (fs, _) :: _, _) :: more ->
+        (match List.find_opt (fun ((n : Ast.name), _) -> n.Ast.txt = name) fs with
+         | Some (_, Ast.PatVar vn)  -> Some (Lower_state.ty_of_span env vn.Ast.span)
+         | Some (_, Ast.PatWild sp) -> Some (Lower_state.ty_of_span env sp)
+         | _ -> search more)
+      | _ :: more -> search more
+    in
+    search rows
+  in
+  let field_ty name =
+    match scrut_field_ty name with
+    | Some t -> t
+    | None ->
+      (match span_field_ty name with
+       | Some t -> t
+       | None -> Lower_types.unknown_ty)
+  in
+  let field_vars =
+    List.map (fun name ->
+      let v : Tir.var = {
+        v_name = Lower_state.fresh_name ("f_" ^ name);
+        v_ty   = field_ty name;
+        v_lin  = Tir.Unr;
+      } in
+      (name, v)) fields
+  in
+  let new_scruts =
+    List.map (fun (_, v) -> Tir.AVar v) field_vars @ rest_scruts in
+  let expand_row (pats, body) =
+    match pats with
+    | Ast.PatRecord (fs, _) :: rest ->
+      let sub name =
+        match List.find_opt (fun ((n : Ast.name), _) -> n.Ast.txt = name) fs with
+        | Some (_, p) -> p
+        | None -> Ast.PatWild Ast.dummy_span   (* field not mentioned by this row *)
+      in
+      Some (List.map (fun name -> sub name) fields @ rest, body)
+    | fp :: rest when is_trivial_pat fp ->
+      (* A wildcard/var row in a record column matches every record; bind its
+         name to the whole record and wildcard out every field column. *)
+      let body' = bind_trivial_pat env scrut fp body in
+      Some (List.map (fun _ -> Ast.PatWild Ast.dummy_span) fields @ rest, body')
+    | _ ->
+      (* Unreachable: the column's static type is a record, so no other
+         discriminating pattern kind can appear here. *)
+      None
+  in
+  let rows' = List.filter_map expand_row rows in
+  let inner = compile_matrix env new_scruts rows' fallback in
+  List.fold_right (fun (name, v) acc ->
+    Tir.ELet (v, Tir.EField (scrut, name), acc)) field_vars inner
 
 (** Collect the (name, span) of every variable binding in a pattern,
     including [PatAs] outer names.  Used to register pattern-bound locals

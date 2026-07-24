@@ -899,16 +899,12 @@ pattern's bindings).
 
 **This is now the COMPLETE relation** — every arm of `infer_pattern`
 (typecheck.ml:2566–2685) is accounted for below, one way or the other:
-`PatWild`/`PatVar`/`PatLit`/`PatCon`/`PatTuple`/`PatAtom`/`PatAs` each get a
+`PatWild`/`PatVar`/`PatLit`/`PatCon`/`PatTuple`/`PatAtom` each get a
 live rule ((P-Wild)/(P-Var)/(P-Lit)/(P-Con)/(P-Tuple)/(P-Atom) added across
 Tasks 1–3; (P-As) added 2026-07-24, once `parser.mly` gained an as-pattern
 production — see the note after it below for the reachability history);
-`PatRecord` alone is documented as **unreachable from surface grammar**
-instead of given a live rule (it has a real, working `infer_pattern` arm —
-the code path is not dead in the OCaml sense — but no March program a user
-can actually write ever constructs one, so per this document's own
-methodology, §0, no rule is stated for it — see the `PatRecord` note after
-(P-As) below):
+(P-Record) was added the same day, once `parser.mly` gained a record-pattern
+production — see the note after (P-As) below.
 
 ```
 (P-Wild)  ──────────────────────────────           typecheck.ml:2569–2570
@@ -1022,36 +1018,49 @@ methodology, §0, no rule is stated for it — see the `PatRecord` note after
           --   core-march.md:864 (eval.ml:826–829, unchanged by this rule's
           --   addition — the interpreter already implemented this; only the
           --   grammar production was missing)
+
+(P-Record) ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, componentwise recursion,   typecheck.ml:3544–3553
+             one field per (name, sub-pattern) pair)
+           ──────────────────────────────────────────────────────────────
+           Γ ⊢ PatRecord [(f₁,p₁)…(fₖ,pₖ)] : TRecord (sort [(f₁,τ₁)…(fₖ,τₖ)]) ⊣ Γ, Γ₁, …, Γₖ
+           -- structurally the record-analog of (P-Tuple) above: each field's
+           --   sub-pattern is typed independently (no `~expected` threading),
+           --   and the pattern's own type is a FRESH, CLOSED `TRecord` built
+           --   purely from the fields the pattern itself mentions, sorted by
+           --   name (same sort-by-name convention as T-Record's literal
+           --   typing, §2). A bare punned field `f` is parsed as `(f, PatVar
+           --   f)` (parser.mly's `record_field_pat`), so it flows through
+           --   this rule identically to a spelled-out `f: f`.
+           -- because March records require EXACT field-set equality to unify
+           --   (no width subtyping — typecheck.ml:2789), this pattern's
+           --   synthesized `TRecord` only unifies against a scrutinee whose
+           --   own record type has PRECISELY these k fields, no more, no
+           --   fewer. A pattern naming a strict subset of the scrutinee's
+           --   fields (`{ x }` against `{ x : Int, y : Int }`) fails to
+           --   unify — partial field lists are not yet supported; every
+           --   field of the record must be named in the pattern (wildcarded
+           --   if unused), the same restriction (P-Tuple) has for arity.
 ```
 
-**No `(P-Record)` rule: `PatRecord` is unreachable from surface syntax**, exactly
-as `core-march.md` already documents for the operational side (`core-march.md:181–196`,
-"`PatRecord` has no surface production at all — it is dead code, reachable
-only by constructing the AST node directly"). Grepping `lib/parser/parser.mly`
-for `PatRecord` finds zero occurrences; the typechecker's own `infer_pattern`
-arm for it (typecheck.ml:2671–2680 — componentwise field recursion into a
-sorted `TRecord`, structurally the record-analog of P-Tuple above) can
-therefore never fire on a program a user actually wrote. Per this document's
-own methodology (§0: "every rule is transcribed... and cited"), no `(P-Record)`
-rule is stated here — inventing one would document code the parser can never
-reach, mirroring exactly how `core-march.md` handled the same gap for its
-`match(PatRecord …)` rule.
-
-**`(P-As)` became a live rule 2026-07-24** (see the rule itself above,
-between (P-Atom) and this note). Through 2026-07-23 `PatAs` (`p as x`) was
-unreachable from surface syntax — the same gap `PatRecord` above still has
-— even though `infer_pattern` already had a working arm for it
-(typecheck.ml:3554–3557, unchanged by this update: only `parser.mly` was
-missing a production). `pattern` gained an as-pattern layer
-(`pattern_no_as AS lower_name`, `parser.mly:1441` era; see
-`specs/lang/grammar.md` §6.3 for the grammar-side detail), so `Some(x) as
-whole` and similar now parse and typecheck via the `(P-As)` rule above.
-Before this change, `core-march.md`'s golden corpus used guarded branches
-reading their own pattern's bindings (`g27_guard_binding.march`) as "the
-reachable substitute for the unparseable as-pattern" (`core-march.md:1247`)
-— that historical workaround is no longer the only option, though guards
-remain valid March and `core-march.md` has not yet been revisited to update
-that framing (out of scope for this pass).
+**`(P-As)` and `(P-Record)` became live rules 2026-07-24** (see both rules
+above, between (P-Atom) and this note). Through 2026-07-23 `PatAs` (`p as
+x`) and `PatRecord` (`{ f, … }`) were both unreachable from surface syntax
+— even though `infer_pattern` already had a working arm for each
+(typecheck.ml:3554–3557 for `PatAs`, typecheck.ml:3544–3553 for
+`PatRecord`, unchanged by this update: only `parser.mly` was missing a
+production for either). `pattern` gained an as-pattern layer
+(`pattern_no_as AS lower_name`, `parser.mly:1441` era) and `simple_pattern`
+gained a record-pattern production (`LBRACE record_field_pat,* RBRACE`);
+see `specs/lang/grammar.md` §6.3 for the grammar-side detail of both. `Some(x) as
+whole` and `{ x, y: p } -> …` now parse and typecheck via the `(P-As)` and
+`(P-Record)` rules above, respectively. Before this change, `core-march.md`'s
+golden corpus used guarded branches reading their own pattern's bindings
+(`g27_guard_binding.march`) as "the reachable substitute for the
+unparseable as-pattern" (`core-march.md:1247`), and used field-access
+guards as the substitute for the unparseable record pattern — neither
+historical workaround is the only option anymore, though both remain valid
+March and `core-march.md` has not yet been revisited to update that framing
+(out of scope for this pass).
 
 `instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
 side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation

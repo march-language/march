@@ -1175,7 +1175,7 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
 
   | PatTuple _, _ -> None  (* match(PatTuple) — §4.3 *)
 
-  | PatRecord (fields, _), VRecord record_fields ->  (* match(PatRecord) — §4.3, unreachable from surface syntax per §4.3.1 *)
+  | PatRecord (fields, _), VRecord record_fields ->  (* match(PatRecord) — §4.3 *)
     let bindings = List.fold_left (fun acc (fname, fpat) ->
         match acc with
         | None -> None

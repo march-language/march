@@ -1,0 +1,8 @@
+mod P30RecordPatternInArm do
+  fn main() do
+    let r = { x: 1 }
+    match r do
+      { x } -> x
+    end
+  end
+end
