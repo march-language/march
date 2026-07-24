@@ -163,6 +163,12 @@
       font-family: 'JetBrains Mono', monospace; font-size: 13.5px; line-height: 1.72; tab-size: 2;
       color: var(--text);
     }
+    .m-hero-learn {
+      padding: 10px 24px; border-top: 1px solid var(--border);
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-faint);
+    }
+    .m-hero-learn a { color: var(--accent); text-decoration: none; }
+    .m-hero-learn a:hover { text-decoration: underline; }
 
     /* FEATURES */
     .m-features { padding: 80px 32px; border-top: 1px solid var(--border); }
@@ -474,6 +480,7 @@
         <div class="m-code-tabs" id="hero-tabs"></div>
       </div>
       <pre class="m-hero-pre"><code id="hero-code"></code></pre>
+      <p class="m-hero-learn" id="hero-learn"></p>
     </div>
   </div>
 </section>
@@ -698,7 +705,7 @@ function syntaxHL(code, dark) {
 
 // ─── Code content ─────────────────────────────────────────────────────────────
 const HERO_EXAMPLES = [
-  { label: 'Actors', code: `actor Counter do
+  { label: 'Actors', learn: '/docs/actors/', code: `actor Counter do
   state { count : Int }
   init  { count: 0 }
 
@@ -706,16 +713,20 @@ const HERO_EXAMPLES = [
     { state with count: state.count + n }
   end
 
-  on Get() -> reply state.count
+  on Get() do
+    println("count: " ++ int_to_string(state.count))
+    state
+  end
 end
 
 fn main() : Unit do
   let c = spawn(Counter)
   send(c, Increment(10))
   send(c, Increment(5))
-  send(c, Get())      -- prints 15
+  send(c, Get())      -- prints "count: 15"
+  run_until_idle()
 end` },
-  { label: 'Linear Types', code: `linear type DbConn = DbConn(Int)
+  { label: 'Linear Types', learn: '/docs/linear-types/', code: `always_linear type DbConn = DbConn(Int)
 
 fn query_users(conn : DbConn)
     : (List(String), DbConn) do
@@ -728,55 +739,55 @@ fn with_db(path : String) : List(String) do
   Db.close(conn2)                -- consumed
   rows
 end` },
-  { label: 'Capabilities', code: `-- Capabilities are proof tokens tracked by the type system
-fn read_config(path : String) : String
-  needs [IO, FileSystem]
-do
-  File.read(path)
-end
+  { label: 'Capabilities', learn: '/docs/capabilities/', code: `-- Capabilities are proof tokens tracked by the type system
+mod Config do
+  needs IO.FileSystem
 
--- No capabilities needed: always safe, even in pure tests
-fn transform(s : String) : String do
-  s |> String.trim |> String.to_upper
-end
+  fn read_config(path : String) : String do
+    File.read(path)
+  end
 
-fn main() : Unit needs [IO, FileSystem] do
-  read_config("/etc/march/config.toml")
-  |> transform |> println
+  -- No capabilities needed: always safe, even in pure tests
+  fn transform(s : String) : String do
+    s |> String.trim |> String.to_upper
+  end
+
+  fn main() : Unit do
+    read_config("/etc/march/config.toml")
+    |> transform |> println
+  end
 end` },
-  { label: 'Property Tests', code: `-- Checked with 100s of randomly generated inputs
-property reverse_involutive(lst : List(Int)) do
-  List.reverse(List.reverse(lst)) == lst
+  { label: 'Property Tests', learn: '/docs/property-testing/', code: `-- Checked with 100s of randomly generated inputs
+test "reverse is involutive" do
+  Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
+    List.reverse(List.reverse(xs)) == xs
+  )
 end
 
-property sort_idempotent(lst : List(Int)) do
-  let s = List.sort(lst)
-  List.sort(s) == s
-end
-
-property map_preserves_length(
-  lst : List(Int), f : Int -> Int
-) do
-  List.length(List.map(lst, f))
-    == List.length(lst)
+test "sort is idempotent" do
+  Check.all(Gen.list(Gen.int(-50, 50)), fn xs ->
+    let s = List.sort(xs)
+    List.sort(s) == s
+  )
 end` },
-  { label: '~H Sigil', code: `-- ~H validates and compiles HTML templates at compile time
-fn dashboard(user : User, msgs : List(Msg)) : Html do
+  { label: '~H Sigil', learn: '/docs/sigils/', code: `-- ~H compiles HTML templates; interpolations are auto-escaped
+fn render_user(u : User) : IOList do
   ~H"""
-  <div class="dashboard">
-    <header>
-      <h1>Hello, {user.name}</h1>
-      <span class="badge">{List.length(msgs)}</span>
-    </header>
-    <ul>
-      {for msg <- msgs}
-        <li>{msg.body}</li>
-      {/for}
-    </ul>
-  </div>
+  <li class="user-row">
+    <strong>\${u.name}</strong>
+    <span class="email">\${u.email}</span>
+  </li>
+  """
+end
+
+fn dashboard(users : List(User)) : IOList do
+  let items = Html.list(users, render_user)
+  ~H"""
+  <h1>Users (\${int_to_string(List.length(users))})</h1>
+  <ul class="user-list">\${items}</ul>
   """
 end` },
-  { label: 'Error Handling', code: `-- let? chains Results; each Err short-circuits
+  { label: 'Error Handling', learn: '/docs/tour/#result-propagation-with-let', code: `-- let? chains Results; each Err short-circuits
 fn load(path : String) : Result(Config, String) do
   let? src  = File.read(path)
   let? toml = Toml.parse(src)
@@ -862,7 +873,7 @@ end
 
 (area(Circle(5.0)), area(Rect(3.0, 4.0)))`;
 
-const LINEAR = `linear type FileHandle = FileHandle(Int)
+const LINEAR = `always_linear type FileHandle = FileHandle(Int)
 
 fn write_and_close(
   f : FileHandle, s : String
@@ -917,7 +928,10 @@ function renderHeroTabs() {
 }
 
 function renderHeroCode() {
-  document.getElementById('hero-code').innerHTML = hl(HERO_EXAMPLES[heroTab].code);
+  const ex = HERO_EXAMPLES[heroTab];
+  document.getElementById('hero-code').innerHTML = hl(ex.code);
+  document.getElementById('hero-learn').innerHTML =
+    `Learn more about <a href="${ex.learn}">${ex.label}</a> →`;
 }
 
 function renderInstall() {

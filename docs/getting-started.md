@@ -7,7 +7,7 @@ permalink: /docs/getting-started/
 
 # Getting Started
 
-This guide walks you from zero to a working March program. See [Installation](installation.md) first if you haven't built the compiler yet.
+This guide walks you from zero to a working March program. See [Installation](installation.md) first if you haven't installed March yet.
 
 ---
 
@@ -28,8 +28,10 @@ end
 Run it:
 
 ```sh
-dune exec march -- hello.march
+march hello.march
 ```
+
+(Building from source instead of using an installed binary? Use `dune exec march -- hello.march`.)
 
 Output:
 ```
@@ -64,8 +66,10 @@ end
 
 Run it:
 ```sh
-dune exec march -- greet.march
+march greet.march
 ```
+
+(Source build: `dune exec march -- greet.march`.)
 
 Output:
 ```
@@ -88,9 +92,11 @@ Key things to notice:
 To produce a standalone native binary, use `--compile`:
 
 ```sh
-dune exec march -- --compile -o greet greet.march
+march --compile -o greet greet.march
 ./greet
 ```
+
+(Source build: `dune exec march -- --compile -o greet greet.march`.)
 
 The compiler runs LLVM, links the C runtime, and produces a native executable.
 
@@ -101,15 +107,18 @@ The compiler runs LLVM, links the C runtime, and produces a native executable.
 Start an interactive session:
 
 ```sh
-dune exec march -- repl
+march repl
 ```
 
-(With an installed binary, just run `march repl`, or `march` with no arguments.)
+(`march` with no arguments also drops you into the REPL. Building from source:
+`dune exec march -- repl`.)
 
 Or via forge:
 ```sh
-dune exec forge -- interactive
+forge interactive
 ```
+
+(Source build: `dune exec forge -- interactive`.)
 
 The REPL loads the standard library and drops you into a numbered prompt:
 
@@ -153,9 +162,11 @@ back off) — see the [REPL guide](repl.md) for the full command list.
 
 Create a new project:
 ```sh
-dune exec forge -- new my_app
+forge new my_app
 cd my_app
 ```
+
+(Source build: `dune exec forge -- new my_app`.)
 
 This scaffolds:
 ```
@@ -169,14 +180,16 @@ my_app/
 
 Build and run:
 ```sh
-dune exec forge -- build
-dune exec forge -- run
+forge build
+forge run
 ```
 
 Run tests:
 ```sh
-dune exec forge -- test
+forge test
 ```
+
+(Source build: prefix each with `dune exec forge --`, e.g. `dune exec forge -- build`.)
 
 ---
 
@@ -242,6 +255,15 @@ Learn the language:
 - [Language Tour](tour.md) — a comprehensive walkthrough of all syntax
 - [Type System](types.md) — algebraic data types, generics, Option/Result
 - [Pattern Matching](pattern-matching.md) — destructuring and exhaustiveness checking
-- [Actors](actors.md) — concurrent programming with the actor model
+- [Actors](actors.md) — concurrent programming with the actor model, and the jumping-off point for supervision, clustering, and hot code reload
+
+Curious about March's compile-time safety guarantees? These go beyond a standard ML-family type system:
+
+- [Interfaces](interfaces.md) — ad-hoc polymorphism with `interface`/`impl`
+- [Linear Types](linear-types.md) — resources the compiler proves are used exactly once, at zero runtime cost
+- [Refinement Types](refinement-types.md) — value predicates (`{Int | _ >= 0}`) checked by an SMT solver
+- [Capabilities](capabilities.md) — IO permissions tracked in the type system
+- [Safety by Construction](safety-by-construction.md) — how these layers compose on one function
+- [Memory Model](memory-model.md) — why March has no garbage collector or pauses
 
 Coming from another language? [Python](coming-from-python.md) · [TypeScript](coming-from-typescript.md) · [Haskell/Elixir/OCaml](coming-from-fp.md).
