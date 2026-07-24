@@ -960,6 +960,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; returns None for PatAs, which routes a NON-TRIVIAL inner pattern into the
 ; fail-loudly "unhandled pattern kind" branch.  strip_as_column rewrites the
 ; row instead.  Compile natively, run, diff against the interpreter's output.
+; `tier` / `twice` pin the fixpoint: strip_as_column can PRODUCE a
+; first-column or-pattern and peels only one PatAs layer, so `(1 | 2) as k`
+; and `(1 as a) as b` reached that same fail-loudly branch as an ICE — on
+; syntax specs/lang/pattern-matching.md documents and the interpreter runs.
 (rule
  (targets native_as_pattern native_as_pattern.out)
  (deps (file %{exe:../bin/main.exe})

@@ -392,8 +392,28 @@ and compile_matrix_impl
       (match rows with (_, body) :: _ -> body | [] ->
         (match fallback with Some f -> f | None -> Lower_state.nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
-      let rows = expand_or_rows rows in
-      let rows = strip_as_column env scrut rows in
+      (* Normalize the first column until neither rewrite has anything left to
+         do.  A single pass in either order is not enough, because each
+         rewrite can EXPOSE work for the other and each peels only ONE layer:
+         [strip_as_column] turns `(p | q) as n` into a first-column [PatOr],
+         and neither is recursive, so `(1 as a) as b` keeps an inner [PatAs].
+         Whatever survives reaches [pat_tag_and_subs], which returns [None]
+         for both kinds → the fail-loudly branch below raises an internal
+         compiler error on syntax the interpreter runs correctly.
+         Terminates: each iteration removes at least one [PatAs]/[PatOr] node
+         from a first column, and neither rewrite ever introduces one. *)
+      let rec normalize_first_column rows =
+        let pending =
+          List.exists (fun (pats, _) ->
+              match pats with
+              | Ast.PatOr _ :: _ -> true
+              | Ast.PatAs (inner, _, _) :: _ -> not (is_trivial_pat inner)
+              | _ -> false) rows
+        in
+        if not pending then rows
+        else normalize_first_column (expand_or_rows (strip_as_column env scrut rows))
+      in
+      let rows = normalize_first_column rows in
       (match record_fields_in_column rows with
        | Some fields ->
          expand_record_column env scrut rest_scruts fields rows fallback
@@ -678,10 +698,19 @@ and expand_record_column
          name to the whole record and wildcard out every field column. *)
       let body' = bind_trivial_pat env scrut fp body in
       Some (List.map (fun _ -> Ast.PatWild Ast.dummy_span) fields @ rest, body')
-    | _ ->
-      (* Unreachable: the column's static type is a record, so no other
-         discriminating pattern kind can appear here. *)
-      None
+    | [] -> None   (* no columns left to expand *)
+    | fp :: _ ->
+      (* The column's static type is a record, so no other discriminating
+         pattern kind should be able to appear here — and [PatAs]/[PatOr] are
+         normalized away by [compile_matrix_impl] before this is reached.
+         Returning [None] here would DROP the row silently, making the arm's
+         body unreachable with no diagnostic (the exact B4 failure mode).
+         Fail loudly instead, like the sibling [pat_tag_and_subs] path. *)
+      failwith (Printf.sprintf
+        "lower: unhandled pattern kind in a record column at %s — \
+         expand_record_column does not know how to expand this pattern, so \
+         the arm would be silently dropped instead of compiled"
+        (string_of_pat_span (span_of_pat fp)))
   in
   let rows' = List.filter_map expand_row rows in
   let inner = compile_matrix env new_scruts rows' fallback in
