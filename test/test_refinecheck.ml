@@ -26,6 +26,18 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* Number of ERRORS the refinement pass reports on [src].  A plain boolean
+   cannot tell "both violations found" from "one found, one silently lost",
+   which is exactly the failure mode the co-occurrence guards below pin. *)
+let refine_error_count src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.length
+    (List.filter
+       (fun (d : March_errors.Errors.diagnostic) ->
+         d.March_errors.Errors.severity = March_errors.Errors.Error)
+       ctx.March_errors.Errors.diagnostics)
+
 (* True iff the refinement pass reports at least one WARNING on [src].
    [has_refine_error] only sees Errors, so vocabulary diagnostics need this. *)
 let has_refine_warning src =
@@ -930,6 +942,129 @@ let tier0_suite =
              \  end\n\
               end\n")) ]
 
+(* ── String refinements ──────────────────────────────────────────────────── *)
+let str_decl body =
+  Printf.sprintf
+    "mod M do\n\
+    \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+    \  fn short(s : {String | len(_) <= 3}) : Int do 2 end\n\
+     %s\n\
+     end\n"
+    body
+
+let string_suite =
+  [ gated "nonempty(\"\") is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (str_decl "  fn main() : Int do nonempty(\"\") end")));
+
+    gated "nonempty(\"abc\") passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (str_decl "  fn main() : Int do nonempty(\"abc\") end")));
+
+    gated "short(\"abcd\") is rejected (length 4 > 3)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (str_decl "  fn main() : Int do short(\"abcd\") end")));
+
+    gated "an unknown String variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (str_decl "  fn f(s : String) : Int do nonempty(s) end")));
+
+    gated "a String-refined local propagates" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (str_decl "  fn f(s : {String | len(_) > 0}) : Int do nonempty(s) end")));
+
+    gated "list `len` still works (no overload regression)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do i end\n\
+             \  fn main() : Int do at([1, 2], 5) end\n\
+              end\n"));
+
+    (* Regression: an early draft resolved `len` with a `match` dangling inside
+       an `if ... then`, which silently swallowed the rest of the `else if`
+       chain.  OCaml accepted it and every string test still passed, but ALL
+       non-string variable resolution had quietly stopped working.  This is the
+       cheapest predicate that pins the non-string path. *)
+    gated "an Int `_ == 0` contract still rejects a violating literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn iszero(n : {Int | _ == 0}) : Int do n end\n\
+             \  fn main() : Int do iszero(5) end\n\
+              end\n"));
+
+    (* Regression: the string encoding once declared a bare `len` function, which
+       collided with any program variable of that name.  z3 answered the
+       malformed query with an error line, and because the solver is ONE
+       long-lived process whose driver reads exactly one verdict per query, that
+       desynchronised the channel and silently swallowed every later diagnostic
+       in the compilation.  Both violations here must be reported.
+
+       The guard `len > 0` puts an Int constant named `len` into the very same
+       VC as the string preamble, which is what makes the two symbols collide.
+       The second expected error is the canary: it comes from a LATER, perfectly
+       well-formed VC, so losing it proves the channel was corrupted rather than
+       just this one query being wrong. *)
+    gated "a variable named `len` does not collide with the string encoding" (fun () ->
+        Alcotest.(check int) "two errors" 2
+          (refine_error_count
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn iszero(n : {Int | _ == 0}) : Int do n end\n\
+             \  fn f(len : Int) : Int do\n\
+             \    if len > 0 do nonempty(\"\") else 0 end\n\
+             \  end\n\
+             \  fn main() : Int do iszero(5) end\n\
+              end\n"));
+
+    (* Regression: a caller variable reflected as an Int must never be compared
+       against a string constant.  z3 rejects the mixed-sort term outright, with
+       the same channel-corrupting consequence. *)
+    gated "a mixed-sort guard does not corrupt the check it guards" (fun () ->
+        (* `u` is neither the binder nor a parameter of the callee, so it is
+           reflected as an Int while `"a"` reflects into the string sort.  The
+           resulting `(= u $str…)` is ill-sorted and must be DROPPED from the
+           assumptions; sending it makes z3 reject the query and the violation
+           in the very same VC is lost. *)
+        Alcotest.(check int) "one error" 1
+          (refine_error_count
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn g(u : String) : Int do\n\
+             \    if u == \"a\" do nonempty(\"\") else 0 end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract rejects the empty literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"\") end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract accepts a non-empty literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"x\") end\n\
+              end\n"));
+
+    gated "an `s == \"\"` guard does not manufacture a length fact" (fun () ->
+        (* Distinctness from the empty literal does NOT establish a length —
+           there is no injectivity axiom.  Silence here is correct. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn f(s : String) : Int do\n\
+             \    if s == \"\" do 0 else nonempty(s) end\n\
+             \  end\n\
+              end\n")) ]
+
 (* ── Shared predicate-vocabulary foundation ────────────────────────────────
    Task 1 is pure plumbing: it adds the registry without wiring it to
    anything, so these must pass both before AND after. *)
@@ -1218,6 +1353,7 @@ let () =
       ("record-postconditions", record_suite);
       ("guard-path-sensitivity", guard_suite);
       ("tier0-postcond", tier0_suite);
+      ("string-refinements", string_suite);
       ("predicate-vocab", vocab_suite);
       ("adt-tags", adt_suite) ]
 
