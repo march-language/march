@@ -6,6 +6,99 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Merge-loss round 2 — 14 commits on `docs/core-march-types-skeleton` never reached `main` (2026-07-24)
+
+**A second, distinct merge loss from the same branch as the 2026-07-18 audit
+(which was recorded as COMPLETE).** `git merge-base --is-ancestor <sha> HEAD`
+says NO for all of these; `git log --oneline main..e283d9b9` counts 14.
+
+- ✅ **RESTORED 2026-07-24: `e283d9b9` — "perceus: un-starve FBIP reuse (sink
+  past RC ops)".** This one was found the expensive way, via a 7.5x benchmark
+  regression. See the dedicated entry below.
+- [ ] **The other 13 are UNAUDITED.** Known Perceus/RC commits in the missing
+  set, any of which may be a live correctness bug on `main` right now:
+  `f2b67001` (niche-erased Option FBIP reuse → RC underflow), `d2d0a3a3`
+  (resolve tuple-field types for RC decisions — covariance/stats_basic),
+  `f2729935` (resolve branch-var field types for RC decisions — sort-RC float
+  half), `6f047e02` (dup borrowed field reached through a record intermediate),
+  `895ebfee` (DataFrame P0 — nested-fn tvar-family crash + ambiguous-ctor
+  wrong answer). Audit every one for presence-or-supersession, exactly as the
+  2026-07-18 audit did, and record the verdict per commit.
+- [ ] **Process gap, not just a backlog.** Two separate audits of this branch
+  have now each declared completion while leaving real fixes behind. Before
+  the next one, decide on a mechanical check (e.g. a CI job asserting no
+  `fix(`/`feat(` commit on a merged branch is missing from `main`) rather than
+  a third manual pass.
+
+## Perceus FBIP in-place reuse was disabled program-wide (FIXED 2026-07-24)
+
+- ✅ **FIXED — `lib/tir/perceus_fbip.ml` `try_fbip_sink` now hops `ESeq` heads
+  that are RC ops on a DIFFERENT variable.** Once `join_points` began lifting a
+  match's panic default arm into a `$jp_clo` closure, every real arm carried a
+  `dec_rc $jp_clo` between its `let` chain and its tail `EAlloc`.
+  `try_fbip_sink` only traversed `ELet`, so the scrutinee's own `dec` never
+  reached the alloc and **no `EReuse` was ever emitted anywhere in any
+  program** — every in-place rewrite silently became free + fresh allocation.
+  Sound to sink past: RC ops neither read fields nor observe ordering,
+  delaying a `dec` can only delay (never hasten) a free, and the aliasing
+  corner is caught by `EReuse`'s runtime RC==1 uniqueness branch (shared cells
+  take the fresh-alloc path). Companion fail-loudly full-overwrite guard added
+  at the generic `EReuse` emission site in `lib/tir/llvm_emit.ml`.
+  `bench/tree_transform.march` 3842.5 ms → 852.2 ms; `bench/list_ops.march`
+  143.0 ms → 67.3 ms (exactly its pre-regression figure).
+- **The lesson worth keeping: the golden snapshot certified the regression.**
+  `test/snapshots/perceus/fbip_dead_binding_reuse.expected` — whose source
+  header states "Perceus should reuse the freed cell (EReuse)" — had the
+  starved `dec_rc xs; ... alloc List.Cons(...)` shape pinned as its EXPECTED
+  output. A snapshot regenerated without reading the diff against the
+  fixture's stated intent is worse than no snapshot: it converts a regression
+  into a guarantee. Regenerating snapshots is a review step, not a chore.
+
+## Performance regressions vs the 2026-03-24 benchmark table (OPEN, 2026-07-24)
+
+Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
+class, with OCaml/Rust as controls (both within noise of their 2026-03-24
+figures, so the host is not the variable). See `bench/RESULTS.md`.
+
+- [ ] **`fib(40)`: 287.7 ms → 639.6 ms (~2.2x slower).** Level with Rust in
+  March, now ~2.2x behind. **This benchmark allocates nothing**, so it is
+  unaffected by the FBIP fix above and the cause is entirely unidentified.
+  Suspects to rule out in order: per-call scheduler/reduction-counter
+  overhead (compiled `main` is a green thread and `march_sched_tick` is on
+  some call paths), TCO/known-call regressions, lazy-stack-growth guard-page
+  faults, and `--opt 2` flag plumbing through the CAS cache.
+- [ ] **`tree-transform` residual: 513.3 ms (2026-03-24) vs 852.2 ms after the
+  FBIP fix (~1.7x).** FBIP is confirmed firing again (`reuse` nodes present in
+  `--dump-tir`, snapshot regenerated), so this residual is something else and
+  plausibly shares a cause with `fib` — both are recursion-heavy.
+- **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
+  `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
+
+## Compiler: `pfn` unreachable from a sibling in the same NESTED module (OPEN, 2026-07-24)
+
+- [ ] **A public `fn` in a nested `mod` cannot call a `pfn` declared beside it
+  in that same module** — reported as `Module `X` does not export `y``.
+  Top-level modules are unaffected. Since the project convention is exactly
+  one top-level `mod` per file, nested modules are the normal way to have
+  several modules, so this breaks ordinary private-helper code. Minimal repro:
+
+  ```march
+  mod Outer do
+    mod Crypto do
+      fn encode(x : Int) : Int do scramble(x) end
+      pfn scramble(x : Int) : Int do x * 31 end
+    end
+  end
+  -- Module `Crypto` does not export `scramble`.
+  ```
+
+  Found by the differential oracle: `examples/modules.march` (whose Part 3 is
+  a deliberate pub-vs-`pfn` demonstration) now fails to typecheck at all, so
+  it reports `INTERP_FAIL` and reddens the sweep. Suspected interaction
+  between the 0.2.0 "Module does not export" diagnostic change and the
+  intra-module qualification pass (`specs/2026-06-23-desugar-intra-module-qualification.md`)
+  rewriting the bare call to a qualified one before the export check runs.
+
 ## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
 **Read this before assuming a green CI run means the corresponding behavior works.**
@@ -70,6 +163,7 @@ makes a quarantine indistinguishable from a deletion.
   - **Confirmed cross-thread (not a single-threaded logic bug):** with `MARCH_NUM_SCHEDULERS=1` (fully cooperative, one OS thread, no real concurrency possible), 100/100 iterations ran clean. Only the default multi-scheduler mode reproduces it.
   - **Heisenbug — any instrumentation near the hot path suppresses it:** `MARCH_SANITIZE=thread` (ThreadSanitizer) ran 40 iterations completely clean, no race reported. A custom lightweight lock-free trace (atomic ring buffer logging every step of `task_wait_done`'s check/register/recheck, `march_thunk_trampoline`'s done-store/waiter-read/wake-call, and `march_sched_wake`'s status-check/CAS/push, in `runtime/march_scheduler.{c,h}`+`runtime/march_runtime.c`, guarded by a `MARCH_TRACE_WAKEUP` macro) ALSO ran 300 iterations clean — the race window is apparently narrow enough that even a plain relaxed atomic fetch-add + a couple of field writes per event closes it. The tracing instrumentation was reverted (not committed) once it failed to reproduce; it added zero net signal.
   - **Manual code review of the check-register-recheck sequence** (`task_wait_done`/`march_thunk_trampoline`, `runtime/march_runtime.c:1988-2096`) traced through every interleaving constructible by inspection and each one is saved by either the fast-path check or the recheck, under standard C11 per-location coherence reasoning (a load of an atomic after a store to the SAME location, in real time, must observe that store regardless of ordering on OTHER locations). Did not find the specific gap by inspection alone — which is itself informative: this is subtle enough that static reading isn't sufficient, and either involves a multi-step interaction with `march_sched_wake`'s own PARKED-spin handshake, or a genuine ARM64/Apple-Silicon weak-memory subtlety not captured by the naive coherence argument.
+  - **RE-CONFIRMED LIVE 2026-07-24 on `main` (132e2a90), and one candidate mechanism EXPERIMENTALLY RULED OUT.** Rate on a quiet host, default 4 schedulers, `test/native/task_burst_await.march` compiled `--opt 2`, 15s per-run watchdog: **24 hangs / 500 runs (4.8%)**. So the `21c8a0b0` park/wake work fixed the throughput cliff but did NOT fix this. Ruled out: the hypothesis that `march_sched_wake`'s "not WAITING — no need to wake" early return on `PROC_RUNNING` drops the wake when the trampoline lands between `task_wait_done`'s final recheck and its `march_sched_park_self` (`recv` is immune only because it holds `mbox_lock` across both its emptiness check and its `PROC_PARKED` store; `task_wait_done` has no such lock). A standard LockSupport-style wake permit (`march_proc.wake_pending`, deposited before the status load, consumed instead of parking, re-checked after the `PROC_PARKED` store with a status rewind) was implemented and measured at **25 hangs / 500 runs** — statistically identical to baseline. Reverted, not committed. The permit was necessary-looking but not sufficient, so the missed edge is elsewhere; do not re-derive this hypothesis from scratch.
   - **Not yet tried (next steps for a future session):** (a) reproduce on Linux/x86-64 via the project's own zig cross-compile toolchain, to check if this is ARM64/Apple-Silicon-specific (different memory model, different `swapcontext` syscall cost) or portable; (b) per-thread (`_Thread_local`, non-atomic) trace buffers instead of a shared atomic ring buffer, to get tracing overhead close to zero — read them post-hang by walking each OS thread's TLS block via the debugger, more complex to set up but avoids the shared-atomic-fetch-add cost entirely; (c) intentionally add external CPU load during the stress loop to simulate "host oversubscription," which 45ccb8e7's commit message (below) cites as the suspected trigger condition for these hangs; (d) `rr` record-and-replay is Linux-only, so not usable on this macOS dev machine directly, but would be the most direct tool if reproduced on Linux via (a).
   - Given this bug's existence, **any CI run whose `Test` step happens to hit this exact test can hang indefinitely** regardless of the `timeout-minutes` containment added in the CI-hardening entry above (which bounds the damage to minutes instead of 6 hours, but does not fix the underlying hang). Confirmed the park/wake fix immediately below (`21c8a0b0`) does NOT prevent this — it was reproduced against current HEAD, which includes that fix.
   - **QUARANTINED from `dune runtest` (2026-07-24)**, confirmed live in CI: after landing the `timeout-minutes` containment above, the very next `main` push hit this exact race on BOTH `build (ubuntu-24.04)` and `build (macos-15)` in the same run (`Test` step failing at the full 30-minute timeout on each) — the deadlock reproduces much more readily on GH Actions' weaker/shared runners than on a beefy local dev machine, apparently pushing CI from "occasionally hangs" to "hangs most runs." `test/dune`'s `task_burst_await` diff rule now uses its own `task_burst_await_quarantined` alias instead of `runtest` (compile-check rule untouched, so a real compile regression there still surfaces); un-quarantine once the deadlock itself is fixed.

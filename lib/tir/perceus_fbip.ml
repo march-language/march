@@ -87,6 +87,25 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
     when not (Perceus_liveness.name_free_in dec_v.Tir.v_name rhs) ->
     Option.map (fun inner' -> Tir.ELet (v, rhs, inner'))
                (try_fbip_sink dec_v inner)
+  (* An RC operation on a DIFFERENT variable — e.g. the cross-branch /
+     join-point-closure cleanup decs that [insert_rc]'s ECase case seeds at
+     arm heads (a lowered match's panic default arm becomes a [$jp_clo]
+     closure, live only on the fall-through path, so every REAL arm gets a
+     [dec_rc $jp_clo] between its let chain and its tail EAlloc).  Sinking
+     dec_v's dec past it is sound: RC ops neither read fields nor observe
+     ordering, delaying a dec can only delay (never hasten) a free, and the
+     aliasing corner — the other op's dec transitively releasing dec_v's own
+     cell — is caught by the EReuse runtime RC==1 uniqueness check in
+     llvm_emit (shared cell takes the fresh-alloc path).  Without this case
+     FBIP was starved program-wide: since join_points began lifting default
+     arms, virtually every candidate arm carried such a dec, so [try_fbip_sink]
+     stopped at the ESeq and no EReuse was ever produced. *)
+  | Tir.ESeq ((Tir.EDecRC (Tir.AVar w) | Tir.EIncRC (Tir.AVar w)
+              | Tir.EAtomicDecRC (Tir.AVar w)
+              | Tir.EAtomicIncRC (Tir.AVar w)) as rc_op, rest)
+    when not (String.equal w.Tir.v_name dec_v.Tir.v_name) ->
+    Option.map (fun rest' -> Tir.ESeq (rc_op, rest'))
+               (try_fbip_sink dec_v rest)
   | _ -> None
 
 (** Detect DecRC + Alloc of compatible arity and replace with Reuse. *)
