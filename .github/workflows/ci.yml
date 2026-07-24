@@ -331,16 +331,25 @@ jobs:
         with:
           name: ocaml-build-exes-${{ github.run_id }}
           path: _build/default
+      # main.exe too, not just the test binary: two of the "(unit)" groups in
+      # the `rest` shard (record-update converged, cli: timings) shell out to
+      # the compiler. They locate it themselves via _build/default/bin/main.exe
+      # relative to cwd, so with the artifact unpacked here they FIND it and
+      # try to run it — a non-executable one fails with rc=126 rather than
+      # being skipped as "no march binary". (Under `dune runtest` these skip,
+      # because the test's cwd is _build/default/test where that path doesn't
+      # resolve; running them here is a small coverage gain.)
       - name: Restore exec bits (the artifact zip does not preserve them)
         run: |
           set -e
-          f=_build/default/test/test_properties.exe
-          if [ ! -f "$f" ]; then
-            echo "::error::expected $f from the ocaml-build artifact, but it is missing."
-            find _build -type f | head -20
-            exit 1
-          fi
-          chmod +x "$f"
+          for f in _build/default/test/test_properties.exe _build/default/bin/main.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+              find _build -type f | head -20
+              exit 1
+            fi
+            chmod +x "$f"
+          done
 
       # Fails if any group in the binary is neither covered by a shard filter
       # nor the oracle group — so adding a property group upstream can't
