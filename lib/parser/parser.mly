@@ -1465,10 +1465,15 @@ pattern_no_as:
   | p = simple_pattern { p }
 
 simple_pattern:
-  (* Record pattern: { x, y: p }.  Field lists are OPEN — a pattern need not
-     mention every field of the record it matches (see typecheck's
-     expected-type-driven field lookup).  Punned `{ x }` is shorthand for
-     `{ x: x }`, mirroring the record-literal shorthand. *)
+  (* Record pattern: { x, y: p }.  This production places no restriction on
+     which fields, or how many, appear — but today `infer_pattern`
+     (typecheck.ml) synthesizes a CLOSED `TRecord` from exactly the fields
+     named here, and March records require exact field-set equality to
+     unify (no width subtyping), so in practice a pattern must currently
+     name every field of the record it matches. Partial field lists (`{ x }`
+     against a two-field record) are planned future work, not yet
+     typecheckable. Punned `{ x }` is shorthand for `{ x: x }`, mirroring the
+     record-literal shorthand. *)
   | LBRACE; fields = separated_nonempty_list(COMMA, record_field_pat); RBRACE
     { PatRecord (fields, mk_span ($loc)) }
   | UNDERSCORE { PatWild (mk_span ($loc)) }
