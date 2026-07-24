@@ -42,6 +42,22 @@ git log is authoritative for exact commits.
   `MARCH_HTTP_EVLOOP=1` — automatically fall back to the previous
   single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
 
+### Documentation
+
+- Migrated 14 language-reference chapters (Type System, Pattern Matching,
+  Modules, Interfaces, Linear Types, Refinement Types, Capabilities, Safety
+  by Construction, Memory Model, Actors, Parallel Collections, Supervision,
+  Session Types, Clustering) from `specs/lang/` into real, styled pages on
+  march-lang.org (`/docs/<topic>/`). These previously rendered as blank,
+  unstyled `/<topic>.html` stub pages ("this topic has moved") that every
+  site page linking to them — the homepage, the language tour, Getting
+  Started, the stdlib guide, the FFI guide, and the "coming from X" guides —
+  pointed at. Content was adapted for a general-programmer reader rather
+  than copied verbatim: `specs/lang/` keeps the full conformance-ledger
+  detail (source citations, golden-test IDs, dated findings) for compiler
+  contributors, while the published pages state each caveat once, in plain
+  language, without implementation citations.
+
 ## [0.2.0] - 2026-07-23
 
 ### Fixed

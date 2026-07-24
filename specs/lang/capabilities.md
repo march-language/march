@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Capabilities
+nav_order: 5.6
+permalink: /docs/capabilities/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Capabilities
 

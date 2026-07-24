@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Memory Model
+nav_order: 5.8
+permalink: /docs/memory-model/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Memory Model — How FBIP Works
 

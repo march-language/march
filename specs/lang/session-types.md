@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Session Types
+nav_order: 10.7
+permalink: /docs/session-types/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Session Types
 
@@ -8,9 +15,9 @@ March's **session types** turn those agreements into types the compiler checks. 
 
 These are *binary* session types: a protocol describes exactly two roles talking over one channel. (For data-parallel fan-out across a whole collection, see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/); for actor mailboxes, see [Actors]({{ site.baseurl }}/docs/actors/) — and the [section below](#session-types-and-actors) on how the two relate.)
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends — mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](core-march.md) §4.11.5). **Multi-party session types (`MPST.*`) are typing-only**: every `MPST.*` program segfaults compiled (exit 139) even though the interpreter runs it correctly — a filed open finding (`specs/todos.md`, F3). This document's examples all use binary (two-role) protocols, which are the safe, byte-identical, production-ready surface; MPST is documented as a typing concept in the [typing reference](core-march-types.md) §2.7.4 but should not be relied on compiled today.
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends — mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.5). **Multi-party session types (`MPST.*`) are typing-only**: every `MPST.*` program segfaults compiled (exit 139) even though the interpreter runs it correctly — a filed open finding (`specs/todos.md`, F3). This document's examples all use binary (two-role) protocols, which are the safe, byte-identical, production-ready surface; MPST is documented as a typing concept in the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7.4 but should not be relied on compiled today.
 
-For the typing side (protocol declaration, projection, duality, per-operation channel-state typing) see the [typing reference](core-march-types.md) §2.7; for the runtime model (the crossed-queue representation, why `recv` never suspends, and the no-scheduler deadlock boundary) see the [operational reference](core-march.md) §4.11.
+For the typing side (protocol declaration, projection, duality, per-operation channel-state typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7; for the runtime model (the crossed-queue representation, why `recv` never suspends, and the no-scheduler deadlock boundary) see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.
 
 ---
 
@@ -121,7 +128,7 @@ Notice what you *can't* write here. If `client` tried to `Chan.recv` before `Cha
 > end
 > ```
 >
-> The function-structured `client`/`server` form above is exactly this shape split into two functions called in the right order from `main` — it does not run the two sides concurrently on separate green threads. See the [operational reference](core-march.md) §4.11.1–§4.11.3 for the queue representation and §4.11.6 (finding F6) for why recv-before-send is a scope boundary, not a bug: session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler.
+> The function-structured `client`/`server` form above is exactly this shape split into two functions called in the right order from `main` — it does not run the two sides concurrently on separate green threads. See the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.1–§4.11.3 for the queue representation and §4.11.6 (finding F6) for why recv-before-send is a scope boundary, not a bug: session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler.
 
 ---
 
@@ -175,7 +182,7 @@ If a program using session-typed channels compiles, then:
 
 These properties are the same ones you'd otherwise chase with runtime assertions and integration tests — promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
 
-**One thing that sounds like a guarantee but is not, verified live and filed as an open finding** (`specs/todos.md`; see the [operational reference](core-march.md) §4.11.6 for the full write-up):
+**One thing that sounds like a guarantee but is not, verified live and filed as an open finding** (`specs/todos.md`; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.6 for the full write-up):
 
 - **An `offer` that doesn't handle every label is a warning, not an error.** `match`'s exhaustiveness check (the same one that governs every other `match` in March) only warns on a missing case — `--check` still exits 0. If your build treats warnings as informational only, an unhandled label compiles.
 

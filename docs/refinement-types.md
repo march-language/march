@@ -1,3 +1,333 @@
-# Refinement Types — Moved
+---
+layout: docs
+title: Refinement Types
+nav_order: 5.5
+permalink: /docs/refinement-types/
+---
 
-This topic is now part of the **March Language Reference**. The canonical version is **[../specs/lang/refinement-types.md](../specs/lang/refinement-types.md)**; see the reference umbrella **[specs/lang/index.md](../specs/lang/index.md)**.
+# Refinement Types
+
+Normally, a type like `Int` only tells the compiler "this is a whole number" — it says
+nothing about *which* whole numbers are actually valid here. A **refinement type** lets
+you attach an extra condition to a type, so `{Int | _ >= 0}` means "an `Int`, and
+specifically one that's never negative." The condition (`_ >= 0` here) is called a
+**predicate** — just a true/false check on the value.
+
+The clever part is that March doesn't just remember the condition as documentation — it
+actually *proves* it, at compile time, using an automated reasoning tool called an
+**SMT solver** (specifically [Z3](https://github.com/Z3Prover/z3)). An SMT solver is
+software that can mechanically work out whether a set of logical/arithmetic statements
+is possible or is a contradiction — the same kind of tool used to verify hardware
+designs and cryptographic protocols. In March, it's put to work checking your function
+contracts, so a whole class of bugs — out-of-bounds indices, negative sizes, division by
+zero, broken invariants — becomes a **compile error** instead of a runtime panic.
+
+If you've heard the term **dependent typing** — types that depend on *values*, not just
+other types — refinements are March's practical, restricted slice of it. You get the
+safety where it pays off (preconditions, bounds, postconditions) without a proof
+assistant's ceremony — and, crucially, **without false positives**: if the checker can't
+prove a value is definitely wrong, it stays silent rather than guessing.
+
+> **Requires Z3.** Refinement checking runs only when the `z3` solver is on your
+> `PATH`. Without it, the predicates type-check as their base type and no
+> refinement diagnostics are produced (the build still succeeds).
+
+---
+
+## The Problem They Solve
+
+```march
+fn at(xs : List(Int), i : Int) : Int do
+  -- if i is out of range this panics at runtime
+  List.nth(xs, i)
+end
+
+at([10, 20, 30], 5)   -- boom, eventually, at runtime
+```
+
+A refinement moves the contract into the type, where the compiler checks it:
+
+```march
+fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do
+  List.nth(xs, i)
+end
+
+at([10, 20, 30], 5)   -- compile error: 5 is not < len([10,20,30]) = 3
+at([10, 20, 30], 1)   -- ok
+```
+
+---
+
+## Syntax
+
+A refinement is written `{ BaseType | predicate }`. The placeholder `_` stands
+for the value being refined:
+
+```march
+{Int | _ >= 0}              -- a non-negative Int
+{Int | _ > 0}              -- a positive Int
+{Int | _ != 0}             -- a non-zero Int (safe divisor)
+{Int | _ >= 0 && _ < 100}  -- a bounded Int
+```
+
+You can name the value instead of using `_`:
+
+```march
+{v : Int | v >= 0 && v < 100}
+```
+
+Refinements appear anywhere a type does — **parameters** (preconditions) and
+**return types** (postconditions):
+
+```march
+-- precondition: callers must pass a positive size
+fn chunks(xs : List(a), size : {Int | _ > 0}) : List(List(a)) do ... end
+
+-- postcondition: this function promises a non-negative result
+fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+```
+
+The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
+`+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
+connectives `&& || not`, integer/bool literals, and **measures** (below).
+
+---
+
+## How Checking Works — Definite Failure
+
+Think of the checker as a cautious lawyer rather than an eager one: it only objects when
+it can prove, beyond doubt, that you're wrong. There are exactly three outcomes for a
+predicate at a given point in your code:
+
+- The argument **always** satisfies the predicate → **pass**, silently.
+- The argument **never** satisfies it → **compile error** with a counterexample.
+- It **might or might not** satisfy it (the value is unknown, or the solver can't
+  decide) → **skipped**, silently.
+
+```march
+fn take_pos(n : {Int | _ >= 0}) : Int do n end
+
+take_pos(-3)                     -- error: -3 can never be >= 0
+take_pos(5)                      -- pass
+
+fn f(k : Int) : Int do
+  take_pos(k)                    -- skipped: k is unknown, might be >= 0
+end
+```
+
+The consequence: **no false positives, by design — but incomplete.** The
+checker never flags correct code, and never blocks a build over something it
+can't disprove. It also won't *prove* everything you might hope; facts it can't
+establish are conservatively let through. This trade is deliberate — a
+refinement checker that cries wolf is one developers turn off.
+
+---
+
+## Path Sensitivity — Guards Establish Facts
+
+A guard you write becomes a fact the solver can use for the rest of that branch. The
+then-branch learns the condition is true; the else-branch learns it's false:
+
+```march
+fn get(xs : List(Int), i : Int) : Int do
+  if i >= 0 && i < List.length(xs) do
+    at(xs, i)          -- ok: the guard proves the precondition here
+  else
+    0
+  end
+end
+```
+
+(`len`, used in earlier examples, is a special name usable only inside a `{...}`
+refinement predicate — you can't call it as an ordinary function. In plain code, like
+the guard above, use `List.length` instead; the solver knows they mean the same thing.)
+
+`match` arm guards (`when`) work the same way. An `assert(p)` acts as an
+**assume** — it injects `p` as a fact for the code that follows:
+
+```march
+fn g(i : Int) : Int do
+  assert(i >= 0)
+  take_pos(i)          -- ok: the assert established i >= 0
+end
+```
+
+Use `assert` as the escape hatch for facts the checker can't derive on its own
+(it's the place a hand-proved lemma lives).
+
+---
+
+## Postconditions
+
+A refined return type is checked on **every return path** of the function,
+under the path/scope reaching it:
+
+```march
+fn clamp_low(n : Int) : {Int | _ >= 0} do
+  if n < 0 do 0 else n end        -- both branches satisfy _ >= 0  ✓
+end
+
+fn bad(n : Int) : {Int | _ >= 0} do
+  if n < 0 do n else 0 end        -- error: the n < 0 branch returns a negative
+end
+```
+
+---
+
+## Measures — Refining over Data Structures
+
+Every predicate so far has been about a single plain number, like `i >= 0`. But often
+the bound you actually care about depends on the *shape* of a data structure — "the
+index must be less than the list's length," say. A **measure** is how you bring that
+into a predicate: it's an ordinary-looking function from a value to an `Int` (or
+`Bool`), except the compiler is allowed to reason about it symbolically, not just run
+it. The built-in `len` measures a list this way:
+
+```march
+fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
+```
+
+You can define your own with the `@[measure]` attribute — for example the size
+of a tree:
+
+```march
+type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+
+@[measure]
+fn size(t : Tree(a)) : Int do
+  match t do
+    Leaf          -> 0
+    Node(l, x, r) -> 1 + size(l) + size(r)
+  end
+end
+
+fn get(t : Tree(a), i : {Int | _ >= 0 && _ < size(t)}) : a do ... end
+```
+
+Once a function is marked `@[measure]`, the solver treats its own definition as a set of
+rules it's allowed to use — so for a value whose shape it can see (a literal list, an
+explicit `Node`/`Leaf` tree), it can effectively "run" the measure symbolically:
+from the equations above it works out `size(Node(Leaf, x, Leaf)) = 1`, so an
+out-of-bounds index into a literal tree is caught, and `size(t) >= 0` is known for any
+`t`. Measures may call **other measures** and be **mutually recursive** (e.g. a
+`Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
+`length` measure over `List(a)` reasons the same way as `size`.
+
+### The measure soundness gate
+
+The solver trusts a `@[measure]` completely — it treats the function's body as a fact
+about the world. That means a badly-behaved measure (one that never finishes, divides
+by zero, or skips a case) could let the solver "prove" something false. To prevent that,
+the compiler requires every measure to be provably well-behaved before it's allowed to
+be used at all — a **hard compile error** if it isn't. A `@[measure]` is rejected if it:
+
+- has an **effect** (`spawn`, `send`, `dbg`, `assert`) — it must be pure,
+- can **diverge or abort** (`panic`, `todo`, `exit`) — it must always finish,
+- is **non-total** — a non-exhaustive `match` on its parameter, or a `/` / `%`
+  that could divide by zero — it must handle every case,
+- is **not structurally recursive** — a recursive call whose argument isn't a
+  component of the matched parameter — each call must work on a strictly smaller piece
+  of the input, so it's guaranteed to terminate.
+
+A measure that is sound but outside what the encoding can model (see
+limitations, below) isn't an error — it simply falls back to weaker, symbolic
+reasoning.
+
+---
+
+## Limitations
+
+No refinement system is complete — this one is intentionally a *pragmatic slice* of
+dependent typing. Know the edges:
+
+- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
+  encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
+  it's deliberately omitted. Predicates over other types aren't supported.
+- **Incomplete (by the definite-failure stance).** The checker catches values
+  that are *definitely* wrong and stays silent otherwise. It will not prove
+  every true property; quantified/measure facts in particular sometimes return
+  "unknown" and are skipped. This never produces a false positive, but it does
+  mean some real guarantees go unchecked.
+- **Direct calls only — no higher-order or interface dispatch.** A precondition
+  on a function passed as a value, called through a variable, or dispatched
+  through an `interface`/`impl` is **not** checked. (True higher-order checking
+  needs refinement subtyping in unification, which isn't implemented.)
+- **Measures see structure, not elements.** Element values inside a data
+  structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
+  Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
+- **No relational postconditions yet.** Properties that *relate* a measure
+  across an operation — `size(insert(t, x)) == size(t) + 1` — are not yet
+  provable automatically (they often need induction the solver can't do by
+  itself). Use an `assert` lemma where you need them.
+- **Performance: measures can be slow on a cold cache.** Quantified + datatype
+  reasoning is far more expensive per query than plain arithmetic. Verdicts are
+  content-addressed and cached (warm rebuilds are fast), and the cost is
+  isolated to call sites that actually mention a measure — but a cold build of
+  measure-heavy code pays for it. See the flag below.
+
+---
+
+## Where Refinements Resolve
+
+*This is a plumbing detail about how the checker looks up which function a call refers
+to, not something you need to know to start using refinements — feel free to skip to
+[Practical Rules](#practical-rules).*
+
+Refinement checking follows the same name resolution as the type checker:
+**direct named calls**, across modules, through **`alias`** and **`use`**:
+
+```march
+mod App do
+  use Lib.{take_pos}          -- imported name resolves to Lib.take_pos
+  alias Lib.Inner as I        -- alias resolves to Lib.Inner.*
+
+  fn run() : Int do
+    take_pos(-1)              -- error: resolved + checked against Lib's precondition
+    I.helper(-1)             -- error: alias-qualified call checked too
+  end
+end
+```
+
+A bare call binds to the nearest enclosing module that defines it (with
+shadowing), so a local helper is never confused with a same-named function
+elsewhere.
+
+---
+
+## The `--no-measure-axioms` Flag
+
+*Also a niche knob — only relevant if a measure-heavy build feels slow.*
+
+Pass `--no-measure-axioms` to reflect `@[measure]` functions **symbolically**
+instead of axiomatising them. This skips the datatype/quantifier reasoning (and
+the soundness gate), trading structural measure reasoning for speed. It changes
+only diagnostics, never the compiled artifact. Refinement checking of plain
+`Int`/`Bool` predicates is unaffected and always cheap.
+
+```bash
+march --check --no-measure-axioms app.march
+```
+
+---
+
+## Practical Rules
+
+1. **Refine the contract, not the convenience.** Add `{Int | _ > 0}` where a
+   non-positive value is a genuine bug (a chunk size, an unguarded divisor), not
+   to every `Int`. Many March APIs already clamp defensively and have no real
+   precondition.
+2. **Guard, then call.** A precondition you can't satisfy with a literal is
+   discharged by an `if`/`when` guard right before the call.
+3. **Reach for `assert` as your lemma.** When you *know* a fact the checker
+   can't derive, `assert(p)` makes it available — and documents the assumption.
+4. **Annotate measures you'll reason about.** A `@[measure]` only earns its
+   keep if a predicate mentions it; keep them total, exhaustive, and structural
+   so they pass the gate.
+
+---
+
+## Next Steps
+
+- [Type System](types.md) — the types refinements attach to
+- [Linear Types](linear-types.md) — the other compile-time safety layer
+- [Pattern Matching](pattern-matching.md) — `match` guards feed path sensitivity
