@@ -5,7 +5,7 @@ nav_order: 9
 permalink: /docs/actors/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Actors
 
@@ -13,12 +13,12 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 
 **Compiled-actor status:** the core actor message plane runs both in the tree-walking interpreter and in ahead-of-time-compiled (native) binaries. In the compiled runtime, both actors and tasks run on an M:N green-thread scheduler (`runtime/march_scheduler.c`) — multiple OS threads, each running many lightweight green threads, with work-stealing across threads. Actor declarations lower to TIR (`lib/tir/lower_actor.ml`) and emit LLVM IR that calls the public C API (`march_spawn`/`march_send`/`march_kill`/`march_is_alive`, `runtime/march_runtime.c`); each actor runs as its own green thread. Actors park cooperatively when their mailbox is empty; tasks park when awaiting a result.
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The two formerly-diverging planes are also backend-identical now (their historical findings are closed in the `specs/todos.md` ledger):
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **live-message plane** — `spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill` — produces identical observable output on both backends for a program whose output does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled — see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded yield-poll in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait forever) — pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The two formerly-diverging planes are also backend-identical now (their historical findings are closed in the `specs/todos.md` ledger):
 
-- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid): byte-identical as of 2026-07-18 — compiled `get_cap` builds the real epoch cap (niche `None` for a dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms as the interpreter, and `send` to a dead pid returns `None` on both backends. Pinned by `test/native/cap_epoch_plane`. See [`core-march.md`](core-march.md) §4.10.6.
-- **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` and the full compiled supervision plane (spawn-time child `init`, crash isolation, all three restart strategies) work compiled as of 2026-07-08 (`examples/supervision_strategies.march` runs clean). See [`core-march.md`](core-march.md) §4.10.7.
+- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid): byte-identical as of 2026-07-18 — compiled `get_cap` builds the real epoch cap (niche `None` for a dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms as the interpreter, and `send` to a dead pid returns `None` on both backends. Pinned by `test/native/cap_epoch_plane`. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
+- **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` and the full compiled supervision plane (spawn-time child `init`, crash isolation, all three restart strategies) work compiled as of 2026-07-08 (`examples/supervision_strategies.march` runs clean). See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7.
 
-The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
+The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
 
 ---
 
@@ -48,7 +48,7 @@ actor Counter do
 end
 ```
 
-Inside a handler, `state` refers to the current state record. Each handler must return the new state (same type as `state`). The typechecker enforces exactly this: the `init` block must produce the declared state record, and every handler body is checked to *return* the state type — see the [typing reference](core-march-types.md) §2.6.1 for the precise checks the actor declaration performs (state-record construction, duplicate-handler rejection, message-constructor registration, `init`/handler conformance).
+Inside a handler, `state` refers to the current state record. Each handler must return the new state (same type as `state`). The typechecker enforces exactly this: the `init` block must produce the declared state record, and every handler body is checked to *return* the state type — see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.1 for the precise checks the actor declaration performs (state-record construction, duplicate-handler rejection, message-constructor registration, `init`/handler conformance).
 
 ---
 
@@ -68,8 +68,8 @@ actor expression (from an `if`, `match`, or function call) is rejected at
 compile time, because March resolves which actor to spawn statically from its
 name. The typing account (including the subtlety that the resulting `Pid`'s type
 parameter is a fresh variable, *not* the actor's state type) is in the
-[typing reference](core-march-types.md) §2.6.2–§2.6.3; the runtime side (registering
-an `actor_inst`, returning a `VPid`) is in [`core-march.md`](core-march.md) §4.10.1.
+[typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.2–§2.6.3; the runtime side (registering
+an `actor_inst`, returning a `VPid`) is in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.1.
 
 ---
 
@@ -87,14 +87,14 @@ The message is the constructor applied to its arguments. The actor handles it ac
 
 **Message names share one flat global constructor namespace.** A handler `on Msg(…)`
 registers `Msg` as an ordinary constructor — there is no per-actor message namespace,
-exactly analogous to the [no-per-module-type-namespace design point](core-march-types.md)
+exactly analogous to the [no-per-module-type-namespace design point](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md)
 (§2.5). So a message name that collides with a constructor another type (including a
 stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` when the
 stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
 multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
 collide (e.g. `Increment`, `Poke`), or qualify. Two consequences of this design — the
 compiled wrong-actor-`send` misroute and the payload-typing rule — are documented in the
-[typing reference](core-march-types.md) §2.6.4.
+[typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.4.
 
 `send` returns `Some(())` if the actor is alive, or `None` if the actor is dead:
 
@@ -107,7 +107,7 @@ end
 
 > **Interp-vs-compiled note.** The dead-actor drop (`None`) is the *interpreter's*
 > behavior; the compiled backend returns `Some` for a `send` to a dead pid (a filed
-> divergence — [`core-march.md`](core-march.md) §4.10.6). A `send` to a *live* actor
+> divergence — [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6). A `send` to a *live* actor
 > agrees on both backends. See §4.10.2 for the async-enqueue operational rule.
 
 ---
@@ -148,7 +148,7 @@ fn main() do
 end
 ```
 
-**Blocking semantics:** If the mailbox is empty when `receive()` is called, the actor parks (interpreter: re-queues the triggering message and retries the handler on a later pass; compiled: green thread parks). It resumes automatically once a message is delivered. `run_until_idle()` returns as soon as all actors are either idle or waiting — no deadlock. See [`core-march.md`](core-march.md) §4.10.3 for the pop-or-`BlockedOnReceive` rule.
+**Blocking semantics:** If the mailbox is empty when `receive()` is called, the actor parks (interpreter: re-queues the triggering message and retries the handler on a later pass; compiled: green thread parks). It resumes automatically once a message is delivered. `run_until_idle()` returns as soon as all actors are either idle or waiting — no deadlock. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.3 for the pop-or-`BlockedOnReceive` rule.
 
 **Once-per-handler limitation:** only the *first* `receive()` in a handler body is safe to block on — if a handler calls `receive()` twice and the second one blocks (empty mailbox), the message the first `receive()` already popped is lost (the scheduler's re-queue only restores the outer triggering message). A handler needing multiple messages should recurse, with each `receive()` the first operation in its own handler body. The example above `receive()`s exactly once, on an already-queued message, so it neither blocks nor trips this limitation. (This is what the golden witness `g36_actor_receive` pins.)
 
@@ -175,7 +175,7 @@ After `kill`, `is_alive(counter)` returns `false` and further `send`s return `No
 (interpreted — see the dead-`send` note above). `is_alive` is a pure registry lookup and
 is the one lifecycle observation that is **byte-identical interpreted vs compiled** (the
 golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
-The operational rules for `kill`/`is_alive` are in [`core-march.md`](core-march.md) §4.10.6.
+The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
 
 ---
 
@@ -203,7 +203,7 @@ Use capabilities when you hold a reference across an actor restart boundary and 
 > returns an uninterned garbage atom for every cap — matching neither `:ok` nor `:error`
 > (hence the `_` catch-all above rather than a `:error` arm) — and `get_cap` does not gate
 > on liveness. The entire capability mechanism is therefore non-functional in compiled
-> binaries today; it is a filed open finding ([`core-march.md`](core-march.md) §4.10.6, and
+> binaries today; it is a filed open finding ([`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6, and
 > `specs/todos.md`). Two of the underlying builtins, `revoke_cap` and `is_cap_valid`, are
 > additionally not registered in the typechecker, so they are not surface-callable at all.
 > Use plain `send`/`is_alive` if you need behavior that agrees on both backends.
@@ -442,7 +442,7 @@ fn main() do
 end
 ```
 
-In long-running applications, the scheduler runs automatically — you do not call `run_until_idle()`. `run_until_idle()` drains the scheduler to a fixed point (every mailbox empty); its operational rule is in [`core-march.md`](core-march.md) §4.10.4, and the determinism property it enables — interleaving-free output byte-identical interpreted vs compiled — is §4.10.5.
+In long-running applications, the scheduler runs automatically — you do not call `run_until_idle()`. `run_until_idle()` drains the scheduler to a fixed point (every mailbox empty); its operational rule is in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.4, and the determinism property it enables — interleaving-free output byte-identical interpreted vs compiled — is §4.10.5.
 
 ---
 
@@ -488,7 +488,7 @@ mod MyService do
 end
 ```
 
-The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](core-march.md) §4.10.7 for the operational rules of `one_for_one` restart and epoch invalidation.
+The `app` declaration integrates with the supervision system. See [Supervision](supervision.md) for the tutorial, and [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7 for the operational rules of `one_for_one` restart and epoch invalidation.
 
 > **Supervision observation is interp-only compiled today.** The `one_for_one` restart
 > semantics are correct interpreted, but the only surface way to reach a supervised child

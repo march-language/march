@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md)
+---
+layout: docs
+title: Interfaces
+nav_order: 5.3
+permalink: /docs/interfaces/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md)
 
 # Interfaces
 
@@ -406,6 +413,6 @@ So "no vtables or runtime type lookups" is accurate for the compiled backend's s
 
 ## Next Steps
 
-- [Types](type-system.md) — types you implement interfaces for
+- [Types](types.md) — types you implement interfaces for
 - [Standard Library](../../docs/stdlib.md) — stdlib types and their interface implementations
 - [Pattern Matching](pattern-matching.md) — using `match` with interface-dispatched values

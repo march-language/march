@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Refinement Types
+nav_order: 5.5
+permalink: /docs/refinement-types/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Refinement Types
 
@@ -321,6 +328,6 @@ compiled, since neither backend inserts any runtime predicate check.
 
 ## Next Steps
 
-- [Type System](type-system.md) — the types refinements attach to
+- [Type System](types.md) — the types refinements attach to
 - [Linear Types](linear-types.md) — the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md) — `match` guards feed path sensitivity
