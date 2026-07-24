@@ -710,7 +710,20 @@ let tier0_suite =
     gated "explicit annotation still wins over the inferred postcondition" (fun () ->
         Alcotest.(check bool) "error" true
           (has_refine_error
-             (t0 "  fn f() : Int do let c : {Int | _ < 0} = neg()\n    takepos(c) end"))) ]
+             (t0 "  fn f() : Int do let c : {Int | _ < 0} = neg()\n    takepos(c) end")));
+
+    gated "inline call arg `takepos(neg())` is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (t0 "  fn f() : Int do takepos(neg()) end")));
+
+    gated "inline call arg with compatible postcondition passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do takepos(nonneg()) end")));
+
+    gated "inline call to a non-refined function is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (t0 "  fn plain() : Int do 0 - 9 end\n  fn f() : Int do takepos(plain()) end"))) ]
 
 let () =
   Alcotest.run "march-refinecheck"

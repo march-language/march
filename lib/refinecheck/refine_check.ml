@@ -967,9 +967,21 @@ let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname :
      | _ -> None)
   | _ -> None
 
+(* Fresh-name counter for SMT constants standing in for a call's return value.
+   Monotonic per compilation; freshness is all that is required. *)
+let ret_ctr = ref 0
+
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
-let reflect_scalar (sc : scope) (actual : A.expr)
+let reflect_scalar ~(postcond : string -> (string * A.expr) option) (sc : scope)
+    (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
+  (* Reflect an expression with no scope help — also the fallback for a call
+     whose callee has no usable postcondition. *)
+  let plain e =
+    match smt_of ~resolve_var:(fun _ -> None) ~resolve_measure:(fun _ _ -> None) e with
+    | Some t -> Some (t, [], [])
+    | None -> None
+  in
   match actual with
   | A.EVar { A.txt = x; _ } ->
     let xc = Smt.Const x in
@@ -988,15 +1000,30 @@ let reflect_scalar (sc : scope) (actual : A.expr)
           guard about it can constrain it.  Without a guard it stays
           unconstrained and the definite-failure check keeps us silent. *)
        Some (xc, [ (x, Smt.SInt) ], []))
-  | _ ->
-    (match smt_of ~resolve_var:(fun _ -> None) ~resolve_measure:(fun _ _ -> None) actual with
-     | Some t -> Some (t, [], [])
-     | None -> None)
+  (* A direct named call: stand its result up as a fresh constant carrying the
+     callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
+     character, so a qualified name needs no mangling. *)
+  | A.EApp (A.EVar { A.txt = fname; _ }, _, _) ->
+    (match postcond fname with
+     | Some (b, q) ->
+       incr ret_ctr;
+       let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
+       let c = Smt.Const nm in
+       let rv n = if n = b || n = "_" then Some c else None in
+       let assumptions =
+         match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
+         | Some qa -> [ qa ]
+         | None -> []
+       in
+       Some (c, [ (nm, Smt.SInt) ], assumptions)
+     | None -> plain actual)
+  | _ -> plain actual
 
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
-let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
+let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) option)
+    (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) : unit =
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
   let actual_of_name name =
@@ -1020,10 +1047,10 @@ let check_call ~root errctx ~span (sg : fn_sig) (args : A.expr list)
        a path condition references caller variables — both go through the
        actual caller values so the names line up in SMT. *)
     let resolve_var name =
-      if name = rp.binder || name = "_" then absorb (reflect_scalar sc self_actual)
+      if name = rp.binder || name = "_" then absorb (reflect_scalar ~postcond sc self_actual)
       else
         match actual_of_name name with
-        | Some a -> absorb (reflect_scalar sc a)
+        | Some a -> absorb (reflect_scalar ~postcond sc a)
         | None ->
           (* a caller-scope variable from the path context *)
           decls := (name, Smt.SInt) :: !decls;
@@ -1437,7 +1464,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
      | Some (Some sg) ->
-       List.iter (fun rp -> check_call ~root errctx ~span:sp sg args path rp sc) sg.refined
+       let postcond = postcond_of ctx defs in
+       List.iter (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc) sg.refined
      | _ -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
