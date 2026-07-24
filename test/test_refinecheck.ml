@@ -143,7 +143,20 @@ let path_suite =
         Alcotest.(check bool) "error" true
           (has_refine_error
              (decl
-                "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")))
+                "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")));
+
+    gated "a `let` rebinding the guarded name retires the guard fact" (fun () ->
+        (* `i` inside the branch is a fresh 5, not the guarded outer `i`; the
+           call is correct code and must not be flagged. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do\n\
+                \    if i < 0 do\n\
+                \      let i = 5\n\
+                \      take_n(i)\n\
+                \    else 0 end\n\
+                \  end")))
   ]
 
 (* Postconditions: a function's return value must satisfy its return refinement. *)
@@ -467,7 +480,34 @@ let flag_suite =
            end\n"
         in
         Alcotest.(check bool) "gate on" true (has_refine_error prog);
-        Alcotest.(check bool) "gate off" false (has_refine_error_no_axioms prog)) ]
+        Alcotest.(check bool) "gate off" false (has_refine_error_no_axioms prog));
+
+    (* Constructor-tag refinements are NOT measure axioms: the flag documents
+       itself as an escape hatch from measure cost only, so tag checking (and
+       the vocabulary warning that depends on the ADT registry) must behave
+       identically with it off. *)
+    gated "--no-measure-axioms still checks constructor tags" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_no_axioms
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(None) end\n\
+              end\n"));
+
+    Alcotest.test_case "--no-measure-axioms does not call `is_Some` unknown vocabulary"
+      `Quick (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ~measure_axioms:false ctx
+          (parse
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_Some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n");
+        Alcotest.(check bool) "no warning" false
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning)
+             ctx.March_errors.Errors.diagnostics)) ]
 
 (* Use/alias-aware call resolution: a call name resolves the way the typechecker
    resolves it (lexical module scope + alias + use), not by fragile string
@@ -1047,16 +1087,101 @@ let adt_suite =
               end\n"));
 
     gated "narrowing does not leak past a rebinding pattern binder" (fun () ->
-        (* The arm rebinds `x`, so the outer scrutinee's tag says nothing
-           about the inner `x`.  Correct code — must stay silent. *)
+        (* The INNER arm rebinds `x`, so the outer scrutinee's `None` tag says
+           nothing about the inner `x` — which is a `Some` payload here.
+           Correct code; the call must not be flagged.  (The call is what makes
+           this a real test: an arm body of `0` exercises nothing.) *)
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod M do\n\
              \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
              \  fn f(x : Option(Int), y : Option(Int)) : Int do\n\
-             \    match y do\n\
-             \      Some(x) -> 0\n\
-             \      None -> 0\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        match y do\n\
+             \          Some(x) -> unwrap(x)\n\
+             \          None -> 0\n\
+             \        end\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* ── Path facts must not survive a rebinding of the name they mention ── *)
+    gated "a `let` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        let x = Some(1)\n\
+             \        unwrap(x)\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a lambda param rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn apply(g : (Option(Int)) -> Int) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None -> apply(fn x -> unwrap(x))\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a `let?` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn mk() : Result(Option(Int), String) do Ok(Some(1)) end\n\
+             \  fn f(x : Option(Int)) : Result(Int, String) do\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        let? x = mk()\n\
+             \        Ok(unwrap(x))\n\
+             \      Some(v) -> Ok(v)\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a user ADT `let` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  type Shape = Circle(Int) | Square(Int)\n\
+             \  fn area(sh : {Shape | is_Circle(_)}) : Int do 0 end\n\
+             \  fn f(s : Shape) : Int do\n\
+             \    match s do\n\
+             \      Square(n) ->\n\
+             \        let s = Circle(1)\n\
+             \        area(s)\n\
+             \      Circle(n) -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* A path condition lives in the CALLER's namespace; it must not be
+       re-pointed at the callee's actuals just because the caller happens to
+       use the same variable name as the callee's refinement binder. *)
+    gated "a caller variable sharing the callee's binder name is not confused"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(o)}) : Int do 0 end\n\
+             \  fn f(o : Option(Int), y : Option(Int)) : Int do\n\
+             \    match o do\n\
+             \      None -> unwrap(y)\n\
+             \      Some(v) -> v\n\
              \    end\n\
              \  end\n\
               end\n"));

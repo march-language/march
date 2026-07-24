@@ -218,7 +218,6 @@ let is_adt_base (t : A.ty) : bool =
   match t with
   | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
   | _ -> false
-[@@warning "-32"]
 
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,
@@ -967,6 +966,65 @@ let rec pat_binders (p : A.pattern) : string list =
 let scope_shadow (sc : scope) (names : string list) : scope =
   if names = [] then sc else List.filter (fun (n, _) -> not (List.mem n names)) sc
 
+(* Does [e] mention any of [names]?  Deliberately syntactic and deliberately
+   OVER-approximate: an occurrence anywhere in the subtree counts, including
+   under a nested binder of the same name.  [path_shadow] only ever uses this
+   to DISCARD a fact, so over-approximating loses information (silence) rather
+   than inventing it (a false positive). *)
+let rec expr_mentions (names : string list) (e : A.expr) : bool =
+  let any = List.exists (expr_mentions names) in
+  let bound ps = List.exists (fun n -> List.mem n names) ps in
+  let params ps = List.exists (fun (p : A.param) -> List.mem p.A.param_name.A.txt names) ps in
+  match e with
+  | A.EVar n -> List.mem n.A.txt names
+  | A.ELit _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> false
+  | A.EApp (f, args, _) -> expr_mentions names f || any args
+  | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> any args
+  | A.ELam (ps, body, _) -> params ps || expr_mentions names body
+  | A.EBlock (es, _) -> any es
+  | A.ELet (b, _) -> bound (pat_binders b.A.bind_pat) || expr_mentions names b.A.bind_expr
+  | A.ELetFn (n, ps, _, body, _) ->
+    List.mem n.A.txt names || params ps || expr_mentions names body
+  | A.ELetQ (p, e1, e2, _) ->
+    bound (pat_binders p) || expr_mentions names e1 || expr_mentions names e2
+  | A.EMatch (subj, brs, _) ->
+    expr_mentions names subj
+    || List.exists
+         (fun (br : A.branch) ->
+           bound (pat_binders br.A.branch_pat)
+           || (match br.A.branch_guard with Some g -> expr_mentions names g | None -> false)
+           || expr_mentions names br.A.branch_body)
+         brs
+  | A.ERecord (fs, _) -> List.exists (fun (_, v) -> expr_mentions names v) fs
+  | A.ERecordUpdate (r, fs, _) ->
+    expr_mentions names r || List.exists (fun (_, v) -> expr_mentions names v) fs
+  | A.EField (r, _, _) -> expr_mentions names r
+  | A.EIf (c, t, el, _) -> any [ c; t; el ]
+  | A.ECond (arms, _) ->
+    List.exists (fun (c, b) -> expr_mentions names c || expr_mentions names b) arms
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
+  | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _)
+  | A.EDbg (Some e, _) -> expr_mentions names e
+
+(* The path-context companion to [scope_shadow].  A path condition is recorded
+   against a VARIABLE NAME (`is_None(x)`, `x < 0`); when an inner scope rebinds
+   that name, the fact is about the OUTER value and saying it about the inner
+   one is a false positive:
+
+     match x do
+       None ->
+         let x = Some(1)
+         unwrap(x)     -- `is_None(x)` must not survive to here
+       ...
+
+   So every binding construct in [visit] must drop any condition mentioning one
+   of its binders before descending — exactly the discipline [scope_shadow]
+   already imposes on the refined-local scope.  Dropping a fact is always sound
+   under the definite-failure stance: fewer assumptions means fewer definite
+   contradictions, i.e. more silence. *)
+let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
+  if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
+
 let scope_add_param (sc : scope) (p : A.param) : scope =
   let sc = scope_shadow sc [ p.A.param_name.A.txt ] in
   match refined_scope_ty p.A.param_ty with
@@ -1246,9 +1304,11 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         Hashtbl.add reflect_cache key result;
         result
     in
-    (* Resolve a scalar variable.  A predicate references callee parameters;
-       a path condition references caller variables — both go through the
-       actual caller values so the names line up in SMT. *)
+    (* Resolve a scalar variable IN THE PREDICATE, i.e. in the CALLEE's
+       namespace: the refined binder (`_` or its declared name) denotes this
+       call's actual argument, and another parameter's name denotes that
+       parameter's actual.  Path conditions live in the CALLER's namespace and
+       must NOT come through here — see [path_resolve_var]. *)
     let resolve_var name =
       if name = rp.binder || name = "_" then
         absorb (reflect_cached "$self" (fun () -> reflect_scalar ~postcond sc self_actual))
@@ -1337,11 +1397,48 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
             | None -> (match a with A.EVar { A.txt = x; _ } -> measure_of_var m x | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
+    (* ── Caller-namespace resolvers, for the PATH CONTEXT only ─────────────
+       A path condition was collected at the call site, so every name in it is
+       a CALLER variable and denotes itself.  Routing it through the predicate
+       resolvers above (which consult [rp.binder] and [actual_of_name]) would
+       silently re-point it at the callee's actuals whenever the caller happens
+       to use the same identifier as a callee parameter or as the refinement's
+       named binder — reporting `y = None` from a fact about an unrelated
+       caller `o`.  A caller variable therefore always reflects to `Const name`
+       — the very term [reflect_scalar]/[reflect_dt] give an `EVar` actual, so
+       when the argument really IS that variable the two sides still meet on
+       the same SMT symbol and the narrowing keeps working. *)
+    let path_resolve_var name =
+      absorb
+        (reflect_cached ("$path$" ^ name) (fun () ->
+             reflect_scalar ~postcond sc (A.EVar { A.txt = name; A.span })))
+    in
+    let path_resolve_measure m name =
+      if is_axiom_measure m then (
+        uses_axiom := true;
+        let adt = Hashtbl.find axiom_measures m in
+        decls := (name, Smt.SData adt) :: !decls;
+        Some (Smt.App (m, [ Smt.Const name ])))
+      else measure_of_var m name
+    in
+    let path_resolve_tester ctor arg =
+      match sort_of_ctor ctor with
+      | None -> None
+      | Some adt ->
+        (match reflect_dt adt arg with
+         | Some t ->
+           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+           Some (Smt.IsCtor (ctor, t))
+         | None -> None)
+    in
     (* Translate the path conditions into assumptions (dropping any that fall
        outside the supported fragment — sound, just weaker). *)
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_measure ~resolve_tester cond with
+        match
+          smt_of ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
+            ~resolve_tester:path_resolve_tester cond
+        with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
@@ -1409,12 +1506,28 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
 (* Return-position expressions of a body, each with the path reaching it. *)
 let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
   match e with
-  | A.EBlock (es, _) -> (match List.rev es with last :: _ -> tails path last | [] -> [ (path, e) ])
+  | A.EBlock (es, _) ->
+    (match List.rev es with
+     | last :: _ ->
+       (* A `let` before the tail REBINDS its names, so any fact the path
+          context holds about them is about the outer value — retire it
+          (see [path_shadow]). *)
+       let path =
+         List.fold_left
+           (fun p e ->
+             match e with
+             | A.ELet (b, _) -> path_shadow p (pat_binders b.A.bind_pat)
+             | _ -> p)
+           path es
+       in
+       tails path last
+     | [] -> [ (path, e) ])
   | A.EIf (c, t, el, _) -> tails ((c, false) :: path) t @ tails ((c, true) :: path) el
   | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails ((c, false) :: path) b) arms
   | A.EMatch (_, branches, _) ->
     List.concat_map
       (fun (br : A.branch) ->
+        let path = path_shadow path (pat_binders br.A.branch_pat) in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
         tails p br.A.branch_body)
       branches
@@ -1800,7 +1913,11 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
          (fun (path, sc) e ->
            visit ~root errctx defs ctx path sc e;
            let path' =
-             match e with A.EAssert (p, _) -> (p, false) :: path | _ -> path
+             match e with
+             | A.EAssert (p, _) -> (p, false) :: path
+             (* A `let` REBINDS its names: retire any fact about them. *)
+             | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
+             | _ -> path
            in
            let sc' =
              match e with
@@ -1811,10 +1928,14 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
          (path, sc) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
-    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
+    let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+    visit ~root errctx defs ctx (path_shadow path names)
+      (List.fold_left scope_add_param sc ps) body
   | A.ELetFn (n, ps, _, body, _) ->
+    let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let sc = scope_shadow sc [ n.A.txt ] in
-    visit ~root errctx defs ctx path (List.fold_left scope_add_param sc ps) body
+    visit ~root errctx defs ctx (path_shadow path names)
+      (List.fold_left scope_add_param sc ps) body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter
@@ -1822,6 +1943,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let binders = pat_binders br.A.branch_pat in
         (* A pattern binder shadows a same-named refined outer local. *)
         let sc = scope_shadow sc binders in
+        (* …and a same-named fact in the path context, for the same reason. *)
+        let path = path_shadow path binders in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
         (* Constructor-tag narrowing.  Inside a `Ctor(…) ->` arm a VARIABLE
            scrutinee is known to carry that tag, so we push the synthetic path
@@ -1867,8 +1990,9 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     (* `let? p = e1` binds p's names in the Ok payload before continuing into
        e2 — a binding construct exactly like ELet/ELam/EMatch, so it must
        shadow any same-named outer refined local before e2 is visited. *)
-    let sc = scope_shadow sc (pat_binders p) in
-    visit ~root errctx defs ctx path sc e2
+    let binders = pat_binders p in
+    let sc = scope_shadow sc binders in
+    visit ~root errctx defs ctx (path_shadow path binders) sc e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
@@ -2068,10 +2192,16 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
      LSP/REPL embedding tomorrow) and every VC mentioning a propagated
      postcondition misses the content-addressed VC cache forever. *)
   ret_ctr := 0;
+  (* Registering the module's (and the built-in) ADTs is NOT part of the
+     measure-axiom machinery [measure_axioms] gates: constructor-tag
+     refinements build their own small datatype preamble per VC and pay no
+     quantifier cost.  Leaving these inside the guard emptied [adt_ctors] under
+     `--no-measure-axioms`, which made `is_Some` look like unknown vocabulary
+     and produced a warning that is simply false. *)
+  register_builtin_adts ();
+  register_adt_names m.A.mod_decls;
+  register_field_sorts m.A.mod_decls;
   if measure_axioms then begin
-    register_builtin_adts ();
-    register_adt_names m.A.mod_decls;
-    register_field_sorts m.A.mod_decls;
     build_measure_preamble mfns;
     build_type_preamble ();
     (* M-b soundness gate: a `@[measure]` must be a total, terminating, pure
