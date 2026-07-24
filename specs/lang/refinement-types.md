@@ -82,7 +82,8 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
-connectives `&& || not`, integer/bool literals, and **measures** (below).
+connectives `&& || not`, integer/bool literals, **measures**, and ADT
+**constructor tags** (both below).
 
 ---
 
@@ -262,6 +263,81 @@ reasoning.
 
 ---
 
+## Constructor Tags — Refining over ADT Variants
+
+Every constructor of every ADT — your own types, and the built-in `Option`,
+`Result` and `List` — implicitly gains an `is_<Ctor>` **tester** the checker
+understands inside a predicate. Nothing declares them; `type Shape = Circle(Int)
+| Square(Int)` gives you `is_Circle` and `is_Square` for free.
+
+```march
+-- a contract that says "this Option is definitely populated"
+fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do ... end
+
+unwrap(Some(1))   -- fine
+unwrap(None)      -- error: `None` can never satisfy `is_Some(_)`
+```
+
+The name is **exact-case**: `is_Some` is the tester for the constructor `Some`;
+`is_some` is not a tester at all (it happens to be the lowercase stdlib helper
+`Option.is_some`), so a misspelling draws the unrecognized-predicate warning
+rather than silently meaning something else.
+
+There are two sources of tag facts.
+
+**A constructor literal at the call site**, as above — the argument's tag is
+known exactly, so the tester decides.
+
+**A `match` arm**, which is where the realistic bug lives. Entering an arm
+narrows the scrutinee's tag for everything inside it:
+
+```march
+fn f(x : Option(Int)) : Int do
+  match x do
+    None    -> unwrap(x)   -- error: inside this arm, `x` is definitely `None`
+    Some(v) -> unwrap(x)   -- fine: inside this arm, `x` is definitely `Some`
+  end
+end
+```
+
+Narrowing is deliberately conservative, and where it stops is where the checker
+goes quiet rather than guessing:
+
+- **The scrutinee must be a bare variable.** `match mk() do …` matches an
+  expression with no stable name to attach a fact to, so no narrowing happens
+  and calls inside the arms are skipped. Bind it to a `let` first if you want
+  the fact.
+- **A rebinding pattern binder ends it.** Matching `y` with `Some(x) ->` says
+  nothing about `x` — that `x` is a fresh binder for the payload, not the
+  scrutinee — so no fact is recorded against the name it shadows.
+- **An `as` pattern is not narrowed.** `None as z ->` binds the whole scrutinee
+  under a second name, but the arm's head is a `PatAs`, not a bare constructor
+  pattern, so no tag fact is recorded — for `z` or for the scrutinee. Write
+  `None ->` if you want the narrowing.
+- **An ambiguous constructor name is skipped.** If two ADTs in scope both
+  declare a constructor `Row`, `is_Row` identifies no particular datatype and is
+  not checked.
+- **Rebinding the name retires the fact.** A narrowing is recorded against a
+  *name*, so any construct that rebinds that name inside the arm — a `let`, a
+  `let?`, a lambda parameter, an inner `match` binder — discards it. In
+
+  ```march
+  match x do
+    None ->
+      let x = Some(1)
+      unwrap(x)     -- fine: this `x` is a different value
+    Some(v) -> v
+  end
+  ```
+
+  the fact `is_None(x)` does not survive the `let`. The same rule applies to
+  scalar facts from an `if` guard.
+
+As everywhere else, these are checked under the definite-failure stance: an
+`Option` whose tag isn't known is simply not an error.
+
+---
+
 ## Where Refinements Resolve
 
 Refinement checking follows the same name resolution as the type checker:
@@ -290,9 +366,17 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
-  encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
-  it's deliberately omitted. Predicates over other types aren't supported.
+- **`Int`/`Bool` values, plus ADT constructor *tags*.** There are **no `Float`
+  value-refinements** — encoding floats as mathematical reals is unsound for
+  IEEE-754 arithmetic, so it's deliberately omitted. Over an ADT the checker
+  reasons about the constructor tag only (`is_Some(_)`), never the payload:
+  `{Option(Int) | is_Some(_)}` is checkable, a predicate about the `Int` inside
+  is not.
+- **A tag refinement is discharged at the call site, not carried through a
+  binding.** A constructor literal or a `match` narrowing establishes the fact
+  where the call is written. Forwarding a `{Option(Int) | is_Some(_)}`
+  *parameter* to another function expecting the same contract is not yet
+  recognized — the checker stays silent rather than assuming it.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
@@ -328,8 +412,9 @@ edges:
   0}` used to compile clean and enforce nothing. The checker now warns when a
   predicate applies a function outside its known vocabulary: the comparison,
   arithmetic, and boolean operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `+`,
-  `-`, `*`, `negate`, `not`, `&&`, `||`), the built-in `len`, and any function
-  annotated `@[measure]`. This is a Warning, not an Error — the program still
+  `-`, `*`, `negate`, `not`, `&&`, `||`), the built-in `len`, every ADT's
+  `is_<Ctor>` tester, and any function annotated `@[measure]`. This is a
+  Warning, not an Error — the program still
   compiles — but it tells you the refinement it's attached to is not actually
   checked, so you can annotate the function `@[measure]` or switch to a
   supported predicate.

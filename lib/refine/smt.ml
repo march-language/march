@@ -8,6 +8,7 @@ type sort = SInt | SBool | SData of string  (* a named (algebraic-datatype) sort
 type term =
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
   | App of string * term list (* uninterpreted-fn / datatype-constructor application *)
+  | IsCtor of string * term  (* Z3 datatype tester: ((_ is Ctor) x) *)
   | IntLit of int
   | BoolLit of bool
   | Add of term * term
@@ -37,6 +38,7 @@ let rec render = function
   | Const s -> s
   | App (f, []) -> f
   | App (f, args) -> Printf.sprintf "(%s %s)" f (String.concat " " (List.map render args))
+  | IsCtor (c, t) -> Printf.sprintf "((_ is %s) %s)" c (render t)
   | IntLit n -> if n < 0 then Printf.sprintf "(- %d)" (- n) else string_of_int n
   | BoolLit b -> if b then "true" else "false"
   | Add (a, b) -> Printf.sprintf "(+ %s %s)" (render a) (render b)
