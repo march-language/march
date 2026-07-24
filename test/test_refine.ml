@@ -69,6 +69,48 @@ let with_solver name f =
       | None -> Printf.printf "\n[skip] %s: no z3 on PATH\n" name
       | Some s -> Fun.protect ~finally:(fun () -> Solver.close s) (fun () -> f s))
 
+(* A VC whose preamble z3 rejects (unknown sort), used to prove that ONE bad VC
+   does not take the shared solver channel down with it.  Before the fix, z3's
+   `(error …)` line was read in place of the verdict, Solver.check raised, and
+   Refine killed + respawned the solver twice before marking z3 unavailable for
+   the WHOLE REST OF THE RUN — every later VC silently unchecked. *)
+let bad_preamble = "(declare-const bogus NoSuchSort)"
+
+let resync_suite =
+  [ with_solver "a z3 error yields Unknown, not a wrong verdict" (fun s ->
+        (* The verdict after an error is computed against an incomplete state,
+           so it must never be trusted: under definite-failure a bogus `sat`
+           would be reported as a violation — a false positive. *)
+        match Solver.check ~preamble:bad_preamble s sample_vc with
+        | Solver.Unknown -> ()
+        | Solver.Unsat -> Alcotest.fail "expected unknown, got unsat"
+        | Solver.Sat _ -> Alcotest.fail "expected unknown, got sat");
+
+    with_solver "the channel resyncs: a later VC still checks correctly" (fun s ->
+        ignore (Solver.check ~preamble:bad_preamble s sample_vc);
+        (* Same solver, next VC.  If the channel were desynchronized this reads
+           a stale line; if the solver were dead this raises. *)
+        match Solver.check s sample_vc with
+        | Solver.Unsat -> ()
+        | Solver.Sat _ -> Alcotest.fail "desynced: expected unsat, got sat"
+        | Solver.Unknown -> Alcotest.fail "desynced: expected unsat, got unknown");
+
+    with_solver "a bad VC does not disable checking for later ones (Refine)" (fun s ->
+        ignore s;
+        (* Drive the full Refine path, which is where the shutdown happened. *)
+        let root = Filename.get_temp_dir_name () in
+        (match Refine.discharge ~root ~preamble:bad_preamble sample_vc with
+         | Refine.Unverified -> ()
+         | Refine.Verified -> Alcotest.fail "expected unverified, got verified"
+         | Refine.Refuted _ -> Alcotest.fail "expected unverified, got refuted");
+        let later = Refine.discharge ~root sample_vc in
+        (* Reap the shared solver this test spawned, so the lifecycle suite's
+           child count isn't polluted by it. *)
+        Refine.shutdown ();
+        match later with
+        | Refine.Verified -> ()
+        | _ -> Alcotest.fail "later VC was silently left unchecked") ]
+
 let solver_suite =
   [ with_solver "valid VC is unsat (verified)" (fun s ->
         let vc : Smt.vc =
@@ -275,6 +317,7 @@ let () =
       ("smt", smt_suite);
       ("model", model_suite);
       ("solver", solver_suite);
+      ("solver-resync", resync_suite);
       ("cache", cache_suite);
       ("refine", refine_suite);
       ("lifecycle", lifecycle_suite) ]
