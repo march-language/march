@@ -985,6 +985,34 @@ let string_suite =
              \  fn g(u : String) : Int do\n\
              \    if u == \"a\" do nonempty(\"\") else 0 end\n\
              \  end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract rejects the empty literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"\") end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract accepts a non-empty literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"x\") end\n\
+              end\n"));
+
+    gated "an `s == \"\"` guard does not manufacture a length fact" (fun () ->
+        (* Distinctness from the empty literal does NOT establish a length —
+           there is no injectivity axiom.  Silence here is correct. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn f(s : String) : Int do\n\
+             \    if s == \"\" do 0 else nonempty(s) end\n\
+             \  end\n\
               end\n")) ]
 
 let () =
