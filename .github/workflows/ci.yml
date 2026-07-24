@@ -204,33 +204,50 @@ jobs:
   # 1090 checks silently skip today (confirmed identical across every historical
   # CI run — "no-march-binary", 0 matched). Wiring MARCH_BIN into that step
   # directly isn't viable either: each unique generated program is a real
-  # `--compile` (no CAS cache hit across distinct sources — measured ~3-4s each,
-  # dominated by clang recompiling the whole C runtime from source every
-  # invocation), so all 1090 would add tens of minutes to the fast Test step on
-  # every push. Instead this runs as its own job (parallel to the build matrix
-  # and cross-linux-oracle above, like they already run concurrently), sharded
-  # 4-way via alcotest's own case-number filtering (`test <suite> <cases>`) so no
-  # single shard is dominated by the two heavier cases (case 0 = println_arith at
-  # QCheck count 100; case 20 = opt_matrix at count 20 * 2 opt levels).
+  # `--compile` (no CAS cache hit across distinct sources — measured ~6.5s each
+  # on GH Actions' own runners (slower than a local dev machine), dominated by
+  # clang recompiling the whole C runtime from source every invocation), so all
+  # 1090 would add well over an hour to the fast Test step on every push.
+  # Instead this runs as its own job (parallel to the build matrix and
+  # cross-linux-oracle above, like they already run concurrently), sharded
+  # 8-way via alcotest's own case-number filtering (`test <suite> <cases>`),
+  # hand-balanced by measured per-case cost (not a naive index range) so no
+  # single shard is dominated by the two heavier cases (case 0 = println_arith
+  # at QCheck count 100; case 20 = opt_matrix at count 20 * 2 opt levels).
   # Follow-up (deliberately not done here, bigger scope): precompiling the C
-  # runtime once instead of per-`--compile` would cut every invocation from
-  # ~3-4s to a fraction of a second, making this whole job unnecessary — filed
-  # as a separate compiler build-path improvement in specs/todos.md.
+  # runtime once instead of per-`--compile` would cut every invocation to a
+  # fraction of a second, making this whole job unnecessary — filed as a
+  # separate compiler build-path improvement in specs/todos.md.
   property-oracle:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
+        # 8-way (not 4-way): the first version of this job was sized against
+        # local timing (~4s/compile on a 14-core Apple Silicon dev machine)
+        # and failed on real GH Actions hardware, which measured ~6.5s/compile
+        # (case 0 alone: 100 iterations in 10m48s) — shard 1 (250 cases) needed
+        # ~27min against a 25min timeout. Re-balanced by measured cost so the
+        # heaviest shard (150 cases) needs ~16min, comfortable margin under
+        # the step timeout below.
         include:
           - shard: 1
-            cases: "0,1,2,3"
+            cases: "0,20"
           - shard: 2
-            cases: "4,5,6,7,20"
+            cases: "1,2,3"
           - shard: 3
-            cases: "8,9,10,11,12,13"
+            cases: "4,5,6"
           - shard: 4
-            cases: "14,15,16,17,18,19"
+            cases: "7,8,9"
+          - shard: 5
+            cases: "10,11,12"
+          - shard: 6
+            cases: "13,14,15"
+          - shard: 7
+            cases: "16,17"
+          - shard: 8
+            cases: "18,19"
     steps:
       - uses: actions/checkout@v4
 
@@ -263,7 +280,7 @@ jobs:
           dune shutdown 2>/dev/null || true
           dune build bin/main.exe test/test_properties.exe
 
-      - name: Differential oracle (shard ${{ matrix.shard }}/4, cases ${{ matrix.cases }})
+      - name: Differential oracle (shard ${{ matrix.shard }}/8, cases ${{ matrix.cases }})
         timeout-minutes: 25
         run: |
           eval $(opam env)
