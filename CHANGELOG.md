@@ -42,6 +42,13 @@ git log is authoritative for exact commits.
   `MARCH_HTTP_EVLOOP=1` — automatically fall back to the previous
   single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
 
+### Fixed
+
+- Unreachable match arms are now reported inside functions with a declared
+  return type. `check_redundant_arms` ran only on the type-inference path, so
+  any `match` in checking position — which is every `match` in a function with
+  a return annotation, i.e. most of them — silently skipped the analysis.
+
 ### Documentation
 
 - Migrated 14 language-reference chapters (Type System, Pattern Matching,

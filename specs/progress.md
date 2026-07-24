@@ -283,6 +283,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-24, redundant-arm warnings restored on the checking-mode typecheck path)
+
+**Unreachable match arms are reported again in the common case.** `lib/typecheck/typecheck.ml` typechecks a `match` on two paths — inference mode (`infer_expr`, ~line 5495) and checking mode (`check_expr`'s `EMatch` arm, ~line 5324). Both called `check_exhaustiveness`; only the inference path also called `check_redundant_arms`. Since a function body with a declared return type is *checked* rather than inferred, every `match` inside a return-annotated function — i.e. most matches in real code — silently skipped unreachable-arm analysis. Demonstrated directly before the fix: `fn f(o : Option(Int)) : Int do match o do _ -> 9 ; Some(x) -> x ; None -> 0 end end` produced no diagnostic, while the identical body with the `: Int` annotation removed produced two `redundant_arm` warnings. One-line fix (add the missing call after `check_exhaustiveness` at the checking-mode site). Two regression tests pin both paths (`match_diagnostics` group, `test/test_compiler.ml`). Notably the restored check surfaced **zero** previously-hidden dead arms anywhere in `test/` or `stdlib/` — the suite's failure set is byte-identical before and after, verified by a revert-to-base control run.
+
+Feature list addition:
+
+- Redundant (unreachable) match-arm warnings on both the inference and checking typecheck paths
+
 ## Current State (as of 2026-07-24, CI caching pass: opam deps cached, build-once fan-out, and the C runtime precompiled instead of rebuilt per `--compile`)
 
 **Standing caveat on the green CI this pass produced: six tests are quarantined out of `dune runtest`, five of them on unresolved races.** Four (`task_burst_await`, `node_call_loopback`, `node_discovery`, `rpc_auto_enroll`) are blocked on the scheduler missed-wakeup deadlock, one (`signal_term_suppress`) on the `Signal.watch` deferred-dispatch race, and one (`forge`'s `build_check`) on an unrelated CI/local discrepancy plus a real constructor-resolution bug. The behavior each pins — fork-join `task_await`, multi-node RPC over TCP, SWIM discovery, RPC auto-enrollment, watched-`SIGTERM` suppression, `forge build` end-to-end — is therefore **not verified on any commit**, and a regression in it would not turn CI red. A nightly `continue-on-error` lane (`.github/workflows/nightly.yml`'s `quarantined` job) runs all six purely to signal when they start passing again; it reports, it does not fix, and it gates nothing. Full inventory table, root-cause grouping and un-quarantine procedure: see the "Quarantined tests — coverage that is currently DARK" section at the top of `specs/todos.md`.

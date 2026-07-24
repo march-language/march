@@ -8289,8 +8289,57 @@ let test_entry_qual_annotated_same_tvar_ok () =
   end|} in
   Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
 
+(* A match in CHECKING position (function with a declared return type) must
+   still get redundant-arm warnings.  check_expr's EMatch arm called only
+   check_exhaustiveness, never check_redundant_arms, so every match inside an
+   annotated function silently skipped the analysis. *)
+let test_redundant_arm_in_checking_position () =
+  let ctx = typecheck {|mod T do
+    fn f(o : Option(Int)) : Int do
+      match o do
+        _ -> 9
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "redundant arm reported in checking position" true
+    has_redundant
+
+(* Control: the same match in INFERENCE position (no return annotation) already
+   warned before this fix.  Pins that the fix does not regress it. *)
+let test_redundant_arm_in_inference_position () =
+  let ctx = typecheck {|mod T do
+    fn f(o) do
+      match o do
+        _ -> 9
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "redundant arm reported in inference position" true
+    has_redundant
+
 let compiler_suites =
   [
+      ( "match_diagnostics",
+        [
+          Alcotest.test_case "redundant arm warned in checking position" `Quick
+            test_redundant_arm_in_checking_position;
+          Alcotest.test_case "redundant arm warned in inference position" `Quick
+            test_redundant_arm_in_inference_position;
+        ] );
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick

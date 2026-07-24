@@ -5336,7 +5336,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         with_offer_refinement env scrut br (fun () ->
           check_expr env' br.branch_body expected ~reason)
       );
-    check_exhaustiveness env msp scrut_ty branches
+    check_exhaustiveness env msp scrut_ty branches;
+    check_redundant_arms env scrut_ty branches
 
   (* Constructor in check mode: when the bare constructor name is ambiguous
      across types, use the expected type to pick the candidate whose parent
