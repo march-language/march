@@ -117,10 +117,8 @@ let predicate_operators =
 
 let is_predicate_operator (m : string) : bool = List.mem m predicate_operators
 
-(* True iff the checker attaches meaning to [m] applied inside a predicate.
-   Extended by the ADT-tag feature with its constructor testers. *)
-let known_predicate_fn (m : string) : bool =
-  is_predicate_operator m || is_measure m
+(* [known_predicate_fn] is defined below [adt_ctors], since the vocabulary now
+   includes the auto-derived `is_<Ctor>` testers. *)
 
 (* Conservative syntactic non-negativity of a measure body: every return path is
    a non-negative literal, a sum/product of non-negatives, or a call to a measure
@@ -145,6 +143,28 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
    type params / other ADTs -> opaque "Elem", Int/Bool concrete). *)
 let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
 let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(* ── Constructor testers ───────────────────────────────────────────────────
+   Every constructor of every registered ADT implicitly gains an `is_<Ctor>`
+   predicate: "is_Some" -> Some "Some", when `Some` is a constructor of some
+   registered ADT.  The match is EXACT-CASE, so `is_some` (the lowercase
+   stdlib helper `Option.is_some`) is NOT a tester: a misspelling keeps drawing
+   the unrecognized-predicate warning rather than silently meaning something. *)
+let ctor_of_tester (m : string) : string option =
+  let pfx = "is_" in
+  let n = String.length pfx in
+  if String.length m <= n || String.sub m 0 n <> pfx then None
+  else
+    let ctor = String.sub m n (String.length m - n) in
+    let known =
+      Hashtbl.fold (fun _ ctors acc -> acc || List.mem ctor ctors) adt_ctors false
+    in
+    if known then Some ctor else None
+
+(* True iff the checker attaches meaning to [m] applied inside a predicate. *)
+let known_predicate_fn (m : string) : bool =
+  is_predicate_operator m || is_measure m || ctor_of_tester m <> None
+
 (* measures we soundly axiomatize: name -> its argument ADT name. *)
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
 let is_axiom_measure m = Hashtbl.mem axiom_measures m
@@ -480,14 +500,25 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
     List.iter (fun s -> Hashtbl.replace measure_preamble_sorts s ()) covered
   end
 
-(* The built-in `List(a)` modelled as an ADT so user measures over lists are
-   axiomatised exactly like user ADTs: `Nil | Cons(a, List(a))`, element opaque
-   (`Elem`), tail recursive (`List`).  Seeded before user types so a user-defined
-   `List` (unusual) still overrides. *)
+(* The built-in ADTs, modelled so user measures and constructor testers over
+   them work exactly like over user ADTs.  `List(a)` = `Nil | Cons(a, List(a))`
+   with the element opaque (`Elem`) and the tail recursive.  `Option(a)` and
+   `Result(a, e)` have no `type` declaration anywhere — not in the stdlib
+   either; they are pre-registered by the typechecker (see [builtin_ctors] in
+   typecheck.ml), so the refinement checker must seed them the same way or
+   `is_Some` would name nothing.  Payloads are opaque (`Elem`): a constructor
+   tester cares about the tag, not the contents.  Seeded before user types so a
+   user-defined `List`/`Option` (unusual) still overrides. *)
 let register_builtin_adts () : unit =
   Hashtbl.replace adt_ctors (adt_sort_name "List") [ "Nil"; "Cons" ];
   Hashtbl.replace ctor_field_sorts "Nil" [];
-  Hashtbl.replace ctor_field_sorts "Cons" [ Smt.SData "Elem"; Smt.SData (adt_sort_name "List") ]
+  Hashtbl.replace ctor_field_sorts "Cons" [ Smt.SData "Elem"; Smt.SData (adt_sort_name "List") ];
+  Hashtbl.replace adt_ctors (adt_sort_name "Option") [ "None"; "Some" ];
+  Hashtbl.replace ctor_field_sorts "None" [];
+  Hashtbl.replace ctor_field_sorts "Some" [ Smt.SData "Elem" ];
+  Hashtbl.replace adt_ctors (adt_sort_name "Result") [ "Ok"; "Err" ];
+  Hashtbl.replace ctor_field_sorts "Ok" [ Smt.SData "Elem" ];
+  Hashtbl.replace ctor_field_sorts "Err" [ Smt.SData "Elem" ]
 
 (* Build type_preamble from all registered TDRecord sorts, excluding any sorts
    already declared in measure_preamble (tracked in measure_preamble_sorts). *)

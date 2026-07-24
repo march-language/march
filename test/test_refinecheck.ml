@@ -969,6 +969,24 @@ let vocab_suite =
              \  fn main() : Int do f(3) end\n\
               end\n")) ]
 
+(* ── ADT constructor tags ────────────────────────────────────────────────── *)
+let adt_suite =
+  [ gated "`is_Some` is recognized vocabulary (no warning)" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_Some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n"));
+
+    gated "a misspelled lowercase `is_some` still warns" (fun () ->
+        Alcotest.(check bool) "warning" true
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -987,5 +1005,6 @@ let () =
       ("record-postconditions", record_suite);
       ("guard-path-sensitivity", guard_suite);
       ("tier0-postcond", tier0_suite);
-      ("predicate-vocab", vocab_suite) ]
+      ("predicate-vocab", vocab_suite);
+      ("adt-tags", adt_suite) ]
 
