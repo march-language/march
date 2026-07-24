@@ -3653,7 +3653,14 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        [], t0)
 
   | Ast.PatAs (inner, name, _) ->
-    let bindings, t = infer_pattern env inner in
+    (* Thread [expected] into the aliased pattern, exactly as [PatTuple] and
+       constructor arguments do.  Dropping it sent a record pattern under an
+       alias (`{ code: 404 } as w`) down the CLOSED-synthesis branch, so `w`
+       got the narrow `{ code : Int }` instead of the scrutinee's own type —
+       two misleading errors (`expected { code : Int } but got
+       { code : Int, msg : String }` and `this record does not have a field
+       called msg`), neither pointing at the real cause. *)
+    let bindings, t = infer_pattern ?expected env inner in
     Hashtbl.replace env.type_map name.span t;
     (name.txt, Mono t) :: bindings, t
 

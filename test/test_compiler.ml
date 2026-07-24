@@ -8369,6 +8369,36 @@ let test_partial_record_pattern_typechecks () =
   end|} in
   Alcotest.(check bool) "partial record pattern: no errors" false (has_errors ctx)
 
+(* `<record pattern> as name`: the PatAs arm of infer_pattern dropped the
+   EXPECTED type, so the record pattern fell into the closed-synthesis branch
+   and the alias got the narrow `{ code : Int }` — two misleading errors on a
+   program that runs fine, and the single most natural reason to write an
+   as-pattern over a record. *)
+let test_record_pattern_under_alias_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { code : Int, msg : String }) : String do
+      match r do
+        { code: 404 } as w -> w.msg
+        _                  -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "record pattern under an alias: no errors" false
+    (has_errors ctx)
+
+(* Same, with an or-pattern of records under the alias. *)
+let test_or_of_records_under_alias_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { code : Int, msg : String }) : String do
+      match r do
+        ({ code: 404 } | { code: 410 }) as w -> w.msg
+        _                                    -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "or-of-records under an alias: no errors" false
+    (has_errors ctx)
+
 (* A field the record does not have must still be an error. *)
 let test_record_pattern_unknown_field_rejected () =
   let ctx = typecheck {|mod T do
@@ -8512,6 +8542,10 @@ let compiler_suites =
             test_record_pattern_arm_not_flagged_redundant;
           Alcotest.test_case "partial record pattern typechecks" `Quick
             test_partial_record_pattern_typechecks;
+          Alcotest.test_case "record pattern under an alias typechecks" `Quick
+            test_record_pattern_under_alias_typechecks;
+          Alcotest.test_case "or-of-records under an alias typechecks" `Quick
+            test_or_of_records_under_alias_typechecks;
           Alcotest.test_case "record pattern unknown field rejected" `Quick
             test_record_pattern_unknown_field_rejected;
           Alcotest.test_case "or-pattern binding rejected" `Quick
