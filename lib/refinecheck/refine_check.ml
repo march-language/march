@@ -780,10 +780,12 @@ let is_ret_suffix (s : string) : bool =
 
 (* Render one model entry.  Internal SMT constants use `$` to join a symbol to
    its subject:
-     - a measure application, "len$xs"      -> "len(xs) = 3"
-     - a propagated call result, "f$ret1"   -> "f() returns -1"   (the `ret1`
-       part is an internal freshness tag, NOT an argument — rendering it as
-       "f(ret1)" reads as a call to `f` with a variable named `ret1`).
+     - a measure application, "len$xs"        -> "len(xs) = 3"
+     - a propagated call result, "f$ret1"     -> "f() can return -1"   (the
+       `ret1` part is an internal freshness tag, NOT an argument — rendering
+       it as "f(ret1)" reads as a call to `f` with a variable named `ret1`).
+       The model gives a WITNESS satisfying f's postcondition, not a claim
+       about what f actually returns, so the phrasing must not assert fact.
    Anything else prints as "k = v". *)
 let render_model_entry (k, v) : string =
   let v' = pretty_smt_value v in
@@ -791,7 +793,7 @@ let render_model_entry (k, v) : string =
   | Some i ->
     let head = String.sub k 0 i in
     let tail = String.sub k (i + 1) (String.length k - i - 1) in
-    if is_ret_suffix tail then Printf.sprintf "%s() returns %s" head v'
+    if is_ret_suffix tail then Printf.sprintf "%s() can return %s" head v'
     else Printf.sprintf "%s(%s) = %s" head tail v'
   | None -> Printf.sprintf "%s = %s" k v'
 
@@ -1659,7 +1661,13 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) -> go e
   | A.ESend (a, b, _) -> go a; go b
-  | A.ELetQ (_, e1, e2, _) -> go e1; go e2
+  | A.ELetQ (p, e1, e2, _) ->
+    go e1;
+    (* `let? p = e1` binds p's names in the Ok payload before continuing into
+       e2 — a binding construct exactly like ELet/ELam/EMatch, so it must
+       shadow any same-named outer refined local before e2 is visited. *)
+    let sc = scope_shadow sc (pat_binders p) in
+    visit ~root errctx defs ctx path sc e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 

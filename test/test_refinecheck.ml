@@ -861,6 +861,23 @@ let tier0_suite =
              \    let c = 5\n\
              \    takepos(c)\n\
              \  end\n\
+              end\n"));
+
+    gated "a let? binder shadows a refined outer local" (fun () ->
+        (* `let? c = ok5()` rebinds `c` to the Ok payload (5) before the
+           continuation runs; the outer refined `c` (from `neg()`) must not
+           leak into `takepos(c)`. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod LetQ do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn ok5() : Result(Int, String) do Ok(5) end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Result(Int, String) do\n\
+             \    let c = neg()\n\
+             \    let? c = ok5()\n\
+             \    Ok(takepos(c))\n\
+             \  end\n\
               end\n")) ]
 
 let () =
