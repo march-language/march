@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Refinement types now support `String`. `len` measures a String as well as a
+  list, so `{String | len(_) > 0}` and `{String | _ != ""}` are checkable
+  contracts and passing an empty string literal to a non-empty parameter is a
+  compile error. `len` counts bytes, matching the `string_length` builtin.
+  Which `len` applies is decided by the value's declared base type, so list and
+  String uses coexist unambiguously. The encoding models `String` as an opaque
+  sort and deliberately avoids SMT string theory, so there is no prefix/suffix/
+  contains/regex reasoning, and an `s == ""` guard does not establish a length
+  in the else-branch — see `specs/lang/refinement-types.md` for the full limits.
+
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
   parameter is a compile error. Applies to both `takepos(neg())` and

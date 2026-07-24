@@ -83,6 +83,8 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
 connectives `&& || not`, integer/bool literals, and **measures** (below).
+`String` values are supported to the narrower extent described in
+[String Refinements](#string-refinements): `len` and `==`/`!=` against literals.
 
 ---
 
@@ -242,6 +244,59 @@ Measures may call **other measures** and be **mutually recursive** (e.g. a
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons structurally just like `size`.
 
+## String Refinements
+
+`len` also measures a **String**, so an emptiness contract is expressible and
+checkable:
+
+```march
+fn slug(s : {String | len(_) > 0}) : String do ... end
+fn code(s : {String | len(_) <= 3}) : String do ... end
+
+fn main() do
+  slug("")        -- rejected: len("") is 0, so the predicate can never hold
+  slug("hello")   -- fine
+  code("abcd")    -- rejected: len("abcd") is 4
+end
+```
+
+Equality against a **string literal** works too, so the contract can be written
+the other way round:
+
+```march
+fn slug(s : {String | _ != ""}) : String do ... end
+```
+
+`len` is **overloaded** — the same name measures a list and a String. Which one
+applies is decided by the *declared* base type of the value being measured, never
+guessed from context, so `{Int | _ < len(xs)}` over a `List` and
+`{String | len(_) > 0}` over a `String` coexist without ambiguity. If the checker
+cannot tell, it skips the obligation rather than assume.
+
+`len` counts **bytes**, matching the `string_length` builtin exactly (March has no
+codepoint-length primitive). For non-ASCII text a character is several bytes:
+`len("é")` is 2, not 1.
+
+### What String refinements do *not* do
+
+The encoding models `String` as an **opaque sort** with `len` as an uninterpreted
+function — deliberately outside any SMT string theory, so queries stay decidable
+and cheap. Two consequences are worth stating plainly:
+
+- **A `== ""` guard does not establish a length.** In
+
+  ```march
+  if s == "" do 0 else nonempty(s) end
+  ```
+
+  the else-branch knows only that `s` is *distinct from* the empty literal. There
+  is no axiom relating a string's identity to its length, so `len(s) > 0` does not
+  follow and the call is silently skipped. This is a real gap, not an oversight:
+  closing it needs an injectivity axiom whose cost was judged not worth it.
+- **No prefix, suffix, contains, concatenation, or regex reasoning.** Only `len`
+  and `==`/`!=` against literals are understood. Any other string operation in a
+  predicate makes the obligation unreflectable, and unreflectable means skipped.
+
 ### The measure soundness gate
 
 A `@[measure]` is a *promise* that the function is a **total, terminating, pure**
@@ -290,9 +345,11 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
+- **`Int`, `Bool`, and `String`.** There are **no `Float` value-refinements** —
   encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
-  it's deliberately omitted. Predicates over other types aren't supported.
+  it's deliberately omitted. `String` supports only `len` and literal
+  equality (see [String Refinements](#string-refinements)); refinements over
+  other types aren't supported.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
