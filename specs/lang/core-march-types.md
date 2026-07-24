@@ -904,7 +904,11 @@ live rule ((P-Wild)/(P-Var)/(P-Lit)/(P-Con)/(P-Tuple)/(P-Atom) added across
 Tasks 1–3; (P-As) added 2026-07-24, once `parser.mly` gained an as-pattern
 production — see the note after it below for the reachability history);
 (P-Record) was added the same day, once `parser.mly` gained a record-pattern
-production — see the note after (P-As) below.
+production — see the note after (P-As) below. (P-Or) was added in the
+record-matching-gaps plan's Task 5 (2026-07-24), the only one of these that
+adds a genuinely NEW `Ast.pattern` constructor rather than wiring up one
+that already existed — see the rule itself, just above the note after
+(P-Record), for the binding restriction and its rationale.
 
 ```
 (P-Wild)  ──────────────────────────────           typecheck.ml:2569–2570
@@ -1069,6 +1073,37 @@ production — see the note after (P-As) below.
            --   partial pattern reaching this fallback (rather than the
            --   expected-known rule above) is still closed, the same
            --   restriction (P-Tuple) has for arity.
+
+(P-Or)    ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ  (i = 1..n, n ≥ 1)                   typecheck.ml:3609–3642
+          unify(τ₁, τᵢ)  for each i > 1
+          Γ₁, …, Γₙ each bind ZERO names, else reject
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ PatOr [p₁…pₙ] : τ₁ ⊣ Γ
+          -- every alternative is inferred independently (threading the same
+          --   `~expected`, if any, into each) and unified against the FIRST
+          --   alternative's type, so `1 | 2 | 3` and `Red | Green` both
+          --   require every alternative to agree on one type — a mismatched
+          --   alternative (e.g. `1 | "x"`) is an ordinary unify error, not a
+          --   dedicated diagnostic.
+          -- the bindings check is NOT a type-level constraint (nothing to
+          --   unify) — it is a hard reject of ANY alternative that binds a
+          --   variable at all: "Or-pattern alternatives cannot bind
+          --   variables (`x`)." (code `or_pattern_binding`). The reason is
+          --   operational, not type-theoretic: the arm body is shared across
+          --   every alternative via a single 0-arg join point in lowering
+          --   (`lower_match.ml`'s `expand_or_rows`/`hoist_fallback_jp`),
+          --   which has nowhere to carry a per-alternative binding into that
+          --   shared call — `A(x) | B(x) -> x` would need a DIFFERENT `x`
+          --   bound depending on which alternative matched, and the compiler
+          --   has no mechanism (yet — an n-ary join point would suffice,
+          --   filed in `specs/todos.md`) to pass one in. Consequently the
+          --   overall result binding list is always `Γ` unchanged (`[]`),
+          --   never `Γ, x:τ` — this is the one pattern-typing rule that can
+          --   never introduce a name, unlike every other rule above.
+          -- cf. operational match(PatOr, v), core-march.md — tries each
+          --   alternative in order, first match wins, exactly mirroring
+          --   `is_useful`/`norm_pat_rows`'s (§4.1) treatment of an or-pattern
+          --   as several exhaustiveness/redundancy ROWS rather than one.
 ```
 
 **`(P-As)` and `(P-Record)` became live rules 2026-07-24** (see both rules

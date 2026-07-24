@@ -1044,6 +1044,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/record_pattern_partial.expected native_record_pattern_partial.out)))
 
+; ── Or-patterns must compile ─────────────────────────────────────────
+; compile_matrix splits a row whose first column is a PatOr into one row per
+; alternative.  The arm body is hoisted into a shared 0-arg join point first,
+; so N alternatives do not emit N copies of the body — the same blowup
+; hoist_fallback_jp exists to prevent for fallbacks.
+(rule
+ (targets native_or_pattern native_or_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/or_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_or_pattern
+        native/or_pattern.march)
+   (with-stdout-to native_or_pattern.out
+        (system "./native_or_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/or_pattern.expected native_or_pattern.out)))
+
 ; A WATCHED SIGTERM must NOT terminate the process (default graceful-shutdown is
 ; suppressed on the first delivery): the program runs its handler and survives to
 ; exit 0.  An unwatched SIGTERM still kills the process (that half is verified

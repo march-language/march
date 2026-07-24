@@ -1,0 +1,8 @@
+mod P32OrPattern do
+  fn main() do
+    match 1 do
+      1 | 2 -> 10
+      _     -> 0
+    end
+  end
+end

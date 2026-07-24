@@ -528,6 +528,7 @@ let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl
     | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) -> List.concat_map pat_vars ps
     | A.PatAs (p, n, _) -> n.A.txt :: pat_vars p
     | A.PatRecord (fs, _) -> List.concat_map (fun (_, p) -> pat_vars p) fs
+    | A.PatOr (ps, _) -> List.concat_map pat_vars ps
     | A.PatWild _ | A.PatLit _ -> []
   in
   iter_all

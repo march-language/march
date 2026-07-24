@@ -1196,6 +1196,16 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
      | None -> None
      | Some bs -> Some ((alias.txt, v) :: bs))
 
+  | PatOr (alts, _), _ ->  (* match(PatOr) — §4.3, first matching alternative wins *)
+    let rec try_alts = function
+      | [] -> None
+      | p :: rest ->
+        (match match_pattern v p with
+         | Some bs -> Some bs
+         | None -> try_alts rest)
+    in
+    try_alts alts
+
 (** Match a list of patterns against a list of values. *)
 and match_list (pats : pattern list) (vs : value list) : (string * value) list option =
   List.fold_left2 (fun acc p v ->

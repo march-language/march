@@ -309,6 +309,73 @@ does, since `simple_pattern` admits a parenthesized full `pattern`.
 
 ---
 
+## Or Patterns
+
+`p1 | p2 | p3` matches an arm against several alternatives, trying each in
+order and running the shared arm body on the first one that matches:
+
+```march
+match n do
+  1 | 2 | 3 -> "small"
+  _         -> "big"
+end
+
+match color do
+  Red | Green -> "warm"
+  Blue        -> "cool"
+end
+```
+
+Alternatives can be literals, nullary/atom constructors, or any other
+pattern shape — the only restriction is that **no alternative may bind a
+variable**:
+
+```march
+type E = A(Int) | B(Int)
+
+match e do
+  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+end
+```
+
+This is rejected, not silently mishandled, because all alternatives share
+ONE arm body: if `A(x)` matched, `x` is bound; if `B(x)` matched instead, a
+*different* `x` would need to be bound, and the compiler has nowhere to put
+a per-alternative binding when the body is shared. (Internally, the arm
+body is hoisted into a single zero-argument join point that every
+alternative jumps to — exactly the mechanism that keeps `1 | 2 | 3 -> body`
+from emitting three copies of `body`, but which has no way to carry a bound
+value into that shared call.)
+
+If you need per-alternative bindings, either split into separate arms:
+
+```march
+match e do
+  A(x) -> x
+  B(x) -> x
+end
+```
+
+or match the common shape and test the difference with a `when` guard:
+
+```march
+match e do
+  x when is_a_or_b(x) -> extract(x)
+end
+```
+
+Exhaustiveness and redundancy checking see through or-patterns: `Red |
+Green` followed by a `Blue` arm is exhaustive for a three-constructor
+`Color`, and an arm that only repeats alternatives already covered by an
+earlier arm is flagged as unreachable exactly as any other redundant arm
+would be.
+
+An or-pattern nests beneath `as`: `1 | 2 as n` parses as `(1 | 2) as n`
+(binding `n` to the whole matched value is fine — only the alternatives
+themselves may not bind).
+
+---
+
 ## Guards
 
 Guards add a boolean condition to a pattern arm with `when`:

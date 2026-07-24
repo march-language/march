@@ -3606,6 +3606,40 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
          List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
        !bindings, TRecord sorted)
 
+  | Ast.PatOr (alts, sp) ->
+    (* Every alternative must have the same type.  Bindings are rejected: the
+       arm body is shared across alternatives via a 0-arg join point in
+       lowering, which has nowhere to put per-alternative bindings.
+       [span_of_pat] isn't defined until later in this file (it's used by
+       exhaustiveness checking, which runs after inference), so the
+       diagnostic points at the whole or-pattern's span [sp] rather than at
+       the specific offending sub-pattern. *)
+    let results = List.map (fun p -> infer_pattern ?expected env p) alts in
+    (match results with
+     | [] -> [], fresh_var env.level
+     | (_, t0) :: rest ->
+       List.iter (fun (_, t) ->
+         unify env ~span:sp ~reason:(Some (RMatchArm sp)) t0 t) rest;
+       let binders = List.concat_map fst results in
+       (match binders with
+        | [] -> ()
+        | (n, _) :: _ ->
+          Err.report env.errors
+            { Err.severity = Error; span = sp;
+              message =
+                Printf.sprintf
+                  "Or-pattern alternatives cannot bind variables (`%s`)." n;
+              labels = [];
+              notes  =
+                ["Every alternative of `p1 | p2` shares one arm body, so a \
+                  name bound in one alternative would be undefined when \
+                  another matches.";
+                 "Split this into separate arms, or match the common shape \
+                  and test the difference in a `when` guard."];
+              code = Some "or_pattern_binding";
+              fix  = None });
+       [], t0)
+
   | Ast.PatAs (inner, name, _) ->
     let bindings, t = infer_pattern env inner in
     Hashtbl.replace env.type_map name.span t;
@@ -3676,6 +3710,7 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
   | Ast.PatRecord _          -> SPWild   (* conservative *)
+  | Ast.PatOr _              -> SPWild   (* conservative: see norm_pat_rows *)
   | Ast.PatCon  (n, args)    ->
     (* Qualified constructor patterns ("MarchType.TBool", "Ast.Query")
        carry their full dotted text; exhaustiveness compares against the
@@ -3688,6 +3723,16 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
+
+(** Expand a pattern into the set of [spat] rows it covers.  An or-pattern
+    contributes one row per alternative; every other pattern contributes
+    exactly one.  Nested or-patterns (inside a constructor argument or tuple
+    element) are normalised to [SPWild] by [norm_pat] — conservative, so
+    coverage is under-reported rather than over-reported. *)
+let norm_pat_rows (p : Ast.pattern) : spat list =
+  match p with
+  | Ast.PatOr (alts, _) -> List.map norm_pat alts
+  | _ -> [norm_pat p]
 
 (** All [(ctor_name, arity)] pairs for a type name, in declaration order.
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
@@ -4010,6 +4055,7 @@ let span_of_pat : Ast.pattern -> Ast.span = function
   | Ast.PatLit  (_, sp)     -> sp
   | Ast.PatRecord (_, sp)   -> sp
   | Ast.PatAs   (_, _, sp)  -> sp
+  | Ast.PatOr   (_, sp)     -> sp
 
 (** Check if [row] is useful relative to [matrix] for scrutinee types [tys].
     Returns false iff every value matched by [row] is already covered by [matrix]. *)
@@ -4093,6 +4139,7 @@ let rec pat_has_record (p : Ast.pattern) : bool =
   match p with
   | Ast.PatRecord _ -> true
   | Ast.PatAs (inner, _, _) -> pat_has_record inner
+  | Ast.PatOr (ps, _) -> List.exists pat_has_record ps
   | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
     List.exists pat_has_record ps
   | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
@@ -4106,9 +4153,12 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let prefix = ref [] in
   List.iter (fun (br : Ast.branch) ->
-    let arm_row = [norm_pat br.branch_pat] in
+    (* An or-pattern contributes one row per alternative; the arm is
+       redundant only if EVERY alternative is already subsumed by the
+       prefix — a single live alternative keeps the whole arm reachable. *)
+    let arm_rows = List.map (fun r -> [r]) (norm_pat_rows br.branch_pat) in
     if br.branch_guard = None && not (pat_has_record br.branch_pat) then begin
-      if not (is_useful env [scrut_ty] !prefix arm_row) then begin
+      if not (List.exists (fun row -> is_useful env [scrut_ty] !prefix row) arm_rows) then begin
         let pat_sp   = span_of_pat br.branch_pat in
         let body_sp  = span_of_expr br.branch_body in
         let arm_span = { pat_sp with
@@ -4124,7 +4174,7 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
               start_line = arm_span.March_ast.Ast.start_line;
               end_line   = arm_span.March_ast.Ast.end_line }) }
       end;
-      prefix := !prefix @ [arm_row]
+      prefix := !prefix @ arm_rows
     end
   ) branches
 
@@ -4155,11 +4205,11 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
        match can never fall through → safe. Otherwise record the span so
        [check_no_panic_module] rejects it; no global Warning here. *)
     let guardless_matrix =
-      List.filter_map
+      List.concat_map
         (fun (br : Ast.branch) ->
           match br.branch_guard with
-          | None   -> Some [norm_pat br.branch_pat]
-          | Some _ -> None)
+          | None   -> List.map (fun r -> [r]) (norm_pat_rows br.branch_pat)
+          | Some _ -> [])
         branches
     in
     match find_missing_mc env [scrut_ty] guardless_matrix with
@@ -4169,7 +4219,10 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
   end
   else begin
     let matrix =
-      List.map (fun (br : Ast.branch) -> [norm_pat br.branch_pat]) branches
+      List.concat_map
+        (fun (br : Ast.branch) ->
+          List.map (fun r -> [r]) (norm_pat_rows br.branch_pat))
+        branches
     in
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
@@ -5964,6 +6017,7 @@ and free_vars_pattern (p : Ast.pattern) : string list =
   | Ast.PatRecord (fields, _) -> List.concat_map (fun (_, p) -> free_vars_pattern p) fields
   | Ast.PatAs (p, n, _) -> n.txt :: free_vars_pattern p
   | Ast.PatAtom (_, ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatOr (ps, _) -> List.concat_map free_vars_pattern ps
 
 (** Emit unused-variable warnings for fn params not referenced in the body.
     The wildcard [_] and names starting with [_] are silently ignored. *)
@@ -7803,6 +7857,7 @@ let unqualified_module_deps
     | Ast.PatTuple (ps, _) -> List.iter pat ps
     | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> pat p) fs
     | Ast.PatAs (p, _, _) -> pat p
+    | Ast.PatOr (ps, _) -> List.iter pat ps
     | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> ()
   in
   let param (p : Ast.param) = oty p.Ast.param_ty in
@@ -9602,6 +9657,9 @@ let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
     List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
       StringSet.empty fields
   | Ast.PatAs (p, v, _) -> StringSet.add v.txt (collect_pattern_vars p)
+  | Ast.PatOr (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
 
 (** True if [expr] is provably structurally smaller than some function parameter.
     - [params]: the set of function parameter variable names.

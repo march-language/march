@@ -4627,8 +4627,52 @@ let test_eval_record_pattern_partial () =
     (match call_fn env "h" [] with
      | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
 
+(* Or-patterns: alternatives separated by `|` in a single arm. *)
+let test_eval_or_pattern_literals () =
+  let env = eval_module {|mod T do
+    fn f(n) do
+      match n do
+        1 | 2 | 3 -> "small"
+        _         -> "big"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "1 -> small" "small"
+    (match call_fn env "f" [March_eval.Eval.VInt 1] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "3 -> small" "small"
+    (match call_fn env "f" [March_eval.Eval.VInt 3] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "9 -> big" "big"
+    (match call_fn env "f" [March_eval.Eval.VInt 9] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+let test_eval_or_pattern_nullary_ctors () =
+  let env = eval_module {|mod T do
+    type Color = Red | Green | Blue
+    fn warm(c) do
+      match c do
+        Red | Green -> true
+        Blue        -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Red is warm" true
+    (match call_fn env "warm" [March_eval.Eval.VCon ("Red", [])] with
+     | March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool");
+  Alcotest.(check bool) "Blue is not warm" false
+    (match call_fn env "warm" [March_eval.Eval.VCon ("Blue", [])] with
+     | March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
+
 let eval_suites =
   [
+      ( "or_patterns",
+        [
+          Alcotest.test_case "or-pattern over literals" `Quick
+            test_eval_or_pattern_literals;
+          Alcotest.test_case "or-pattern over nullary constructors" `Quick
+            test_eval_or_pattern_nullary_ctors;
+        ] );
       ( "record_patterns",
         [
           Alcotest.test_case "record pattern in a match arm" `Quick

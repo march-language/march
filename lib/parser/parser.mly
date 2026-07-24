@@ -1453,7 +1453,17 @@ pattern:
     { PatAs (p, n, mk_span ($loc)) }
   | p = pattern_no_as { p }
 
+(* Or-patterns: `1 | 2 | 3`.  PIPE is also `arm_sep` (parser.mly:1409), but
+   an arm separator only ever follows a COMPLETE branch — one that has
+   already consumed its ARROW and body — so LR(1) distinguishes the two uses
+   without a conflict.  Verified: adding this production leaves menhir's
+   conflict count unchanged at 9. *)
 pattern_no_as:
+  | p = pattern_alt; PIPE; ps = separated_nonempty_list(PIPE, pattern_alt)
+    { PatOr (p :: ps, mk_span ($loc)) }
+  | p = pattern_alt { p }
+
+pattern_alt:
   | con = qualified_upper; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatCon (con, ps) }
   | con = qualified_upper

@@ -1,0 +1,25 @@
+mod OrPattern do
+type Color = Red | Green | Blue
+
+fn size(n : Int) : String do
+  match n do
+    1 | 2 | 3 -> "small"
+    _         -> "big"
+  end
+end
+
+fn warm(c : Color) : Bool do
+  match c do
+    Red | Green -> true
+    Blue        -> false
+  end
+end
+
+fn main() : Unit do
+  println(size(1))
+  println(size(3))
+  println(size(9))
+  println(bool_to_string(warm(Red)))
+  println(bool_to_string(warm(Blue)))
+end
+end

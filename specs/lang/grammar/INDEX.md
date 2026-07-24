@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p31 parse, 12 reject — r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31)
+# Grammar corpus index (p01–p32 parse, 12 reject — r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 43/43 — 31 parse, 12
+Exit 0 iff every program behaves as declared (currently 44/44 — 32 parse, 12
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -87,6 +87,7 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p29_as_pattern.march`](parse/p29_as_pattern.march) | §6.2 — `pattern`'s as-pattern layer | `match 1 do x as y -> y end` — `pattern: pattern_no_as AS lower_name` builds `PatAs`. Was `reject/r08` until as-patterns were implemented (2026-07-24); the reachability gap it documented is closed. |
 | [`parse/p30_record_pattern_in_arm.march`](parse/p30_record_pattern_in_arm.march) | §6.2 — `simple_pattern`'s record-pattern production / §6.3 — `PatRecord` reachability | `match r do { x } -> x end` against `r = { x: 1 }` — `simple_pattern: LBRACE record_field_pat... RBRACE` builds `PatRecord`. Was `reject/r02` (the scrutinee there was the ill-typed literal `1`, since a record pattern had no way to parse at all; here it is a real record so the program is well-typed per this corpus's own rule) until record patterns were implemented (2026-07-24); the reachability gap it documented is closed. |
 | [`parse/p31_record_pattern_in_let.march`](parse/p31_record_pattern_in_let.march) | §6.2 — record patterns also reachable through `let`'s `simple_pattern` call site | `let { x } = r; x` — the same `LBRACE`-led production, reached through the `let`-binding pattern position rather than a `match` arm. Was `reject/r07`; retired for the same reason as `p30`. |
+| [`parse/p32_or_pattern.march`](parse/p32_or_pattern.march) | §6.2 — `pattern_no_as`'s or-pattern layer (`pattern_alt PIPE separated_nonempty_list(PIPE, pattern_alt)`) | `match 1 do 1 \| 2 -> 10; _ -> 0 end` — builds `PatOr [PatLit 1; PatLit 2]`. `PIPE` also serves as `arm_sep`, but an arm separator only ever follows a complete branch (post-`->`), so LR(1) distinguishes the two uses with no new conflict (menhir's shift/reduce count stays at 9). The binding-rejection counterpart (`A(x) \| B(x)`) is a **type** error, not a parse error, so it lives in `specs/lang/types/reject/` (`t82`), not this corpus. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
 Task 3 (§5 Blocks & statements) added p09–p11/r05–r06: block-sequencing,
@@ -119,8 +120,10 @@ A later fix (2026-07-22) resolving the leading-`|` arm-separator and
 single-line cond-form parser gaps added p27/p28 —
 a later pass (2026-07-24) closing the as-pattern reachability gap added
 p29 and retired r08 — the same pass, closing the record-pattern
-reachability gap, added p30/p31 and retired r02/r07 —
-43 programs total (31 `parse/`, 12 `reject/`). See
+reachability gap, added p30/p31 and retired r02/r07 — the same pass, adding
+or-patterns, added p32 (the binding-rejection witness is a type error, not a
+parse error, so it lives in `specs/lang/types/reject/t82` instead) —
+44 programs total (32 `parse/`, 12 `reject/`). See
 `specs/plans/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan

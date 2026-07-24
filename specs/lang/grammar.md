@@ -1314,22 +1314,32 @@ over the same thirteen grammar alternatives):
   constructor patterns over March's built-in `List` representation; there is
   no dedicated `PatList` AST node.
 
-### 6.2 `pattern` — adds constructors and atoms on top of `simple_pattern`
+### 6.2 `pattern` — adds constructors, atoms, and or-patterns on top of `simple_pattern`
 
 ```ebnf
-pattern ::= qualified_upper "(" separated_nonempty_list(",", pattern) ")"
-          | qualified_upper
-          | ATOM "(" separated_nonempty_list(",", pattern) ")"
-          | ATOM
-          | simple_pattern
+pattern         ::= pattern_no_as "as" lower_name
+                   | pattern_no_as
+
+pattern_no_as   ::= pattern_alt "|" separated_nonempty_list("|", pattern_alt)   (* or-pattern *)
+                   | pattern_alt
+
+pattern_alt     ::= qualified_upper "(" separated_nonempty_list(",", pattern) ")"
+                   | qualified_upper
+                   | ATOM "(" separated_nonempty_list(",", pattern) ")"
+                   | ATOM
+                   | simple_pattern
 
 qualified_upper ::= UPPER_IDENT
                    | UPPER_IDENT "." UPPER_IDENT
 ```
 
-(`parser.mly:1311–1320`; `qualified_upper` at `parser.mly:1305–1309`.)
-`pattern` is `simple_pattern` **plus** two more alternatives, both leading
-with a token `simple_pattern` never starts with (`UPPER_IDENT` or `ATOM`):
+(`parser.mly:1451–1454` for `pattern`; `pattern_no_as` at `parser.mly:1461–1464`;
+`pattern_alt` at `parser.mly:1466–1474`; `qualified_upper` at
+`parser.mly:1439–1443`.) The full hierarchy is now three layers deep —
+`pattern` adds the `as`-alias (§6.3), `pattern_no_as` adds or-patterns (below),
+and `pattern_alt` is `simple_pattern` **plus** two more alternatives, both
+leading with a token `simple_pattern` never starts with (`UPPER_IDENT` or
+`ATOM`):
 
 - **Constructor patterns**, `C(...)`/bare `C` → `PatCon`. The callee is
   `qualified_upper`, not a bare `UPPER_IDENT` — it also accepts the
@@ -1346,6 +1356,18 @@ with a token `simple_pattern` never starts with (`UPPER_IDENT` or `ATOM`):
   [`parse/p14_list_and_atom_payload_patterns.march`](grammar/parse/p14_list_and_atom_payload_patterns.march)
   (below).
 - Everything else falls through to `simple_pattern` (6.1).
+
+One level up, `pattern_no_as` adds **or-patterns**: `p1 | p2 | p3` →
+`PatOr [p1; p2; p3]`, any two or more `pattern_alt`s separated by `PIPE`.
+`PIPE` is also `arm_sep` (§3.3/§5.3, `NL | PIPE` between match arms), but the
+two uses never conflict: an arm separator only ever follows a COMPLETE
+branch — one that has already consumed its `ARROW` and body — so by the time
+menhir sees a `PIPE` inside a pattern (before any `ARROW`), the only live
+derivation is the or-pattern one; LR(1) distinguishes them without needing a
+precedence declaration. Confirmed empirically before writing this production
+and reconfirmed after: menhir's shift/reduce conflict count is unchanged at
+9. See §6.3 for the reachability history and the binding restriction
+`typecheck.ml` enforces on `PatOr`'s alternatives.
 
 **Where `simple_pattern` is used more narrowly than the full `pattern`.**
 Three call sites in `parser.mly` bind only `simple_pattern`, never `pattern`
@@ -1426,6 +1448,30 @@ and
 `(P-As)` and `(P-Record)` rules). `core-march.md`'s §4.3/§4.3.1 still
 describe both as dead code as of this pass — out of this task's scope;
 that file needs its own pass to catch up.
+
+### 6.4 Or-patterns (`PatOr`) — a genuinely new AST constructor, added 2026-07-24
+
+Unlike `PatAs`/`PatRecord` above (§6.3, both pre-existing AST constructors
+that only lacked a grammar production), `PatOr` did not exist anywhere in
+the AST before this pass. `p1 | p2 | p3` builds `PatOr [p1; p2; p3]` via the
+`pattern_no_as`/`pattern_alt` layering shown in §6.2 — the or layer sits
+**beneath** the `as`-alias layer, so `1 | 2 as n` parses as `(1 | 2) as n`,
+not `1 | (2 as n)`.
+
+Every alternative must independently typecheck to the same type, but **no
+alternative may bind a variable** — `A(x) | B(x) -> x` is a parse success
+and a type-checking rejection (`` Or-pattern alternatives cannot bind
+variables (`x`). ``, code `or_pattern_binding`), not a grammar restriction.
+See `core-march-types.md`'s `(P-Or)` rule for the full typing judgment and
+the operational reason for the restriction (a shared arm body has nowhere
+to put a per-alternative binding), and `pattern-matching.md`'s "Or
+Patterns" section for the user-facing explanation and workarounds.
+
+Reachability witness: [`parse/p32_or_pattern.march`](grammar/parse/p32_or_pattern.march)
+(this corpus, a parse-stage witness since `1 | 2` parses regardless of
+typing). The binding-rejection counterpart is a **type** error, not a parse
+error, so its witness lives in the types corpus instead:
+`specs/lang/types/reject/t82_or_pattern_binding.march`.
 
 ## 7. Types
 

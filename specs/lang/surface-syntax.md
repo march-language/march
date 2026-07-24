@@ -365,6 +365,8 @@ Some(x) as whole          -- as-pattern: binds `whole` to the entire value
                           --   while `x` destructures it
 { x: a, y: b }            -- record pattern: destructures fields x, y
 { x, y }                  -- punned: shorthand for { x: x, y: y }
+1 | 2 | 3                 -- or-pattern: matches any of the alternatives
+Red | Green               -- or-pattern over nullary constructors
 ```
 
 In a `match` arm, a record pattern's field list is open: `{ x: a }` matches
@@ -382,6 +384,23 @@ end
 let { x: px, y: py } = point   -- let: every field still required
 fn area({ w: w, h: h }) do w * h end   -- fn param: every field still required
 ```
+
+An or-pattern's alternatives may **not** bind variables — `A(x) | B(x) -> x`
+is a compile error, because every alternative shares one arm body:
+
+```march
+match n do
+  1 | 2 | 3 -> "small"   -- OK: no alternative binds anything
+  _         -> "big"
+end
+
+match e do
+  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+end
+```
+
+Split into separate arms, or match the common shape and test the difference
+with a `when` guard, instead.
 
 ---
 

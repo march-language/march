@@ -252,6 +252,16 @@ match point do
   { x: 0, y: 0 } -> "origin"
   { x: x, y: y } -> "at " ++ int_to_string(x) ++ "," ++ int_to_string(y)
 end
+
+-- Or-pattern: `p1 | p2 | p3` matches an arm against several alternatives.
+-- RESTRICTION: no alternative may bind a variable — every alternative
+-- shares ONE arm body, so `A(x) | B(x) -> x` is a compile error ("Or-pattern
+-- alternatives cannot bind variables"). Split into separate arms, or match
+-- the common shape and test the difference with a `when` guard, instead.
+match n do
+  1 | 2 | 3 -> "small"
+  _         -> "big"
+end
 ```
 
 ### If / Else

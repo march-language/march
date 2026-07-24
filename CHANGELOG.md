@@ -28,6 +28,11 @@ git log is authoritative for exact commits.
   matches any record with a `code` field equal to 404, whatever else it has.
   Naming a field the record does not have is a compile error.
 
+- Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
+  alternatives. Alternatives may not bind variables — every alternative shares
+  one arm body, so a name bound in one would be undefined when another
+  matches; use separate arms or a `when` guard instead.
+
 ### Changed
 
 - `dune runtest` no longer runs `test/test_properties.exe`. That one binary

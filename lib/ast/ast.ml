@@ -46,6 +46,7 @@ type pattern =
   | PatLit of literal * span          (** Literal pattern *)
   | PatRecord of (name * pattern) list * span (** Record pattern: { x, y = p } *)
   | PatAs of pattern * name * span    (** As pattern: pat as name *)
+  | PatOr of pattern list * span      (** Or pattern: p1 | p2 | p3 *)
 
 (** Expressions — the heart of the language. *)
 type expr =

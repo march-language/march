@@ -8380,6 +8380,61 @@ let test_record_pattern_unknown_field_rejected () =
   end|} in
   Alcotest.(check bool) "unknown field: error reported" true (has_errors ctx)
 
+(* Or-pattern alternatives may not bind variables in this pass: sharing an arm
+   body across alternatives uses lower_match's 0-arg join point, which cannot
+   pass per-alternative bindings. The rejection must be a clear diagnostic,
+   not a lowering crash. *)
+let test_or_pattern_binding_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "binding or-pattern rejected" true (has_errors ctx)
+
+let test_or_pattern_nonbinding_accepted () =
+  let ctx = typecheck {|mod T do
+    fn f(n : Int) : String do
+      match n do
+        1 | 2 -> "small"
+        _     -> "big"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-binding or-pattern accepted" false (has_errors ctx)
+
+(* Exhaustiveness must see THROUGH an or-pattern: `Red | Green` plus `Blue`
+   covers Color, so no warning; dropping `Blue` must warn. *)
+let test_or_pattern_exhaustiveness () =
+  let ctx_full = typecheck {|mod T do
+    type Color = Red | Green | Blue
+    fn f(c : Color) : Int do
+      match c do
+        Red | Green -> 1
+        Blue        -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "or-pattern covers its alternatives" false
+    (has_errors ctx_full);
+  let ctx_partial = typecheck {|mod T do
+    type Color = Red | Green | Blue
+    fn f(c : Color) : Int do
+      match c do
+        Red | Green -> 1
+      end
+    end
+  end|} in
+  let missing_blue =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning)
+      ctx_partial.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "missing Blue still warns" true missing_blue
+
 let compiler_suites =
   [
       ( "match_diagnostics",
@@ -8394,6 +8449,12 @@ let compiler_suites =
             test_partial_record_pattern_typechecks;
           Alcotest.test_case "record pattern unknown field rejected" `Quick
             test_record_pattern_unknown_field_rejected;
+          Alcotest.test_case "or-pattern binding rejected" `Quick
+            test_or_pattern_binding_rejected;
+          Alcotest.test_case "or-pattern non-binding accepted" `Quick
+            test_or_pattern_nonbinding_accepted;
+          Alcotest.test_case "or-pattern exhaustiveness sees through alternatives" `Quick
+            test_or_pattern_exhaustiveness;
         ] );
       ( "resolver",
         [

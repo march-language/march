@@ -46,6 +46,20 @@ let rec is_trivial_pat : Ast.pattern -> bool = function
   | Ast.PatAs (p, _, _) -> is_trivial_pat p
   | _ -> false
 
+(** True if [pat] contains an or-pattern anywhere.  Used by [lower_match] to
+    decide whether an arm body needs hoisting into a shared join point:
+    [expand_or_rows] (below) splits a row headed by an or-pattern into one
+    row per alternative, all referencing the SAME lowered body expression, so
+    without hoisting that body would be duplicated once per alternative in
+    the emitted decision tree. *)
+let rec pat_has_or : Ast.pattern -> bool = function
+  | Ast.PatOr _ -> true
+  | Ast.PatAs (p, _, _) -> pat_has_or p
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.exists pat_has_or ps
+  | Ast.PatRecord (fs, _) -> List.exists (fun (_, p) -> pat_has_or p) fs
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
+
 (** Wrap [body] with bindings from a trivial pattern on [scrut].
     Handles PatVar (bind), PatWild (no-op), PatAs (bind outer name + recurse). *)
 let rec bind_trivial_pat (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
@@ -78,6 +92,7 @@ let span_of_pat : Ast.pattern -> Ast.span = function
   | Ast.PatLit  (_, sp)    -> sp
   | Ast.PatRecord (_, sp)  -> sp
   | Ast.PatAs   (_, _, sp) -> sp
+  | Ast.PatOr   (_, sp)    -> sp
 
 (** Return the string tag and sub-pattern list for a pattern that discriminates.
     PatCon → (tag, subs); PatTuple → ("$Tuple", subs); PatLit → (repr, []).
@@ -204,8 +219,10 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
   | Ast.PatAtom (a, subs, _) -> Some (a, subs)
   (* Records carry no tag — they are expanded into per-field columns by
      [expand_record_column] before tag dispatch is ever reached, so
-     [pat_tag_and_subs] never sees one. *)
-  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ | Ast.PatRecord _ -> None
+     [pat_tag_and_subs] never sees one. Or-patterns are split into one row
+     per alternative by [expand_or_rows] before tag dispatch, so it never
+     sees one either. *)
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ | Ast.PatRecord _ | Ast.PatOr _ -> None
 
 (* Compile a pattern matrix to a TIR expression (decision tree).
 
@@ -252,6 +269,17 @@ let strip_as_column (env : Lower_state.env) (scrut : Tir.atom)
       } in
       (inner :: rest, Tir.ELet (v, Tir.EAtom scrut, body))
     | _ -> (pats, body)) rows
+
+(** Split a row whose first column is an or-pattern into one row per
+    alternative.  Alternatives bind no variables (enforced at typecheck), so
+    the rows can share one body expression. *)
+let expand_or_rows (rows : (Ast.pattern list * Tir.expr) list)
+  : (Ast.pattern list * Tir.expr) list =
+  List.concat_map (fun (pats, body) ->
+    match pats with
+    | Ast.PatOr (alts, _) :: rest ->
+      List.map (fun a -> (a :: rest, body)) alts
+    | _ -> [(pats, body)]) rows
 
 (** The sorted union of field names mentioned by every [PatRecord] in the
     first column, or [None] if no row has a record pattern there.
@@ -350,6 +378,7 @@ and compile_matrix_impl
       (match rows with (_, body) :: _ -> body | [] ->
         (match fallback with Some f -> f | None -> Lower_state.nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
+      let rows = expand_or_rows rows in
       let rows = strip_as_column env scrut rows in
       (match record_fields_in_column rows with
        | Some fields ->
@@ -623,6 +652,7 @@ let rec collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
   | Ast.PatRecord (fields, _) ->
     List.concat_map (fun (_, p) -> collect_pat_names p) fields
   | Ast.PatAs (p, n, _) -> (n.txt, n.span) :: collect_pat_names p
+  | Ast.PatOr (ps, _) -> List.concat_map collect_pat_names ps
 
 (** Lower a branch body with the pattern's bound names registered in
     [_fn_param_types] for the duration of the lowering.  Restores any
@@ -649,11 +679,23 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
   let has_guards = List.exists (fun (br : Ast.branch) ->
       br.branch_guard <> None) branches in
   if not has_guards then begin
-    (* Fast path: no guards — use efficient matrix compilation. *)
+    (* Fast path: no guards — use efficient matrix compilation.
+
+       An or-pattern's arm body is referenced once per alternative after
+       [expand_or_rows] splits the row.  Hoist it into a shared 0-arg join
+       point first (alternatives bind no variables, so nothing needs to be
+       passed) rather than emitting N copies. *)
+    let wraps = ref [] in
     let rows = List.map (fun (br : Ast.branch) ->
-        ([br.branch_pat],
-         lower_branch_body_with_pat env br.branch_pat br.branch_body)) branches in
-    compile_matrix env [scrut] rows None
+        let body = lower_branch_body_with_pat env br.branch_pat br.branch_body in
+        if pat_has_or br.branch_pat then begin
+          let (clo_var, lambda_expr) = hoist_fallback_jp body in
+          wraps := (clo_var, lambda_expr) :: !wraps;
+          ([br.branch_pat], Tir.EApp (clo_var, []))
+        end else ([br.branch_pat], body)) branches in
+    let tree = compile_matrix env [scrut] rows None in
+    List.fold_left (fun acc (clo_var, lambda_expr) ->
+      Tir.ELet (clo_var, lambda_expr, acc)) tree !wraps
   end else begin
     (* Guards present: compile each branch individually with fallthrough
        to the remaining branches when the guard fails.
@@ -691,6 +733,16 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
         List.iter (fun (name, sp) ->
           Hashtbl.replace Lower_state._fn_param_types name (Lower_state.ty_of_span env sp)) pat_names;
         let body = lower_expr env br.branch_body in
+        (* An or-pattern's arm body is referenced once per alternative after
+           [expand_or_rows] (inside [compile_matrix_impl]) splits the row.
+           Hoist it into a shared 0-arg join point first, exactly as the
+           no-guard fast path above does, rather than emitting N copies. *)
+        let (body, or_wrap) =
+          if pat_has_or br.branch_pat then
+            let (clo_var, lambda_expr) = hoist_fallback_jp body in
+            (Tir.EApp (clo_var, []), fun e -> Tir.ELet (clo_var, lambda_expr, e))
+          else (body, fun e -> e)
+        in
         let guard_expr_opt = Option.map (lower_expr env) br.branch_guard in
         List.iter (fun (name, _) -> Hashtbl.remove Lower_state._fn_param_types name) pat_names;
         List.iter (fun (name, ty) ->
@@ -720,8 +772,8 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
                 [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
                 Some guard_fail))
         in
-        wrap (compile_matrix_impl env [scrut]
-                [([br.branch_pat], guarded_body)] fallback_opt)
+        or_wrap (wrap (compile_matrix_impl env [scrut]
+                [([br.branch_pat], guarded_body)] fallback_opt))
     in
     go branches
   end
