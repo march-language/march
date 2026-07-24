@@ -17,7 +17,10 @@ git log is authoritative for exact commits.
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
   parameter is a compile error. Applies to both `takepos(neg())` and
   `let c = neg()` forms, and resolves across modules via `alias`/`use`.
-  Postconditions that mention a parameter (relational) are not yet propagated.
+  Only postconditions the definition side actually *proved* propagate — an
+  unproven one stays legal but tells callers nothing, so a stale return
+  refinement can never flag correct code. Postconditions that mention a
+  parameter (relational) are not yet propagated.
 
 ### Documentation
 
