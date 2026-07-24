@@ -1046,9 +1046,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; ── Or-patterns must compile ─────────────────────────────────────────
 ; compile_matrix splits a row whose first column is a PatOr into one row per
-; alternative.  The arm body is hoisted into a shared 0-arg join point first,
-; so N alternatives do not emit N copies of the body — the same blowup
+; alternative.  The arm body is hoisted into a shared join point first, so N
+; alternatives do not emit N copies of the body — the same blowup
 ; hoist_fallback_jp exists to prevent for fallbacks.
+; The `classify` / `classify_guarded` / `message` arms additionally pin the
+; scoping fix: an arm may contain an or-pattern AND bind names elsewhere, and
+; those binders live inside the decision tree while the join-point closure is
+; created outside it.  They are passed as join-point PARAMETERS; before that,
+; clang rejected the module with "use of undefined value '@x'".
 (rule
  (targets native_or_pattern native_or_pattern.out)
  (deps (file %{exe:../bin/main.exe})

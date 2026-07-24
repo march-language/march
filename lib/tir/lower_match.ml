@@ -297,26 +297,40 @@ let record_fields_in_column (rows : (Ast.pattern list * Tir.expr) list)
   if names = [] then None
   else Some (List.sort_uniq String.compare names)
 
-(** Hoist a (non-atomic) fallback expression [fb] into a fresh 0-arg join
-    point.  Returns [(clo_var, lambda_expr)] where:
+(** Hoist a (non-atomic) fallback expression [fb] into a fresh join point.
+    Returns [(clo_var, lambda_expr)] where:
       - [lambda_expr] is the lambda-creation site
         [ELetRec([jp_fn], EAtom(AVar jp_fn))] whose body is [fb];
         [Defun.defunctionalize] lifts [jp_fn] to a top-level fn with a
         closure struct for [fb]'s free variables.
       - [clo_var] is the fresh variable the closure is bound to; every
-        fall-through site becomes [EApp(clo_var, [])], which Defun rewrites
+        fall-through site becomes [EApp(clo_var, args)], which Defun rewrites
         to [ECallPtr].
 
     Callers bind the closure with [ELet(clo_var, lambda_expr, body)] and use
-    [EApp(clo_var, [])] as the (shared) fall-through call inside [body], so
+    [EApp(clo_var, args)] as the (shared) fall-through call inside [body], so
     the fallback body is emitted ONCE instead of duplicated at every
-    fall-through site. *)
-let hoist_fallback_jp (fb : Tir.expr) : Tir.var * Tir.expr =
+    fall-through site.
+
+    [params] (default [[]]) makes the join point N-ary.  This matters for
+    or-pattern arm bodies: the closure is created OUTSIDE the decision tree,
+    so any variable the ARM binds inside the tree would be a free variable of
+    [fb] that is not in scope at the creation site — Defun would resolve the
+    dangling name against the global namespace and emit a call to an
+    unrelated top-level function (or, more usually, `use of undefined value`
+    from clang).  Passing those binders as explicit parameters keeps the body
+    emitted once while making every call site supply the values that ARE in
+    scope there.  The parameter and argument vars share the binder's source
+    name and [ty_of_span] type, so the argument at each call site resolves to
+    the decision tree's own binding. *)
+let hoist_fallback_jp ?(params : Tir.var list = []) (fb : Tir.expr) : Tir.var * Tir.expr =
   let jp_fn_name = Lower_state.fresh_name "jp" in
-  let jp_fn_ty   = Tir.TFn ([], Lower_types.unknown_ty) in
+  let jp_fn_ty   =
+    Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) params,
+             Lower_types.unknown_ty) in
   let jp_fn : Tir.fn_def = {
     fn_name   = jp_fn_name;
-    fn_params = [];
+    fn_params = params;
     fn_ret_ty = Lower_types.unknown_ty;
     fn_body   = fb;
     fn_kind   = Tir.FnJoinPoint;
@@ -654,6 +668,26 @@ let rec collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
   | Ast.PatAs (p, n, _) -> (n.txt, n.span) :: collect_pat_names p
   | Ast.PatOr (ps, _) -> List.concat_map collect_pat_names ps
 
+(** The variables an arm's pattern binds, as [Tir.var]s carrying the same
+    name and [ty_of_span] type the decision tree will bind them with
+    ([bind_trivial_pat] / [strip_as_column] / [expand_record_column] all mint
+    their binding from exactly this pair).  Duplicates are dropped, keeping
+    the first occurrence, so the parameter list of an or-pattern join point is
+    well-formed even for a pattern that mentions a name twice.
+
+    Used to give an or-pattern arm's hoisted join point explicit parameters —
+    see [hoist_fallback_jp]. *)
+let pat_binder_vars (env : Lower_state.env) (pat : Ast.pattern) : Tir.var list =
+  let seen = Hashtbl.create 8 in
+  List.filter_map (fun (name, sp) ->
+      if Hashtbl.mem seen name then None
+      else begin
+        Hashtbl.add seen name ();
+        Some { Tir.v_name = name; v_ty = Lower_state.ty_of_span env sp;
+               v_lin = Tir.Unr }
+      end)
+    (collect_pat_names pat)
+
 (** Lower a branch body with the pattern's bound names registered in
     [_fn_param_types] for the duration of the lowering.  Restores any
     shadowed entries afterwards. *)
@@ -682,16 +716,21 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
     (* Fast path: no guards — use efficient matrix compilation.
 
        An or-pattern's arm body is referenced once per alternative after
-       [expand_or_rows] splits the row.  Hoist it into a shared 0-arg join
-       point first (alternatives bind no variables, so nothing needs to be
-       passed) rather than emitting N copies. *)
+       [expand_or_rows] splits the row.  Hoist it into a shared join point
+       first rather than emitting N copies.  The ALTERNATIVES bind no
+       variables (enforced at typecheck), but the ARM around them may
+       (`P(x, 1 | 2)`, `{ code: 1 | 2, msg: m }`, `(1 | 2) as n`), and those
+       binders live INSIDE the decision tree while the closure is created
+       outside it — so they are passed as explicit join-point parameters. *)
     let wraps = ref [] in
     let rows = List.map (fun (br : Ast.branch) ->
         let body = lower_branch_body_with_pat env br.branch_pat br.branch_body in
         if pat_has_or br.branch_pat then begin
-          let (clo_var, lambda_expr) = hoist_fallback_jp body in
+          let params = pat_binder_vars env br.branch_pat in
+          let (clo_var, lambda_expr) = hoist_fallback_jp ~params body in
           wraps := (clo_var, lambda_expr) :: !wraps;
-          ([br.branch_pat], Tir.EApp (clo_var, []))
+          ([br.branch_pat],
+           Tir.EApp (clo_var, List.map (fun v -> Tir.AVar v) params))
         end else ([br.branch_pat], body)) branches in
     let tree = compile_matrix env [scrut] rows None in
     List.fold_left (fun acc (clo_var, lambda_expr) ->
@@ -735,12 +774,18 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
         let body = lower_expr env br.branch_body in
         (* An or-pattern's arm body is referenced once per alternative after
            [expand_or_rows] (inside [compile_matrix_impl]) splits the row.
-           Hoist it into a shared 0-arg join point first, exactly as the
-           no-guard fast path above does, rather than emitting N copies. *)
+           Hoist it into a shared join point first, exactly as the no-guard
+           fast path above does (including the arm's own binders as explicit
+           parameters — the closure is bound outermost, outside the scope of
+           every binding the decision tree introduces), rather than emitting
+           N copies.  Note the GUARD is not hoisted: it stays inside the tree
+           via [guarded_body], so it reads the binders directly. *)
         let (body, or_wrap) =
           if pat_has_or br.branch_pat then
-            let (clo_var, lambda_expr) = hoist_fallback_jp body in
-            (Tir.EApp (clo_var, []), fun e -> Tir.ELet (clo_var, lambda_expr, e))
+            let params = pat_binder_vars env br.branch_pat in
+            let (clo_var, lambda_expr) = hoist_fallback_jp ~params body in
+            (Tir.EApp (clo_var, List.map (fun v -> Tir.AVar v) params),
+             fun e -> Tir.ELet (clo_var, lambda_expr, e))
           else (body, fun e -> e)
         in
         let guard_expr_opt = Option.map (lower_expr env) br.branch_guard in

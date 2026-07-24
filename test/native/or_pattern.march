@@ -1,6 +1,8 @@
 mod OrPattern do
 type Color = Red | Green | Blue
 
+type Pair = Pair(Int, Int)
+
 fn size(n : Int) : String do
   match n do
     1 | 2 | 3 -> "small"
@@ -15,11 +17,48 @@ fn warm(c : Color) : Bool do
   end
 end
 
+-- An or-pattern in an arm that ALSO binds a name.  The alternatives bind
+-- nothing (still enforced), but `x` is bound by the decision tree INSIDE the
+-- tree while the arm body's join point is created outside it.  Before the
+-- join point took the arm's binders as parameters, `x` was a free variable of
+-- a closure built out of scope: clang rejected the module with
+-- "use of undefined value '@x'" (or, when a top-level `x` existed, silently
+-- called it).
+fn classify(p : Pair) : Int do
+  match p do
+    Pair(x, 1 | 2) -> x + 100
+    Pair(x, _)     -> x
+  end
+end
+
+-- Same shape on the GUARD path, which hoists via a different code path
+-- (or_wrap, applied outermost).  The guard itself stays inside the tree.
+fn classify_guarded(p : Pair) : Int do
+  match p do
+    Pair(x, 1 | 2) when x > 0 -> x + 100
+    Pair(x, _)                -> x
+  end
+end
+
+-- An or-pattern in a record FIELD column, with a binder in a sibling column.
+fn message(r : { code : Int, msg : String }) : String do
+  match r do
+    { code: 1 | 2, msg: m } -> m
+    _                       -> "other"
+  end
+end
+
 fn main() : Unit do
   println(size(1))
   println(size(3))
   println(size(9))
   println(bool_to_string(warm(Red)))
   println(bool_to_string(warm(Blue)))
+  println(int_to_string(classify(Pair(5, 1))))
+  println(int_to_string(classify(Pair(5, 9))))
+  println(int_to_string(classify_guarded(Pair(5, 2))))
+  println(int_to_string(classify_guarded(Pair(0 - 5, 2))))
+  println(message({ code: 2, msg: "two" }))
+  println(message({ code: 7, msg: "seven" }))
 end
 end
