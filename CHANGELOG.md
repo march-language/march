@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `dune runtest` no longer runs `test/test_properties.exe`. That one binary
+  was ~86% of the suite's wall-clock (652s of 756s measured in CI) because its
+  QCheck property groups push generated programs through the whole compiler
+  pipeline hundreds of times each, and alcotest runs cases sequentially with
+  no parallelism to offer. CI now runs it as its own parallel, sharded job.
+  It is still built (so compile errors there still fail the build); run it
+  locally with `dune build @test/property_tests`, or a subset with
+  `./_build/default/test/test_properties.exe test '<group-regex>'`.
+
 - `march --compile` no longer recompiles the whole C runtime from source on
   every invocation. The ~20 `runtime/*.c` files are now compiled once per
   (runtime-source, C-toolchain, compile-flags) combination, cached under

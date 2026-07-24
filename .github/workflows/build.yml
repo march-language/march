@@ -71,6 +71,11 @@ jobs:
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
               /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c /tmp/blake3/c/blake3_portable.c
             cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
+            # NOT covered by .github/actions/opam-deps (which the native legs
+            # below use): this runs inside an ephemeral Alpine container and
+            # creates a GLOBAL switch in the container's own opam root, not the
+            # `_opam` local switch that action caches. Caching across the
+            # docker-run boundary would be a separate mechanism; left uncached.
             opam init --disable-sandboxing --bare -y
             opam switch create 5.3.0 ocaml-base-compiler.5.3.0
             eval $(opam env)
@@ -86,13 +91,22 @@ jobs:
 
       # --- macOS and Linux x86_64 native builds ---
 
-      - name: Set up OCaml (native)
+      # Sets up OCaml (pinning setup-ocaml@v3.7.0 — the first release with a
+      # stable-opam entry for macos-15, our minimum macOS target; the older @v3
+      # failed with "no matching opam release" on darwin-arm64, and forcing a
+      # prerelease opam fails GPG verification) AND installs the opam deps from
+      # a cached switch, replacing the separate uncached `opam install` step
+      # this job used to run. Shares its cache key with ci.yml, so a release
+      # build usually starts from a switch some CI run already populated.
+      #
+      # Only the opam half is shared: this job's system-dependency step below
+      # is deliberately NOT the common one, because release artifacts need a
+      # STATIC libblake3.a (no Homebrew dylib dependency on the user's machine)
+      # rather than ci.yml's plain `brew install blake3`.
+      - name: Set up OCaml + install opam dependencies (cached, native)
         if: "!matrix.cross"
-        # v3.7.0 (2026-07) is the first setup-ocaml with a stable-opam release
-        # entry for macos-15 (our minimum macOS target). The older @v3 failed
-        # with "no matching opam release" on darwin-arm64; forcing a prerelease
-        # opam fails GPG verification. Pin the fixed version.
-        uses: ocaml/setup-ocaml@v3.7.0
+        timeout-minutes: 12
+        uses: ./.github/actions/opam-deps
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
@@ -123,10 +137,6 @@ jobs:
             sudo cp blake3.h /usr/local/include/blake3.h
             sudo ldconfig
           fi
-
-      - name: Install dependencies (native)
-        if: "!matrix.cross"
-        run: opam install --deps-only -y .
 
       - name: Build (Linux x86_64)
         if: matrix.static && !matrix.cross

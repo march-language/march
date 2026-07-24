@@ -32,27 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up OCaml
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: 5.3.0
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
-          # libblake3-dev is not packaged for Ubuntu 24.04; build from source (same as ci.yml).
-          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
-          cd /tmp/blake3/c
-          gcc -O2 -shared -fPIC -o libblake3.so \
-            blake3.c blake3_dispatch.c blake3_portable.c \
-            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
-            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-          sudo cp libblake3.so /usr/local/lib/libblake3.so
-          sudo cp blake3.h /usr/local/include/blake3.h
-          sudo ldconfig
-
-      - name: Install dependencies
-        run: opam install --deps-only --with-test -y .
+      # Shared with ci.yml: pins setup-ocaml, caches the opam switch (_opam),
+      # and installs the same system libraries. Previously this job did all
+      # three inline and uncached, reinstalling all 46 opam packages every run.
+      - name: Set up toolchain (OCaml + cached opam deps + system libs)
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
 
       - name: Regenerate stdlib docs
         run: |

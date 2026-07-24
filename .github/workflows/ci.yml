@@ -274,6 +274,111 @@ jobs:
   # per-case cost (not a naive index range) so no single shard is dominated by
   # the two heavier cases (case 0 = println_arith at QCheck count 100; case 20
   # = opt_matrix at count 20 * 2 opt levels).
+  # test_properties.exe's QCheck property groups — everything in that binary
+  # EXCEPT the interp-vs-compiled oracle group (which property-oracle below
+  # runs, sharded, with MARCH_BIN set).
+  #
+  # Why this is its own job: measured on CI, this binary was 652s of the Test
+  # step's 756s — the single dominant cost of `dune runtest` and of the whole
+  # workflow's critical path. alcotest has no parallelism of any kind (no
+  # --jobs/--parallel; cases run sequentially in-process), so the only lever is
+  # running several filtered processes concurrently. test/dune therefore takes
+  # it out of the `runtest` alias and this job runs it instead.
+  #
+  # Selection is by group-name REGEX, which has two sharp edges worth knowing:
+  #   - alcotest's filter is a regex, so `+` and `(` in group names must be
+  #     escaped — an unescaped name silently matches NOTHING and the shard
+  #     "passes" in ~0s having run nothing. The coverage guard below exists
+  #     precisely because that failure mode is invisible.
+  #   - the oracle group must NOT be matched here. It is excluded by omission,
+  #     so a new group added upstream would also be silently skipped — hence
+  #     the guard asserting every listed group is covered by some shard.
+  property-tests:
+    runs-on: ubuntu-24.04
+    needs: [ocaml-build]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `type soundness + eval` is isolated: it evaluates generated
+          # programs against the full stdlib and measured far slower than
+          # every other group combined, with high QCheck-seed variance.
+          - shard: soundness
+            filter: 'type soundness'
+          - shard: tir
+            filter: 'tir pipeline|tir passes|tir pass invariants'
+          - shard: rest
+            filter: 'algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (blake3 for the native build)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Download prebuilt exes
+        uses: actions/download-artifact@v4
+        with:
+          name: ocaml-build-exes-${{ github.run_id }}
+          path: _build/default
+      - name: Restore exec bits (the artifact zip does not preserve them)
+        run: |
+          set -e
+          f=_build/default/test/test_properties.exe
+          if [ ! -f "$f" ]; then
+            echo "::error::expected $f from the ocaml-build artifact, but it is missing."
+            find _build -type f | head -20
+            exit 1
+          fi
+          chmod +x "$f"
+
+      # Fails if any group in the binary is neither covered by a shard filter
+      # nor the oracle group — so adding a property group upstream can't
+      # silently go unrun by this workflow.
+      - name: Guard — every property group is covered by some shard
+        run: |
+          set -euo pipefail
+          B=_build/default/test/test_properties.exe
+          # `list` prints "<group> <case-index> <description>"; keep the group.
+          $B list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+            | sed -E 's/[[:space:]]+[0-9]+[[:space:]]+.*$//' | sed -E 's/[[:space:]]+$//' \
+            | grep -v '^$' | grep -v 'qcheck random seed' | sort -u > /tmp/groups.txt
+          COVERED='type soundness|tir pipeline|tir passes|tir pass invariants|algebraic oracle|semantic properties|parse\+typecheck|classify_compile|record-update converged|cli: timings|oracle: interp = compiled'
+          missing=0
+          while IFS= read -r g; do
+            if ! printf '%s' "$g" | grep -qE "$COVERED"; then
+              echo "::error::property group '$g' is not covered by any property-tests shard nor by property-oracle"
+              missing=1
+            fi
+          done < /tmp/groups.txt
+          echo "--- groups found ---"; cat /tmp/groups.txt
+          exit $missing
+
+      - name: Property tests (shard ${{ matrix.shard }})
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          # No MARCH_BIN: the oracle group is property-oracle's job. (The exe
+          # would otherwise find _build/default/bin/main.exe on its own and
+          # start compiling — the filters below keep it out of these shards.)
+          _build/default/test/test_properties.exe test '${{ matrix.filter }}' -e 2>&1 | tee /tmp/shard.log
+          ran=$(grep -cE '\[(OK|FAIL)\]' /tmp/shard.log || true)
+          echo "cases actually run: $ran"
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::shard '${{ matrix.shard }}' ran 0 cases — its filter regex matched nothing (unescaped + or ( in a group name?)"
+            exit 1
+          fi
+
   property-oracle:
     runs-on: ubuntu-24.04
     needs: [ocaml-build]

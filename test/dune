@@ -522,10 +522,35 @@
  (modules test_refinecheck)
  (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck alcotest))
 
-(test
+; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
+;
+; Measured on CI, this one binary was 652s of the Test step's 756s -- the
+; single dominant cost of `dune runtest`, and by extension of the whole
+; workflow's critical path. Its QCheck property groups (not the oracle group,
+; which skips under runtest since MARCH_BIN is unset and the compiler exe
+; isn't findable from the test's cwd) run generated programs through the full
+; parse -> typecheck -> lower -> mono -> defun -> perceus pipeline hundreds of
+; times each, and alcotest has no parallelism whatsoever -- it runs cases
+; sequentially in-process, with no --jobs/--parallel of any kind -- so the
+; only way to shorten it is to run several filtered processes concurrently.
+;
+; .github/workflows/ci.yml therefore runs it as its own parallel job(s), which
+; also keeps the two halves of this binary from fighting over one timeout: the
+; `property-tests` job runs the property groups, while `property-oracle` runs
+; the interp-vs-compiled oracle group (8 shards, MARCH_BIN set).
+;
+; It is still BUILT by CI (the ocaml-build job builds test/test_properties.exe
+; and fans it out), so a compile error here still fails the build -- just not
+; via `dune runtest`. Run the whole thing locally with:
+;   dune build @test/property_tests
+(executable
  (name test_properties)
  (modules test_properties)
  (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_eval march_tir march_scheduler march_modules alcotest qcheck-core qcheck-alcotest))
+
+(rule
+ (alias property_tests)
+ (action (run %{exe:test_properties.exe})))
 
 (test
  (name test_stdlib_march)
