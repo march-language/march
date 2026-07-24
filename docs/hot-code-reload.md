@@ -17,11 +17,18 @@ This is useful in practice: no cold-start latency, no dropped connections, no TC
 
 When you run `forge deploy hot`, the build tool:
 
-1. Compiles your code to a shared library (`.so`) with content-addressed hashing
-2. Diffs the function manifest against what the server has loaded
-3. Uploads only the functions that changed (by content hash)
-4. Sends each changed function to the server, signed with your ed25519 key
-5. The server activates them atomically — new calls immediately use the new code
+1. Compiles your code to a shared library (`.so`) — the same kind of file a server can
+   load into an already-running process, without restarting it
+2. Hashes every function's compiled body by its content, so two builds that produce
+   the same code get the same hash — this is what lets the next step tell "changed"
+   from "unchanged" without comparing source text
+3. Diffs those hashes against a manifest of what the server currently has loaded, and
+   uploads only the functions whose hash actually changed
+4. Signs each changed function with your **ed25519 key** (a public/private key pair —
+   the server uses your public key to confirm the patch really came from you, the same
+   idea as an SSH key) and sends it to the server
+5. The server activates the new functions atomically — new calls immediately use the
+   new code, and no function is ever left half-updated
 
 Actors that have a state schema change receive a `migrate_state` call before they handle any new messages, so they are never left in an inconsistent state.
 
@@ -108,7 +115,7 @@ No changes detected — server is already up to date.
 
 ## Capability-safe deploys
 
-A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded with `dlopen`, and starts handling requests. The ed25519 signature on each patch answers one question — *is this really from us?* It says nothing about a second, equally important one: *is this code allowed to do what it does?*
+A hot deploy pushes new code straight into a running process: it's compiled, shipped to the server, loaded into the live process's memory with `dlopen` (the OS mechanism for loading a shared library at runtime, the same one plugins use), and starts handling requests. The ed25519 signature on each patch answers one question — *is this really from us?* It says nothing about a second, equally important one: *is this code allowed to do what it does?*
 
 That gap is real. A patch you signed could call `file_delete`, open a network connection, or spawn a process — even if the version it replaces never touched the filesystem or the network at all. Signing proves **origin**, not **behavior**.
 
@@ -207,7 +214,8 @@ Note the diagnostic names the exact capability *and* the specific function that 
 $ forge deploy hot --grant-cap IO.FileWrite --so v2.so
 Deploying 1 changed function(s)...
   granted widening: IO.FileWrite (via --grant-cap IO.FileWrite)
-  Uploading artifact v2.so... Artifact uploaded.
+Uploading artifact v2.so...
+Artifact uploaded.
   FAILED Server.handle: ERR cap_policy IO.FileWrite — deploy rejected by node capability policy
   Rolled back: 1 function(s) failed, server state unchanged.
 error: 1 function(s) failed to activate
@@ -243,13 +251,23 @@ IO.FileRead
 IO.NetConnect.TLS
 ```
 
-A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature. An empty policy file or an unset `MARCH_DEPLOY_POLICY` ⇒ permissive (all activations admitted) — the default, for backward compatibility. The policy is loaded once at startup; change it by restarting the server.
+A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature.
+
+> **An empty policy *file* is the opposite of permissive.** Only an **unset** (or
+> pointing-at-nothing) `MARCH_DEPLOY_POLICY` means "no policy is loaded" ⇒ permissive,
+> which is the default for backward compatibility. The moment the server can open a
+> policy file at all — even a completely empty, zero-byte one — it treats that as "a
+> policy is active, and it permits zero capabilities," so it will then reject *every*
+> function that declares any capability at all. If you want permissive, unset the
+> variable entirely; don't point it at an empty file.
+
+The policy is loaded once at startup; change it by restarting the server.
 
 A useful pattern is to size the policy from the app's own manifest: build the app, inspect the `caps=` fields in the `.hcr_manifest`, and grant exactly the capabilities the running boundary functions declare — then any future patch that reaches for more is caught.
 
 ### `--grant-cap`
 
-`--grant-cap <CAP>` is repeatable and subsumption-matched — `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. Each grant is folded into the deploy's signed payload and recorded in the audit log, so an authorized widening is tamper-evident and traceable to the signer.
+`--grant-cap <CAP>` is repeatable and subsumption-matched — `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log separately records who deployed which function, and when, so a widening is always traceable back to whoever authorized it.
 
 ```sh
 forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
@@ -262,17 +280,23 @@ The grant only relaxes the client-side monotonicity gate. It does **not** overri
 A `migrate_state` function runs in the migration window, ahead of any pending user messages — a moment where doing IO (or panicking) has dangerous ordering and partial-failure semantics. The compiler enforces this: a `*_migrate_state` function whose own body performs any IO builtin or `extern` call is a compile error.
 
 ```
-error: migrate_state must be IO-free
-  MyApp.Counter.counter_migrate_state calls `file_write` (needs IO.FileWrite)
-  migrate_state runs during the hot-migration window, before user messages.
-  Move side effects into a normal handler that runs after migration completes.
+migrate_state must be IO-free
+MyApp.Counter.counter_migrate_state calls capabilities that need IO.FileWrite.
+migrate_state runs during the hot-migration window, before user messages.
+hint: move side effects into a normal handler that runs after migration completes.
 ```
 
 The check uses the migration function's **own** effects — a `migrate_state` in a module that declares `needs IO.Console` for its *handlers* still compiles cleanly, because the migration body itself does no IO.
 
 ### Threat model — what the gates do and do not prove
 
-The capability manifest is **self-reported by the compiler**. The node's checks prove *integrity* (the capability set was signed and has not been tampered with — a `cap_root` mismatch aborts with `ERR cap_tamper`) and *policy* (the declared authority fits the node), but **not truthfulness** (that the compiled machine code actually stays within the declared caps — the server cannot recompute effects from a shared object).
+The capability manifest is **self-reported by the compiler**. The node's checks prove
+*integrity* — each function's declared capability set is hashed into a `cap_root`, and
+that hash is part of what's signed, so an attacker modifying the capability list in
+transit (without the signing key) produces a hash mismatch that aborts with
+`ERR cap_tamper` — and *policy* (the declared authority fits the node), but **not
+truthfulness** (that the compiled machine code actually stays within the declared caps —
+the server cannot recompute effects from a shared object).
 
 - **Defends against:** accidental authority creep by an honest toolchain (the common case); operator error shipping the wrong build to a restricted node; a compromised deploy *pipeline* that still builds with the real compiler; tampering with the capability set in transit.
 - **Does not defend against:** a party holding the signing key who hand-crafts a `.so` with a lying manifest. Capability admission is authorization *on top of* authentication — a defense-in-depth layer, not a sandbox. For stronger guarantees, combine it with OS-level confinement of the reload server.
@@ -444,9 +468,18 @@ Invariant predicates support:
 
 Invariants can only reference the actor's own state fields. External function calls and heap allocation are not allowed in predicates.
 
+> **Write an unsupported expression and the invariant is silently skipped, not
+> rejected.** If an `@invariant` predicate falls outside this grammar, the compiler
+> prints a `warning: @invariant on <actor> contains unsupported expression; omitting` at
+> build time and drops the invariant entirely — `forge deploy hot` then proceeds with
+> **no SMT verification at all** for that actor, not a rejected deploy. It's easy to
+> read the previous section and assume `@invariant` is always enforced; in practice it's
+> only enforced for predicates in the table above, so treat that compiler warning as
+> something to look for, not something you can ignore.
+
 ---
 
-## Full forge.toml reference
+## Single-server `forge.toml` reference
 
 ```toml
 [hot-reload]
@@ -457,6 +490,13 @@ public_key = "base64key="       # ed25519 public key (base64), embedded for sign
 
 Only `ssh_host` is strictly required — `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
 
+This is the single-server setup this page focuses on. Two more `[hot-reload]` options
+exist for larger deployments, beyond the scope of this page: a `strategy` key
+(`"rolling"`, the default, vs. `"simultaneous"`) and a `health_check_url` that's polled
+between rolling-deploy steps, plus a repeatable `[[hot-reload.env]]` table for naming
+multiple server environments (each with its own `ssh_host`/`socket`/`public_key`) so one
+project can deploy the same batch to a whole fleet.
+
 ---
 
 ## Deploying signature changes
@@ -465,20 +505,23 @@ When a function's signature changes between deploys — for example, `B.foo` gai
 
 `forge deploy hot` enforces this automatically via the **coordinated upgrade gate**. The compiler records which boundary functions call each export in the `.hcr_manifest` sidecar (`callers:` field). The server stores this caller set per slot at activation time. On the next deploy, when it detects a `sig_hash` change for `B.foo`, it checks whether every server-recorded caller is included in the current deploy batch:
 
-- **All callers covered:** the deploy proceeds with a message like:
+- **All callers covered:** the deploy proceeds, and forge notes it:
   ```
   Coordinated upgrade: sig_hash changed, all callers covered.
-    B.foo: old sig abc123 → new sig def456
-    A.Worker_dispatch: present in deploy (impl_hash changed) ✓
   ```
 
-- **A caller is missing:** the deploy is rejected with a named-caller error:
+- **A caller is missing:** the deploy is rejected, naming exactly which caller is uncovered:
   ```
-  error: B.foo signature changed but the following callers are not included in this deploy:
-    A.Worker_dispatch calls B.foo — must also be updated in this batch
-  hint: add Module A to the deploy batch or use expand-contract:
-    1. Add B.foo_v2 alongside B.foo, update A to call B.foo_v2, deploy together
+  error: function signature changed but not all callers are in this deploy:
+
+    B.foo — uncovered caller(s):
+      A.Worker_dispatch
+
+  Include the missing modules in this deploy, or use expand-contract:
+    1. Add B.foo_v2 alongside B.foo, update callers, deploy together
     2. In a later deploy, remove B.foo
+
+  error: deploy aborted
   ```
 
 If neither module in a pair has ever been deployed with caller tracking enabled (e.g. they were compiled separately before this feature existed), the gate conservatively allows the deploy — the caller set is empty, so there are no recorded callers to check.
@@ -487,29 +530,55 @@ If neither module in a pair has ever been deployed with caller tracking enabled 
 
 ## Independent deploy pace (epoch-tagged dispatch)
 
-The coordinated upgrade gate works well when you can batch all callers into one deploy. But sometimes you want to deploy `B.foo` v2 today and migrate the callers next sprint — without blocking the deploy or risking ABI mismatches.
+The coordinated upgrade gate above is a hard synchronization requirement: every caller
+of a changed signature has to be redeployed in the very same batch, or the deploy is
+refused outright. That's the right default — it's what keeps a partial rollout from ever
+passing the wrong arguments to new code — but it's also a real constraint. Sometimes
+`A` and `B` are owned by different people, or you'd genuinely rather ship `B.foo` v2
+today and only get around to updating `A` to match next sprint, without the two
+deploys being forced to happen together.
 
-**Epoch-tagged dispatch** (Phase 9) makes this safe. The compiler bakes a per-file-static epoch cell (`@__march_hcr_epoch`) and an exported init function (`@__march_init(i32)`) into every `.so` output. The reload server assigns a monotonic epoch number per deploy batch via the `GET_EPOCH` protocol command and stamps it into the loaded `.so` by calling `__march_init` after `dlopen`.
+**Epoch-tagged dispatch** is the alternative mechanism that makes that safe, and the
+idea is closer to keeping a small version history than to any kind of locking. Every
+deploy batch is stamped with a **monotonically increasing epoch number** — think of it
+like a global "build number" that only ever goes up. Each function keeps not just its
+newest version but a short rolling history of recent versions too (its **ring slots** —
+a small, fixed-size buffer of "this version, introduced at this epoch"). And critically,
+every *caller* remembers which epoch it itself was deployed at.
 
-At runtime, boundary call sites call `march_dispatch_enter_gen(NAME_ID, epoch, &v)` instead of the simpler `march_dispatch_enter`. This function routes to the **newest ring slot whose epoch ≤ the caller's epoch**, rather than always picking the newest slot. The effect:
+When a caller invokes a function under epoch-tagged dispatch, the runtime doesn't just
+jump to the newest version — it walks the callee's ring slots and picks **the newest
+version that existed at or before the caller's own epoch**. So:
 
-- Old deployed `A.so` (epoch 5) calls `B.foo` → gets the `B.foo` that was active at epoch 5 (old version)
-- New deployed `A.so` (epoch 7) calls `B.foo` → gets the newest `B.foo` (new version)
+- An old `A.so`, still running at epoch 5, calls `B.foo` → it gets the `B.foo` that was
+  current *at epoch 5* — the version it was actually built and tested against.
+- A freshly-redeployed `A.so`, now at epoch 7, calls `B.foo` → it gets the newest
+  `B.foo`, because its own epoch has caught up.
 
-Old callers naturally see the old function until they are redeployed. No coordination, no batching required.
+In other words, a caller only ever sees a version of a function that's compatible with
+the epoch it was itself deployed at — never anything newer. Old callers automatically
+keep working against the old signature until *they* get redeployed, at which point they
+pick up the new one for free. No coordination, no batching, no window where a live call
+could receive the wrong shape of arguments.
 
-When Phase 9 is active, the Phase 8 gate downgrades from a hard error to an advisory warning — the deploy proceeds regardless, because epoch routing guarantees old callers cannot reach new code.
-
-The deploy flow gains one step: forge calls `GET_EPOCH` to receive the batch's epoch number, which the server increments atomically for each deploy. If the server does not support `GET_EPOCH`, forge falls back to epoch 0 and the Phase 8 gate applies as normal.
+This changes what the coordinated upgrade gate does: once a server supports epoch-tagged
+dispatch, a missing caller is no longer a hard error — the gate downgrades to an
+advisory warning, because epoch routing has already made it *safe* for that caller to
+lag behind; the deploy proceeds. Mechanically, forge asks the server for the batch's
+epoch number (via a `GET_EPOCH` request) before deploying, and the server hands back a
+number that only ever increases. If the server doesn't support this exchange at all, forge
+falls back to epoch 0 and the plain coordinated upgrade gate applies exactly as described
+above — so this feature degrades gracefully rather than silently skipping the safety
+check.
 
 ### Compatibility table
 
-| Server supports epoch | Forge supports epoch | Result |
+| Server supports epochs | Forge supports epochs | Result |
 |---|---|---|
-| No | No | Phase 8 gate only |
-| Yes | No | Phase 8 gate (forge never calls GET_EPOCH) |
-| No | Yes | Forge calls GET_EPOCH → ERR → epoch 0 → Phase 8 gate |
-| Yes | Yes | Full Phase 9: epoch-tagged routing, gate becomes advisory |
+| No | No | Coordinated upgrade gate only (hard error on a missing caller) |
+| Yes | No | Same — forge never asks for an epoch, so it never uses the feature |
+| No | Yes | Forge asks for an epoch, the server doesn't answer, forge falls back to epoch 0 — same as above |
+| Yes | Yes | Full epoch-tagged routing — the gate becomes an advisory warning instead of a hard error |
 
 ---
 

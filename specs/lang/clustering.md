@@ -5,7 +5,7 @@ nav_order: 10.5
 permalink: /docs/clustering/
 ---
 
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Clustering & RPC
 

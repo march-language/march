@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md)
+---
+layout: docs
+title: Pattern Matching
+nav_order: 5.2
+permalink: /docs/pattern-matching/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md)
 
 # Pattern Matching
 
@@ -484,6 +491,6 @@ A guard that fails causes the clause to be skipped and the next clause is tried.
 
 ## Next Steps
 
-- [Type System](type-system.md) — the types you're matching against
+- [Type System](types.md) — the types you're matching against
 - [Tour](../../docs/tour.md) — language overview with more examples
 - [Interfaces](interfaces.md) — polymorphic dispatch with `interface`

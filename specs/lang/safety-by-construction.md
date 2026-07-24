@@ -1,4 +1,11 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Safety by Construction
+nav_order: 5.7
+permalink: /docs/safety-by-construction/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 
 # Safety by Construction
 

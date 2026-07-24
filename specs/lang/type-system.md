@@ -1,6 +1,13 @@
-> Part of the March Language Reference — see [specs/lang/index.md](index.md).
+---
+layout: docs
+title: Type System
+nav_order: 5.1
+permalink: /docs/types/
+---
+
+> Part of the March Language Reference — see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
 > This chapter is the **tutorial-register companion** to
-> [`core-march-types.md`](core-march-types.md), which has the FORMAL typing
+> [`core-march-types.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md), which has the FORMAL typing
 > rules (the `Γ ⊢ e : τ` judgment, cited arm-for-arm against
 > `lib/typecheck/typecheck.ml`) for the core fragment — literals, `let`,
 > lambda/application, `if`, ADT constructors and `match`, tuples/records,
@@ -341,7 +348,7 @@ end
 `f()?`) — only the `let?` binding form above exists. A bare `?` in expression
 position is a distinct, unrelated feature (a typed hole for
 incomplete-program tooling), not an unwrap shorthand; see
-[`let-propagation.md`](let-propagation.md) §12 for the full list of
+[`let-propagation.md`](https://github.com/march-language/march/blob/main/specs/lang/let-propagation.md) §12 for the full list of
 deliberately out-of-scope `let?`-adjacent forms, including postfix `?`.
 
 `let?` only works with `Result(a, e)`. For `Option(a)`, use `match` or the
