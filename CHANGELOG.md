@@ -28,6 +28,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Scalar tagging now carries `nsw`, letting LLVM fold the tag/untag round
+  trip away entirely.** The `(v << 1) | 1` immediate-scalar tag was emitted
+  as a plain `shl`, so LLVM could not assume the shift preserved the sign and
+  a sign-truncating `sbfx` survived on every scalar round trip — and, worse,
+  that residue blocked accumulator tail-recursion elimination on recursive
+  functions whose result feeds the tag. With `shl nsw` (asserting exactly the
+  63-bit-losslessness the tagging convention already assumes), `fib(40)`
+  compiles to an accumulator loop with a single recursive call — with the
+  preemption check still inside the loop — and drops from 465 ms to ~390 ms.
+  Trade-off, made deliberately: an `Int` outside [-2^62, 2^62) passed through
+  a generic/erased slot was *already* silently corrupted by the round trip;
+  under `nsw` that same out-of-convention value is poison rather than a
+  deterministic wrong value. The full differential-oracle sweep (141
+  programs) is unchanged: 100 MATCH, 0 divergences.
+
 - **Compiled code no longer pays a thread-local-storage resolver call on every
   function entry.** Each compiled function began by loading, decrementing and
   storing the `_Thread_local` scheduler reduction counter. Thread-local access

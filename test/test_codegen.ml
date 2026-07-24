@@ -5580,7 +5580,7 @@ let test_int_tag_coerce_ir () =
     with Not_found -> false
   in
   (* Tag: shl i64 %*, 1 and or i64 %*, 1 should appear for i64→ptr boxing *)
-  Alcotest.(check bool) "tag: shl i64 ... 1"  true (ir_has "shl i64");
+  Alcotest.(check bool) "tag: shl nsw i64 ... 1"  true (ir_has "shl nsw i64");
   Alcotest.(check bool) "tag: or i64 ... 1"   true (ir_has "or i64");
   (* Untag: ashr i64 %*, 1 should appear for ptr→i64 unboxing *)
   Alcotest.(check bool) "untag: ashr i64"      true (ir_has "ashr i64");
@@ -5626,7 +5626,7 @@ let test_int_tag_wrapper_ir () =
      its scalar result so the ECallPtr dispatch can untag it on read. *)
   Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
   Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl nsw i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the

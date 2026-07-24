@@ -19,7 +19,7 @@
 
 | Benchmark        | March    | OCaml    | Rust     | Elixir   |
 |------------------|----------|----------|----------|----------|
-| fib(40)          | 464.9 ms | 364.1 ms | **286.5 ms** | 1010.3 ms |
+| fib(40)          | 394.7 ms | 364.1 ms | **286.5 ms** | 1010.3 ms |
 | binary-trees(15) | 164.7 ms | **24.1 ms** | 150.7 ms | 335.1 ms |
 | tree-transform   | **579.1 ms** | 3669.5 ms | 4902.3 ms | 2369.0 ms |
 | list-ops(1M)     | 64.3 ms  | 34.8 ms  | **5.4 ms** | 311.7 ms |
@@ -34,7 +34,7 @@ No allocation, pure arithmetic. All languages use the same double recursion.
 
 | Language | Median  | Min     | Max     |
 |----------|---------|---------|---------|
-| March    | 464.9 ms | 463.3 ms | 470.2 ms |
+| March    | 394.7 ms | 392.5 ms | 401.7 ms |
 | OCaml    | 364.1 ms | 360.4 ms | 369.2 ms |
 | **Rust** | **286.5 ms** | 283.7 ms | 292.2 ms |
 | Elixir   | 1010.3 ms | 985.7 ms | 1246.2 ms |
@@ -46,9 +46,12 @@ counter is `_Thread_local`, and thread-local access is an indirect resolver
 call on both platforms (Darwin/arm64 `adrp; ldr; blr` through the TLV
 descriptor; Linux/arm64 PIE via TLSDESC), executed on *every function entry*.
 Compiled code now reads a plain process-wide preemption flag instead: one
-load, one predictable branch, no call. **A residual ~72 ms remains
-unexplained** — with the check removed entirely `fib` measures 360 ms, still
-short of the historical 288 ms.
+load, one predictable branch, no call. A second recovery came from adding
+`nsw` to the scalar tag, which unblocks LLVM's accumulator TRE — `fib` now
+compiles to a loop with a single recursive call, preemption check verified
+inside the loop. The remaining ~35% over the 2026-03-24 figure is the
+per-iteration volatile preemption check plus call frame — the price of
+compiled green threads staying preemptible, tracked in `specs/todos.md`.
 
 ---
 

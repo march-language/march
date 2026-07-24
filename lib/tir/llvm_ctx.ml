@@ -439,7 +439,20 @@ let alloc_size n = 16 + n * 8
     inline code. Returns the final `ptr` register. *)
 let emit_tag_scalar ctx ~sh ~tag ~ptr (i64v : string) : string =
   let shifted = fresh ctx sh in
-  emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+  (* nsw is a deliberate optimization enabler, not decoration: it asserts the
+     shift cannot signed-overflow, which is exactly the existing tagging
+     convention (values must survive the (v<<1)|1 / ashr-1 round trip, i.e.
+     fit in 63 bits — the same assumption the trampoline and every erased
+     slot already make).  With nsw, InstCombine folds the whole
+     tag-then-conditionally-untag round trip away (ashr(or(shl nsw x,1),1)
+     -> x); without it, a sign-truncating sbfx survives on every scalar
+     round trip and, worse, blocks LLVM's accumulator TRE on recursive
+     functions whose result feeds the tag.  Measured: bench/fib.march
+     465 -> 385 ms.  Trade-off, documented deliberately: an Int outside
+     [-2^62, 2^62) passed through an erased slot was ALREADY silently
+     corrupted by the round trip; under nsw that same out-of-convention
+     value is poison instead of a deterministic wrong value. *)
+  emit ctx (Printf.sprintf "%s = shl nsw i64 %s, 1" shifted i64v);
   let tagged = fresh ctx tag in
   emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged shifted);
   let as_ptr = fresh ctx ptr in

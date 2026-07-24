@@ -179,10 +179,22 @@ count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
     default 4 threads the sibling runs on another OS thread and prints first
     even with preemption completely broken, so the obvious version of this
     test would have passed against both bugs.
-- [ ] **Residual, still unexplained: ~72 ms on `fib`.** With the check removed
-  entirely the benchmark measures 0.36 s against the 2026-03-24 figure of
-  0.288 s, so something outside the preemption check accounts for the last
-  ~25%. Not investigated.
+- ✅ **PARTIALLY RECOVERED (2026-07-24, same day): the residual was the
+  missing `nsw` on the scalar tag.** `emit_tag_scalar`'s `(v<<1)|1` used a
+  plain `shl`, leaving a sign-truncating `sbfx` per scalar round trip AND
+  blocking LLVM's accumulator TRE. With `shl nsw` (sound: it asserts the
+  63-bit round-trip losslessness the convention already assumes; an
+  out-of-range Int was already corrupted, it is now poison instead — see the
+  comment in `lib/tir/llvm_ctx.ml`), `fib` compiles to an accumulator loop
+  with one recursive call, volatile preemption check verified INSIDE the
+  loop (disassembly + starvation test): 465 -> ~390 ms. Oracle 100 MATCH /
+  0 divergences.
+- [ ] **Remaining `fib` gap vs 2026-03-24 (~390 vs 288 ms): the per-iteration
+  volatile check plus call frame.** ~100 ms over ~165M loop iterations
+  (post-TRE) ≈ 2 cycles/iteration — the price of staying preemptible. Any
+  further recovery means checking less often (e.g. unrolling the TRE loop or
+  a check-every-N scheme), which re-opens the counter-cost question; not
+  obviously worth it.
 - [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
   so the table stops implying a regression that is actually a feature cost.
 
