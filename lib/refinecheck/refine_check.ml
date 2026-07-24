@@ -19,8 +19,11 @@ module Smt = March_refine.Smt
 module Refine = March_refine.Refine
 module Err = March_errors.Errors
 
-(* A refined parameter: position, predicate binder, predicate expression. *)
-type rparam = { idx : int; binder : string; pred : A.expr }
+(* A refined parameter: position, predicate binder, predicate expression, and —
+   when the base type is a registered ADT rather than `Int` — that ADT's SMT
+   sort name, so the call site reflects the actual argument as a datatype term
+   instead of a scalar. *)
+type rparam = { idx : int; binder : string; pred : A.expr; sort : string option }
 
 let binder_name : A.name option -> string = function
   | None -> "_"
@@ -579,6 +582,29 @@ let type_only_preamble () : string =
       in
       (if needs_elem then "(declare-sort Elem 0)\n" else "") ^ datatype_decls all_sorts
 
+(* Datatype declarations for [seeds] and everything reachable from them — the
+   preamble a VC needs when a constructor tester ranges over those sorts.
+   [skip] drops sorts already declared elsewhere in the same VC (Z3 rejects a
+   duplicate sort inside one push), and [skip_elem] does the same for the
+   opaque `Elem` sort. *)
+let adt_vc_preamble ~(skip : string -> bool) ~(skip_elem : bool) (seeds : string list) : string =
+  let sorts = List.filter (fun s -> not (skip s)) (adt_closure seeds) in
+  if sorts = [] then ""
+  else
+    let needs_elem =
+      (not skip_elem)
+      && List.exists
+           (fun sort ->
+             List.exists
+               (fun ctor ->
+                 List.exists
+                   (fun s -> s = Smt.SData "Elem")
+                   (try Hashtbl.find ctor_field_sorts ctor with Not_found -> []))
+               (try Hashtbl.find adt_ctors sort with Not_found -> []))
+           sorts
+    in
+    (if needs_elem then "(declare-sort Elem 0)\n" else "") ^ datatype_decls sorts
+
 let record_vc_preamble () : string =
   match !measure_preamble, !type_preamble with
   | "", t -> t
@@ -732,8 +758,9 @@ let measure_gate_errors (fd : A.fn_def) : string list =
    maps a (measure-name, argument-name) to its measure term.  None => outside
    the supported Int/Bool linear fragment. *)
 let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
-    ?(resolve_measure_app = fun _ _ -> None) (e : A.expr) : Smt.term option =
-  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app in
+    ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
+    (e : A.expr) : Smt.term option =
+  let r = smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app ~resolve_tester in
   let b2 f a b = match r a, r b with Some x, Some y -> Some (f x y) | _ -> None in
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
@@ -751,6 +778,14 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
           (match r a with
            | Some arg_term -> resolve_measure_app m arg_term
            | None -> None)))
+  (* A constructor tester `is_Ctor(e)`: reflects to the Z3 datatype tester
+     ((_ is Ctor) e).  [resolve_tester] owns reflecting [e] into a term of the
+     right datatype sort (and declaring/registering it); a context that cannot
+     do that returns None and the predicate is skipped. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ arg ], _) when ctor_of_tester m <> None ->
+    (match ctor_of_tester m with
+     | Some ctor -> resolve_tester ctor arg
+     | None -> None)
   | A.EVar { A.txt; _ } -> resolve_var txt
   (* Zero/multi-arity constructors: Nil → App("Nil",[]), Cons(h,t) → App("Cons",[h,t]).
      Only constructors registered in ctor_field_sorts are handled (builtins + user ADTs). *)
@@ -788,7 +823,11 @@ let rec pred_str (e : A.expr) : string =
   match e with
   | A.ELit (A.LitInt n, _) -> string_of_int n
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m -> m ^ "(" ^ pred_str a ^ ")"
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m || ctor_of_tester m <> None ->
+    m ^ "(" ^ pred_str a ^ ")"
+  | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
+  | A.ECon ({ A.txt = ctor; _ }, args, _) ->
+    ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.EVar { A.txt; _ } -> txt
   | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
@@ -886,6 +925,20 @@ let refined_int_ty : A.ty option -> (string * A.expr) option = function
     Some (binder_name binder, pred)
   | _ -> None
 
+(* A refined PARAMETER, for the call-site check: `Int` (no sort) or any
+   registered ADT — applied or not, so `{Option(Int) | is_Some(_)}` counts —
+   carrying that ADT's SMT sort name.  Deliberately wider than
+   [refined_scope_ty]: an ADT refinement is a fact the call site can discharge
+   from a constructor literal or a `match` narrowing, but it is not (yet)
+   something the checker carries through a local binding. *)
+let refined_param_ty : A.ty option -> (string * A.expr * string option) option = function
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred, None)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+    when is_adt_base base ->
+    Some (binder_name binder, pred, Some (adt_sort_name name))
+  | _ -> None
+
 (* Like refined_int_ty but also admits record TyCon params.
    Returns (binder, pred, sort_opt) where sort_opt = Some "M_…" for record params. *)
 let refined_scope_ty : A.ty option -> (string * A.expr * string option) option = function
@@ -955,8 +1008,8 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
     |> List.filter_map (fun (idx, fp) ->
            match fp with
            | A.FPNamed p | A.FPDefault (p, _) ->
-             (match refined_int_ty p.A.param_ty with
-              | Some (binder, pred) -> Some { idx; binder; pred }
+             (match refined_param_ty p.A.param_ty with
+              | Some (binder, pred, sort) -> Some { idx; binder; pred; sort }
               | None -> None)
            | A.FPPat _ -> None)
   in
@@ -1130,6 +1183,19 @@ let reflect_scalar ~(postcond : string -> (string * A.expr) option) (sc : scope)
      | None -> plain actual)
   | _ -> plain actual
 
+(* The registered ADT sort a constructor belongs to.  None when the name is
+   unknown OR when it is ambiguous across two registered ADTs (March allows the
+   same bare constructor name in two modules): an ambiguous tag identifies no
+   particular datatype, so the tester says nothing definite and is skipped. *)
+let sort_of_ctor (ctor : string) : string option =
+  match
+    Hashtbl.fold
+      (fun sort ctors acc -> if List.mem ctor ctors then sort :: acc else acc)
+      adt_ctors []
+  with
+  | [ s ] -> Some s
+  | _ -> None
+
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
@@ -1150,6 +1216,9 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
        axiom cost.  Set when [resolve_measure] reflects an axiom measure. *)
     let uses_axiom = ref false in
+    (* ADT sorts a constructor tester ranged over; their datatype declarations
+       are attached to this VC's preamble. *)
+    let adt_sorts = ref [] in
     let absorb = function
       | Some (t, d, a) -> decls := d @ !decls; assume := a @ !assume; Some t
       | None -> None
@@ -1226,6 +1295,31 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         decls := (nm, sort) :: !decls;
         Some (Smt.Const nm)
     in
+    (* A constructor tester, in the predicate or in a path condition.  Its
+       subject is reflected into the datatype sort the constructor belongs to:
+       the refined binder (`_` or its name) stands for THIS call's actual
+       argument, another parameter's name for that parameter's actual, and
+       anything else — a caller-scope variable, a constructor literal — for
+       itself.  [reflect_dt] turns a literal into `(Ctor …)` (so the tester
+       decides concretely) and a variable into an opaque datatype constant (so
+       an unconstrained value stays unknown and we keep silent). *)
+    let resolve_tester ctor arg =
+      match sort_of_ctor ctor with
+      | None -> None
+      | Some adt ->
+        let subject =
+          match arg with
+          | A.EVar { A.txt = x; _ } when x = rp.binder || x = "_" -> self_actual
+          | A.EVar { A.txt = x; _ } ->
+            (match actual_of_name x with Some a -> a | None -> arg)
+          | _ -> arg
+        in
+        (match reflect_dt adt subject with
+         | Some t ->
+           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
+           Some (Smt.IsCtor (ctor, t))
+         | None -> None)
+    in
     let resolve_measure m name =
       if is_axiom_measure m then (
         uses_axiom := true;
@@ -1247,11 +1341,11 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
        outside the supported fragment — sound, just weaker). *)
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_measure cond with
+        match smt_of ~resolve_var ~resolve_measure ~resolve_tester cond with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure rp.pred with
+    (match smt_of ~resolve_var ~resolve_measure ~resolve_tester rp.pred with
      | None -> ()
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
@@ -1261,7 +1355,22 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
            [] !decls
        in
        let vc = { Smt.decls; assumptions = !assume; goal } in
-       let preamble = if !uses_axiom then !measure_preamble else "" in
+       (* Attach the (expensive) axiom preamble only when an axiomatised
+          measure was reflected, and the datatype declarations only when a
+          constructor tester was.  When both fire, the measure preamble
+          already declares `Elem` and its own covered sorts, so the ADT half
+          must not redeclare them. *)
+       let preamble =
+         let m = if !uses_axiom then !measure_preamble else "" in
+         let a =
+           if !adt_sorts = [] then ""
+           else
+             adt_vc_preamble
+               ~skip:(fun s -> m <> "" && Hashtbl.mem measure_preamble_sorts s)
+               ~skip_elem:(m <> "") !adt_sorts
+         in
+         match m, a with "", x | x, "" -> x | x, y -> x ^ "\n" ^ y
+       in
        (* Report a violation ONLY when the precondition can *never* hold under
           the assumptions (a definite failure).  If it merely *might* fail
           (e.g. a symbolic, unknown length), that is unprovable either way and

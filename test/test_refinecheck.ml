@@ -985,6 +985,39 @@ let adt_suite =
              "mod M do\n\
              \  fn f(o : {Option(Int) | is_some(_)}) : Int do 1 end\n\
              \  fn main() : Int do f(Some(1)) end\n\
+              end\n"));
+
+    gated "unwrap(None) is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(None) end\n\
+              end\n"));
+
+    gated "unwrap(Some(1)) passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(Some(1)) end\n\
+              end\n"));
+
+    gated "an unknown Option variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do unwrap(x) end\n\
+              end\n"));
+
+    gated "a user ADT tester works" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  type Shape = Circle(Int) | Square(Int)\n\
+             \  fn area(s : {Shape | is_Circle(_)}) : Int do 0 end\n\
+             \  fn main() : Int do area(Square(2)) end\n\
               end\n")) ]
 
 let () =
