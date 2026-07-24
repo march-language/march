@@ -116,6 +116,48 @@ refinement checker that cries wolf is one developers turn off.
 
 ---
 
+## Postconditions Flow to Call Sites
+
+A function's declared return refinement is a fact its callers can use. Both the
+direct and the `let`-bound form are checked:
+
+```march
+fn neg() : {Int | _ < 0} do 0 - 1 end
+fn takepos(n : {Int | _ >= 0}) : Int do n end
+
+takepos(neg())          -- error: `neg` returns a negative, `takepos` needs >= 0
+
+let c = neg()
+takepos(c)              -- error: same, through the binding
+```
+
+Resolution follows the same rules as everything else — direct named calls,
+across modules, through `alias` and `use`.
+
+**Only *closed* postconditions propagate.** A predicate that mentions a
+parameter — `{Int | _ < n}`, `{Int | _ < len(xs)}` — is *relational*, and using
+it at a call site requires substituting arguments for parameters. That is not
+yet supported, so a relational postcondition is silently skipped at call sites
+(it is still checked at the definition).
+
+**Only *proven* postconditions propagate.** A declared return refinement
+becomes an assumption at call sites only when the definition side actually
+*proved* it — every return path of every clause discharged as verified. A
+postcondition the checker can neither prove nor refute stays perfectly legal at
+the definition (rejecting it would flag correct-but-unprovable code), it simply
+does not travel: callers learn nothing from it.
+
+This is not a stylistic preference, it is what keeps the no-false-positives
+promise. A propagated fact is *added* to the assumptions a call-site query
+proves against, so a false assumption makes a violation easier to "prove" — a
+stale `{Int | _ < 0}` on a function that in fact returns `6` would flag the
+perfectly correct call `takepos(score(5))`. Only facts that are true may be
+assumed. The cost is incompleteness — a postcondition whose body is opaque to
+the solver buys its callers nothing — which is the safe direction and the trade
+this checker makes everywhere else.
+
+---
+
 ## Path Sensitivity — Guards Establish Facts
 
 A guard you write becomes an assumption the solver can use. The then-branch
@@ -263,9 +305,18 @@ edges:
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
-- **No relational postconditions yet.** Properties that *relate* a measure
-  across an operation — `size(insert(t, x)) == size(t) + 1` — are not yet
-  provable automatically (they often need induction the solver can't do by
+- **An unproven postcondition does not reach callers.** If the checker can't
+  prove a declared return refinement at the definition (an opaque body, a
+  predicate it can't reflect, or a body that routes its value through a local
+  `let` binding rather than returning it directly), the declaration is still
+  accepted but callers learn nothing from it. Only proven postconditions are
+  assumed at call sites.
+- **No relational postconditions yet.** A return refinement that mentions a
+  parameter (`{Int | _ == n + 1}`, `{Int | _ < len(xs)}`) is checked at the
+  definition but is **not** propagated to call sites — instantiating it there
+  requires substituting arguments for parameters. Properties that *relate* a
+  measure across an operation — `size(insert(t, x)) == size(t) + 1` — are also
+  not provable automatically (they often need induction the solver can't do by
   itself). Use an `assert` lemma where you need them.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are

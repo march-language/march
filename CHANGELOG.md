@@ -11,6 +11,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- Refinement checking now propagates a function's declared return refinement to
+  its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
+  parameter is a compile error. Applies to both `takepos(neg())` and
+  `let c = neg()` forms, and resolves across modules via `alias`/`use`.
+  Only postconditions the definition side actually *proved* propagate — an
+  unproven one stays legal but tells callers nothing, so a stale return
+  refinement can never flag correct code. Postconditions that mention a
+  parameter (relational) are not yet propagated.
+
 ### Changed
 
 - `dune runtest` no longer runs `test/test_properties.exe`. That one binary
@@ -102,6 +113,16 @@ git log is authoritative for exact commits.
   are raw C pointers at runtime — whenever they were passed to a builtin
   whose C signature declares the parameter as `ptr`. Restricted the
   coercion to the direction it was actually meant for.
+
+- Refinement checking's return-refinement propagation could false-positive
+  through a `let? p = e` binding: the continuation after `let? c = ok5()`
+  still saw an outer refined local named `c` instead of the newly-bound one,
+  so a subsequent correct use of `c` could be wrongly flagged. `let?` now
+  shadows its bound names before checking its continuation, matching every
+  other binding construct (`let`, lambda params, `match` binders). Also
+  reworded refinement counterexamples from `f() returns v` to
+  `f() can return v` — the solver's model is a witness satisfying `f`'s
+  postcondition, not necessarily `f`'s actual return value.
 
 - The browser cookbook/playground REPL's bundled stdlib was missing
   `Vault` — the docs/cookbook/vault.md examples errored with `no member
