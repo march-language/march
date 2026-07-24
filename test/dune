@@ -918,7 +918,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; timeout instead — either way it currently blocks CI on every run that hits
 ; the race. Un-quarantine (restore `(alias runtest)` below) once the
 ; deadlock itself is fixed. Runnable manually meanwhile via
-; `dune build @test/task_burst_await_quarantined`.
+; `dune build @test/task_burst_await_quarantined`.  Full quarantine
+; inventory (what coverage this leaves dark): specs/todos.md.
 (rule
  (alias task_burst_await_quarantined)
  (action (diff native/task_burst_await.expected native_task_burst_await.out)))
@@ -1000,7 +1001,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; an exact missing sync edge) but a distinct symptom — tracked as a
 ; separate entry there. Un-quarantine (restore `(alias runtest)` below)
 ; once the dispatch race is fixed. Runnable manually via
-; `dune build @test/signal_term_suppress_quarantined`.
+; `dune build @test/signal_term_suppress_quarantined`.  Full quarantine
+; inventory (what coverage this leaves dark): specs/todos.md.
 (rule
  (alias signal_term_suppress_quarantined)
  (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
@@ -2987,7 +2989,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; not yet root-caused for this specific test (real TCP loopback adds
 ; another axis vs. task_burst_await's pure in-process burst). Un-quarantine
 ; (restore `(alias runtest)` below) once investigated. Runnable manually via
-; `dune build @test/node_call_loopback_quarantined`.
+; `dune build @test/node_call_loopback_quarantined`.  Full quarantine
+; inventory (what coverage this leaves dark): specs/todos.md.
 (rule
  (alias node_call_loopback_quarantined)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
@@ -3045,7 +3048,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; rather than burning another ~30min CI round-trip to discover it
 ; independently. See specs/todos.md's scheduler-deadlock P0 entry.
 ; Un-quarantine once that's investigated. Runnable manually via
-; `dune build @test/node_discovery_quarantined`.
+; `dune build @test/node_discovery_quarantined`.  Full quarantine
+; inventory (what coverage this leaves dark): specs/todos.md.
 (rule
  (alias node_discovery_quarantined)
  (action (diff native/node_discovery.expected native_node_discovery.sorted.out)))
@@ -3091,7 +3095,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; not yet root-caused (possibly CI-networking-specific: port contention,
 ; connection refused, etc.). See specs/todos.md's scheduler-deadlock P0
 ; entry. Un-quarantine once BOTH failure modes are investigated. Runnable
-; manually via `dune build @test/rpc_auto_enroll_quarantined`.
+; manually via `dune build @test/rpc_auto_enroll_quarantined`.  Full
+; quarantine inventory (what coverage this leaves dark): specs/todos.md.
 (rule
  (alias rpc_auto_enroll_quarantined)
  (action (diff native/rpc_auto_enroll.expected native_rpc_auto_enroll.out)))

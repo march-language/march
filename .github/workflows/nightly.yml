@@ -34,10 +34,17 @@ jobs:
           eval $(opam env)
           dune shutdown 2>/dev/null || true
           failed=""
-          for a in task_burst_await signal_term_suppress node_call_loopback \
-                   node_discovery rpc_auto_enroll; do
+          # Full alias paths, not bare names: build_check lives in
+          # forge/test/dune, the rest in test/dune. Keep this list in sync
+          # with the quarantine inventory in specs/todos.md.
+          for a in test/task_burst_await_quarantined \
+                   test/signal_term_suppress_quarantined \
+                   test/node_call_loopback_quarantined \
+                   test/node_discovery_quarantined \
+                   test/rpc_auto_enroll_quarantined \
+                   forge/test/build_check_quarantined; do
             echo "::group::$a"
-            if dune build "@test/${a}_quarantined"; then
+            if dune build "@$a"; then
               echo "$a: PASSED"
             else
               echo "$a: still failing"
