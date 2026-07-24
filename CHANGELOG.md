@@ -11,6 +11,8 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-23
+
 ### Fixed
 
 - A module could not reference a same-name-prefixed sibling module in a
@@ -370,5 +372,6 @@ First tagged release.
   crypto, DataFrame, distributed-OTP actors, and more); FFI for C interop,
   hot code reload, and a `--check-json` machine-readable diagnostics mode.
 
-[Unreleased]: https://github.com/march-language/march/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/march-language/march/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/march-language/march/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/march-language/march/releases/tag/v0.1.1

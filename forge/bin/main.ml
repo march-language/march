@@ -1168,7 +1168,7 @@ let () =
   in
   let main =
     Cmd.group ~default:default_term
-      (Cmd.info "forge" ~version:"0.1.0"
+      (Cmd.info "forge" ~version:Version.version
          ~doc:"The March package manager and build tool"
          ~man:(archive_man_blocks ()))
       cmds

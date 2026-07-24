@@ -5,7 +5,7 @@
 #
 # Downloads a prebuilt March release from GitHub, verifies its checksum, and
 # installs it under ~/.march. Installs the most recent stable release by
-# default; set MARCH_VERSION=<tag> (e.g. v0.1.1 or nightly-20260612) to pin one,
+# default; set MARCH_VERSION=<tag> (e.g. v0.2.0 or nightly-20260612) to pin one,
 # or MARCH_VERSION=nightly for the latest nightly.
 #
 # Layout (shared with `forge toolchain`):
