@@ -6,6 +6,45 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
+
+**Read this before assuming a green CI run means the corresponding behavior works.**
+Six tests have been pulled out of `dune runtest` onto their own aliases. Five of them
+are quarantined on **genuinely unresolved concurrency races, not on test bugs** — the
+behavior each one pins is unverified on every commit, and a regression in that behavior
+would not turn CI red. Quarantining was a containment decision (these hung or flaked CI,
+in one case silently consuming the full 6h GitHub Actions job ceiling), explicitly not a
+fix.
+
+| Alias | Pinned behavior now unverified | Blocked on |
+|---|---|---|
+| `test/task_burst_await_quarantined` | `task_spawn`/`task_await` fork-join under burst load | scheduler missed-wakeup deadlock (P0 below) |
+| `test/node_call_loopback_quarantined` | multi-node RPC over real TCP loopback | same deadlock |
+| `test/node_discovery_quarantined` | SWIM node discovery / membership | same deadlock |
+| `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same deadlock (quarantined preemptively — same shape, not independently observed failing) |
+| `test/signal_term_suppress_quarantined` | a watched `SIGTERM` must NOT kill the process | `Signal.watch` deferred-dispatch race (entry below) |
+| `forge/test/build_check_quarantined` | `forge build` end-to-end check | a CI/local discrepancy **plus** a real 3-way qualified-call constructor-resolution bug |
+
+Two distinct root causes, both open, both heisenbugs (every diagnostic tried — lldb,
+ThreadSanitizer, lightweight tracing — either suppressed the symptom or failed to
+localize the missing sync edge):
+- **the scheduler missed-wakeup deadlock** (four tests) — see the P0 entry below;
+- **the `Signal.watch` dispatch race** (one test) — see its entry below. Note this one
+  is NOT merely an ordering flake: the dominant failure shape is *torn* output, so an
+  order-insensitive golden does not fix it.
+
+`forge`'s is a third, unrelated cause and is the only one of the six that is not a race.
+
+**How you find out these are fixable:** `.github/workflows/nightly.yml`'s `quarantined`
+job runs all six aliases every night, `continue-on-error`, purely as a signal — a green
+run is the cue to un-quarantine (restore `(alias runtest)` in `test/dune`, or re-add
+`test_build_check` to forge's `tests` stanza). **That lane reports; it does not fix, and
+it does not gate anything.** Nothing else in CI runs these. Keep its alias list in sync
+with the table above — before it existed, these tests ran in no workflow at all, which
+makes a quarantine indistinguishable from a deletion.
+
+---
+
 ## CI infra (2026-07-23)
 
 - [ ] **Runtime-object cache key doesn't cover system-header CONTENTS, only their `-I` paths and `-D` defines** (`lib/cas/runtime_archive.ml`, found in review 2026-07-24). `march_tls.c`/`march_compress.c`/`march_blake3.c` compile against openssl/zlib/zstd/brotli/blake3 headers discovered via `-I/opt/homebrew/opt/openssl@3/include` etc. A `brew upgrade openssl@3` (or a CI base-image libc bump that leaves clang's `--version` string unchanged) keeps the path, the define, `runtime_identity`, `compiler_identity` and `cc_identity` all identical, so the stale `.o` is served. Before the cache existed every build recompiled, so this self-healed silently. Real-world risk is moderate — OpenSSL 3.x and zlib are ABI-stable across minors, and a genuinely incompatible header change usually breaks the *link* loudly rather than miscompiling — but it is exactly the class of bug this project has been bitten by. Fix: fold `Digest.file` of the resolved `openssl/ssl.h`, `zlib.h`, `zstd.h`, `brotli/encode.h`, `blake3.h` into the key. Workaround today: `rm -rf ~/.march/cache/runtime-objs` after a system-library upgrade (or `MARCH_NO_RUNTIME_CACHE=1`).

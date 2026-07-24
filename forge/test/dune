@@ -27,7 +27,8 @@
 ; sibling case that commit fixed. See specs/todos.md. Un-quarantine (add
 ; test_build_check back to the `tests` stanza above) once BOTH the CI/local
 ; discrepancy and the constructor-resolution bug are investigated. Runnable
-; manually via `dune build @forge/test/build_check_quarantined`.
+; manually via `dune build @forge/test/build_check_quarantined`.  Full
+; quarantine inventory (what coverage this leaves dark): specs/todos.md.
 (executable
  (name test_build_check)
  (modules test_build_check)
