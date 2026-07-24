@@ -3040,6 +3040,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     else begin
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
+    (* FULL-OVERWRITE invariant (fail-loudly): the reuse's arg count must
+       equal the resolved constructor's declared field count.  The
+       reuse-preserves-semantics rule (core-march.md §4.16) rests on the
+       reuse branch overwriting the ENTIRE payload — tag + every field — so
+       the reused cell is observationally identical to a fresh allocation.
+       An UNDER-write (fewer args than ce_fields) would silently leave the
+       OLD cell's trailing fields visible through the new value; the
+       per-index nth_opt failwith below only catches the OVER-index
+       direction, and [ctor_entry]'s suffix-fallback can genuinely resolve
+       to an entry of a different arity when two types share a ctor name
+       and no arity-exact candidate exists.  Perceus_fbip's [same_arity]
+       ($fbip$-encoded freed-cell arity = new arg count) makes the SIZES
+       match; this check pins the remaining leg (arg count = resolved
+       ctor's field count) at emission time. *)
+    if List.length args <> List.length entry.ce_fields then
+      failwith (Printf.sprintf
+        "LLVM emit: EReuse of constructor %s supplies %d arg(s) but the \
+         resolved ctor_info entry declares %d field(s) — an under-write \
+         would leak the reused cell's stale fields (type-incorrect TIR or \
+         a ctor_info suffix-fallback collision reached codegen)"
+        ctor (List.length args) (List.length entry.ce_fields));
     (* Pre-compute all arg values before branching *)
     let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
