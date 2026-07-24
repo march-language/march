@@ -747,7 +747,52 @@ let tier0_suite =
                 \  fn f() : Int do\n\
                 \    let c = notfour()\n\
                 \    four(c)\n\
-                \  end"))) ]
+                \  end")));
+
+    gated "postcondition resolves through a qualified cross-module call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             "mod Root do\n\
+              mod Lib do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+              end\n\
+              mod App do\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do let c = Lib.neg()\n    takepos(c) end\n\
+              end\n\
+              end\n"));
+
+    gated "relational postcondition is NOT propagated (Tier 1 boundary)" (fun () ->
+        (* `_ < n` mentions the parameter `n`, so pred_is_closed rejects it and
+           the call site learns nothing.  Silence here is correct, not a bug. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (t0 "  fn below(n : Int) : {Int | _ < n} do n - 1 end\n\
+                 \  fn f() : Int do let c = below(0)\n    takepos(c) end")));
+
+    gated "postcondition reaches a call inside an if-branch" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (t0 "  fn f(k : Int) : Int do\n\
+                 \    let c = neg()\n\
+                 \    if k > 0 do takepos(c) else 0 end\n\
+                 \  end")));
+
+    gated "shadowed local definition wins over an enclosing refined one" (fun () ->
+        (* App.neg has no refinement and must shadow Lib.neg, so nothing is
+           learned and the call is skipped. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             "mod Root do\n\
+              mod Lib do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+              end\n\
+              mod App do\n\
+             \  fn neg() : Int do 5 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do let c = neg()\n    takepos(c) end\n\
+              end\n\
+              end\n")) ]
 
 let () =
   Alcotest.run "march-refinecheck"
