@@ -11177,9 +11177,32 @@ let test_compiled_sanitize_clean_exit () =
        arenas) that are never freed, and Linux ASAN runs LeakSanitizer at exit by
        default (macOS does not). This test guards the teardown ABORT (the macOS
        arm64 altstack munmap), NOT leaks, so leak detection would spuriously fail
-       it on Linux. *)
-    let run_rc = Sys.command (Printf.sprintf
-      "ASAN_OPTIONS=detect_leaks=0 %s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out_file)) in
+       it on Linux.
+
+       Bounded wait, not Sys.command: ASAN's own shadow-memory init has been
+       observed to wedge indefinitely under extreme concurrent system load,
+       independent of March's own code (reproduces with a trivial unrelated
+       `clang -fsanitize=address` C program under the same load) -- an
+       unbounded Sys.command call would let that hang the entire test suite
+       with no way to recover short of an operator finding and killing the
+       process by hand. A timeout here fails loudly (never silently), so a
+       recurrence is still real signal -- just one that can't take down
+       everything else. *)
+    let result =
+      run_with_timeout ~timeout_secs:30.0 ~stdout_file:out_file
+        [| "/usr/bin/env"; "ASAN_OPTIONS=detect_leaks=0"; bin |]
+    in
+    let run_rc =
+      match result with
+      | `Timeout ->
+        Alcotest.failf
+          "sanitized binary did not exit within 30s (killed). If this \
+           recurs, first rule out a machine-wide ASAN environment issue \
+           before assuming a March regression: compile and run a trivial \
+           unrelated `clang -fsanitize=address` C program under the same \
+           load -- if THAT also hangs, this is not this test's fault."
+      | `Exited rc -> rc
+    in
     Alcotest.(check int)
       "sanitized binary exits 0 (no ASAN altstack munmap abort at teardown)"
       0 run_rc;

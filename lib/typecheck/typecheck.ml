@@ -9002,8 +9002,50 @@ let rec check_decl env (d : Ast.decl) : env =
     let prefix = mod_str ^ "." in
     (match ud.use_sel with
      | Ast.UseSingle ->
-       (* Import the module path as an accessible prefix — no new bindings needed *)
-       env
+       (* A single-segment `use Foo` needs no new bindings: bare references
+          like `Foo.bar` already match the qualified key "Foo.bar" directly.
+          A DOTTED `use A.B` is different — the module's members are bound
+          under the FULL qualified key "A.B.bar", which a bare "B.bar"
+          reference (the natural way to use the last, most-specific segment
+          after importing it) does not match. Re-export every "A.B.name" as
+          "B.name" — identical in spirit to how `alias A.B as C` re-exports
+          under the chosen short name — so `use A.B` then `B.bar(...)` works
+          the same way `alias A.B as B` would. A single-segment path makes
+          [last_seg] equal [mod_str], so the rebind is a same-key no-op and
+          this subsumes the old behavior exactly. *)
+       let last_seg = match List.rev ud.use_path with
+         | last :: _ -> last.Ast.txt
+         | [] -> mod_str
+       in
+       let short_prefix = last_seg ^ "." in
+       let new_bindings = StrMap.fold (fun k sch acc ->
+           let plen = String.length prefix in
+           if String.length k > plen && String.sub k 0 plen = prefix then
+             let rest = String.sub k plen (String.length k - plen) in
+             let short_key = short_prefix ^ rest in
+             if StrMap.mem short_key env.vars then acc
+             else (short_key, sch) :: acc
+           else acc) env.vars [] in
+       if new_bindings <> [] then begin
+         let entry = { ie_span = sp
+                     ; ie_desc = Printf.sprintf
+                         "Unused import: nothing from `%s` is used.\n\
+                          Remove this import or use something from it." mod_str
+                     ; ie_matches = (fun name ->
+                         name = mod_str
+                         || (String.length name > String.length short_prefix
+                             && String.sub name 0 (String.length short_prefix) = short_prefix)
+                         || (String.length name > String.length prefix
+                             && String.sub name 0 (String.length prefix) = prefix))
+                     ; ie_used = ref false } in
+         env.import_tracker := entry :: !(env.import_tracker);
+         import_index_add_exact env.import_idx mod_str entry;
+         import_index_add_prefix env.import_idx last_seg entry;
+         let prefix_root = match String.index_opt mod_str '.' with
+           | Some i -> String.sub mod_str 0 i | None -> mod_str in
+         import_index_add_prefix env.import_idx prefix_root entry
+       end;
+       bind_vars new_bindings env
      | Ast.UseAll ->
        (* Find all vars with "Prefix.name" and rebind them as plain "name".
           Skip names the current module defines itself (env.local_fns):
