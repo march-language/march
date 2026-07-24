@@ -25,6 +25,13 @@ jobs:
             ocaml-compiler: 5.3.0
 
     runs-on: ${{ matrix.os }}
+    # Backstop for the dune-daemon wedge documented in CLAUDE.md/scripts/run-tests.sh
+    # (a `dune build`/`dune runtest` invocation can hang indefinitely on its RPC
+    # daemon, independent of what's being built/run — confirmed in CI: one run's
+    # `Build` step, and another's `Test` step, each silently ate the full 6h GH
+    # Actions job ceiling instead of failing fast). Per-step timeouts below give a
+    # faster, more precise signal; this is the outer safety net.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +70,7 @@ jobs:
           fi
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: opam install --deps-only --with-test -y .
 
       - name: Install zig (cross-compile driver for the linux/amd64 TLS+gzip test)
@@ -74,34 +82,47 @@ jobs:
         run: scripts/fetch-cross-sysroot.sh amd64
 
       - name: Build
+        timeout-minutes: 10
         run: |
           eval $(opam env)
-          # Build @install (the public exes: march / forge / march-lsp → all of
-          # lib/), NOT a bare `dune build`. A no-target `dune build` intermittently
-          # wedges at ~0% CPU AFTER building everything (a known dune no-target
-          # daemon hang) and redundantly re-runs the native test .out binaries that
-          # the Test step already runs. A targeted build sidesteps the wedge; the
-          # Test step (`dune runtest`) still builds+runs the full test suite, so
-          # test-code compile errors are still caught.
-          dune build @install
+          # Clear any stale daemon state before the first dune invocation of the
+          # job (cheap defense-in-depth against the wedge below; likely a no-op on
+          # a fresh GH-hosted runner, but mirrors scripts/run-tests.sh's
+          # MARCH_DUNE_SHUTDOWN — belt-and-suspenders costs nothing here).
+          dune shutdown 2>/dev/null || true
+          # Build the public exe directly (bin/main.exe = `march`), NOT `@install`
+          # (which also builds forge/march-lsp — neither is referenced anywhere
+          # else in this job) and NOT a bare `dune build`. A no-target `dune build`
+          # intermittently wedges at ~0% CPU AFTER building everything (a known
+          # dune daemon hang, see CLAUDE.md/scripts/run-tests.sh) — even the
+          # narrower `@install` alias hit this once in CI (a `Build` step silently
+          # ate the full 6h job ceiling). A single explicit exe target is the
+          # narrowest safe scope; the Test step (`dune runtest`) still builds+runs
+          # the full test suite (incl. forge/lsp), so those compile errors are
+          # still caught, just one step later.
+          dune build bin/main.exe
 
       - name: Test
+        timeout-minutes: 30
         run: |
           eval $(opam env)
           dune runtest
 
       - name: Static-semantics conformance corpus (slow lane, not part of runtest)
+        timeout-minutes: 10
         run: |
           eval $(opam env)
           dune build @types-check
 
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
+        timeout-minutes: 5
         run: |
           eval $(opam env)
           dune build @grammar-check
 
       - name: Golden corpus AddressSanitizer gate (Linux only; RC/UAF guard)
         if: runner.os == 'Linux'
+        timeout-minutes: 15
         run: |
           eval $(opam env)
           dune build bin/main.exe
@@ -109,11 +130,13 @@ jobs:
             ./specs/lang/golden/sanitize.sh
 
       - name: Check doc notebooks (.scrollmd) compile
+        timeout-minutes: 5
         run: |
           eval $(opam env)
           MARCH_BIN="dune exec march --" python3 scripts/gen-scrollmd.py --check
 
       - name: Check formatting
+        timeout-minutes: 3
         run: |
           eval $(opam env)
           dune fmt 2>&1 || true
@@ -128,6 +151,7 @@ jobs:
   # path end to end.
   cross-linux-oracle:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -155,17 +179,93 @@ jobs:
           version: 0.15.2
 
       - name: Install dependencies
+        timeout-minutes: 10
         run: opam install --deps-only --with-test -y .
 
       - name: Build compiler + oracle
+        timeout-minutes: 10
         run: |
           eval $(opam env)
+          dune shutdown 2>/dev/null || true
           dune build bin/main.exe test/test_oracle.exe
 
       - name: Cross oracle (linux/amd64, native-referenced, runs natively on the x86_64 runner)
+        timeout-minutes: 20
         run: |
           eval $(opam env)
           MARCH_ORACLE_CROSS=amd64 \
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
           MARCH_ROOT="$PWD" \
           ./_build/default/test/test_oracle.exe
+
+  # Differential-oracle CI (test/test_properties.ml's "oracle: interp = compiled"
+  # group, ~1090 QCheck-generated compile-vs-interpret comparisons). This is NOT
+  # wired into `dune runtest`'s Test step above: MARCH_BIN isn't set there, so all
+  # 1090 checks silently skip today (confirmed identical across every historical
+  # CI run — "no-march-binary", 0 matched). Wiring MARCH_BIN into that step
+  # directly isn't viable either: each unique generated program is a real
+  # `--compile` (no CAS cache hit across distinct sources — measured ~3-4s each,
+  # dominated by clang recompiling the whole C runtime from source every
+  # invocation), so all 1090 would add tens of minutes to the fast Test step on
+  # every push. Instead this runs as its own job (parallel to the build matrix
+  # and cross-linux-oracle above, like they already run concurrently), sharded
+  # 4-way via alcotest's own case-number filtering (`test <suite> <cases>`) so no
+  # single shard is dominated by the two heavier cases (case 0 = println_arith at
+  # QCheck count 100; case 20 = opt_matrix at count 20 * 2 opt levels).
+  # Follow-up (deliberately not done here, bigger scope): precompiling the C
+  # runtime once instead of per-`--compile` would cut every invocation from
+  # ~3-4s to a fraction of a second, making this whole job unnecessary — filed
+  # as a separate compiler build-path improvement in specs/todos.md.
+  property-oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            cases: "0,1,2,3"
+          - shard: 2
+            cases: "4,5,6,7,20"
+          - shard: 3
+            cases: "8,9,10,11,12,13"
+          - shard: 4
+            cases: "14,15,16,17,18,19"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3.7.0
+        with:
+          ocaml-compiler: 5.3.0
+
+      - name: Install system dependencies (blake3 for the native build)
+        run: |
+          sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
+          git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+          cd /tmp/blake3/c
+          gcc -O2 -shared -fPIC -o libblake3.so \
+            blake3.c blake3_dispatch.c blake3_portable.c \
+            blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+            blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+          sudo cp libblake3.so /usr/local/lib/libblake3.so
+          sudo cp blake3.h /usr/local/include/blake3.h
+          sudo ldconfig
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: opam install --deps-only --with-test -y .
+
+      - name: Build compiler + property-test binary
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build bin/main.exe test/test_properties.exe
+
+      - name: Differential oracle (shard ${{ matrix.shard }}/4, cases ${{ matrix.cases }})
+        timeout-minutes: 25
+        run: |
+          eval $(opam env)
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            ./_build/default/test/test_properties.exe test 'oracle: interp = compiled' "${{ matrix.cases }}" -e
