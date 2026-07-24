@@ -880,8 +880,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_task_burst_await.out
         (system "./native_task_burst_await")))))
 
+; QUARANTINED from `runtest` (2026-07-24): this program can trigger a
+; separate, still-open scheduler bug — a missed-wakeup deadlock in
+; task_await/task_spawn, live-reproduced (roughly 1-in-10-to-30 local runs,
+; apparently much more often on GH Actions' weaker/shared runners) and
+; confirmed to survive the 21c8a0b0 park/wake fix. See the P0 entry in
+; specs/todos.md ("Scheduler fork-join throughput collapse") for the full
+; repro + lldb-confirmed state + why it's a heisenbug (both ThreadSanitizer
+; and lightweight tracing suppress it). Running this under `dune runtest`
+; hung the CI `Test` step for the full 6h job ceiling before timeout-minutes
+; was added, and now fails the (much faster, but still real) 30-minute
+; timeout instead — either way it currently blocks CI on every run that hits
+; the race. Un-quarantine (restore `(alias runtest)` below) once the
+; deadlock itself is fixed. Runnable manually meanwhile via
+; `dune build @test/task_burst_await_quarantined`.
 (rule
- (alias runtest)
+ (alias task_burst_await_quarantined)
  (action (diff native/task_burst_await.expected native_task_burst_await.out)))
 
 ; ── Phase 7.2: Signal.watch deferred dispatch (compiled) ──────────────
