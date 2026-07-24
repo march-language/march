@@ -30,6 +30,11 @@ let is_int_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> true
   | _ -> false
 
+let is_string_base : A.ty -> bool = function
+  | A.TyCon ({ A.txt = "String"; _ }, []) -> true
+  | _ -> false
+[@@warning "-32"]
+
 (* A function's declared return refinement, when its base type is Int.
    Defined here (rather than beside the other postcondition helpers) because
    [collect_all_defs] records it into every fn_sig. *)
@@ -96,6 +101,27 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
 let measure_nonneg : string list ref = ref []
 let is_nonneg_measure (m : string) : bool = m = "len" || List.mem m !measure_nonneg
 
+(* ── The predicate vocabulary ──────────────────────────────────────────────
+   Which names carry meaning inside a refinement predicate.  Previously this
+   knowledge was implicit: spread across [is_measure], [is_nonneg_measure] and
+   inline "len" comparisons at four sites, and otherwise encoded only in
+   [smt_of]'s match arms.  Naming it lets us (a) warn about a predicate the
+   checker will silently ignore, and (b) give the ADT feature one place to
+   register its constructor testers. *)
+
+(* Operators [smt_of] translates.  Kept in sync with its match arms by the
+   `every operator is known vocabulary` test in test_refinecheck.ml. *)
+let predicate_operators =
+  [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
+  ; "=="; "!="; "<"; "<="; ">"; ">=" ]
+
+let is_predicate_operator (m : string) : bool = List.mem m predicate_operators
+
+(* True iff the checker attaches meaning to [m] applied inside a predicate.
+   Extended by the ADT-tag feature with its constructor testers. *)
+let known_predicate_fn (m : string) : bool =
+  is_predicate_operator m || is_measure m
+
 (* Conservative syntactic non-negativity of a measure body: every return path is
    a non-negative literal, a sum/product of non-negatives, or a call to a measure
    already known non-negative (incl. the measure itself, inductively). *)
@@ -161,6 +187,15 @@ let is_record_base (t : A.ty) : bool =
      | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
      | _ -> false)
   | _ -> false
+
+(* True when [t] is a bare TyCon naming any registered ADT — variant or
+   record, and (unlike [is_record_base]) whether or not it is applied to type
+   arguments, e.g. `Option(Int)`.  The ADT-tag feature dispatches on this. *)
+let is_adt_base (t : A.ty) : bool =
+  match t with
+  | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
+  | _ -> false
+[@@warning "-32"]
 
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,
@@ -1671,6 +1706,104 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
+(* ── Predicate-vocabulary warning ──────────────────────────────────────────
+   A refinement predicate that calls a name [known_predicate_fn] does not
+   recognize is never reflected into an SMT query — the definite-failure
+   stance simply skips it, so the contract silently enforces nothing.  This
+   walk finds every `{T | pred}` in the module (parameter, return, and local
+   `let`-binding refinements — anywhere `A.TyRefine` can appear) and warns
+   once per unrecognized applied name.
+
+   Must run AFTER [registered_measures] is populated (see [check_module]):
+   otherwise every user `@[measure]` looks unrecognized and warns spuriously. *)
+let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
+  let rec go (e : A.expr) =
+    match e with
+    | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
+      if not (known_predicate_fn f) then
+        Err.warning errctx ~span
+          (Printf.sprintf
+             "`%s` is not a measure or known predicate, so this refinement is not checked. \
+              Annotate the function `@[measure]`, or use a supported predicate."
+             f);
+      List.iter go args
+    | A.EApp (f, args, _) -> go f; List.iter go args
+    | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    | A.EAnnot (e, _, _) -> go e
+    | A.ELit _ | A.EVar _ -> ()
+    | _ -> ()
+  in
+  go e
+
+let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
+  match t with
+  | A.TyRefine (base, _binder, pred) ->
+    warn_predicate_ty errctx base;
+    warn_predicate_expr errctx pred
+  | A.TyCon (_, args) -> List.iter (warn_predicate_ty errctx) args
+  | A.TyArrow (a, b) -> warn_predicate_ty errctx a; warn_predicate_ty errctx b
+  | A.TyTuple ts -> List.iter (warn_predicate_ty errctx) ts
+  | A.TyRecord fs -> List.iter (fun (_, t) -> warn_predicate_ty errctx t) fs
+  | A.TyLinear (_, t) -> warn_predicate_ty errctx t
+  | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
+
+let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
+  let ge = warn_predicate_expr_tys errctx in
+  match e with
+  | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ -> ()
+  | A.EApp (f, args, _) -> ge f; List.iter ge args
+  | A.ECon (_, es, _) | A.EAtom (_, es, _) | A.ETuple (es, _) -> List.iter ge es
+  | A.ELam (ps, body, _) ->
+    List.iter (fun (p : A.param) -> Option.iter (warn_predicate_ty errctx) p.A.param_ty) ps;
+    ge body
+  | A.EBlock (es, _) -> List.iter ge es
+  | A.ELet (b, _) ->
+    Option.iter (warn_predicate_ty errctx) b.A.bind_ty;
+    ge b.A.bind_expr
+  | A.EMatch (e, brs, _) ->
+    ge e;
+    List.iter
+      (fun (br : A.branch) ->
+        Option.iter ge br.A.branch_guard;
+        ge br.A.branch_body)
+      brs
+  | A.ERecord (fs, _) -> List.iter (fun (_, e) -> ge e) fs
+  | A.ERecordUpdate (e, fs, _) -> ge e; List.iter (fun (_, e) -> ge e) fs
+  | A.EField (e, _, _) -> ge e
+  | A.EIf (c, t, e, _) -> ge c; ge t; ge e
+  | A.ECond (arms, _) -> List.iter (fun (c, b) -> ge c; ge b) arms
+  | A.EPipe (a, b, _) -> ge a; ge b
+  | A.EAnnot (e, t, _) -> ge e; warn_predicate_ty errctx t
+  | A.ESend (a, b, _) -> ge a; ge b
+  | A.ESpawn (e, _) -> ge e
+  | A.EDbg (eo, _) -> Option.iter ge eo
+  | A.ELetFn (_, ps, ret_ty, body, _) ->
+    List.iter (fun (p : A.param) -> Option.iter (warn_predicate_ty errctx) p.A.param_ty) ps;
+    Option.iter (warn_predicate_ty errctx) ret_ty;
+    ge body
+  | A.ELetQ (_, e1, e2, _) -> ge e1; ge e2
+  | A.EAssert (e, _) -> ge e
+  | A.ESigil (_, e, _) -> ge e
+
+let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
+  List.iter
+    (function
+      | A.DFn (fd, _) ->
+        Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+        List.iter
+          (fun (c : A.fn_clause) ->
+            List.iter
+              (function
+                | A.FPNamed p | A.FPDefault (p, _) ->
+                  Option.iter (warn_predicate_ty errctx) p.A.param_ty
+                | A.FPPat _ -> ())
+              c.A.fc_params;
+            warn_predicate_expr_tys errctx c.A.fc_body)
+          fd.A.fn_clauses
+      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ds
+      | _ -> ())
+    decls
+
 let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
   check_fn_post ~root errctx fd;
   List.iter
@@ -1792,4 +1925,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
   gate_unverified_posts ~root errctx defs m.A.mod_decls;
   (* Always walk: a function may have a refined *return* (postcondition) even
      with no refined parameters, so it won't appear in [defs]. *)
-  visit_decls ~root errctx defs rctx0 m.A.mod_decls
+  visit_decls ~root errctx defs rctx0 m.A.mod_decls;
+  (* Vocabulary warning: runs last so [registered_measures] (set at the top of
+     this function) is already populated — otherwise a user `@[measure]`
+     would look unrecognized and warn spuriously. *)
+  warn_predicate_decls errctx m.A.mod_decls

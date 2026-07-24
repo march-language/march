@@ -26,6 +26,16 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* True iff the refinement pass reports at least one WARNING on [src].
+   [has_refine_error] only sees Errors, so vocabulary diagnostics need this. *)
+let has_refine_warning src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.exists
+    (fun (d : March_errors.Errors.diagnostic) ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning)
+    ctx.March_errors.Errors.diagnostics
+
 let gated name f =
   Alcotest.test_case name `Quick (fun () ->
       if z3_available () then f ()
@@ -880,6 +890,85 @@ let tier0_suite =
              \  end\n\
               end\n")) ]
 
+(* ── Shared predicate-vocabulary foundation ────────────────────────────────
+   Task 1 is pure plumbing: it adds the registry without wiring it to
+   anything, so these must pass both before AND after. *)
+let vocab_suite =
+  [ gated "an unrecognized predicate name still compiles (no error)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "ordinary Int predicates are unaffected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn main() : Int do take_n(-3) end\n\
+              end\n"));
+
+    gated "every operator smt_of handles is known vocabulary" (fun () ->
+        (* If smt_of gains an operator, add it to predicate_operators too, or
+           a predicate using it will draw a spurious "no effect" warning. *)
+        List.iter
+          (fun op ->
+            Alcotest.(check bool)
+              (Printf.sprintf "%s is known" op) true
+              (March_refinecheck.Refine_check.known_predicate_fn op))
+          [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
+          ; "=="; "!="; "<"; "<="; ">"; ">=" ]);
+
+    gated "an unrecognized predicate name warns" (fun () ->
+        Alcotest.(check bool) "warning" true
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "a recognized predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(n : {Int | _ >= 0 && _ < 10}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "a `len` predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do i end\n\
+             \  fn main() : Int do at([1, 2], 0) end\n\
+              end\n"));
+
+    gated "a user @[measure] predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  type Tree = Leaf | Node(Tree, Tree)\n\
+             \  @[measure]\n\
+             \  fn size(t : Tree) : Int do\n\
+             \    match t do\n\
+             \      Leaf -> 0\n\
+             \      Node(l, r) -> 1 + size(l) + size(r)\n\
+             \    end\n\
+             \  end\n\
+             \  fn get(t : Tree, i : {Int | _ >= 0 && _ < size(t)}) : Int do i end\n\
+             \  fn main() : Int do get(Leaf, 0) end\n\
+              end\n"));
+
+    gated "an unrecognized predicate is still not an error" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -897,5 +986,6 @@ let () =
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
       ("guard-path-sensitivity", guard_suite);
-      ("tier0-postcond", tier0_suite) ]
+      ("tier0-postcond", tier0_suite);
+      ("predicate-vocab", vocab_suite) ]
 
