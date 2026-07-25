@@ -979,10 +979,12 @@ let tier0_suite =
               end\n\
               end\n"));
 
-    gated "relational postcondition is NOT propagated (Tier 1 boundary)" (fun () ->
-        (* `_ < n` mentions the parameter `n`, so pred_is_closed rejects it and
-           the call site learns nothing.  Silence here is correct, not a bug. *)
-        Alcotest.(check bool) "no error" false
+    (* Tier 1 superseded this: `_ < n` mentions the parameter `n`, and the call
+       `below(0)` instantiates it as `_ < 0`, which contradicts `_ >= 0`.  Until
+       relational postconditions propagated, this case asserted SILENCE and was
+       the marker for the Tier 0/Tier 1 boundary. *)
+    gated "relational postcondition IS propagated after substitution" (fun () ->
+        Alcotest.(check bool) "error" true
           (has_refine_error
              (t0 "  fn below(n : Int) : {Int | _ < n} do n - 1 end\n\
                  \  fn f() : Int do let c = below(0)\n    takepos(c) end")));
@@ -1559,6 +1561,76 @@ let classifier_suite =
           (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]))
   ]
 
+(* Integration tests for propagating a relational postcondition to call sites.
+   NOTE: `use` and `opaque` are reserved words in March, so the caller here is
+   named `usit` and the unanalysable callee `blackbox`. *)
+let tier1_suite =
+  [ gated "relational postcondition propagates through an inline call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(below(0)) end
+end|}));
+
+    gated "relational postcondition propagates through a let" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do
+    let c = below(0)
+    takepos(c)
+  end
+end|}));
+
+    gated "a satisfiable instantiation stays silent" (fun () ->
+        (* below(10) < 10 does not contradict >= 0 — it might be 5. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(below(10)) end
+end|}));
+
+    gated "an unknown actual stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(q : Int) : Int do takepos(below(q)) end
+end|}));
+
+    gated "simultaneous substitution: an actual naming another formal" (fun () ->
+        (* f(m, 1) must instantiate `_ < n + m` as `_ < m + 1`, NOT `_ < 1 + 1`.
+           With m unknown the result is unprovable either way, so silence here
+           is the correct outcome — this pins that we do not CRASH or invent a
+           fact from a sequential rewrite. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn f(n : Int, m : Int) : {Int | _ < n + m} do n + m - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(m : Int) : Int do takepos(f(m, 1)) end
+end|}));
+
+    gated "an unverified relational postcondition does not propagate" (fun () ->
+        (* `_ < n` is not provable from an unanalysable body, so the gate clears
+           it and callers learn nothing.  The Tier 0 guarantee, inherited. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn blackbox(n : Int) : Int do n end
+  fn shady(n : Int) : {Int | _ < n} do blackbox(n) end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(shady(0)) end
+end|})) ]
+
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -1580,5 +1652,6 @@ let () =
       ("string-refinements", string_suite);
       ("predicate-vocab", vocab_suite);
       ("adt-tags", adt_suite);
-      ("pred-classifier", classifier_suite) ]
+      ("pred-classifier", classifier_suite);
+      ("tier1-relational", tier1_suite) ]
 

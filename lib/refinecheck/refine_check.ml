@@ -1234,11 +1234,12 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
   | A.FPNamed p | A.FPDefault (p, _) -> scope_add_param sc p
   | A.FPPat pat -> scope_shadow sc (pat_binders pat)
 
-(* [postcond] resolves a callee name to its closed return refinement.  An
-   explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
+(* [postcond] resolves a callee name AND the call's actual arguments to the
+   callee's return refinement, already instantiated in the CALLER's namespace.
+   An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
    direct named call falls back to the callee's declared postcondition. *)
-let scope_add_binding ~(postcond : string -> (string * A.expr) option) (sc : scope)
-    (b : A.binding) : scope =
+let scope_add_binding ~(postcond : string -> A.expr list -> (string * A.expr) option)
+    (sc : scope) (b : A.binding) : scope =
   (* Shadow first: `let c = neg()` followed by `let c = 5` must not leave the
      first `c`'s postcondition attached to the second. *)
   let sc = scope_shadow sc (pat_binders b.A.bind_pat) in
@@ -1246,8 +1247,8 @@ let scope_add_binding ~(postcond : string -> (string * A.expr) option) (sc : sco
   | A.PatVar n, Some r -> (n.A.txt, r) :: sc
   | A.PatVar n, None ->
     (match b.A.bind_expr with
-     | A.EApp (A.EVar { A.txt = fname; _ }, _, _) ->
-       (match postcond fname with
+     | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+       (match postcond fname args with
         | Some (binder, pred) -> (n.A.txt, (binder, pred, None)) :: sc
         | None -> sc)
      | _ -> sc)
@@ -1382,23 +1383,51 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
              if imported then lookup (qualify m fname) else None)
            ctx.uses)
 
-(* Resolve a call name to the callee's *closed* return refinement, or None.
-   This is the single place the closedness filter is applied, so both use
-   sites (a let-bound local and an inline argument) agree, and Tier 1
-   (relational postconditions) is a change to this one function.
+(* Resolve a call name and its actual arguments to the callee's return
+   refinement, expressed entirely in the CALLER's namespace, or None.  This is
+   the single place the usability filter is applied, so both use sites (a
+   let-bound local and an inline argument) agree.
+
+   [Closed]        the predicate mentions only the binder; it means the same
+                   thing at every call site, so it is returned unchanged.
+   [Relational ps] the predicate mentions parameters; the call's actuals are
+                   substituted for them SIMULTANEOUSLY, so the result talks
+                   about the caller's terms and the existing reflection
+                   machinery needs no changes.
+   [Unusable]      never propagated.
+
+   Skip, don't guess: if any parameter the predicate mentions has no
+   corresponding actual (arity mismatch, a pattern parameter, an omitted
+   defaulted argument), propagation is abandoned for this call.  A partially
+   substituted predicate would mix the callee's and caller's namespaces —
+   exactly the conflation that has produced false positives here before.
 
    The other half of the filter is applied earlier: [gate_unverified_posts]
    has already cleared [ret] on every signature whose postcondition the
    definition side did not PROVE, so anything reaching here is a fact. *)
 let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
-  : (string * A.expr) option =
+    (args : A.expr list) : (string * A.expr) option =
   match resolve_call ctx defs fname with
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->
        (match classify_pred b sg.param_names p with
         | Closed -> Some (b, p)
-        | Relational _ | Unusable -> None)
+        | Unusable -> None
+        | Relational ps ->
+          (* Positional formal -> actual.  A formal recorded as "_" is a
+             pattern parameter with no usable name; it can never be a member of
+             [ps] (the classifier reads "_" as the binder), and mapping it would
+             be meaningless, so it is excluded here too. *)
+          let env =
+            List.mapi (fun i n -> (n, List.nth_opt args i)) sg.param_names
+            |> List.filter_map (function
+                 | "_", _ | _, None -> None
+                 | n, Some a -> Some (n, a))
+          in
+          if List.for_all (fun p -> List.mem_assoc p env) ps then
+            Some (b, subst_params env p)
+          else None)
      | _ -> None)
   | _ -> None
 
@@ -1562,8 +1591,8 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
   | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
-let reflect_scalar ~(postcond : string -> (string * A.expr) option) (sc : scope)
-    (actual : A.expr)
+let reflect_scalar ~(postcond : string -> A.expr list -> (string * A.expr) option)
+    (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   (* Reflect an expression with no scope help — also the fallback for a call
      whose callee has no usable postcondition. *)
@@ -1593,8 +1622,8 @@ let reflect_scalar ~(postcond : string -> (string * A.expr) option) (sc : scope)
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)
-  | A.EApp (A.EVar { A.txt = fname; _ }, _, _) ->
-    (match postcond fname with
+  | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) ->
+    (match postcond fname cargs with
      | Some (b, q) ->
        incr ret_ctr;
        let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
@@ -1625,7 +1654,8 @@ let sort_of_ctor (ctor : string) : string option =
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
-let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) option)
+let check_call ~root errctx ~span
+    ~(postcond : string -> A.expr list -> (string * A.expr) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) : unit =
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
