@@ -627,6 +627,96 @@ end|}));
   fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
     { count: old.count, history: Nil }
   end
+end|}));
+
+    (* ── Call-site (precondition) side. ─────────────────────────────────────
+       Four of these six assert SILENCE: an unreflectable record, an
+       unreflectable field value, and a forwarded refinement that is merely
+       unproven must all be SKIPPED under the definite-failure stance. *)
+    gated "record precondition: literal argument violates" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn main() : Int do serve({ port: 0 }) end
+end|}));
+
+    gated "record precondition: literal argument satisfies" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn main() : Int do serve({ port: 8080 }) end
+end|}));
+
+    gated "record precondition: unknown record is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(c : Config) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: unknown FIELD value is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(p : Int) : Int do serve({ port: p }) end
+end|}));
+
+    gated "record precondition: a refined record param forwards" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port >= 1}) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: multi-field predicate on the wrong field" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int, retries : Int }
+  fn serve(c : {v : Config | v.port >= 1 && v.retries >= 0}) : Int do c.port end
+  fn main() : Int do serve({ port: 8080, retries: -1 }) end
+end|}));
+
+    (* Forwarding: the discriminating pair.  A WEAKER refinement neither
+       establishes nor contradicts the callee's, so it must be silent; a
+       CONTRADICTORY one is a definite failure and must be reported.  The
+       second is what proves field facts actually travel through a variable. *)
+    gated "record precondition: forwarding a WEAKER refinement is not proven" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port >= 0}) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: forwarding a CONTRADICTORY refinement is caught" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port <= 0}) : Int do serve(c) end
+end|}));
+
+    (* A record sort and a measure/ADT sort in ONE verification condition: the
+       two preambles must dedup, since a Z3 error maps the VC to Unknown and
+       would silently skip the check rather than merely adding noise. *)
+    gated "record precondition: record + measure sorts coexist in one VC" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | mlength(v.history) == v.count}) : Int do s.count end
+  fn main() : Int do take({ count: 1, history: Nil }) end
 end|})) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
