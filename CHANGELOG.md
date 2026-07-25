@@ -26,12 +26,17 @@ git log is authoritative for exact commits.
 
 - Record patterns may mention a subset of a record's fields: `{ code: 404 }`
   matches any record with a `code` field equal to 404, whatever else it has.
-  Naming a field the record does not have is a compile error.
+  Naming a field the record does not have is a compile error. Note that an arm
+  containing a record pattern is excluded from both exhaustiveness and
+  redundancy analysis — a match whose only arm is `{ code: 404 } -> ...`
+  typechecks clean and panics at runtime on any other `code`.
 
 - Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
-  alternatives. Alternatives may not bind variables — every alternative shares
-  one arm body, so a name bound in one would be undefined when another
-  matches; use separate arms or a `when` guard instead.
+  alternatives. The ALTERNATIVES may not bind variables — every alternative
+  shares one arm body, so a name bound in one would be undefined when another
+  matches; use separate arms or a `when` guard instead. The rest of the arm is
+  free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
+  checking see through or-patterns at any nesting depth.
 
 ### Changed
 
