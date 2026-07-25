@@ -8410,20 +8410,10 @@ let test_record_pattern_unknown_field_rejected () =
   end|} in
   Alcotest.(check bool) "unknown field: error reported" true (has_errors ctx)
 
-(* Or-pattern alternatives may not bind variables in this pass: sharing an arm
-   body across alternatives uses lower_match's 0-arg join point, which cannot
-   pass per-alternative bindings. The rejection must be a clear diagnostic,
-   not a lowering crash. *)
-let test_or_pattern_binding_rejected () =
-  let ctx = typecheck {|mod T do
-    type E = A(Int) | B(Int)
-    fn f(e : E) : Int do
-      match e do
-        A(x) | B(x) -> x
-      end
-    end
-  end|} in
-  Alcotest.(check bool) "binding or-pattern rejected" true (has_errors ctx)
+(* Superseded by test_or_pattern_binding_{accepted,name_mismatch_rejected,
+   type_mismatch_rejected}: alternatives that agree on names and types are now
+   accepted rather than rejected wholesale.  See the "Or-pattern alternatives
+   may bind" group below. *)
 
 let test_or_pattern_nonbinding_accepted () =
   let ctx = typecheck {|mod T do
@@ -8530,10 +8520,251 @@ let test_as_over_or_pattern_arm_not_flagged_redundant () =
   Alcotest.(check bool) "arm after `(1 | 2) as k` is reachable" false
     has_redundant
 
+(* ── Record patterns participate in coverage analysis ──────────────────────
+   [spat] had no record shape, so [norm_pat] collapsed every PatRecord to
+   SPWild. That made a record arm look like it matched everything, which cost
+   coverage in both directions: a match that covers only ONE value of a field
+   was reported exhaustive (and panicked at runtime), and — because SPWild
+   subsumes what follows — the NEXT arm was reported unreachable. The second
+   half was papered over by excluding record arms from redundancy analysis
+   entirely; these tests pin the real behaviour so that carve-out can go. *)
+
+(* The headline bug: this match handles exactly one `code` and panics on
+   every other, yet typechecked clean. *)
+let test_record_pattern_non_exhaustive_is_reported () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404 } -> "gone"
+      end
+    end
+  end|} in
+  let warns_missing =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && contains "Non-exhaustive" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "single-literal record match reported non-exhaustive"
+    true warns_missing
+
+(* A record match that DOES cover its scrutinee must stay silent — the fix
+   must not trade a false negative for a false positive. *)
+let test_record_pattern_exhaustive_is_silent () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404 } -> "gone"
+        { code: _ }   -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "covered record match: no diagnostics" false
+    (has_errors ctx
+     || List.exists (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Warning)
+          ctx.March_errors.Errors.diagnostics)
+
+(* With a real record shape, a genuinely unreachable record arm should be
+   caught — the carve-out could never do this. *)
+let test_record_pattern_genuinely_redundant_is_reported () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: _ }   -> "any"
+        { code: 404 } -> "gone"
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "record arm after a catch-all record arm is flagged"
+    true has_redundant
+
+(* Nested records must work too: the field's own sub-pattern is what
+   discriminates, so coverage has to recurse through it. *)
+let test_nested_record_pattern_non_exhaustive_is_reported () =
+  let ctx = typecheck {|mod T do
+    type Inner = { flag : Bool }
+    type Outer = { inner : Inner }
+    fn f(o : Outer) : Int do
+      match o do
+        { inner: { flag: true } } -> 1
+      end
+    end
+  end|} in
+  let warns_missing =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && contains "Non-exhaustive" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "nested record match reported non-exhaustive" true
+    warns_missing
+
+(* ── Open field lists in binding positions ─────────────────────────────────
+   `infer_pattern` takes an optional `~expected` that a record pattern uses to
+   drive its field types (that is what makes field lists open). The match path
+   passes the scrutinee type; the let path computed the RHS type on the line
+   above and then didn't pass it, so a partial destructure was a type error
+   even though the type was right there. *)
+
+let test_partial_record_destructure_in_let () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : Int do
+      let { code: c } = p
+      c
+    end
+  end|} in
+  Alcotest.(check bool) "partial record destructure in let: no errors" false
+    (has_errors ctx)
+
+let test_partial_record_destructure_in_toplevel_let () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    let origin = { code: 0, msg: "" }
+    let { code: c } = origin
+    fn f() : Int do c end
+  end|} in
+  Alcotest.(check bool) "partial destructure in top-level let: no errors" false
+    (has_errors ctx)
+
+let test_partial_record_destructure_in_letq () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn get() : Result(P, String) do Ok({ code: 1, msg: "m" }) end
+    fn f() : Result(Int, String) do
+      let? { code: c } = get()
+      Ok(c)
+    end
+  end|} in
+  Alcotest.(check bool) "partial destructure in let?: no errors" false
+    (has_errors ctx)
+
+(* A field the record does not have must still be rejected in a let, with the
+   same dedicated diagnostic the match path gives — not a unification
+   mismatch that leaks an internal tyvar name. *)
+let test_let_record_destructure_unknown_field_rejected () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : Int do
+      let { zzz: c } = p
+      c
+    end
+  end|} in
+  let names_field =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "unknown_record_field")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "let with unknown field: dedicated diagnostic" true
+    names_field
+
+(* [report_mismatch]'s parameters are named against their user-facing meaning:
+   `expected` holds what was PROVIDED and `found` holds what was REQUIRED (see
+   the convention comment on the function). The record-field note read the
+   pair the other way round, so an extra field was reported as a missing one.
+   Passing `{ w: 8, h: 9 }` where `{ w : Int }` is required must say `h` is
+   surplus, not that it is absent. *)
+let test_record_field_mismatch_note_polarity () =
+  let ctx = typecheck {|mod T do
+    fn width({ w: w }) : Int do w end
+    fn main() : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
+  end|} in
+  let notes =
+    List.concat_map (fun (d : March_errors.Errors.diagnostic) -> d.notes)
+      ctx.March_errors.Errors.diagnostics
+  in
+  let mentions_h = List.filter (fun n -> contains "`h`" n) notes in
+  Alcotest.(check bool) "a note mentions the surplus field" true
+    (mentions_h <> []);
+  Alcotest.(check bool)
+    "surplus field is not described as missing from the provided value" false
+    (List.exists (fun n -> contains "missing in the found type" n) mentions_h)
+
+(* ── Or-pattern alternatives may bind ──────────────────────────────────────
+   Originally rejected outright: the arm body is shared across alternatives
+   via a join point, which was 0-ary and so had nowhere to put a
+   per-alternative binding. The join point became n-ary when an arm binding
+   OUTSIDE the or turned out to need the same machinery, which left only the
+   typecheck rule. Alternatives must now agree — same names, unifiable types —
+   rather than bind nothing. *)
+
+let test_or_pattern_binding_accepted () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> x + 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same name, same type across alternatives: accepted"
+    false (has_errors ctx)
+
+(* Different name sets have no consistent meaning for the shared body: `y`
+   would be unbound whenever the first alternative matched. *)
+let test_or_pattern_binding_name_mismatch_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(y) -> x + y
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "differing binder names across alternatives: rejected"
+    true (has_errors ctx)
+
+(* Same name, incompatible types — the join-point parameter can only have one
+   type, so this must be a type error rather than a miscompile. *)
+let test_or_pattern_binding_type_mismatch_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(String)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same binder at differing types: rejected" true
+    (has_errors ctx)
+
 let compiler_suites =
   [
       ( "match_diagnostics",
         [
+          Alcotest.test_case "or-pattern binding accepted" `Quick
+            test_or_pattern_binding_accepted;
+          Alcotest.test_case "or-pattern binder name mismatch rejected" `Quick
+            test_or_pattern_binding_name_mismatch_rejected;
+          Alcotest.test_case "or-pattern binder type mismatch rejected" `Quick
+            test_or_pattern_binding_type_mismatch_rejected;
+          Alcotest.test_case "record field mismatch note polarity" `Quick
+            test_record_field_mismatch_note_polarity;
+          Alcotest.test_case "partial record destructure in let" `Quick
+            test_partial_record_destructure_in_let;
+          Alcotest.test_case "partial record destructure in top-level let" `Quick
+            test_partial_record_destructure_in_toplevel_let;
+          Alcotest.test_case "partial record destructure in let?" `Quick
+            test_partial_record_destructure_in_letq;
+          Alcotest.test_case "let record destructure unknown field rejected" `Quick
+            test_let_record_destructure_unknown_field_rejected;
+          Alcotest.test_case "record match non-exhaustive is reported" `Quick
+            test_record_pattern_non_exhaustive_is_reported;
+          Alcotest.test_case "covered record match is silent" `Quick
+            test_record_pattern_exhaustive_is_silent;
+          Alcotest.test_case "genuinely redundant record arm is reported" `Quick
+            test_record_pattern_genuinely_redundant_is_reported;
+          Alcotest.test_case "nested record match non-exhaustive is reported" `Quick
+            test_nested_record_pattern_non_exhaustive_is_reported;
           Alcotest.test_case "redundant arm warned in checking position" `Quick
             test_redundant_arm_in_checking_position;
           Alcotest.test_case "redundant arm warned in inference position" `Quick
@@ -8548,8 +8779,6 @@ let compiler_suites =
             test_or_of_records_under_alias_typechecks;
           Alcotest.test_case "record pattern unknown field rejected" `Quick
             test_record_pattern_unknown_field_rejected;
-          Alcotest.test_case "or-pattern binding rejected" `Quick
-            test_or_pattern_binding_rejected;
           Alcotest.test_case "or-pattern non-binding accepted" `Quick
             test_or_pattern_nonbinding_accepted;
           Alcotest.test_case "or-pattern exhaustiveness sees through alternatives" `Quick

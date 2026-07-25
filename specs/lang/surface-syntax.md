@@ -395,7 +395,11 @@ match n do
 end
 
 match e do
-  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+  A(x) | B(x) -> x * 10   -- OK: every alternative binds `x` at the same type
+end
+
+match e do
+  A(x) | B(y) -> x + y    -- REJECTED: alternatives must bind the same names
 end
 ```
 

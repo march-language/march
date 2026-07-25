@@ -24,19 +24,32 @@ git log is authoritative for exact commits.
   existed in the AST and interpreter since the beginning but had no grammar
   production, and neither TIR lowering path handled it.
 
+- Record patterns now take part in exhaustiveness and redundancy analysis.
+  A match that handles only some values of a field — `match p do { code: 404 }
+  -> ... end` — is reported non-exhaustive instead of typechecking clean and
+  panicking at runtime, and a record arm already covered by an earlier one is
+  reported unreachable. Previously the checker's internal pattern shape had no
+  record case, so any arm containing a record pattern read as a wildcard.
+
+- Record patterns in `let` and `let?` bindings may also name a subset of the
+  record's fields — `let { code: c } = p` no longer requires naming every
+  field of `p`. The binding's right-hand side supplies the expected type; it
+  simply wasn't being passed to the pattern. Naming a field the record lacks
+  now gives the same `unknown_record_field` error the `match` path gives,
+  instead of a unification mismatch that leaked an internal type-variable
+  name. A bare record pattern used directly as a function parameter stays
+  closed — that position has no annotation to source a type from.
+
 - Record patterns may mention a subset of a record's fields: `{ code: 404 }`
   matches any record with a `code` field equal to 404, whatever else it has.
-  Naming a field the record does not have is a compile error. Note that an arm
-  containing a record pattern is excluded from both exhaustiveness and
-  redundancy analysis — a match whose only arm is `{ code: 404 } -> ...`
-  typechecks clean and panics at runtime on any other `code`.
+  Naming a field the record does not have is a compile error.
 
 - Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
-  alternatives. The ALTERNATIVES may not bind variables — every alternative
-  shares one arm body, so a name bound in one would be undefined when another
-  matches; use separate arms or a `when` guard instead. The rest of the arm is
-  free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
-  checking see through or-patterns at any nesting depth.
+  alternatives. Alternatives may bind variables, provided every alternative
+  binds the same names at the same types (`A(x) | B(x) -> x * 10`); they share
+  one arm body which reaches those names as parameters, so `A(x) | B(y)` and a
+  name bound at two different types are both compile errors. Exhaustiveness
+  and redundancy checking see through or-patterns at any nesting depth.
 
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
@@ -79,6 +92,13 @@ git log is authoritative for exact commits.
   single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
 
 ### Fixed
+
+- A record type-mismatch note stated its two sides backwards: a field present
+  in the value you passed but absent from the expected type was reported as
+  "present in the expected type but missing in the found type". The note now
+  names the two sides in words, and the reverse case (a field the expected
+  type requires but the value lacks) is reported too, where before it was
+  silent.
 
 - Unreachable match arms are now reported inside functions with a declared
   return type. `check_redundant_arms` ran only on the type-inference path, so

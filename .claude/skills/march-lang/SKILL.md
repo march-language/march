@@ -254,10 +254,10 @@ match point do
 end
 
 -- Or-pattern: `p1 | p2 | p3` matches an arm against several alternatives.
--- RESTRICTION: no alternative may bind a variable — every alternative
--- shares ONE arm body, so `A(x) | B(x) -> x` is a compile error ("Or-pattern
--- alternatives cannot bind variables"). Split into separate arms, or match
--- the common shape and test the difference with a `when` guard, instead.
+-- Alternatives MAY bind, but every alternative must bind the same names at
+-- the same types (they share one arm body, reached with those names as
+-- parameters): `A(x) | B(x) -> x` is fine, `A(x) | B(y) -> x + y` is a
+-- compile error. Split into separate arms when they need to differ.
 match n do
   1 | 2 | 3 -> "small"
   _         -> "big"

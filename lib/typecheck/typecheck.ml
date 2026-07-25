@@ -2529,18 +2529,34 @@ let report_mismatch env ~span ~reason expected found =
          [ Printf.sprintf "The %s argument of `%s` mismatches: expected `%s` but got `%s`."
              ordinal cname (pp_ty fnd_arg) (pp_ty exp_arg) ]
        | None -> [])
-    | TRecord flds1, TRecord flds2 ->
-      (* Find first field that differs *)
-      let notes = List.filter_map (fun (name, t1) ->
-        match List.assoc_opt name flds2 with
+    | TRecord provided_flds, TRecord required_flds ->
+      (* Per the convention above, [expected] holds what was PROVIDED and
+         [found] holds what was REQUIRED — hence the local names.  Getting
+         this backwards is why an extra field used to be reported as a
+         missing one ("present in the expected type but missing in the found
+         type" for a field that was in the provided value and absent from the
+         required type).  Report both directions, surplus first, and name the
+         two sides in words rather than reusing the overloaded
+         "expected"/"found" pair. *)
+      let surplus = List.filter_map (fun (name, t1) ->
+        match List.assoc_opt name required_flds with
         | Some t2 when pp_ty t1 <> pp_ty t2 ->
           Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
             name (pp_ty t2) (pp_ty t1))
         | None ->
-          Some (Printf.sprintf "Field `%s` is present in the expected type but missing in the found type." name)
-        | _ -> None) flds1
+          Some (Printf.sprintf
+                  "Field `%s` is present in the value provided, but the \
+                   expected type has no such field." name)
+        | _ -> None) provided_flds
       in
-      (match notes with n :: _ -> [n] | [] -> [])
+      let absent = List.filter_map (fun (name, _) ->
+        if List.mem_assoc name provided_flds then None
+        else
+          Some (Printf.sprintf
+                  "Field `%s` is required by the expected type, but the value \
+                   provided has no such field." name)) required_flds
+      in
+      (match surplus @ absent with n :: _ -> [n] | [] -> [])
     | _ -> []
   in
   (* Common-case hints for frequently-confused types.
@@ -3619,38 +3635,77 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        !bindings, TRecord sorted)
 
   | Ast.PatOr (alts, sp) ->
-    (* Every alternative must have the same type.  Bindings are rejected: the
-       arm body is shared across alternatives via a 0-arg join point in
-       lowering, which has nowhere to put per-alternative bindings.
+    (* Every alternative must have the same type, AND must bind the same names
+       at the same types.  Lowering splits the row into one per alternative but
+       shares a single lowered body, reached through a join point whose
+       parameters are the arm's binders ([pat_binder_vars] in lower_match.ml) —
+       so a name only some alternatives supply would be unbound on the paths
+       that don't, and a name supplied at two different types has no single
+       parameter type.  Both are rejected here rather than miscompiled.
+
        [span_of_pat] isn't defined until later in this file (it's used by
-       exhaustiveness checking, which runs after inference), so the
-       diagnostic points at the whole or-pattern's span [sp] rather than at
-       the specific offending sub-pattern. *)
+       exhaustiveness checking, which runs after inference), so diagnostics
+       point at the whole or-pattern's span [sp] rather than at the specific
+       offending alternative. *)
     let results = List.map (fun p -> infer_pattern ?expected env p) alts in
     (match results with
      | [] -> [], fresh_var env.level
      | (_, t0) :: rest ->
        List.iter (fun (_, t) ->
          unify env ~span:sp ~reason:(Some (RMatchArm sp)) t0 t) rest;
-       let binders = List.concat_map fst results in
-       (match binders with
-        | [] -> ()
-        | (n, _) :: _ ->
-          Err.report env.errors
-            { Err.severity = Error; span = sp;
-              message =
-                Printf.sprintf
-                  "Or-pattern alternatives cannot bind variables (`%s`)." n;
-              labels = [];
-              notes  =
-                ["Every alternative of `p1 | p2` shares one arm body, so a \
-                  name bound in one alternative would be undefined when \
-                  another matches.";
-                 "Split this into separate arms, or match the common shape \
-                  and test the difference in a `when` guard."];
-              code = Some "or_pattern_binding";
-              fix  = None });
-       [], t0)
+       let bs0 = match results with (bs, _) :: _ -> bs | [] -> [] in
+       let ty_of_scheme = function Mono t -> t | Poly (_, _, t) -> t in
+       let names bs = List.sort_uniq String.compare (List.map fst bs) in
+       let n0 = names bs0 in
+       let report_names_differ missing extra =
+         let describe label ns =
+           Printf.sprintf "%s: %s" label
+             (String.concat ", " (List.map (fun n -> "`" ^ n ^ "`") ns))
+         in
+         let detail =
+           String.concat "; "
+             ((if missing = [] then []
+               else [describe "bound by an earlier alternative only" missing])
+              @ (if extra = [] then []
+                 else [describe "bound by a later alternative only" extra]))
+         in
+         Err.report env.errors
+           { Err.severity = Error; span = sp;
+             message = "Or-pattern alternatives must bind the same variables.";
+             labels = [];
+             notes  =
+               [detail;
+                "Every alternative of `p1 | p2` shares one arm body, so a name \
+                 bound by only some alternatives would be undefined when the \
+                 others match.";
+                "Bind the same names in every alternative, split this into \
+                 separate arms, or match the common shape and test the \
+                 difference in a `when` guard."];
+             code = Some "or_pattern_binding";
+             fix  = None }
+       in
+       List.iter (fun (bs, _) ->
+         let ni = names bs in
+         if ni <> n0 then
+           report_names_differ
+             (List.filter (fun n -> not (List.mem n ni)) n0)
+             (List.filter (fun n -> not (List.mem n n0)) ni)
+         else
+           (* Same names: each must carry the same type in every alternative,
+              since the join point gives it exactly one parameter. *)
+           List.iter (fun (n, sch) ->
+             match List.assoc_opt n bs0 with
+             | Some sch0 ->
+               unify env ~span:sp
+                 ~reason:(Some (RBuiltin
+                   (Printf.sprintf
+                      "`%s` is bound by more than one alternative of this \
+                       or-pattern, so every alternative must bind it at the \
+                       same type." n)))
+                 (ty_of_scheme sch0) (ty_of_scheme sch)
+             | None -> ()) bs
+       ) rest;
+       bs0, t0)
 
   | Ast.PatAs (inner, name, _) ->
     (* Thread [expected] into the aliased pattern, exactly as [PatTuple] and
@@ -3721,6 +3776,12 @@ type spat =
   | SPCon  of string * spat list    (** Constructor: Some(x), None *)
   | SPLit  of Ast.literal           (** Literal: 0, true, "hi" *)
   | SPTup  of spat list             (** Tuple: (a, b) *)
+  | SPRec  of (string * spat) list
+      (** Record: { x: p, … }, sorted by field name.  Field lists are OPEN, so
+          this may name a SUBSET of the record's fields — an absent field is
+          an implicit wildcard.  [spec_rec_mc] fills them in against the field
+          list taken from the scrutinee's TYPE, which is what lets two arms
+          naming different subsets line up in the same matrix column. *)
 
 (** Qualified constructor patterns ("MarchType.TBool", "Ast.Query") carry
     their full dotted text; exhaustiveness compares against the scrutinee
@@ -3745,7 +3806,9 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatWild _            -> SPWild
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
-  | Ast.PatRecord _          -> SPWild   (* conservative: [spat] has no record shape *)
+  | Ast.PatRecord (fs, _)    ->
+    SPRec (List.sort (fun (a, _) (b, _) -> String.compare a b)
+             (List.map (fun ((n : Ast.name), sub) -> (n.txt, norm_pat sub)) fs))
   | Ast.PatOr _              -> SPWild   (* conservative: see norm_pat_rows *)
   | Ast.PatCon  (n, args)    -> SPCon (bare_ctor_name n.txt, List.map norm_pat args)
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
@@ -3769,8 +3832,11 @@ let rec or_expansion_size (p : Ast.pattern) : int =
   | Ast.PatAs (p', _, _) -> or_expansion_size p'
   | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
     sat (List.fold_left (fun acc p -> sat (acc * or_expansion_size p)) 1 ps)
-  (* PatRecord collapses to SPWild whatever it contains. *)
-  | Ast.PatRecord _ | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> 1
+  (* A record's field sub-patterns multiply exactly like a tuple's elements —
+     `{ a: 1 | 2, b: 3 | 4 }` denotes four shapes. *)
+  | Ast.PatRecord (fs, _) ->
+    sat (List.fold_left (fun acc (_, p) -> sat (acc * or_expansion_size p)) 1 fs)
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> 1
 
 (** Every [spat] row [p] covers, distributing or-patterns at ANY depth into
     the cross-product of their alternatives. *)
@@ -3778,7 +3844,13 @@ let rec norm_pat_all (p : Ast.pattern) : spat list =
   match p with
   | Ast.PatWild _ | Ast.PatVar _ -> [SPWild]
   | Ast.PatAs (p', _, _)         -> norm_pat_all p'
-  | Ast.PatRecord _              -> [SPWild]
+  | Ast.PatRecord (fs, _)        ->
+    let sorted =
+      List.sort (fun ((a : Ast.name), _) ((b : Ast.name), _) ->
+          String.compare a.txt b.txt) fs in
+    let names = List.map (fun ((n : Ast.name), _) -> n.txt) sorted in
+    List.map (fun row -> SPRec (List.combine names row))
+      (norm_pat_args (List.map snd sorted))
   | Ast.PatOr (alts, _)          -> List.concat_map norm_pat_all alts
   | Ast.PatCon (n, args)         ->
     List.map (fun a -> SPCon (bare_ctor_name n.txt, a)) (norm_pat_args args)
@@ -3895,7 +3967,7 @@ let spec_ctor_mc (c : string) (a : int) (matrix : spat list list)
       match p with
       | SPWild               -> Some (List.init a (fun _ -> SPWild) @ rest)
       | SPCon (d, ps) when d = c -> Some (ps @ rest)
-      | SPCon _ | SPLit _ | SPTup _ -> None
+      | SPCon _ | SPLit _ | SPTup _ | SPRec _ -> None
   ) matrix
 
 (** Specialize the pattern matrix for a tuple of [a] components. *)
@@ -3908,6 +3980,32 @@ let spec_tup_mc (a : int) (matrix : spat list list) : spat list list =
       | SPWild               -> Some (List.init a (fun _ -> SPWild) @ rest)
       | SPTup ps when List.length ps = a -> Some (ps @ rest)
       | _ -> None
+  ) matrix
+
+(** Specialize the pattern matrix for a record with exactly [fields] (sorted
+    field names, taken from the scrutinee's TYPE, not from any one pattern).
+
+    A record is irrefutable at the top level — one shape, no tag — so this is
+    the tuple case with names instead of positions, plus one twist: field
+    lists are OPEN, so a row may name only some of [fields].  Absent fields
+    become wildcards, which is what lets `{ code: 404 }` and `{ msg: m }`
+    occupy the same column. *)
+let spec_rec_mc (fields : string list) (matrix : spat list list)
+    : spat list list =
+  let wilds = List.map (fun _ -> SPWild) fields in
+  List.filter_map (fun row ->
+    match row with
+    | [] -> None
+    | p :: rest ->
+      match p with
+      | SPWild        -> Some (wilds @ rest)
+      | SPRec assoc   ->
+        Some (List.map (fun f ->
+                match List.assoc_opt f assoc with
+                | Some sp -> sp
+                | None    -> SPWild) fields
+              @ rest)
+      | SPCon _ | SPLit _ | SPTup _ -> None
   ) matrix
 
 (** Specialize the pattern matrix for a literal value [lit].
@@ -3958,7 +4056,9 @@ let rec example_of (ty : ty) : string =
   | TVar _              -> "_"
   | TError              -> "_"
   | TArrow _            -> "<fn>"
-  | TRecord _           -> "{ ... }"
+  | TRecord fs          ->
+    "{ " ^ String.concat ", "
+             (List.map (fun (n, t) -> n ^ ": " ^ example_of t) fs) ^ " }"
   | TChan _             -> "<chan>"
   | TLin (_, t)         -> example_of t
   | TNat n              -> string_of_int n
@@ -4118,7 +4218,41 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
           in
           Some (tup_ex :: rest_exs)
       end
-    | TArrow _ | TRecord _ | TChan _ | TLin _ | TNat _ | TNatOp _ ->
+    | TRecord [] -> None   (* the empty record has one value — always covered *)
+    | TRecord field_tys ->
+      (* A record is single-shape, so this mirrors the tuple case: specialize
+         into one column per field and recurse.  The field list comes from the
+         TYPE (every field, sorted), not from any one pattern — patterns name
+         open subsets and [spec_rec_mc] fills the gaps with wildcards. *)
+      let fields    = List.map fst field_tys in
+      let inner_tys = List.map snd field_tys in
+      let arity     = List.length fields in
+      let any_rec =
+        List.exists
+          (fun row -> match row with SPRec _ :: _ -> true | _ -> false)
+          matrix
+      in
+      if any_rec then begin
+        let sub      = spec_rec_mc fields matrix in
+        let full_tys = inner_tys @ rest_tys in
+        match find_missing_mc env full_tys sub with
+        | None -> None
+        | Some exs ->
+          let fld_exs, rest_exs = split_at arity exs in
+          let rec_str =
+            Printf.sprintf "{ %s }"
+              (String.concat ", " (List.map2 (fun f e -> f ^ ": " ^ e)
+                                     fields fld_exs))
+          in
+          Some (rec_str :: rest_exs)
+      end else begin
+        (* No record patterns and no wildcards: entirely missing. *)
+        let def = default_mc matrix in
+        match find_missing_mc env rest_tys def with
+        | None -> None
+        | Some rest_exs -> Some (example_of (TRecord field_tys) :: rest_exs)
+      end
+    | TArrow _ | TChan _ | TLin _ | TNat _ | TNatOp _ ->
       (* Non-enumerable types: treat like infinite domain. *)
       let def = default_mc matrix in
       (match find_missing_mc env rest_tys def with
@@ -4185,6 +4319,15 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
           let sub_m = spec_tup_mc arity matrix in
           let wild_args = List.init arity (fun _ -> SPWild) in
           is_useful env (inner_tys @ rest_tys) sub_m (wild_args @ row_rest)
+        | TRecord field_tys when field_tys <> [] ->
+          (* Single-shape like a tuple: always expand, never take the default
+             path.  A record has no "other constructor" for the default path
+             to stand for, so expanding is both safe and strictly sharper. *)
+          let fields = List.map fst field_tys in
+          let sub_m = spec_rec_mc fields matrix in
+          let wild_args = List.map (fun _ -> SPWild) fields in
+          is_useful env (List.map snd field_tys @ rest_tys) sub_m
+            (wild_args @ row_rest)
         | _ ->
           let def = default_mc matrix in
           is_useful env rest_tys def row_rest)
@@ -4199,37 +4342,41 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
        let inner_tys = match ty with TTuple ts -> ts | _ -> List.init arity (fun _ -> TError) in
        let sub_m = spec_tup_mc arity matrix in
        is_useful env (inner_tys @ rest_tys) sub_m (sub_pats @ row_rest)
+     | SPRec assoc ->
+       (* Expand against the TYPE's field list, not this pattern's — the row
+          being tested may name a different subset than the matrix rows do,
+          and both must land in the same columns. *)
+       let field_tys = match ty with
+         | TRecord fs -> fs
+         | _ -> List.map (fun (n, _) -> (n, TError)) assoc
+       in
+       let fields = List.map fst field_tys in
+       let sub_m  = spec_rec_mc fields matrix in
+       let row_args =
+         List.map (fun f ->
+             match List.assoc_opt f assoc with
+             | Some sp -> sp
+             | None    -> SPWild) fields
+       in
+       is_useful env (List.map snd field_tys @ rest_tys) sub_m
+         (row_args @ row_rest)
      | SPLit lit ->
        let sub_m = spec_lit_mc lit matrix in
        is_useful env rest_tys sub_m row_rest)
 
-(** True if [p] contains a record pattern anywhere.
-
-    [norm_pat] collapses [PatRecord] to [SPWild] because [spat] has no record
-    shape. For EXHAUSTIVENESS that direction is safe — an arm claiming to
-    cover more than it does can only suppress a warning. For REDUNDANCY it is
-    backwards: `{ code: 404, … }` normalises to "matches everything", so the
-    very next arm is reported unreachable even though it plainly runs. Such
-    arms therefore get the same treatment guarded arms already get — never
-    flagged, and excluded from the prefix so later arms aren't judged against
-    a wildcard that isn't really there. Costs some true positives; a false
-    "this can never be reached" on correct code costs more. *)
-let rec pat_has_record (p : Ast.pattern) : bool =
-  match p with
-  | Ast.PatRecord _ -> true
-  | Ast.PatAs (inner, _, _) -> pat_has_record inner
-  | Ast.PatOr (ps, _) -> List.exists pat_has_record ps
-  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
-    List.exists pat_has_record ps
-  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
-
 (** Emit Warnings for redundant (unreachable) arms.
     Guarded arms are never flagged, and their patterns are excluded from the
     prefix so that subsequent arms aren't mistakenly flagged as subsumed.
-    Arms containing a record pattern get the same treatment — see
-    [pat_has_record] for why — as do arms whose or-expansion exceeded
-    [or_expansion_cap], since those fall back to the same widening
-    [norm_pat] and would mis-subsume the following arm for the same reason. *)
+    Arms whose or-expansion exceeded [or_expansion_cap] get the same treatment,
+    since those fall back to the widening [norm_pat] and would mis-subsume the
+    following arm.
+
+    Record arms used to be excluded here too: [spat] had no record shape, so
+    [norm_pat] collapsed them to [SPWild] ("matches everything") and the arm
+    after a record arm was reported unreachable on code that plainly runs it.
+    [SPRec] removed the cause rather than the symptom — record arms are now
+    analysed like any other, so a genuinely unreachable one is finally
+    caught. *)
 let check_redundant_arms (env : env) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let prefix = ref [] in
@@ -4239,7 +4386,6 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
        prefix — a single live alternative keeps the whole arm reachable. *)
     let arm_rows = List.map (fun r -> [r]) (norm_pat_rows br.branch_pat) in
     if br.branch_guard = None
-       && not (pat_has_record br.branch_pat)
        && not (pat_or_expansion_capped br.branch_pat) then begin
       if not (List.exists (fun row -> is_useful env [scrut_ty] !prefix row) arm_rows) then begin
         let pat_sp   = span_of_pat br.branch_pat in
@@ -5142,7 +5288,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          a type annotation on the binding (`let x : T = e`) so the RHS is
          checked against it, mirroring the normal infer_block ELet arm. *)
       let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
-      let bindings, pat_ty = infer_pattern env b.bind_pat in
+      let bindings, pat_ty = infer_pattern ~expected:rhs_ty env b.bind_pat in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
       (* Record variable name type for hover even in tail position *)
@@ -5480,7 +5626,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
            ~reason:(Some (RBuiltin
              "The right-hand side of `let?` must be a Result value."))
            result_ty (t_result t_ok t_err);
-         let bindings, pat_ty = infer_pattern env p in
+         (* [t_ok] is no longer a bare fresh var — the unify above bound it to
+            the RHS's Ok payload — so it is a usable expected type here, and a
+            record pattern needs it to open its field list. *)
+         let bindings, pat_ty = infer_pattern ~expected:t_ok env p in
          unify env ~span:sp
            ~reason:(Some (RLetBind sp))
            t_ok pat_ty;
@@ -5800,7 +5949,13 @@ and infer_block env exprs =
        works while `let x : Int = "foo"` is rejected.  The annotated type then
        becomes the binding's type, so the pattern unifies against it. *)
     let rhs_ty = infer_let_annotated env_rhs sp b.bind_ty b.bind_expr in
-    let bindings, pat_ty = infer_pattern env_rhs b.bind_pat in
+    (* Drive the pattern from the RHS type, exactly as the match path drives
+       arms from the scrutinee type.  A record pattern needs this to know the
+       record's full field list — without it, it synthesizes a CLOSED record
+       from just the fields it names and `let { code: c } = p` fails to unify
+       against a wider `p`.  The [unify] below is then a no-op for records and
+       unchanged for every other pattern shape. *)
+    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env_rhs b.bind_pat in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
@@ -8596,7 +8751,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let env' = enter_level env in
     let rhs_ty = infer_expr env' b.bind_expr in
     Hashtbl.replace env.type_map sp (repr rhs_ty);
-    let bindings, pat_ty = infer_pattern env' b.bind_pat in
+    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     discharge_constraints env sp;
     ignore (leave_level env');
@@ -10651,7 +10806,7 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   unify env' ~span:sp
     ~reason:(Some (RBuiltin "The right-hand side of `let?` must be a Result value."))
     result_ty (t_result t_ok t_err);
-  let bindings, pat_ty = infer_pattern env' p in
+  let bindings, pat_ty = infer_pattern ~expected:t_ok env' p in
   unify env' ~span:sp ~reason:(Some (RLetBind sp)) t_ok pat_ty;
   ignore (leave_level env');
   bind_vars bindings env
