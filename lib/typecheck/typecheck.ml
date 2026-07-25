@@ -2529,18 +2529,34 @@ let report_mismatch env ~span ~reason expected found =
          [ Printf.sprintf "The %s argument of `%s` mismatches: expected `%s` but got `%s`."
              ordinal cname (pp_ty fnd_arg) (pp_ty exp_arg) ]
        | None -> [])
-    | TRecord flds1, TRecord flds2 ->
-      (* Find first field that differs *)
-      let notes = List.filter_map (fun (name, t1) ->
-        match List.assoc_opt name flds2 with
+    | TRecord provided_flds, TRecord required_flds ->
+      (* Per the convention above, [expected] holds what was PROVIDED and
+         [found] holds what was REQUIRED — hence the local names.  Getting
+         this backwards is why an extra field used to be reported as a
+         missing one ("present in the expected type but missing in the found
+         type" for a field that was in the provided value and absent from the
+         required type).  Report both directions, surplus first, and name the
+         two sides in words rather than reusing the overloaded
+         "expected"/"found" pair. *)
+      let surplus = List.filter_map (fun (name, t1) ->
+        match List.assoc_opt name required_flds with
         | Some t2 when pp_ty t1 <> pp_ty t2 ->
           Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
             name (pp_ty t2) (pp_ty t1))
         | None ->
-          Some (Printf.sprintf "Field `%s` is present in the expected type but missing in the found type." name)
-        | _ -> None) flds1
+          Some (Printf.sprintf
+                  "Field `%s` is present in the value provided, but the \
+                   expected type has no such field." name)
+        | _ -> None) provided_flds
       in
-      (match notes with n :: _ -> [n] | [] -> [])
+      let absent = List.filter_map (fun (name, _) ->
+        if List.mem_assoc name provided_flds then None
+        else
+          Some (Printf.sprintf
+                  "Field `%s` is required by the expected type, but the value \
+                   provided has no such field." name)) required_flds
+      in
+      (match surplus @ absent with n :: _ -> [n] | [] -> [])
     | _ -> []
   in
   (* Common-case hints for frequently-confused types.
@@ -5233,7 +5249,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          a type annotation on the binding (`let x : T = e`) so the RHS is
          checked against it, mirroring the normal infer_block ELet arm. *)
       let rhs_ty = infer_let_annotated env sp b.bind_ty b.bind_expr in
-      let bindings, pat_ty = infer_pattern env b.bind_pat in
+      let bindings, pat_ty = infer_pattern ~expected:rhs_ty env b.bind_pat in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
       (* Record variable name type for hover even in tail position *)
@@ -5571,7 +5587,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
            ~reason:(Some (RBuiltin
              "The right-hand side of `let?` must be a Result value."))
            result_ty (t_result t_ok t_err);
-         let bindings, pat_ty = infer_pattern env p in
+         (* [t_ok] is no longer a bare fresh var — the unify above bound it to
+            the RHS's Ok payload — so it is a usable expected type here, and a
+            record pattern needs it to open its field list. *)
+         let bindings, pat_ty = infer_pattern ~expected:t_ok env p in
          unify env ~span:sp
            ~reason:(Some (RLetBind sp))
            t_ok pat_ty;
@@ -5891,7 +5910,13 @@ and infer_block env exprs =
        works while `let x : Int = "foo"` is rejected.  The annotated type then
        becomes the binding's type, so the pattern unifies against it. *)
     let rhs_ty = infer_let_annotated env_rhs sp b.bind_ty b.bind_expr in
-    let bindings, pat_ty = infer_pattern env_rhs b.bind_pat in
+    (* Drive the pattern from the RHS type, exactly as the match path drives
+       arms from the scrutinee type.  A record pattern needs this to know the
+       record's full field list — without it, it synthesizes a CLOSED record
+       from just the fields it names and `let { code: c } = p` fails to unify
+       against a wider `p`.  The [unify] below is then a no-op for records and
+       unchanged for every other pattern shape. *)
+    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env_rhs b.bind_pat in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
@@ -8687,7 +8712,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let env' = enter_level env in
     let rhs_ty = infer_expr env' b.bind_expr in
     Hashtbl.replace env.type_map sp (repr rhs_ty);
-    let bindings, pat_ty = infer_pattern env' b.bind_pat in
+    let bindings, pat_ty = infer_pattern ~expected:rhs_ty env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     discharge_constraints env sp;
     ignore (leave_level env');
@@ -10742,7 +10767,7 @@ let check_letq_repl (env : env) (p : Ast.pattern) (e : Ast.expr) : env =
   unify env' ~span:sp
     ~reason:(Some (RBuiltin "The right-hand side of `let?` must be a Result value."))
     result_ty (t_result t_ok t_err);
-  let bindings, pat_ty = infer_pattern env' p in
+  let bindings, pat_ty = infer_pattern ~expected:t_ok env' p in
   unify env' ~span:sp ~reason:(Some (RLetBind sp)) t_ok pat_ty;
   ignore (leave_level env');
   bind_vars bindings env

@@ -8618,10 +8618,101 @@ let test_nested_record_pattern_non_exhaustive_is_reported () =
   Alcotest.(check bool) "nested record match reported non-exhaustive" true
     warns_missing
 
+(* ── Open field lists in binding positions ─────────────────────────────────
+   `infer_pattern` takes an optional `~expected` that a record pattern uses to
+   drive its field types (that is what makes field lists open). The match path
+   passes the scrutinee type; the let path computed the RHS type on the line
+   above and then didn't pass it, so a partial destructure was a type error
+   even though the type was right there. *)
+
+let test_partial_record_destructure_in_let () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : Int do
+      let { code: c } = p
+      c
+    end
+  end|} in
+  Alcotest.(check bool) "partial record destructure in let: no errors" false
+    (has_errors ctx)
+
+let test_partial_record_destructure_in_toplevel_let () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    let origin = { code: 0, msg: "" }
+    let { code: c } = origin
+    fn f() : Int do c end
+  end|} in
+  Alcotest.(check bool) "partial destructure in top-level let: no errors" false
+    (has_errors ctx)
+
+let test_partial_record_destructure_in_letq () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn get() : Result(P, String) do Ok({ code: 1, msg: "m" }) end
+    fn f() : Result(Int, String) do
+      let? { code: c } = get()
+      Ok(c)
+    end
+  end|} in
+  Alcotest.(check bool) "partial destructure in let?: no errors" false
+    (has_errors ctx)
+
+(* A field the record does not have must still be rejected in a let, with the
+   same dedicated diagnostic the match path gives — not a unification
+   mismatch that leaks an internal tyvar name. *)
+let test_let_record_destructure_unknown_field_rejected () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : Int do
+      let { zzz: c } = p
+      c
+    end
+  end|} in
+  let names_field =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "unknown_record_field")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "let with unknown field: dedicated diagnostic" true
+    names_field
+
+(* [report_mismatch]'s parameters are named against their user-facing meaning:
+   `expected` holds what was PROVIDED and `found` holds what was REQUIRED (see
+   the convention comment on the function). The record-field note read the
+   pair the other way round, so an extra field was reported as a missing one.
+   Passing `{ w: 8, h: 9 }` where `{ w : Int }` is required must say `h` is
+   surplus, not that it is absent. *)
+let test_record_field_mismatch_note_polarity () =
+  let ctx = typecheck {|mod T do
+    fn width({ w: w }) : Int do w end
+    fn main() : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
+  end|} in
+  let notes =
+    List.concat_map (fun (d : March_errors.Errors.diagnostic) -> d.notes)
+      ctx.March_errors.Errors.diagnostics
+  in
+  let mentions_h = List.filter (fun n -> contains "`h`" n) notes in
+  Alcotest.(check bool) "a note mentions the surplus field" true
+    (mentions_h <> []);
+  Alcotest.(check bool)
+    "surplus field is not described as missing from the provided value" false
+    (List.exists (fun n -> contains "missing in the found type" n) mentions_h)
+
 let compiler_suites =
   [
       ( "match_diagnostics",
         [
+          Alcotest.test_case "record field mismatch note polarity" `Quick
+            test_record_field_mismatch_note_polarity;
+          Alcotest.test_case "partial record destructure in let" `Quick
+            test_partial_record_destructure_in_let;
+          Alcotest.test_case "partial record destructure in top-level let" `Quick
+            test_partial_record_destructure_in_toplevel_let;
+          Alcotest.test_case "partial record destructure in let?" `Quick
+            test_partial_record_destructure_in_letq;
+          Alcotest.test_case "let record destructure unknown field rejected" `Quick
+            test_let_record_destructure_unknown_field_rejected;
           Alcotest.test_case "record match non-exhaustive is reported" `Quick
             test_record_pattern_non_exhaustive_is_reported;
           Alcotest.test_case "covered record match is silent" `Quick

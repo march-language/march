@@ -31,6 +31,15 @@ git log is authoritative for exact commits.
   reported unreachable. Previously the checker's internal pattern shape had no
   record case, so any arm containing a record pattern read as a wildcard.
 
+- Record patterns in `let` and `let?` bindings may also name a subset of the
+  record's fields — `let { code: c } = p` no longer requires naming every
+  field of `p`. The binding's right-hand side supplies the expected type; it
+  simply wasn't being passed to the pattern. Naming a field the record lacks
+  now gives the same `unknown_record_field` error the `match` path gives,
+  instead of a unification mismatch that leaked an internal type-variable
+  name. A bare record pattern used directly as a function parameter stays
+  closed — that position has no annotation to source a type from.
+
 - Record patterns may mention a subset of a record's fields: `{ code: 404 }`
   matches any record with a `code` field equal to 404, whatever else it has.
   Naming a field the record does not have is a compile error.
@@ -83,6 +92,13 @@ git log is authoritative for exact commits.
   single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
 
 ### Fixed
+
+- A record type-mismatch note stated its two sides backwards: a field present
+  in the value you passed but absent from the expected type was reported as
+  "present in the expected type but missing in the found type". The note now
+  names the two sides in words, and the reverse case (a field the expected
+  type requires but the value lacks) is reported too, where before it was
+  silent.
 
 - Unreachable match arms are now reported inside functions with a declared
   return type. `check_redundant_arms` ran only on the type-inference path, so

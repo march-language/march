@@ -177,14 +177,16 @@ non-trivial pattern desugars through the same match-lowering path:
 fn area({ w: w, h: h }) : Int do w * h end   -- full destructure, unaffected
 ```
 
-Two positions remain **closed** to exactly the fields named, because neither
-has an independent expected type for the pattern to open against:
+A `let` binding is open too — its right-hand side supplies the expected type:
 
-- **A `let` binding**: `let { x: px } = p` still requires naming every field
-  of `p`'s type. `infer_pattern` only receives an expected type when the
-  caller already has one to offer (a `match`'s scrutinee, a constructor
-  argument, a tuple element); a `let` pattern's binding is exactly the thing
-  establishing the type, so there is nothing to drive it from yet.
+```march
+let { code: c } = p        -- fine even though `p` also has a `msg` field
+let? { code: c } = fetch() -- and in `let?`, driven by the Ok payload's type
+```
+
+One position remains **closed** to exactly the fields named, because it has
+no independent expected type for the pattern to open against:
+
 - **A bare pattern used directly as a function parameter**, e.g.
   `fn get_w({ w: w }) : Int do w end` — a pattern in that grammar position
   cannot itself carry a type annotation (only `name : Type` can), so its type
