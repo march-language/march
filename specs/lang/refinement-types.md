@@ -137,11 +137,37 @@ takepos(c)              -- error: same, through the binding
 Resolution follows the same rules as everything else — direct named calls,
 across modules, through `alias` and `use`.
 
-**Only *closed* postconditions propagate.** A predicate that mentions a
-parameter — `{Int | _ < n}`, `{Int | _ < len(xs)}` — is *relational*, and using
-it at a call site requires substituting arguments for parameters. That is not
-yet supported, so a relational postcondition is silently skipped at call sites
-(it is still checked at the definition).
+**Relational postconditions propagate too, by substitution.** A predicate that
+mentions a parameter — `{Int | _ < n}`, `{Int | _ < len(xs)}` — is *relational*.
+At a call site the call's arguments are substituted for the callee's parameters,
+which restates the contract entirely in the caller's own terms:
+
+```march
+fn below(n : Int) : {Int | _ < n} do n - 1 end
+fn takepos(k : {Int | _ >= 0}) : Int do k end
+
+takepos(below(0))       -- error: `_ < n` instantiates to `_ < 0`, never >= 0
+takepos(below(10))      -- fine: `_ < 10` can still be >= 0
+```
+
+Parameters are matched to arguments **positionally**, and substitution is
+**simultaneous** — with `fn f(n : Int, m : Int) : {Int | _ < n + m}` called as
+`f(m, 1)`, the result is `_ < m + 1` (the caller's `m`), never `_ < 1 + 1`.
+
+Propagation is **skipped** — silently, and with no loss of soundness — whenever
+the instantiation cannot be made exactly:
+
+- the predicate mentions a name that is neither the refinement binder nor one of
+  the callee's parameters;
+- a parameter the predicate mentions has no corresponding argument (an arity
+  mismatch, or an omitted defaulted argument);
+- the predicate uses syntax the checker does not reflect;
+- the callee has a *pattern* parameter, which is rewritten before this pass runs
+  and so no longer carries the parameter names the predicate refers to.
+
+A partially substituted predicate is never used: mixing the callee's and the
+caller's namespaces is precisely how a false positive would arise here, so the
+checker abandons the whole instantiation rather than guess at part of it.
 
 **Only *proven* postconditions propagate.** A declared return refinement
 becomes an assumption at call sites only when the definition side actually
@@ -516,13 +542,19 @@ edges:
   `let` binding rather than returning it directly), the declaration is still
   accepted but callers learn nothing from it. Only proven postconditions are
   assumed at call sites.
-- **No relational postconditions yet.** A return refinement that mentions a
-  parameter (`{Int | _ == n + 1}`, `{Int | _ < len(xs)}`) is checked at the
-  definition but is **not** propagated to call sites — instantiating it there
-  requires substituting arguments for parameters. Properties that *relate* a
-  measure across an operation — `size(insert(t, x)) == size(t) + 1` — are also
-  not provable automatically (they often need induction the solver can't do by
-  itself). Use an `assert` lemma where you need them.
+- **Relational postconditions propagate, but only as far as the definition side
+  got.** A return refinement mentioning a parameter (`{Int | _ == n + 1}`,
+  `{Int | _ < len(xs)}`) *is* instantiated at call sites by substituting the
+  call's arguments — but only if the definition **proved** it, so a relational
+  contract the solver cannot discharge travels no further than a closed one
+  would. Propagation is also skipped when an argument is missing, when the
+  predicate mentions anything that is neither the binder nor a parameter, or
+  when the callee takes a pattern parameter. See the propagation section above.
+- **Properties needing induction are still out of reach.** Relating a measure
+  across an operation — `size(insert(t, x)) == size(t) + 1` — is not provable
+  automatically; these usually need induction the solver can't do by itself.
+  Substitution does not help here: the contract must be provable at the
+  definition for it to travel at all. Use an `assert` lemma where you need them.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
