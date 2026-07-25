@@ -573,6 +573,7 @@ let structural_subvars (param : string) (body : A.expr) : (string, unit) Hashtbl
     | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) -> List.concat_map pat_vars ps
     | A.PatAs (p, n, _) -> n.A.txt :: pat_vars p
     | A.PatRecord (fs, _) -> List.concat_map (fun (_, p) -> pat_vars p) fs
+    | A.PatOr (ps, _) -> List.concat_map pat_vars ps
     | A.PatWild _ | A.PatLit _ -> []
   in
   iter_all
@@ -838,6 +839,16 @@ let rec pat_binders (p : A.pattern) : string list =
   | A.PatCon (_, ps) | A.PatAtom (_, ps, _) | A.PatTuple (ps, _) ->
     List.concat_map pat_binders ps
   | A.PatRecord (fps, _) -> List.concat_map (fun (_, sub) -> pat_binders sub) fps
+  (* UNION across alternatives, not intersection.  This list drives
+     [scope_shadow], so a name that is missed here leaves an outer refined
+     entry visible and lets the checker attribute the outer value's predicate
+     to the inner binder — a false positive, the one failure this subsystem
+     must never have.  Retiring a name an alternative did not actually bind
+     only discards a fact, which is safe.  (Typecheck rejects or-patterns
+     whose alternatives bind, so today this recursion finds names only in
+     patterns nested around one; it is written for the contract, not the
+     current restriction.) *)
+  | A.PatOr (ps, _) -> List.concat_map pat_binders ps
   | A.PatWild _ | A.PatLit _ -> []
 
 (* Drop shadowed entries.  [scope] is an assoc list read with [List.assoc_opt],

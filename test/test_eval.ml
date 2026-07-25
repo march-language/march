@@ -4494,8 +4494,207 @@ let test_main_wrong_arity_rejected () =
   Alcotest.(check bool) "wrong-arity main rejected" true
     (March_errors.Errors.has_errors errors)
 
+(* As-patterns: `p as n` binds n to the whole matched value while p continues
+   to destructure it.  PatAs existed in the AST, interpreter, and typechecker
+   from the start but had no grammar production. *)
+let test_eval_as_pattern_binds_whole () =
+  let env = eval_module {|mod T do
+    fn f(o) do
+      match o do
+        Some(x) as whole ->
+          match whole do
+            Some(y) -> x + y
+            None -> 0
+          end
+        None -> 0
+      end
+    end
+  end|} in
+  let v = call_fn env "f"
+      [March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt 21])] in
+  Alcotest.(check int) "Some(21) as whole -> 21 + 21" 42
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* An as-pattern over a TRIVIAL inner pattern takes lower_match's
+   bind_trivial_pat path; over a NON-TRIVIAL inner it takes the new
+   strip_as_column path.  Cover the trivial one too. *)
+let test_eval_as_pattern_trivial_inner () =
+  let env = eval_module {|mod T do
+    fn f(n) do
+      match n do
+        x as y -> x + y
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "x as y -> x + y" 10
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* Record patterns in a match arm, with the field list exactly matching the
+   record's fields.  PatRecord existed in the AST and interpreter but had no
+   grammar production. *)
+let test_eval_record_pattern_match () =
+  let env = eval_module {|mod T do
+    fn f() do
+      let r = { x: 3, y: 4 }
+      match r do
+        { x: a, y: b } -> a * b
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "{x: 3, y: 4} -> 3 * 4" 12
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* Punned field patterns: `{ x, y }` is shorthand for `{ x: x, y: y }`. *)
+let test_eval_record_pattern_punned () =
+  let env = eval_module {|mod T do
+    fn f() do
+      let r = { x: 3, y: 4 }
+      match r do
+        { x, y } -> x + y
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "{x, y} punned -> 3 + 4" 7
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* Record pattern in an irrefutable `let` binding — a DIFFERENT lowering path
+   (lower.ml's bind_subpat) from the match matrix compiler. *)
+let test_eval_record_pattern_let () =
+  let env = eval_module {|mod T do
+    fn f() do
+      let r = { x: 3, y: 4 }
+      let { x: a, y: b } = r
+      a * b + 1
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "let {x: a, y: b} = r" 13
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* Record pattern as a function parameter.  desugar.ml routes a single clause
+   with a non-PatVar FPPat through the general path, which builds an EMatch —
+   so this rides the match-lowering path, not a third one. *)
+let test_eval_record_pattern_fn_param () =
+  let env = eval_module {|mod T do
+    fn area({ w: w, h: h }) do w * h end
+    fn f() do area({ w: 6, h: 7 }) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "fn area({w, h})" 42
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+(* A REFUTABLE sub-pattern inside a record pattern forces the matrix compiler
+   to actually dispatch on a projected field rather than just destructure. *)
+let test_eval_record_pattern_refutable_field () =
+  let env = eval_module {|mod T do
+    fn f(r) do
+      match r do
+        { code: 404, msg: m } -> m
+        { code: c, msg: _ }   -> "other " ++ int_to_string(c)
+      end
+    end
+    fn g() do f({ code: 404, msg: "gone" }) end
+    fn h() do f({ code: 200, msg: "ok" }) end
+  end|} in
+  Alcotest.(check string) "404 arm" "gone"
+    (match call_fn env "g" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "fallthrough arm" "other 200"
+    (match call_fn env "h" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+(* Partial record patterns must also RUN, not merely typecheck: the matrix
+   compiler projects the union of mentioned fields across rows, so two arms
+   mentioning different subsets must both work. *)
+let test_eval_record_pattern_partial () =
+  let env = eval_module {|mod T do
+    fn f(r) do
+      match r do
+        { code: 404 } -> "gone"
+        { msg: m }    -> m
+      end
+    end
+    fn g() do f({ code: 404, msg: "unused" }) end
+    fn h() do f({ code: 200, msg: "ok" }) end
+  end|} in
+  Alcotest.(check string) "first arm matches on code alone" "gone"
+    (match call_fn env "g" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "second arm matches on msg alone" "ok"
+    (match call_fn env "h" [] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+(* Or-patterns: alternatives separated by `|` in a single arm. *)
+let test_eval_or_pattern_literals () =
+  let env = eval_module {|mod T do
+    fn f(n) do
+      match n do
+        1 | 2 | 3 -> "small"
+        _         -> "big"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "1 -> small" "small"
+    (match call_fn env "f" [March_eval.Eval.VInt 1] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "3 -> small" "small"
+    (match call_fn env "f" [March_eval.Eval.VInt 3] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString");
+  Alcotest.(check string) "9 -> big" "big"
+    (match call_fn env "f" [March_eval.Eval.VInt 9] with
+     | March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+let test_eval_or_pattern_nullary_ctors () =
+  let env = eval_module {|mod T do
+    type Color = Red | Green | Blue
+    fn warm(c) do
+      match c do
+        Red | Green -> true
+        Blue        -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Red is warm" true
+    (match call_fn env "warm" [March_eval.Eval.VCon ("Red", [])] with
+     | March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool");
+  Alcotest.(check bool) "Blue is not warm" false
+    (match call_fn env "warm" [March_eval.Eval.VCon ("Blue", [])] with
+     | March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
+
 let eval_suites =
   [
+      ( "or_patterns",
+        [
+          Alcotest.test_case "or-pattern over literals" `Quick
+            test_eval_or_pattern_literals;
+          Alcotest.test_case "or-pattern over nullary constructors" `Quick
+            test_eval_or_pattern_nullary_ctors;
+        ] );
+      ( "record_patterns",
+        [
+          Alcotest.test_case "record pattern in a match arm" `Quick
+            test_eval_record_pattern_match;
+          Alcotest.test_case "punned record field patterns" `Quick
+            test_eval_record_pattern_punned;
+          Alcotest.test_case "record pattern in a let binding" `Quick
+            test_eval_record_pattern_let;
+          Alcotest.test_case "record pattern as a function parameter" `Quick
+            test_eval_record_pattern_fn_param;
+          Alcotest.test_case "refutable sub-pattern inside a record pattern" `Quick
+            test_eval_record_pattern_refutable_field;
+          Alcotest.test_case "partial record patterns across two arms" `Quick
+            test_eval_record_pattern_partial;
+        ] );
+      ( "as_patterns",
+        [
+          Alcotest.test_case "as-pattern binds the whole value" `Quick
+            test_eval_as_pattern_binds_whole;
+          Alcotest.test_case "as-pattern over a trivial inner pattern" `Quick
+            test_eval_as_pattern_trivial_inner;
+        ] );
       ( "signal_watch", [
           Alcotest.test_case "deferred USR1 drain + coalesce + unwatch" `Quick
             test_signal_watch_deferred;

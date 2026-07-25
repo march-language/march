@@ -116,9 +116,13 @@ let p2 = { p with x: 5.0 }  -- new Point, y unchanged
 let u2 = { u with age: 31 } -- new User, name/email unchanged
 ```
 
-**Record patterns are not yet supported by the parser** (`{ x, y } -> ...` in
-a `match` is a parse error) — use field access in a guard instead. See
-[Pattern Matching](pattern-matching.md#record-patterns) for the workaround.
+Records can also be destructured with a record pattern (`{ x, y } -> ...` in
+a `match`, a `let`, or a function parameter). In a `match` arm the field list
+is open — `{ x }` matches any record with an `x` field, whatever else it
+has — while a `let` binding or a bare record-pattern function parameter
+still requires naming every field. See
+[Pattern Matching](pattern-matching.md#record-patterns) for the syntax,
+punning rules, and why those two positions differ.
 
 ---
 

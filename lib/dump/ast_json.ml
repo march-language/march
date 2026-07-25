@@ -284,6 +284,12 @@ let rec pattern_to_json (p : pattern) : string =
       ("name", name_to_json n);
       ("span", span_to_json span);
     ]
+  | PatOr (ps, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "PatOr");
+      ("patterns", Dump.json_list (List.map pattern_to_json ps));
+      ("span", span_to_json span);
+    ]
 
 (* ------------------------------------------------------------------ *)
 (* expr / param / binding / branch / ty / nat_op                       *)

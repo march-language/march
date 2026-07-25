@@ -3409,7 +3409,20 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     [], ty_of_lit lit
 
   | Ast.PatTuple (ps, _) ->
-    let bs_tys  = List.map (infer_pattern env) ps in
+    (* Thread per-element expected types so a nested record pattern inside a
+       tuple pattern — which is what desugar builds for multi-param fns —
+       still gets an expected type to open its field list against. *)
+    let elem_expected =
+      match expected with
+      | Some t -> (match repr t with TTuple ts -> ts | _ -> [])
+      | None -> []
+    in
+    let bs_tys =
+      List.mapi (fun i p ->
+        match List.nth_opt elem_expected i with
+        | Some et -> infer_pattern ~expected:et env p
+        | None    -> infer_pattern env p) ps
+    in
     let bindings = List.concat_map fst bs_tys in
     let tys      = List.map snd bs_tys in
     bindings, TTuple tys
@@ -3541,19 +3554,113 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
     let bindings  = List.concat_map fst bs_tys in
     bindings, t_atom
 
-  | Ast.PatRecord (flds, _) ->
-    let bindings = ref [] in
-    let fld_tys = List.map (fun (name, pat) ->
-        let bs, t = infer_pattern env pat in
-        bindings := bs @ !bindings;
-        (name.Ast.txt, t)
-      ) flds
+  | Ast.PatRecord (flds, sp) ->
+    (* Record patterns have OPEN field lists: `{ x }` matches any record with
+       at least an `x`.  Since [unify] requires exact field-set equality
+       (no width subtyping, no row variables), we cannot synthesize the
+       pattern's type from the mentioned fields and unify — that rejects every
+       partial pattern.  Drive the sub-patterns from the EXPECTED type
+       instead, and return the expected type unchanged so the caller's unify
+       is a no-op.
+
+       With no expected type available (an unannotated scrutinee whose type is
+       still a fresh var), fall back to the old closed-record synthesis: it is
+       the only thing that can constrain the scrutinee at all, and it matches
+       the pre-existing behaviour for full destructures. *)
+    let expected_rec =
+      match expected with
+      | Some t -> expand_record env (repr t)
+      | None -> None
     in
-    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
-    !bindings, TRecord sorted
+    (match expected_rec with
+     | Some (TRecord expected_flds) ->
+       let bindings = ref [] in
+       List.iter (fun ((name : Ast.name), pat) ->
+         match List.assoc_opt name.Ast.txt expected_flds with
+         | Some fty ->
+           let bs, pty = infer_pattern ~expected:fty env pat in
+           unify env ~span:name.Ast.span ~reason:(Some (RMatchArm sp)) fty pty;
+           bindings := bs @ !bindings
+         | None ->
+           Err.report env.errors
+             { Err.severity = Error; span = name.Ast.span;
+               message =
+                 Printf.sprintf "This record has no field `%s`." name.Ast.txt;
+               labels = [];
+               notes  =
+                 [Printf.sprintf "Available fields: %s"
+                    (String.concat ", " (List.map fst expected_flds))];
+               code = Some "unknown_record_field";
+               fix  = None }
+       ) flds;
+       (* Record the PATTERN's own type under its span.  lower_match's
+          [expand_record_column] emits [EField] on the column's scrutinee, and
+          llvm_emit can only compute a static GEP when that scrutinee's TIR
+          type is the record's — otherwise it falls back to the by-name
+          dynamic accessor and decodes the result with the FIELD's type, which
+          dereferences an inline unboxed Float as a pointer (SIGSEGV).  A
+          NESTED record column (a record inside a constructor payload) has a
+          synthetic sub-var deliberately left at the lowering placeholder, so
+          this span is the only place the record type can be recovered from. *)
+       Hashtbl.replace env.type_map sp (TRecord expected_flds);
+       !bindings, TRecord expected_flds
+     | _ ->
+       let bindings = ref [] in
+       let fld_tys = List.map (fun ((name : Ast.name), pat) ->
+           let bs, t = infer_pattern env pat in
+           bindings := bs @ !bindings;
+           (name.Ast.txt, t)
+         ) flds
+       in
+       let sorted =
+         List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
+       (* Same reason as the expected-driven branch above. *)
+       Hashtbl.replace env.type_map sp (TRecord sorted);
+       !bindings, TRecord sorted)
+
+  | Ast.PatOr (alts, sp) ->
+    (* Every alternative must have the same type.  Bindings are rejected: the
+       arm body is shared across alternatives via a 0-arg join point in
+       lowering, which has nowhere to put per-alternative bindings.
+       [span_of_pat] isn't defined until later in this file (it's used by
+       exhaustiveness checking, which runs after inference), so the
+       diagnostic points at the whole or-pattern's span [sp] rather than at
+       the specific offending sub-pattern. *)
+    let results = List.map (fun p -> infer_pattern ?expected env p) alts in
+    (match results with
+     | [] -> [], fresh_var env.level
+     | (_, t0) :: rest ->
+       List.iter (fun (_, t) ->
+         unify env ~span:sp ~reason:(Some (RMatchArm sp)) t0 t) rest;
+       let binders = List.concat_map fst results in
+       (match binders with
+        | [] -> ()
+        | (n, _) :: _ ->
+          Err.report env.errors
+            { Err.severity = Error; span = sp;
+              message =
+                Printf.sprintf
+                  "Or-pattern alternatives cannot bind variables (`%s`)." n;
+              labels = [];
+              notes  =
+                ["Every alternative of `p1 | p2` shares one arm body, so a \
+                  name bound in one alternative would be undefined when \
+                  another matches.";
+                 "Split this into separate arms, or match the common shape \
+                  and test the difference in a `when` guard."];
+              code = Some "or_pattern_binding";
+              fix  = None });
+       [], t0)
 
   | Ast.PatAs (inner, name, _) ->
-    let bindings, t = infer_pattern env inner in
+    (* Thread [expected] into the aliased pattern, exactly as [PatTuple] and
+       constructor arguments do.  Dropping it sent a record pattern under an
+       alias (`{ code: 404 } as w`) down the CLOSED-synthesis branch, so `w`
+       got the narrow `{ code : Int }` instead of the scrutinee's own type —
+       two misleading errors (`expected { code : Int } but got
+       { code : Int, msg : String }` and `this record does not have a field
+       called msg`), neither pointing at the real cause. *)
+    let bindings, t = infer_pattern ?expected env inner in
     Hashtbl.replace env.type_map name.span t;
     (name.txt, Mono t) :: bindings, t
 
@@ -3615,25 +3722,96 @@ type spat =
   | SPLit  of Ast.literal           (** Literal: 0, true, "hi" *)
   | SPTup  of spat list             (** Tuple: (a, b) *)
 
-(** Normalize an AST pattern to a [spat]. *)
+(** Qualified constructor patterns ("MarchType.TBool", "Ast.Query") carry
+    their full dotted text; exhaustiveness compares against the scrutinee
+    type's BARE ctor names, so keep only the last segment. *)
+let bare_ctor_name (txt : string) : string =
+  match String.rindex_opt txt '.' with
+  | Some i -> String.sub txt (i + 1) (String.length txt - i - 1)
+  | None -> txt
+
+(** Normalize an AST pattern to a SINGLE [spat], widening anything [spat]
+    cannot represent to [SPWild].
+
+    Only used as the fallback for a pattern whose or-expansion exceeds
+    [or_expansion_cap]; [norm_pat_rows] is the entry point everything else
+    goes through.  Note that [SPWild] in a coverage matrix means "matches
+    everything", i.e. it OVER-reports what the arm covers: safe for
+    exhaustiveness (it can only suppress a warning), wrong for redundancy
+    (the next arm looks subsumed), which is why the callers that use this
+    fallback also skip redundancy checking for the arm. *)
 let rec norm_pat (p : Ast.pattern) : spat =
   match p with
   | Ast.PatWild _            -> SPWild
   | Ast.PatVar  _            -> SPWild
   | Ast.PatAs  (p', _, _)    -> norm_pat p'
-  | Ast.PatRecord _          -> SPWild   (* conservative *)
-  | Ast.PatCon  (n, args)    ->
-    (* Qualified constructor patterns ("MarchType.TBool", "Ast.Query")
-       carry their full dotted text; exhaustiveness compares against the
-       scrutinee type's BARE ctor names, so keep only the last segment. *)
-    let bare = match String.rindex_opt n.txt '.' with
-      | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
-      | None -> n.txt
-    in
-    SPCon (bare, List.map norm_pat args)
+  | Ast.PatRecord _          -> SPWild   (* conservative: [spat] has no record shape *)
+  | Ast.PatOr _              -> SPWild   (* conservative: see norm_pat_rows *)
+  | Ast.PatCon  (n, args)    -> SPCon (bare_ctor_name n.txt, List.map norm_pat args)
   | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
+
+(** Upper bound on the number of [spat] rows one arm may expand to.  Nested
+    or-patterns multiply — `C(1 | 2, 3 | 4)` denotes four concrete shapes —
+    so the cross-product is capped and a pattern beyond it falls back to the
+    widening [norm_pat]. *)
+let or_expansion_cap = 256
+
+(** How many [spat] rows [p] expands to, saturating at [or_expansion_cap + 1]
+    so a pathological pattern is rejected by the cap instead of overflowing
+    (or building the list to find out). *)
+let rec or_expansion_size (p : Ast.pattern) : int =
+  let sat n = min n (or_expansion_cap + 1) in
+  match p with
+  | Ast.PatOr (alts, _) ->
+    sat (List.fold_left (fun acc a -> sat (acc + or_expansion_size a)) 0 alts)
+  | Ast.PatAs (p', _, _) -> or_expansion_size p'
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    sat (List.fold_left (fun acc p -> sat (acc * or_expansion_size p)) 1 ps)
+  (* PatRecord collapses to SPWild whatever it contains. *)
+  | Ast.PatRecord _ | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> 1
+
+(** Every [spat] row [p] covers, distributing or-patterns at ANY depth into
+    the cross-product of their alternatives. *)
+let rec norm_pat_all (p : Ast.pattern) : spat list =
+  match p with
+  | Ast.PatWild _ | Ast.PatVar _ -> [SPWild]
+  | Ast.PatAs (p', _, _)         -> norm_pat_all p'
+  | Ast.PatRecord _              -> [SPWild]
+  | Ast.PatOr (alts, _)          -> List.concat_map norm_pat_all alts
+  | Ast.PatCon (n, args)         ->
+    List.map (fun a -> SPCon (bare_ctor_name n.txt, a)) (norm_pat_args args)
+  | Ast.PatAtom (n, args, _)     ->
+    List.map (fun a -> SPCon (":" ^ n, a)) (norm_pat_args args)
+  | Ast.PatTuple (ps, _)         -> List.map (fun a -> SPTup a) (norm_pat_args ps)
+  | Ast.PatLit (l, _)            -> [SPLit l]
+
+and norm_pat_args (ps : Ast.pattern list) : spat list list =
+  List.fold_right (fun p acc ->
+      let heads = norm_pat_all p in
+      List.concat_map (fun h -> List.map (fun t -> h :: t) acc) heads)
+    ps [[]]
+
+(** True when [p]'s or-expansion is too large to enumerate, so [norm_pat_rows]
+    falls back to the widening [norm_pat].  Redundancy checking must skip such
+    an arm — see [check_redundant_arms]. *)
+let pat_or_expansion_capped (p : Ast.pattern) : bool =
+  or_expansion_size p > or_expansion_cap
+
+(** Expand a pattern into the set of [spat] rows it covers.  Or-patterns are
+    expanded at EVERY depth, not just the top level: nesting one inside a
+    constructor argument or tuple element used to normalise it to [SPWild],
+    which in a coverage matrix means "matches everything" — so `Some(1 | 2)`
+    silently claimed to cover all of `Some(_)`, suppressing a real
+    non-exhaustiveness warning AND reporting the following arm unreachable.
+    (The old comment here claimed the widening was conservative; [SPWild] is
+    an over-report, not an under-report, in both consumers.)
+
+    Beyond [or_expansion_cap] rows the enumeration is abandoned and the
+    widening [norm_pat] is used instead — see [pat_or_expansion_capped]. *)
+let norm_pat_rows (p : Ast.pattern) : spat list =
+  if pat_or_expansion_capped p then [norm_pat p] else norm_pat_all p
 
 (** All [(ctor_name, arity)] pairs for a type name, in declaration order.
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
@@ -3956,6 +4134,7 @@ let span_of_pat : Ast.pattern -> Ast.span = function
   | Ast.PatLit  (_, sp)     -> sp
   | Ast.PatRecord (_, sp)   -> sp
   | Ast.PatAs   (_, _, sp)  -> sp
+  | Ast.PatOr   (_, sp)     -> sp
 
 (** Check if [row] is useful relative to [matrix] for scrutinee types [tys].
     Returns false iff every value matched by [row] is already covered by [matrix]. *)
@@ -4024,16 +4203,45 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
        let sub_m = spec_lit_mc lit matrix in
        is_useful env rest_tys sub_m row_rest)
 
+(** True if [p] contains a record pattern anywhere.
+
+    [norm_pat] collapses [PatRecord] to [SPWild] because [spat] has no record
+    shape. For EXHAUSTIVENESS that direction is safe — an arm claiming to
+    cover more than it does can only suppress a warning. For REDUNDANCY it is
+    backwards: `{ code: 404, … }` normalises to "matches everything", so the
+    very next arm is reported unreachable even though it plainly runs. Such
+    arms therefore get the same treatment guarded arms already get — never
+    flagged, and excluded from the prefix so later arms aren't judged against
+    a wildcard that isn't really there. Costs some true positives; a false
+    "this can never be reached" on correct code costs more. *)
+let rec pat_has_record (p : Ast.pattern) : bool =
+  match p with
+  | Ast.PatRecord _ -> true
+  | Ast.PatAs (inner, _, _) -> pat_has_record inner
+  | Ast.PatOr (ps, _) -> List.exists pat_has_record ps
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.exists pat_has_record ps
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
+
 (** Emit Warnings for redundant (unreachable) arms.
     Guarded arms are never flagged, and their patterns are excluded from the
-    prefix so that subsequent arms aren't mistakenly flagged as subsumed. *)
+    prefix so that subsequent arms aren't mistakenly flagged as subsumed.
+    Arms containing a record pattern get the same treatment — see
+    [pat_has_record] for why — as do arms whose or-expansion exceeded
+    [or_expansion_cap], since those fall back to the same widening
+    [norm_pat] and would mis-subsume the following arm for the same reason. *)
 let check_redundant_arms (env : env) (scrut_ty : ty)
     (branches : Ast.branch list) =
   let prefix = ref [] in
   List.iter (fun (br : Ast.branch) ->
-    let arm_row = [norm_pat br.branch_pat] in
-    if br.branch_guard = None then begin
-      if not (is_useful env [scrut_ty] !prefix arm_row) then begin
+    (* An or-pattern contributes one row per alternative (at every depth); the
+       arm is redundant only if EVERY alternative is already subsumed by the
+       prefix — a single live alternative keeps the whole arm reachable. *)
+    let arm_rows = List.map (fun r -> [r]) (norm_pat_rows br.branch_pat) in
+    if br.branch_guard = None
+       && not (pat_has_record br.branch_pat)
+       && not (pat_or_expansion_capped br.branch_pat) then begin
+      if not (List.exists (fun row -> is_useful env [scrut_ty] !prefix row) arm_rows) then begin
         let pat_sp   = span_of_pat br.branch_pat in
         let body_sp  = span_of_expr br.branch_body in
         let arm_span = { pat_sp with
@@ -4049,7 +4257,7 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
               start_line = arm_span.March_ast.Ast.start_line;
               end_line   = arm_span.March_ast.Ast.end_line }) }
       end;
-      prefix := !prefix @ [arm_row]
+      prefix := !prefix @ arm_rows
     end
   ) branches
 
@@ -4080,11 +4288,11 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
        match can never fall through → safe. Otherwise record the span so
        [check_no_panic_module] rejects it; no global Warning here. *)
     let guardless_matrix =
-      List.filter_map
+      List.concat_map
         (fun (br : Ast.branch) ->
           match br.branch_guard with
-          | None   -> Some [norm_pat br.branch_pat]
-          | Some _ -> None)
+          | None   -> List.map (fun r -> [r]) (norm_pat_rows br.branch_pat)
+          | Some _ -> [])
         branches
     in
     match find_missing_mc env [scrut_ty] guardless_matrix with
@@ -4094,7 +4302,10 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
   end
   else begin
     let matrix =
-      List.map (fun (br : Ast.branch) -> [norm_pat br.branch_pat]) branches
+      List.concat_map
+        (fun (br : Ast.branch) ->
+          List.map (fun r -> [r]) (norm_pat_rows br.branch_pat))
+        branches
     in
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
@@ -5336,7 +5547,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         with_offer_refinement env scrut br (fun () ->
           check_expr env' br.branch_body expected ~reason)
       );
-    check_exhaustiveness env msp scrut_ty branches
+    check_exhaustiveness env msp scrut_ty branches;
+    check_redundant_arms env scrut_ty branches
 
   (* Constructor in check mode: when the bare constructor name is ambiguous
      across types, use the expected type to pick the candidate whose parent
@@ -5888,6 +6100,7 @@ and free_vars_pattern (p : Ast.pattern) : string list =
   | Ast.PatRecord (fields, _) -> List.concat_map (fun (_, p) -> free_vars_pattern p) fields
   | Ast.PatAs (p, n, _) -> n.txt :: free_vars_pattern p
   | Ast.PatAtom (_, ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatOr (ps, _) -> List.concat_map free_vars_pattern ps
 
 (** Emit unused-variable warnings for fn params not referenced in the body.
     The wildcard [_] and names starting with [_] are silently ignored. *)
@@ -7727,6 +7940,7 @@ let unqualified_module_deps
     | Ast.PatTuple (ps, _) -> List.iter pat ps
     | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> pat p) fs
     | Ast.PatAs (p, _, _) -> pat p
+    | Ast.PatOr (ps, _) -> List.iter pat ps
     | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> ()
   in
   let param (p : Ast.param) = oty p.Ast.param_ty in
@@ -9526,6 +9740,9 @@ let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
     List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
       StringSet.empty fields
   | Ast.PatAs (p, v, _) -> StringSet.add v.txt (collect_pattern_vars p)
+  | Ast.PatOr (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
 
 (** True if [expr] is provably structurally smaller than some function parameter.
     - [params]: the set of function parameter variable names.

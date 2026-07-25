@@ -79,6 +79,7 @@ let rec remap_pattern tbl = function
   | Ast.PatRecord (fields, sp) ->
     Ast.PatRecord (List.map (fun (n, p) -> (remap_name tbl n, remap_pattern tbl p)) fields, remap_span tbl sp)
   | Ast.PatAs (p, n, sp) -> Ast.PatAs (remap_pattern tbl p, remap_name tbl n, remap_span tbl sp)
+  | Ast.PatOr (ps, sp) -> Ast.PatOr (List.map (remap_pattern tbl) ps, remap_span tbl sp)
 
 let rec remap_expr tbl = function
   | Ast.ELit (lit, sp) -> Ast.ELit (lit, remap_span tbl sp)

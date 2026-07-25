@@ -207,8 +207,12 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          v_lin = lower_linearity b.bind_lin;
        } in
        Tir.ELet (v, rhs, body)
-     | Ast.PatTuple (_, _) ->
-       (* let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; …
+     | Ast.PatTuple (_, _) | Ast.PatRecord (_, _) ->
+       (* This arm now also carries the record case (`let { x, y } = r`) via
+          bind_subpat's PatRecord case below; the local names ($p, rhs_tuple_ty)
+          stay tuple-flavored to keep the diff small, but the logic is generic
+          over any irrefutable compound pattern.
+          let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; …
           Recover the tuple's element types from the rhs and give each field var
           its concrete type.  Tuple scalar fields are stored low-bit tagged; a
           field var left at TVar makes ELet trust the raw ptr load (no untag), so
@@ -263,10 +267,43 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
                Tir.ELet (fv, Tir.EField (scrut, Tir_names.fv_field i),
                  bind_subpat (Tir.AVar fv) ety sub acc)
            ) (List.mapi (fun i p -> (i, p)) subs) inner
+         | Ast.PatRecord (fs, _) ->
+           (* let { x: a, y: b } = r  →  let a = r.x; let b = r.y; …
+              Mirrors the PatTuple arm above: each field gets its concrete
+              type so scalar fields are loaded with the right tagging, and
+              compound sub-patterns recurse through a fresh intermediate. *)
+           let field_ty name =
+             match scrut_ty with
+             | Tir.TRecord fts ->
+               (match List.assoc_opt name fts with
+                | Some t -> t
+                | None -> unknown_ty)
+             | _ -> unknown_ty
+           in
+           List.fold_right (fun ((n : Ast.name), sub) acc ->
+             let fname_txt = n.Ast.txt in
+             match sub with
+             | Ast.PatWild _ -> acc   (* wildcard field → no binding *)
+             | Ast.PatVar vn ->
+               let fty =
+                 match field_ty fname_txt with
+                 | t when t = unknown_ty -> ty_of_span env vn.Ast.span
+                 | t -> t
+               in
+               let fv : Tir.var =
+                 { v_name = vn.Ast.txt; v_ty = fty; v_lin = Tir.Lin } in
+               Tir.ELet (fv, Tir.EField (scrut, fname_txt), acc)
+             | _ ->
+               let fty = field_ty fname_txt in
+               let tmp = fresh_name "p" in
+               let fv : Tir.var =
+                 { v_name = tmp; v_ty = fty; v_lin = Tir.Lin } in
+               Tir.ELet (fv, Tir.EField (scrut, fname_txt),
+                 bind_subpat (Tir.AVar fv) fty sub acc)
+           ) fs inner
          | _ ->
-           (* Records / refutable sub-patterns in an irrefutable `let` are not
-              decomposed here (unchanged from prior behaviour — a bare `let`
-              with such a pattern falls through to the catch-all arm below). *)
+           (* Refutable sub-patterns in an irrefutable `let` are still not
+              decomposed here — such a `let` is a type error upstream. *)
            inner
        in
        let tname = fresh_name "p" in

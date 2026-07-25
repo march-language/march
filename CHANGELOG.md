@@ -13,6 +13,31 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- As-patterns: `Some(x) as whole -> ...` binds a name to the entire matched
+  value while the inner pattern continues to destructure it. Works in match
+  arms, `let` bindings, and function parameters. `PatAs` had been implemented
+  in the AST, interpreter, and typechecker since the beginning but had no
+  grammar production.
+
+- Record patterns: `match r do { x, y: b } -> ... end`, `let { x, y } = r`, and
+  `fn area({ w, h })`. `{ x }` is shorthand for `{ x: x }`. `PatRecord` had
+  existed in the AST and interpreter since the beginning but had no grammar
+  production, and neither TIR lowering path handled it.
+
+- Record patterns may mention a subset of a record's fields: `{ code: 404 }`
+  matches any record with a `code` field equal to 404, whatever else it has.
+  Naming a field the record does not have is a compile error. Note that an arm
+  containing a record pattern is excluded from both exhaustiveness and
+  redundancy analysis — a match whose only arm is `{ code: 404 } -> ...`
+  typechecks clean and panics at runtime on any other `code`.
+
+- Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
+  alternatives. The ALTERNATIVES may not bind variables — every alternative
+  shares one arm body, so a name bound in one would be undefined when another
+  matches; use separate arms or a `when` guard instead. The rest of the arm is
+  free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
+  checking see through or-patterns at any nesting depth.
+
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
   parameter is a compile error. Applies to both `takepos(neg())` and
@@ -52,6 +77,13 @@ git log is authoritative for exact commits.
   `--compile-so`, `--hot-reload` with `--signing-pubkey`, and
   `MARCH_HTTP_EVLOOP=1` — automatically fall back to the previous
   single-command compile. `MARCH_NO_RUNTIME_CACHE=1` forces that fallback.
+
+### Fixed
+
+- Unreachable match arms are now reported inside functions with a declared
+  return type. `check_redundant_arms` ran only on the type-inference path, so
+  any `match` in checking position — which is every `match` in a function with
+  a return annotation, i.e. most of them — silently skipped the analysis.
 
 ### Documentation
 

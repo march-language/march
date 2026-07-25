@@ -252,6 +252,7 @@ let rec fmt_pat = function
     in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | PatAs (p, n, _)               -> Printf.sprintf "%s as %s" (fmt_pat p) n.txt
+  | PatOr (ps, _)                 -> String.concat " | " (List.map fmt_pat ps)
 
 and fmt_pats ps = String.concat ", " (List.map fmt_pat ps)
 

@@ -125,25 +125,98 @@ end
 
 ### Record Patterns
 
-Record patterns are not yet supported in the parser. Use field access in guards instead:
+A record pattern destructures a record's fields directly in a `match` arm,
+a `let` binding, or a function parameter:
 
 ```march
 type Point = { x : Float, y : Float }
 
--- Use if/do with field access rather than record patterns:
--- (March has no `else if` chaining, so nest the follow-up `if` inside `else`)
 fn describe_point(p : Point) : String do
-  if p.x == 0.0 && p.y == 0.0 do
-    "origin"
-  else
-    if p.y == 0.0 do
-      "on x-axis at " ++ float_to_string(p.x)
-    else
-      "at " ++ float_to_string(p.x) ++ ", " ++ float_to_string(p.y)
-    end
+  match p do
+    { x: 0.0, y: 0.0 } -> "origin"
+    { x: x, y: 0.0 }   -> "on x-axis at " ++ float_to_string(x)
+    { x: x, y: y }     -> "at " ++ float_to_string(x) ++ ", " ++ float_to_string(y)
   end
 end
 ```
+
+A field written as a bare name is shorthand — punning — for `name: name`,
+mirroring record-literal punning: `{ x, y }` binds `x` and `y` to the
+record's `x` and `y` fields, exactly like `{ x: x, y: y }`. The example
+above could equally be written `{ x: x, y: y } -> ...` or, punned, as
+`fn describe_point({ x, y })` if the whole function dispatched on the
+struct shape rather than matching in the body.
+
+**Field lists are open in a `match` arm** — a pattern need only name the
+fields it cares about. `{ x: a }` matches any record with (at least) an `x`
+field, whatever else it has; fields the pattern doesn't mention are simply
+not bound. The y-axis check above, for instance, doesn't need to mention `y`
+at all:
+
+```march
+match p do
+  { x: 0.0 } -> "on y-axis"
+  _          -> "elsewhere"
+end
+```
+
+Naming a field the record does **not** have is a compile error
+(`unknown_record_field`), not a silent no-op — a typo like `{ xx: a }`
+against `{ x: Float, y: Float }` is rejected rather than matching nothing:
+
+```
+This record has no field `xx`.
+  Available fields: x, y
+```
+
+A function parameter gets the same openness when it dispatches through an
+explicit `match`, since a single-clause function whose parameter is a
+non-trivial pattern desugars through the same match-lowering path:
+
+```march
+fn area({ w: w, h: h }) : Int do w * h end   -- full destructure, unaffected
+```
+
+Two positions remain **closed** to exactly the fields named, because neither
+has an independent expected type for the pattern to open against:
+
+- **A `let` binding**: `let { x: px } = p` still requires naming every field
+  of `p`'s type. `infer_pattern` only receives an expected type when the
+  caller already has one to offer (a `match`'s scrutinee, a constructor
+  argument, a tuple element); a `let` pattern's binding is exactly the thing
+  establishing the type, so there is nothing to drive it from yet.
+- **A bare pattern used directly as a function parameter**, e.g.
+  `fn get_w({ w: w }) : Int do w end` — a pattern in that grammar position
+  cannot itself carry a type annotation (only `name : Type` can), so its type
+  has no source but the pattern itself and is inferred as exactly `{ w : Int
+  }`. `get_w` above rejects a wider record such as `{ w: 8, h: 9 }`. To open
+  a parameter's field list, annotate the parameter with a name and
+  destructure it in the body instead, which routes it back through
+  `match`'s open-field-list handling:
+
+```march
+fn get_w2(r : { w : Int, h : Int }) : Int do
+  match r do
+    { w: w } -> w    -- r may have any other fields too
+  end
+end
+```
+
+**Record arms get no coverage analysis.** Both the exhaustiveness checker
+and the redundancy checker treat *any* arm containing a record pattern as a
+wildcard, because their internal pattern representation has no record shape.
+Two consequences, both deliberate:
+
+- A match whose only arm is `{ code: 404 } -> …` typechecks clean and panics
+  at runtime on any other `code`. Refutable record patterns need a `_` arm
+  (or a total field pattern) that you add yourself; the compiler will not
+  remind you.
+- The arm following a record arm is never reported unreachable, even when it
+  genuinely is. A false *"this pattern can never be reached"* on correct code
+  costs more than the missed true positive, so the checker stays silent.
+
+This applies to a record pattern nested anywhere in the arm — inside a
+constructor payload, a tuple, an alias, or an or-pattern alternative.
 
 ### Atom Patterns
 
@@ -214,6 +287,108 @@ match n do
   _  -> "other"
 end
 ```
+
+---
+
+## As Patterns
+
+`p as name` binds `name` to the **entire** matched value while `p` still
+destructures it, so a branch can use both the whole value and pieces of it
+without matching it twice:
+
+```march
+match o do
+  Some(x) as whole ->
+    -- `x` is the payload; `whole` is the entire `Some(x)` value
+    println(whole)
+    x
+  None -> 0
+end
+```
+
+The inner pattern can be anything — a bare variable (`x as y` binds both `x`
+and `y` to the same value), a literal, a tuple, or an arbitrarily nested
+constructor pattern. As-patterns work in `match` arms, `let` bindings (`let
+(n as whole) = compute()`), and function parameters, since all three desugar
+through the same pattern grammar.
+
+Chaining aliases directly (`p as a as b`) is a parse error. Parenthesize to
+bind two names to the same value — `(x as a) as b` is accepted — though one
+alias per pattern is almost always what you want.
+
+Note the parentheses in the `let` example above: `let` takes a *simple*
+pattern, so `let n as whole = ...` does not parse. `let (n as whole) = ...`
+does.
+
+---
+
+## Or Patterns
+
+`p1 | p2 | p3` matches an arm against several alternatives, trying each in
+order and running the shared arm body on the first one that matches:
+
+```march
+match n do
+  1 | 2 | 3 -> "small"
+  _         -> "big"
+end
+
+match color do
+  Red | Green -> "warm"
+  Blue        -> "cool"
+end
+```
+
+Alternatives can be literals, nullary/atom constructors, or any other
+pattern shape — the only restriction is that **no alternative may bind a
+variable**:
+
+```march
+type E = A(Int) | B(Int)
+
+match e do
+  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+end
+```
+
+This is rejected, not silently mishandled, because all alternatives share
+ONE arm body: if `A(x)` matched, `x` is bound; if `B(x)` matched instead, a
+*different* `x` would need to be bound, and there is nowhere to put a
+per-alternative binding when the body is shared between alternatives. Names
+the arm binds *outside* the or-pattern are unaffected — `P(x, 1 | 2) -> x +
+100` is fine; only a name bound *inside* an alternative is rejected.
+
+If you need per-alternative bindings, either split into separate arms:
+
+```march
+match e do
+  A(x) -> x
+  B(x) -> x
+end
+```
+
+or match the common shape and test the difference with a `when` guard:
+
+```march
+match e do
+  x when is_a_or_b(x) -> extract(x)
+end
+```
+
+Exhaustiveness and redundancy checking see through or-patterns at **any**
+nesting depth: `Red | Green` followed by a `Blue` arm is exhaustive for a
+three-constructor `Color`, `Some(1 | 2)` covers exactly `Some(1)` and
+`Some(2)` (so a match with only that arm and `None` is still reported
+non-exhaustive), and an arm that only repeats alternatives already covered
+by an earlier arm is flagged as unreachable exactly as any other redundant
+arm would be. An arm whose nested alternatives multiply out to a
+pathologically large number of shapes (more than a few hundred) falls back
+to being treated as a wildcard for coverage purposes, which can only
+suppress a diagnostic, never invent one.
+
+An or-pattern nests beneath `as`: `1 | 2 as n` parses as `(1 | 2) as n`
+(binding `n` to the whole matched value is fine — only the alternatives
+themselves may not bind).
 
 ---
 
@@ -448,9 +623,8 @@ end
 Clauses are checked top to bottom; the first matching clause wins. The compiler warns if later clauses are unreachable.
 
 Multi-head functions work with any pattern in the parameter list that `match`
-itself supports — constructors, literals, tuples (record patterns aren't
-supported anywhere in the parser, including here — see "Record Patterns"
-above):
+itself supports — constructors, literals, tuples, and record patterns
+(see "Record Patterns" above):
 
 ```march
 fn head(Cons(x, _)) : a do x end

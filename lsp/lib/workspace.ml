@@ -107,6 +107,7 @@ let uses_of_decls ~filename (decls : Ast.decl list) : ws_use list =
     | Ast.PatAs (p, _, _) -> wp p
     | Ast.PatTuple (ps, _) | Ast.PatAtom (_, ps, _) -> List.iter wp ps
     | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> wp p) fs
+    | Ast.PatOr (ps, _) -> List.iter wp ps
     | Ast.PatVar _ | Ast.PatWild _ | Ast.PatLit _ -> ()
   in
   let rec wd (d : Ast.decl) =

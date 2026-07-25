@@ -619,6 +619,8 @@ and collect_pat_defs ~def_map ~use_map (pat : Ast.pattern) =
     List.iter (collect_pat_defs ~def_map ~use_map) ps
   | Ast.PatRecord (fields, _) ->
     List.iter (fun (_, p) -> collect_pat_defs ~def_map ~use_map p) fields
+  | Ast.PatOr (ps, _) ->
+    List.iter (collect_pat_defs ~def_map ~use_map) ps
   | Ast.PatWild _ | Ast.PatLit _ -> ()
 
 (* ------------------------------------------------------------------ *)
@@ -682,6 +684,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.PatAtom (_, ps, _) -> List.concat_map pat_binders ps
     | Ast.PatRecord (fields, _) ->
       List.concat_map (fun (_, p) -> pat_binders p) fields
+    | Ast.PatOr (ps, _) -> List.concat_map pat_binders ps
     | Ast.PatWild _ | Ast.PatLit _ -> []
   in
   let param_binder (p : Ast.param) = fresh p.Ast.param_name in
