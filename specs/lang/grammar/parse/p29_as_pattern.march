@@ -1,0 +1,7 @@
+mod P29AsPattern do
+  fn main() do
+    match 1 do
+      x as y -> x + y
+    end
+  end
+end

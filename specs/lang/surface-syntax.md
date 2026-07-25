@@ -361,7 +361,46 @@ Cons(h, t)                -- nested constructor
 :error(msg)               -- atom with args
 Mod.Con(x)                -- qualified constructor (disambiguation)
 -5                        -- negative int literal
+Some(x) as whole          -- as-pattern: binds `whole` to the entire value
+                          --   while `x` destructures it
+{ x: a, y: b }            -- record pattern: destructures fields x, y
+{ x, y }                  -- punned: shorthand for { x: x, y: y }
+1 | 2 | 3                 -- or-pattern: matches any of the alternatives
+Red | Green               -- or-pattern over nullary constructors
 ```
+
+In a `match` arm, a record pattern's field list is open: `{ x: a }` matches
+any record with (at least) an `x` field, whatever else it has, and fields it
+doesn't mention are simply not bound. Naming a field the record lacks is a
+compile error. A `let` binding and a bare record-pattern function parameter
+still require naming every field of the scrutinee, since neither has an
+independent expected type to open the pattern against:
+
+```march
+match point do
+  { x: 0 } -> "on y-axis"   -- y need not be named
+  _        -> "elsewhere"
+end
+let { x: px, y: py } = point   -- let: every field still required
+fn area({ w: w, h: h }) do w * h end   -- fn param: every field still required
+```
+
+An or-pattern's alternatives may **not** bind variables — `A(x) | B(x) -> x`
+is a compile error, because every alternative shares one arm body:
+
+```march
+match n do
+  1 | 2 | 3 -> "small"   -- OK: no alternative binds anything
+  _         -> "big"
+end
+
+match e do
+  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+end
+```
+
+Split into separate arms, or match the common shape and test the difference
+with a `when` guard, instead.
 
 ---
 

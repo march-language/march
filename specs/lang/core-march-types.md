@@ -899,14 +899,16 @@ pattern's bindings).
 
 **This is now the COMPLETE relation** — every arm of `infer_pattern`
 (typecheck.ml:2566–2685) is accounted for below, one way or the other:
-`PatWild`/`PatVar`/`PatLit`/`PatCon`/`PatTuple`/`PatAtom` each get a live rule
-((P-Wild)/(P-Var)/(P-Lit)/(P-Con)/(P-Tuple)/(P-Atom), added across Tasks 1–3);
-`PatRecord` and `PatAs` are each documented as **unreachable from surface
-grammar** instead of given a live rule (both have a real, working
-`infer_pattern` arm — the code path is not dead in the OCaml sense — but no
-March program a user can actually write ever constructs one, so per this
-document's own methodology, §0, no rule is stated for either — see the
-`PatRecord` note after (P-Atom) and the `PatAs` note immediately below):
+`PatWild`/`PatVar`/`PatLit`/`PatCon`/`PatTuple`/`PatAtom` each get a
+live rule ((P-Wild)/(P-Var)/(P-Lit)/(P-Con)/(P-Tuple)/(P-Atom) added across
+Tasks 1–3; (P-As) added 2026-07-24, once `parser.mly` gained an as-pattern
+production — see the note after it below for the reachability history);
+(P-Record) was added the same day, once `parser.mly` gained a record-pattern
+production — see the note after (P-As) below. (P-Or) was added in the
+record-matching-gaps plan's Task 5 (2026-07-24), the only one of these that
+adds a genuinely NEW `Ast.pattern` constructor rather than wiring up one
+that already existed — see the rule itself, just above the note after
+(P-Record), for the binding restriction and its rationale.
 
 ```
 (P-Wild)  ──────────────────────────────           typecheck.ml:2569–2570
@@ -1003,69 +1005,159 @@ document's own methodology, §0, no rule is stated for either — see the
           --   already flagged as the root cause of a (since-fixed)
           --   `Show(Atom)` compiled-link bug in core-march.md:1354–1359,
           --   which traces through both this arm and T-Atom's `EAtom` arm.
+
+(P-As)    Γ ⊢ p : τ ⊣ Γ'                            typecheck.ml:3554–3557
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ (p as x) : τ ⊣ Γ', x:τ
+          -- binds x to the SAME type τ as the inner pattern p, IN ADDITION
+          --   to whatever bindings p itself introduces (Γ') — the
+          --   pattern-typing analog of (P-Var)'s binding, layered on top of
+          --   an arbitrary sub-pattern rather than replacing it. x's type is
+          --   also recorded in env.type_map at x's span (same convention as
+          --   (P-Var)), so lower.ml/LSP hover can resolve it.
+          -- no arity or shape check of its own — τ is whatever `p`
+          --   independently infers to; (p as x) never constrains p beyond
+          --   what p's own rule already does.
+          -- cf. operational match(PatAs(p, x), v) = match(p, v) ∪ {x ↦ v},
+          --   core-march.md:864 (eval.ml:826–829, unchanged by this rule's
+          --   addition — the interpreter already implemented this; only the
+          --   grammar production was missing)
+
+(P-Record, expected known)
+           expand(expected) = TRecord [(f₁,τ₁)…(fₙ,τₙ)]   (n ≥ k, the         typecheck.ml:3557–3596
+             SCRUTINEE's full field set)
+           ∀(fⱼ,pⱼ) ∈ pattern: Γ ⊢ pⱼ : τⱼ' ⊣ Γⱼ,  τⱼ' ~ τⱼ   (else "no field fⱼ")
+           ──────────────────────────────────────────────────────────────
+           Γ ⊢ PatRecord [(f₁,p₁)…(fₖ,pₖ)] : TRecord [(f₁,τ₁)…(fₙ,τₙ)] ⊣ Γ, Γ₁, …, Γₖ
+           -- OPEN field list: k ≤ n — the pattern names some prefix (in the
+           --   general case, some SUBSET) of the scrutinee's fields, and the
+           --   pattern's type is the scrutinee's FULL (expected) record type,
+           --   not a type synthesized from only the mentioned fields. Fields
+           --   the pattern doesn't mention are simply not bound (no Γᵢ
+           --   contribution), mirroring the operational match(PatRecord)
+           --   rule (core-march.md), which already looked fields up by name
+           --   in the value's full field list rather than requiring an exact
+           --   match.
+           -- `expected` is threaded in from the same places (P-Con)'s
+           --   `arg_ty` is: (P-Tuple)'s per-element expected type (itself
+           --   only available when ITS OWN `expected` resolves to a
+           --   `TTuple`), a `match`'s scrutinee type, or a constructor
+           --   argument's declared type. `expand` is `expand_record`
+           --   (typecheck.ml:3156): it accepts either a structural
+           --   `TRecord` directly or a nominal `TCon` naming one.
+           -- naming a field fⱼ absent from the expected record's field list
+           --   is a hard error (`unknown_record_field`), reported per-field
+           --   at that field name's span — not a unification failure, and
+           --   not silently ignored.
+           -- a bare punned field `f` is parsed as `(f, PatVar f)`
+           --   (parser.mly's `record_field_pat`), so it flows through this
+           --   rule identically to a spelled-out `f: f`.
+
+(P-Record, expected unknown)
+           ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ   (i = 1..k, componentwise recursion,          typecheck.ml:3597–3607
+             one field per (name, sub-pattern) pair)
+           ──────────────────────────────────────────────────────────────
+           Γ ⊢ PatRecord [(f₁,p₁)…(fₖ,pₖ)] : TRecord (sort [(f₁,τ₁)…(fₖ,τₖ)]) ⊣ Γ, Γ₁, …, Γₖ
+           -- fallback when `expected` doesn't resolve to a record at all
+           --   (e.g. an unannotated `let` pattern, or a bare record pattern
+           --   used directly as a function parameter — that grammar position
+           --   has no annotation slot, so the parameter's type has no source
+           --   but the pattern itself): the ORIGINAL rule, unchanged.  The
+           --   pattern's type is a FRESH, CLOSED `TRecord` built purely from
+           --   the fields the pattern mentions, sorted by name (same
+           --   sort-by-name convention as T-Record's literal typing, §2).
+           -- because March records require EXACT field-set equality to unify
+           --   (no width subtyping — typecheck.ml:2789), this synthesized
+           --   `TRecord` only unifies against a scrutinee whose own record
+           --   type has PRECISELY these k fields, no more, no fewer — so a
+           --   partial pattern reaching this fallback (rather than the
+           --   expected-known rule above) is still closed, the same
+           --   restriction (P-Tuple) has for arity.
+
+(P-Or)    ∀i: Γ ⊢ pᵢ : τᵢ ⊣ Γᵢ  (i = 1..n, n ≥ 1)                   typecheck.ml:3609–3642
+          unify(τ₁, τᵢ)  for each i > 1
+          Γ₁, …, Γₙ each bind ZERO names, else reject
+          ──────────────────────────────────────────────────────────────
+          Γ ⊢ PatOr [p₁…pₙ] : τ₁ ⊣ Γ
+          -- every alternative is inferred independently (threading the same
+          --   `~expected`, if any, into each) and unified against the FIRST
+          --   alternative's type, so `1 | 2 | 3` and `Red | Green` both
+          --   require every alternative to agree on one type — a mismatched
+          --   alternative (e.g. `1 | "x"`) is an ordinary unify error, not a
+          --   dedicated diagnostic.
+          -- the bindings check is NOT a type-level constraint (nothing to
+          --   unify) — it is a hard reject of ANY alternative that binds a
+          --   variable at all: "Or-pattern alternatives cannot bind
+          --   variables (`x`)." (code `or_pattern_binding`). The reason is
+          --   operational, not type-theoretic: the arm body is shared across
+          --   every alternative via a single 0-arg join point in lowering
+          --   (`lower_match.ml`'s `expand_or_rows`/`hoist_fallback_jp`),
+          --   which has nowhere to carry a per-alternative binding into that
+          --   shared call — `A(x) | B(x) -> x` would need a DIFFERENT `x`
+          --   bound depending on which alternative matched, and the compiler
+          --   has no mechanism (yet — an n-ary join point would suffice,
+          --   filed in `specs/todos.md`) to pass one in. Consequently the
+          --   overall result binding list is always `Γ` unchanged (`[]`),
+          --   never `Γ, x:τ` — this is the one pattern-typing rule that can
+          --   never introduce a name, unlike every other rule above.
+          -- cf. operational match(PatOr, v), core-march.md — tries each
+          --   alternative in order, first match wins, exactly mirroring
+          --   `is_useful`/`norm_pat_rows`'s (§4.1) treatment of an or-pattern
+          --   as several exhaustiveness/redundancy ROWS rather than one.
 ```
 
-**No `(P-Record)` rule: `PatRecord` is unreachable from surface syntax**, exactly
-as `core-march.md` already documents for the operational side (`core-march.md:181–196`,
-"`PatRecord` has no surface production at all — it is dead code, reachable
-only by constructing the AST node directly"). Grepping `lib/parser/parser.mly`
-for `PatRecord` finds zero occurrences; the typechecker's own `infer_pattern`
-arm for it (typecheck.ml:2671–2680 — componentwise field recursion into a
-sorted `TRecord`, structurally the record-analog of P-Tuple above) can
-therefore never fire on a program a user actually wrote. Per this document's
-own methodology (§0: "every rule is transcribed... and cited"), no `(P-Record)`
-rule is stated here — inventing one would document code the parser can never
-reach, mirroring exactly how `core-march.md` handled the same gap for its
-`match(PatRecord …)` rule.
+**`(P-As)` and `(P-Record)` became live rules 2026-07-24** (see both rules
+above, between (P-Atom) and this note). Through 2026-07-23 `PatAs` (`p as
+x`) and `PatRecord` (`{ f, … }`) were both unreachable from surface syntax
+— even though `infer_pattern` already had a working arm for each
+(typecheck.ml:3554–3557 for `PatAs`, typecheck.ml:3544–3553 for
+`PatRecord`, unchanged by this update: only `parser.mly` was missing a
+production for either). `pattern` gained an as-pattern layer
+(`pattern_no_as AS lower_name`, `parser.mly:1441` era) and `simple_pattern`
+gained a record-pattern production (`LBRACE record_field_pat,* RBRACE`);
+see `specs/lang/grammar.md` §6.3 for the grammar-side detail of both. `Some(x) as
+whole` and `{ x, y: p } -> …` now parse and typecheck via the `(P-As)` and
+`(P-Record)` rules above, respectively. Before this change, `core-march.md`'s
+golden corpus used guarded branches reading their own pattern's bindings
+(`g27_guard_binding.march`) as "the reachable substitute for the
+unparseable as-pattern" (`core-march.md:1247`), and used field-access
+guards as the substitute for the unparseable record pattern — neither
+historical workaround is the only option anymore, though both remain valid
+March and `core-march.md` has not yet been revisited to update that framing
+(out of scope for this pass).
 
-**No `(P-As)` rule either: `PatAs` (`p as x`) is likewise unreachable from
-surface syntax**, exactly as `core-march.md` documents for the operational
-side (`core-march.md:872–904`, §4.3.1 "Implemented-but-unreachable pattern
-forms"). Verified fresh for this task:
+**`(P-Record)` gained an open field list 2026-07-24**, the same day, as a
+follow-on to the note above: the original rule (now "expected unknown"
+above) synthesized a CLOSED `TRecord` from only the fields the pattern
+mentioned, and since March records require exact field-set equality to
+unify, a pattern naming a strict subset of a record's fields (`{ x }`
+against `{ x : Int, y : Int }`) was rejected. `infer_pattern` already threads
+an optional `expected` type through recursive calls — used, before this
+change, only to disambiguate an ambiguous bare constructor name in (P-Con).
+The fix ("expected known" above) drives `PatRecord`'s sub-patterns from that
+expected type instead of synthesizing one, when it resolves (through
+`expand_record`) to a record; naming an absent field is now a dedicated
+`unknown_record_field` error rather than a unification mismatch. (P-Tuple)
+was extended in the same change to thread a per-element expected type to its
+sub-patterns (from its OWN `expected`, when that resolves to a `TTuple`) —
+needed for a record pattern nested inside a tuple pattern with a
+known-in-advance element type, e.g. a tuple built from two independently
+type-annotated bindings (a `let`'s type ascription, or two annotated function
+parameters matched together in one `match`) where one element is destructured
+by a partial record pattern.
 
-- `infer_pattern` DOES have a live, working arm for it:
-  ```
-  | Ast.PatAs (inner, name, _) ->
-    let bindings, t = infer_pattern env inner in
-    Hashtbl.replace env.type_map name.span t;
-    (name.txt, Mono t) :: bindings, t
-  ```
-  (typecheck.ml:2682–2685, verbatim) — it types the inner pattern, then binds
-  `name` to that SAME type `t` in addition to whatever `inner` itself bound
-  (i.e. `Γ ⊢ p as x : τ ⊣ Γ, Γ_inner, x:τ` would be the rule, were it reachable
-  — the pattern-typing analog of `PatVar`'s binding, layered on top of an
-  arbitrary sub-pattern rather than replacing it).
-- But grepping `lib/parser/parser.mly` for `PatAs` finds **zero** occurrences
-  (confirmed for this task). The `AS` token exists in the lexer (`("as",
-  AS)`, `lexer.mll:48`) and appears in the grammar exactly once, in
-  `soft_lower_name` (`parser.mly:1361`: `| AS { mk_name "as" $loc }`) — that
-  production lets `as` be used as an ordinary VARIABLE/BINDING name (so `let
-  as = 5` or a param named `as` parses), it does **not** build a `PatAs` node.
-  Neither `pattern` nor `simple_pattern` (parser.mly:1311–1341) has any
-  production shaped like `pattern AS lower_name` or similar. So `p as x` is
-  not parseable pattern syntax at all in March — attempting it either parses
-  `as` as a fresh `PatVar` (if `as` appears where a pattern is expected) or
-  is a plain parse error, never a `PatAs`.
-- `PatAs` is still constructed internally by the DESUGARER (three arms in
-  `desugar.ml`, per `core-march.md:899–900`) — but only by recursing into an
-  *already-constructed* `PatAs`, never by building a fresh one from surface
-  tokens; so even post-desugar, a user-written program can never introduce
-  one that wasn't already there (and none can already be there, since parsing
-  never produces one).
-- Consistent with this, `core-march.md` already treats `PatAs` as the
-  unreachable operational counterpart (`core-march.md:200,872–904,934–968`)
-  and notes the golden corpus uses guarded branches reading their own
-  pattern's bindings (`g27_guard_binding.march`) as "the reachable substitute
-  for the unparseable as-pattern" (`core-march.md:1247`) — this task's
-  `accept/t13_match_guard` and the pre-existing `g25`/`g27` goldens are that
-  same substitute on the type side: guards, not as-patterns, are how March
-  programs actually read a branch's own bindings in a condition.
-
-Per this document's methodology (§0), the `PatAs` arm above is shown ONLY to
-demonstrate `infer_pattern` really does handle it (fidelity — it is not
-silently omitted), exactly mirroring how `core-march.md` handles the same gap
-for its operational `match(PatAs …)` rule; no `(P-As)` rule number is minted,
-since inventing one would document a form no March source file can produce.
+Two positions still hit the "expected unknown" fallback, and so remain
+closed to exactly the fields the pattern names, because neither has an
+independent expected type to give the pattern: a `let` pattern (the binding
+IS what establishes the type, so nothing precedes it to drive from) and a
+bare pattern used directly as a function parameter (that grammar position —
+`fn_param: p = pattern { FPPat p }`, parser.mly — has no annotation slot, so
+the desugared match's scrutinee, `EVar __argN`, carries only a fresh
+unconstrained type variable into (P-Record) as `expected`, which
+`expand_record` cannot resolve to anything). The latter is why the
+motivating `fn area({ w, h })`-shaped case only reopens when the record
+parameter is instead given a name and an annotation, and destructured by an
+explicit `match` in the body: `fn f(r : {w:Int, h:Int}) do match r do {w:w} -> w end end`.
 
 `instantiate_ctor` (typecheck.ml:2387) is called from BOTH T-Con (§2, expression
 side) and P-Con (pattern side) — the same fresh-vars-per-type-param instantiation
@@ -4775,21 +4867,23 @@ typechecker that this document exists to pin down, not defects:
     (typecheck.ml:4192–4196) both check `br.branch_guard` (when present)
     against `t_bool` in `env'` — Γ already extended with the SAME branch's own
     pattern bindings — so a guard can read variables its own pattern just
-    bound (`P(a, b) when a == b -> …`, the reachable substitute for the
-    unparseable `PatAs`, per finding 11 below and `core-march.md:1247`). A
+    bound (`P(a, b) when a == b -> …`, the substitute historically used in
+    place of `PatAs` back when it was unparseable — see finding 11 below,
+    RESOLVED 2026-07-24 — and `core-march.md:1247`). A
     non-Bool guard is rejected with "Match guards must be Bool."
     (`reject/t10_guard_not_bool` is the witness) — the exact same `RBuiltin`
     reason-string shape `ECond`'s non-Bool-condition rejection uses (finding
     12), just with different wording.
-11. **`PatAs` has a live, correct `infer_pattern` arm (typecheck.ml:2682–2685)
-    but is unreachable from surface grammar — confirmed fresh for this task,
-    zero `PatAs` occurrences in `parser.mly`.** The lexer's `AS` token is used
-    in exactly one grammar production, `soft_lower_name` (parser.mly:1361),
-    which lets `as` be spelled as an ordinary variable/binding name — it does
-    NOT build an as-pattern. This is the same disposition `core-march.md`
-    already gives `PatAs` operationally (§4.3.1) and the same shape as this
-    document's pre-existing `PatRecord` finding: real code, unreachable input.
-    No `(P-As)` rule is stated (§2.2).
+11. **[RESOLVED 2026-07-24]** — `PatAs` had a live, correct `infer_pattern`
+    arm (now typecheck.ml:3554–3557) but was unreachable from surface
+    grammar (confirmed fresh at the time, zero `PatAs` occurrences in
+    `parser.mly`). `pattern` gained an as-pattern production
+    (`pattern_no_as AS lower_name`), so `p as x` now parses and typechecks
+    via the `(P-As)` rule (§2.2). This is the same disposition
+    `core-march.md` still gives `PatAs` operationally as of this pass
+    (§4.3.1, not yet updated) and the same shape as this document's
+    pre-existing `PatRecord` finding (real code, unreachable input) — which
+    remains open; only `PatAs` closed.
 12. **`ECond` (`match do c -> b … end`) checks every condition against `Bool`
     and unifies every body into ONE result type anchored at the FIRST arm**
     (T-Cond, §2.1c, typecheck.ml:4020–4036) — but, unlike `EMatch`, never runs

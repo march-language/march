@@ -95,12 +95,16 @@ and fn_kind =
                      honestly anyway: the field must be meaningful at every
                      construction site, and it documents defun's consuming
                      role precisely. *)
-  | FnJoinPoint  (* the hoisted-fallback join point minted by lower.ml's
-                     [compile_matrix] (non-atomic match `fallback`, `jp_fn`) —
-                     structurally the same ELetRec([fn], AVar fn) shape as
-                     [FnLambda] (so it goes through the identical defun lift
-                     into [FnApply]), but the ROLE differs: it exists to dedupe
-                     a shared match fallback, not to represent user code. *)
+  | FnJoinPoint  (* a join point minted by lower_match.ml's
+                     [hoist_fallback_jp] — either a non-atomic match
+                     `fallback` (0-ary) or an or-pattern arm's shared body
+                     (N-ary: the arm's own binders are passed as parameters,
+                     because the closure is created outside the decision tree
+                     that binds them).  Structurally the same
+                     ELetRec([fn], AVar fn) shape as [FnLambda] (so it goes
+                     through the identical defun lift into [FnApply]), but the
+                     ROLE differs: it exists to dedupe a shared match
+                     fallback/arm body, not to represent user code. *)
   | FnApply      (* the closure "apply wrapper" lifted by defun.ml's
                      [lift_lambda] for EVERY defunctionalized lambda/local-fn/
                      join-point ([Tir_names.apply_fn_name], "<fn>$apply$<uid>").

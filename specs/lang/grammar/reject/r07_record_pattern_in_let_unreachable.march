@@ -1,8 +1,0 @@
--- EXPECT-ERROR: I got stuck here
-mod R07RecordPatternInLetUnreachable do
-  fn main() do
-    let r = { x: 1 }
-    let { x } = r
-    x
-  end
-end

@@ -150,6 +150,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.PatTuple (ps, _) -> List.iter pat ps
     | Ast.PatRecord (fs, _) -> List.iter (fun (n, p) -> f SField n; pat p) fs
     | Ast.PatAs (p, n, _) -> pat p; f SPat n
+    | Ast.PatOr (ps, _) -> List.iter pat ps
   and param (p : Ast.param) =
     f SPat p.Ast.param_name;
     (match p.Ast.param_ty with Some t -> ty t | None -> ())

@@ -1,8 +1,0 @@
--- EXPECT-ERROR: I got stuck here
-mod R02RecordPatternInArmUnreachable do
-  fn main() do
-    match 1 do
-      { x } -> x
-    end
-  end
-end

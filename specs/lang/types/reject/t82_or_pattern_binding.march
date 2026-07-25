@@ -1,0 +1,10 @@
+-- EXPECT-ERROR: Or-pattern alternatives cannot bind variables
+mod M do
+  type E = A(Int) | B(Int)
+  fn f(e : E) : Int do
+    match e do
+      A(x) | B(x) -> x
+    end
+  end
+  fn main() do () end
+end

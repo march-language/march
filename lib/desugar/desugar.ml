@@ -294,6 +294,7 @@ let rec pat_binds_conn (p : pattern) : bool =
   | PatTuple (ps, _) -> List.exists pat_binds_conn ps
   | PatRecord (fields, _) -> List.exists (fun (_, fp) -> pat_binds_conn fp) fields
   | PatAs (inner, n, _) -> n.txt = "conn" || pat_binds_conn inner
+  | PatOr (ps, _) -> List.exists pat_binds_conn ps
 
 (** Does a function parameter bind [conn]? *)
 let fn_param_binds_conn : fn_param -> bool = function
@@ -1013,6 +1014,7 @@ let rec respan_pat (p : pattern) : pattern =
     PatRecord (List.map (fun (n, p) -> (respan_name n, respan_pat p)) fs,
                fresh_synthetic_span ())
   | PatAs (p, n, _)      -> PatAs (respan_pat p, respan_name n, fresh_synthetic_span ())
+  | PatOr (ps, _)        -> PatOr (List.map respan_pat ps, fresh_synthetic_span ())
 
 let rec respan_ty (t : ty) : ty =
   match t with
@@ -2046,6 +2048,7 @@ let rec add_pat_vars (bound : string list) (pat : pattern) : string list =
   | PatRecord (fs, _) ->
     List.fold_left (fun b (_, p) -> add_pat_vars b p) bound fs
   | PatAs (p, n, _) -> add_pat_vars (n.txt :: bound) p
+  | PatOr (ps, _) -> List.fold_left add_pat_vars bound ps
   | PatWild _ | PatLit _ -> bound
 
 (** Return the expression walker for [prefix]/[own_names].

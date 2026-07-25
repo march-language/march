@@ -46,6 +46,20 @@ let rec is_trivial_pat : Ast.pattern -> bool = function
   | Ast.PatAs (p, _, _) -> is_trivial_pat p
   | _ -> false
 
+(** True if [pat] contains an or-pattern anywhere.  Used by [lower_match] to
+    decide whether an arm body needs hoisting into a shared join point:
+    [expand_or_rows] (below) splits a row headed by an or-pattern into one
+    row per alternative, all referencing the SAME lowered body expression, so
+    without hoisting that body would be duplicated once per alternative in
+    the emitted decision tree. *)
+let rec pat_has_or : Ast.pattern -> bool = function
+  | Ast.PatOr _ -> true
+  | Ast.PatAs (p, _, _) -> pat_has_or p
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _) ->
+    List.exists pat_has_or ps
+  | Ast.PatRecord (fs, _) -> List.exists (fun (_, p) -> pat_has_or p) fs
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> false
+
 (** Wrap [body] with bindings from a trivial pattern on [scrut].
     Handles PatVar (bind), PatWild (no-op), PatAs (bind outer name + recurse). *)
 let rec bind_trivial_pat (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
@@ -78,6 +92,7 @@ let span_of_pat : Ast.pattern -> Ast.span = function
   | Ast.PatLit  (_, sp)    -> sp
   | Ast.PatRecord (_, sp)  -> sp
   | Ast.PatAs   (_, _, sp) -> sp
+  | Ast.PatOr   (_, sp)    -> sp
 
 (** Return the string tag and sub-pattern list for a pattern that discriminates.
     PatCon → (tag, subs); PatTuple → ("$Tuple", subs); PatLit → (repr, []).
@@ -202,14 +217,12 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
      by the parser; it would only appear if constructed directly in tests. *)
   | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
   | Ast.PatAtom (a, subs, _) -> Some (a, subs)
-  | Ast.PatRecord (_, sp) ->
-    failwith (Printf.sprintf
-      "lower: record patterns are not yet compilable (%s) — PatRecord has no \
-       {...} pattern production in the grammar today, so this indicates a \
-       pattern constructed directly rather than parsed; implement record \
-       destructuring in pat_tag_and_subs before enabling it"
-      (string_of_pat_span sp))
-  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ -> None
+  (* Records carry no tag — they are expanded into per-field columns by
+     [expand_record_column] before tag dispatch is ever reached, so
+     [pat_tag_and_subs] never sees one. Or-patterns are split into one row
+     per alternative by [expand_or_rows] before tag dispatch, so it never
+     sees one either. *)
+  | Ast.PatWild _ | Ast.PatVar _ | Ast.PatAs _ | Ast.PatRecord _ | Ast.PatOr _ -> None
 
 (* Compile a pattern matrix to a TIR expression (decision tree).
 
@@ -233,26 +246,91 @@ let is_atomic_fallback : Tir.expr -> bool = function
   | Tir.EAtom _ -> true
   | _ -> false
 
-(** Hoist a (non-atomic) fallback expression [fb] into a fresh 0-arg join
-    point.  Returns [(clo_var, lambda_expr)] where:
+(** Strip a first-column as-pattern: bind the alias to the current scrutinee
+    and continue matching on the inner pattern.
+
+    [is_trivial_pat] already routes an as-pattern over a TRIVIAL inner
+    (`x as y`) into the default rows, where [bind_trivial_pat] binds both
+    names.  Only a NON-TRIVIAL inner (`Some(x) as s`) reaches the ctor-row
+    path, where [pat_tag_and_subs] returns None for PatAs and the row would
+    hit the fail-loudly "unhandled pattern kind" branch.  Rewriting the row
+    here keeps the alias binding and lets the inner pattern dispatch
+    normally. *)
+let strip_as_column (env : Lower_state.env) (scrut : Tir.atom)
+    (rows : (Ast.pattern list * Tir.expr) list)
+  : (Ast.pattern list * Tir.expr) list =
+  List.map (fun (pats, body) ->
+    match pats with
+    | Ast.PatAs (inner, n, _) :: rest when not (is_trivial_pat inner) ->
+      let v : Tir.var = {
+        v_name = n.Ast.txt;
+        v_ty   = Lower_state.ty_of_span env n.Ast.span;
+        v_lin  = Tir.Unr;
+      } in
+      (inner :: rest, Tir.ELet (v, Tir.EAtom scrut, body))
+    | _ -> (pats, body)) rows
+
+(** Split a row whose first column is an or-pattern into one row per
+    alternative.  Alternatives bind no variables (enforced at typecheck), so
+    the rows can share one body expression. *)
+let expand_or_rows (rows : (Ast.pattern list * Tir.expr) list)
+  : (Ast.pattern list * Tir.expr) list =
+  List.concat_map (fun (pats, body) ->
+    match pats with
+    | Ast.PatOr (alts, _) :: rest ->
+      List.map (fun a -> (a :: rest, body)) alts
+    | _ -> [(pats, body)]) rows
+
+(** The sorted union of field names mentioned by every [PatRecord] in the
+    first column, or [None] if no row has a record pattern there.
+
+    The union (not any single row's list) is what makes every row expand to
+    the same arity, which the matrix invariant requires. *)
+let record_fields_in_column (rows : (Ast.pattern list * Tir.expr) list)
+  : string list option =
+  let names =
+    List.concat_map (function
+      | (Ast.PatRecord (fs, _) :: _, _) ->
+        List.map (fun ((n : Ast.name), _) -> n.Ast.txt) fs
+      | _ -> []) rows
+  in
+  if names = [] then None
+  else Some (List.sort_uniq String.compare names)
+
+(** Hoist a (non-atomic) fallback expression [fb] into a fresh join point.
+    Returns [(clo_var, lambda_expr)] where:
       - [lambda_expr] is the lambda-creation site
         [ELetRec([jp_fn], EAtom(AVar jp_fn))] whose body is [fb];
         [Defun.defunctionalize] lifts [jp_fn] to a top-level fn with a
         closure struct for [fb]'s free variables.
       - [clo_var] is the fresh variable the closure is bound to; every
-        fall-through site becomes [EApp(clo_var, [])], which Defun rewrites
+        fall-through site becomes [EApp(clo_var, args)], which Defun rewrites
         to [ECallPtr].
 
     Callers bind the closure with [ELet(clo_var, lambda_expr, body)] and use
-    [EApp(clo_var, [])] as the (shared) fall-through call inside [body], so
+    [EApp(clo_var, args)] as the (shared) fall-through call inside [body], so
     the fallback body is emitted ONCE instead of duplicated at every
-    fall-through site. *)
-let hoist_fallback_jp (fb : Tir.expr) : Tir.var * Tir.expr =
+    fall-through site.
+
+    [params] (default [[]]) makes the join point N-ary.  This matters for
+    or-pattern arm bodies: the closure is created OUTSIDE the decision tree,
+    so any variable the ARM binds inside the tree would be a free variable of
+    [fb] that is not in scope at the creation site — Defun would resolve the
+    dangling name against the global namespace and emit a call to an
+    unrelated top-level function (or, more usually, `use of undefined value`
+    from clang).  Passing those binders as explicit parameters keeps the body
+    emitted once while making every call site supply the values that ARE in
+    scope there.  The parameter and argument vars share the binder's source
+    name and [ty_of_span] type, so the argument at each call site resolves to
+    the decision tree's own binding. *)
+let hoist_fallback_jp ?(params : Tir.var list = []) (fb : Tir.expr) : Tir.var * Tir.expr =
   let jp_fn_name = Lower_state.fresh_name "jp" in
-  let jp_fn_ty   = Tir.TFn ([], Lower_types.unknown_ty) in
+  let jp_fn_ty   =
+    Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) params,
+             Lower_types.unknown_ty) in
   let jp_fn : Tir.fn_def = {
     fn_name   = jp_fn_name;
-    fn_params = [];
+    fn_params = params;
     fn_ret_ty = Lower_types.unknown_ty;
     fn_body   = fb;
     fn_kind   = Tir.FnJoinPoint;
@@ -314,6 +392,32 @@ and compile_matrix_impl
       (match rows with (_, body) :: _ -> body | [] ->
         (match fallback with Some f -> f | None -> Lower_state.nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
+      (* Normalize the first column until neither rewrite has anything left to
+         do.  A single pass in either order is not enough, because each
+         rewrite can EXPOSE work for the other and each peels only ONE layer:
+         [strip_as_column] turns `(p | q) as n` into a first-column [PatOr],
+         and neither is recursive, so `(1 as a) as b` keeps an inner [PatAs].
+         Whatever survives reaches [pat_tag_and_subs], which returns [None]
+         for both kinds → the fail-loudly branch below raises an internal
+         compiler error on syntax the interpreter runs correctly.
+         Terminates: each iteration removes at least one [PatAs]/[PatOr] node
+         from a first column, and neither rewrite ever introduces one. *)
+      let rec normalize_first_column rows =
+        let pending =
+          List.exists (fun (pats, _) ->
+              match pats with
+              | Ast.PatOr _ :: _ -> true
+              | Ast.PatAs (inner, _, _) :: _ -> not (is_trivial_pat inner)
+              | _ -> false) rows
+        in
+        if not pending then rows
+        else normalize_first_column (expand_or_rows (strip_as_column env scrut rows))
+      in
+      let rows = normalize_first_column rows in
+      (match record_fields_in_column rows with
+       | Some fields ->
+         expand_record_column env scrut rest_scruts fields rows fallback
+       | None ->
       (* Split rows into a front block of non-trivial first-column rows and
          a (possibly empty) suffix starting at the first trivial first-column
          row.  The suffix becomes the default for all ECase branches. *)
@@ -486,7 +590,132 @@ and compile_matrix_impl
           | Some _ -> default
           | None -> Some (Lower_state.nonexhaustive_panic ())
         in
-        Tir.ECase (scrut, tir_branches, default)
+        Tir.ECase (scrut, tir_branches, default))
+
+(** Replace a first-column record pattern with one column per field.
+
+    Binds [ELet(f_<name>, EField(scrut, name), …)] around the recursive call
+    so each field is projected exactly once and shared by every row.
+
+    Field types matter: a field var left at [Lower_types.unknown_ty] makes
+    Perceus treat an unboxed scalar as RC-managed (the same hazard documented
+    on [infer_pattern]'s PatWild arm in typecheck.ml).  Prefer the scrutinee's
+    own structural [TRecord] type; fall back to the typechecker's recorded
+    type for the sub-pattern's span; only then give up and use [unknown_ty].
+
+    The SCRUTINEE's type matters just as much, and for a different reason:
+    [llvm_emit]'s [EField] arm computes a static GEP only when the object
+    atom's [Tir.ty] is the record's.  Otherwise it emits the by-name dynamic
+    accessor [march_record_field_dyn] and then decodes the returned word with
+    the FIELD's type — and a statically-laid-out record stores a [Float] as a
+    raw inline double, so [march_unbox_float] dereferences a double's bit
+    pattern as a pointer and the program SIGSEGVs.  Only the TOP-LEVEL column
+    carries a real record type: a record nested in a constructor payload is
+    matched against a synthetic sub-var that [compile_matrix_impl] leaves at
+    [unknown_ty] on purpose (see [field_ty_at]'s comment).  [retyped_scrut]
+    below recovers the record type from the typechecker's entry for the
+    record PATTERN's own span and re-annotates the atom in place — same
+    variable, same binding, no extra [ELet] and so no change to reference
+    counting; the annotation exists purely so codegen can lay out the GEP. *)
+and expand_record_column
+    (env         : Lower_state.env)
+    (scrut       : Tir.atom)
+    (rest_scruts : Tir.atom list)
+    (fields      : string list)
+    (rows        : (Ast.pattern list * Tir.expr) list)
+    (fallback    : Tir.expr option)
+  : Tir.expr =
+  (* The record type the typechecker recorded for a first-column record
+     pattern in this column, if any row has one. *)
+  let pattern_record_ty () =
+    let rec search = function
+      | [] -> None
+      | (Ast.PatRecord (_, sp) :: _, _) :: more ->
+        (match Lower_state.ty_of_span env sp with
+         | Tir.TRecord _ as t -> Some t
+         | _ -> search more)
+      | _ :: more -> search more
+    in
+    search rows
+  in
+  let scrut =
+    match scrut with
+    | Tir.AVar ({ Tir.v_ty = Tir.TRecord _; _ }) -> scrut
+    | Tir.AVar v ->
+      (match pattern_record_ty () with
+       | Some rt -> Tir.AVar { v with Tir.v_ty = rt }
+       | None    -> scrut)
+    | _ -> scrut
+  in
+  let scrut_field_ty name =
+    match scrut with
+    | Tir.AVar { Tir.v_ty = Tir.TRecord fs; _ } -> List.assoc_opt name fs
+    | _ -> None
+  in
+  (* First span the typechecker recorded for a sub-pattern of this field. *)
+  let span_field_ty name =
+    let rec search = function
+      | [] -> None
+      | (Ast.PatRecord (fs, _) :: _, _) :: more ->
+        (match List.find_opt (fun ((n : Ast.name), _) -> n.Ast.txt = name) fs with
+         | Some (_, Ast.PatVar vn)  -> Some (Lower_state.ty_of_span env vn.Ast.span)
+         | Some (_, Ast.PatWild sp) -> Some (Lower_state.ty_of_span env sp)
+         | _ -> search more)
+      | _ :: more -> search more
+    in
+    search rows
+  in
+  let field_ty name =
+    match scrut_field_ty name with
+    | Some t -> t
+    | None ->
+      (match span_field_ty name with
+       | Some t -> t
+       | None -> Lower_types.unknown_ty)
+  in
+  let field_vars =
+    List.map (fun name ->
+      let v : Tir.var = {
+        v_name = Lower_state.fresh_name ("f_" ^ name);
+        v_ty   = field_ty name;
+        v_lin  = Tir.Unr;
+      } in
+      (name, v)) fields
+  in
+  let new_scruts =
+    List.map (fun (_, v) -> Tir.AVar v) field_vars @ rest_scruts in
+  let expand_row (pats, body) =
+    match pats with
+    | Ast.PatRecord (fs, _) :: rest ->
+      let sub name =
+        match List.find_opt (fun ((n : Ast.name), _) -> n.Ast.txt = name) fs with
+        | Some (_, p) -> p
+        | None -> Ast.PatWild Ast.dummy_span   (* field not mentioned by this row *)
+      in
+      Some (List.map (fun name -> sub name) fields @ rest, body)
+    | fp :: rest when is_trivial_pat fp ->
+      (* A wildcard/var row in a record column matches every record; bind its
+         name to the whole record and wildcard out every field column. *)
+      let body' = bind_trivial_pat env scrut fp body in
+      Some (List.map (fun _ -> Ast.PatWild Ast.dummy_span) fields @ rest, body')
+    | [] -> None   (* no columns left to expand *)
+    | fp :: _ ->
+      (* The column's static type is a record, so no other discriminating
+         pattern kind should be able to appear here — and [PatAs]/[PatOr] are
+         normalized away by [compile_matrix_impl] before this is reached.
+         Returning [None] here would DROP the row silently, making the arm's
+         body unreachable with no diagnostic (the exact B4 failure mode).
+         Fail loudly instead, like the sibling [pat_tag_and_subs] path. *)
+      failwith (Printf.sprintf
+        "lower: unhandled pattern kind in a record column at %s — \
+         expand_record_column does not know how to expand this pattern, so \
+         the arm would be silently dropped instead of compiled"
+        (string_of_pat_span (span_of_pat fp)))
+  in
+  let rows' = List.filter_map expand_row rows in
+  let inner = compile_matrix env new_scruts rows' fallback in
+  List.fold_right (fun (name, v) acc ->
+    Tir.ELet (v, Tir.EField (scrut, name), acc)) field_vars inner
 
 (** Collect the (name, span) of every variable binding in a pattern,
     including [PatAs] outer names.  Used to register pattern-bound locals
@@ -503,6 +732,27 @@ let rec collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
   | Ast.PatRecord (fields, _) ->
     List.concat_map (fun (_, p) -> collect_pat_names p) fields
   | Ast.PatAs (p, n, _) -> (n.txt, n.span) :: collect_pat_names p
+  | Ast.PatOr (ps, _) -> List.concat_map collect_pat_names ps
+
+(** The variables an arm's pattern binds, as [Tir.var]s carrying the same
+    name and [ty_of_span] type the decision tree will bind them with
+    ([bind_trivial_pat] / [strip_as_column] / [expand_record_column] all mint
+    their binding from exactly this pair).  Duplicates are dropped, keeping
+    the first occurrence, so the parameter list of an or-pattern join point is
+    well-formed even for a pattern that mentions a name twice.
+
+    Used to give an or-pattern arm's hoisted join point explicit parameters —
+    see [hoist_fallback_jp]. *)
+let pat_binder_vars (env : Lower_state.env) (pat : Ast.pattern) : Tir.var list =
+  let seen = Hashtbl.create 8 in
+  List.filter_map (fun (name, sp) ->
+      if Hashtbl.mem seen name then None
+      else begin
+        Hashtbl.add seen name ();
+        Some { Tir.v_name = name; v_ty = Lower_state.ty_of_span env sp;
+               v_lin = Tir.Unr }
+      end)
+    (collect_pat_names pat)
 
 (** Lower a branch body with the pattern's bound names registered in
     [_fn_param_types] for the duration of the lowering.  Restores any
@@ -529,11 +779,28 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
   let has_guards = List.exists (fun (br : Ast.branch) ->
       br.branch_guard <> None) branches in
   if not has_guards then begin
-    (* Fast path: no guards — use efficient matrix compilation. *)
+    (* Fast path: no guards — use efficient matrix compilation.
+
+       An or-pattern's arm body is referenced once per alternative after
+       [expand_or_rows] splits the row.  Hoist it into a shared join point
+       first rather than emitting N copies.  The ALTERNATIVES bind no
+       variables (enforced at typecheck), but the ARM around them may
+       (`P(x, 1 | 2)`, `{ code: 1 | 2, msg: m }`, `(1 | 2) as n`), and those
+       binders live INSIDE the decision tree while the closure is created
+       outside it — so they are passed as explicit join-point parameters. *)
+    let wraps = ref [] in
     let rows = List.map (fun (br : Ast.branch) ->
-        ([br.branch_pat],
-         lower_branch_body_with_pat env br.branch_pat br.branch_body)) branches in
-    compile_matrix env [scrut] rows None
+        let body = lower_branch_body_with_pat env br.branch_pat br.branch_body in
+        if pat_has_or br.branch_pat then begin
+          let params = pat_binder_vars env br.branch_pat in
+          let (clo_var, lambda_expr) = hoist_fallback_jp ~params body in
+          wraps := (clo_var, lambda_expr) :: !wraps;
+          ([br.branch_pat],
+           Tir.EApp (clo_var, List.map (fun v -> Tir.AVar v) params))
+        end else ([br.branch_pat], body)) branches in
+    let tree = compile_matrix env [scrut] rows None in
+    List.fold_left (fun acc (clo_var, lambda_expr) ->
+      Tir.ELet (clo_var, lambda_expr, acc)) tree !wraps
   end else begin
     (* Guards present: compile each branch individually with fallthrough
        to the remaining branches when the guard fails.
@@ -571,6 +838,22 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
         List.iter (fun (name, sp) ->
           Hashtbl.replace Lower_state._fn_param_types name (Lower_state.ty_of_span env sp)) pat_names;
         let body = lower_expr env br.branch_body in
+        (* An or-pattern's arm body is referenced once per alternative after
+           [expand_or_rows] (inside [compile_matrix_impl]) splits the row.
+           Hoist it into a shared join point first, exactly as the no-guard
+           fast path above does (including the arm's own binders as explicit
+           parameters — the closure is bound outermost, outside the scope of
+           every binding the decision tree introduces), rather than emitting
+           N copies.  Note the GUARD is not hoisted: it stays inside the tree
+           via [guarded_body], so it reads the binders directly. *)
+        let (body, or_wrap) =
+          if pat_has_or br.branch_pat then
+            let params = pat_binder_vars env br.branch_pat in
+            let (clo_var, lambda_expr) = hoist_fallback_jp ~params body in
+            (Tir.EApp (clo_var, List.map (fun v -> Tir.AVar v) params),
+             fun e -> Tir.ELet (clo_var, lambda_expr, e))
+          else (body, fun e -> e)
+        in
         let guard_expr_opt = Option.map (lower_expr env) br.branch_guard in
         List.iter (fun (name, _) -> Hashtbl.remove Lower_state._fn_param_types name) pat_names;
         List.iter (fun (name, ty) ->
@@ -600,8 +883,8 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
                 [{ br_tag = Tir_names.bool_lit_tag true; br_vars = []; br_body = body }],
                 Some guard_fail))
         in
-        wrap (compile_matrix_impl env [scrut]
-                [([br.branch_pat], guarded_body)] fallback_opt)
+        or_wrap (wrap (compile_matrix_impl env [scrut]
+                [([br.branch_pat], guarded_body)] fallback_opt))
     in
     go branches
   end

@@ -1394,6 +1394,10 @@ expr_atom:
   (* Contextual keywords usable as variable names in expressions *)
   | STATE { EVar (mk_name "state" $loc) }
 
+record_field_pat:
+  | name = lower_name; COLON; p = pattern { (name, p) }
+  | name = lower_name                     { (name, PatVar name) }
+
 record_field_expr:
   | name = lower_name; COLON; e = expr { (name, e) }
 
@@ -1438,7 +1442,28 @@ qualified_upper:
   | con1 = UPPER_IDENT; DOT; con2 = UPPER_IDENT
     { mk_name (con1 ^ "." ^ con2) $loc }
 
+(* An as-pattern layer wrapping the ordinary pattern forms.  Written as
+   `pattern_no_as AS lower_name` rather than left-recursively on `pattern`
+   so that `p as a as b` is a parse error rather than a silent nesting, and
+   so no precedence declaration is needed for AS.  Uses `lower_name`, not
+   `soft_lower_name`: `soft_lower_name` accepts AS itself as an identifier
+   (parser.mly:1491), and allowing `x as as` buys nothing. *)
 pattern:
+  | p = pattern_no_as; AS; n = lower_name
+    { PatAs (p, n, mk_span ($loc)) }
+  | p = pattern_no_as { p }
+
+(* Or-patterns: `1 | 2 | 3`.  PIPE is also `arm_sep` (parser.mly:1409), but
+   an arm separator only ever follows a COMPLETE branch — one that has
+   already consumed its ARROW and body — so LR(1) distinguishes the two uses
+   without a conflict.  Verified: adding this production leaves menhir's
+   conflict count unchanged at 9. *)
+pattern_no_as:
+  | p = pattern_alt; PIPE; ps = separated_nonempty_list(PIPE, pattern_alt)
+    { PatOr (p :: ps, mk_span ($loc)) }
+  | p = pattern_alt { p }
+
+pattern_alt:
   | con = qualified_upper; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatCon (con, ps) }
   | con = qualified_upper
@@ -1450,6 +1475,22 @@ pattern:
   | p = simple_pattern { p }
 
 simple_pattern:
+  (* Record pattern: { x, y: p }.  This production places no restriction on
+     which fields, or how many, appear.  In a match arm (and, transitively, a
+     function parameter that dispatches through one), `infer_pattern`
+     (typecheck.ml) drives the pattern's field types from the scrutinee's
+     EXPECTED record type when one is known, so the field list is open: `{ x }`
+     matches any record with an `x` field, whatever else it has, and naming a
+     field the record lacks is an `unknown_record_field` error. Without a known
+     expected type (an unannotated `let` pattern, or a bare pattern used
+     directly as a function parameter — this grammar position has no
+     annotation slot) `infer_pattern` falls back to synthesizing a CLOSED
+     `TRecord` from just the fields named here, and since March records
+     require exact field-set equality to unify (no width subtyping), such a
+     pattern must name every field of the record it matches. Punned `{ x }`
+     is shorthand for `{ x: x }`, mirroring the record-literal shorthand. *)
+  | LBRACE; fields = separated_nonempty_list(COMMA, record_field_pat); RBRACE
+    { PatRecord (fields, mk_span ($loc)) }
   | UNDERSCORE { PatWild (mk_span ($loc)) }
   | id = soft_lower_name { PatVar id }
   | n = INT { PatLit (LitInt n, mk_span ($loc)) }

@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t90 accept, t01–t81 reject)
+# Typing corpus index (t01–t90 accept, t01–t82 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 171/171 — 90 accept, 81
+Exit 0 iff every program behaves as declared (currently 172/172 — 90 accept, 82
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -473,8 +473,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t79_impl_coherence_duplicate` | **(impl coherence, T-ImplCoherent) two `impl Speak(Dog)` (§2.3, 2026-07-17)** — a type may implement an interface at most once. Both blocks previously typechecked (`--check` exit 0) and the backends ran DIFFERENT method bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order). `register_impl_shape` now does a lookup-before-insert via `types_overlap` (unifiability), distinguishing a genuine duplicate (different decl span) from Pass-1 re-registration (same span). Accept companions `t83`/`t84` | `Overlapping implementation` |
 | `t80_impl_parametric_overlap` | **(impl coherence Stage 2, T-ImplCoherent) `impl Descr(Box(a))` + `impl Descr(Box(Int))` (§2.3, 2026-07-17)** — parametric overlap: the general `Box(a)` head UNIFIES with the specific `Box(Int)` (`a ↦ Int`), so both could match `Box(1)` and the backends would disagree. Caught by `types_overlap` (unify-based), which the Stage-1 exact-key form did not. Accept twin `t85` | `Overlapping implementation` |
 | `t81_spawn_pid_cross_actor` | **(finding 18 FIXED) cross-actor pid list rejected (§2.6.3, 2026-07-18)** — `spawn(A) : Pid[{x: Int}]` and `spawn(B) : Pid[{s: String}]` no longer unify (both used to be `Pid[<fresh var>]`, silently conflating distinct actors' pids). Accept twin `t87` | ``expected `{ x : Int }` but got `{ s : String }`` |
+| `t82_or_pattern_binding` | **(Task 5 of the record-matching-gaps plan) or-pattern alternatives may not bind variables (§6.2, 2026-07-24)** — `A(x) \| B(x) -> x` parses fine (`PatOr [PatCon("A",[PatVar x]); PatCon("B",[PatVar x])]`) but is rejected at `infer_pattern`: sharing one arm body across alternatives goes through `lower_match.ml`'s 0-arg `hoist_fallback_jp` join point, which has nowhere to pass per-alternative bindings. Non-binding or-patterns (`1 \| 2`, `Red \| Green`) typecheck normally — see `accept/` for the positive case exercised via `test_or_pattern_nonbinding_accepted` (`test/test_compiler.ml`) rather than a dedicated accept fixture, since `parse/p32` already witnesses the parse shape. Lifting the restriction needs n-ary join points (filed in `specs/todos.md`) | `Or-pattern alternatives cannot bind variables` |
 
-**Result: 171 / 171 (90 accept, 81 reject).**
+**Result: 172 / 172 (90 accept, 82 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

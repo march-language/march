@@ -8289,8 +8289,278 @@ let test_entry_qual_annotated_same_tvar_ok () =
   end|} in
   Alcotest.(check bool) "Main.identity (a->a) used at Int: no error" false (has_errors ctx)
 
+(* A match in CHECKING position (function with a declared return type) must
+   still get redundant-arm warnings.  check_expr's EMatch arm called only
+   check_exhaustiveness, never check_redundant_arms, so every match inside an
+   annotated function silently skipped the analysis. *)
+let test_redundant_arm_in_checking_position () =
+  let ctx = typecheck {|mod T do
+    fn f(o : Option(Int)) : Int do
+      match o do
+        _ -> 9
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "redundant arm reported in checking position" true
+    has_redundant
+
+(* Control: the same match in INFERENCE position (no return annotation) already
+   warned before this fix.  Pins that the fix does not regress it. *)
+let test_redundant_arm_in_inference_position () =
+  let ctx = typecheck {|mod T do
+    fn f(o) do
+      match o do
+        _ -> 9
+        Some(x) -> x
+        None -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "redundant arm reported in inference position" true
+    has_redundant
+
+(* Record-pattern arms must NOT be flagged redundant.  [norm_pat] collapses
+   PatRecord to SPWild, so `{ code: 404, msg: m }` normalises to "matches
+   everything" and the arm after it was reported unreachable — on code that
+   plainly runs it (this exact program prints "gone" then "other 200").
+   Surfaced only once record patterns became reachable AND redundancy
+   checking started running in checking position; neither alone showed it. *)
+let test_record_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404, msg: m } -> m
+        { code: c, msg: _ }   -> "other " ++ int_to_string(c)
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "record-pattern arm not falsely flagged" false
+    has_redundant
+
+(* A record pattern need not mention every field.  infer_pattern used to
+   SYNTHESIZE a closed TRecord from the mentioned fields only, and unify
+   requires exact field-set equality, so `{ x }` against {x, y} was a type
+   error.  Drive the field types from the EXPECTED type instead. *)
+let test_partial_record_pattern_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { x : Int, y : Int }) : Int do
+      match r do
+        { x: a } -> a
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "partial record pattern: no errors" false (has_errors ctx)
+
+(* `<record pattern> as name`: the PatAs arm of infer_pattern dropped the
+   EXPECTED type, so the record pattern fell into the closed-synthesis branch
+   and the alias got the narrow `{ code : Int }` — two misleading errors on a
+   program that runs fine, and the single most natural reason to write an
+   as-pattern over a record. *)
+let test_record_pattern_under_alias_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { code : Int, msg : String }) : String do
+      match r do
+        { code: 404 } as w -> w.msg
+        _                  -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "record pattern under an alias: no errors" false
+    (has_errors ctx)
+
+(* Same, with an or-pattern of records under the alias. *)
+let test_or_of_records_under_alias_typechecks () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { code : Int, msg : String }) : String do
+      match r do
+        ({ code: 404 } | { code: 410 }) as w -> w.msg
+        _                                    -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "or-of-records under an alias: no errors" false
+    (has_errors ctx)
+
+(* A field the record does not have must still be an error. *)
+let test_record_pattern_unknown_field_rejected () =
+  let ctx = typecheck {|mod T do
+    fn f(r : { x : Int, y : Int }) : Int do
+      match r do
+        { zzz: a } -> a
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unknown field: error reported" true (has_errors ctx)
+
+(* Or-pattern alternatives may not bind variables in this pass: sharing an arm
+   body across alternatives uses lower_match's 0-arg join point, which cannot
+   pass per-alternative bindings. The rejection must be a clear diagnostic,
+   not a lowering crash. *)
+let test_or_pattern_binding_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "binding or-pattern rejected" true (has_errors ctx)
+
+let test_or_pattern_nonbinding_accepted () =
+  let ctx = typecheck {|mod T do
+    fn f(n : Int) : String do
+      match n do
+        1 | 2 -> "small"
+        _     -> "big"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-binding or-pattern accepted" false (has_errors ctx)
+
+(* Exhaustiveness must see THROUGH an or-pattern: `Red | Green` plus `Blue`
+   covers Color, so no warning; dropping `Blue` must warn. *)
+let test_or_pattern_exhaustiveness () =
+  let ctx_full = typecheck {|mod T do
+    type Color = Red | Green | Blue
+    fn f(c : Color) : Int do
+      match c do
+        Red | Green -> 1
+        Blue        -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "or-pattern covers its alternatives" false
+    (has_errors ctx_full);
+  let ctx_partial = typecheck {|mod T do
+    type Color = Red | Green | Blue
+    fn f(c : Color) : Int do
+      match c do
+        Red | Green -> 1
+      end
+    end
+  end|} in
+  (* Assert on the MESSAGE, not merely "some warning exists": a false
+     redundancy warning on the same program would otherwise keep this green.
+     The non-exhaustiveness warning carries no [code], so the missing
+     constructor's name in the message is the only distinguishing signal. *)
+  let missing_blue =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match"
+        && _contains_substr d.message "Blue")
+      ctx_partial.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "missing Blue still warns" true missing_blue
+
+(* Or-patterns must be seen through at EVERY depth, not just the top level.
+   [norm_pat] used to collapse a NESTED PatOr to SPWild, which in a coverage
+   matrix means "matches everything" — so `Some(1 | 2)` claimed to cover all
+   of `Some(_)`.  That both suppressed a real non-exhaustiveness warning and
+   made the next arm look unreachable. *)
+let test_nested_or_pattern_exhaustiveness () =
+  let ctx = typecheck {|mod T do
+    fn f(o : Option(Int)) : Int do
+      match o do
+        Some(1 | 2) -> 10
+        None        -> 0
+      end
+    end
+  end|} in
+  let warns_nonexhaustive =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && _contains_substr d.message "Non-exhaustive pattern match")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "Some(1 | 2) does not cover Some(_)" true
+    warns_nonexhaustive
+
+let test_nested_or_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    type P = P(Int, Int)
+    fn f(p : P) : Int do
+      match p do
+        P(x, 1 | 2) -> x + 100
+        P(x, _)     -> x
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "arm after a nested or-pattern is reachable" false
+    has_redundant
+
+(* Same false positive reached through an as-pattern over an or-pattern. *)
+let test_as_over_or_pattern_arm_not_flagged_redundant () =
+  let ctx = typecheck {|mod T do
+    fn f(n : Int) : Int do
+      match n do
+        (1 | 2) as k -> k + 100
+        _            -> 0
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "arm after `(1 | 2) as k` is reachable" false
+    has_redundant
+
 let compiler_suites =
   [
+      ( "match_diagnostics",
+        [
+          Alcotest.test_case "redundant arm warned in checking position" `Quick
+            test_redundant_arm_in_checking_position;
+          Alcotest.test_case "redundant arm warned in inference position" `Quick
+            test_redundant_arm_in_inference_position;
+          Alcotest.test_case "record-pattern arm not flagged redundant" `Quick
+            test_record_pattern_arm_not_flagged_redundant;
+          Alcotest.test_case "partial record pattern typechecks" `Quick
+            test_partial_record_pattern_typechecks;
+          Alcotest.test_case "record pattern under an alias typechecks" `Quick
+            test_record_pattern_under_alias_typechecks;
+          Alcotest.test_case "or-of-records under an alias typechecks" `Quick
+            test_or_of_records_under_alias_typechecks;
+          Alcotest.test_case "record pattern unknown field rejected" `Quick
+            test_record_pattern_unknown_field_rejected;
+          Alcotest.test_case "or-pattern binding rejected" `Quick
+            test_or_pattern_binding_rejected;
+          Alcotest.test_case "or-pattern non-binding accepted" `Quick
+            test_or_pattern_nonbinding_accepted;
+          Alcotest.test_case "or-pattern exhaustiveness sees through alternatives" `Quick
+            test_or_pattern_exhaustiveness;
+          Alcotest.test_case "nested or-pattern does not widen coverage" `Quick
+            test_nested_or_pattern_exhaustiveness;
+          Alcotest.test_case "arm after a nested or-pattern not flagged redundant" `Quick
+            test_nested_or_pattern_arm_not_flagged_redundant;
+          Alcotest.test_case "arm after `(p | q) as n` not flagged redundant" `Quick
+            test_as_over_or_pattern_arm_not_flagged_redundant;
+        ] );
       ( "resolver",
         [
           Alcotest.test_case "collect_lib_files skips dangling symlinks" `Quick

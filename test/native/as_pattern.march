@@ -1,0 +1,42 @@
+mod AsPattern do
+fn describe(o : Option(Int)) : String do
+  match o do
+    Some(x) as whole ->
+      match whole do
+        Some(y) -> "some " ++ int_to_string(x + y)
+        None -> "impossible"
+      end
+    None -> "none"
+  end
+end
+
+-- `(p | q) as n`: strip_as_column PRODUCES a first-column or-pattern, so a
+-- single expand-then-strip pass left a PatOr that pat_tag_and_subs cannot
+-- tag — an internal compiler error on syntax the interpreter ran fine.
+fn tier(n : Int) : Int do
+  match n do
+    (1 | 2) as k -> k + 100
+    _            -> 0
+  end
+end
+
+-- `(p as a) as b`: strip_as_column peels ONE layer, so the inner PatAs
+-- survived into the same ICE.  Both are fixed by normalizing the first
+-- column to a fixpoint.
+fn twice(n : Int) : Int do
+  match n do
+    (1 as a) as b -> a + b
+    _             -> 0
+  end
+end
+
+fn main() : Unit do
+  println(describe(Some(21)))
+  println(describe(None))
+  println(int_to_string(tier(1)))
+  println(int_to_string(tier(2)))
+  println(int_to_string(tier(7)))
+  println(int_to_string(twice(1)))
+  println(int_to_string(twice(5)))
+end
+end

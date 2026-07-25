@@ -957,6 +957,138 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/signal_watch.expected native_signal_watch.out)))
 
+; ── As-patterns (`p as n`) must compile ──────────────────────────────
+; PatAs existed in the AST/interpreter/typechecker but had no grammar
+; production.  With the production added, lower_match's pat_tag_and_subs
+; returns None for PatAs, which routes a NON-TRIVIAL inner pattern into the
+; fail-loudly "unhandled pattern kind" branch.  strip_as_column rewrites the
+; row instead.  Compile natively, run, diff against the interpreter's output.
+; `tier` / `twice` pin the fixpoint: strip_as_column can PRODUCE a
+; first-column or-pattern and peels only one PatAs layer, so `(1 | 2) as k`
+; and `(1 as a) as b` reached that same fail-loudly branch as an ICE — on
+; syntax specs/lang/pattern-matching.md documents and the interpreter runs.
+(rule
+ (targets native_as_pattern native_as_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/as_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_as_pattern
+        native/as_pattern.march)
+   (with-stdout-to native_as_pattern.out
+        (system "./native_as_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/as_pattern.expected native_as_pattern.out)))
+
+; ── Record patterns must compile ─────────────────────────────────────
+; PatRecord had no grammar production, so neither lowering path handled it:
+; lower_match.ml:205 failed loudly, and lower.ml's bind_subpat catch-all
+; returned the body unchanged — SILENTLY dropping every binding, which would
+; leave x/y as undefined global fn references.  Covers all three entry points
+; (match arm, `let`, fn param) plus a refutable sub-pattern that forces real
+; dispatch on a projected field.
+; `boxed` / `wrapped` additionally pin a record pattern NESTED in a
+; constructor payload with a Float field: the column's scrutinee has no
+; record type there, so EField fell back to march_record_field_dyn and
+; march_unbox_float dereferenced a raw inline double — SIGSEGV, compiled
+; only (the interpreter and every Int/String field were unaffected).
+(rule
+ (targets native_record_pattern native_record_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_pattern
+        native/record_pattern.march)
+   (with-stdout-to native_record_pattern.out
+        (system "./native_record_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_pattern.expected native_record_pattern.out)))
+
+; ── Partial record patterns must compile ─────────────────────────────
+; Two arms mentioning DIFFERENT field subsets force expand_record_column to
+; project the union of mentioned fields and wildcard the ones a given row
+; omits.  `width` additionally checks that PatTuple's expected-type threading
+; reaches a record pattern nested inside an explicit tuple match over two
+; annotated params (see native/record_pattern_partial.march's own comment for
+; why it isn't a bare record-pattern parameter — that position can't carry a
+; type annotation, so it stays closed regardless of this fix).
+(rule
+ (targets native_record_pattern_partial native_record_pattern_partial.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/record_pattern_partial.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_pattern_partial
+        native/record_pattern_partial.march)
+   (with-stdout-to native_record_pattern_partial.out
+        (system "./native_record_pattern_partial")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_pattern_partial.expected native_record_pattern_partial.out)))
+
+; ── Or-patterns must compile ─────────────────────────────────────────
+; compile_matrix splits a row whose first column is a PatOr into one row per
+; alternative.  The arm body is hoisted into a shared join point first, so N
+; alternatives do not emit N copies of the body — the same blowup
+; hoist_fallback_jp exists to prevent for fallbacks.
+; The `classify` / `classify_guarded` / `message` arms additionally pin the
+; scoping fix: an arm may contain an or-pattern AND bind names elsewhere, and
+; those binders live inside the decision tree while the join-point closure is
+; created outside it.  They are passed as join-point PARAMETERS; before that,
+; clang rejected the module with "use of undefined value '@x'".
+(rule
+ (targets native_or_pattern native_or_pattern.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/or_pattern.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_or_pattern
+        native/or_pattern.march)
+   (with-stdout-to native_or_pattern.out
+        (system "./native_or_pattern")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/or_pattern.expected native_or_pattern.out)))
+
 ; A WATCHED SIGTERM must NOT terminate the process (default graceful-shutdown is
 ; suppressed on the first delivery): the program runs its handler and survives to
 ; exit 0.  An unwatched SIGTERM still kills the process (that half is verified

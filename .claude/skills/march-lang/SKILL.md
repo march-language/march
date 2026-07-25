@@ -233,6 +233,35 @@ match pair do
   (Some(x), None)    -> x
   (None,    _)       -> 0
 end
+
+-- As-pattern: bind a name to the whole matched value while destructuring it
+match opt do
+  Some(x) as whole ->
+    println(whole)
+    x
+  None -> 0
+end
+
+-- Record pattern: destructures fields; `{ x }` is shorthand for `{ x: x }`.
+-- In a match arm, the field list is OPEN: `{ x: 0 }` alone matches any record
+-- with an x field of 0, whatever else it has; naming a field the record
+-- lacks is a compile error. A `let` binding and a bare record-pattern
+-- function parameter still require every field (no independent expected
+-- type to open against), e.g. `fn area({ w: w, h: h }) do w * h end`.
+match point do
+  { x: 0, y: 0 } -> "origin"
+  { x: x, y: y } -> "at " ++ int_to_string(x) ++ "," ++ int_to_string(y)
+end
+
+-- Or-pattern: `p1 | p2 | p3` matches an arm against several alternatives.
+-- RESTRICTION: no alternative may bind a variable — every alternative
+-- shares ONE arm body, so `A(x) | B(x) -> x` is a compile error ("Or-pattern
+-- alternatives cannot bind variables"). Split into separate arms, or match
+-- the common shape and test the difference with a `when` guard, instead.
+match n do
+  1 | 2 | 3 -> "small"
+  _         -> "big"
+end
 ```
 
 ### If / Else
