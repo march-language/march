@@ -1096,25 +1096,64 @@ let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
     in
     go arg_term
 
+(* True when [t] is a WELL-SORTED term for a constructor field of [sort].
+
+   This check is not cosmetic.  The scalar reflection declares every variable it
+   meets as `SInt`, so a record field of a non-Int type bound to a variable
+   (`{ port: 8080, name: n }` where `name : String` has SMT sort `Elem`) would
+   build a constructor application whose argument sorts do not match the
+   datatype declaration.  Z3 answers such a VC with an `(error …)` rather than
+   sat/unsat, and that error desynchronises the long-lived `z3 -in` channel —
+   silently disabling refinement checking for the REST of the compilation.  A
+   malformed VC is therefore far worse than a skipped one, so any field we
+   cannot place at its declared sort makes the whole record unreflectable.
+
+   Int/Bool fields accept any scalar term except a constructor application;
+   a datatype-sorted field accepts only a constructor OF THAT SORT (so
+   `history: Nil` and `history: Cons(1, Nil)` still reflect, while
+   `history: xs` — an opaque variable — does not). *)
+let term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
+  let is_ctor_app = function
+    | Smt.App (c, _) -> Hashtbl.mem ctor_field_sorts c
+    | _ -> false
+  in
+  match sort with
+  | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
+  | Smt.SData s ->
+    (match t with
+     | Smt.App (ctor, _) ->
+       (match Hashtbl.find_opt adt_ctors s with
+        | Some cs -> List.mem ctor cs
+        | None -> false)
+     | _ -> false)
+
 (* Reflect an ERecord literal as a constructor application in SMT.
    Fields are reordered to match the declaration order stored in ctor_field_names.
-   Returns None if any field's scalar term is untranslatable (conservative skip). *)
+   Returns None if any field is missing, untranslatable, or reflects to a term
+   that does not fit its declared sort (conservative skip). *)
 let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list)
     (reflect_scalar : A.expr -> Smt.term option) : Smt.term option =
   match Hashtbl.find_opt adt_ctors sort_name with
   | Some [ ctor ] ->
-    (match Hashtbl.find_opt ctor_field_names ctor with
-     | None -> None
-     | Some fname_list ->
+    (match Hashtbl.find_opt ctor_field_names ctor, Hashtbl.find_opt ctor_field_sorts ctor with
+     | Some fname_list, Some fsorts when List.length fname_list = List.length fsorts ->
        let field_map = List.map (fun (n, e) -> (n.A.txt, e)) fields in
        let in_order =
          List.filter_map (fun fname -> List.assoc_opt fname field_map) fname_list
        in
        if List.length in_order <> List.length fname_list then None
        else
-         let reflected = List.map reflect_scalar in_order in
+         let reflected =
+           List.map2
+             (fun e s ->
+               match reflect_scalar e with
+               | Some t when term_fits_sort s t -> Some t
+               | _ -> None)
+             in_order fsorts
+         in
          if List.exists Option.is_none reflected then None
-         else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
+         else Some (Smt.App (ctor, List.filter_map Fun.id reflected))
+     | _ -> None)
   | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)

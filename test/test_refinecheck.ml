@@ -717,6 +717,33 @@ end|}));
   type State = { count : Int, history : List(Int) }
   fn take(s : {v : State | mlength(v.history) == v.count}) : Int do s.count end
   fn main() : Int do take({ count: 1, history: Nil }) end
+end|}));
+
+    (* A record field whose declared type is NOT Int, bound to a variable.  The
+       scalar reflection declares every variable SInt, so reflecting it anyway
+       would build a constructor application with mismatched argument sorts —
+       and Z3 answers a malformed VC with an error that DESYNCS the long-lived
+       `z3 -in` channel, silently disabling refinement checking for the rest of
+       the compilation.  So the record must be skipped instead. *)
+    gated "record precondition: non-Int field bound to a variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(n : String) : Int do serve({ port: 0, name: n }) end
+end|}));
+
+    (* The channel-survival half: an unrelated Int violation AFTER such a record
+       call must still be reported.  If the record VC poisoned the solver this
+       goes silent — the failure mode is silence, so only this shape catches it. *)
+    gated "record precondition: a skipped record does not poison the solver" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn first(n : String) : Int do serve({ port: 8080, name: n }) end
+  fn second() : Int do take_n(-3) end
 end|})) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
