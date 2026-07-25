@@ -343,8 +343,43 @@ march_proc  *march_sched_find(int64_t pid);
  * from keeping the value in a register across the signal delivery point. */
 extern volatile _Thread_local int64_t march_tls_reductions;
 
-/* Called by compiled code when march_tls_reductions hits zero.
- * Resets the budget to MARCH_REDUCTION_BUDGET and cooperatively yields
+/* Preemption request flag — a PLAIN (deliberately non-thread-local) global,
+ * read by every compiled function on entry.
+ *
+ * Why not march_tls_reductions?  Compiled code used to load/decrement/store
+ * that _Thread_local counter on every call.  Thread-local access is not a
+ * plain load on either supported platform: on Darwin/arm64 the symbol is a
+ * TLV descriptor and each access compiles to `adrp; ldr; blr` — an INDIRECT
+ * CALL into the resolver — and on Linux/arm64 PIE it goes through a TLSDESC
+ * call.  A non-inlinable call on every function entry also forces a frame and
+ * register spills a leaf-ish function would not otherwise need.  Measured on
+ * bench/fib.march (330M calls): 0.63s with the TLS check vs 0.36s without,
+ * i.e. the check cost 1.75x on call-dense recursive code.
+ *
+ * A plain global is `adrp; ldr` with no call, and — critically — it is only
+ * ever READ on the hot path, so the cache line stays shared across scheduler
+ * threads instead of ping-ponging on a per-call store.
+ *
+ * Set by the SIGUSR1 preemption handler on whichever scheduler threads the
+ * daemon signals each quantum; cleared by march_yield_from_compiled().
+ *
+ * SEMANTIC NOTE — this is a per-process request, not a per-thread one.  The
+ * daemon signals every scheduler thread each quantum, so previously each
+ * thread yielded every quantum.  Now the first thread to observe the flag
+ * clears it, so a given thread is preempted on average every
+ * (num_schedulers x quantum) rather than every quantum.  Preemption remains
+ * bounded and starvation-free in expectation; only the per-thread latency
+ * relaxes.  The count-based trigger (yield every MARCH_REDUCTION_BUDGET
+ * calls, independent of the timer) is intentionally gone: at 4000 calls it
+ * fired within microseconds on call-dense code, vastly more often than the
+ * 1ms quantum required, and it was pure overhead.
+ *
+ * volatile for the same reason as march_tls_reductions: the value must be
+ * re-read rather than cached in a register across a signal delivery point. */
+extern volatile int64_t march_preempt_request;
+
+/* Called by compiled code when march_preempt_request is set.
+ * Clears the request, refills the reduction budget, and cooperatively yields
  * back to the scheduler via march_sched_yield(). No-op outside a
  * scheduler context (e.g. when running without the green-thread runtime). */
 void march_yield_from_compiled(void);

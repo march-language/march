@@ -3314,3 +3314,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
+
+; ── Regression: a CPU-bound green thread must not starve its siblings ──────
+; MARCH_NUM_SCHEDULERS=1 is essential and not incidental: it is the only
+; configuration in which this test measures PREEMPTION rather than
+; parallelism.  With the default 4 scheduler threads, `B` runs on a different
+; OS thread and prints first even with preemption completely broken.
+; See the fixture header for the two bugs this pins (the volatile load, and
+; the single-scheduler path never starting the preemption daemon).
+(rule
+ (targets native_preempt_starvation native_preempt_starvation.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/preempt_starvation.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_preempt_starvation
+        native/preempt_starvation.march)
+   (with-stdout-to native_preempt_starvation.out
+        (system "MARCH_NUM_SCHEDULERS=1 ./native_preempt_starvation")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/preempt_starvation.expected native_preempt_starvation.out)))

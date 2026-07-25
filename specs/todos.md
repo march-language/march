@@ -15,15 +15,71 @@ says NO for all of these; `git log --oneline main..e283d9b9` counts 14.
 - ✅ **RESTORED 2026-07-24: `e283d9b9` — "perceus: un-starve FBIP reuse (sink
   past RC ops)".** This one was found the expensive way, via a 7.5x benchmark
   regression. See the dedicated entry below.
-- [ ] **The other 13 are UNAUDITED.** Known Perceus/RC commits in the missing
-  set, any of which may be a live correctness bug on `main` right now:
-  `f2b67001` (niche-erased Option FBIP reuse → RC underflow), `d2d0a3a3`
-  (resolve tuple-field types for RC decisions — covariance/stats_basic),
-  `f2729935` (resolve branch-var field types for RC decisions — sort-RC float
-  half), `6f047e02` (dup borrowed field reached through a record intermediate),
-  `895ebfee` (DataFrame P0 — nested-fn tvar-family crash + ambiguous-ctor
-  wrong answer). Audit every one for presence-or-supersession, exactly as the
-  2026-07-18 audit did, and record the verdict per commit.
+### Audit results (2026-07-24) — the branch holds 31 non-docs commits, not 13
+
+Method: patch re-application is useless after months of drift (169/275 came
+back "ambiguous"), so each commit was scored by **content presence** — what
+fraction of its substantive added code lines exist anywhere in `lib/ bin/
+runtime/ stdlib/ forge/ lsp/ js/` today. Calibrated against three known
+outcomes: `e283d9b9` (restored this session) → 100%, `c30161d7` and
+`4b4c70b3` (restored by the 2026-07-18 audit) → 100% / 90%. Script kept at
+`scratchpad/content_audit.sh`.
+
+**A low score means "this implementation is absent", NOT "the bug is live"** —
+several were superseded by a different fix that IS in `main` (e.g. `5a648f9c`
+to_string-via-Show scores 0% but was superseded by `6d2eed85`, and to_string
+on containers verifiably works). Every claim below is a *behavioural* probe,
+not a line count.
+
+**CONFIRMED LIVE BREAKAGE ON `main` (2026-07-24):**
+
+- [ ] **`4a1c2ee3` — compiled `String.from_codepoint` does not LINK.**
+  `Undefined symbols: "_string_from_codepoint", referenced from
+  _String.from_codepoint`. Interpreted it works and prints `Some(A)` /
+  `Some(☃)`. Any compiled program touching the codepoint codec fails to
+  build. This is precisely what the lost commit's subject line says it
+  unblocked.
+- [ ] **`61ce42b0` — two bench programs crash compiled (exit 138/SIGBUS).**
+  `bench/iolist_template.march` and `bench/string_pipeline.march` both die
+  with no output. The lost commit is titled "make IOList flatten stack-safe;
+  kill two bench stack overflows" — the same two.
+- [ ] **`bench/deque_ops.march` does not terminate compiled** (killed at 180s,
+  produces nothing). Not yet mapped to a specific lost commit.
+
+**Probed and NOT reproducing** (superseded, or the probe doesn't hit it):
+`d2d0a3a3` (`examples/stats_basic.march` interp==compiled parity ok),
+`895ebfee` (`bench/dataframe_bench.march` runs clean), `5a648f9c`
+(to_string-on-container works, superseded by `6d2eed85`), `c30161d7`,
+`4b4c70b3`, `b7140673`, `778d399c`, `a7f96dad` (all score PRESENT).
+
+- [ ] **Still unprobed, ranked by risk** — each needs a behavioural test
+  before any verdict: `f2b67001` (niche-erased Option FBIP reuse → RC
+  underflow), `f2729935` / `6f047e02` (Perceus RC field-type resolution),
+  `6dd1968c` (B18 TCO release-timing), `4a58e992` (Task.race/any/cancel —
+  possibly superseded by the 2026-07-18 cancel-token work), `03498340`
+  (node_discovery stack overflow; the torn-stdout half is superseded by
+  `e73644aa`), `c430e330` (reject overlapping impls), `b267a436` (derived
+  structural Show), `b84ae429` (monomorphism restriction), `fcfd78ba` +
+  `3c8826a0` + `4ab998ea` (the three-stage uniform apply-fn ABI flip — these
+  are a *sequence*; restoring one without the others is likely worse than
+  restoring none), `d5562dfc`, `1a547481`, `21f4fbb2`, `8f624a50`,
+  `7868160e`, `65eefa53`.
+
+### Why the safety nets missed all of this
+
+- [ ] **The differential oracle cannot see these crashes.**
+  `bench/iolist_template.march` is `SKIPPED`; `string_pipeline` and
+  `deque_ops` are `INTERP_TIMEOUT`. The sweep only compares programs where
+  the tree-walking interpreter produced ground truth inside its 10s budget,
+  so for every compute-heavy benchmark — exactly the ones most likely to
+  exercise RC, FBIP and TCO — a compiled SIGBUS, hang, or wrong answer is
+  invisible. The sweep reported **0 divergences** on the same day three bench
+  programs were broken compiled. Give these an expected-stdout anchor and
+  compare the compiled run against it directly, with no interpreter leg.
+- [ ] **Nothing runs the benchmarks.** `bench/*.march` is not in `dune
+  runtest`; the FBIP regression, both SIGBUS crashes and the `deque_ops` hang
+  would all have been caught by a cheap "every bench program compiles, runs,
+  exits 0, and prints its known answer" gate. That gate does not exist.
 - [ ] **Process gap, not just a backlog.** Two separate audits of this branch
   have now each declared completion while leaving real fixes behind. Before
   the next one, decide on a mechanical check (e.g. a CI job asserting no
@@ -60,17 +116,96 @@ Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
 class, with OCaml/Rust as controls (both within noise of their 2026-03-24
 figures, so the host is not the variable). See `bench/RESULTS.md`.
 
-- [ ] **`fib(40)`: 287.7 ms → 639.6 ms (~2.2x slower).** Level with Rust in
-  March, now ~2.2x behind. **This benchmark allocates nothing**, so it is
-  unaffected by the FBIP fix above and the cause is entirely unidentified.
-  Suspects to rule out in order: per-call scheduler/reduction-counter
-  overhead (compiled `main` is a green thread and `march_sched_tick` is on
-  some call paths), TCO/known-call regressions, lazy-stack-growth guard-page
-  faults, and `--opt 2` flag plumbing through the CAS cache.
-- [ ] **`tree-transform` residual: 513.3 ms (2026-03-24) vs 852.2 ms after the
-  FBIP fix (~1.7x).** FBIP is confirmed firing again (`reuse` nodes present in
-  `--dump-tir`, snapshot regenerated), so this residual is something else and
-  plausibly shares a cause with `fib` — both are recursion-heavy.
+### ROOT-CAUSED AND FIXED 2026-07-24 — the per-call check was a TLS resolver call
+
+**`66371f3b` (2026-03-25) "feat(sched): Phase 4 — reduction counting in
+compiled code" landed the day AFTER the 2026-03-24 benchmark table was
+recorded.** Every compiled function entry now emits a load / decrement /
+store against the `@march_tls_reductions` global plus a conditional branch to
+`@march_yield_from_compiled` (`Llvm_ctx.emit_reduction_check`, gated only on
+`ctx.repl`). So the published table is a pre-preemption baseline and every
+number since carries this cost. **This is the price of a deliberate feature,
+not a regression to hunt** — but it was never re-baselined, so it has been
+sitting in the table as an unexplained 2.2x.
+
+A/B measured by gating the emission behind a temporary env var, **with
+`.march/cas/artifacts` cleared between every build** (see the warning below):
+
+| benchmark | TLS check (before) | plain-flag check (now) | no check at all | 2026-03-24 |
+|---|---|---|---|---|
+| `fib(40)` | 640 ms | **465 ms** | 360 ms | 288 ms |
+| `tree_transform` | 852 ms | **579 ms** | 540 ms | 513 ms |
+| `list_ops` | 67 ms | **64 ms** | 80 ms* | 68 ms |
+| `binary_trees` | 177 ms | **165 ms** | 150 ms | 265 ms |
+
+\* the allocation-bound benchmarks are within noise of each other; the check
+cost falls almost entirely on call-dense code.
+
+Removing it lands `fib` and `tree_transform` essentially back on their
+historical figures, which closes both open items. Allocation-bound
+benchmarks are unaffected — the cost is per *call*, so it falls entirely on
+call-dense recursive code.
+
+Ruled out along the way, so nobody re-walks them: the tag/untag round-trip
+through the `case` result slot (`shl`/`or`/`inttoptr` on store, conditional
+`ashr`+`select` on load — present today, a bare `inttoptr` in 2026-03; in
+isolation the tagged form is *marginally faster*), March's clang flags
+(`-fno-strict-aliasing -fwrapv -msse4.2` — no effect), and scheduler thread
+count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
+
+- ✅ **FIXED — the cost was never the check's arithmetic, it was TLS.**
+  `march_tls_reductions` is `_Thread_local`, and thread-local access is an
+  indirect resolver call on both supported platforms: Darwin/arm64 emits
+  `adrp; ldr; blr` through the TLV descriptor, Linux/arm64 PIE goes through
+  TLSDESC. Confirmed by disassembly (`blr x8` at the top of every `_fib`
+  call) and by isolating the same IR against a plain global, where the check
+  measured as free. Compiled code now reads a plain, process-wide
+  `march_preempt_request` flag set by the preemption handler once per
+  quantum. Measured: `fib(40)` 640→465 ms, `tree-transform` 852→579 ms,
+  `binary-trees` 177→165 ms, `list-ops` 67→64 ms.
+  - **The load must be `volatile`.** A plain load of a global that nothing in
+    the loop writes is loop-invariant, so LLVM hoists it straight out of a
+    TCO loop body and the loop never re-reads it — preemption silently stops
+    for exactly the tail-recursive loops that need it most. The old
+    load/decrement/**store** sequence could not be hoisted, which is why this
+    hazard never existed before.
+  - **Also fixed a pre-existing hole this exposed:** `march_sched_run`'s
+    single-scheduler fast path returned without ever calling
+    `march_sched_preempt_start()`, so `MARCH_NUM_SCHEDULERS=1` had no timer
+    preemption whatsoever and depended entirely on the reduction counter.
+  - **Pinned by `test/native/preempt_starvation.march`** (new): a CPU-bound
+    TCO loop and a short task on ONE scheduler thread, asserting the short
+    one prints first. `MARCH_NUM_SCHEDULERS=1` is essential — with the
+    default 4 threads the sibling runs on another OS thread and prints first
+    even with preemption completely broken, so the obvious version of this
+    test would have passed against both bugs.
+- ✅ **PARTIALLY RECOVERED (2026-07-24, same day): the residual was the
+  missing `nsw` on the scalar tag.** `emit_tag_scalar`'s `(v<<1)|1` used a
+  plain `shl`, leaving a sign-truncating `sbfx` per scalar round trip AND
+  blocking LLVM's accumulator TRE. With `shl nsw` (sound: it asserts the
+  63-bit round-trip losslessness the convention already assumes; an
+  out-of-range Int was already corrupted, it is now poison instead — see the
+  comment in `lib/tir/llvm_ctx.ml`), `fib` compiles to an accumulator loop
+  with one recursive call, volatile preemption check verified INSIDE the
+  loop (disassembly + starvation test): 465 -> ~390 ms. Oracle 100 MATCH /
+  0 divergences.
+- [ ] **Remaining `fib` gap vs 2026-03-24 (~390 vs 288 ms): the per-iteration
+  volatile check plus call frame.** ~100 ms over ~165M loop iterations
+  (post-TRE) ≈ 2 cycles/iteration — the price of staying preemptible. Any
+  further recovery means checking less often (e.g. unrolling the TRE loop or
+  a check-every-N scheme), which re-opens the counter-cost question; not
+  obviously worth it.
+- [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
+  so the table stops implying a regression that is actually a feature cost.
+
+> ⚠️ **Benchmark A/B methodology — the CAS artifact cache will lie to you.**
+> The first run of this experiment concluded "the reduction check costs
+> nothing", because compiled artifacts are content-hash cached in
+> `<project>/.march/cas/artifacts/` and the key covers compiler flags but
+> **not environment variables**. Both arms of the A/B were served the same
+> cached binary. Always `rm -rf .march/cas/artifacts` between arms and
+> confirm the two outputs have *different* hashes before believing a null
+> result. (Same class as the existing `cas_flags` note for CLI flags.)
 - **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
   `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
 
