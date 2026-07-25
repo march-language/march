@@ -73,6 +73,26 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
                           None)))
         in
         match checked with
+        | Some Solver.Unknown ->
+            (* Do NOT cache `unknown`.  It is the absence of an answer rather
+               than an answer about fixed SMT text, and persisting it is
+               actively harmful in two ways:
+
+               - It is nondeterministic.  The solver runs under a wall-clock
+                 timeout (Solver.create sets :timeout), so a loaded machine can
+                 turn a decidable VC into `unknown` — and caching freezes that
+                 accident into the project's cache for every later build.
+               - Since the resync fix, a MALFORMED VC also yields `unknown`.
+                 Caching that makes a compiler bug's "silently unchecked"
+                 verdict outlive the fix to the compiler bug — which is exactly
+                 how a warm cache masked two refinement regression tests.
+
+               Not caching costs only re-asking the VCs nobody could decide,
+               which are precisely the ones where re-asking might now succeed:
+               a quieter machine, a newer z3, or a fixed encoding.  Genuine
+               verdicts (unsat / sat-with-model) are facts about fixed text and
+               are still cached, so the hot path is unaffected. *)
+            Solver.Unknown
         | Some r ->
             Vc_cache.store ~root key r;
             r

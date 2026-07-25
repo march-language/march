@@ -175,6 +175,48 @@ let cache_suite =
         Alcotest.(check bool) "hit unsat" true
           (Vc_cache.lookup ~root key = Some Solver.Unsat));
 
+    (* `unknown` is the ABSENCE of an answer, not an answer, and persisting it
+       is what let a warm cache mask refinement regression tests: a malformed
+       VC yields Unknown (see the solver-resync suite), and caching that froze
+       the resulting SKIP into the project's cache, where it silently outlived
+       the compiler bug that caused it.  It is also nondeterministic — the
+       solver runs under a wall-clock timeout, so machine load can decide it. *)
+    with_solver "an unknown verdict is NOT cached" (fun _s ->
+        let unk_root =
+          Filename.concat (Filename.get_temp_dir_name ())
+            (Printf.sprintf "march_refine_unk_%d" (Unix.getpid ()))
+        in
+        let bad = "(declare-const bogus NoSuchSort)" in
+        (match Refine.discharge ~root:unk_root ~preamble:bad vc with
+         | Refine.Unverified -> ()
+         | _ -> Alcotest.fail "expected Unverified from a malformed VC");
+        Refine.shutdown ();
+        Alcotest.(check bool) "no cache entry" true
+          (Vc_cache.lookup ~root:unk_root (Vc_cache.key_of_vc ~preamble:bad vc)
+           = None));
+
+    (* The converse: real verdicts must still be cached, or we trade a
+       correctness bug for a performance regression. *)
+    with_solver "a real verdict IS still cached" (fun _s ->
+        let ok_root =
+          Filename.concat (Filename.get_temp_dir_name ())
+            (Printf.sprintf "march_refine_ok_%d" (Unix.getpid ()))
+        in
+        ignore (Refine.discharge ~root:ok_root vc);
+        Refine.shutdown ();
+        Alcotest.(check bool) "cache entry present" true
+          (Vc_cache.lookup ~root:ok_root (Vc_cache.key_of_vc vc) <> None));
+
+    (* Caches written before the no-cache-unknown change still hold `unknown`
+       entries; serving one keeps a VC silently unchecked forever.  A stored
+       unknown must read back as a MISS. *)
+    Alcotest.test_case "a legacy stored unknown reads back as a miss" `Quick
+      (fun () ->
+        let key = Vc_cache.key_of_vc { vc with Smt.assumptions = [ Smt.BoolLit true ] } in
+        Vc_cache.store ~root key Solver.Unknown;
+        Alcotest.(check bool) "reads as miss" true
+          (Vc_cache.lookup ~root key = None));
+
     Alcotest.test_case "round-trips a sat model" `Quick (fun () ->
         let key = "ff" ^ String.make 62 'a' in
         let r = Solver.Sat [ ("d", "0"); ("i", "10") ] in
