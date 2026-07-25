@@ -676,6 +676,210 @@ let guard_suite =
                 \    end\n\
                 \  end"))) ]
 
+(* ── Tier 0: postcondition propagation ─────────────────────────────────────
+   A callee's declared return refinement becomes a fact at its call sites. *)
+let t0 body =
+  Printf.sprintf
+    "mod M do\n\
+    \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+    \  fn nonneg() : {Int | _ >= 0} do 1 end\n\
+    \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+     %s\n\
+     end\n"
+    body
+
+let tier0_suite =
+  [ gated "recording a return refinement changes nothing on a compatible call" (fun () ->
+        (* Task 1 records the signature but does not yet consume it.  Both of
+           these must stay silent, before AND after the change. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do let c = nonneg()\n    takepos(c) end")));
+
+    gated "a non-refined function is still resolvable (no regression)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn plain() : Int do 7 end\n  fn f() : Int do takepos(plain()) end")));
+
+    gated "let-bound postcondition `_ < 0` contradicts `_ >= 0`" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (t0 "  fn f() : Int do let c = neg()\n    takepos(c) end")));
+
+    gated "let-bound compatible postcondition passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do let c = nonneg()\n    takepos(c) end")));
+
+    gated "explicit annotation still wins over the inferred postcondition" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (t0 "  fn f() : Int do let c : {Int | _ < 0} = neg()\n    takepos(c) end")));
+
+    gated "inline call arg `takepos(neg())` is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (t0 "  fn f() : Int do takepos(neg()) end")));
+
+    gated "inline call arg with compatible postcondition passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (t0 "  fn f() : Int do takepos(nonneg()) end")));
+
+    gated "inline call to a non-refined function is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (t0 "  fn plain() : Int do 0 - 9 end\n  fn f() : Int do takepos(plain()) end")));
+
+    gated "inline call arg binder used twice must reflect to one constant" (fun () ->
+        (* `four`'s predicate `n > 3 && n < 5` forces n == 4, contradicting
+           `notfour`'s postcondition `_ != 4`.  If the two occurrences of `n`
+           reflect the inline argument `notfour()` to two DIFFERENT fresh
+           SMT constants, the contradiction is lost and this wrongly passes
+           (see the let-bound control just below, which must still fail). *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn notfour() : {Int | _ != 4} do 5 end\n\
+                \  fn four(n : {Int | n > 3 && n < 5}) : Int do n end\n\
+                \  fn f() : Int do four(notfour()) end")));
+
+    gated "let-bound control for the binder-reuse case still fails" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn notfour() : {Int | _ != 4} do 5 end\n\
+                \  fn four(n : {Int | n > 3 && n < 5}) : Int do n end\n\
+                \  fn f() : Int do\n\
+                \    let c = notfour()\n\
+                \    four(c)\n\
+                \  end")));
+
+    gated "postcondition resolves through a qualified cross-module call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             "mod Root do\n\
+              mod Lib do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+              end\n\
+              mod App do\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do let c = Lib.neg()\n    takepos(c) end\n\
+              end\n\
+              end\n"));
+
+    gated "relational postcondition is NOT propagated (Tier 1 boundary)" (fun () ->
+        (* `_ < n` mentions the parameter `n`, so pred_is_closed rejects it and
+           the call site learns nothing.  Silence here is correct, not a bug. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (t0 "  fn below(n : Int) : {Int | _ < n} do n - 1 end\n\
+                 \  fn f() : Int do let c = below(0)\n    takepos(c) end")));
+
+    gated "postcondition reaches a call inside an if-branch" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (t0 "  fn f(k : Int) : Int do\n\
+                 \    let c = neg()\n\
+                 \    if k > 0 do takepos(c) else 0 end\n\
+                 \  end")));
+
+    gated "shadowed local definition wins over an enclosing refined one" (fun () ->
+        (* App.neg has no refinement and must shadow Lib.neg, so nothing is
+           learned and the call is skipped. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             "mod Root do\n\
+              mod Lib do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+              end\n\
+              mod App do\n\
+             \  fn neg() : Int do 5 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do let c = neg()\n    takepos(c) end\n\
+              end\n\
+              end\n"));
+
+    gated "an UNVERIFIED postcondition does not propagate (no false positive)" (fun () ->
+        (* `score`'s declared `_ < 0` is stale: `helper(x)` is opaque, so the
+           definition side can neither prove nor refute it.  An unproven
+           postcondition stays legal at the definition and must NOT travel to
+           call sites — believing it here would flag the CORRECT call
+           `takepos(score(5))` (score(5) = 6, which satisfies `_ >= 0`). *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod Stale do\n\
+             \  fn helper(x : Int) : Int do x + 1 end\n\
+             \  fn score(x : Int) : {Int | _ < 0} do helper(x) end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn main() : Int do takepos(score(5)) end\n\
+              end\n"));
+
+    gated "a VERIFIED postcondition still propagates (headline feature)" (fun () ->
+        (* `0 - 1` is reflectable and verifies against `_ < 0`, so the fact is
+           true and may be assumed at the call site. *)
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod Ok do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do takepos(neg()) end\n\
+              end\n"));
+
+    gated "a lambda parameter shadows a refined outer local" (fun () ->
+        (* The inner `c` is the lambda's own unrefined parameter; the outer
+           refined `c` must not leak into its body. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod Shadow do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do\n\
+             \    let c = neg()\n\
+             \    let g = fn c -> takepos(c)\n\
+             \    g(5)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a match pattern binder shadows a refined outer local" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod ShadowMatch do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f(o : Option(Int)) : Int do\n\
+             \    let c = neg()\n\
+             \    match o do\n\
+             \      Some(c) -> takepos(c)\n\
+             \      None -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "an unrefined let shadows a refined outer local" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod ShadowLet do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Int do\n\
+             \    let c = neg()\n\
+             \    let c = 5\n\
+             \    takepos(c)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a let? binder shadows a refined outer local" (fun () ->
+        (* `let? c = ok5()` rebinds `c` to the Ok payload (5) before the
+           continuation runs; the outer refined `c` (from `neg()`) must not
+           leak into `takepos(c)`. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod LetQ do\n\
+             \  fn neg() : {Int | _ < 0} do 0 - 1 end\n\
+             \  fn ok5() : Result(Int, String) do Ok(5) end\n\
+             \  fn takepos(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn f() : Result(Int, String) do\n\
+             \    let c = neg()\n\
+             \    let? c = ok5()\n\
+             \    Ok(takepos(c))\n\
+             \  end\n\
+              end\n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -692,5 +896,6 @@ let () =
       ("flag-gating", flag_suite);
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
-      ("guard-path-sensitivity", guard_suite) ]
+      ("guard-path-sensitivity", guard_suite);
+      ("tier0-postcond", tier0_suite) ]
 
