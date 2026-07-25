@@ -1490,6 +1490,75 @@ let adt_suite =
              \  end\n\
               end\n")) ]
 
+(* ── Tier 1: relational postconditions ──────────────────────────────────────
+   Direct unit tests for the predicate classifier.  These need no solver, so
+   they are NOT gated: they exercise pure AST analysis. *)
+
+module RC = March_refinecheck.Refine_check
+
+(* Parse `fn g(<params>) : {Int | <pred>} do 0 end` and hand back the
+   refinement's (binder, predicate) so the classifier can be probed directly. *)
+let ret_refinement_of (fn_src : string) : string * March_ast.Ast.expr =
+  let m = parse (Printf.sprintf "mod M do\n  %s\nend\n" fn_src) in
+  let rec find (ds : March_ast.Ast.decl list) =
+    match ds with
+    | March_ast.Ast.DFn (fd, _) :: _ -> (
+      match fd.March_ast.Ast.fn_ret_ty with
+      | Some (March_ast.Ast.TyRefine (_, binder, pred)) ->
+        ((match binder with Some b -> b.March_ast.Ast.txt | None -> "_"), pred)
+      | _ -> Alcotest.fail "function has no return refinement")
+    | _ :: rest -> find rest
+    | [] -> Alcotest.fail "no function declaration found"
+  in
+  find m.March_ast.Ast.mod_decls
+
+let classify fn_src params =
+  let binder, pred = ret_refinement_of fn_src in
+  RC.classify_pred binder params pred
+
+let scope_str = function
+  | RC.Closed -> "Closed"
+  | RC.Relational ps -> "Relational[" ^ String.concat ";" (List.sort compare ps) ^ "]"
+  | RC.Unusable -> "Unusable"
+
+let check_scope name expected actual =
+  Alcotest.(check string) name expected (scope_str actual)
+
+let classifier_suite =
+  [ Alcotest.test_case "a closed predicate mentions no parameter" `Quick (fun () ->
+        check_scope "closed" "Closed"
+          (classify "fn g(n : Int) : {Int | _ >= 0} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "a predicate mentioning one parameter is relational" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[n]"
+          (classify "fn g(n : Int) : {Int | _ < n} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "a predicate mentioning two parameters lists both" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[m;n]"
+          (classify "fn g(n : Int, m : Int) : {Int | _ < n + m} do 0 end" [ "n"; "m" ]));
+
+    Alcotest.test_case "a measure applied to a parameter is relational in that parameter"
+      `Quick (fun () ->
+        (* `len` is the application HEAD — a function name, not a value — so it
+           must not itself register as a free name. *)
+        check_scope "relational" "Relational[xs]"
+          (classify "fn g(xs : List(Int)) : {Int | _ < len(xs)} do 0 end" [ "xs" ]));
+
+    Alcotest.test_case "a predicate mentioning an unknown name is unusable" `Quick
+      (fun () ->
+        check_scope "unusable" "Unusable"
+          (classify "fn g(n : Int) : {Int | _ < q} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "unrecognised syntax is unusable" `Quick (fun () ->
+        (* A field projection is syntax [classify_pred] does not traverse, so it
+           falls through to the conservative catch-all rather than being read as
+           a bare mention of `r`. *)
+        check_scope "unusable" "Unusable"
+          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -1510,5 +1579,6 @@ let () =
       ("tier0-postcond", tier0_suite);
       ("string-refinements", string_suite);
       ("predicate-vocab", vocab_suite);
-      ("adt-tags", adt_suite) ]
+      ("adt-tags", adt_suite);
+      ("pred-classifier", classifier_suite) ]
 

@@ -142,22 +142,31 @@ let return_refine (fd : A.fn_def) : (string * A.expr) option =
     Some (binder_name binder, pred)
   | _ -> None
 
-(* True iff [pred]'s only free variable is the refinement binder — i.e. the
-   predicate constrains the refined value alone and mentions no parameter.
+(* How a return refinement's predicate relates to the callee's parameters.
 
-   `{Int | _ >= 0}`      -> closed
-   `{Int | _ == n + 1}`  -> NOT closed (mentions the parameter `n`)
-   `{Int | _ < len(xs)}` -> NOT closed (mentions `xs`)
+   [Closed]      — mentions only the refinement binder; usable as-is (Tier 0).
+                   `{Int | _ >= 0}`
+   [Relational]  — mentions the binder plus exactly these parameters; usable at
+                   a call site only after substituting the call's actuals for
+                   them (Tier 1).
+                   `{Int | _ == n + 1}`, `{Int | _ < len(xs)}`
+   [Unusable]    — mentions a name that is neither the binder nor a parameter,
+                   or contains syntax the checker cannot reason about; never
+                   propagated.
 
-   A non-closed (relational) postcondition can only be used at a call site by
-   substituting actuals for formals — deliberately out of scope (Tier 1).
-   Unrecognised syntax is conservatively treated as NOT closed, so an
-   unfamiliar predicate is skipped rather than trusted. *)
-let pred_is_closed (binder : string) (pred : A.expr) : bool =
-  let ok = ref true in
+   The `_ -> Unusable` fallback is what keeps unfamiliar syntax out: an
+   unrecognised predicate is skipped rather than trusted. *)
+type pred_scope = Closed | Relational of string list | Unusable
+
+let classify_pred (binder : string) (params : string list) (pred : A.expr) : pred_scope =
+  let used = ref [] and bad = ref false in
   let rec go (e : A.expr) =
     match e with
-    | A.EVar { A.txt; _ } -> if txt <> binder && txt <> "_" then ok := false
+    | A.EVar { A.txt; _ } ->
+      if txt = binder || txt = "_" then ()
+      else if List.mem txt params then
+        (if not (List.mem txt !used) then used := txt :: !used)
+      else bad := true
     (* The head of an application is a function/operator name, not a value
        reference: only its arguments can carry free variables. *)
     | A.EApp (A.EVar _, args, _) -> List.iter go args
@@ -165,10 +174,35 @@ let pred_is_closed (binder : string) (pred : A.expr) : bool =
     | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
     | A.EAnnot (e, _, _) -> go e
     | A.ELit _ -> ()
-    | _ -> ok := false
+    | _ -> bad := true
   in
   go pred;
-  !ok
+  if !bad then Unusable
+  else if !used = [] then Closed
+  else Relational (List.rev !used)
+
+(* Simultaneous substitution of formals by actual expressions.  Simultaneous,
+   not sequential: with `f(m, 1)` against `{Int | _ < n + m}`, rewriting n := m
+   and then m := 1 would rewrite the freshly-introduced `m` and yield
+   `_ < 1 + 1` — a fact about the caller that was never proven.  One traversal
+   consulting the original map avoids that.
+
+   The arms mirror what [classify_pred] admits; anything it rejects as
+   [Unusable] never reaches here, so the `_ -> e` fallback is unreachable in
+   practice and inert if reached.  An application's HEAD is deliberately left
+   alone: it names a function, operator or measure, not a value, so a parameter
+   that happens to share a measure's name must not rewrite the call itself. *)
+let rec subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
+  let go = subst_params env in
+  match e with
+  | A.EVar { A.txt; _ } -> (match List.assoc_opt txt env with Some a -> a | None -> e)
+  | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map go args, sp)
+  | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
+  | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
+  | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
+  | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+  | A.EAnnot (inner, t, sp) -> A.EAnnot (go inner, t, sp)
+  | _ -> e
 
 (* A function's signature: parameter names by position, its refined params, and
    its declared return refinement (binder + predicate) when the return type is
@@ -1361,7 +1395,10 @@ let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname :
   match resolve_call ctx defs fname with
   | Some (Some sg) ->
     (match sg.ret with
-     | Some (b, p) when pred_is_closed b p -> Some (b, p)
+     | Some (b, p) ->
+       (match classify_pred b sg.param_names p with
+        | Closed -> Some (b, p)
+        | Relational _ | Unusable -> None)
      | _ -> None)
   | _ -> None
 
