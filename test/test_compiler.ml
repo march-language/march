@@ -8530,10 +8530,106 @@ let test_as_over_or_pattern_arm_not_flagged_redundant () =
   Alcotest.(check bool) "arm after `(1 | 2) as k` is reachable" false
     has_redundant
 
+(* ── Record patterns participate in coverage analysis ──────────────────────
+   [spat] had no record shape, so [norm_pat] collapsed every PatRecord to
+   SPWild. That made a record arm look like it matched everything, which cost
+   coverage in both directions: a match that covers only ONE value of a field
+   was reported exhaustive (and panicked at runtime), and — because SPWild
+   subsumes what follows — the NEXT arm was reported unreachable. The second
+   half was papered over by excluding record arms from redundancy analysis
+   entirely; these tests pin the real behaviour so that carve-out can go. *)
+
+(* The headline bug: this match handles exactly one `code` and panics on
+   every other, yet typechecked clean. *)
+let test_record_pattern_non_exhaustive_is_reported () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404 } -> "gone"
+      end
+    end
+  end|} in
+  let warns_missing =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && contains "Non-exhaustive" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "single-literal record match reported non-exhaustive"
+    true warns_missing
+
+(* A record match that DOES cover its scrutinee must stay silent — the fix
+   must not trade a false negative for a false positive. *)
+let test_record_pattern_exhaustive_is_silent () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: 404 } -> "gone"
+        { code: _ }   -> "other"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "covered record match: no diagnostics" false
+    (has_errors ctx
+     || List.exists (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Warning)
+          ctx.March_errors.Errors.diagnostics)
+
+(* With a real record shape, a genuinely unreachable record arm should be
+   caught — the carve-out could never do this. *)
+let test_record_pattern_genuinely_redundant_is_reported () =
+  let ctx = typecheck {|mod T do
+    type P = { code : Int, msg : String }
+    fn f(p : P) : String do
+      match p do
+        { code: _ }   -> "any"
+        { code: 404 } -> "gone"
+      end
+    end
+  end|} in
+  let has_redundant =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.code = Some "redundant_arm")
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "record arm after a catch-all record arm is flagged"
+    true has_redundant
+
+(* Nested records must work too: the field's own sub-pattern is what
+   discriminates, so coverage has to recurse through it. *)
+let test_nested_record_pattern_non_exhaustive_is_reported () =
+  let ctx = typecheck {|mod T do
+    type Inner = { flag : Bool }
+    type Outer = { inner : Inner }
+    fn f(o : Outer) : Int do
+      match o do
+        { inner: { flag: true } } -> 1
+      end
+    end
+  end|} in
+  let warns_missing =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Warning
+        && contains "Non-exhaustive" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "nested record match reported non-exhaustive" true
+    warns_missing
+
 let compiler_suites =
   [
       ( "match_diagnostics",
         [
+          Alcotest.test_case "record match non-exhaustive is reported" `Quick
+            test_record_pattern_non_exhaustive_is_reported;
+          Alcotest.test_case "covered record match is silent" `Quick
+            test_record_pattern_exhaustive_is_silent;
+          Alcotest.test_case "genuinely redundant record arm is reported" `Quick
+            test_record_pattern_genuinely_redundant_is_reported;
+          Alcotest.test_case "nested record match non-exhaustive is reported" `Quick
+            test_nested_record_pattern_non_exhaustive_is_reported;
           Alcotest.test_case "redundant arm warned in checking position" `Quick
             test_redundant_arm_in_checking_position;
           Alcotest.test_case "redundant arm warned in inference position" `Quick

@@ -204,21 +204,33 @@ fn get_w2(r : { w : Int, h : Int }) : Int do
 end
 ```
 
-**Record arms get no coverage analysis.** Both the exhaustiveness checker
-and the redundancy checker treat *any* arm containing a record pattern as a
-wildcard, because their internal pattern representation has no record shape.
-Two consequences, both deliberate:
+**Record arms take part in coverage analysis.** `spat` (the exhaustiveness
+checker's internal pattern shape, `typecheck.ml`) carries `SPRec`, an
+assoc-list of field name to sub-shape sorted by name. A record is
+single-shape, so `find_missing_mc` and `is_useful` handle it exactly as they
+handle a tuple — specialize into one column per field, recurse — with one
+difference: the field list is taken from the scrutinee's **type**, not from
+any one pattern, since patterns may name open subsets. `spec_rec_mc` fills a
+field an arm didn't mention with `SPWild`, which is what lets `{ code: 404 }`
+and `{ msg: m }` occupy the same matrix column.
 
-- A match whose only arm is `{ code: 404 } -> …` typechecks clean and panics
-  at runtime on any other `code`. Refutable record patterns need a `_` arm
-  (or a total field pattern) that you add yourself; the compiler will not
-  remind you.
-- The arm following a record arm is never reported unreachable, even when it
-  genuinely is. A false *"this pattern can never be reached"* on correct code
-  costs more than the missed true positive, so the checker stays silent.
+```march
+match p do
+  { code: 404 } -> "gone"
+end
+-- warning: Non-exhaustive pattern match — missing case: { code: _, msg: _ }
+```
 
-This applies to a record pattern nested anywhere in the arm — inside a
-constructor payload, a tuple, an alias, or an or-pattern alternative.
+Redundancy works the same way, so a record arm already covered by an earlier
+one is reported unreachable.
+
+Historical note: until 2026-07-25 `spat` had no record shape and `norm_pat`
+collapsed every `PatRecord` to `SPWild`. That over-claimed coverage (a
+single-literal record match typechecked clean and panicked at runtime) and,
+in the redundancy direction, made the arm *after* a record arm look
+unreachable — which was worked around by excluding record arms from
+redundancy analysis entirely. `SPRec` removed the cause, and that carve-out
+is gone.
 
 ### Atom Patterns
 

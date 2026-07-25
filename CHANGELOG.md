@@ -24,12 +24,16 @@ git log is authoritative for exact commits.
   existed in the AST and interpreter since the beginning but had no grammar
   production, and neither TIR lowering path handled it.
 
+- Record patterns now take part in exhaustiveness and redundancy analysis.
+  A match that handles only some values of a field — `match p do { code: 404 }
+  -> ... end` — is reported non-exhaustive instead of typechecking clean and
+  panicking at runtime, and a record arm already covered by an earlier one is
+  reported unreachable. Previously the checker's internal pattern shape had no
+  record case, so any arm containing a record pattern read as a wildcard.
+
 - Record patterns may mention a subset of a record's fields: `{ code: 404 }`
   matches any record with a `code` field equal to 404, whatever else it has.
-  Naming a field the record does not have is a compile error. Note that an arm
-  containing a record pattern is excluded from both exhaustiveness and
-  redundancy analysis — a match whose only arm is `{ code: 404 } -> ...`
-  typechecks clean and panics at runtime on any other `code`.
+  Naming a field the record does not have is a compile error.
 
 - Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
   alternatives. The ALTERNATIVES may not bind variables — every alternative
