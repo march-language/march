@@ -1335,6 +1335,16 @@ int march_sched_try_recv2(void **out) {
 void march_sched_wake(march_proc *target) {
     if (!target) return;
 
+    /* Deposit a wake permit BEFORE looking at `status`, so a target that is
+     * still PROC_RUNNING (it has passed its own last condition-recheck but
+     * has not reached its PROC_PARKED store yet) consumes the permit in
+     * march_sched_park_self instead of parking.  seq_cst on this store and
+     * the status load below, pairing with park_self's seq_cst exchange and
+     * PROC_PARKED store: a Dekker-style store-then-load on two locations,
+     * exactly like the task_wait_done pair — release/acquire is not enough
+     * (see the store-buffering comment there). */
+    atomic_store_explicit(&target->wake_pending, 1, memory_order_seq_cst);
+
     /* If the process is PROC_PARKED, its context has not yet been saved by
      * swapcontext.  We must wait until the scheduler transitions it to
      * PROC_WAITING before we can push it to a deque; otherwise two
@@ -1353,9 +1363,9 @@ void march_sched_wake(march_proc *target) {
     march_proc_status cur;
     int64_t spins = 0;
     do {
-        cur = atomic_load_explicit(&target->status, memory_order_acquire);
+        cur = atomic_load_explicit(&target->status, memory_order_seq_cst);
         if (cur == PROC_DEAD || cur == PROC_RUNNABLE || cur == PROC_RUNNING)
-            return; /* Not WAITING — no need to wake. */
+            return; /* Not WAITING — the permit above covers the RUNNING case. */
         /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
         if (cur == PROC_PARKED) {
             if (spins < SCHED_WAKE_SPIN_GRACE) {
@@ -1375,6 +1385,17 @@ void march_sched_wake(march_proc *target) {
             &target->status, &expected, PROC_RUNNABLE,
             memory_order_acq_rel, memory_order_acquire))
         return; /* Not WAITING (already woken by another sender). */
+
+    /* We won the race and are about to enqueue the target, so the permit
+     * deposited above has been redeemed — clear it, otherwise it would linger
+     * and spuriously cancel the target's NEXT park.  A permit deposited by
+     * another waker between the CAS and this clear can be erased, but that
+     * waker's own CAS necessarily failed (status is already RUNNABLE) and the
+     * target is being enqueued regardless: it will run and re-evaluate its
+     * wait condition, which is all that waker wanted.  Skipping a park is
+     * always safe (every park site loops and rechecks); missing a wake is
+     * not. */
+    atomic_store_explicit(&target->wake_pending, 0, memory_order_relaxed);
 
     /* Enqueue to the GLOBAL run queue, never a deque.  Wake may execute on
      * any thread (another scheduler, or a non-scheduler thread such as a
@@ -1397,11 +1418,38 @@ void march_sched_park_self(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return; /* not running inside the scheduler: nothing to park */
 
+    /* Consume a wake permit instead of parking, if one was deposited while
+     * we were still RUNNING (see march_sched_wake and the wake_pending
+     * comment in march_scheduler.h).  Returning here is a "spurious wake"
+     * from the caller's point of view, which every park site tolerates by
+     * looping and re-checking its condition.  This first check is an
+     * optimization only; the one that closes the race is the second check
+     * below, after the PROC_PARKED store. */
+    if (atomic_exchange_explicit(&p->wake_pending, 0, memory_order_seq_cst))
+        return;
+
     /* PROC_PARKED: about to swapcontext but haven't yet saved our context.
      * A waker that sees PROC_PARKED must spin-wait until sched_loop
      * transitions us to PROC_WAITING (context saved) before re-enqueuing
      * us — march_sched_wake already implements exactly that handshake. */
-    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
+    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_seq_cst);
+
+    /* Re-check the permit AFTER publishing PROC_PARKED — the half that makes
+     * the handshake airtight.  A waker landing between the exchange above
+     * and the PROC_PARKED store still reads `status` as PROC_RUNNING and
+     * early-returns, but its permit deposit (seq_cst store before its
+     * seq_cst status load) and our PROC_PARKED store (seq_cst before this
+     * seq_cst exchange) interlock like any Dekker pair: either it sees our
+     * PARKED store and takes the spin-to-WAITING path, or we see its permit
+     * here and un-park.  Un-parking means restoring PROC_RUNNING, which is
+     * race-free: only sched_loop moves PARKED -> WAITING, and only after
+     * swapcontext returns control to it, which has not happened.  A waker
+     * spinning on our PROC_PARKED observes PROC_RUNNING next iteration and
+     * returns without enqueuing — correct, since we never parked. */
+    if (atomic_exchange_explicit(&p->wake_pending, 0, memory_order_seq_cst)) {
+        atomic_store_explicit(&p->status, PROC_RUNNING, memory_order_seq_cst);
+        return;
+    }
 
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
