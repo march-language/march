@@ -8410,20 +8410,10 @@ let test_record_pattern_unknown_field_rejected () =
   end|} in
   Alcotest.(check bool) "unknown field: error reported" true (has_errors ctx)
 
-(* Or-pattern alternatives may not bind variables in this pass: sharing an arm
-   body across alternatives uses lower_match's 0-arg join point, which cannot
-   pass per-alternative bindings. The rejection must be a clear diagnostic,
-   not a lowering crash. *)
-let test_or_pattern_binding_rejected () =
-  let ctx = typecheck {|mod T do
-    type E = A(Int) | B(Int)
-    fn f(e : E) : Int do
-      match e do
-        A(x) | B(x) -> x
-      end
-    end
-  end|} in
-  Alcotest.(check bool) "binding or-pattern rejected" true (has_errors ctx)
+(* Superseded by test_or_pattern_binding_{accepted,name_mismatch_rejected,
+   type_mismatch_rejected}: alternatives that agree on names and types are now
+   accepted rather than rejected wholesale.  See the "Or-pattern alternatives
+   may bind" group below. *)
 
 let test_or_pattern_nonbinding_accepted () =
   let ctx = typecheck {|mod T do
@@ -8699,10 +8689,64 @@ let test_record_field_mismatch_note_polarity () =
     "surplus field is not described as missing from the provided value" false
     (List.exists (fun n -> contains "missing in the found type" n) mentions_h)
 
+(* ── Or-pattern alternatives may bind ──────────────────────────────────────
+   Originally rejected outright: the arm body is shared across alternatives
+   via a join point, which was 0-ary and so had nowhere to put a
+   per-alternative binding. The join point became n-ary when an arm binding
+   OUTSIDE the or turned out to need the same machinery, which left only the
+   typecheck rule. Alternatives must now agree — same names, unifiable types —
+   rather than bind nothing. *)
+
+let test_or_pattern_binding_accepted () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> x + 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same name, same type across alternatives: accepted"
+    false (has_errors ctx)
+
+(* Different name sets have no consistent meaning for the shared body: `y`
+   would be unbound whenever the first alternative matched. *)
+let test_or_pattern_binding_name_mismatch_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(Int)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(y) -> x + y
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "differing binder names across alternatives: rejected"
+    true (has_errors ctx)
+
+(* Same name, incompatible types — the join-point parameter can only have one
+   type, so this must be a type error rather than a miscompile. *)
+let test_or_pattern_binding_type_mismatch_rejected () =
+  let ctx = typecheck {|mod T do
+    type E = A(Int) | B(String)
+    fn f(e : E) : Int do
+      match e do
+        A(x) | B(x) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "same binder at differing types: rejected" true
+    (has_errors ctx)
+
 let compiler_suites =
   [
       ( "match_diagnostics",
         [
+          Alcotest.test_case "or-pattern binding accepted" `Quick
+            test_or_pattern_binding_accepted;
+          Alcotest.test_case "or-pattern binder name mismatch rejected" `Quick
+            test_or_pattern_binding_name_mismatch_rejected;
+          Alcotest.test_case "or-pattern binder type mismatch rejected" `Quick
+            test_or_pattern_binding_type_mismatch_rejected;
           Alcotest.test_case "record field mismatch note polarity" `Quick
             test_record_field_mismatch_note_polarity;
           Alcotest.test_case "partial record destructure in let" `Quick
@@ -8735,8 +8779,6 @@ let compiler_suites =
             test_or_of_records_under_alias_typechecks;
           Alcotest.test_case "record pattern unknown field rejected" `Quick
             test_record_pattern_unknown_field_rejected;
-          Alcotest.test_case "or-pattern binding rejected" `Quick
-            test_or_pattern_binding_rejected;
           Alcotest.test_case "or-pattern non-binding accepted" `Quick
             test_or_pattern_nonbinding_accepted;
           Alcotest.test_case "or-pattern exhaustiveness sees through alternatives" `Quick

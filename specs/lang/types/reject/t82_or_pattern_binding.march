@@ -1,9 +1,13 @@
--- EXPECT-ERROR: Or-pattern alternatives cannot bind variables
+-- EXPECT-ERROR: Or-pattern alternatives must bind the same variables
+-- Alternatives that AGREE on names and types are accepted (see
+-- accept/t91_or_pattern_binding_agrees.march). What is rejected is
+-- alternatives that disagree: the shared arm body reaches its binders through
+-- one join point, so `y` would be unbound whenever `A` matched.
 mod M do
   type E = A(Int) | B(Int)
   fn f(e : E) : Int do
     match e do
-      A(x) | B(x) -> x
+      A(x) | B(y) -> x + y
     end
   end
   fn main() do () end

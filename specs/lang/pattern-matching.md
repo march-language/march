@@ -357,34 +357,48 @@ end
 ```
 
 Alternatives can be literals, nullary/atom constructors, or any other
-pattern shape — the only restriction is that **no alternative may bind a
-variable**:
+pattern shape, and they **may bind variables** — provided every alternative
+binds the same names at the same types:
 
 ```march
-type E = A(Int) | B(Int)
+type E = A(Int) | B(Int) | C
 
 match e do
-  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+  A(x) | B(x) -> x * 10   -- `x` comes from whichever alternative matched
+  C           -> 0
 end
 ```
 
-This is rejected, not silently mishandled, because all alternatives share
-ONE arm body: if `A(x)` matched, `x` is bound; if `B(x)` matched instead, a
-*different* `x` would need to be bound, and the compiler has nowhere to put
-a per-alternative binding when the body is shared. (Internally, the arm
-body is hoisted into a single join point that every alternative jumps to —
-exactly the mechanism that keeps `1 | 2 | 3 -> body` from emitting three
-copies of `body`. Names the arm binds *outside* the or-pattern are passed to
-that join point as arguments, so `P(x, 1 | 2) -> x + 100` is fine; a name
-bound *inside* one alternative has no value to pass on the paths where a
-different alternative matched, which is what this rule rejects.)
-
-If you need per-alternative bindings, either split into separate arms:
+Internally the arm body is hoisted into a single join point that every
+alternative jumps to — the mechanism that keeps `1 | 2 | 3 -> body` from
+emitting three copies of `body` — and the arm's binders are that join point's
+parameters (`pat_binder_vars` in `lower_match.ml`). `expand_or_rows` splits
+the row into one per alternative, each path binds its own copy, and each
+calls the shared body with its own argument. That is why the names must line
+up: one parameter list has to serve every path. Two ways they can fail to:
 
 ```march
 match e do
-  A(x) -> x
-  B(x) -> x
+  A(x) | B(y) -> x + y    -- REJECTED: "Or-pattern alternatives must bind the
+end                       --            same variables." `y` has no value to
+                          --            pass on the path where `A` matched.
+```
+
+```march
+type E2 = A(Int) | B(String)
+
+match e2 do
+  A(x) | B(x) -> 0        -- REJECTED: one join-point parameter cannot be
+end                       --            both Int and String
+```
+
+If alternatives genuinely need to bind different things, split them into
+separate arms:
+
+```march
+match e do
+  A(x) -> f(x)
+  B(s) -> g(s)
 end
 ```
 
@@ -408,8 +422,8 @@ to being treated as a wildcard for coverage purposes, which can only
 suppress a diagnostic, never invent one.
 
 An or-pattern nests beneath `as`: `1 | 2 as n` parses as `(1 | 2) as n`
-(binding `n` to the whole matched value is fine — only the alternatives
-themselves may not bind).
+(binding `n` to the whole matched value, alongside anything the alternatives
+themselves bind).
 
 ---
 

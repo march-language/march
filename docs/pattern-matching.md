@@ -344,38 +344,43 @@ end
 ```
 
 Alternatives can be literals, nullary/atom constructors, or any other
-pattern shape — the only restriction is that **no alternative may bind a
-variable**:
+pattern shape, and they **may bind variables** — provided every alternative
+binds the same names at the same types:
 
 ```march
-type E = A(Int) | B(Int)
+type E = A(Int) | B(Int) | C
 
 match e do
-  A(x) | B(x) -> x   -- REJECTED: "Or-pattern alternatives cannot bind variables (`x`)."
+  A(x) | B(x) -> x * 10   -- `x` comes from whichever alternative matched
+  C           -> 0
 end
 ```
 
-This is rejected, not silently mishandled, because all alternatives share
-ONE arm body: if `A(x)` matched, `x` is bound; if `B(x)` matched instead, a
-*different* `x` would need to be bound, and there is nowhere to put a
-per-alternative binding when the body is shared between alternatives. Names
-the arm binds *outside* the or-pattern are unaffected — `P(x, 1 | 2) -> x +
-100` is fine; only a name bound *inside* an alternative is rejected.
-
-If you need per-alternative bindings, either split into separate arms:
+All alternatives share ONE arm body, which reaches its binders as parameters,
+so the names have to line up. Two ways they can fail to:
 
 ```march
 match e do
-  A(x) -> x
-  B(x) -> x
+  A(x) | B(y) -> x + y    -- REJECTED: "Or-pattern alternatives must bind the
+end                       --            same variables." `y` would be unbound
+                          --            whenever `A` matched.
+```
+
+```march
+type E2 = A(Int) | B(String)
+
+match e2 do
+  A(x) | B(x) -> 0        -- REJECTED: `x` cannot be both Int and String
 end
 ```
 
-or match the common shape and test the difference with a `when` guard:
+If alternatives genuinely need to bind different things, split them into
+separate arms:
 
 ```march
 match e do
-  x when is_a_or_b(x) -> extract(x)
+  A(x) -> f(x)
+  B(s) -> g(s)
 end
 ```
 
@@ -391,8 +396,8 @@ to being treated as a wildcard for coverage purposes, which can only
 suppress a diagnostic, never invent one.
 
 An or-pattern nests beneath `as`: `1 | 2 as n` parses as `(1 | 2) as n`
-(binding `n` to the whole matched value is fine — only the alternatives
-themselves may not bind).
+(binding `n` to the whole matched value, alongside anything the alternatives
+themselves bind).
 
 ---
 

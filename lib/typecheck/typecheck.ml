@@ -3635,38 +3635,77 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
        !bindings, TRecord sorted)
 
   | Ast.PatOr (alts, sp) ->
-    (* Every alternative must have the same type.  Bindings are rejected: the
-       arm body is shared across alternatives via a 0-arg join point in
-       lowering, which has nowhere to put per-alternative bindings.
+    (* Every alternative must have the same type, AND must bind the same names
+       at the same types.  Lowering splits the row into one per alternative but
+       shares a single lowered body, reached through a join point whose
+       parameters are the arm's binders ([pat_binder_vars] in lower_match.ml) —
+       so a name only some alternatives supply would be unbound on the paths
+       that don't, and a name supplied at two different types has no single
+       parameter type.  Both are rejected here rather than miscompiled.
+
        [span_of_pat] isn't defined until later in this file (it's used by
-       exhaustiveness checking, which runs after inference), so the
-       diagnostic points at the whole or-pattern's span [sp] rather than at
-       the specific offending sub-pattern. *)
+       exhaustiveness checking, which runs after inference), so diagnostics
+       point at the whole or-pattern's span [sp] rather than at the specific
+       offending alternative. *)
     let results = List.map (fun p -> infer_pattern ?expected env p) alts in
     (match results with
      | [] -> [], fresh_var env.level
      | (_, t0) :: rest ->
        List.iter (fun (_, t) ->
          unify env ~span:sp ~reason:(Some (RMatchArm sp)) t0 t) rest;
-       let binders = List.concat_map fst results in
-       (match binders with
-        | [] -> ()
-        | (n, _) :: _ ->
-          Err.report env.errors
-            { Err.severity = Error; span = sp;
-              message =
-                Printf.sprintf
-                  "Or-pattern alternatives cannot bind variables (`%s`)." n;
-              labels = [];
-              notes  =
-                ["Every alternative of `p1 | p2` shares one arm body, so a \
-                  name bound in one alternative would be undefined when \
-                  another matches.";
-                 "Split this into separate arms, or match the common shape \
-                  and test the difference in a `when` guard."];
-              code = Some "or_pattern_binding";
-              fix  = None });
-       [], t0)
+       let bs0 = match results with (bs, _) :: _ -> bs | [] -> [] in
+       let ty_of_scheme = function Mono t -> t | Poly (_, _, t) -> t in
+       let names bs = List.sort_uniq String.compare (List.map fst bs) in
+       let n0 = names bs0 in
+       let report_names_differ missing extra =
+         let describe label ns =
+           Printf.sprintf "%s: %s" label
+             (String.concat ", " (List.map (fun n -> "`" ^ n ^ "`") ns))
+         in
+         let detail =
+           String.concat "; "
+             ((if missing = [] then []
+               else [describe "bound by an earlier alternative only" missing])
+              @ (if extra = [] then []
+                 else [describe "bound by a later alternative only" extra]))
+         in
+         Err.report env.errors
+           { Err.severity = Error; span = sp;
+             message = "Or-pattern alternatives must bind the same variables.";
+             labels = [];
+             notes  =
+               [detail;
+                "Every alternative of `p1 | p2` shares one arm body, so a name \
+                 bound by only some alternatives would be undefined when the \
+                 others match.";
+                "Bind the same names in every alternative, split this into \
+                 separate arms, or match the common shape and test the \
+                 difference in a `when` guard."];
+             code = Some "or_pattern_binding";
+             fix  = None }
+       in
+       List.iter (fun (bs, _) ->
+         let ni = names bs in
+         if ni <> n0 then
+           report_names_differ
+             (List.filter (fun n -> not (List.mem n ni)) n0)
+             (List.filter (fun n -> not (List.mem n n0)) ni)
+         else
+           (* Same names: each must carry the same type in every alternative,
+              since the join point gives it exactly one parameter. *)
+           List.iter (fun (n, sch) ->
+             match List.assoc_opt n bs0 with
+             | Some sch0 ->
+               unify env ~span:sp
+                 ~reason:(Some (RBuiltin
+                   (Printf.sprintf
+                      "`%s` is bound by more than one alternative of this \
+                       or-pattern, so every alternative must bind it at the \
+                       same type." n)))
+                 (ty_of_scheme sch0) (ty_of_scheme sch)
+             | None -> ()) bs
+       ) rest;
+       bs0, t0)
 
   | Ast.PatAs (inner, name, _) ->
     (* Thread [expected] into the aliased pattern, exactly as [PatTuple] and

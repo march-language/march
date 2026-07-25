@@ -45,11 +45,11 @@ git log is authoritative for exact commits.
   Naming a field the record does not have is a compile error.
 
 - Or-patterns: `1 | 2 | 3 -> "small"` matches an arm against several
-  alternatives. The ALTERNATIVES may not bind variables — every alternative
-  shares one arm body, so a name bound in one would be undefined when another
-  matches; use separate arms or a `when` guard instead. The rest of the arm is
-  free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
-  checking see through or-patterns at any nesting depth.
+  alternatives. Alternatives may bind variables, provided every alternative
+  binds the same names at the same types (`A(x) | B(x) -> x * 10`); they share
+  one arm body which reaches those names as parameters, so `A(x) | B(y)` and a
+  name bound at two different types are both compile errors. Exhaustiveness
+  and redundancy checking see through or-patterns at any nesting depth.
 
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`

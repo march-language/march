@@ -1,4 +1,6 @@
 mod OrPattern do
+type Either = Left(Int) | Right(Int) | Neither
+
 type Color = Red | Green | Blue
 
 type Pair = Pair(Int, Int)
@@ -48,6 +50,18 @@ fn message(r : { code : Int, msg : String }) : String do
   end
 end
 
+
+-- The alternatives themselves bind `v`.  This is what n-ary join points
+-- unlocked: expand_or_rows splits the row per alternative, each path binds
+-- its own `v` from a different constructor's payload, and both call the one
+-- shared body through the join point with their own argument.
+fn unwrap(e : Either) : Int do
+  match e do
+    Left(v) | Right(v) -> v * 2
+    Neither            -> 0
+  end
+end
+
 fn main() : Unit do
   println(size(1))
   println(size(3))
@@ -60,5 +74,8 @@ fn main() : Unit do
   println(int_to_string(classify_guarded(Pair(0 - 5, 2))))
   println(message({ code: 2, msg: "two" }))
   println(message({ code: 7, msg: "seven" }))
+  println(int_to_string(unwrap(Left(4))))
+  println(int_to_string(unwrap(Right(6))))
+  println(int_to_string(unwrap(Neither)))
 end
 end

@@ -4664,6 +4664,29 @@ let test_eval_or_pattern_nullary_ctors () =
     (match call_fn env "warm" [March_eval.Eval.VCon ("Blue", [])] with
      | March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
 
+(* Or-pattern ALTERNATIVES may bind, provided every alternative binds the same
+   names at the same types.  Each split row binds its own copy from a
+   different constructor's payload and calls the one shared arm body through
+   an n-ary join point. *)
+let test_eval_or_pattern_binding_alternatives () =
+  let env = eval_module {|mod T do
+    type E = A(Int) | B(Int) | C
+    fn f(e) do
+      match e do
+        A(x) | B(x) -> x * 10
+        C           -> 0
+      end
+    end
+  end|} in
+  let call v = match call_fn env "f" [v] with
+    | March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt" in
+  Alcotest.(check int) "binds from the first alternative" 30
+    (call (March_eval.Eval.VCon ("A", [March_eval.Eval.VInt 3])));
+  Alcotest.(check int) "binds from the second alternative" 70
+    (call (March_eval.Eval.VCon ("B", [March_eval.Eval.VInt 7])));
+  Alcotest.(check int) "non-or arm still reached" 0
+    (call (March_eval.Eval.VCon ("C", [])))
+
 let eval_suites =
   [
       ( "or_patterns",
@@ -4672,6 +4695,8 @@ let eval_suites =
             test_eval_or_pattern_literals;
           Alcotest.test_case "or-pattern over nullary constructors" `Quick
             test_eval_or_pattern_nullary_ctors;
+          Alcotest.test_case "or-pattern alternatives that bind" `Quick
+            test_eval_or_pattern_binding_alternatives;
         ] );
       ( "record_patterns",
         [
