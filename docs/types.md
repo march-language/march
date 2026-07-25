@@ -602,6 +602,11 @@ guarantee:
 | Code may only touch resources it was granted | Capability `needs` / `Cap(X)` | Type checker (transitive), compile time | Per module / call |
 | A two-party conversation follows a protocol | Session type `protocol` + `Chan` | Type checker, compile time | Per channel |
 
+Typestate's state parameter is usually a `tag` — a zero-arg phantom label
+type (`tag Open` is shorthand for `type Open = Open`). See
+[Capabilities: Typestate](capabilities.md#typestate-tracking-resource-lifecycle)
+for the full walkthrough.
+
 ### Two confusable pairs
 
 **Refinement vs. smart-constructor.** A refinement `{Int | _ > 0}` checks a
