@@ -1021,15 +1021,28 @@ void march_sched_request_shutdown(void) {
 void march_sched_run(void) {
     atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
 
-    /* Single-scheduler fast path: no threads needed. */
+    /* Single-scheduler fast path: no worker threads needed.
+     *
+     * The preemption daemon IS still needed.  This path used to return without
+     * ever calling march_sched_preempt_start(), so MARCH_NUM_SCHEDULERS=1 had
+     * no timer preemption at all: the only thing that ever preempted a
+     * CPU-bound green thread was compiled code's per-call reduction counter
+     * hitting zero.  That made single-scheduler mode — the configuration used
+     * to get deterministic, race-free runs — the one place where a green
+     * thread could monopolise the scheduler if the counter were ever removed.
+     * Caught by the starvation test: a CPU-bound TCO loop starved a sibling
+     * green thread here while behaving correctly on >= 2 schedulers, where the
+     * sibling merely ran on another OS thread (parallelism, not preemption). */
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
+        march_sched_preempt_start();
         sched_loop(&g_scheds[0]);
         /* Final drain: a Signal.watch delivery that landed just before shutdown
          * (e.g. a synchronous self-raise right before main returns) may have set
          * its pending flag after the loop's last top-of-iteration drain but
          * before g_all_done was observed.  Run it now, on this normal stack. */
         march_signal_drain();
+        march_sched_preempt_stop();
         return;
     }
 
@@ -1196,16 +1209,27 @@ march_proc *march_sched_find(int64_t pid) {
 
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */
 
-/* Thread-local reduction budget for LLVM-compiled code.  Initialised to the
- * full budget so the first quantum runs immediately without an extra reset.
+/* Thread-local reduction budget.  No longer on the compiled hot path (see
+ * march_preempt_request below); retained because march_yield_from_compiled
+ * refills it and the `task_reductions()` builtin reads it.
  * volatile: zeroed by the SIGUSR1 preemption handler (see Phase 5A). */
 volatile _Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
+/* Preemption request flag read by every compiled function on entry.  Plain
+ * global on purpose — see the long rationale on the declaration in
+ * march_scheduler.h (TLS access is an indirect call per entry on both
+ * Darwin/arm64 and Linux/arm64-PIE; this cost 1.75x on bench/fib.march). */
+volatile int64_t march_preempt_request = 0;
+
 void march_yield_from_compiled(void) {
+    /* Clear the request FIRST.  If we cleared it after yielding, this thread
+     * would re-enter compiled code, immediately observe the still-set flag,
+     * and yield again in a tight loop until the daemon happened to clear it. */
+    march_preempt_request = 0;
     /* Refill the budget before yielding so the process gets a fresh quantum
      * when it is rescheduled.  Do this unconditionally — if we are not inside
      * a scheduler context the yield below is a no-op, but the counter should
-     * still be valid for future use. */
+     * still be valid for future use (task_reductions() reads it). */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
     march_sched_yield();
 }
@@ -1311,6 +1335,16 @@ int march_sched_try_recv2(void **out) {
 void march_sched_wake(march_proc *target) {
     if (!target) return;
 
+    /* Deposit a wake permit BEFORE looking at `status`, so a target that is
+     * still PROC_RUNNING (it has passed its own last condition-recheck but
+     * has not reached its PROC_PARKED store yet) consumes the permit in
+     * march_sched_park_self instead of parking.  seq_cst on this store and
+     * the status load below, pairing with park_self's seq_cst exchange and
+     * PROC_PARKED store: a Dekker-style store-then-load on two locations,
+     * exactly like the task_wait_done pair — release/acquire is not enough
+     * (see the store-buffering comment there). */
+    atomic_store_explicit(&target->wake_pending, 1, memory_order_seq_cst);
+
     /* If the process is PROC_PARKED, its context has not yet been saved by
      * swapcontext.  We must wait until the scheduler transitions it to
      * PROC_WAITING before we can push it to a deque; otherwise two
@@ -1329,9 +1363,9 @@ void march_sched_wake(march_proc *target) {
     march_proc_status cur;
     int64_t spins = 0;
     do {
-        cur = atomic_load_explicit(&target->status, memory_order_acquire);
+        cur = atomic_load_explicit(&target->status, memory_order_seq_cst);
         if (cur == PROC_DEAD || cur == PROC_RUNNABLE || cur == PROC_RUNNING)
-            return; /* Not WAITING — no need to wake. */
+            return; /* Not WAITING — the permit above covers the RUNNING case. */
         /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
         if (cur == PROC_PARKED) {
             if (spins < SCHED_WAKE_SPIN_GRACE) {
@@ -1351,6 +1385,17 @@ void march_sched_wake(march_proc *target) {
             &target->status, &expected, PROC_RUNNABLE,
             memory_order_acq_rel, memory_order_acquire))
         return; /* Not WAITING (already woken by another sender). */
+
+    /* We won the race and are about to enqueue the target, so the permit
+     * deposited above has been redeemed — clear it, otherwise it would linger
+     * and spuriously cancel the target's NEXT park.  A permit deposited by
+     * another waker between the CAS and this clear can be erased, but that
+     * waker's own CAS necessarily failed (status is already RUNNABLE) and the
+     * target is being enqueued regardless: it will run and re-evaluate its
+     * wait condition, which is all that waker wanted.  Skipping a park is
+     * always safe (every park site loops and rechecks); missing a wake is
+     * not. */
+    atomic_store_explicit(&target->wake_pending, 0, memory_order_relaxed);
 
     /* Enqueue to the GLOBAL run queue, never a deque.  Wake may execute on
      * any thread (another scheduler, or a non-scheduler thread such as a
@@ -1373,11 +1418,38 @@ void march_sched_park_self(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return; /* not running inside the scheduler: nothing to park */
 
+    /* Consume a wake permit instead of parking, if one was deposited while
+     * we were still RUNNING (see march_sched_wake and the wake_pending
+     * comment in march_scheduler.h).  Returning here is a "spurious wake"
+     * from the caller's point of view, which every park site tolerates by
+     * looping and re-checking its condition.  This first check is an
+     * optimization only; the one that closes the race is the second check
+     * below, after the PROC_PARKED store. */
+    if (atomic_exchange_explicit(&p->wake_pending, 0, memory_order_seq_cst))
+        return;
+
     /* PROC_PARKED: about to swapcontext but haven't yet saved our context.
      * A waker that sees PROC_PARKED must spin-wait until sched_loop
      * transitions us to PROC_WAITING (context saved) before re-enqueuing
      * us — march_sched_wake already implements exactly that handshake. */
-    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
+    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_seq_cst);
+
+    /* Re-check the permit AFTER publishing PROC_PARKED — the half that makes
+     * the handshake airtight.  A waker landing between the exchange above
+     * and the PROC_PARKED store still reads `status` as PROC_RUNNING and
+     * early-returns, but its permit deposit (seq_cst store before its
+     * seq_cst status load) and our PROC_PARKED store (seq_cst before this
+     * seq_cst exchange) interlock like any Dekker pair: either it sees our
+     * PARKED store and takes the spin-to-WAITING path, or we see its permit
+     * here and un-park.  Un-parking means restoring PROC_RUNNING, which is
+     * race-free: only sched_loop moves PARKED -> WAITING, and only after
+     * swapcontext returns control to it, which has not happened.  A waker
+     * spinning on our PROC_PARKED observes PROC_RUNNING next iteration and
+     * returns without enqueuing — correct, since we never parked. */
+    if (atomic_exchange_explicit(&p->wake_pending, 0, memory_order_seq_cst)) {
+        atomic_store_explicit(&p->status, PROC_RUNNING, memory_order_seq_cst);
+        return;
+    }
 
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
@@ -1424,7 +1496,12 @@ static pthread_t    g_preempt_thread;
  * automatically on platforms that support it. */
 static void march_preempt_signal_handler(int sig) {
     (void)sig;
-    march_tls_reductions = 0;
+    /* Both writes are async-signal-safe (volatile scalar stores).
+     * march_preempt_request is what compiled code actually polls;
+     * march_tls_reductions is kept in sync so task_reductions() and any
+     * interpreter-side budget logic still see a spent quantum. */
+    march_preempt_request = 1;
+    march_tls_reductions  = 0;
 }
 
 static void *preempt_daemon(void *arg) {

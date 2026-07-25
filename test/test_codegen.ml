@@ -946,7 +946,7 @@ let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
     every tco_loop iteration), emit_mutual_tco_group never emitted a reduction
     check anywhere in its combined dispatch function. That starves the
     scheduler worker running the loop forever. Assert the mutual_loop body
-    contains the same reduction-check IR (@march_tls_reductions decrement +
+    contains the same preemption-check IR (@march_preempt_request load +
     @march_yield_from_compiled call) that self-TCO loops get. *)
 let test_mutual_tco_has_reduction_check () =
   let ir = emit_mutual_tco_ir {|mod Test do
@@ -962,8 +962,8 @@ let test_mutual_tco_has_reduction_check () =
   end|} in
   Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
-  Alcotest.(check bool) "mutual TCO is_even/is_odd: reduction budget loaded" true
-    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "mutual TCO is_even/is_odd: preempt request loaded" true
+    (ir_contains ir "load volatile i64, ptr @march_preempt_request");
   Alcotest.(check bool) "mutual TCO is_even/is_odd: yield call present" true
     (ir_contains ir "@march_yield_from_compiled");
   (* The check must be inside the loop body, not merely present somewhere else
@@ -993,8 +993,15 @@ let test_phase4_nonleaf_has_reduction_check () =
     end
     fn main() : Unit do println(int_to_string(fib(10))) end
   end|} in
-  Alcotest.(check bool) "non-leaf fib: @march_tls_reductions loaded" true
-    (ir_contains ir "@march_tls_reductions");
+  (* Must match the LOAD, not the preamble declaration: @march_tls_reductions
+     and @march_preempt_request are both declared in every native preamble, so
+     a bare name match would pass even with no check emitted at all.
+     `volatile` is asserted deliberately — without it the load is
+     loop-invariant and LLVM hoists the check out of TCO loops, silently
+     disabling preemption (pinned end-to-end by
+     test/native/preempt_starvation.march). *)
+  Alcotest.(check bool) "non-leaf fib: @march_preempt_request loaded" true
+    (ir_contains ir "load volatile i64, ptr @march_preempt_request");
   Alcotest.(check bool) "non-leaf fib: march_yield_from_compiled called" true
     (ir_contains ir "@march_yield_from_compiled");
   Alcotest.(check bool) "non-leaf fib: sched_yield block emitted" true
@@ -1011,9 +1018,11 @@ let test_phase4_leaf_fn_no_reduction_check () =
     fn square(n : Int) : Int do n * n end
     fn main() : Unit do println(int_to_string(42)) end
   end|} in
-  (* No non-leaf functions → no reduction check IR anywhere in the output. *)
-  Alcotest.(check bool) "all-leaf module: no icmp reduction check" false
-    (ir_contains ir "icmp sle i64")
+  (* No non-leaf functions → no preemption check IR anywhere in the output.
+     Assert on the LOAD: the preamble declares @march_preempt_request
+     unconditionally, so only an actual load proves a check was emitted. *)
+  Alcotest.(check bool) "all-leaf module: no preempt-request load" false
+    (ir_contains ir "load volatile i64, ptr @march_preempt_request")
 
 (** TCO function: reduction check must be inside the tco_loop block. *)
 let test_phase4_tco_fn_reduction_in_loop () =
@@ -1026,8 +1035,8 @@ let test_phase4_tco_fn_reduction_in_loop () =
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop emitted" true
     (ir_contains ir "tco_loop");
-  Alcotest.(check bool) "TCO countdown: reduction check in loop" true
-    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "TCO countdown: preemption check in loop" true
+    (ir_contains ir "load volatile i64, ptr @march_preempt_request");
   Alcotest.(check bool) "TCO countdown: yield call present" true
     (ir_contains ir "@march_yield_from_compiled")
 
@@ -1040,8 +1049,8 @@ let test_phase4_nonrecursive_caller_has_check () =
     fn main() : Unit do println(int_to_string(apply_double(3))) end
   end|} in
   (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
-  Alcotest.(check bool) "apply_double: reduction check present" true
-    (ir_contains ir "@march_tls_reductions")
+  Alcotest.(check bool) "apply_double: preemption check present" true
+    (ir_contains ir "load volatile i64, ptr @march_preempt_request")
 
 let test_llvm_no_call_to_double_underscore () =
   let src = {|mod Test do
@@ -5571,7 +5580,7 @@ let test_int_tag_coerce_ir () =
     with Not_found -> false
   in
   (* Tag: shl i64 %*, 1 and or i64 %*, 1 should appear for i64→ptr boxing *)
-  Alcotest.(check bool) "tag: shl i64 ... 1"  true (ir_has "shl i64");
+  Alcotest.(check bool) "tag: shl nsw i64 ... 1"  true (ir_has "shl nsw i64");
   Alcotest.(check bool) "tag: or i64 ... 1"   true (ir_has "or i64");
   (* Untag: ashr i64 %*, 1 should appear for ptr→i64 unboxing *)
   Alcotest.(check bool) "untag: ashr i64"      true (ir_has "ashr i64");
@@ -5617,7 +5626,7 @@ let test_int_tag_wrapper_ir () =
      its scalar result so the ECallPtr dispatch can untag it on read. *)
   Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
   Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl nsw i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
@@ -9293,7 +9302,8 @@ declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
 declare i64  @march_mpst_close(ptr %ep)
 |}
 
-let golden_preamble_wasm_stub : string = {|; WASM: plain global (no TLS), no-op scheduler stub
+let golden_preamble_wasm_stub : string = {|; WASM: plain globals (no TLS), no-op scheduler stub
+@march_preempt_request = external global i64
 @march_tls_reductions = external global i64
 declare void @march_yield_from_compiled()
 declare void @march_run_scheduler()
@@ -9325,7 +9335,8 @@ let golden_preamble ~(is_wasm : bool) ~(repl : bool) : string =
   else
     let tls_insert =
       if repl then ""
-      else "@march_tls_reductions = external thread_local global i64
+      else "@march_preempt_request = external global i64
+@march_tls_reductions = external thread_local global i64
 declare void @march_yield_from_compiled()
 "
     in

@@ -37,6 +37,25 @@ git log is authoritative for exact commits.
   matches; use separate arms or a `when` guard instead. The rest of the arm is
   free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
   checking see through or-patterns at any nesting depth.
+- A refinement over a **record's fields** is now checked on **parameters**, not
+  just return types. Given `fn serve(c : {v : Config | v.port >= 1})`, the call
+  `serve({ port: 0 })` is a compile error. A record literal argument is a fact
+  (fields are matched by name, so declaration order doesn't matter), and a
+  variable holding a record-refined parameter carries its fields through, so
+  forwarding to a same-shaped parameter verifies. An unrefined record, a record
+  literal with an unknown field value, or a field outside the reflected
+  fragment is skipped rather than guessed at — the definite-failure stance is
+  unchanged, and correct code is never flagged.
+
+- Refinement types now support `String`. `len` measures a String as well as a
+  list, so `{String | len(_) > 0}` and `{String | _ != ""}` are checkable
+  contracts and passing an empty string literal to a non-empty parameter is a
+  compile error. `len` counts bytes, matching the `string_length` builtin.
+  Which `len` applies is decided by the value's declared base type, so list and
+  String uses coexist unambiguously. The encoding models `String` as an opaque
+  sort and deliberately avoids SMT string theory, so there is no prefix/suffix/
+  contains/regex reasoning, and an `s == ""` guard does not establish a length
+  in the else-branch — see `specs/lang/refinement-types.md` for the full limits.
 
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
@@ -46,6 +65,181 @@ git log is authoritative for exact commits.
   unproven one stays legal but tells callers nothing, so a stale return
   refinement can never flag correct code. Postconditions that mention a
   parameter (relational) are not yet propagated.
+- Refinement predicates can now constrain an ADT's **constructor tag**. Every
+  constructor of every type — including the built-in `Option`, `Result` and
+  `List` — gains an implicit `is_<Ctor>` tester, so `fn unwrap(o : {Option(Int)
+  | is_Some(_)})` is a checkable contract: `unwrap(None)` is a compile error,
+  and so is `unwrap(x)` written inside a `None ->` match arm, where the arm
+  narrows the scrutinee's tag. Testers are exact-case (`is_some` is not
+  `is_Some`). Narrowing is skipped for a non-variable scrutinee, for an `as`
+  pattern, for an arm that rebinds the scrutinee's name, and for a constructor
+  name shared by two ADTs — in each case the checker stays silent rather than
+  guessing. A fact is recorded against a *name*, so any inner `let`, `let?`,
+  lambda parameter or nested `match` binder that rebinds that name retires it.
+- Refinement predicates that call an unknown function now produce a warning
+  instead of being silently ignored. `{Int | totally_bogus_fn(_) > 0}` compiled
+  clean and enforced nothing; it now says so. The supported vocabulary is the
+  comparison/arithmetic/boolean operators, `len`, and `@[measure]` functions.
+
+### Fixed
+
+- Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
+  absence of an answer, not an answer: the solver runs under a wall-clock
+  timeout, so a loaded machine could turn a decidable check into `unknown` and
+  the cache would freeze that accident into every later build. A malformed
+  query also yields `unknown`, so caching one made a compiler bug's
+  silently-unchecked result outlive the fix for that bug — which is how a warm
+  cache masked two refinement regression tests. Caches written before this
+  change self-heal, and real verdicts are still cached.
+
+- **The `task_await` missed-wakeup deadlock is fixed** — fork-join workloads
+  (`task_spawn` + `task_await`) hung roughly once every 20 runs, and the same
+  race intermittently hung CI's test step. It was a memory-ordering bug, not a
+  logic bug: the waiter's register-then-recheck and the completer's
+  publish-then-read-waiter form a classic store-buffering (Dekker) pair, and
+  release/acquire ordering does not prevent a store from being reordered after
+  a later load of a different address. On Apple Silicon the compiler emits an
+  RCpc acquire load (`ldapr`) that may complete before an earlier release
+  store drains, so both sides could read stale values at once: the task
+  completed, the completer saw no registered waiter and woke nobody, and the
+  waiter — having read a stale "not done" — parked forever. Upgraded both
+  sides of the pair to sequentially-consistent ordering (24 hangs/500 runs →
+  1/1000), and closed the residual window — a wake arriving after the
+  waiter's final recheck but before it finishes parking was dropped — with a
+  wake-permit handshake in the scheduler (0 hangs/3000 runs). The
+  `task_burst_await` regression test is back in the default test suite after
+  being quarantined as un-runnably flaky; actor mailbox delivery never had
+  either bug (its check-and-park runs under the mailbox lock).
+
+- A single malformed verification condition no longer disables refinement
+  checking for the rest of a compilation. z3 emits an `(error …)` line and then
+  still answers the query, but that line was read as the verdict; the solver was
+  killed, respawned, hit the same error, and z3 was then marked unavailable for
+  the whole run — so every later call site was silently left unchecked with no
+  diagnostic. Error lines are now skipped, and a query that produced one is
+  reported as unproven rather than trusted.
+
+- **A z3 error message spanning more than one line no longer shifts every later
+  verdict by one.** The fix above skipped a single `(error …)` *line*, but a
+  sort mismatch prints the offending term and then a second line naming the
+  declaration it violates; the continuation stayed in the pipe and was consumed
+  as the *next* query's answer. Under the definite-failure stance that is worse
+  than an unchecked call — a later, unrelated, **correct** call inherits some
+  other query's `unsat` and is reported as a violation. The whole error
+  s-expression is now consumed, counting parens only outside its quoted
+  message.
+
+- **A record argument holding a list literal with concrete elements is now
+  skipped instead of building a malformed query.** `{ history: Cons(1, Nil) }`
+  puts a well-sorted `List` constructor at a `List` field, but the built-in
+  `List` is generic so its element sort is opaque, and the integer `1` does not
+  fit there. The field sort-check only looked at the top-level term, so the
+  mismatch reached z3 — the exact multi-line error above. The check now
+  recurses into a constructor's arguments.
+
+- **A refinement path fact survived a rebinding of the name it was about**, so
+  correct code could be flagged. After `if x < 0 do`, a `let x = 5` inside the
+  branch left `x < 0` attached to the *new* `x`, and a call needing `{Int | _ >=
+  0}` was reported as a definite violation. Facts are now retired by every
+  binding construct that rebinds a name they mention — `let`, `let?`, lambda and
+  local-`fn` parameters, and `match` arm binders — in both the call-site and the
+  return-position checks.
+
+- **Scalar tagging now carries `nsw`, letting LLVM fold the tag/untag round
+  trip away entirely.** The `(v << 1) | 1` immediate-scalar tag was emitted
+  as a plain `shl`, so LLVM could not assume the shift preserved the sign and
+  a sign-truncating `sbfx` survived on every scalar round trip — and, worse,
+  that residue blocked accumulator tail-recursion elimination on recursive
+  functions whose result feeds the tag. With `shl nsw` (asserting exactly the
+  63-bit-losslessness the tagging convention already assumes), `fib(40)`
+  compiles to an accumulator loop with a single recursive call — with the
+  preemption check still inside the loop — and drops from 465 ms to ~390 ms.
+  Trade-off, made deliberately: an `Int` outside [-2^62, 2^62) passed through
+  a generic/erased slot was *already* silently corrupted by the round trip;
+  under `nsw` that same out-of-convention value is poison rather than a
+  deterministic wrong value. The full differential-oracle sweep (141
+  programs) is unchanged: 100 MATCH, 0 divergences.
+
+- **Compiled code no longer pays a thread-local-storage resolver call on every
+  function entry.** Each compiled function began by loading, decrementing and
+  storing the `_Thread_local` scheduler reduction counter. Thread-local access
+  is not a plain load on either supported platform: on Darwin/arm64 the symbol
+  is a TLV descriptor and each access compiles to `adrp; ldr; blr` — an
+  indirect call into the resolver — and on Linux/arm64 PIE it goes through a
+  TLSDESC call. A non-inlinable call on every entry also forces a stack frame
+  and register spills. Compiled code now reads a plain (non-thread-local)
+  `march_preempt_request` flag instead, which the preemption handler sets once
+  per quantum; the hot path is a single load and a predictable branch, and it
+  is read-only, so the cache line stays shared across scheduler threads rather
+  than ping-ponging on a per-call store.
+
+  `fib(40)` 640 ms → 465 ms, `tree-transform` 852 ms → 579 ms, `binary-trees`
+  177 ms → 165 ms. Preemption latency is unchanged in wall-clock terms (still
+  driven by the 1 ms quantum); what is gone is the *count*-based trigger that
+  also fired every 4000 calls, which on call-dense code fired within
+  microseconds — far more often than the quantum required, for no benefit.
+  Because the flag is process-wide rather than per-thread, a given scheduler
+  thread is now preempted on average every (threads × quantum) rather than
+  every quantum.
+
+- **`MARCH_NUM_SCHEDULERS=1` had no timer preemption at all.**
+  `march_sched_run`'s single-scheduler fast path returned without ever
+  starting the preemption daemon, so in the configuration used for
+  deterministic, race-free runs the *only* thing that ever preempted a
+  CPU-bound green thread was the per-call reduction counter. A tail-recursive
+  loop could otherwise monopolise the scheduler indefinitely. The daemon is
+  now started (and stopped) on that path too. Found by a new starvation test
+  that runs a CPU-bound task alongside a short one on a single scheduler
+  thread — the only configuration in which such a test measures preemption
+  rather than parallelism.
+
+- **Perceus FBIP in-place reuse was silently disabled program-wide**, making
+  every "functional but in-place" rewrite a heap free + fresh allocation
+  instead. `bench/tree_transform.march` (the FBIP showcase) ran at 3842 ms
+  against 513 ms in the last published benchmark table, and
+  `bench/list_ops.march` at 143 ms against 68 ms.
+
+  Cause: once `join_points` began lifting a `match`'s panic default arm into
+  a `$jp_clo` closure, every real arm carried a `dec_rc $jp_clo` between its
+  `let` chain and its tail allocation. `try_fbip_sink` only traversed `ELet`
+  nodes, so the scrutinee's own `dec_rc` could never reach the allocation and
+  no `EReuse` was ever produced. `try_fbip_sink` now also hops `ESeq` heads
+  that are RC operations on a *different* variable — sound because RC ops
+  neither read fields nor observe ordering, delaying a `dec` can only delay
+  (never hasten) a free, and the aliasing corner is caught by `EReuse`'s
+  runtime RC==1 uniqueness branch, which sends shared cells down the
+  fresh-allocation path. A fail-loudly full-overwrite guard at the generic
+  `EReuse` emission site rejects a reuse whose argument count doesn't match
+  the resolved constructor's declared field count, which would otherwise leak
+  the reused cell's stale trailing fields.
+
+  After the fix: tree-transform 852 ms, list-ops 67 ms (the latter exactly
+  matching the pre-regression figure). Note that `fib(40)` — which allocates
+  nothing and is therefore unaffected by FBIP — remains ~2.2x slower than the
+  same published table, an unrelated and still-open regression.
+
+  This restores work that existed and was verified on the
+  `docs/core-march-types-skeleton` line but never reached `main`; the TIR
+  golden snapshot `fbip_dead_binding_reuse` had the starved `dec_rc` + `alloc`
+  shape pinned in as its expected output, so the one test written to catch
+  this regression was certifying it instead.
+
+- `bench/run_benchmarks.sh` invoked `dune exec march` without `--root .`.
+  Run from a git worktree (which lives under the parent checkout), dune
+  resolved its root to the *parent* repository and benchmarked that
+  compiler rather than the one under test — silently reporting the wrong
+  binary's numbers, with no error.
+
+### Fixed
+
+- A record refinement whose record had a field of a non-`Int` type bound to a
+  variable (e.g. `{ port: 8080, name: n }` where `name : String`) could
+  silently disable refinement checking for the **rest of the file**. The
+  reflection placed the variable at the wrong solver sort, the solver rejected
+  the malformed query, and the error desynchronised the long-lived solver
+  session, so every later check — including plain `Int` ones in unrelated
+  functions — came back inconclusive and reported nothing. Such a record is now
+  skipped instead of mis-reflected.
 
 ### Changed
 

@@ -13,13 +13,12 @@ fn $jp4$apply$0($clo : Ptr(Unit)) : '_ =
 ## bump_head
 fn bump_head(xs : List(Int)) : List(Int) =
   case xs of
-  Cons($f2, $f3) -> dec_rc xs;
-let $jp_clo5 : () -> '_ = alloc $Clo_$jp4$0($jp4$apply$0) in
+  Cons($f2, $f3) -> let $jp_clo5 : () -> '_ = alloc $Clo_$jp4$0($jp4$apply$0) in
 dec_rc $jp_clo5;
 let t : List(Int) = $f3 in
 let h : Int = $f2 in
 let $t1 : Int = +(h, 1) in
-alloc List.Cons($t1, t)
+reuse xs as List.Cons($t1, t)
   Nil() -> dec_rc xs;
 alloc List.Nil(Int)()
   _ -> dec_rc xs;

@@ -34,9 +34,12 @@
     regression — interpreter and compiler drifting TOGETHER, invisible to
     the interp-vs-compiled diff — still reddens the sweep. The sort-bench
     family (`mergesort`/`heapsort`/`timsort`/`alphadev_sort` -> "1423",
-    `sort_nearly_sorted` -> "0\n0") is the canonical case: it crashes
-    COMPILED today (sort RC family, see [known_divergence]), so the anchor
-    guards the interpreter's checksum ground truth from silent drift.
+    `sort_nearly_sorted` -> "0\n0") is the canonical case. Those five used
+    to crash COMPILED (the sort RC-underflow family, fixed 2026-07-17 and
+    pruned from [known_divergence] 2026-07-24), so the pair now covers both
+    halves: the interp-vs-compiled diff catches a backend regression, and
+    the anchor independently guards the interpreter's checksum ground truth
+    from silent drift.
 
     --- Divergence classification (the core contract) -------------------
     A DIVERGENCE is any of: Mismatch, RunFail(signal-crash), or
@@ -186,44 +189,42 @@ let should_skip path =
 
 let known_divergence =
   [
-    (* to_string()/println() on a container falls through to the runtime's
-       generic "#<tag:N>" fallback when compiled instead of dispatching
-       through the Show interface like the interpreter does.
-       specs/todos.md P1: "`to_string` on any non-primitive type (`List`,
-       `Option`, `Result`, tuples, custom ADTs) is broken compiled". *)
-    "hello", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\")";
-    "list_lib", "to_string-on-container #<tag:N> (specs/todos.md: \"to_string on any non-primitive type\")";
+    (* EMPTY as of 2026-07-24 — every previously-triaged entry has been
+       confirmed fixed and pruned.  An empty list is the intended steady
+       state: it means the compiled backend agrees with the interpreter on
+       the entire sweep corpus, so ANY divergence is an un-triaged failure
+       that reddens the sweep.  Add an entry here only to triage a
+       genuinely-open compiler bug, and always with the specs/todos.md
+       pointer for the tracked fix.
 
-    (* Sort family: compiled-only RC-underflow/misclassification crash
-       family in the Sort module's merge/heap internals. Pre-existing,
-       independent of every wave that has re-checked it.
-       specs/progress.md: "heapsort RC underflow".
-       MODE HISTORY: on 2026-07-10 the family manifested as an UNKILLABLE
-       kernel wedge (compiled binary pinned at march_incrc inside a lambda
-       apply, macOS `UE` uninterruptible state, ignoring SIGKILL → verdict
-       RUN_TIMEOUT). RE-VERIFIED 2026-07-15 on this base: the family now
-       CRASHES CLEANLY at run time — mergesort/timsort/alphadev_sort exit 138
-       (SIGBUS), heapsort/sort_nearly_sorted exit 139 (SIGSEGV) — the
-       runtime's fatal-fault handler _exit(128+signo)s, so the verdict is
-       RUN_FAIL(crashed) again, not a wedge. Same underlying RC bug (garbage
-       pointer reaching an RC op); the interpreter is the ground truth (each
-       prints its deterministic checksum — pinned in [expected_stdout]).
-       These entries stay until the RC bug is fixed. *)
-    "alphadev_sort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
-    "heapsort", "sort RC-underflow family: compiled crash (exit 139/SIGSEGV), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
-    "mergesort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
-    "sort_nearly_sorted", "sort RC-underflow family: compiled crash (exit 139/SIGSEGV), interp clean checksum 0\\n0 (specs/todos.md; re-verified 2026-07-15)";
-    "timsort", "sort RC-underflow family: compiled crash (exit 138/SIGBUS), interp clean checksum 1423 (specs/todos.md; re-verified 2026-07-15)";
+       PRUNE LOG (kept so a re-appearance is recognised, not re-diagnosed
+       from scratch):
 
-    (* dataframe_bench / dataframe_basic: FIXED and pruned 2026-07-18.  Their
-       history spanned three stacked bugs: (1) the item-45 float SIGSEGV
-       (native_float_arr <-> List(Float) boxing, runtime fix), which unmasked
-       (2) group_by/inner_join/summarize returning EMPTY compiled — root-caused
-       to emit_case's TVar-erased niche recovery committing on the FIRST
-       niche-shaped ctor-name owner (Csv's `Row` hijacked boxed DataFrame.Row's
-       decode; llvm_case.ml all-owners fix).  Both programs now MATCH end to
-       end; regression fixtures niche_ctor_ambiguity + dataframe_groupby_count
-       pin the mechanism and the user-facing path. *)
+       - dataframe_bench / dataframe_basic — pruned 2026-07-18.  Three
+         stacked bugs: the float SIGSEGV (native_float_arr <-> List(Float)
+         boxing, runtime fix), which unmasked group_by/inner_join/summarize
+         returning EMPTY compiled — root-caused to emit_case's TVar-erased
+         niche recovery committing on the FIRST niche-shaped ctor-name owner
+         (Csv's `Row` hijacked boxed DataFrame.Row's decode; llvm_case.ml
+         all-owners fix).  Pinned by niche_ctor_ambiguity +
+         dataframe_groupby_count.
+
+       - hello / list_lib — "to_string-on-container `#<tag:N>`": to_string()
+         on a List/Option/Result/tuple/ADT fell through to the runtime's
+         generic tag fallback compiled instead of dispatching through Show.
+         FIXED 2026-07-17 (to_string now routes through Show dispatch);
+         entries went stale and were pruned 2026-07-24 after the sweep
+         reported both as MATCH.  Pinned by native/to_string_show.march.
+
+       - alphadev_sort / heapsort / mergesort / sort_nearly_sorted / timsort
+         — the "sort RC-underflow family": a compiled-only garbage-pointer-
+         into-an-RC-op crash in the Sort module's merge/heap internals.
+         Long-lived (it once manifested as an UNKILLABLE macOS `UE` kernel
+         wedge, later as clean exit 138/139).  ROOT-CAUSED AND FIXED
+         2026-07-17 (see specs/todos.md, "sort-RC-underflow family"); entries
+         went stale and were pruned 2026-07-24 after the sweep reported all
+         five as MATCH against their pinned [expected_stdout] checksums
+         (1423 / "0\n0"), which still guard the interpreter ground truth. *)
   ]
 
 let known_divergence_tbl =

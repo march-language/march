@@ -52,7 +52,15 @@ let path_for ~root key =
 let lookup ~root key : Solver.result option =
   let p = path_for ~root key in
   if Sys.file_exists p then
-    Some (result_of_string (In_channel.with_open_bin p In_channel.input_all))
+    match result_of_string (In_channel.with_open_bin p In_channel.input_all) with
+    (* Treat a stored `unknown` as a MISS.  Refine no longer writes these, but
+       caches created before that change still hold them, and an `unknown` is
+       the absence of an answer: serving it would keep a VC silently unchecked
+       on every future build with no way to tell.  Re-asking is cheap and may
+       now succeed.  [result_of_string] also falls back to Unknown on a
+       malformed/truncated entry, so this doubles as corruption recovery. *)
+    | Solver.Unknown -> None
+    | r -> Some r
   else None
 
 let store ~root key (r : Solver.result) : unit =

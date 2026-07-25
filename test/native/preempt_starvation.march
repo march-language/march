@@ -1,0 +1,51 @@
+-- Regression: a CPU-bound green thread must NOT starve its siblings.
+--
+-- Run with MARCH_NUM_SCHEDULERS=1 (see test/dune), which is the ONLY
+-- configuration that actually tests preemption: with two or more scheduler
+-- threads a sibling green thread runs on another OS thread and the output
+-- interleaves whether or not preemption works at all.  On one scheduler
+-- thread, the only way `B` can print before `A` finishes is if the runtime
+-- preempts `A` mid-loop.
+--
+-- `burn` is tail-recursive, so it is compiled to a TCO loop with the
+-- preemption check inside the loop body.  It is deliberately long enough
+-- (~100M iterations, a few hundred ms) to span many 1ms preemption quanta,
+-- so the expected ordering is not timing-marginal.
+--
+-- This pins two bugs, both found the day the per-call reduction counter was
+-- replaced by a preemption-request flag:
+--
+--   1. The compiled check must load the flag VOLATILE.  A plain load of a
+--      global that nothing in the loop writes is loop-invariant, so LLVM
+--      hoists it out of the TCO loop and the loop never re-reads it —
+--      preemption silently stops for precisely the tail-recursive loops that
+--      most need it.  (The previous load/decrement/store sequence could not
+--      be hoisted, which is why this went unnoticed.)
+--
+--   2. march_sched_run's single-scheduler fast path must start the preemption
+--      daemon.  It used to return without ever calling
+--      march_sched_preempt_start(), so MARCH_NUM_SCHEDULERS=1 had no timer
+--      preemption at all and relied entirely on the reduction counter.
+mod PreemptStarvation do
+  needs IO.Spawn
+
+  @[no_warn_recursion]
+  pfn burn(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else burn(n - 1, acc + n) end
+  end
+
+  fn main() : Unit do
+    let a = task_spawn(fn _ ->
+      let r = burn(100000000, 0)
+      println("A done")
+      r
+    )
+    let b = task_spawn(fn _ ->
+      println("B done")
+      1
+    )
+    let _ = task_await_unwrap(a)
+    let _ = task_await_unwrap(b)
+    ()
+  end
+end
