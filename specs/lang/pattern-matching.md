@@ -149,65 +149,59 @@ above could equally be written `{ x: x, y: y } -> ...` or, punned, as
 `fn describe_point({ x, y })` if the whole function dispatched on the
 struct shape rather than matching in the body.
 
-**Field lists are open in a `match` arm** — a pattern need only name the
-fields it cares about. `{ x: a }` matches any record with (at least) an `x`
-field, whatever else it has; fields the pattern doesn't mention are simply
-not bound. The y-axis check above, for instance, doesn't need to mention `y`
-at all:
+#### Field lists are open
+
+A record pattern need only name the fields it cares about. `{ x: a }` matches
+any record that has (at least) an `x` field, whatever else it carries; fields
+the pattern doesn't mention are simply not bound. The y-axis check above, for
+instance, needn't mention `y` at all:
 
 ```march
 match p do
   { x: 0.0 } -> "on y-axis"
   _          -> "elsewhere"
 end
+
+let { x: px } = p            -- `p` may have any number of other fields
+let? { x: px } = fetch()     -- likewise, against the Ok payload's type
 ```
 
-Naming a field the record does **not** have is a compile error
-(`unknown_record_field`), not a silent no-op — a typo like `{ xx: a }`
-against `{ x: Float, y: Float }` is rejected rather than matching nothing:
+This works wherever the pattern is matched against a value whose type is
+already known — a `match` scrutinee, a `let` or `let?` right-hand side, a
+constructor argument, a tuple element.
+
+Naming a field the record does **not** have is a compile error, not a silent
+no-op, so a typo is caught rather than quietly matching nothing:
 
 ```
 This record has no field `xx`.
   Available fields: x, y
 ```
 
-A function parameter gets the same openness when it dispatches through an
-explicit `match`, since a single-clause function whose parameter is a
-non-trivial pattern desugars through the same match-lowering path:
+#### The one exception: a bare pattern as a parameter
+
+A pattern written directly as a parameter — `fn get_w({ w: w })` — is the one
+place a record pattern is *closed*, matching exactly the fields it names.
+Parameter patterns can't carry a type annotation (only `name : Type` can), so
+the pattern is the sole source of its own type: `get_w` is inferred as taking
+exactly `{ w : Int }` and rejects a wider `{ w: 8, h: 9 }`.
+
+Give the parameter a name and a type, then destructure in the body, and the
+field list opens as everywhere else:
 
 ```march
-fn area({ w: w, h: h }) : Int do w * h end   -- full destructure, unaffected
-```
-
-A `let` binding is open too — its right-hand side supplies the expected type:
-
-```march
-let { code: c } = p        -- fine even though `p` also has a `msg` field
-let? { code: c } = fetch() -- and in `let?`, driven by the Ok payload's type
-```
-
-One position remains **closed** to exactly the fields named, because it has
-no independent expected type for the pattern to open against:
-
-- **A bare pattern used directly as a function parameter**, e.g.
-  `fn get_w({ w: w }) : Int do w end` — a pattern in that grammar position
-  cannot itself carry a type annotation (only `name : Type` can), so its type
-  has no source but the pattern itself and is inferred as exactly `{ w : Int
-  }`. `get_w` above rejects a wider record such as `{ w: 8, h: 9 }`. To open
-  a parameter's field list, annotate the parameter with a name and
-  destructure it in the body instead, which routes it back through
-  `match`'s open-field-list handling:
-
-```march
-fn get_w2(r : { w : Int, h : Int }) : Int do
+fn get_w(r : { w : Int, h : Int }) : Int do
   match r do
-    { w: w } -> w    -- r may have any other fields too
+    { w: w } -> w      -- open: `r` may carry other fields too
   end
 end
 ```
 
-**Record arms take part in coverage analysis.** `spat` (the exhaustiveness
-checker's internal pattern shape, `typecheck.ml`) carries `SPRec`, an
+#### Coverage
+
+Record arms take part in exhaustiveness and redundancy checking like any
+other pattern. `spat` (the exhaustiveness checker's internal pattern shape,
+`typecheck.ml`) carries `SPRec`, an
 assoc-list of field name to sub-shape sorted by name. A record is
 single-shape, so `find_missing_mc` and `is_useful` handle it exactly as they
 handle a tuple — specialize into one column per field, recurse — with one
