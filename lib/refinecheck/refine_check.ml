@@ -25,8 +25,12 @@ module Err = March_errors.Errors
        opaque `Str` sort rather than `Int`;
      - a registered ADT's sort name — the call site reflects the actual
        argument as a datatype term instead of a scalar;
+     - a registered 1-constructor RECORD's sort name (`Some "M_Config"`), a
+       special case of the ADT line above: the call site additionally resolves
+       the predicate's `v.field` projections through that sort's selectors;
      - [None] for a plain `Int`.
-   Use [rp_is_str] rather than comparing against [str_sort] by hand. *)
+   Use [rp_is_str] rather than comparing against [str_sort] by hand, and
+   [is_record_sort] rather than testing for a record shape by hand. *)
 type rparam = { idx : int; binder : string; pred : A.expr; sort : string option }
 
 let binder_name : A.name option -> string = function
@@ -313,6 +317,16 @@ let is_record_base (t : A.ty) : bool =
      | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
      | _ -> false)
   | _ -> false
+
+(* [is_record_base] on an already-computed SMT sort name.  Records are a strict
+   SUBSET of the ADT sorts, so a consumer that wants the record-specific path
+   (field selectors) must test this rather than merely observing `sort = Some
+   _`, which is also true of a String ([str_sort]) and of a plain variant. *)
+let is_record_sort (s : string) : bool =
+  s <> str_sort
+  && (match Hashtbl.find_opt adt_ctors s with
+      | Some [ ctor ] -> Hashtbl.mem ctor_field_names ctor
+      | _ -> false)
 
 (* True when [t] is a bare TyCon naming any registered ADT — variant or
    record, and (unlike [is_record_base]) whether or not it is applied to type
@@ -1051,7 +1065,12 @@ type scope = (string * (string * A.expr * string option)) list
    SMT sort name.  Deliberately wider than [refined_scope_ty] on the ADT side:
    an ADT refinement is a fact the call site can discharge from a constructor
    literal or a `match` narrowing, but it is not (yet) something the checker
-   carries through a local binding. *)
+   carries through a local binding.
+
+   RECORDS need no clause of their own: a record type IS a registered
+   1-constructor ADT, so [is_adt_base] already admits `{v : Config | v.port >=
+   1}` and hands back the same `M_Config` sort name the record path in
+   [check_call] keys on (see [is_record_sort]). *)
 let refined_param_ty : A.ty option -> (string * A.expr * string option) option = function
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
@@ -1206,6 +1225,12 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
     |> List.filter_map (fun (idx, fp) ->
            match fp with
            | A.FPNamed p | A.FPDefault (p, _) ->
+             (* [refined_param_ty] admits all four refinable bases — Int,
+                String, variant ADT and record — so a record-refined parameter
+                (`{v : Config | v.port >= 1}`) reaches [fn_sig.refined] and its
+                field predicate is discharged at call sites.  The reported
+                `sort` is what selects the String / ADT / record path in
+                [check_call]; `None` keeps the Int path unchanged. *)
              (match refined_param_ty p.A.param_ty with
               | Some (binder, pred, sort) -> Some { idx; binder; pred; sort }
               | None -> None)
@@ -1332,6 +1357,161 @@ let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname :
 (* Fresh-name counter for SMT constants standing in for a call's return value.
    Monotonic per compilation; freshness is all that is required. *)
 let ret_ctr = ref 0
+
+(* ── Record reflection helpers ────────────────────────────────────────────
+   Shared by the call-site (precondition) and return-site (postcondition)
+   checks, so both sides map a record value and its field projections into SMT
+   exactly the same way. *)
+
+(* Build a resolve_field closure for a known record binder: v.fname becomes the
+   SMT selector applied to the term representing v. *)
+let make_field_resolver (binder : string) (sort_name : string) (binder_term : Smt.term)
+    : string -> string -> Smt.term option =
+  fun varname fname ->
+    if varname <> binder && varname <> "_" then None
+    else
+      match Hashtbl.find_opt adt_ctors sort_name with
+      | Some [ ctor ] ->
+        (match Hashtbl.find_opt ctor_field_names ctor with
+         | None -> None
+         | Some names ->
+           let rec find_idx i = function
+             | [] -> None
+             | n :: _ when n = fname -> Some i
+             | _ :: rest -> find_idx (i + 1) rest
+           in
+           (match find_idx 0 names with
+            | None -> None
+            | Some idx ->
+              Some (Smt.App (Printf.sprintf "%s_%d" ctor idx, [ binder_term ]))))
+      | _ -> None
+
+(* Evaluate a field-selector application on a concrete constructor term.
+   <ctor>_<idx>(App(ctor, args)) → args[idx] — enables concrete len evaluation
+   through record field projections like State_1(State(1, Nil)) → Nil. *)
+let rec selector_reduce (term : Smt.term) : Smt.term =
+  match term with
+  | Smt.App (selector, [ (Smt.App (ctor, args) as inner) ]) ->
+    let prefix = ctor ^ "_" in
+    let plen = String.length prefix in
+    if String.length selector > plen && String.sub selector 0 plen = prefix then
+      match int_of_string_opt (String.sub selector plen (String.length selector - plen)) with
+      | Some idx when idx >= 0 && idx < List.length args -> selector_reduce (List.nth args idx)
+      | _ -> Smt.App (selector, [ inner ])
+    else Smt.App (selector, [ inner ])
+  | other -> other
+
+(* Evaluate `len` on a concrete SMT list term (Nil / Cons / selector chain).
+   Returns None for opaque (variable/unknown) terms — avoids quantifier-based
+   axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
+let rec concrete_len (term : Smt.term) : int option =
+  match selector_reduce term with
+  | Smt.App ("Nil", []) -> Some 0
+  | Smt.App ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
+  | _ -> None
+
+(* Try to evaluate an axiom measure on a concrete SMT term.
+   Uses selector_reduce to unfold record projections, then matches the
+   constructor against known base cases (measure_base_cases).  For
+   inductive cases we recurse up to a depth limit to avoid loops.
+   Returns None if the term is opaque, not a base case, or too deep. *)
+let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
+  match Hashtbl.find_opt measure_base_cases name with
+  | None -> None
+  | Some bases ->
+    let go term =
+      match selector_reduce term with
+        | Smt.App (ctor, []) ->
+          (* Zero-arg constructor: look up in base cases *)
+          List.assoc_opt ctor bases
+        | Smt.App (_ctor, _args) ->
+          (* Multi-arg constructor: not a base case for simple measures;
+             would need the step case — give up for now *)
+          None
+        | _ ->
+          (* Non-App after selector_reduce: opaque (variable, literal, etc.).
+             selector_reduce is a fixed point on non-App terms, so further
+             recursion cannot reduce it — return None immediately. *)
+          None
+    in
+    go arg_term
+
+(* True when [t] is a WELL-SORTED term for a constructor field of [sort].
+
+   This check is not cosmetic.  The scalar reflection declares every variable it
+   meets as `SInt`, so a record field of a non-Int type bound to a variable
+   (`{ port: 8080, name: n }` where `name : String` has SMT sort `Elem`) would
+   build a constructor application whose argument sorts do not match the
+   datatype declaration.  Z3 answers such a VC with an `(error …)` rather than
+   sat/unsat, and that error desynchronises the long-lived `z3 -in` channel —
+   silently disabling refinement checking for the REST of the compilation.  A
+   malformed VC is therefore far worse than a skipped one, so any field we
+   cannot place at its declared sort makes the whole record unreflectable.
+
+   Int/Bool fields accept any scalar term except a constructor application;
+   a datatype-sorted field accepts only a constructor OF THAT SORT (so
+   `history: Nil` still reflects, while `history: xs` — an opaque variable —
+   does not).
+
+   The check RECURSES into a constructor's arguments, because a top-level fit
+   is not enough: `history: Cons(1, Nil)` places a well-sorted `M_List`
+   constructor at an `M_List` field, but `Cons`'s own head field is declared
+   `Elem` (the built-in `List` is generic, so its element sort is opaque) and
+   the scalar reflection hands it the integer `1`.  Z3 rejects `(Cons 1 Nil)`
+   with a multi-line `(error …)`, which is the very desynchronisation this
+   function exists to prevent — so a list literal with concrete elements makes
+   the record unreflectable, and the call is skipped. *)
+let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
+  let is_ctor_app = function
+    | Smt.App (c, _) -> Hashtbl.mem ctor_field_sorts c
+    | _ -> false
+  in
+  match sort with
+  | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
+  | Smt.SData s ->
+    (match t with
+     | Smt.App (ctor, args) ->
+       (match Hashtbl.find_opt adt_ctors s with
+        | Some cs when List.mem ctor cs ->
+          (* Every argument must sit at its own declared field sort.  An arity
+             mismatch, or a constructor we have no field sorts for, is treated
+             as a non-fit — again the skip direction. *)
+          (match Hashtbl.find_opt ctor_field_sorts ctor with
+           | Some fsorts when List.length fsorts = List.length args ->
+             List.for_all2 term_fits_sort fsorts args
+           | Some _ -> false
+           | None -> args = [])
+        | _ -> false)
+     | _ -> false)
+
+(* Reflect an ERecord literal as a constructor application in SMT.
+   Fields are reordered to match the declaration order stored in ctor_field_names.
+   Returns None if any field is missing, untranslatable, or reflects to a term
+   that does not fit its declared sort (conservative skip). *)
+let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list)
+    (reflect_scalar : A.expr -> Smt.term option) : Smt.term option =
+  match Hashtbl.find_opt adt_ctors sort_name with
+  | Some [ ctor ] ->
+    (match Hashtbl.find_opt ctor_field_names ctor, Hashtbl.find_opt ctor_field_sorts ctor with
+     | Some fname_list, Some fsorts when List.length fname_list = List.length fsorts ->
+       let field_map = List.map (fun (n, e) -> (n.A.txt, e)) fields in
+       let in_order =
+         List.filter_map (fun fname -> List.assoc_opt fname field_map) fname_list
+       in
+       if List.length in_order <> List.length fname_list then None
+       else
+         let reflected =
+           List.map2
+             (fun e s ->
+               match reflect_scalar e with
+               | Some t when term_fits_sort s t -> Some t
+               | _ -> None)
+             in_order fsorts
+         in
+         if List.exists Option.is_none reflected then None
+         else Some (Smt.App (ctor, List.filter_map Fun.id reflected))
+     | _ -> None)
+  | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
 let reflect_scalar ~(postcond : string -> (string * A.expr) option) (sc : scope)
@@ -1536,6 +1716,73 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         Hashtbl.add reflect_cache key result;
         result
     in
+    (* ── The record-refined-parameter path ──────────────────────────────────
+       A record actual is NOT a scalar: it must become a datatype term so the
+       predicate's `v.field` projections select from it.  We recognise exactly
+       two shapes and SKIP everything else:
+
+         - a record literal `{ port: 0 }`  -> the constructor applied to its
+           field terms, reordered into declaration order.  If ANY field is
+           itself unreflectable — or reflects to a term that would not be
+           WELL-SORTED at that field's declared sort — the whole record
+           reflects to None: a partial or ill-sorted reflection would either
+           assert facts about fields we cannot see, or build a VC z3 answers
+           with an `(error …)`.
+         - a variable holding a record-refined local/param -> an opaque
+           datatype constant carrying that local's own predicate as an
+           assumption, which is what lets a refinement forward through a call.
+
+       An unrefined record variable, a call, a field access, … all yield None
+       and the call is skipped — the definite-failure stance.
+
+       Note this path deliberately keeps the SAME two-discharge decision
+       procedure as the Int path (report only when ¬goal is Verified).  It does
+       NOT use check_post's report-on-SAT branch, so a record fact that merely
+       fails to establish the callee's precondition stays silent. *)
+    let scalar_arg e = absorb (reflect_scalar ~postcond sc e) in
+    let record_self sort_name : Smt.term option =
+      match self_actual with
+      | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar_arg
+      | A.EVar { A.txt = x; _ } ->
+        (match List.assoc_opt x sc with
+         | Some (b, q, Some s) when s = sort_name ->
+           let c = Smt.Const x in
+           decls := (x, Smt.SData sort_name) :: !decls;
+           (* The carried predicate must resolve `b.field` against the SAME
+              term the goal projects from, or the assumption constrains a
+              different value than the one being checked. *)
+           let rv n = if n = b || n = "_" then Some c else None in
+           let rf = make_field_resolver b sort_name c in
+           (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
+                    ~resolve_field:rf q with
+            | Some qa -> assume := qa :: !assume
+            (* Untranslatable predicate: the constant stays unconstrained, so
+               neither the goal nor its negation can be proven and the call is
+               skipped.  Sound, just weaker. *)
+            | None -> ());
+           Some c
+         | _ -> None)
+      | _ -> None
+    in
+    (* [`Other] = every non-record subject — Int, String and variant ADT — each
+       handled by its own resolver below, unchanged.
+       [`Skip]   = a RECORD parameter whose actual we cannot reflect; the goal
+                   is not even built, so the call is silently skipped. *)
+    let mode =
+      match rp.sort with
+      | Some sort_name when is_record_sort sort_name ->
+        (match record_self sort_name with
+         | None -> `Skip
+         | Some t ->
+           (* Seed the ADT preamble so this VC gets the record's
+              `declare-datatypes`.  Sharing main's [adt_sorts] machinery (rather
+              than emitting a separate record preamble) is what keeps a VC that
+              mentions a record AND a tester AND a string free of duplicate sort
+              declarations, which z3 rejects inside one push. *)
+           if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+           `Record (sort_name, t))
+      | _ -> `Other
+    in
     (* Resolve a scalar variable IN THE PREDICATE, i.e. in the CALLEE's
        namespace: the refined binder (`_` or its declared name) denotes this
        call's actual argument, and another parameter's name denotes that
@@ -1548,6 +1795,12 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
          choice is driven by a DECLARED type (the refinement's own base type for
          the binder, the callee's parameter type otherwise), never inferred from
          the actual — so an unknown stays unknown instead of being guessed. *)
+      match mode with
+      (* The refined value is a record: it stands for the datatype term, not
+         for anything [reflect_scalar] could produce.  Records and strings are
+         disjoint sorts, so this cannot shadow the String path. *)
+      | `Record (_, t) when is_self name -> Some t
+      | _ ->
       if is_self name && self_is_str then reflect_str "$self" self_actual
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
@@ -1654,15 +1907,77 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
             | None -> (match a with A.EVar { A.txt = x; _ } -> measure_of_var m x | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
-    (* `len(<expr>)` where the expression itself reflected to a term: the string
-       meaning applies exactly when that term is one of OUR declared `Str`
-       constants (e.g. an inline `len("abc")`).  Anything else stays None, which
-       is what the default was, so no existing behaviour changes. *)
+    (* [resolve_field] turns the predicate's `v.port` into the record's SMT
+       selector applied to the term standing for the refined value.  Only the
+       record path installs one; every other path keeps [smt_of]'s default
+       (which returns None, dropping any field-bearing predicate). *)
+    let resolve_field =
+      match mode with
+      | `Record (sort_name, t) -> make_field_resolver rp.binder sort_name t
+      | `Other | `Skip -> fun _ _ -> None
+    in
+    (* A measure applied to a non-variable term — `len(v.history)` where
+       `v.history` is a field selector.  Mirrors check_post: evaluate
+       concretely when we can (a concrete answer needs no quantified axioms,
+       which is what keeps Z3 from returning `unknown`), otherwise fall back
+       to a symbolic constant, or to the axiomatised application. *)
+    let mapp_ctr = ref 0 in
+    (* Memoized per (measure, term): two occurrences of `len(v.history)` in one
+       predicate denote the same value and must share a constant, or a
+       contradiction between them is lost. *)
+    let mapp_cache : (string, Smt.term option) Hashtbl.t = Hashtbl.create 8 in
+    let resolve_measure_app_record m arg_term =
+      let key = m ^ "|" ^ Smt.render arg_term in
+      match Hashtbl.find_opt mapp_cache key with
+      | Some cached -> cached
+      | None ->
+        let result =
+          if m = "len" then
+            match concrete_len arg_term with
+            | Some n -> Some (Smt.IntLit n)
+            | None ->
+              incr mapp_ctr;
+              let nm = Printf.sprintf "len$app%d" !mapp_ctr in
+              decls := (nm, Smt.SInt) :: !decls;
+              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+              Some (Smt.Const nm)
+          else if is_axiom_measure m then
+            match concrete_measure_app m arg_term with
+            | Some n -> Some (Smt.IntLit n)
+            | None ->
+              (* No concrete answer: use the axiomatised application, which
+                 makes this VC need the quantified-axiom preamble. *)
+              uses_axiom := true;
+              Some (Smt.App (m, [ arg_term ]))
+          else begin
+            incr mapp_ctr;
+            let nm = Printf.sprintf "%s$app%d" m !mapp_ctr in
+            decls := (nm, Smt.SInt) :: !decls;
+            if is_nonneg_measure m then
+              assume := Smt.Ge (Smt.Const nm, Smt.IntLit 0) :: !assume;
+            Some (Smt.Const nm)
+          end
+        in
+        Hashtbl.add mapp_cache key result;
+        result
+    in
+    (* `len(<expr>)` where the expression itself reflected to a term.  Two
+       disjoint meanings, tried in order:
+         - STRING: the term is one of OUR declared `Str` constants (e.g. an
+           inline `len("abc")`) — main's rule, unchanged;
+         - RECORD: the term is a field selector such as `len(v.history)` —
+           evaluated concretely when possible, otherwise a symbolic constant or
+           the axiomatised application.
+       They cannot both match one term (a `Str` constant is never a selector),
+       so the order is arbitrary and neither changes the other's behaviour. *)
     let resolve_measure_app m arg =
       match m, arg with
       | "len", Smt.Const c when string_len_available () && Hashtbl.mem str_names c ->
         Some (Smt.App (strlen_fn, [ arg ]))
-      | _ -> None
+      | _ ->
+        (match mode with
+         | `Record _ -> resolve_measure_app_record m arg
+         | `Other | `Skip -> None)
     in
     (* Pre-reflect a String binder before the path conditions are translated, so
        a caller variable mentioned by a guard is already known to be `Str`-sorted
@@ -1725,8 +2040,15 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;
-    (match smt_of ~resolve_var ~resolve_measure ~resolve_measure_app ~resolve_tester
-             ~resolve_str_lit:str_lit_const rp.pred with
+    (* [`Skip]: a record parameter whose actual could not be reflected — build
+       no goal at all, so neither discharge runs and the call is passed over. *)
+    (match
+       (match mode with
+        | `Skip -> None
+        | `Other | `Record _ ->
+          smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
+            ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
+     with
      | None -> ()
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) -> ()
      | Some goal ->
@@ -1762,7 +2084,12 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
           them — z3 rejects a duplicate sort inside one push, and one such
           error line desynchronises the shared solver channel.  The string
           preamble declares only `$Str`/`$strlen`, names no other preamble can
-          produce, so it composes with either or both unconditionally. *)
+          produce, so it composes with either or both unconditionally.
+
+          A RECORD subject seeds its sort into [adt_sorts] (see [mode]), so it
+          rides this same path and inherits the same deduplication — which is
+          what makes a VC mentioning a record AND a tester AND a string emit
+          each sort exactly once. *)
        let preamble =
          let m = if !uses_axiom then !measure_preamble else "" in
          let a =
@@ -1841,29 +2168,6 @@ let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list
       branches
   | _ -> [ (path, e) ]
 
-(* Build a resolve_field closure for a known record binder: v.fname becomes the
-   SMT selector applied to the term representing v. *)
-let make_field_resolver (binder : string) (sort_name : string) (binder_term : Smt.term)
-    : string -> string -> Smt.term option =
-  fun varname fname ->
-    if varname <> binder && varname <> "_" then None
-    else
-      match Hashtbl.find_opt adt_ctors sort_name with
-      | Some [ ctor ] ->
-        (match Hashtbl.find_opt ctor_field_names ctor with
-         | None -> None
-         | Some names ->
-           let rec find_idx i = function
-             | [] -> None
-             | n :: _ when n = fname -> Some i
-             | _ :: rest -> find_idx (i + 1) rest
-           in
-           (match find_idx 0 names with
-            | None -> None
-            | Some idx ->
-              Some (Smt.App (Printf.sprintf "%s_%d" ctor idx, [ binder_term ]))))
-      | _ -> None
-
 (* Facts true throughout the body: each refined param contributes its predicate. *)
 (* Returns (decls, assumptions, has_record).
    Int entries: declare an SInt const, reflect predicate over it.
@@ -1921,77 +2225,6 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
     ([], [], false) sc
   in
   (ds, asm, has_rec, has_string)
-
-(* Evaluate a field-selector application on a concrete constructor term.
-   <ctor>_<idx>(App(ctor, args)) → args[idx] — enables concrete len evaluation
-   through record field projections like State_1(State(1, Nil)) → Nil. *)
-let rec selector_reduce (term : Smt.term) : Smt.term =
-  match term with
-  | Smt.App (selector, [ (Smt.App (ctor, args) as inner) ]) ->
-    let prefix = ctor ^ "_" in
-    let plen = String.length prefix in
-    if String.length selector > plen && String.sub selector 0 plen = prefix then
-      match int_of_string_opt (String.sub selector plen (String.length selector - plen)) with
-      | Some idx when idx >= 0 && idx < List.length args -> selector_reduce (List.nth args idx)
-      | _ -> Smt.App (selector, [ inner ])
-    else Smt.App (selector, [ inner ])
-  | other -> other
-
-(* Evaluate `len` on a concrete SMT list term (Nil / Cons / selector chain).
-   Returns None for opaque (variable/unknown) terms — avoids quantifier-based
-   axioms that would cause Z3 to return `unknown` instead of sat/unsat. *)
-let rec concrete_len (term : Smt.term) : int option =
-  match selector_reduce term with
-  | Smt.App ("Nil", []) -> Some 0
-  | Smt.App ("Cons", [ _h; t ]) -> Option.map (( + ) 1) (concrete_len t)
-  | _ -> None
-
-(* Try to evaluate an axiom measure on a concrete SMT term.
-   Uses selector_reduce to unfold record projections, then matches the
-   constructor against known base cases (measure_base_cases).  For
-   inductive cases we recurse up to a depth limit to avoid loops.
-   Returns None if the term is opaque, not a base case, or too deep. *)
-let concrete_measure_app (name : string) (arg_term : Smt.term) : int option =
-  match Hashtbl.find_opt measure_base_cases name with
-  | None -> None
-  | Some bases ->
-    let go term =
-      match selector_reduce term with
-        | Smt.App (ctor, []) ->
-          (* Zero-arg constructor: look up in base cases *)
-          List.assoc_opt ctor bases
-        | Smt.App (_ctor, _args) ->
-          (* Multi-arg constructor: not a base case for simple measures;
-             would need the step case — give up for now *)
-          None
-        | _ ->
-          (* Non-App after selector_reduce: opaque (variable, literal, etc.).
-             selector_reduce is a fixed point on non-App terms, so further
-             recursion cannot reduce it — return None immediately. *)
-          None
-    in
-    go arg_term
-
-(* Reflect an ERecord literal as a constructor application in SMT.
-   Fields are reordered to match the declaration order stored in ctor_field_names.
-   Returns None if any field's scalar term is untranslatable (conservative skip). *)
-let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list)
-    (reflect_scalar : A.expr -> Smt.term option) : Smt.term option =
-  match Hashtbl.find_opt adt_ctors sort_name with
-  | Some [ ctor ] ->
-    (match Hashtbl.find_opt ctor_field_names ctor with
-     | None -> None
-     | Some fname_list ->
-       let field_map = List.map (fun (n, e) -> (n.A.txt, e)) fields in
-       let in_order =
-         List.filter_map (fun fname -> List.assoc_opt fname field_map) fname_list
-       in
-       if List.length in_order <> List.length fname_list then None
-       else
-         let reflected = List.map reflect_scalar in_order in
-         if List.exists Option.is_none reflected then None
-         else Some (Smt.App (ctor, List.filter_map Fun.id reflected)))
-  | _ -> None
 
 (* Check one return-position tail against the declared return refinement.
 

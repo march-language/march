@@ -689,6 +689,161 @@ end|}));
   fn migrate(old : {s : State | s.count >= 0}) : {v : State | v.count >= 0 && len(v.history) == v.count} do
     { count: old.count, history: Nil }
   end
+end|}));
+
+    (* ── Call-site (precondition) side. ─────────────────────────────────────
+       Four of these six assert SILENCE: an unreflectable record, an
+       unreflectable field value, and a forwarded refinement that is merely
+       unproven must all be SKIPPED under the definite-failure stance. *)
+    gated "record precondition: literal argument violates" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn main() : Int do serve({ port: 0 }) end
+end|}));
+
+    gated "record precondition: literal argument satisfies" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn main() : Int do serve({ port: 8080 }) end
+end|}));
+
+    gated "record precondition: unknown record is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(c : Config) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: unknown FIELD value is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(p : Int) : Int do serve({ port: p }) end
+end|}));
+
+    gated "record precondition: a refined record param forwards" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port >= 1}) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: multi-field predicate on the wrong field" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int, retries : Int }
+  fn serve(c : {v : Config | v.port >= 1 && v.retries >= 0}) : Int do c.port end
+  fn main() : Int do serve({ port: 8080, retries: -1 }) end
+end|}));
+
+    (* Forwarding: the discriminating pair.  A WEAKER refinement neither
+       establishes nor contradicts the callee's, so it must be silent; a
+       CONTRADICTORY one is a definite failure and must be reported.  The
+       second is what proves field facts actually travel through a variable. *)
+    gated "record precondition: forwarding a WEAKER refinement is not proven" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port >= 0}) : Int do serve(c) end
+end|}));
+
+    gated "record precondition: forwarding a CONTRADICTORY refinement is caught" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn fwd(c : {v : Config | v.port <= 0}) : Int do serve(c) end
+end|}));
+
+    (* A record sort and a measure/ADT sort in ONE verification condition: the
+       two preambles must dedup, since a Z3 error maps the VC to Unknown and
+       would silently skip the check rather than merely adding noise. *)
+    gated "record precondition: record + measure sorts coexist in one VC" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  @[measure]
+  pfn mlength(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + mlength(t)
+    end
+  end
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | mlength(v.history) == v.count}) : Int do s.count end
+  fn main() : Int do take({ count: 1, history: Nil }) end
+end|}));
+
+    (* A record field whose declared type is NOT Int, bound to a variable.  The
+       scalar reflection declares every variable SInt, so reflecting it anyway
+       would build a constructor application with mismatched argument sorts —
+       and Z3 answers a malformed VC with an error that DESYNCS the long-lived
+       `z3 -in` channel, silently disabling refinement checking for the rest of
+       the compilation.  So the record must be skipped instead. *)
+    gated "record precondition: non-Int field bound to a variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(n : String) : Int do serve({ port: 0, name: n }) end
+end|}));
+
+    (* The channel-survival half: an unrelated Int violation AFTER such a record
+       call must still be reported.  If the record VC poisoned the solver this
+       goes silent — the failure mode is silence, so only this shape catches it. *)
+    gated "record precondition: a skipped record does not poison the solver" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn take_n(n : {Int | _ >= 0}) : Int do n end
+  fn first(n : String) : Int do serve({ port: 8080, name: n }) end
+  fn second() : Int do take_n(-3) end
+end|}));
+
+    (* A NESTED sort mismatch: `Cons(1, Nil)` sits well at an `M_List` field,
+       but `Cons`'s own head field is `Elem` (the built-in `List` is generic, so
+       its element sort is opaque) and the scalar reflection puts the integer
+       `1` there.  A top-level-only fit check passes this and builds
+       `(Cons 1 Nil)`, which z3 rejects with a MULTI-LINE `(error …)` — the
+       exact shape that used to leave a continuation line in the pipe and shift
+       every later verdict by one.  The record must be skipped instead. *)
+    gated "record precondition: a concrete list element is a nested sort mismatch" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, history : List(Int) }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f() : Int do serve({ port: 0, history: Cons(1, Nil) }) end
+end|}));
+
+    (* Channel survival across ALL FOUR refinable subjects in one module, with
+       the record's unreflectable list field first and a plain Int violation
+       LAST.  A verdict shifted by one desynchronised read turns the two
+       CORRECT calls in between into reported violations, so this pins the
+       no-false-positive property and the report-still-arrives property at
+       once. *)
+    gated "record + string + ADT + Int in one module: only the Int call is reported" (fun () ->
+        Alcotest.(check int) "exactly one violation" 1
+          (refine_error_count {|mod M do
+  type Config = { port : Int, history : List(Int) }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn takepos(n : {Int | _ >= 0}) : Int do n end
+  fn main() : Int do
+    let a = serve({ port: 8080, history: Cons(1, Nil) })
+    let b = nonempty("hello")
+    let c = unwrap(Some(7))
+    let d = takepos(-3)
+    a + b + c + d
+  end
 end|})) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts

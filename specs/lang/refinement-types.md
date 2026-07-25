@@ -245,6 +245,66 @@ Measures may call **other measures** and be **mutually recursive** (e.g. a
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons structurally just like `size`.
 
+### Refining a record over its fields
+
+A refinement may also range over a **record** type, with the predicate reading
+its fields. This works on **both** sides of a signature — as a postcondition on
+the return type, and as a precondition on a parameter:
+
+```march
+type Config = { port : Int, retries : Int }
+
+-- precondition: callers must pass a config with a usable port
+fn serve(c : {v : Config | v.port >= 1 && v.retries >= 0}) : Int do c.port end
+
+-- postcondition: this function promises a valid config
+fn defaults() : {v : Config | v.port >= 1} do { port: 8080, retries: 3 } end
+```
+
+At a call site the argument is checked against the field predicate:
+
+```march
+serve({ port: 8080, retries: 3 })   -- fine
+serve({ port: 0, retries: 3 })      -- error: `v.port >= 1` can never hold
+serve({ retries: 0, port: 0 })      -- same error; field order doesn't matter
+```
+
+What counts as a **fact** about a record argument:
+
+- **A record literal.** Its field values are known, so the predicate is decided
+  against them. Fields may be written in any order — they are matched to the
+  declaration by name, not position.
+- **A variable holding a record-refined parameter or local.** Its own
+  refinement travels with it, so a call forwards:
+
+  ```march
+  fn fwd(c : {v : Config | v.port >= 1}) : Int do serve(c) end   -- fine
+  ```
+
+  Forwarding obeys the same definite-failure rule as everything else: a
+  *weaker* incoming refinement (`v.port >= 0`) neither proves nor contradicts
+  the callee's, so it is **skipped**, not reported. Only a *contradictory* one
+  (`v.port <= 0`) is an error.
+
+Everything else about a record is **skipped**:
+
+- an **unrefined record variable** — nothing is known about its fields;
+- a record literal with an **unknown field value** (`{ port: p }` for a
+  parameter `p`) — the checker will not assert facts about fields it cannot
+  see, so the *whole* record is skipped rather than partially reflected;
+- a record literal with a field whose type is outside the reflected fragment
+  (a `String`, a function, a nested record) bound to anything but a literal
+  data constructor;
+- a record literal with a **list field holding concrete elements**
+  (`history: Cons(1, Nil)`). The built-in `List` is generic, so the checker
+  models its element type as an opaque sort — an `Int` cannot be placed there,
+  and rather than build a query the solver would reject, the whole record is
+  skipped. An **empty** list (`history: Nil`) has no elements and reflects
+  fine, which is what the `len(v.history) == v.count` examples above rely on.
+
+Records also compose with measures — `{v : State | len(v.history) == v.count}`
+reasons about a `List` field structurally, exactly as `len` does elsewhere.
+
 ## String Refinements
 
 `len` also measures a **String**, so an emptiness contract is expressible and
@@ -421,14 +481,18 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int`/`Bool` values, `String` (narrowly), plus ADT constructor *tags*.**
-  There are **no `Float` value-refinements** — encoding floats as mathematical
-  reals is unsound for IEEE-754 arithmetic, so it's deliberately omitted.
-  `String` supports only `len` and literal equality (see
-  [String Refinements](#string-refinements)). Over an ADT the checker reasons
-  about the constructor tag only (`is_Some(_)`), never the payload:
-  `{Option(Int) | is_Some(_)}` is checkable, a predicate about the `Int` inside
-  is not. Refinements over other types aren't supported.
+- **`Int`/`Bool` values, record fields, `String` (narrowly), plus ADT
+  constructor *tags*.** There are **no `Float` value-refinements** — encoding
+  floats as mathematical reals is unsound for IEEE-754 arithmetic, so it's
+  deliberately omitted. A predicate may range over the `Int`/`Bool` **fields of
+  a record** (see [above](#refining-a-record-over-its-fields)); a record field
+  of an unreflected type makes the whole record opaque. `String` supports only
+  `len` and literal equality (see
+  [String Refinements](#string-refinements)). Over a **variant**
+  (multi-constructor) ADT the checker reasons about the constructor tag only
+  (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
+  a predicate about the `Int` inside is not. Refinements over other types
+  aren't supported.
 - **A tag refinement is discharged at the call site, not carried through a
   binding.** A constructor literal or a `match` narrowing establishes the fact
   where the call is written. Forwarding a `{Option(Int) | is_Some(_)}`

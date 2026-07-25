@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- A refinement over a **record's fields** is now checked on **parameters**, not
+  just return types. Given `fn serve(c : {v : Config | v.port >= 1})`, the call
+  `serve({ port: 0 })` is a compile error. A record literal argument is a fact
+  (fields are matched by name, so declaration order doesn't matter), and a
+  variable holding a record-refined parameter carries its fields through, so
+  forwarding to a same-shaped parameter verifies. An unrefined record, a record
+  literal with an unknown field value, or a field outside the reflected
+  fragment is skipped rather than guessed at — the definite-failure stance is
+  unchanged, and correct code is never flagged.
+
 - Refinement types now support `String`. `len` measures a String as well as a
   list, so `{String | len(_) > 0}` and `{String | _ != ""}` are checkable
   contracts and passing an empty string literal to a non-empty parameter is a
@@ -65,6 +75,24 @@ git log is authoritative for exact commits.
   the whole run — so every later call site was silently left unchecked with no
   diagnostic. Error lines are now skipped, and a query that produced one is
   reported as unproven rather than trusted.
+
+- **A z3 error message spanning more than one line no longer shifts every later
+  verdict by one.** The fix above skipped a single `(error …)` *line*, but a
+  sort mismatch prints the offending term and then a second line naming the
+  declaration it violates; the continuation stayed in the pipe and was consumed
+  as the *next* query's answer. Under the definite-failure stance that is worse
+  than an unchecked call — a later, unrelated, **correct** call inherits some
+  other query's `unsat` and is reported as a violation. The whole error
+  s-expression is now consumed, counting parens only outside its quoted
+  message.
+
+- **A record argument holding a list literal with concrete elements is now
+  skipped instead of building a malformed query.** `{ history: Cons(1, Nil) }`
+  puts a well-sorted `List` constructor at a `List` field, but the built-in
+  `List` is generic so its element sort is opaque, and the integer `1` does not
+  fit there. The field sort-check only looked at the top-level term, so the
+  mismatch reached z3 — the exact multi-line error above. The check now
+  recurses into a constructor's arguments.
 
 - **A refinement path fact survived a rebinding of the name it was about**, so
   correct code could be flagged. After `if x < 0 do`, a `let x = 5` inside the
@@ -158,6 +186,17 @@ git log is authoritative for exact commits.
   resolved its root to the *parent* repository and benchmarked that
   compiler rather than the one under test — silently reporting the wrong
   binary's numbers, with no error.
+
+### Fixed
+
+- A record refinement whose record had a field of a non-`Int` type bound to a
+  variable (e.g. `{ port: 8080, name: n }` where `name : String`) could
+  silently disable refinement checking for the **rest of the file**. The
+  reflection placed the variable at the wrong solver sort, the solver rejected
+  the malformed query, and the error desynchronised the long-lived solver
+  session, so every later check — including plain `Int` ones in unrelated
+  functions — came back inconclusive and reported nothing. Such a record is now
+  skipped instead of mis-reflected.
 
 ### Changed
 

@@ -105,12 +105,53 @@ let read_balanced (ic : in_channel) : string =
    against an incomplete assertion state and is therefore NOT trusted: [check]
    maps it to [Unknown].  That direction matters — under the definite-failure
    stance a spurious `sat` would be reported as a refinement violation, i.e. a
-   false positive on correct code. *)
+   false positive on correct code.
+
+   An `(error …)` is a whole s-expression and its quoted message is often
+   MULTI-LINE — a sort mismatch prints the offending term and then a second
+   line naming the declaration it violates.  Skipping only the first line would
+   leave the continuation in the pipe to be consumed as the NEXT query's
+   verdict, shifting every later answer by one: precisely the desynchronisation
+   this is meant to prevent, and one that manifests as false positives (a
+   later, unrelated, CORRECT call inherits some other VC's `unsat`).  So the
+   error is consumed to its closing paren, counting parens only OUTSIDE the
+   quoted message. *)
+
+(* Advance an s-expression scan across one line: returns the paren depth and
+   whether the line ended inside a quoted string.  Parens inside a string
+   literal are message text, not structure, so they are not counted.  (SMT-LIB
+   escapes an embedded quote as `""`, which this reads as close-then-reopen —
+   the same end state, so the escape needs no special case.) *)
+let scan_sexp ~(depth : int) ~(in_string : bool) (line : string) : int * bool =
+  let d = ref depth and q = ref in_string in
+  String.iter
+    (fun c ->
+      if !q then (if c = '"' then q := false)
+      else
+        match c with
+        | '"' -> q := true
+        | '(' -> incr d
+        | ')' -> decr d
+        | _ -> ())
+    line;
+  (!d, !q)
+
 let rec read_verdict (ic : in_channel) ~(saw_error : bool) : string * bool =
   let line = String.trim (input_line ic) in
   if line = "" then read_verdict ic ~saw_error
-  else if String.starts_with ~prefix:"(error" line then
+  else if String.starts_with ~prefix:"(error" line then begin
+    (* Consume the rest of this error s-expression, however many lines it takes. *)
+    let d = ref 0 and q = ref false in
+    let d0, q0 = scan_sexp ~depth:0 ~in_string:false line in
+    d := d0;
+    q := q0;
+    while !d > 0 do
+      let d1, q1 = scan_sexp ~depth:!d ~in_string:!q (input_line ic) in
+      d := d1;
+      q := q1
+    done;
     read_verdict ic ~saw_error:true
+  end
   else (line, saw_error)
 
 let check ?(preamble = "") (t : t) (vc : Smt.vc) : result =
