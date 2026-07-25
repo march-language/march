@@ -49,6 +49,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
+  absence of an answer, not an answer: the solver runs under a wall-clock
+  timeout, so a loaded machine could turn a decidable check into `unknown` and
+  the cache would freeze that accident into every later build. A malformed
+  query also yields `unknown`, so caching one made a compiler bug's
+  silently-unchecked result outlive the fix for that bug — which is how a warm
+  cache masked two refinement regression tests. Caches written before this
+  change self-heal, and real verdicts are still cached.
+
 - A single malformed verification condition no longer disables refinement
   checking for the rest of a compilation. z3 emits an `(error …)` line and then
   still answers the query, but that line was read as the verdict; the solver was
