@@ -6,6 +6,234 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Merge-loss round 2 — 14 commits on `docs/core-march-types-skeleton` never reached `main` (2026-07-24)
+
+**A second, distinct merge loss from the same branch as the 2026-07-18 audit
+(which was recorded as COMPLETE).** `git merge-base --is-ancestor <sha> HEAD`
+says NO for all of these; `git log --oneline main..e283d9b9` counts 14.
+
+- ✅ **RESTORED 2026-07-24: `e283d9b9` — "perceus: un-starve FBIP reuse (sink
+  past RC ops)".** This one was found the expensive way, via a 7.5x benchmark
+  regression. See the dedicated entry below.
+### Audit results (2026-07-24) — the branch holds 31 non-docs commits, not 13
+
+Method: patch re-application is useless after months of drift (169/275 came
+back "ambiguous"), so each commit was scored by **content presence** — what
+fraction of its substantive added code lines exist anywhere in `lib/ bin/
+runtime/ stdlib/ forge/ lsp/ js/` today. Calibrated against three known
+outcomes: `e283d9b9` (restored this session) → 100%, `c30161d7` and
+`4b4c70b3` (restored by the 2026-07-18 audit) → 100% / 90%. Script kept at
+`scratchpad/content_audit.sh`.
+
+**A low score means "this implementation is absent", NOT "the bug is live"** —
+several were superseded by a different fix that IS in `main` (e.g. `5a648f9c`
+to_string-via-Show scores 0% but was superseded by `6d2eed85`, and to_string
+on containers verifiably works). Every claim below is a *behavioural* probe,
+not a line count.
+
+**CONFIRMED LIVE BREAKAGE ON `main` (2026-07-24):**
+
+- [ ] **`4a1c2ee3` — compiled `String.from_codepoint` does not LINK.**
+  `Undefined symbols: "_string_from_codepoint", referenced from
+  _String.from_codepoint`. Interpreted it works and prints `Some(A)` /
+  `Some(☃)`. Any compiled program touching the codepoint codec fails to
+  build. This is precisely what the lost commit's subject line says it
+  unblocked.
+- [ ] **`61ce42b0` — two bench programs crash compiled (exit 138/SIGBUS).**
+  `bench/iolist_template.march` and `bench/string_pipeline.march` both die
+  with no output. The lost commit is titled "make IOList flatten stack-safe;
+  kill two bench stack overflows" — the same two.
+- [ ] **`bench/deque_ops.march` does not terminate compiled** (killed at 180s,
+  produces nothing). Not yet mapped to a specific lost commit.
+
+**Probed and NOT reproducing** (superseded, or the probe doesn't hit it):
+`d2d0a3a3` (`examples/stats_basic.march` interp==compiled parity ok),
+`895ebfee` (`bench/dataframe_bench.march` runs clean), `5a648f9c`
+(to_string-on-container works, superseded by `6d2eed85`), `c30161d7`,
+`4b4c70b3`, `b7140673`, `778d399c`, `a7f96dad` (all score PRESENT).
+
+- [ ] **Still unprobed, ranked by risk** — each needs a behavioural test
+  before any verdict: `f2b67001` (niche-erased Option FBIP reuse → RC
+  underflow), `f2729935` / `6f047e02` (Perceus RC field-type resolution),
+  `6dd1968c` (B18 TCO release-timing), `4a58e992` (Task.race/any/cancel —
+  possibly superseded by the 2026-07-18 cancel-token work), `03498340`
+  (node_discovery stack overflow; the torn-stdout half is superseded by
+  `e73644aa`), `c430e330` (reject overlapping impls), `b267a436` (derived
+  structural Show), `b84ae429` (monomorphism restriction), `fcfd78ba` +
+  `3c8826a0` + `4ab998ea` (the three-stage uniform apply-fn ABI flip — these
+  are a *sequence*; restoring one without the others is likely worse than
+  restoring none), `d5562dfc`, `1a547481`, `21f4fbb2`, `8f624a50`,
+  `7868160e`, `65eefa53`.
+
+### Why the safety nets missed all of this
+
+- [ ] **The differential oracle cannot see these crashes.**
+  `bench/iolist_template.march` is `SKIPPED`; `string_pipeline` and
+  `deque_ops` are `INTERP_TIMEOUT`. The sweep only compares programs where
+  the tree-walking interpreter produced ground truth inside its 10s budget,
+  so for every compute-heavy benchmark — exactly the ones most likely to
+  exercise RC, FBIP and TCO — a compiled SIGBUS, hang, or wrong answer is
+  invisible. The sweep reported **0 divergences** on the same day three bench
+  programs were broken compiled. Give these an expected-stdout anchor and
+  compare the compiled run against it directly, with no interpreter leg.
+- [ ] **Nothing runs the benchmarks.** `bench/*.march` is not in `dune
+  runtest`; the FBIP regression, both SIGBUS crashes and the `deque_ops` hang
+  would all have been caught by a cheap "every bench program compiles, runs,
+  exits 0, and prints its known answer" gate. That gate does not exist.
+- [ ] **Process gap, not just a backlog.** Two separate audits of this branch
+  have now each declared completion while leaving real fixes behind. Before
+  the next one, decide on a mechanical check (e.g. a CI job asserting no
+  `fix(`/`feat(` commit on a merged branch is missing from `main`) rather than
+  a third manual pass.
+
+## Perceus FBIP in-place reuse was disabled program-wide (FIXED 2026-07-24)
+
+- ✅ **FIXED — `lib/tir/perceus_fbip.ml` `try_fbip_sink` now hops `ESeq` heads
+  that are RC ops on a DIFFERENT variable.** Once `join_points` began lifting a
+  match's panic default arm into a `$jp_clo` closure, every real arm carried a
+  `dec_rc $jp_clo` between its `let` chain and its tail `EAlloc`.
+  `try_fbip_sink` only traversed `ELet`, so the scrutinee's own `dec` never
+  reached the alloc and **no `EReuse` was ever emitted anywhere in any
+  program** — every in-place rewrite silently became free + fresh allocation.
+  Sound to sink past: RC ops neither read fields nor observe ordering,
+  delaying a `dec` can only delay (never hasten) a free, and the aliasing
+  corner is caught by `EReuse`'s runtime RC==1 uniqueness branch (shared cells
+  take the fresh-alloc path). Companion fail-loudly full-overwrite guard added
+  at the generic `EReuse` emission site in `lib/tir/llvm_emit.ml`.
+  `bench/tree_transform.march` 3842.5 ms → 852.2 ms; `bench/list_ops.march`
+  143.0 ms → 67.3 ms (exactly its pre-regression figure).
+- **The lesson worth keeping: the golden snapshot certified the regression.**
+  `test/snapshots/perceus/fbip_dead_binding_reuse.expected` — whose source
+  header states "Perceus should reuse the freed cell (EReuse)" — had the
+  starved `dec_rc xs; ... alloc List.Cons(...)` shape pinned as its EXPECTED
+  output. A snapshot regenerated without reading the diff against the
+  fixture's stated intent is worse than no snapshot: it converts a regression
+  into a guarantee. Regenerating snapshots is a review step, not a chore.
+
+## Performance regressions vs the 2026-03-24 benchmark table (OPEN, 2026-07-24)
+
+Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
+class, with OCaml/Rust as controls (both within noise of their 2026-03-24
+figures, so the host is not the variable). See `bench/RESULTS.md`.
+
+### ROOT-CAUSED AND FIXED 2026-07-24 — the per-call check was a TLS resolver call
+
+**`66371f3b` (2026-03-25) "feat(sched): Phase 4 — reduction counting in
+compiled code" landed the day AFTER the 2026-03-24 benchmark table was
+recorded.** Every compiled function entry now emits a load / decrement /
+store against the `@march_tls_reductions` global plus a conditional branch to
+`@march_yield_from_compiled` (`Llvm_ctx.emit_reduction_check`, gated only on
+`ctx.repl`). So the published table is a pre-preemption baseline and every
+number since carries this cost. **This is the price of a deliberate feature,
+not a regression to hunt** — but it was never re-baselined, so it has been
+sitting in the table as an unexplained 2.2x.
+
+A/B measured by gating the emission behind a temporary env var, **with
+`.march/cas/artifacts` cleared between every build** (see the warning below):
+
+| benchmark | TLS check (before) | plain-flag check (now) | no check at all | 2026-03-24 |
+|---|---|---|---|---|
+| `fib(40)` | 640 ms | **465 ms** | 360 ms | 288 ms |
+| `tree_transform` | 852 ms | **579 ms** | 540 ms | 513 ms |
+| `list_ops` | 67 ms | **64 ms** | 80 ms* | 68 ms |
+| `binary_trees` | 177 ms | **165 ms** | 150 ms | 265 ms |
+
+\* the allocation-bound benchmarks are within noise of each other; the check
+cost falls almost entirely on call-dense code.
+
+Removing it lands `fib` and `tree_transform` essentially back on their
+historical figures, which closes both open items. Allocation-bound
+benchmarks are unaffected — the cost is per *call*, so it falls entirely on
+call-dense recursive code.
+
+Ruled out along the way, so nobody re-walks them: the tag/untag round-trip
+through the `case` result slot (`shl`/`or`/`inttoptr` on store, conditional
+`ashr`+`select` on load — present today, a bare `inttoptr` in 2026-03; in
+isolation the tagged form is *marginally faster*), March's clang flags
+(`-fno-strict-aliasing -fwrapv -msse4.2` — no effect), and scheduler thread
+count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
+
+- ✅ **FIXED — the cost was never the check's arithmetic, it was TLS.**
+  `march_tls_reductions` is `_Thread_local`, and thread-local access is an
+  indirect resolver call on both supported platforms: Darwin/arm64 emits
+  `adrp; ldr; blr` through the TLV descriptor, Linux/arm64 PIE goes through
+  TLSDESC. Confirmed by disassembly (`blr x8` at the top of every `_fib`
+  call) and by isolating the same IR against a plain global, where the check
+  measured as free. Compiled code now reads a plain, process-wide
+  `march_preempt_request` flag set by the preemption handler once per
+  quantum. Measured: `fib(40)` 640→465 ms, `tree-transform` 852→579 ms,
+  `binary-trees` 177→165 ms, `list-ops` 67→64 ms.
+  - **The load must be `volatile`.** A plain load of a global that nothing in
+    the loop writes is loop-invariant, so LLVM hoists it straight out of a
+    TCO loop body and the loop never re-reads it — preemption silently stops
+    for exactly the tail-recursive loops that need it most. The old
+    load/decrement/**store** sequence could not be hoisted, which is why this
+    hazard never existed before.
+  - **Also fixed a pre-existing hole this exposed:** `march_sched_run`'s
+    single-scheduler fast path returned without ever calling
+    `march_sched_preempt_start()`, so `MARCH_NUM_SCHEDULERS=1` had no timer
+    preemption whatsoever and depended entirely on the reduction counter.
+  - **Pinned by `test/native/preempt_starvation.march`** (new): a CPU-bound
+    TCO loop and a short task on ONE scheduler thread, asserting the short
+    one prints first. `MARCH_NUM_SCHEDULERS=1` is essential — with the
+    default 4 threads the sibling runs on another OS thread and prints first
+    even with preemption completely broken, so the obvious version of this
+    test would have passed against both bugs.
+- ✅ **PARTIALLY RECOVERED (2026-07-24, same day): the residual was the
+  missing `nsw` on the scalar tag.** `emit_tag_scalar`'s `(v<<1)|1` used a
+  plain `shl`, leaving a sign-truncating `sbfx` per scalar round trip AND
+  blocking LLVM's accumulator TRE. With `shl nsw` (sound: it asserts the
+  63-bit round-trip losslessness the convention already assumes; an
+  out-of-range Int was already corrupted, it is now poison instead — see the
+  comment in `lib/tir/llvm_ctx.ml`), `fib` compiles to an accumulator loop
+  with one recursive call, volatile preemption check verified INSIDE the
+  loop (disassembly + starvation test): 465 -> ~390 ms. Oracle 100 MATCH /
+  0 divergences.
+- [ ] **Remaining `fib` gap vs 2026-03-24 (~390 vs 288 ms): the per-iteration
+  volatile check plus call frame.** ~100 ms over ~165M loop iterations
+  (post-TRE) ≈ 2 cycles/iteration — the price of staying preemptible. Any
+  further recovery means checking less often (e.g. unrolling the TRE loop or
+  a check-every-N scheme), which re-opens the counter-cost question; not
+  obviously worth it.
+- [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
+  so the table stops implying a regression that is actually a feature cost.
+
+> ⚠️ **Benchmark A/B methodology — the CAS artifact cache will lie to you.**
+> The first run of this experiment concluded "the reduction check costs
+> nothing", because compiled artifacts are content-hash cached in
+> `<project>/.march/cas/artifacts/` and the key covers compiler flags but
+> **not environment variables**. Both arms of the A/B were served the same
+> cached binary. Always `rm -rf .march/cas/artifacts` between arms and
+> confirm the two outputs have *different* hashes before believing a null
+> result. (Same class as the existing `cas_flags` note for CLI flags.)
+- **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
+  `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
+
+## Compiler: `pfn` unreachable from a sibling in the same NESTED module (OPEN, 2026-07-24)
+
+- [ ] **A public `fn` in a nested `mod` cannot call a `pfn` declared beside it
+  in that same module** — reported as `Module `X` does not export `y``.
+  Top-level modules are unaffected. Since the project convention is exactly
+  one top-level `mod` per file, nested modules are the normal way to have
+  several modules, so this breaks ordinary private-helper code. Minimal repro:
+
+  ```march
+  mod Outer do
+    mod Crypto do
+      fn encode(x : Int) : Int do scramble(x) end
+      pfn scramble(x : Int) : Int do x * 31 end
+    end
+  end
+  -- Module `Crypto` does not export `scramble`.
+  ```
+
+  Found by the differential oracle: `examples/modules.march` (whose Part 3 is
+  a deliberate pub-vs-`pfn` demonstration) now fails to typecheck at all, so
+  it reports `INTERP_FAIL` and reddens the sweep. Suspected interaction
+  between the 0.2.0 "Module does not export" diagnostic change and the
+  intra-module qualification pass (`specs/2026-06-23-desugar-intra-module-qualification.md`)
+  rewriting the bare call to a qualified one before the export check runs.
+
 ## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
 **Read this before assuming a green CI run means the corresponding behavior works.**
@@ -70,6 +298,7 @@ makes a quarantine indistinguishable from a deletion.
   - **Confirmed cross-thread (not a single-threaded logic bug):** with `MARCH_NUM_SCHEDULERS=1` (fully cooperative, one OS thread, no real concurrency possible), 100/100 iterations ran clean. Only the default multi-scheduler mode reproduces it.
   - **Heisenbug — any instrumentation near the hot path suppresses it:** `MARCH_SANITIZE=thread` (ThreadSanitizer) ran 40 iterations completely clean, no race reported. A custom lightweight lock-free trace (atomic ring buffer logging every step of `task_wait_done`'s check/register/recheck, `march_thunk_trampoline`'s done-store/waiter-read/wake-call, and `march_sched_wake`'s status-check/CAS/push, in `runtime/march_scheduler.{c,h}`+`runtime/march_runtime.c`, guarded by a `MARCH_TRACE_WAKEUP` macro) ALSO ran 300 iterations clean — the race window is apparently narrow enough that even a plain relaxed atomic fetch-add + a couple of field writes per event closes it. The tracing instrumentation was reverted (not committed) once it failed to reproduce; it added zero net signal.
   - **Manual code review of the check-register-recheck sequence** (`task_wait_done`/`march_thunk_trampoline`, `runtime/march_runtime.c:1988-2096`) traced through every interleaving constructible by inspection and each one is saved by either the fast-path check or the recheck, under standard C11 per-location coherence reasoning (a load of an atomic after a store to the SAME location, in real time, must observe that store regardless of ordering on OTHER locations). Did not find the specific gap by inspection alone — which is itself informative: this is subtle enough that static reading isn't sufficient, and either involves a multi-step interaction with `march_sched_wake`'s own PARKED-spin handshake, or a genuine ARM64/Apple-Silicon weak-memory subtlety not captured by the naive coherence argument.
+  - **RE-CONFIRMED LIVE 2026-07-24 on `main` (132e2a90), and one candidate mechanism EXPERIMENTALLY RULED OUT.** Rate on a quiet host, default 4 schedulers, `test/native/task_burst_await.march` compiled `--opt 2`, 15s per-run watchdog: **24 hangs / 500 runs (4.8%)**. So the `21c8a0b0` park/wake work fixed the throughput cliff but did NOT fix this. Ruled out: the hypothesis that `march_sched_wake`'s "not WAITING — no need to wake" early return on `PROC_RUNNING` drops the wake when the trampoline lands between `task_wait_done`'s final recheck and its `march_sched_park_self` (`recv` is immune only because it holds `mbox_lock` across both its emptiness check and its `PROC_PARKED` store; `task_wait_done` has no such lock). A standard LockSupport-style wake permit (`march_proc.wake_pending`, deposited before the status load, consumed instead of parking, re-checked after the `PROC_PARKED` store with a status rewind) was implemented and measured at **25 hangs / 500 runs** — statistically identical to baseline. Reverted, not committed. The permit was necessary-looking but not sufficient, so the missed edge is elsewhere; do not re-derive this hypothesis from scratch.
   - **Not yet tried (next steps for a future session):** (a) reproduce on Linux/x86-64 via the project's own zig cross-compile toolchain, to check if this is ARM64/Apple-Silicon-specific (different memory model, different `swapcontext` syscall cost) or portable; (b) per-thread (`_Thread_local`, non-atomic) trace buffers instead of a shared atomic ring buffer, to get tracing overhead close to zero — read them post-hang by walking each OS thread's TLS block via the debugger, more complex to set up but avoids the shared-atomic-fetch-add cost entirely; (c) intentionally add external CPU load during the stress loop to simulate "host oversubscription," which 45ccb8e7's commit message (below) cites as the suspected trigger condition for these hangs; (d) `rr` record-and-replay is Linux-only, so not usable on this macOS dev machine directly, but would be the most direct tool if reproduced on Linux via (a).
   - Given this bug's existence, **any CI run whose `Test` step happens to hit this exact test can hang indefinitely** regardless of the `timeout-minutes` containment added in the CI-hardening entry above (which bounds the damage to minutes instead of 6 hours, but does not fix the underlying hang). Confirmed the park/wake fix immediately below (`21c8a0b0`) does NOT prevent this — it was reproduced against current HEAD, which includes that fix.
   - **QUARANTINED from `dune runtest` (2026-07-24)**, confirmed live in CI: after landing the `timeout-minutes` containment above, the very next `main` push hit this exact race on BOTH `build (ubuntu-24.04)` and `build (macos-15)` in the same run (`Test` step failing at the full 30-minute timeout on each) — the deadlock reproduces much more readily on GH Actions' weaker/shared runners than on a beefy local dev machine, apparently pushing CI from "occasionally hangs" to "hangs most runs." `test/dune`'s `task_burst_await` diff rule now uses its own `task_burst_await_quarantined` alias instead of `runtest` (compile-check rule untouched, so a real compile regression there still surfaces); un-quarantine once the deadlock itself is fixed.
@@ -989,6 +1218,24 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 ## Done (recently completed)
 
+- Record field preconditions **integrated with `main`** (String refinements,
+  ADT constructor tags, the predicate-vocabulary foundation, and the two
+  solver-robustness fixes), 2026-07-24. `sig_of_clause` now collects through
+  `main`'s `refined_param_ty` — a record IS a registered 1-constructor ADT, so
+  one predicate admits all four refinable bases; a new `is_record_sort` picks
+  the record-specific path (field selectors) out of the three things
+  `rparam.sort` can now name. The branch's dedicated record preamble was
+  dropped: the record path seeds its sort into `main`'s `adt_sorts` and
+  inherits the existing deduplication against the measure and `$Str`
+  preambles, so a VC mentioning a record AND a tester AND a string declares
+  each sort once. Two real defects found and fixed during the sweep:
+  `term_fits_sort` was shallow, so `history: Cons(1, Nil)` (an `Int` in the
+  generic `List`'s opaque `Elem` field) built a malformed VC; and z3's
+  multi-line `(error …)` reply left a continuation line in the pipe that was
+  read as the NEXT query's verdict, shifting every later answer by one and
+  turning correct calls into reported violations. `term_fits_sort` now
+  recurses into constructor arguments; `read_verdict` consumes the whole error
+  s-expression. `test_refinecheck` 124 → 137, all green on a cold VC cache.
 - Record field **preconditions**: a refinement over a record's fields
   (`{v : Config | v.port >= 1}`) is now checked on parameters at every call
   site, closing the half that return-type record refinements already covered.
@@ -1009,6 +1256,104 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
   functions later went unreported). `reflect_record_literal` is now
   sort-checked against `ctor_field_sorts`; this also closes the same hole on
   the return side. `test_refinecheck` 86 → 97, all green on a cold VC cache.
+- String refinements integrated with the predicate-vocabulary foundation and
+  ADT constructor-tag refinements (`lib/refinecheck/refine_check.ml`,
+  2026-07-24). `rparam` now carries a single `sort : string option` covering
+  `Int`/`String`/ADT instead of the two branches' parallel flags; `smt_of`
+  carries both `?resolve_tester` and `?resolve_str_lit`; path conditions
+  resolve in the caller's namespace *and* see the string-literal table. One
+  hazard existed only in the combination: `path_resolve_var` would declare a
+  `$Str`-sorted caller variable a second time as `Int`, which makes z3 emit an
+  error line and silently disables refinement checking for the rest of the
+  compilation — it now yields the string-sorted constant, with a
+  drop-`Int`-decls-for-`$Str`-symbols guard at VC assembly as backstop. The
+  measure, ADT-datatype and `$Str` preambles compose in any combination
+  (verified by teeing the solver channel: zero `(error` lines, and a later
+  violation in the same file still reported). `test_refinecheck` = 124 tests,
+  19/19 suites registered.
+
+- String refinements: `{String | len(_) > 0}` and `{String | _ != ""}` are
+  checkable contracts. `String` is encoded as an uninterpreted SMT sort, `len`
+  as an uninterpreted `Str -> Int` with a non-negativity axiom, and each
+  distinct string literal in a VC as a constant with its BYTE length pinned
+  (matching `string_length`, which aliases `march_string_byte_length`) and
+  pairwise distinctness asserted — deliberately inside EUF + linear arithmetic,
+  with no SMT string theory. `len` overload resolution keys on the value's
+  DECLARED base type, never on inference, so list `len` is unchanged. Two
+  encoding hazards found and fixed during the work: the SMT symbols now carry a
+  `$` (illegal in a March identifier) so a program variable named `len` cannot
+  collide with the `len` function declaration, and ill-sorted terms mixing a
+  string with an Int are dropped — either one made z3 emit an error line, which
+  desynchronised the shared long-lived `z3 -in` channel and silently disabled
+  refinement checking for the REST of the compilation. Known gaps (documented):
+  an `s == ""` guard establishes no length in the else-branch (no injectivity
+  axiom), no prefix/suffix/contains/regex, and String return refinements are
+  checked at the definition but do not propagate to call sites.
+
+- Refinement path-fact shadowing + caller/callee namespace split
+  (`lib/refinecheck/refine_check.ml`, 2026-07-24). Three review-found false
+  positives, all "a fact about a *name* read where that name changed meaning".
+  (1) `path_shadow` (+ `expr_mentions`) is the path-context companion to
+  `scope_shadow`: it drops any path condition mentioning a name a binding
+  construct rebinds, applied at all five sites in `visit` (`EBlock` `let`
+  threading, `ELam`, `ELetFn`, `EMatch` arm binders, `ELetQ`) and the two in
+  `tails`. Fixes both the ADT case (`None -> let x = Some(1); unwrap(x)`) and
+  the pre-existing `Int`/`if`-guard case. Over-approximate by design —
+  discarding a fact can only produce silence. (2) `check_call` gained
+  caller-namespace `path_resolve_var`/`path_resolve_measure`/
+  `path_resolve_tester` for the path context, so a path condition is no longer
+  re-pointed at the callee's actuals through `rp.binder`/`actual_of_name`; a
+  caller variable reflects to `Const name`, the same term an `EVar` actual
+  reflects to, so narrowing still links. Predicate translation unchanged.
+  (3) `register_builtin_adts`/`register_adt_names`/`register_field_sorts`
+  hoisted out of the `measure_axioms` guard — with the flag off, `adt_ctors`
+  was empty and the vocabulary warning falsely called `is_Some` unknown.
+  Plus: removed `is_adt_base`'s stale `[@@warning "-32"]`; documented the
+  `as`-pattern narrowing limit; replaced the vacuous "narrowing does not leak
+  past a rebinding pattern binder" test (both arms were `-> 0`, so nothing was
+  checked). `test_refinecheck.exe`: 112 tests, exit 0 (was 104); nine new
+  cases, each confirmed RED first. Open follow-up: `check_post`'s `resolve_var`
+  has the same caller/callee conflation for a *named* return binder.
+
+- ADT constructor-tag refinements (`lib/refinecheck/refine_check.ml`,
+  `lib/refine/smt.ml`, 2026-07-24). Every constructor of every registered ADT
+  implicitly gains an `is_<Ctor>` tester the refinement checker understands
+  (`ctor_of_tester`, folded into `known_predicate_fn`), reflected to the Z3
+  datatype tester `((_ is Ctor) x)` via a new `Smt.IsCtor`. Two fact sources:
+  a constructor literal at the call site (`unwrap(None)`), and `match`-arm
+  narrowing, which pushes a synthetic `is_Ctor(s)` path condition so it flows
+  through the existing `smt_of` translation. `rparam` gained a `sort` field and
+  `refined_param_ty` admits any registered-ADT base type; `check_call` reflects
+  the subject with the existing `reflect_dt` and attaches the datatype
+  declarations (`adt_vc_preamble`, deduplicated against `measure_preamble`).
+  `Option`/`Result` are seeded in `register_builtin_adts` alongside `List` —
+  the plan assumed they came from stdlib `DType`s, but they have NO `type`
+  declaration anywhere; the typechecker pre-registers them (`builtin_ctors`)
+  and the refinement checker must do the same or `is_Some` names nothing.
+  Deliberately NOT extended: `refined_scope_ty` / `return_refine_ext` /
+  `check_post`, so a tag refinement is discharged at the call site and not
+  carried through a binding — extending `scope_facts` would have flipped
+  `check_post` into its "SAT = definite error" mode for ADT scope entries whose
+  sorts the record preamble does not declare, a false-positive risk with no
+  test coverage. Narrowing is skipped for a non-variable scrutinee, an arm that
+  rebinds the scrutinee's name, and an ambiguous constructor name (shared by
+  two ADTs). `test_refinecheck.exe`: 104 tests, exit 0 (was 94);
+  `run_compiler`/`run_eval`/`run_stdlib -q` all exit 0; zero new diagnostics on
+  stdlib-using programs.
+
+- Refinement predicate-vocabulary warning: `lib/refinecheck/refine_check.ml`
+  names the predicate vocabulary in one place (`predicate_operators`,
+  `is_predicate_operator`, `known_predicate_fn` = operators ∪ `len` ∪
+  registered `@[measure]`s) instead of leaving it scattered across
+  `is_measure`/`is_nonneg_measure`/inline `"len"` checks, and adds
+  `is_string_base`/`is_adt_base` base-type predicates for the ADT-tag and
+  String-refinement features to dispatch on (no consumer yet). A predicate
+  applying a name outside that vocabulary — e.g. `{Int | totally_bogus_fn(_) >
+  0}`, which previously compiled clean and enforced nothing — now draws a
+  Warning (never an Error; `--check` still exits 0) covering parameter,
+  return, and local-binding refinements. Verified zero spurious warnings on a
+  real stdlib-using program. `test_refinecheck.exe`: 94 tests, exit 0 (was
+  86); `run_compiler`/`run_eval` both exit 0.
 
 - Tier 0 postcondition propagation: a callee's closed return refinement is
   recorded in `fn_sig.ret` and consumed at call sites, for both `let`-bound and

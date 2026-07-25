@@ -69,6 +69,48 @@ let with_solver name f =
       | None -> Printf.printf "\n[skip] %s: no z3 on PATH\n" name
       | Some s -> Fun.protect ~finally:(fun () -> Solver.close s) (fun () -> f s))
 
+(* A VC whose preamble z3 rejects (unknown sort), used to prove that ONE bad VC
+   does not take the shared solver channel down with it.  Before the fix, z3's
+   `(error …)` line was read in place of the verdict, Solver.check raised, and
+   Refine killed + respawned the solver twice before marking z3 unavailable for
+   the WHOLE REST OF THE RUN — every later VC silently unchecked. *)
+let bad_preamble = "(declare-const bogus NoSuchSort)"
+
+let resync_suite =
+  [ with_solver "a z3 error yields Unknown, not a wrong verdict" (fun s ->
+        (* The verdict after an error is computed against an incomplete state,
+           so it must never be trusted: under definite-failure a bogus `sat`
+           would be reported as a violation — a false positive. *)
+        match Solver.check ~preamble:bad_preamble s sample_vc with
+        | Solver.Unknown -> ()
+        | Solver.Unsat -> Alcotest.fail "expected unknown, got unsat"
+        | Solver.Sat _ -> Alcotest.fail "expected unknown, got sat");
+
+    with_solver "the channel resyncs: a later VC still checks correctly" (fun s ->
+        ignore (Solver.check ~preamble:bad_preamble s sample_vc);
+        (* Same solver, next VC.  If the channel were desynchronized this reads
+           a stale line; if the solver were dead this raises. *)
+        match Solver.check s sample_vc with
+        | Solver.Unsat -> ()
+        | Solver.Sat _ -> Alcotest.fail "desynced: expected unsat, got sat"
+        | Solver.Unknown -> Alcotest.fail "desynced: expected unsat, got unknown");
+
+    with_solver "a bad VC does not disable checking for later ones (Refine)" (fun s ->
+        ignore s;
+        (* Drive the full Refine path, which is where the shutdown happened. *)
+        let root = Filename.get_temp_dir_name () in
+        (match Refine.discharge ~root ~preamble:bad_preamble sample_vc with
+         | Refine.Unverified -> ()
+         | Refine.Verified -> Alcotest.fail "expected unverified, got verified"
+         | Refine.Refuted _ -> Alcotest.fail "expected unverified, got refuted");
+        let later = Refine.discharge ~root sample_vc in
+        (* Reap the shared solver this test spawned, so the lifecycle suite's
+           child count isn't polluted by it. *)
+        Refine.shutdown ();
+        match later with
+        | Refine.Verified -> ()
+        | _ -> Alcotest.fail "later VC was silently left unchecked") ]
+
 let solver_suite =
   [ with_solver "valid VC is unsat (verified)" (fun s ->
         let vc : Smt.vc =
@@ -132,6 +174,48 @@ let cache_suite =
         Vc_cache.store ~root key Solver.Unsat;
         Alcotest.(check bool) "hit unsat" true
           (Vc_cache.lookup ~root key = Some Solver.Unsat));
+
+    (* `unknown` is the ABSENCE of an answer, not an answer, and persisting it
+       is what let a warm cache mask refinement regression tests: a malformed
+       VC yields Unknown (see the solver-resync suite), and caching that froze
+       the resulting SKIP into the project's cache, where it silently outlived
+       the compiler bug that caused it.  It is also nondeterministic — the
+       solver runs under a wall-clock timeout, so machine load can decide it. *)
+    with_solver "an unknown verdict is NOT cached" (fun _s ->
+        let unk_root =
+          Filename.concat (Filename.get_temp_dir_name ())
+            (Printf.sprintf "march_refine_unk_%d" (Unix.getpid ()))
+        in
+        let bad = "(declare-const bogus NoSuchSort)" in
+        (match Refine.discharge ~root:unk_root ~preamble:bad vc with
+         | Refine.Unverified -> ()
+         | _ -> Alcotest.fail "expected Unverified from a malformed VC");
+        Refine.shutdown ();
+        Alcotest.(check bool) "no cache entry" true
+          (Vc_cache.lookup ~root:unk_root (Vc_cache.key_of_vc ~preamble:bad vc)
+           = None));
+
+    (* The converse: real verdicts must still be cached, or we trade a
+       correctness bug for a performance regression. *)
+    with_solver "a real verdict IS still cached" (fun _s ->
+        let ok_root =
+          Filename.concat (Filename.get_temp_dir_name ())
+            (Printf.sprintf "march_refine_ok_%d" (Unix.getpid ()))
+        in
+        ignore (Refine.discharge ~root:ok_root vc);
+        Refine.shutdown ();
+        Alcotest.(check bool) "cache entry present" true
+          (Vc_cache.lookup ~root:ok_root (Vc_cache.key_of_vc vc) <> None));
+
+    (* Caches written before the no-cache-unknown change still hold `unknown`
+       entries; serving one keeps a VC silently unchecked forever.  A stored
+       unknown must read back as a MISS. *)
+    Alcotest.test_case "a legacy stored unknown reads back as a miss" `Quick
+      (fun () ->
+        let key = Vc_cache.key_of_vc { vc with Smt.assumptions = [ Smt.BoolLit true ] } in
+        Vc_cache.store ~root key Solver.Unknown;
+        Alcotest.(check bool) "reads as miss" true
+          (Vc_cache.lookup ~root key = None));
 
     Alcotest.test_case "round-trips a sat model" `Quick (fun () ->
         let key = "ff" ^ String.make 62 'a' in
@@ -275,6 +359,7 @@ let () =
       ("smt", smt_suite);
       ("model", model_suite);
       ("solver", solver_suite);
+      ("solver-resync", resync_suite);
       ("cache", cache_suite);
       ("refine", refine_suite);
       ("lifecycle", lifecycle_suite) ]

@@ -26,6 +26,28 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* Number of ERRORS the refinement pass reports on [src].  A plain boolean
+   cannot tell "both violations found" from "one found, one silently lost",
+   which is exactly the failure mode the co-occurrence guards below pin. *)
+let refine_error_count src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.length
+    (List.filter
+       (fun (d : March_errors.Errors.diagnostic) ->
+         d.March_errors.Errors.severity = March_errors.Errors.Error)
+       ctx.March_errors.Errors.diagnostics)
+
+(* True iff the refinement pass reports at least one WARNING on [src].
+   [has_refine_error] only sees Errors, so vocabulary diagnostics need this. *)
+let has_refine_warning src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.exists
+    (fun (d : March_errors.Errors.diagnostic) ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning)
+    ctx.March_errors.Errors.diagnostics
+
 let gated name f =
   Alcotest.test_case name `Quick (fun () ->
       if z3_available () then f ()
@@ -133,7 +155,20 @@ let path_suite =
         Alcotest.(check bool) "error" true
           (has_refine_error
              (decl
-                "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")))
+                "  fn g(i : Int) : Int do if i < 0 do take_n(i) else 0 end end")));
+
+    gated "a `let` rebinding the guarded name retires the guard fact" (fun () ->
+        (* `i` inside the branch is a fresh 5, not the guarded outer `i`; the
+           call is correct code and must not be flagged. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (decl
+                "  fn g(i : Int) : Int do\n\
+                \    if i < 0 do\n\
+                \      let i = 5\n\
+                \      take_n(i)\n\
+                \    else 0 end\n\
+                \  end")))
   ]
 
 (* Postconditions: a function's return value must satisfy its return refinement. *)
@@ -457,7 +492,34 @@ let flag_suite =
            end\n"
         in
         Alcotest.(check bool) "gate on" true (has_refine_error prog);
-        Alcotest.(check bool) "gate off" false (has_refine_error_no_axioms prog)) ]
+        Alcotest.(check bool) "gate off" false (has_refine_error_no_axioms prog));
+
+    (* Constructor-tag refinements are NOT measure axioms: the flag documents
+       itself as an escape hatch from measure cost only, so tag checking (and
+       the vocabulary warning that depends on the ADT registry) must behave
+       identically with it off. *)
+    gated "--no-measure-axioms still checks constructor tags" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_no_axioms
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(None) end\n\
+              end\n"));
+
+    Alcotest.test_case "--no-measure-axioms does not call `is_Some` unknown vocabulary"
+      `Quick (fun () ->
+        let ctx = March_errors.Errors.create () in
+        March_refinecheck.Refine_check.check_module ~measure_axioms:false ctx
+          (parse
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_Some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n");
+        Alcotest.(check bool) "no warning" false
+          (List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               d.March_errors.Errors.severity = March_errors.Errors.Warning)
+             ctx.March_errors.Errors.diagnostics)) ]
 
 (* Use/alias-aware call resolution: a call name resolves the way the typechecker
    resolves it (lexical module scope + alias + use), not by fragile string
@@ -744,6 +806,44 @@ end|}));
   fn take_n(n : {Int | _ >= 0}) : Int do n end
   fn first(n : String) : Int do serve({ port: 8080, name: n }) end
   fn second() : Int do take_n(-3) end
+end|}));
+
+    (* A NESTED sort mismatch: `Cons(1, Nil)` sits well at an `M_List` field,
+       but `Cons`'s own head field is `Elem` (the built-in `List` is generic, so
+       its element sort is opaque) and the scalar reflection puts the integer
+       `1` there.  A top-level-only fit check passes this and builds
+       `(Cons 1 Nil)`, which z3 rejects with a MULTI-LINE `(error …)` — the
+       exact shape that used to leave a continuation line in the pipe and shift
+       every later verdict by one.  The record must be skipped instead. *)
+    gated "record precondition: a concrete list element is a nested sort mismatch" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, history : List(Int) }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f() : Int do serve({ port: 0, history: Cons(1, Nil) }) end
+end|}));
+
+    (* Channel survival across ALL FOUR refinable subjects in one module, with
+       the record's unreflectable list field first and a plain Int violation
+       LAST.  A verdict shifted by one desynchronised read turns the two
+       CORRECT calls in between into reported violations, so this pins the
+       no-false-positive property and the report-still-arrives property at
+       once. *)
+    gated "record + string + ADT + Int in one module: only the Int call is reported" (fun () ->
+        Alcotest.(check int) "exactly one violation" 1
+          (refine_error_count {|mod M do
+  type Config = { port : Int, history : List(Int) }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn takepos(n : {Int | _ >= 0}) : Int do n end
+  fn main() : Int do
+    let a = serve({ port: 8080, history: Cons(1, Nil) })
+    let b = nonempty("hello")
+    let c = unwrap(Some(7))
+    let d = takepos(-3)
+    a + b + c + d
+  end
 end|})) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
@@ -997,6 +1097,399 @@ let tier0_suite =
              \  end\n\
               end\n")) ]
 
+(* ── String refinements ──────────────────────────────────────────────────── *)
+let str_decl body =
+  Printf.sprintf
+    "mod M do\n\
+    \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+    \  fn short(s : {String | len(_) <= 3}) : Int do 2 end\n\
+     %s\n\
+     end\n"
+    body
+
+let string_suite =
+  [ gated "nonempty(\"\") is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (str_decl "  fn main() : Int do nonempty(\"\") end")));
+
+    gated "nonempty(\"abc\") passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (str_decl "  fn main() : Int do nonempty(\"abc\") end")));
+
+    gated "short(\"abcd\") is rejected (length 4 > 3)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (str_decl "  fn main() : Int do short(\"abcd\") end")));
+
+    gated "an unknown String variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (str_decl "  fn f(s : String) : Int do nonempty(s) end")));
+
+    gated "a String-refined local propagates" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (str_decl "  fn f(s : {String | len(_) > 0}) : Int do nonempty(s) end")));
+
+    gated "list `len` still works (no overload regression)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do i end\n\
+             \  fn main() : Int do at([1, 2], 5) end\n\
+              end\n"));
+
+    (* Regression: an early draft resolved `len` with a `match` dangling inside
+       an `if ... then`, which silently swallowed the rest of the `else if`
+       chain.  OCaml accepted it and every string test still passed, but ALL
+       non-string variable resolution had quietly stopped working.  This is the
+       cheapest predicate that pins the non-string path. *)
+    gated "an Int `_ == 0` contract still rejects a violating literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn iszero(n : {Int | _ == 0}) : Int do n end\n\
+             \  fn main() : Int do iszero(5) end\n\
+              end\n"));
+
+    (* Regression: the string encoding once declared a bare `len` function, which
+       collided with any program variable of that name.  z3 answered the
+       malformed query with an error line, and because the solver is ONE
+       long-lived process whose driver reads exactly one verdict per query, that
+       desynchronised the channel and silently swallowed every later diagnostic
+       in the compilation.  Both violations here must be reported.
+
+       The guard `len > 0` puts an Int constant named `len` into the very same
+       VC as the string preamble, which is what makes the two symbols collide.
+       The second expected error is the canary: it comes from a LATER, perfectly
+       well-formed VC, so losing it proves the channel was corrupted rather than
+       just this one query being wrong. *)
+    gated "a variable named `len` does not collide with the string encoding" (fun () ->
+        Alcotest.(check int) "two errors" 2
+          (refine_error_count
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn iszero(n : {Int | _ == 0}) : Int do n end\n\
+             \  fn f(len : Int) : Int do\n\
+             \    if len > 0 do nonempty(\"\") else 0 end\n\
+             \  end\n\
+             \  fn main() : Int do iszero(5) end\n\
+              end\n"));
+
+    (* Regression: a caller variable reflected as an Int must never be compared
+       against a string constant.  z3 rejects the mixed-sort term outright, with
+       the same channel-corrupting consequence. *)
+    gated "a mixed-sort guard does not corrupt the check it guards" (fun () ->
+        (* `u` is neither the binder nor a parameter of the callee, so it is
+           reflected as an Int while `"a"` reflects into the string sort.  The
+           resulting `(= u $str…)` is ill-sorted and must be DROPPED from the
+           assumptions; sending it makes z3 reject the query and the violation
+           in the very same VC is lost. *)
+        Alcotest.(check int) "one error" 1
+          (refine_error_count
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn g(u : String) : Int do\n\
+             \    if u == \"a\" do nonempty(\"\") else 0 end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract rejects the empty literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"\") end\n\
+              end\n"));
+
+    gated "a `_ != \"\"` contract accepts a non-empty literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(s : {String | _ != \"\"}) : Int do 1 end\n\
+             \  fn main() : Int do f(\"x\") end\n\
+              end\n"));
+
+    gated "an `s == \"\"` guard does not manufacture a length fact" (fun () ->
+        (* Distinctness from the empty literal does NOT establish a length —
+           there is no injectivity axiom.  Silence here is correct. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end\n\
+             \  fn f(s : String) : Int do\n\
+             \    if s == \"\" do 0 else nonempty(s) end\n\
+             \  end\n\
+              end\n")) ]
+
+(* ── Shared predicate-vocabulary foundation ────────────────────────────────
+   Task 1 is pure plumbing: it adds the registry without wiring it to
+   anything, so these must pass both before AND after. *)
+let vocab_suite =
+  [ gated "an unrecognized predicate name still compiles (no error)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "ordinary Int predicates are unaffected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+             \  fn main() : Int do take_n(-3) end\n\
+              end\n"));
+
+    gated "every operator smt_of handles is known vocabulary" (fun () ->
+        (* If smt_of gains an operator, add it to predicate_operators too, or
+           a predicate using it will draw a spurious "no effect" warning. *)
+        List.iter
+          (fun op ->
+            Alcotest.(check bool)
+              (Printf.sprintf "%s is known" op) true
+              (March_refinecheck.Refine_check.known_predicate_fn op))
+          [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
+          ; "=="; "!="; "<"; "<="; ">"; ">=" ]);
+
+    gated "an unrecognized predicate name warns" (fun () ->
+        Alcotest.(check bool) "warning" true
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "a recognized predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(n : {Int | _ >= 0 && _ < 10}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n"));
+
+    gated "a `len` predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do i end\n\
+             \  fn main() : Int do at([1, 2], 0) end\n\
+              end\n"));
+
+    gated "a user @[measure] predicate does not warn" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  type Tree = Leaf | Node(Tree, Tree)\n\
+             \  @[measure]\n\
+             \  fn size(t : Tree) : Int do\n\
+             \    match t do\n\
+             \      Leaf -> 0\n\
+             \      Node(l, r) -> 1 + size(l) + size(r)\n\
+             \    end\n\
+             \  end\n\
+             \  fn get(t : Tree, i : {Int | _ >= 0 && _ < size(t)}) : Int do i end\n\
+             \  fn main() : Int do get(Leaf, 0) end\n\
+              end\n"));
+
+    gated "an unrecognized predicate is still not an error" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(n : {Int | totally_bogus_fn(_) > 0}) : Int do n end\n\
+             \  fn main() : Int do f(3) end\n\
+              end\n")) ]
+
+(* ── ADT constructor tags ────────────────────────────────────────────────── *)
+let adt_suite =
+  [ gated "`is_Some` is recognized vocabulary (no warning)" (fun () ->
+        Alcotest.(check bool) "no warning" false
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_Some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n"));
+
+    gated "a misspelled lowercase `is_some` still warns" (fun () ->
+        Alcotest.(check bool) "warning" true
+          (has_refine_warning
+             "mod M do\n\
+             \  fn f(o : {Option(Int) | is_some(_)}) : Int do 1 end\n\
+             \  fn main() : Int do f(Some(1)) end\n\
+              end\n"));
+
+    gated "unwrap(None) is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(None) end\n\
+              end\n"));
+
+    gated "unwrap(Some(1)) passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn main() : Int do unwrap(Some(1)) end\n\
+              end\n"));
+
+    gated "an unknown Option variable is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do unwrap(x) end\n\
+              end\n"));
+
+    gated "a user ADT tester works" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  type Shape = Circle(Int) | Square(Int)\n\
+             \  fn area(s : {Shape | is_Circle(_)}) : Int do 0 end\n\
+             \  fn main() : Int do area(Square(2)) end\n\
+              end\n"));
+
+    gated "unwrap(o) inside a `None ->` arm is rejected" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None -> unwrap(x)\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "unwrap(o) inside a `Some(_) ->` arm passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      Some(v) -> unwrap(x)\n\
+             \      None -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "narrowing does not leak past a rebinding pattern binder" (fun () ->
+        (* The INNER arm rebinds `x`, so the outer scrutinee's `None` tag says
+           nothing about the inner `x` — which is a `Some` payload here.
+           Correct code; the call must not be flagged.  (The call is what makes
+           this a real test: an arm body of `0` exercises nothing.) *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int), y : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        match y do\n\
+             \          Some(x) -> unwrap(x)\n\
+             \          None -> 0\n\
+             \        end\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* ── Path facts must not survive a rebinding of the name they mention ── *)
+    gated "a `let` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        let x = Some(1)\n\
+             \        unwrap(x)\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a lambda param rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn apply(g : (Option(Int)) -> Int) : Int do 0 end\n\
+             \  fn f(x : Option(Int)) : Int do\n\
+             \    match x do\n\
+             \      None -> apply(fn x -> unwrap(x))\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a `let?` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn mk() : Result(Option(Int), String) do Ok(Some(1)) end\n\
+             \  fn f(x : Option(Int)) : Result(Int, String) do\n\
+             \    match x do\n\
+             \      None ->\n\
+             \        let? x = mk()\n\
+             \        Ok(unwrap(x))\n\
+             \      Some(v) -> Ok(v)\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a user ADT `let` rebinding the scrutinee retires the narrowing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  type Shape = Circle(Int) | Square(Int)\n\
+             \  fn area(sh : {Shape | is_Circle(_)}) : Int do 0 end\n\
+             \  fn f(s : Shape) : Int do\n\
+             \    match s do\n\
+             \      Square(n) ->\n\
+             \        let s = Circle(1)\n\
+             \        area(s)\n\
+             \      Circle(n) -> 0\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    (* A path condition lives in the CALLER's namespace; it must not be
+       re-pointed at the callee's actuals just because the caller happens to
+       use the same variable name as the callee's refinement binder. *)
+    gated "a caller variable sharing the callee's binder name is not confused"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(o)}) : Int do 0 end\n\
+             \  fn f(o : Option(Int), y : Option(Int)) : Int do\n\
+             \    match o do\n\
+             \      None -> unwrap(y)\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n"));
+
+    gated "a complex scrutinee expression is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end\n\
+             \  fn mk() : Option(Int) do None end\n\
+             \  fn f() : Int do\n\
+             \    match mk() do\n\
+             \      None -> 0\n\
+             \      Some(v) -> v\n\
+             \    end\n\
+             \  end\n\
+              end\n")) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -1014,5 +1507,8 @@ let () =
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
       ("guard-path-sensitivity", guard_suite);
-      ("tier0-postcond", tier0_suite) ]
+      ("tier0-postcond", tier0_suite);
+      ("string-refinements", string_suite);
+      ("predicate-vocab", vocab_suite);
+      ("adt-tags", adt_suite) ]
 

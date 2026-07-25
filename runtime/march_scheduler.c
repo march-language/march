@@ -1021,15 +1021,28 @@ void march_sched_request_shutdown(void) {
 void march_sched_run(void) {
     atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
 
-    /* Single-scheduler fast path: no threads needed. */
+    /* Single-scheduler fast path: no worker threads needed.
+     *
+     * The preemption daemon IS still needed.  This path used to return without
+     * ever calling march_sched_preempt_start(), so MARCH_NUM_SCHEDULERS=1 had
+     * no timer preemption at all: the only thing that ever preempted a
+     * CPU-bound green thread was compiled code's per-call reduction counter
+     * hitting zero.  That made single-scheduler mode — the configuration used
+     * to get deterministic, race-free runs — the one place where a green
+     * thread could monopolise the scheduler if the counter were ever removed.
+     * Caught by the starvation test: a CPU-bound TCO loop starved a sibling
+     * green thread here while behaving correctly on >= 2 schedulers, where the
+     * sibling merely ran on another OS thread (parallelism, not preemption). */
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
+        march_sched_preempt_start();
         sched_loop(&g_scheds[0]);
         /* Final drain: a Signal.watch delivery that landed just before shutdown
          * (e.g. a synchronous self-raise right before main returns) may have set
          * its pending flag after the loop's last top-of-iteration drain but
          * before g_all_done was observed.  Run it now, on this normal stack. */
         march_signal_drain();
+        march_sched_preempt_stop();
         return;
     }
 
@@ -1196,16 +1209,27 @@ march_proc *march_sched_find(int64_t pid) {
 
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */
 
-/* Thread-local reduction budget for LLVM-compiled code.  Initialised to the
- * full budget so the first quantum runs immediately without an extra reset.
+/* Thread-local reduction budget.  No longer on the compiled hot path (see
+ * march_preempt_request below); retained because march_yield_from_compiled
+ * refills it and the `task_reductions()` builtin reads it.
  * volatile: zeroed by the SIGUSR1 preemption handler (see Phase 5A). */
 volatile _Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
+/* Preemption request flag read by every compiled function on entry.  Plain
+ * global on purpose — see the long rationale on the declaration in
+ * march_scheduler.h (TLS access is an indirect call per entry on both
+ * Darwin/arm64 and Linux/arm64-PIE; this cost 1.75x on bench/fib.march). */
+volatile int64_t march_preempt_request = 0;
+
 void march_yield_from_compiled(void) {
+    /* Clear the request FIRST.  If we cleared it after yielding, this thread
+     * would re-enter compiled code, immediately observe the still-set flag,
+     * and yield again in a tight loop until the daemon happened to clear it. */
+    march_preempt_request = 0;
     /* Refill the budget before yielding so the process gets a fresh quantum
      * when it is rescheduled.  Do this unconditionally — if we are not inside
      * a scheduler context the yield below is a no-op, but the counter should
-     * still be valid for future use. */
+     * still be valid for future use (task_reductions() reads it). */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
     march_sched_yield();
 }
@@ -1424,7 +1448,12 @@ static pthread_t    g_preempt_thread;
  * automatically on platforms that support it. */
 static void march_preempt_signal_handler(int sig) {
     (void)sig;
-    march_tls_reductions = 0;
+    /* Both writes are async-signal-safe (volatile scalar stores).
+     * march_preempt_request is what compiled code actually polls;
+     * march_tls_reductions is kept in sync so task_reductions() and any
+     * interpreter-side budget logic still see a spent quantum. */
+    march_preempt_request = 1;
+    march_tls_reductions  = 0;
 }
 
 static void *preempt_daemon(void *arg) {
