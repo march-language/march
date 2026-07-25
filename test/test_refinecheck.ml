@@ -846,6 +846,164 @@ end|}));
   end
 end|})) ]
 
+(* ── Record FIELD facts in the path context ────────────────────────────────
+   A guard on a record field (`if c.port >= 1`) lands in the path context like
+   any other condition, but until the path translation grew a record field
+   resolver `c.port` translated to None and the fact was silently dropped.
+
+   Only the CONTRADICTION direction is observable through this API: under the
+   definite-failure stance a fact that merely *discharges* a precondition turns
+   an error into silence, and silence is also what a skipped call produces.  So
+   the RED cases below are the ones where a guard makes a call a DEFINITE
+   failure, and they are paired with silence assertions covering the satisfying
+   guard and the unguarded (still skipped) shape.
+
+   The four shadowing cases assert SILENCE.  A path fact is recorded against a
+   NAME; when an inner scope rebinds that name the fact is about the OUTER
+   value, and attributing it to the inner binding is a false positive — the one
+   failure this subsystem must never have.  Each is written so the inner call is
+   still REFLECTABLE (the binder is re-established as a record), because a
+   shadowing test whose inner call is skipped for an unrelated reason would pass
+   no matter what the shadowing code did. *)
+let record_path_suite =
+  let prog body =
+    Printf.sprintf
+      {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn mk() : Result(Config, String) do Ok({ port: 1 }) end
+%s
+end|}
+      body
+  in
+  [ gated "a satisfying field guard leaves the call silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "a field guard contradicting the precondition is caught" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port <= 0 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "the else-branch negates a field guard" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do 0 else serve(c) end\n\
+                \  end")));
+
+    (* The guard narrows a refinement that on its own is merely WEAKER (and so
+       correctly silent — see the record-postconditions group) into a definite
+       failure.  This is the case that proves the guard's fact and the carried
+       record refinement land on the SAME SMT constant. *)
+    gated "a field guard narrows a weaker record refinement into a failure" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : {v : Config | v.port >= 0}) : Int do\n\
+                \    if c.port == 0 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "an unguarded unrefined record argument is still skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (prog "  fn f(c : Config) : Int do serve(c) end")));
+
+    (* ── Shadow discipline ──────────────────────────────────────────────────
+       The guard is CONTRADICTORY, so a fact that survived the rebinding would
+       be reported as a violation of correct code. *)
+    gated "an inner `let` rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      let c = d\n\
+                \      serve(c)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    gated "a lambda parameter rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      let g = fn (c : Config) -> serve(c)\n\
+                \      g(d)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* `let?` is the one rebinding this group cannot make DISCRIMINATING: its
+       binder can carry no type annotation (`let? x : T = …` is a dedicated
+       parse error) and March has no annotated-expression form, so the payload's
+       record type is never declared anywhere [recenv] can see it.  The inner
+       `c` is therefore not a known record, the call is skipped for that reason,
+       and this case would stay silent even if `let?` retired nothing.  It is
+       kept as a safety assertion — `visit`'s `ELetQ` arm does call both
+       [path_shadow] and [recenv_shadow], and this pins that it stays silent —
+       but it does NOT prove the retirement the way the other three do. *)
+    gated "a `let?` binder rebinding the record stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Result(Int, String) do\n\
+                \    if c.port <= 0 do\n\
+                \      let? c = mk()\n\
+                \      Ok(serve(c))\n\
+                \    else Ok(0) end\n\
+                \  end")));
+
+    gated "a match binder rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      match d do\n\
+                \        c -> serve(c)\n\
+                \      end\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* The same four rebindings, but with the guard SATISFYING the callee's
+       precondition: the outer fact must not travel in this direction either,
+       so these stay silent for the right reason (no fact, not a masked one).
+       Paired with the contradictory versions above they pin that the retirement
+       is unconditional rather than direction-dependent. *)
+    gated "a rebinding retires a SATISFYING field fact too" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port >= 1 do\n\
+                \      let c = d\n\
+                \      serve(c)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* Channel survival: a record path fact in the same module as an unrelated
+       Int violation.  A malformed VC (a symbol declared at two sorts, say) is
+       answered with an `(error …)` that desynchronises the shared `z3 -in`
+       channel and silently disables checking for the rest of the compilation —
+       so the failure mode is SILENCE, and only this shape catches it. *)
+    gated "a record field guard does not poison the solver channel" (fun () ->
+        Alcotest.(check int) "exactly one violation" 1
+          (refine_error_count
+             (prog
+                "  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+                \  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do serve(c) else 0 end\n\
+                \  end\n\
+                \  fn g() : Int do take_n(-3) end"))) ]
+
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
    that discharge call-site VCs and postconditions. *)
 let guard_suite =
@@ -1506,6 +1664,7 @@ let () =
       ("flag-gating", flag_suite);
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
+      ("record-path-facts", record_path_suite);
       ("guard-path-sensitivity", guard_suite);
       ("tier0-postcond", tier0_suite);
       ("string-refinements", string_suite);

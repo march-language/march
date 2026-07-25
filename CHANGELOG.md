@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- A **guard on a record field** now reaches the refinement checker. `if
+  c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}`
+  precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported
+  as a definite failure. The variable needs no refinement of its own — a plain
+  `c : Config` parameter works, since an unrefined record is modelled as an
+  unconstrained value that the guard then decides. With no guard the call is
+  still skipped. Field facts obey the same rebinding rule as tag and scalar
+  facts: a `let`, `let?`, lambda parameter or `match` binder that rebinds the
+  name retires the fact.
+
 - As-patterns: `Some(x) as whole -> ...` binds a name to the entire matched
   value while the inner pattern continues to destructure it. Works in match
   arms, `let` bindings, and function parameters. `PatAs` had been implemented

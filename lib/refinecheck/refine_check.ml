@@ -1190,6 +1190,75 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
+(* ── Record-typed variables in scope, refined or not ───────────────────────
+   [scope] carries only REFINED locals, so a plain `c : Config` parameter is
+   invisible to it — and a guard `if c.port >= 1` had nowhere to attach: the
+   path condition's `c.port` translated to `None` and the fact was dropped.
+
+   This env maps a variable whose DECLARED type is a registered record to that
+   record's SMT sort.  [check_call] uses it for exactly two things:
+     - a PATH CONDITION mentioning `c.field` reflects as the record's SMT
+       selector applied to the constant `c`;
+     - a record ARGUMENT that is such a variable reflects to that SAME
+       constant, so the guard constrains the very value the goal projects from.
+   Those two must agree or the fact is about a different value than the goal.
+
+   It carries NO predicate.  A variable here is a wholly UNCONSTRAINED datatype
+   constant: on its own neither the goal nor its negation is provable, so the
+   call stays skipped exactly as before unless the path context settles it.
+   Adding an entry can therefore only turn a skip into a check the guards
+   actually decide — never into a guess.
+
+   Like [scope] and [path] it obeys the shadow discipline: every binding
+   construct must retire its binders' names before descending, or an outer
+   record's identity is attributed to an inner binding.  Note the two channels
+   are independent and BOTH matter here — [recenv_shadow] stops the inner
+   binding being reflected as the outer constant, [path_shadow] stops the outer
+   fact surviving; either one alone leaves a false positive. *)
+type recenv = (string * string) list
+
+let recenv_shadow (re : recenv) (names : string list) : recenv =
+  if names = [] then re else List.filter (fun (n, _) -> not (List.mem n names)) re
+
+(* The SMT sort of a declared type when it names a registered record — through
+   a refinement wrapper too, so `c : {v : Config | …}` is tracked as well (its
+   predicate still travels through [scope]; this records only the sort). *)
+let record_sort_of_ty : A.ty option -> string option = function
+  | Some (A.TyCon ({ A.txt = name; _ }, []) as t) when is_record_base t ->
+    Some (adt_sort_name name)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as b), _, _)) when is_record_base b ->
+    Some (adt_sort_name name)
+  | _ -> None
+
+let recenv_add_param (re : recenv) (p : A.param) : recenv =
+  let re = recenv_shadow re [ p.A.param_name.A.txt ] in
+  match record_sort_of_ty p.A.param_ty with
+  | Some s -> (p.A.param_name.A.txt, s) :: re
+  | None -> re
+
+let recenv_add_fnparam (re : recenv) : A.fn_param -> recenv = function
+  | A.FPNamed p | A.FPDefault (p, _) -> recenv_add_param re p
+  | A.FPPat pat -> recenv_shadow re (pat_binders pat)
+
+(* `let c : Config = …` takes the sort from the annotation; an UNANNOTATED
+   `let c = d` whose RHS is a variable already known to be a record propagates
+   that sort, since `c` and `d` denote the same value and so may share one SMT
+   constant.  Everything else only shadows.  Note the shadowing happens FIRST,
+   so `let c = c` finds nothing to propagate and the name simply leaves the
+   env — the conservative direction. *)
+let recenv_add_binding (re : recenv) (b : A.binding) : recenv =
+  let re = recenv_shadow re (pat_binders b.A.bind_pat) in
+  match b.A.bind_pat with
+  | A.PatVar n ->
+    (match record_sort_of_ty b.A.bind_ty with
+     | Some s -> (n.A.txt, s) :: re
+     | None ->
+       (match b.A.bind_expr with
+        | A.EVar { A.txt = y; _ } ->
+          (match List.assoc_opt y re with Some s -> (n.A.txt, s) :: re | None -> re)
+        | _ -> re))
+  | _ -> re
+
 let scope_add_param (sc : scope) (p : A.param) : scope =
   let sc = scope_shadow sc [ p.A.param_name.A.txt ] in
   match refined_scope_ty p.A.param_ty with
@@ -1590,8 +1659,15 @@ let sort_of_ctor (ctor : string) : string option =
    whether it is negated (the else-branch of an `if`). *)
 let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) option)
     (sg : fn_sig) (args : A.expr list)
-    (path : (A.expr * bool) list) (rp : rparam) (sc : scope) : unit =
+    (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
+  (* A CALLER-scope name whose declared type is a record (see [recenv]).  Such a
+     name is declared into the record's datatype sort by [path_resolve_field];
+     every other producer must therefore refuse to declare it `Int`, or the VC
+     declares one symbol at two sorts and z3 answers with an `(error …)` that
+     desynchronises the shared `z3 -in` channel — silently disabling refinement
+     checking for the rest of the compilation. *)
+  let is_recvar name = List.mem_assoc name re in
   let actual_of_name name =
     match List.assoc_opt name name_pos with
     | Some i -> List.nth_opt args i
@@ -1772,7 +1848,20 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
                skipped.  Sound, just weaker. *)
             | None -> ());
            Some c
-         | _ -> None)
+         (* An UNREFINED record variable of the right type ([recenv]).  It
+            reflects to an opaque constant carrying NO predicate: on its own
+            that proves nothing in either direction, so the call is still
+            skipped unless the PATH context — a `if c.port >= 1` guard,
+            reflected onto this very constant by [path_resolve_field] — settles
+            it.  Before this the whole call was skipped, so a guarded call could
+            never discharge and a guard that made the call a DEFINITE failure
+            was never reported. *)
+         | _ ->
+           (match List.assoc_opt x re with
+            | Some s when s = sort_name ->
+              decls := (x, Smt.SData sort_name) :: !decls;
+              Some (Smt.Const x)
+            | _ -> None))
       | _ -> None
     in
     (* [`Other] = every non-record subject — Int, String and variant ADT — each
@@ -1823,6 +1912,10 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
+          (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
+             Declaring it `Int` here would put one symbol at two sorts; dropping
+             the sub-term instead just loses a fact (silence). *)
+          else if is_recvar name then None
           else begin
             decls := (name, Smt.SInt) :: !decls;
             Some (Smt.Const name)
@@ -2014,10 +2107,32 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
          compilation.  So the string sort wins here, exactly as it does in
          [resolve_var]'s caller-scope fallback. *)
       if Hashtbl.mem str_names name then Some (Smt.Const name)
+      (* Same rule for a caller-scope RECORD: it is declared at its datatype
+         sort by [path_resolve_field], so it must never also be reflected as a
+         scalar.  Returning None drops the sub-term — and with it the whole
+         condition — which only loses a fact. *)
+      else if is_recvar name then None
       else
         absorb
           (reflect_cached ("$path$" ^ name) (fun () ->
                reflect_scalar ~postcond sc (A.EVar { A.txt = name; A.span })))
+    in
+    (* `c.port` in a PATH CONDITION.  The name is a CALLER variable, so it
+       denotes itself: the record's SMT selector applied to `Const c` — the very
+       term [record_self] gives a record actual that IS that variable, so a
+       guard and the goal meet on one constant.  A name outside [recenv] yields
+       None and the condition is dropped (sound, just weaker). *)
+    let path_resolve_field varname fname =
+      match List.assoc_opt varname re with
+      | None -> None
+      | Some sort_name ->
+        let c = Smt.Const varname in
+        (match make_field_resolver varname sort_name c varname fname with
+         | None -> None
+         | Some t ->
+           decls := (varname, Smt.SData sort_name) :: !decls;
+           if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+           Some t)
     in
     let path_resolve_measure m name =
       if is_axiom_measure m then (
@@ -2045,6 +2160,7 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
       (fun (cond, negated) ->
         match
           smt_of ~resolve_var:path_resolve_var ~resolve_measure:path_resolve_measure
+            ~resolve_field:path_resolve_field
             ~resolve_measure_app ~resolve_tester:path_resolve_tester
             ~resolve_str_lit:str_lit_const cond
         with
@@ -2482,17 +2598,20 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
   in
   go "" decls
 
-(* ── Walk expressions, threading the refined-local scope and path context ── *)
+(* ── Walk expressions, threading the refined-local scope, the record-typed
+   variables ([recenv]) and the path context ─────────────────────────────── *)
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
-    (e : A.expr) : unit =
-  let go = visit ~root errctx defs ctx path sc in
-  let go_path p = visit ~root errctx defs ctx p sc in
+    (re : recenv) (e : A.expr) : unit =
+  let go = visit ~root errctx defs ctx path sc re in
+  let go_path p = visit ~root errctx defs ctx p sc re in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
      | Some (Some sg) ->
        let postcond = postcond_of ctx defs in
-       List.iter (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc) sg.refined
+       List.iter
+         (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+         sg.refined
      | _ -> ());
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
@@ -2503,8 +2622,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        the path so a later call can rely on p. *)
     ignore
       (List.fold_left
-         (fun (path, sc) e ->
-           visit ~root errctx defs ctx path sc e;
+         (fun (path, sc, re) e ->
+           visit ~root errctx defs ctx path sc re e;
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
@@ -2517,18 +2636,24 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELet (b, _) -> scope_add_binding ~postcond:(postcond_of ctx defs) sc b
              | _ -> sc
            in
-           (path', sc'))
-         (path, sc) es)
+           let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
+           (path', sc', re'))
+         (path, sc, re) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     visit ~root errctx defs ctx (path_shadow path names)
-      (List.fold_left scope_add_param sc ps) body
+      (List.fold_left scope_add_param sc ps)
+      (List.fold_left recenv_add_param re ps)
+      body
   | A.ELetFn (n, ps, _, body, _) ->
     let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let sc = scope_shadow sc [ n.A.txt ] in
+    let re = recenv_shadow re [ n.A.txt ] in
     visit ~root errctx defs ctx (path_shadow path names)
-      (List.fold_left scope_add_param sc ps) body
+      (List.fold_left scope_add_param sc ps)
+      (List.fold_left recenv_add_param re ps)
+      body
   | A.EMatch (subj, branches, _) ->
     go subj;
     List.iter
@@ -2538,6 +2663,22 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
         let path = path_shadow path binders in
+        (* …and a same-named record IDENTITY, so an inner binder is not
+           reflected as the outer record's SMT constant.  A bare `PatVar`
+           binder on a record-typed variable scrutinee then re-enters the env
+           under the NEW name: `match d do c -> …` makes `c` the same value as
+           `d`, so sharing one constant is correct.  Looked up in the OUTER env
+           on purpose — `match c do c -> …` must find the pre-shadow entry. *)
+        let re_outer = re in
+        let re = recenv_shadow re binders in
+        let re =
+          match subj, br.A.branch_pat with
+          | A.EVar s, A.PatVar n ->
+            (match List.assoc_opt s.A.txt re_outer with
+             | Some sort -> (n.A.txt, sort) :: re
+             | None -> re)
+          | _ -> re
+        in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
         (* Constructor-tag narrowing.  Inside a `Ctor(…) ->` arm a VARIABLE
            scrutinee is known to carry that tag, so we push the synthetic path
@@ -2564,7 +2705,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
             (tester, false) :: p
           | _ -> p
         in
-        visit ~root errctx defs ctx p sc br.A.branch_body)
+        visit ~root errctx defs ctx p sc re br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
     go c;
@@ -2585,7 +2726,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        shadow any same-named outer refined local before e2 is visited. *)
     let binders = pat_binders p in
     let sc = scope_shadow sc binders in
-    visit ~root errctx defs ctx (path_shadow path binders) sc e2
+    let re = recenv_shadow re binders in
+    visit ~root errctx defs ctx (path_shadow path binders) sc re e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
@@ -2692,8 +2834,9 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+      let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx defs ctx path sc c.A.fc_body)
+      visit ~root errctx defs ctx path sc re c.A.fc_body)
     fd.A.fn_clauses
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
