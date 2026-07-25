@@ -1628,6 +1628,70 @@ end|}));
   fn shady(n : Int) : {Int | _ < n} do blackbox(n) end
   fn takepos(k : {Int | _ >= 0}) : Int do k end
   fn usit() : Int do takepos(shady(0)) end
+end|}));
+
+    (* A callee formal `n` whose name equals a CALLER variable that is not the
+       actual passed for it.  Substitution must use the actual (`hi`), giving
+       `_ < hi` with `hi` unconstrained.  Reading the caller's own `n` instead
+       would give `_ < n` with `n <= 0`, contradicting `_ >= 0` and flagging
+       correct code — the caller/callee conflation that has produced false
+       positives in this subsystem before. *)
+    gated "a caller variable sharing a callee formal's name is not conflated"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(n : {Int | _ <= 0}, hi : Int) : Int do takepos(below(hi)) end
+end|}));
+
+    (* The predicate mentions only the THIRD formal.  These two cases differ
+       solely in which actual sits at index 2, so together they pin that the
+       formal->actual map is positional: taking the first actual would flag the
+       silent case, and ignoring position entirely would miss the loud one. *)
+    gated "substitution picks the actual positionally (satisfiable)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn pick(a : Int, b : Int, hi : Int, c : Int) : {Int | _ < hi} do hi - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(pick(0, 0, 50, 0)) end
+end|}));
+
+    gated "substitution picks the actual positionally (violating)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn pick(a : Int, b : Int, hi : Int, c : Int) : {Int | _ < hi} do hi - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(pick(50, 50, 0, 50)) end
+end|}));
+
+    (* `len` is an application HEAD — a measure, not a value — so it must not be
+       rewritten even when a formal shares its name.  Substituting the head would
+       turn `len(xs)` into `40(xs)`. *)
+    gated "a formal sharing a measure's name does not rewrite the measure"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn odd(len : Int, xs : List(Int)) : {Int | _ < len(xs) + len} do len - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(ys : List(Int)) : Int do takepos(odd(40, ys)) end
+end|}));
+
+    (* postcond_of is consulted for `countdown` from inside `countdown`'s own
+       body: confirms neither the gate nor the substitution loops forever. *)
+    gated "a recursive relational postcondition terminates" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn countdown(n : {Int | _ >= 0}) : {Int | _ <= n} do
+    if n == 0 do 0 else countdown(n - 1) end
+  end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(m : {Int | _ >= 0}) : Int do takepos(countdown(m)) end
 end|})) ]
 
 
