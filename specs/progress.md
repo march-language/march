@@ -284,6 +284,14 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-24, session types: post-`choose` protocol steps now survive projection)
+
+**Session-types-review Task 1 fixed.** `project_steps`' `ProtoChoice` arm (`lib/typecheck/typecheck.ml`) projected every branch of a `choose ... end` block with the projection call's OUTER continuation (`cont`, which is `SEnd` at the top level of a `protocol` block) instead of `rest_ty ()`, the steps that actually follow the choice block in source order. Both roles lost the protocol's tail from their projection consistently, so binary duality still held and a program that skipped the trailing message typechecked and ran clean; in the MPST (>2-role) case it was worse, since the send/recv-pair consistency check doesn't descend into `SOffer`, so a legal 3-role protocol with a choice followed by another message was *rejected* with a spurious "role A should receive from C" error. Fixed by binding `let after_choice = rest_ty ()` before building `branch_tys` and projecting each arm with `after_choice` in place of `cont`; the chooser/merge/`SOffer` logic is untouched. Compile-time-only — the channel runtime is untyped, so no lowering/codegen/runtime changes were needed.
+
+New regression test `test_session_choice_tail_survives_projection` (`test/test_compiler.ml`, registered next to `session binary choice identical branches`) asserts a binary protocol with a step after `choose ... end` projects every branch of the Client's `SOffer` as `Recv(Bool, Send(String, End))`, not `Recv(Bool, End)`. New reject-conformance witness `specs/lang/types/reject/t91_choice_tail_step_required.march` pins the observable behavior change: pre-fix, a program that closes its channel instead of driving the post-choice `Client -> Server : String` step was wrongly ACCEPTED (both projections silently agreed on the truncated protocol); post-fix it correctly rejects with `` Chan.close: channel is at `Send(String, End)` but I expected `End`. ``. `specs/lang/types/INDEX.md`'s reject table grows 81 → 82 (172 / 172 total, still 100%).
+
+`run_compiler` 543 → 544 (one new test), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
 ## Current State (as of 2026-07-24, record field preconditions integrated with String + ADT-tag refinements)
 
 **The record-precondition branch is merged with `main`'s predicate-vocabulary foundation, ADT constructor tags, String refinements, and the two solver-robustness fixes.** The branch had forked before all five and edited the same functions in `lib/refinecheck/refine_check.ml` (7 conflicts), so the integration was resolved on meaning rather than by taking a side. The substantive decisions:

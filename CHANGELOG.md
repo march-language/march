@@ -59,6 +59,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Session types: steps that follow a `choose ... end` block are no longer
+  dropped from every role's projection. Both roles previously lost the
+  protocol's tail consistently enough that duality still passed and the
+  trailing message went silently unenforced; in multi-party protocols a
+  legal choice-then-message protocol could even be rejected with a spurious
+  role-mismatch error. A program that closes a session channel instead of
+  driving the post-choice steps is now correctly rejected.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

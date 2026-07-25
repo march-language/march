@@ -473,8 +473,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t79_impl_coherence_duplicate` | **(impl coherence, T-ImplCoherent) two `impl Speak(Dog)` (§2.3, 2026-07-17)** — a type may implement an interface at most once. Both blocks previously typechecked (`--check` exit 0) and the backends ran DIFFERENT method bodies (interp `impl_tbl` last-write-wins vs the monomorphizer's list order). `register_impl_shape` now does a lookup-before-insert via `types_overlap` (unifiability), distinguishing a genuine duplicate (different decl span) from Pass-1 re-registration (same span). Accept companions `t83`/`t84` | `Overlapping implementation` |
 | `t80_impl_parametric_overlap` | **(impl coherence Stage 2, T-ImplCoherent) `impl Descr(Box(a))` + `impl Descr(Box(Int))` (§2.3, 2026-07-17)** — parametric overlap: the general `Box(a)` head UNIFIES with the specific `Box(Int)` (`a ↦ Int`), so both could match `Box(1)` and the backends would disagree. Caught by `types_overlap` (unify-based), which the Stage-1 exact-key form did not. Accept twin `t85` | `Overlapping implementation` |
 | `t81_spawn_pid_cross_actor` | **(finding 18 FIXED) cross-actor pid list rejected (§2.6.3, 2026-07-18)** — `spawn(A) : Pid[{x: Int}]` and `spawn(B) : Pid[{s: String}]` no longer unify (both used to be `Pid[<fresh var>]`, silently conflating distinct actors' pids). Accept twin `t87` | ``expected `{ x : Int }` but got `{ s : String }`` |
+| `t91_choice_tail_step_required` | **(post-`choose` tail projection, 2026-07-24)** — `project_steps`' `ProtoChoice` arm now projects each branch with the steps that FOLLOW the choice block (`rest_ty ()`) instead of the outer continuation. Pre-fix the trailing `Client -> Server : String` vanished from both roles' projections and closing early was wrongly ACCEPTED | `` Chan.close: channel is at `` |
 
-**Result: 171 / 171 (90 accept, 81 reject).**
+**Result: 172 / 172 (90 accept, 82 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

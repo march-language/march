@@ -7360,8 +7360,13 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
           let inner_with_cont = subst_svar rec_var after_loop inner in
           SRec (rec_var, inner_with_cont))
      | Ast.ProtoChoice (chooser, branches) ->
+       (* Every branch rejoins the protocol tail, so each arm is projected with
+          the steps that FOLLOW this choice block as its continuation — not the
+          outer [cont], which at top level is just SEnd and silently truncates
+          the protocol. *)
+       let after_choice = rest_ty () in
        let branch_tys = List.map (fun (lbl, arm_steps) ->
-           let arm_ty = project_steps env ~proto_name ~multiparty arm_steps role cont in
+           let arm_ty = project_steps env ~proto_name ~multiparty arm_steps role after_choice in
            (lbl.Ast.txt, arm_ty)
          ) branches in
        if chooser.Ast.txt = role then

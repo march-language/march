@@ -1462,6 +1462,41 @@ let test_session_binary_choice_identical_branches () =
     true
     (March_typecheck.Typecheck.session_ty_equal dual_server client_ty)
 
+(** Steps that follow a `choose ... end` block must appear in EVERY branch of
+    every role's projection.  Pre-fix, [project_steps]' ProtoChoice arm passed
+    the OUTER continuation (SEnd at top level) into each branch instead of
+    [rest_ty ()], silently dropping the tail from both roles — consistently
+    enough that duality still passed and the protocol's trailing message was
+    simply unenforceable. *)
+let test_session_choice_tail_survives_projection () =
+  let (ctx, env) = typecheck_full {|mod Test do
+    type Client = Client
+    type Server = Server
+    protocol Tail do
+      choose by Server:
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Bool
+      end
+      Client -> Server : String
+    end
+  end|} in
+  Alcotest.(check bool) "protocol with post-choice tail: no errors" false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Tail" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  (* Client offers; each branch must be Recv(Bool, Send(String, End)) — the
+     trailing `Client -> Server : String` step is part of every branch. *)
+  (match client_ty with
+   | March_typecheck.Typecheck.SOffer branches ->
+     Alcotest.(check int) "two offer branches" 2 (List.length branches);
+     List.iter (fun (lbl, sty) ->
+         match sty with
+         | March_typecheck.Typecheck.SRecv
+             (_, March_typecheck.Typecheck.SSend (_, March_typecheck.Typecheck.SEnd)) -> ()
+         | other ->
+           Alcotest.fail (lbl ^ ": expected Recv(_, Send(_, End)) but got " ^ pp_sty other))
+       branches
+   | other -> Alcotest.fail ("expected SOffer but got " ^ pp_sty other))
+
 let test_session_mpst_bystander_still_merges () =
   (* Regression companion to test_session_binary_choice_identical_branches:
      the merge rule MUST still fire for MULTIPARTY (>2 role) protocols, where a
@@ -8548,6 +8583,7 @@ let compiler_suites =
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;
           Alcotest.test_case "session binary choice identical branches" `Quick test_session_binary_choice_identical_branches;
+          Alcotest.test_case "session choice tail survives projection" `Quick test_session_choice_tail_survives_projection;
           Alcotest.test_case "session mpst bystander still merges"       `Quick test_session_mpst_bystander_still_merges;
           Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
