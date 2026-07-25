@@ -2011,11 +2011,34 @@ static void task_wait_done(int64_t *task) {
             if (atomic_load_explicit((_Atomic int64_t *)&task[4],
                                      memory_order_acquire) != 0)
                 return;
+            /* SEQ_CST ON THE NEXT TWO OPERATIONS IS THE WHOLE FIX for the
+             * long-standing ~1-in-20 missed-wakeup deadlock (specs/todos.md
+             * "Scheduler fork-join").  This store-then-load and the
+             * trampoline's mirror-image store(task[4])-then-load(task[5])
+             * form a Dekker / store-buffering pair, and release/acquire does
+             * NOT order a store before a subsequent load of a DIFFERENT
+             * location.  Concretely, on ARMv8.3+ (Apple Silicon) clang
+             * compiles memory_order_acquire to LDAPR — an RCpc load that is
+             * architecturally allowed to complete before an earlier STLR
+             * drains from the store buffer.  Both sides could therefore read
+             * stale values simultaneously: we saw done==0 and parked forever
+             * while the trampoline saw waiter==NULL and woke nobody — task
+             * complete, waiter parked, exactly the lldb hang state.  This is
+             * also why every prior analysis missed it: interleaving-based
+             * reasoning implicitly assumes sequential consistency, TSan's
+             * instrumentation strengthens the ordering enough to suppress
+             * it, and MARCH_NUM_SCHEDULERS=1 removes the second thread.
+             * seq_cst forces LDAR (RCsc), which cannot hoist above an
+             * earlier STLR, closing the window on both sides.  (A
+             * LockSupport-style wake permit in march_sched_wake was tried
+             * first and measured useless — under this reordering the
+             * trampoline never CALLS march_sched_wake at all, so no permit
+             * scheme can help.) */
             atomic_store_explicit((_Atomic int64_t *)&task[5],
                                   (int64_t)(uintptr_t)self,
-                                  memory_order_release);
+                                  memory_order_seq_cst);
             if (atomic_load_explicit((_Atomic int64_t *)&task[4],
-                                     memory_order_acquire) != 0) {
+                                     memory_order_seq_cst) != 0) {
                 atomic_store_explicit((_Atomic int64_t *)&task[5], 0,
                                       memory_order_relaxed);
                 return;
@@ -2063,20 +2086,27 @@ static void march_thunk_trampoline(void *arg) {
          * is lossless. */
         int64_t raw = (int64_t)(uintptr_t)result;
         task[3] = (raw << 1) | (int64_t)1;     /* tagged result at offset 24 */
-        /* Release-store: ensures task[3] is visible before the done flag. */
+        /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
+         * is one half of a Dekker / store-buffering pair with task_wait_done's
+         * store(task[5])-then-load(task[4]) — see the long comment there.
+         * The previous release/acquire pair allowed BOTH sides' loads to read
+         * stale values on ARMv8.3+ (clang's acquire = LDAPR, an RCpc load
+         * that may complete before an earlier STLR drains), which is the
+         * ~1-in-20 missed-wakeup deadlock: we read waiter==NULL and woke
+         * nobody while the waiter read done==0 and parked forever.  The
+         * comment that used to live here — "a missed wake here is harmless
+         * because the waiter's recheck catches done=1" — was the bug in
+         * prose form: that recheck reasoning only holds under sequential
+         * consistency, which release/acquire does not provide for a
+         * store-then-load pair on different addresses.  seq_cst (STLR + LDAR,
+         * RCsc) restores exactly the ordering the reasoning assumed, and the
+         * store still carries the task[3]-before-done publication the release
+         * store provided (seq_cst is a superset).  march_sched_wake remains a
+         * safe no-op if the waiter is NULL or not yet parked. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
-                              memory_order_release);
-        /* Wake an in-scheduler waiter parked in task_wait_done, if one
-         * registered (word 5).  Must happen after the done-store above, so
-         * a waiter that wakes and rechecks task[4] always sees it set —
-         * task_wait_done's own check/register/recheck sequence is what
-         * actually closes the race on the OTHER side (a waiter that
-         * registers between our done-store and this read still catches
-         * done=1 itself on its recheck, so a missed wake here is harmless).
-         * march_sched_wake is a safe no-op if the waiter isn't PARKED/
-         * WAITING yet (e.g. genuinely raced us) or already NULL. */
+                              memory_order_seq_cst);
         march_proc *waiter = (march_proc *)(uintptr_t)atomic_load_explicit(
-            (_Atomic int64_t *)&task[5], memory_order_acquire);
+            (_Atomic int64_t *)&task[5], memory_order_seq_cst);
         if (waiter) march_sched_wake(waiter);
         /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
          * timed wait.  Touches no task fields, so it is safe to do before or

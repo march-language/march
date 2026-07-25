@@ -144,6 +144,21 @@ typedef struct march_proc {
     march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
     int64_t                    mbox_count;   /* Number of messages in mailbox            */
     _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
+    /* Wake permit (LockSupport/park-unpark style).  march_sched_wake deposits
+     * one BEFORE it inspects `status`; march_sched_park_self consumes one
+     * INSTEAD of parking.  Closes the wake-while-RUNNING window in lock-free
+     * park sequences (task_wait_done): after the waiter's final done-recheck
+     * but before its PROC_PARKED store, a wake that arrives sees status ==
+     * PROC_RUNNING, takes wake's "not WAITING" early return, and would be
+     * dropped — the waiter then parks with nobody left to wake it.  With the
+     * permit, that wake instead cancels the waiter's next park.  Measured:
+     * this was the residual 1-in-1000 task_burst_await hang remaining after
+     * the seq_cst store-buffering fix in task_wait_done (which was the
+     * dominant 1-in-20 cause; see the comment there).  march_sched_recv does
+     * NOT need the permit — it holds mbox_lock across both its emptiness
+     * check and its PROC_PARKED store, so a sender can never observe it as
+     * RUNNING after seeing an empty mailbox. */
+    _Atomic int                wake_pending;
     ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */

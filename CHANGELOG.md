@@ -68,6 +68,25 @@ git log is authoritative for exact commits.
   cache masked two refinement regression tests. Caches written before this
   change self-heal, and real verdicts are still cached.
 
+- **The `task_await` missed-wakeup deadlock is fixed** — fork-join workloads
+  (`task_spawn` + `task_await`) hung roughly once every 20 runs, and the same
+  race intermittently hung CI's test step. It was a memory-ordering bug, not a
+  logic bug: the waiter's register-then-recheck and the completer's
+  publish-then-read-waiter form a classic store-buffering (Dekker) pair, and
+  release/acquire ordering does not prevent a store from being reordered after
+  a later load of a different address. On Apple Silicon the compiler emits an
+  RCpc acquire load (`ldapr`) that may complete before an earlier release
+  store drains, so both sides could read stale values at once: the task
+  completed, the completer saw no registered waiter and woke nobody, and the
+  waiter — having read a stale "not done" — parked forever. Upgraded both
+  sides of the pair to sequentially-consistent ordering (24 hangs/500 runs →
+  1/1000), and closed the residual window — a wake arriving after the
+  waiter's final recheck but before it finishes parking was dropped — with a
+  wake-permit handshake in the scheduler (0 hangs/3000 runs). The
+  `task_burst_await` regression test is back in the default test suite after
+  being quarantined as un-runnably flaky; actor mailbox delivery never had
+  either bug (its check-and-park runs under the mailbox lock).
+
 - A single malformed verification condition no longer disables refinement
   checking for the rest of a compilation. z3 emits an `(error …)` line and then
   still answers the query, but that line was read as the verdict; the solver was

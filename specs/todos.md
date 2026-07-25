@@ -246,17 +246,19 @@ fix.
 
 | Alias | Pinned behavior now unverified | Blocked on |
 |---|---|---|
-| `test/task_burst_await_quarantined` | `task_spawn`/`task_await` fork-join under burst load | scheduler missed-wakeup deadlock (P0 below) |
-| `test/node_call_loopback_quarantined` | multi-node RPC over real TCP loopback | same deadlock |
-| `test/node_discovery_quarantined` | SWIM node discovery / membership | same deadlock |
-| `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same deadlock (quarantined preemptively — same shape, not independently observed failing) |
+| ~~`test/task_burst_await_quarantined`~~ | ~~fork-join under burst load~~ **UN-QUARANTINED 2026-07-24** — deadlock root-caused (store-buffering) and fixed; 3000/3000 clean; back on `runtest` | — |
+| `test/node_call_loopback_quarantined` | multi-node RPC over real TCP loopback | deadlock is FIXED, but local verification is blocked by shared-host port collisions: these tests bind FIXED ports (29850, ...) and this dev host runs several concurrent March sessions — found a 34-hour-old zombie `native_node_call_loopback` holding 29850 (causing "bind failed" + a stale-era server answering with "malformed hello"). Un-quarantine after either (a) a clean soak on an isolated host/CI, or (b) making the tests bind port 0 / a per-run port. |
+| `test/node_discovery_quarantined` | SWIM node discovery / membership | same port-collision verification blocker |
+| `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same (was quarantined preemptively; the deadlock it was quarantined against is now fixed) |
 | `test/signal_term_suppress_quarantined` | a watched `SIGTERM` must NOT kill the process | `Signal.watch` deferred-dispatch race (entry below) |
 | `forge/test/build_check_quarantined` | `forge build` end-to-end check | a CI/local discrepancy **plus** a real 3-way qualified-call constructor-resolution bug |
 
-Two distinct root causes, both open, both heisenbugs (every diagnostic tried — lldb,
-ThreadSanitizer, lightweight tracing — either suppressed the symptom or failed to
-localize the missing sync edge):
-- **the scheduler missed-wakeup deadlock** (four tests) — see the P0 entry below;
+Root causes (updated 2026-07-24):
+- **the scheduler missed-wakeup deadlock** — FIXED (store-buffering memory-ordering
+  bug + a residual wake-while-RUNNING drop; see the P0 entry below for why every
+  diagnostic missed it). `task_burst_await` is back on `runtest`; the three
+  node tests remain quarantined only on the shared-host port-collision
+  verification blocker described in the table;
 - **the `Signal.watch` dispatch race** (one test) — see its entry below. Note this one
   is NOT merely an ordering flake: the dominant failure shape is *torn* output, so an
   order-insensitive golden does not fix it.
@@ -292,7 +294,9 @@ makes a quarantine indistinguishable from a deletion.
 
 ## Scheduler fork-join throughput collapse (2026-07-23)
 
-- **P0 (2026-07-23, same day) — OPEN: a genuine, live-reproducing missed-wakeup deadlock in `task_await`/`task_spawn` survives the park/wake fix below, and is very likely the real cause of the ~2-day CI `Test`-step hangs (separate from the `Build`-step dune-daemon wedge — see the CI-hardening entry in `specs/progress.md`).** `dune runtest` compiles and runs `test/native/task_burst_await.march` (a burst of `task_spawn` + sequential `task_await_unwrap`, `test/dune` ~852-885) as part of every `Test` step; this test can hang the process forever.
+- ✅ **FIXED 2026-07-24 — the missed-wakeup deadlock was a STORE-BUFFERING memory-ordering bug, closed by seq_cst + a wake permit; `task_burst_await` un-quarantined after 3000/3000 clean runs.** Root cause: `task_wait_done`'s store(`task[5]`)-then-load(`task[4]`) and `march_thunk_trampoline`'s store(`task[4]`)-then-load(`task[5]`) form a Dekker/SB pair, and release/acquire does NOT order a store before a subsequent load of a DIFFERENT location. Concretely, clang on ARMv8.3+ (Apple Silicon) compiles `memory_order_acquire` to LDAPR — an RCpc load architecturally allowed to complete before an earlier STLR drains from the store buffer — confirmed by disassembly (`stlr` immediately followed by `ldapr` on BOTH sides of the pair). Both sides could therefore read stale values simultaneously: the waiter saw done==0 and parked forever while the trampoline saw waiter==NULL and woke nobody — task complete, `g_live_procs==1`, main PROC_WAITING, exactly the lldb hang state recorded below. **This is also why every prior diagnostic failed**: interleaving-based manual review implicitly assumes sequential consistency (the "every interleaving is saved" conclusion below was correct SC reasoning about a non-SC machine); TSan's instrumentation strengthens atomics enough to suppress the reorder; `MARCH_NUM_SCHEDULERS=1` removes the second thread; and the earlier wake-permit experiment measured no effect because under SB the trampoline never CALLS `march_sched_wake` at all, so no permit scheme could help. Fix 1: seq_cst on all four operations of the pair (forces LDAR/RCsc, which cannot hoist above an earlier STLR) — hang rate 24/500 -> 1/1000. Fix 2: the residual 1/1000 was the SECOND, previously-masked window — a wake landing after the waiter's final recheck but before its PROC_PARKED store sees status==RUNNING and early-returns; the wake permit (`march_proc.wake_pending`, deposited seq_cst in `march_sched_wake` before the status load, consumed two-sidedly in `march_sched_park_self` around the PROC_PARKED store with a RUNNING rewind) closes it — 0/3000. The actor/mailbox path never had either bug: `march_sched_send`/`march_sched_recv` do their check-and-transition under `mbox_lock`, whose lock ordering substitutes for SC. `test/native/task_burst_await` restored to `runtest`.
+  - **Historical record of the investigation (pre-fix state), kept verbatim below.**
+- **P0 (2026-07-23, same day) — WAS OPEN: a genuine, live-reproducing missed-wakeup deadlock in `task_await`/`task_spawn` survives the park/wake fix below, and is very likely the real cause of the ~2-day CI `Test`-step hangs (separate from the `Build`-step dune-daemon wedge — see the CI-hardening entry in `specs/progress.md`).** `dune runtest` compiles and runs `test/native/task_burst_await.march` (a burst of `task_spawn` + sequential `task_await_unwrap`, `test/dune` ~852-885) as part of every `Test` step; this test can hang the process forever.
   - **Repro:** `march --compile -o /tmp/tba test/native/task_burst_await.march && /tmp/tba`, run repeatedly (`for i in $(seq 1 60); do /tmp/tba; done`). Hung on iteration 8 in one run, iteration 28 in another — roughly 1-in-10-to-30 runs on this machine (4 schedulers, default `MARCH_NUM_SCHEDULERS`).
   - **Confirmed via `lldb` (debug-symbol rebuild, same clang flags + `-g`) at the moment of hang:** the awaiting proc (`main`, pid 0) sits in `PROC_WAITING` (correctly parked, not stuck mid-transition); `g_live_procs == 1` (only `main` remains — every burst task's trampoline has already run to completion and been reaped); `g_runq_head == NULL` (global run queue empty); all 4 scheduler threads + the preemption daemon are idling in `sched_loop`'s 1ms `nanosleep` poll, indefinitely. In short: the task `main` is awaiting **did complete**, but the wakeup for it was never delivered or never took effect — every scheduler thread is correctly polling for work forever, there just never is any again.
   - **Confirmed cross-thread (not a single-threaded logic bug):** with `MARCH_NUM_SCHEDULERS=1` (fully cooperative, one OS thread, no real concurrency possible), 100/100 iterations ran clean. Only the default multi-scheduler mode reproduces it.
