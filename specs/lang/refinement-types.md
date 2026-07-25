@@ -242,6 +242,60 @@ Measures may call **other measures** and be **mutually recursive** (e.g. a
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons structurally just like `size`.
 
+### Refining a record over its fields
+
+A refinement may also range over a **record** type, with the predicate reading
+its fields. This works on **both** sides of a signature — as a postcondition on
+the return type, and as a precondition on a parameter:
+
+```march
+type Config = { port : Int, retries : Int }
+
+-- precondition: callers must pass a config with a usable port
+fn serve(c : {v : Config | v.port >= 1 && v.retries >= 0}) : Int do c.port end
+
+-- postcondition: this function promises a valid config
+fn defaults() : {v : Config | v.port >= 1} do { port: 8080, retries: 3 } end
+```
+
+At a call site the argument is checked against the field predicate:
+
+```march
+serve({ port: 8080, retries: 3 })   -- fine
+serve({ port: 0, retries: 3 })      -- error: `v.port >= 1` can never hold
+serve({ retries: 0, port: 0 })      -- same error; field order doesn't matter
+```
+
+What counts as a **fact** about a record argument:
+
+- **A record literal.** Its field values are known, so the predicate is decided
+  against them. Fields may be written in any order — they are matched to the
+  declaration by name, not position.
+- **A variable holding a record-refined parameter or local.** Its own
+  refinement travels with it, so a call forwards:
+
+  ```march
+  fn fwd(c : {v : Config | v.port >= 1}) : Int do serve(c) end   -- fine
+  ```
+
+  Forwarding obeys the same definite-failure rule as everything else: a
+  *weaker* incoming refinement (`v.port >= 0`) neither proves nor contradicts
+  the callee's, so it is **skipped**, not reported. Only a *contradictory* one
+  (`v.port <= 0`) is an error.
+
+Everything else about a record is **skipped**:
+
+- an **unrefined record variable** — nothing is known about its fields;
+- a record literal with an **unknown field value** (`{ port: p }` for a
+  parameter `p`) — the checker will not assert facts about fields it cannot
+  see, so the *whole* record is skipped rather than partially reflected;
+- a record literal with a field whose type is outside the reflected fragment
+  (a `String`, a function, a nested record) bound to anything but a literal
+  data constructor.
+
+Records also compose with measures — `{v : State | len(v.history) == v.count}`
+reasons about a `List` field structurally, exactly as `len` does elsewhere.
+
 ### The measure soundness gate
 
 A `@[measure]` is a *promise* that the function is a **total, terminating, pure**
@@ -290,9 +344,13 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
-  encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
-  it's deliberately omitted. Predicates over other types aren't supported.
+- **`Int`, `Bool`, and record fields only.** A predicate may range over an
+  `Int`/`Bool` value, or over the `Int`/`Bool` **fields of a record** (see
+  above). There are **no `Float` value-refinements** — encoding floats as
+  mathematical reals is unsound for IEEE-754 arithmetic, so it's deliberately
+  omitted. Refinements over a **variant** (multi-constructor) type are not
+  checked, and a record field of an unreflected type makes the whole record
+  opaque.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return

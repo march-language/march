@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- A refinement over a **record's fields** is now checked on **parameters**, not
+  just return types. Given `fn serve(c : {v : Config | v.port >= 1})`, the call
+  `serve({ port: 0 })` is a compile error. A record literal argument is a fact
+  (fields are matched by name, so declaration order doesn't matter), and a
+  variable holding a record-refined parameter carries its fields through, so
+  forwarding to a same-shaped parameter verifies. An unrefined record, a record
+  literal with an unknown field value, or a field outside the reflected
+  fragment is skipped rather than guessed at — the definite-failure stance is
+  unchanged, and correct code is never flagged.
+
 - Refinement checking now propagates a function's declared return refinement to
   its call sites, so passing a `{Int | _ < 0}` result into a `{Int | _ >= 0}`
   parameter is a compile error. Applies to both `takepos(neg())` and
@@ -21,6 +31,17 @@ git log is authoritative for exact commits.
   unproven one stays legal but tells callers nothing, so a stale return
   refinement can never flag correct code. Postconditions that mention a
   parameter (relational) are not yet propagated.
+
+### Fixed
+
+- A record refinement whose record had a field of a non-`Int` type bound to a
+  variable (e.g. `{ port: 8080, name: n }` where `name : String`) could
+  silently disable refinement checking for the **rest of the file**. The
+  reflection placed the variable at the wrong solver sort, the solver rejected
+  the malformed query, and the error desynchronised the long-lived solver
+  session, so every later check — including plain `Int` ones in unrelated
+  functions — came back inconclusive and reported nothing. Such a record is now
+  skipped instead of mis-reflected.
 
 ### Changed
 
