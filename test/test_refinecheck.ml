@@ -782,17 +782,74 @@ end|}));
 end|}));
 
     (* A record field whose declared type is NOT Int, bound to a variable.  The
-       scalar reflection declares every variable SInt, so reflecting it anyway
-       would build a constructor application with mismatched argument sorts —
-       and Z3 answers a malformed VC with an error that DESYNCS the long-lived
-       `z3 -in` channel, silently disabling refinement checking for the rest of
-       the compilation.  So the record must be skipped instead. *)
-    gated "record precondition: non-Int field bound to a variable is skipped" (fun () ->
-        Alcotest.(check bool) "no error" false
+       scalar reflection declares every variable SInt, so reflecting the
+       variable's own term there would build a constructor application with
+       mismatched argument sorts — and Z3 answers a malformed VC with an error
+       that DESYNCS the long-lived `z3 -in` channel, silently disabling
+       refinement checking for the rest of the compilation.
+
+       The record is no longer skipped for it: the ill-sorted field is replaced
+       by a FRESH constant at the field's DECLARED sort, carrying no
+       assumptions, so the VC is well-sorted and the checkable `port` field
+       survives.  `port: 0` against `v.port >= 1` is therefore now reported —
+       a violation that used to be lost to a sibling field. *)
+    gated "record precondition: an unreflectable sibling field no longer hides `port`" (fun () ->
+        Alcotest.(check bool) "has error" true
           (has_refine_error {|mod M do
   type Config = { port : Int, name : String }
   fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
   fn f(n : String) : Int do serve({ port: 0, name: n }) end
+end|}));
+
+    (* The other direction, and the one that matters for soundness: a
+       SATISFYING `port` alongside the same unreflectable field must stay
+       silent, i.e. the opaque stand-in must not make anything provable. *)
+    gated "record precondition: a satisfying `port` beside an opaque field passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(n : String) : Int do serve({ port: 8080, name: n }) end
+end|}));
+
+    (* Nothing may be concluded ABOUT the opaque field.  Here the predicate is
+       entirely about the unreflectable list field and its true value (`len` of
+       `Cons(1, Nil)` is 1) does NOT satisfy `== 5` — a real violation, which we
+       must nevertheless stay SILENT about, because the stand-in constant is
+       unconstrained and proves nothing in either direction.  If this ever
+       reports, the substitution has started concluding things about a value it
+       cannot see. *)
+    gated "record precondition: a predicate about the opaque field is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | len(v.history) == v.count}) : Int do s.count end
+  fn f() : Int do take({ count: 5, history: Cons(1, Nil) }) end
+end|}));
+
+    (* …and the same predicate whose value the opaque field DOES satisfy is
+       equally silent — the stand-in is symmetric, not a one-way ratchet. *)
+    gated "record precondition: an opaque field cannot discharge either" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | len(v.history) == v.count}) : Int do s.count end
+  fn f() : Int do take({ count: 1, history: Cons(1, Nil) }) end
+end|}));
+
+    (* The opaque stand-in is a CALL-SITE-only device.  [check_post] switches to
+       "a SAT model is a definite violation" whenever a concrete record is in
+       scope, and under that rule a model that assigned an unconstrained field a
+       bad value would be reported as a counterexample even though the real
+       field holds a perfectly good value — a false positive.  So the return
+       side keeps the conservative skip, and this pins it. *)
+    gated "record postcondition: an unreflectable field still skips the whole record" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn mk() : {v : State | v.count >= 0} do
+    { count: -1, history: Cons(1, Nil) }
+  end
 end|}));
 
     (* The channel-survival half: an unrelated Int violation AFTER such a record
@@ -814,9 +871,11 @@ end|}));
        `1` there.  A top-level-only fit check passes this and builds
        `(Cons 1 Nil)`, which z3 rejects with a MULTI-LINE `(error …)` — the
        exact shape that used to leave a continuation line in the pipe and shift
-       every later verdict by one.  The record must be skipped instead. *)
-    gated "record precondition: a concrete list element is a nested sort mismatch" (fun () ->
-        Alcotest.(check bool) "no error" false
+       every later verdict by one.  `(Cons 1 Nil)` is therefore still never
+       built; the field is replaced by a fresh `M_List` constant instead, which
+       is well-sorted, and `port: 0` is now caught rather than lost. *)
+    gated "record precondition: a concrete list element becomes an opaque stand-in" (fun () ->
+        Alcotest.(check bool) "has error" true
           (has_refine_error {|mod M do
   type Config = { port : Int, history : List(Int) }
   fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end

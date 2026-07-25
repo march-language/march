@@ -284,6 +284,22 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-24, refinement types: an unreflectable record field no longer sinks its siblings)
+
+**`serve({ port: 9, history: Cons(1, Nil) })` was skipped whole.** `term_fits_sort` rejects `Cons(1, Nil)`: the built-in `List` is generic, so its element field carries the opaque sort `Elem` and the scalar reflection's integer `1` cannot sit there. `reflect_record_literal` then returned `None` for the ENTIRE record, so the perfectly checkable `port` field was lost along with the one field nobody could see. The same happened for `{ port: 0, name: n }` with a `String`-typed `n`.
+
+**Fix: an opaque stand-in, not a coerced term.** `reflect_record_literal` gained an OPTIONAL `~opaque` that mints a fresh constant at the offending field's DECLARED sort. The ill-sorted `(Cons 1 Nil)` is still never built — the channel-poisoning hazard the original skip existed to prevent (a malformed VC makes z3 emit an `(error …)` that desynchronises the shared `z3 -in` channel and silently disables refinement checking for the rest of the compilation) is untouched. This is deliberately NOT the "make `Int` fit `Elem`" route.
+
+**Soundness.** The stand-in carries no assumptions, so it denotes an arbitrary value of its sort. The call-site decision procedure reports only when `¬goal` is VERIFIED — valid under EVERY assignment — so a goal that depends on the stand-in is never reported *and* never discharged, while a goal that depends only on the reflected siblings is decided exactly as if the record were fully known. Pinned in both directions: a predicate about the opaque field stays silent whether its real value satisfies it (`{count: 1, history: Cons(1, Nil)}` against `len(v.history) == v.count`) or violates it (`count: 5`).
+
+**Call-site only, on purpose.** `check_post` switches to "a SAT model over a concrete record in scope is a definite violation"; a model free to assign the stand-in a bad value would be reported as a counterexample although the real field holds a fine value — a false positive. The return side therefore never passes `~opaque`, and a test pins that it still skips the whole record.
+
+Two existing tests flipped from asserting silence to asserting an error (`{ port: 0, name: n }` and `{ port: 0, history: Cons(1, Nil) }` against `{v : Config | v.port >= 1}`). Both are genuine violations that were being lost to a sibling field, and both test comments were rewritten to state why the channel-safety rationale still holds.
+
+Feature list addition:
+
+- A record argument with an **unreflectable field** (a `String` bound to a variable, a list literal with concrete elements) is still checked on its reflectable fields at a call site; only the unreflectable field is opaque.
+
 ## Current State (as of 2026-07-24, refinement types: record FIELD facts flow into path conditions)
 
 **A guard on a record field now reaches the call it guards.** `if c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}` precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported as a definite failure. The condition was already being collected into the `path` context — it was dropped at translation time, because the path translation in `check_call` passed no `~resolve_field` to `smt_of`, so `c.port` reflected to `None` and the whole condition went away. (`make_field_resolver` already existed; only `check_post` consulted it.)

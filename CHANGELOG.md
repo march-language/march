@@ -23,6 +23,15 @@ git log is authoritative for exact commits.
   facts: a `let`, `let?`, lambda parameter or `match` binder that rebinds the
   name retires the fact.
 
+- An **unreflectable record field no longer hides its siblings** at a call
+  site. `serve({ port: 0, name: n })` and `serve({ port: 0, history:
+  Cons(1, Nil) })` used to be skipped whole, because a `String` field bound to a
+  variable and a list literal with concrete elements cannot be placed at their
+  declared SMT sorts. The offending field is now replaced by an unconstrained
+  stand-in of the right sort, so `port` is checked and both calls are reported.
+  Nothing may be concluded *about* the stand-in in either direction, and the
+  return side keeps the conservative whole-record skip.
+
 - As-patterns: `Some(x) as whole -> ...` binds a name to the entire matched
   value while the inner pattern continues to destructure it. Works in match
   arms, `let` bindings, and function parameters. `PatAs` had been implemented

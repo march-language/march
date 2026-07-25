@@ -1566,9 +1566,31 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
 
 (* Reflect an ERecord literal as a constructor application in SMT.
    Fields are reordered to match the declaration order stored in ctor_field_names.
-   Returns None if any field is missing, untranslatable, or reflects to a term
-   that does not fit its declared sort (conservative skip). *)
-let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list)
+   Returns None if any field is MISSING.
+
+   [opaque] decides what happens to a field that is untranslatable, or that
+   reflects to a term not WELL-SORTED at its declared sort (`history:
+   Cons(1, Nil)`, `name: n` for a `String` `n`).  Without it — the default, and
+   what the postcondition side keeps — the whole record reflects to None and
+   the check is skipped, losing the perfectly checkable sibling fields with it.
+   With it, the offending field is replaced by a FRESH constant that [opaque]
+   mints and declares AT THAT FIELD'S DECLARED SORT.
+
+   Why the substitution is sound *for the call-site check only*.  The stand-in
+   carries no assumptions whatsoever, so it denotes an arbitrary value of the
+   right sort and nothing can be concluded about it in either direction.  The
+   call-site decision procedure reports only when `¬goal` is VERIFIED — valid
+   for every assignment — so a goal that depends on the stand-in is never
+   reported (nor ever discharged), while a goal that depends only on the
+   reflected siblings is decided exactly as if the record had been fully known.
+
+   It must NOT be used by [check_post]: with a concrete record in scope that
+   check switches to "a SAT model is a definite violation", and a model free to
+   assign the stand-in a bad value would then be reported as a counterexample
+   even though the real field holds a fine value — a false positive.  Hence the
+   argument is optional and the return side never passes it. *)
+let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
+    (sort_name : string) (fields : (A.name * A.expr) list)
     (reflect_scalar : A.expr -> Smt.term option) : Smt.term option =
   match Hashtbl.find_opt adt_ctors sort_name with
   | Some [ ctor ] ->
@@ -1585,7 +1607,7 @@ let reflect_record_literal (sort_name : string) (fields : (A.name * A.expr) list
              (fun e s ->
                match reflect_scalar e with
                | Some t when term_fits_sort s t -> Some t
-               | _ -> None)
+               | _ -> Option.map (fun mk -> mk s) opaque)
              in_order fsorts
          in
          if List.exists Option.is_none reflected then None
@@ -1827,9 +1849,23 @@ let check_call ~root errctx ~span ~(postcond : string -> (string * A.expr) optio
        NOT use check_post's report-on-SAT branch, so a record fact that merely
        fails to establish the callee's precondition stays silent. *)
     let scalar_arg e = absorb (reflect_scalar ~postcond sc e) in
+    (* A stand-in for a record field we cannot reflect (see
+       [reflect_record_literal]).  Fresh per occurrence, declared at the field's
+       DECLARED sort, and given NO assumption — so it denotes an arbitrary value
+       and the call-site's "report only when ¬goal is Verified" rule can never
+       conclude anything from it.  Its only job is to keep the VC well-sorted so
+       the record's CHECKABLE fields survive a sibling we cannot see. *)
+    let opaque_ctr = ref 0 in
+    let opaque_field (s : Smt.sort) : Smt.term =
+      incr opaque_ctr;
+      let nm = Printf.sprintf "fld$op%d" !opaque_ctr in
+      decls := (nm, s) :: !decls;
+      Smt.Const nm
+    in
     let record_self sort_name : Smt.term option =
       match self_actual with
-      | A.ERecord (fields, _) -> reflect_record_literal sort_name fields scalar_arg
+      | A.ERecord (fields, _) ->
+        reflect_record_literal ~opaque:opaque_field sort_name fields scalar_arg
       | A.EVar { A.txt = x; _ } ->
         (match List.assoc_opt x sc with
          | Some (b, q, Some s) when s = sort_name ->
