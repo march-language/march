@@ -207,7 +207,57 @@ let post_suite =
         Alcotest.(check bool) "error" true
           (has_refine_error
              (post
-                "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end"))) ]
+                "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end")));
+
+    (* ── The return binder is a CALLEE-side name, not a body name ────────────
+       `check_post` translated the path conditions with the SAME resolver as the
+       return predicate, in which the binder denotes the RETURN value.  A path
+       condition was collected from the function BODY, so every name in it is a
+       body name; when a parameter happens to share the binder's spelling the
+       fact was re-pointed at the returned expression — the same caller/callee
+       conflation already fixed for `check_call`'s path conditions.
+
+       Here the guard `v < 0` is about the PARAMETER `v`; misread as the return
+       value it becomes `k < 0`, which makes `v > 0` (i.e. `k > 0`) definitely
+       false and reports correct code.  The right answer is SILENCE: `k` is
+       unconstrained, so the postcondition is neither proven nor refuted. *)
+    gated "a named return binder colliding with a parameter is not misattributed" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
+                \    if v < 0 do k else 1 end\n\
+                \  end")));
+
+    (* Control: the SAME collision, with a tail that definitely violates.  Had
+       the fix worked by simply dropping the path conditions (or the binder),
+       this would go silent too. *)
+    gated "the same collision still reports a definitely violating tail" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
+                \    if v < 0 do 0 else 1 end\n\
+                \  end")));
+
+    (* Control: a named binder with NO collision still denotes the return value
+       in the PREDICATE — the fix must change only the path context. *)
+    gated "a named return binder still denotes the return value" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post "  fn f() : {v : Int | v >= 0} do 0 - 1 end")));
+
+    (* …and a guard on the colliding parameter must still discharge the
+       postcondition when the tail IS that parameter, which is the case the
+       body-namespace reading gets right and the binder reading only got right
+       by accident. *)
+    gated "a guard on the colliding parameter still discharges" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn f(v : Int) : {v : Int | v > 0} do\n\
+                \    if v > 0 do v else 1 end\n\
+                \  end"))) ]
 
 (* P1c: `assert(p)` acts as an assume — it extends the path context. *)
 let assume_suite =

@@ -284,6 +284,18 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-24, refinement postconditions: a named return binder no longer captures body variables in the path context)
+
+**A live false positive, reproduced against the built compiler before the fix.** `fn f(v : Int, k : Int) : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as "does not satisfy its return type constraint" with the counterexample `k = -1`. The guard `v < 0` is about the PARAMETER `v`; `check_post` translated the path conditions with the SAME `resolve_var` as the return predicate, in which the binder `v` denotes the RETURN value, so the guard became `k < 0` and made `v > 0` (i.e. `k > 0`) definitely false.
+
+This is the same caller/callee conflation already fixed for `check_call`'s path conditions (`path_resolve_var`), reaching the postcondition side by the same route: a path condition is collected from the function BODY, so every name in it is a body name and denotes itself, while the return binder is not a body name at all — it exists only inside the refinement predicate.
+
+**The bug cut both ways.** With the tail `0` instead of `k`, the same collision turned `v < 0` into `0 < 0`: a contradictory assumption, under which the goal discharges vacuously and a GENUINE violation went unreported. That shape is pinned as a second test and was silent before the fix.
+
+Path conditions now go through a `path_resolve_var` / `path_resolve_field` pair resolving through the enclosing scope (`var_const` and `scope_field_resolver`). `_` is deliberately left pointing at the return term: it is not a legal variable in body code, so it can only have come from a predicate, and routing it through `var_const` would declare a constant named `_`. Four tests in `post_suite` — the false positive, the suppressed-violation control, a control that a non-colliding named binder still denotes the return value in the PREDICATE, and one that a guard on the colliding parameter still discharges when the tail IS that parameter (the case the binder reading got right only by accident).
+
+Practical exposure was low — return binders are almost always `_` — but it was a live misattribution path, and a false positive is this subsystem's cardinal sin.
+
 ## Current State (as of 2026-07-24, refinement types: an unreflectable record field no longer sinks its siblings)
 
 **`serve({ port: 9, history: Cons(1, Nil) })` was skipped whole.** `term_fits_sort` rejects `Cons(1, Nil)`: the built-in `List` is generic, so its element field carries the opaque sort `Elem` and the scalar reflection's integer `1` cannot sit there. `reflect_record_literal` then returned `None` for the ENTIRE record, so the perfectly checkable `port` field was lost along with the one field nobody could see. The same happened for `{ port: 0, name: n }` with a `String`-typed `n`.

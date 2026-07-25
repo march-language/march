@@ -2501,9 +2501,38 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
       | None -> fun _ _ -> None
     in
     let resolve_var name = if name = binder || name = "_" then Some tail_term else var_const name in
+    (* ── Body-namespace resolvers, for the PATH CONTEXT only ────────────────
+       A path condition was collected from the function BODY, so every name in
+       it is a body name — a parameter or a local — and denotes itself.  The
+       return BINDER is not a body name at all: it exists only inside the
+       refinement predicate, where it stands for the returned value.  Routing
+       the path through [resolve_var] therefore re-points any body variable that
+       happens to share the binder's spelling at the returned expression:
+
+         fn f(v : Int, k : Int) : {v : Int | v > 0} do
+           if v < 0 do k else 1 end     -- the guard is about the PARAMETER `v`
+
+       read through the binder, `v < 0` becomes `k < 0`, which makes `v > 0`
+       (i.e. `k > 0`) definitely false and reports correct code.  This is the
+       same caller/callee conflation already fixed for [check_call]'s path
+       conditions (see [path_resolve_var] there).
+
+       `_` is left pointing at the return term: it is not a legal variable in
+       body code, so it can only have come from a predicate, and mapping it
+       through [var_const] would declare a constant named `_`. *)
+    let path_resolve_var name = if name = "_" then Some tail_term else var_const name in
+    (* Same split for field selectors: `old.count` in a guard projects from the
+       SCOPE's record parameter, not from the returned record. *)
+    let path_resolve_field varname fname =
+      if varname = "_" then resolve_field varname fname
+      else scope_field_resolver varname fname
+    in
     List.iter
       (fun (cond, negated) ->
-        match smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app cond with
+        match
+          smt_of ~resolve_var:path_resolve_var ~resolve_measure
+            ~resolve_field:path_resolve_field ~resolve_measure_app cond
+        with
         | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
         | None -> ())
       path;

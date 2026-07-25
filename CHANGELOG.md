@@ -103,6 +103,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Refinement checking: a **named return binder** that collides with a parameter
+  no longer misattributes the guards reaching a return. `fn f(v : Int, k : Int)
+  : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as a
+  violation with the counterexample `k = -1` — the guard `v < 0` is about the
+  *parameter*, but the path conditions were translated with the resolver in
+  which `v` denotes the *return value*, so it became `k < 0`. Path conditions
+  now resolve in the function body's namespace; only the return predicate reads
+  the binder as the return value. The same conflation also suppressed genuine
+  violations, which are now reported.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and
