@@ -6,6 +6,234 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Merge-loss round 2 — 14 commits on `docs/core-march-types-skeleton` never reached `main` (2026-07-24)
+
+**A second, distinct merge loss from the same branch as the 2026-07-18 audit
+(which was recorded as COMPLETE).** `git merge-base --is-ancestor <sha> HEAD`
+says NO for all of these; `git log --oneline main..e283d9b9` counts 14.
+
+- ✅ **RESTORED 2026-07-24: `e283d9b9` — "perceus: un-starve FBIP reuse (sink
+  past RC ops)".** This one was found the expensive way, via a 7.5x benchmark
+  regression. See the dedicated entry below.
+### Audit results (2026-07-24) — the branch holds 31 non-docs commits, not 13
+
+Method: patch re-application is useless after months of drift (169/275 came
+back "ambiguous"), so each commit was scored by **content presence** — what
+fraction of its substantive added code lines exist anywhere in `lib/ bin/
+runtime/ stdlib/ forge/ lsp/ js/` today. Calibrated against three known
+outcomes: `e283d9b9` (restored this session) → 100%, `c30161d7` and
+`4b4c70b3` (restored by the 2026-07-18 audit) → 100% / 90%. Script kept at
+`scratchpad/content_audit.sh`.
+
+**A low score means "this implementation is absent", NOT "the bug is live"** —
+several were superseded by a different fix that IS in `main` (e.g. `5a648f9c`
+to_string-via-Show scores 0% but was superseded by `6d2eed85`, and to_string
+on containers verifiably works). Every claim below is a *behavioural* probe,
+not a line count.
+
+**CONFIRMED LIVE BREAKAGE ON `main` (2026-07-24):**
+
+- [ ] **`4a1c2ee3` — compiled `String.from_codepoint` does not LINK.**
+  `Undefined symbols: "_string_from_codepoint", referenced from
+  _String.from_codepoint`. Interpreted it works and prints `Some(A)` /
+  `Some(☃)`. Any compiled program touching the codepoint codec fails to
+  build. This is precisely what the lost commit's subject line says it
+  unblocked.
+- [ ] **`61ce42b0` — two bench programs crash compiled (exit 138/SIGBUS).**
+  `bench/iolist_template.march` and `bench/string_pipeline.march` both die
+  with no output. The lost commit is titled "make IOList flatten stack-safe;
+  kill two bench stack overflows" — the same two.
+- [ ] **`bench/deque_ops.march` does not terminate compiled** (killed at 180s,
+  produces nothing). Not yet mapped to a specific lost commit.
+
+**Probed and NOT reproducing** (superseded, or the probe doesn't hit it):
+`d2d0a3a3` (`examples/stats_basic.march` interp==compiled parity ok),
+`895ebfee` (`bench/dataframe_bench.march` runs clean), `5a648f9c`
+(to_string-on-container works, superseded by `6d2eed85`), `c30161d7`,
+`4b4c70b3`, `b7140673`, `778d399c`, `a7f96dad` (all score PRESENT).
+
+- [ ] **Still unprobed, ranked by risk** — each needs a behavioural test
+  before any verdict: `f2b67001` (niche-erased Option FBIP reuse → RC
+  underflow), `f2729935` / `6f047e02` (Perceus RC field-type resolution),
+  `6dd1968c` (B18 TCO release-timing), `4a58e992` (Task.race/any/cancel —
+  possibly superseded by the 2026-07-18 cancel-token work), `03498340`
+  (node_discovery stack overflow; the torn-stdout half is superseded by
+  `e73644aa`), `c430e330` (reject overlapping impls), `b267a436` (derived
+  structural Show), `b84ae429` (monomorphism restriction), `fcfd78ba` +
+  `3c8826a0` + `4ab998ea` (the three-stage uniform apply-fn ABI flip — these
+  are a *sequence*; restoring one without the others is likely worse than
+  restoring none), `d5562dfc`, `1a547481`, `21f4fbb2`, `8f624a50`,
+  `7868160e`, `65eefa53`.
+
+### Why the safety nets missed all of this
+
+- [ ] **The differential oracle cannot see these crashes.**
+  `bench/iolist_template.march` is `SKIPPED`; `string_pipeline` and
+  `deque_ops` are `INTERP_TIMEOUT`. The sweep only compares programs where
+  the tree-walking interpreter produced ground truth inside its 10s budget,
+  so for every compute-heavy benchmark — exactly the ones most likely to
+  exercise RC, FBIP and TCO — a compiled SIGBUS, hang, or wrong answer is
+  invisible. The sweep reported **0 divergences** on the same day three bench
+  programs were broken compiled. Give these an expected-stdout anchor and
+  compare the compiled run against it directly, with no interpreter leg.
+- [ ] **Nothing runs the benchmarks.** `bench/*.march` is not in `dune
+  runtest`; the FBIP regression, both SIGBUS crashes and the `deque_ops` hang
+  would all have been caught by a cheap "every bench program compiles, runs,
+  exits 0, and prints its known answer" gate. That gate does not exist.
+- [ ] **Process gap, not just a backlog.** Two separate audits of this branch
+  have now each declared completion while leaving real fixes behind. Before
+  the next one, decide on a mechanical check (e.g. a CI job asserting no
+  `fix(`/`feat(` commit on a merged branch is missing from `main`) rather than
+  a third manual pass.
+
+## Perceus FBIP in-place reuse was disabled program-wide (FIXED 2026-07-24)
+
+- ✅ **FIXED — `lib/tir/perceus_fbip.ml` `try_fbip_sink` now hops `ESeq` heads
+  that are RC ops on a DIFFERENT variable.** Once `join_points` began lifting a
+  match's panic default arm into a `$jp_clo` closure, every real arm carried a
+  `dec_rc $jp_clo` between its `let` chain and its tail `EAlloc`.
+  `try_fbip_sink` only traversed `ELet`, so the scrutinee's own `dec` never
+  reached the alloc and **no `EReuse` was ever emitted anywhere in any
+  program** — every in-place rewrite silently became free + fresh allocation.
+  Sound to sink past: RC ops neither read fields nor observe ordering,
+  delaying a `dec` can only delay (never hasten) a free, and the aliasing
+  corner is caught by `EReuse`'s runtime RC==1 uniqueness branch (shared cells
+  take the fresh-alloc path). Companion fail-loudly full-overwrite guard added
+  at the generic `EReuse` emission site in `lib/tir/llvm_emit.ml`.
+  `bench/tree_transform.march` 3842.5 ms → 852.2 ms; `bench/list_ops.march`
+  143.0 ms → 67.3 ms (exactly its pre-regression figure).
+- **The lesson worth keeping: the golden snapshot certified the regression.**
+  `test/snapshots/perceus/fbip_dead_binding_reuse.expected` — whose source
+  header states "Perceus should reuse the freed cell (EReuse)" — had the
+  starved `dec_rc xs; ... alloc List.Cons(...)` shape pinned as its EXPECTED
+  output. A snapshot regenerated without reading the diff against the
+  fixture's stated intent is worse than no snapshot: it converts a regression
+  into a guarantee. Regenerating snapshots is a review step, not a chore.
+
+## Performance regressions vs the 2026-03-24 benchmark table (OPEN, 2026-07-24)
+
+Measured with `RUNS=10 bash bench/run_benchmarks.sh` on the same machine
+class, with OCaml/Rust as controls (both within noise of their 2026-03-24
+figures, so the host is not the variable). See `bench/RESULTS.md`.
+
+### ROOT-CAUSED AND FIXED 2026-07-24 — the per-call check was a TLS resolver call
+
+**`66371f3b` (2026-03-25) "feat(sched): Phase 4 — reduction counting in
+compiled code" landed the day AFTER the 2026-03-24 benchmark table was
+recorded.** Every compiled function entry now emits a load / decrement /
+store against the `@march_tls_reductions` global plus a conditional branch to
+`@march_yield_from_compiled` (`Llvm_ctx.emit_reduction_check`, gated only on
+`ctx.repl`). So the published table is a pre-preemption baseline and every
+number since carries this cost. **This is the price of a deliberate feature,
+not a regression to hunt** — but it was never re-baselined, so it has been
+sitting in the table as an unexplained 2.2x.
+
+A/B measured by gating the emission behind a temporary env var, **with
+`.march/cas/artifacts` cleared between every build** (see the warning below):
+
+| benchmark | TLS check (before) | plain-flag check (now) | no check at all | 2026-03-24 |
+|---|---|---|---|---|
+| `fib(40)` | 640 ms | **465 ms** | 360 ms | 288 ms |
+| `tree_transform` | 852 ms | **579 ms** | 540 ms | 513 ms |
+| `list_ops` | 67 ms | **64 ms** | 80 ms* | 68 ms |
+| `binary_trees` | 177 ms | **165 ms** | 150 ms | 265 ms |
+
+\* the allocation-bound benchmarks are within noise of each other; the check
+cost falls almost entirely on call-dense code.
+
+Removing it lands `fib` and `tree_transform` essentially back on their
+historical figures, which closes both open items. Allocation-bound
+benchmarks are unaffected — the cost is per *call*, so it falls entirely on
+call-dense recursive code.
+
+Ruled out along the way, so nobody re-walks them: the tag/untag round-trip
+through the `case` result slot (`shl`/`or`/`inttoptr` on store, conditional
+`ashr`+`select` on load — present today, a bare `inttoptr` in 2026-03; in
+isolation the tagged form is *marginally faster*), March's clang flags
+(`-fno-strict-aliasing -fwrapv -msse4.2` — no effect), and scheduler thread
+count (`MARCH_NUM_SCHEDULERS=1` changes nothing).
+
+- ✅ **FIXED — the cost was never the check's arithmetic, it was TLS.**
+  `march_tls_reductions` is `_Thread_local`, and thread-local access is an
+  indirect resolver call on both supported platforms: Darwin/arm64 emits
+  `adrp; ldr; blr` through the TLV descriptor, Linux/arm64 PIE goes through
+  TLSDESC. Confirmed by disassembly (`blr x8` at the top of every `_fib`
+  call) and by isolating the same IR against a plain global, where the check
+  measured as free. Compiled code now reads a plain, process-wide
+  `march_preempt_request` flag set by the preemption handler once per
+  quantum. Measured: `fib(40)` 640→465 ms, `tree-transform` 852→579 ms,
+  `binary-trees` 177→165 ms, `list-ops` 67→64 ms.
+  - **The load must be `volatile`.** A plain load of a global that nothing in
+    the loop writes is loop-invariant, so LLVM hoists it straight out of a
+    TCO loop body and the loop never re-reads it — preemption silently stops
+    for exactly the tail-recursive loops that need it most. The old
+    load/decrement/**store** sequence could not be hoisted, which is why this
+    hazard never existed before.
+  - **Also fixed a pre-existing hole this exposed:** `march_sched_run`'s
+    single-scheduler fast path returned without ever calling
+    `march_sched_preempt_start()`, so `MARCH_NUM_SCHEDULERS=1` had no timer
+    preemption whatsoever and depended entirely on the reduction counter.
+  - **Pinned by `test/native/preempt_starvation.march`** (new): a CPU-bound
+    TCO loop and a short task on ONE scheduler thread, asserting the short
+    one prints first. `MARCH_NUM_SCHEDULERS=1` is essential — with the
+    default 4 threads the sibling runs on another OS thread and prints first
+    even with preemption completely broken, so the obvious version of this
+    test would have passed against both bugs.
+- ✅ **PARTIALLY RECOVERED (2026-07-24, same day): the residual was the
+  missing `nsw` on the scalar tag.** `emit_tag_scalar`'s `(v<<1)|1` used a
+  plain `shl`, leaving a sign-truncating `sbfx` per scalar round trip AND
+  blocking LLVM's accumulator TRE. With `shl nsw` (sound: it asserts the
+  63-bit round-trip losslessness the convention already assumes; an
+  out-of-range Int was already corrupted, it is now poison instead — see the
+  comment in `lib/tir/llvm_ctx.ml`), `fib` compiles to an accumulator loop
+  with one recursive call, volatile preemption check verified INSIDE the
+  loop (disassembly + starvation test): 465 -> ~390 ms. Oracle 100 MATCH /
+  0 divergences.
+- [ ] **Remaining `fib` gap vs 2026-03-24 (~390 vs 288 ms): the per-iteration
+  volatile check plus call frame.** ~100 ms over ~165M loop iterations
+  (post-TRE) ≈ 2 cycles/iteration — the price of staying preemptible. Any
+  further recovery means checking less often (e.g. unrolling the TRE loop or
+  a check-every-N scheme), which re-opens the counter-cost question; not
+  obviously worth it.
+- [ ] **Re-baseline `bench/RESULTS.md` against a post-preemption reference**
+  so the table stops implying a regression that is actually a feature cost.
+
+> ⚠️ **Benchmark A/B methodology — the CAS artifact cache will lie to you.**
+> The first run of this experiment concluded "the reduction check costs
+> nothing", because compiled artifacts are content-hash cached in
+> `<project>/.march/cas/artifacts/` and the key covers compiler flags but
+> **not environment variables**. Both arms of the A/B were served the same
+> cached binary. Always `rm -rf .march/cas/artifacts` between arms and
+> confirm the two outputs have *different* hashes before believing a null
+> result. (Same class as the existing `cas_flags` note for CLI flags.)
+- **Not a regression:** `binary-trees(15)` improved (265.4 → 176.6 ms) and
+  `list-ops(1M)` is exactly restored (67.6 → 67.3 ms).
+
+## Compiler: `pfn` unreachable from a sibling in the same NESTED module (OPEN, 2026-07-24)
+
+- [ ] **A public `fn` in a nested `mod` cannot call a `pfn` declared beside it
+  in that same module** — reported as `Module `X` does not export `y``.
+  Top-level modules are unaffected. Since the project convention is exactly
+  one top-level `mod` per file, nested modules are the normal way to have
+  several modules, so this breaks ordinary private-helper code. Minimal repro:
+
+  ```march
+  mod Outer do
+    mod Crypto do
+      fn encode(x : Int) : Int do scramble(x) end
+      pfn scramble(x : Int) : Int do x * 31 end
+    end
+  end
+  -- Module `Crypto` does not export `scramble`.
+  ```
+
+  Found by the differential oracle: `examples/modules.march` (whose Part 3 is
+  a deliberate pub-vs-`pfn` demonstration) now fails to typecheck at all, so
+  it reports `INTERP_FAIL` and reddens the sweep. Suspected interaction
+  between the 0.2.0 "Module does not export" diagnostic change and the
+  intra-module qualification pass (`specs/2026-06-23-desugar-intra-module-qualification.md`)
+  rewriting the bare call to a qualified one before the export check runs.
+
 ## Quarantined tests — coverage that is currently DARK (inventory, 2026-07-24)
 
 **Read this before assuming a green CI run means the corresponding behavior works.**
@@ -18,17 +246,72 @@ fix.
 
 | Alias | Pinned behavior now unverified | Blocked on |
 |---|---|---|
-| `test/task_burst_await_quarantined` | `task_spawn`/`task_await` fork-join under burst load | scheduler missed-wakeup deadlock (P0 below) |
-| `test/node_call_loopback_quarantined` | multi-node RPC over real TCP loopback | same deadlock |
-| `test/node_discovery_quarantined` | SWIM node discovery / membership | same deadlock |
-| `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same deadlock (quarantined preemptively — same shape, not independently observed failing) |
+| ~~`test/task_burst_await_quarantined`~~ | ~~fork-join under burst load~~ **UN-QUARANTINED 2026-07-24** — deadlock root-caused (store-buffering) and fixed; 3000/3000 clean; back on `runtest` | — |
+| `test/node_call_loopback_quarantined` | multi-node RPC over real TCP loopback | deadlock is FIXED, but local verification is blocked by shared-host port collisions: these tests bind FIXED ports (29850, ...) and this dev host runs several concurrent March sessions — found a 34-hour-old zombie `native_node_call_loopback` holding 29850 (causing "bind failed" + a stale-era server answering with "malformed hello"). Un-quarantine after either (a) a clean soak on an isolated host/CI, or (b) making the tests bind port 0 / a per-run port. |
+| `test/node_discovery_quarantined` | SWIM node discovery / membership | same port-collision verification blocker |
+| `test/rpc_auto_enroll_quarantined` | RPC auto-enrollment handshake | same (was quarantined preemptively; the deadlock it was quarantined against is now fixed) |
 | `test/signal_term_suppress_quarantined` | a watched `SIGTERM` must NOT kill the process | `Signal.watch` deferred-dispatch race (entry below) |
 | `forge/test/build_check_quarantined` | `forge build` end-to-end check | a CI/local discrepancy **plus** a real 3-way qualified-call constructor-resolution bug |
 
-Two distinct root causes, both open, both heisenbugs (every diagnostic tried — lldb,
-ThreadSanitizer, lightweight tracing — either suppressed the symptom or failed to
-localize the missing sync edge):
-- **the scheduler missed-wakeup deadlock** (four tests) — see the P0 entry below;
+## Memory-ordering audit of the runtime's lock-free paths (2026-07-24, post-deadlock-fix)
+
+After the `task_await` store-buffering bug, every atomic site in `runtime/` was
+audited for the same class: a lock-free **store followed by a load of a
+DIFFERENT atomic location** whose correctness argument assumes sequential
+consistency (Dekker pairs), plus lifecycle check-then-act races. Method: full
+inventory of `atomic_*` sites per file (scheduler 78, runtime 48, dispatch 31,
+deque 15, http 17, message 6, reload/ffi 4), then per-protocol classification.
+
+**CLEAN — verified sound:**
+- `march_deque.h` — textbook Lê-et-al C11 Chase-Lev: `pop` carries the seq_cst
+  fence between its bottom-store and top-load (the exact SB shape that bit
+  `task_wait_done`), `steal` fences between its two loads, CASes seq_cst. Even
+  documents the TSan-vs-standalone-fence subtlety.
+- Global runq — mutex-protected push/pop; the lock-free empty fast path has
+  bounded staleness (re-polled every dispatch iteration) and its "a queued
+  proc still counts as live" shutdown argument checks out against the
+  `g_live_procs` decrement site (only on PROC_DEAD).
+- `sched_loop` idle/shutdown — all flag reads are POLLS inside a 1ms-sleep
+  loop, never parked waits, so staleness is bounded and no wake can be lost.
+- Actor mailbox (`march_sched_send`/`recv`) — check-and-transition on both
+  sides runs under `mbox_lock`; lock ordering substitutes for SC.
+- `march_message.c` inbox — Treiber stack (single-location CAS push,
+  exchange drain).
+- RC ops — single-location `fetch_add/sub` with the documented returned-value
+  ABA guard. HTTP date double-buffer — correct single-writer publish (reader
+  keys on the flag stored LAST). FFI blocking-call `done` flag — same-location
+  release/acquire message passing. Wake/park — the seq_cst + wake-permit
+  protocol landed with the deadlock fix.
+
+**FINDINGS — two, both filed, neither fixed here:**
+
+- [ ] **HCR dispatch ring: `dlclose` runs BEFORE the `live=0` retire store**
+  (`runtime/march_dispatch.c`, `march_dispatch_publish` reclaim path). The
+  reader (`march_dispatch_enter`) does live-check -> pin (`refs` fetch_add) ->
+  re-validate live, which is the right pattern — but the reclaimer's order is
+  refs==0 check -> `slot_dlclose()` -> ... -> `live=0`. A reader that passed
+  its live-check just before the refs check can pin and re-validate while
+  dlclose is mid-flight; re-validation passes because `live=0` has not been
+  stored yet, and the reader then calls a fn_ptr into an unloading `.so`.
+  Plain TOCTOU (no weak memory needed). The in-code rationale — "acceptable
+  under March's cooperative green-thread scheduler" — predates the
+  multi-scheduler runtime and is stale. Cheap hardening: store `live=0`
+  FIRST, then re-check `refs==0` (a pinned reader is now visible), and only
+  then dlclose; full fix is the epoch/grace reclamation the comment already
+  anticipates. Low urgency: HCR publish is an admin-path operation.
+- [ ] **Signal.watch registration window can erase a delivery**
+  (`runtime/march_runtime.c` watch/unwatch): registration stores the handler
+  FIRST, then clears `pending`/`seen` — a signal arriving between the two has
+  its `pending=1` wiped by the trailing clear, silently dropping that one
+  delivery. Clear-then-install would close it. Adjacent to (but distinct
+  from) the still-quarantined `signal_term_suppress` torn-output race.
+
+Root causes (updated 2026-07-24):
+- **the scheduler missed-wakeup deadlock** — FIXED (store-buffering memory-ordering
+  bug + a residual wake-while-RUNNING drop; see the P0 entry below for why every
+  diagnostic missed it). `task_burst_await` is back on `runtest`; the three
+  node tests remain quarantined only on the shared-host port-collision
+  verification blocker described in the table;
 - **the `Signal.watch` dispatch race** (one test) — see its entry below. Note this one
   is NOT merely an ordering flake: the dominant failure shape is *torn* output, so an
   order-insensitive golden does not fix it.
@@ -64,12 +347,15 @@ makes a quarantine indistinguishable from a deletion.
 
 ## Scheduler fork-join throughput collapse (2026-07-23)
 
-- **P0 (2026-07-23, same day) — OPEN: a genuine, live-reproducing missed-wakeup deadlock in `task_await`/`task_spawn` survives the park/wake fix below, and is very likely the real cause of the ~2-day CI `Test`-step hangs (separate from the `Build`-step dune-daemon wedge — see the CI-hardening entry in `specs/progress.md`).** `dune runtest` compiles and runs `test/native/task_burst_await.march` (a burst of `task_spawn` + sequential `task_await_unwrap`, `test/dune` ~852-885) as part of every `Test` step; this test can hang the process forever.
+- ✅ **FIXED 2026-07-24 — the missed-wakeup deadlock was a STORE-BUFFERING memory-ordering bug, closed by seq_cst + a wake permit; `task_burst_await` un-quarantined after 3000/3000 clean runs.** Root cause: `task_wait_done`'s store(`task[5]`)-then-load(`task[4]`) and `march_thunk_trampoline`'s store(`task[4]`)-then-load(`task[5]`) form a Dekker/SB pair, and release/acquire does NOT order a store before a subsequent load of a DIFFERENT location. Concretely, clang on ARMv8.3+ (Apple Silicon) compiles `memory_order_acquire` to LDAPR — an RCpc load architecturally allowed to complete before an earlier STLR drains from the store buffer — confirmed by disassembly (`stlr` immediately followed by `ldapr` on BOTH sides of the pair). Both sides could therefore read stale values simultaneously: the waiter saw done==0 and parked forever while the trampoline saw waiter==NULL and woke nobody — task complete, `g_live_procs==1`, main PROC_WAITING, exactly the lldb hang state recorded below. **This is also why every prior diagnostic failed**: interleaving-based manual review implicitly assumes sequential consistency (the "every interleaving is saved" conclusion below was correct SC reasoning about a non-SC machine); TSan's instrumentation strengthens atomics enough to suppress the reorder; `MARCH_NUM_SCHEDULERS=1` removes the second thread; and the earlier wake-permit experiment measured no effect because under SB the trampoline never CALLS `march_sched_wake` at all, so no permit scheme could help. Fix 1: seq_cst on all four operations of the pair (forces LDAR/RCsc, which cannot hoist above an earlier STLR) — hang rate 24/500 -> 1/1000. Fix 2: the residual 1/1000 was the SECOND, previously-masked window — a wake landing after the waiter's final recheck but before its PROC_PARKED store sees status==RUNNING and early-returns; the wake permit (`march_proc.wake_pending`, deposited seq_cst in `march_sched_wake` before the status load, consumed two-sidedly in `march_sched_park_self` around the PROC_PARKED store with a RUNNING rewind) closes it — 0/3000. The actor/mailbox path never had either bug: `march_sched_send`/`march_sched_recv` do their check-and-transition under `mbox_lock`, whose lock ordering substitutes for SC. `test/native/task_burst_await` restored to `runtest`.
+  - **Historical record of the investigation (pre-fix state), kept verbatim below.**
+- **P0 (2026-07-23, same day) — WAS OPEN: a genuine, live-reproducing missed-wakeup deadlock in `task_await`/`task_spawn` survives the park/wake fix below, and is very likely the real cause of the ~2-day CI `Test`-step hangs (separate from the `Build`-step dune-daemon wedge — see the CI-hardening entry in `specs/progress.md`).** `dune runtest` compiles and runs `test/native/task_burst_await.march` (a burst of `task_spawn` + sequential `task_await_unwrap`, `test/dune` ~852-885) as part of every `Test` step; this test can hang the process forever.
   - **Repro:** `march --compile -o /tmp/tba test/native/task_burst_await.march && /tmp/tba`, run repeatedly (`for i in $(seq 1 60); do /tmp/tba; done`). Hung on iteration 8 in one run, iteration 28 in another — roughly 1-in-10-to-30 runs on this machine (4 schedulers, default `MARCH_NUM_SCHEDULERS`).
   - **Confirmed via `lldb` (debug-symbol rebuild, same clang flags + `-g`) at the moment of hang:** the awaiting proc (`main`, pid 0) sits in `PROC_WAITING` (correctly parked, not stuck mid-transition); `g_live_procs == 1` (only `main` remains — every burst task's trampoline has already run to completion and been reaped); `g_runq_head == NULL` (global run queue empty); all 4 scheduler threads + the preemption daemon are idling in `sched_loop`'s 1ms `nanosleep` poll, indefinitely. In short: the task `main` is awaiting **did complete**, but the wakeup for it was never delivered or never took effect — every scheduler thread is correctly polling for work forever, there just never is any again.
   - **Confirmed cross-thread (not a single-threaded logic bug):** with `MARCH_NUM_SCHEDULERS=1` (fully cooperative, one OS thread, no real concurrency possible), 100/100 iterations ran clean. Only the default multi-scheduler mode reproduces it.
   - **Heisenbug — any instrumentation near the hot path suppresses it:** `MARCH_SANITIZE=thread` (ThreadSanitizer) ran 40 iterations completely clean, no race reported. A custom lightweight lock-free trace (atomic ring buffer logging every step of `task_wait_done`'s check/register/recheck, `march_thunk_trampoline`'s done-store/waiter-read/wake-call, and `march_sched_wake`'s status-check/CAS/push, in `runtime/march_scheduler.{c,h}`+`runtime/march_runtime.c`, guarded by a `MARCH_TRACE_WAKEUP` macro) ALSO ran 300 iterations clean — the race window is apparently narrow enough that even a plain relaxed atomic fetch-add + a couple of field writes per event closes it. The tracing instrumentation was reverted (not committed) once it failed to reproduce; it added zero net signal.
   - **Manual code review of the check-register-recheck sequence** (`task_wait_done`/`march_thunk_trampoline`, `runtime/march_runtime.c:1988-2096`) traced through every interleaving constructible by inspection and each one is saved by either the fast-path check or the recheck, under standard C11 per-location coherence reasoning (a load of an atomic after a store to the SAME location, in real time, must observe that store regardless of ordering on OTHER locations). Did not find the specific gap by inspection alone — which is itself informative: this is subtle enough that static reading isn't sufficient, and either involves a multi-step interaction with `march_sched_wake`'s own PARKED-spin handshake, or a genuine ARM64/Apple-Silicon weak-memory subtlety not captured by the naive coherence argument.
+  - **RE-CONFIRMED LIVE 2026-07-24 on `main` (132e2a90), and one candidate mechanism EXPERIMENTALLY RULED OUT.** Rate on a quiet host, default 4 schedulers, `test/native/task_burst_await.march` compiled `--opt 2`, 15s per-run watchdog: **24 hangs / 500 runs (4.8%)**. So the `21c8a0b0` park/wake work fixed the throughput cliff but did NOT fix this. Ruled out: the hypothesis that `march_sched_wake`'s "not WAITING — no need to wake" early return on `PROC_RUNNING` drops the wake when the trampoline lands between `task_wait_done`'s final recheck and its `march_sched_park_self` (`recv` is immune only because it holds `mbox_lock` across both its emptiness check and its `PROC_PARKED` store; `task_wait_done` has no such lock). A standard LockSupport-style wake permit (`march_proc.wake_pending`, deposited before the status load, consumed instead of parking, re-checked after the `PROC_PARKED` store with a status rewind) was implemented and measured at **25 hangs / 500 runs** — statistically identical to baseline. Reverted, not committed. The permit was necessary-looking but not sufficient, so the missed edge is elsewhere; do not re-derive this hypothesis from scratch.
   - **Not yet tried (next steps for a future session):** (a) reproduce on Linux/x86-64 via the project's own zig cross-compile toolchain, to check if this is ARM64/Apple-Silicon-specific (different memory model, different `swapcontext` syscall cost) or portable; (b) per-thread (`_Thread_local`, non-atomic) trace buffers instead of a shared atomic ring buffer, to get tracing overhead close to zero — read them post-hang by walking each OS thread's TLS block via the debugger, more complex to set up but avoids the shared-atomic-fetch-add cost entirely; (c) intentionally add external CPU load during the stress loop to simulate "host oversubscription," which 45ccb8e7's commit message (below) cites as the suspected trigger condition for these hangs; (d) `rr` record-and-replay is Linux-only, so not usable on this macOS dev machine directly, but would be the most direct tool if reproduced on Linux via (a).
   - Given this bug's existence, **any CI run whose `Test` step happens to hit this exact test can hang indefinitely** regardless of the `timeout-minutes` containment added in the CI-hardening entry above (which bounds the damage to minutes instead of 6 hours, but does not fix the underlying hang). Confirmed the park/wake fix immediately below (`21c8a0b0`) does NOT prevent this — it was reproduced against current HEAD, which includes that fix.
   - **QUARANTINED from `dune runtest` (2026-07-24)**, confirmed live in CI: after landing the `timeout-minutes` containment above, the very next `main` push hit this exact race on BOTH `build (ubuntu-24.04)` and `build (macos-15)` in the same run (`Test` step failing at the full 30-minute timeout on each) — the deadlock reproduces much more readily on GH Actions' weaker/shared runners than on a beefy local dev machine, apparently pushing CI from "occasionally hangs" to "hangs most runs." `test/dune`'s `task_burst_await` diff rule now uses its own `task_burst_await_quarantined` alias instead of `runtest` (compile-check rule untouched, so a real compile regression there still surfaces); un-quarantine once the deadlock itself is fixed.
@@ -999,6 +1285,143 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ **Partial (open-field-list) record patterns — Task 4 of `specs/plans/2026-07-24-pattern-matching-gaps.md` (`lib/typecheck/typecheck.ml`, 2026-07-24).** Task 3 made record patterns work end-to-end only when the pattern's field list EXACTLY matched the record's own fields: `infer_pattern`'s `PatRecord` arm synthesized a CLOSED `TRecord` from just the mentioned fields, and `unify` (`typecheck.ml:2789`) requires exact field-set equality (no width subtyping, no row variables), so `{ x }` against `{ x: Int, y: Int }` was a type error. Fixed by driving `PatRecord`'s sub-patterns from the EXPECTED type (already threaded as an optional `~expected` arg, used before this change only for constructor-name disambiguation in `PatCon`) instead of synthesizing one: when `expected` resolves to a record (via `expand_record`, accepting both a structural `TRecord` and a nominal `TCon` naming one), each mentioned field is checked against the expected type's field, unmentioned fields are simply not bound, and the pattern's own type is the expected type unchanged (so the caller's `unify` is a no-op); a field the record doesn't have is now a dedicated `unknown_record_field` error, not a unification mismatch. When `expected` doesn't resolve to a record (no annotation reaches the pattern), the ORIGINAL closed-synthesis behavior is the fallback — the only thing that can constrain an otherwise-unconstrained scrutinee at all. Also extended `PatTuple` to thread a per-element expected type to its sub-patterns (from its OWN `expected`, when that resolves to a `TTuple`) — needed for a record pattern nested inside a tuple pattern with an independently-known element type (e.g. two explicitly-annotated function parameters matched together via `match (a, b) do (…, { w: w }) -> … end`); verified this threading is load-bearing by reverting it alone and confirming the same nested-record case starts failing again. **Investigated and found narrower than the task brief assumed:** the brief's own motivating claim — that this also opens a BARE record pattern used directly as a function parameter, e.g. `fn width({ w: w }) : Int do w end` called with a wider `{ w: 8, h: 9 }` — does not hold. Traced empirically (confirmed by compiling the brief's literal fixture and by temporarily reverting `PatTuple`'s threading to check the failure disappears without it): `desugar_fn_def`'s general path (`lib/desugar/desugar.ml:746`) does NOT wrap a single (arity-1) parameter in a tuple — `scrutinee = EVar arg_name` and `pat = p` directly, no `PatTuple` — so `PatTuple` threading never engages for a one-parameter function regardless of pattern shape; and `fn_param`'s grammar (`parser.mly:413`) gives a bare pattern parameter no annotation slot at all (only `name : Type` can carry one), so such a parameter's type has no source but the pattern itself and is necessarily closed to exactly the fields it names, full stop — not something any amount of expected-type threading inside `infer_pattern` can open, since there is no annotation to source an expected type from. This is a genuine, narrow language limitation (not a bug introduced or left by this task): to open a record-pattern parameter's field list, the parameter must be given a name and a type annotation and destructured via an explicit `match` in the body instead (`fn f(r : {w:Int,h:Int}) do match r do {w:w} -> w end end`), which routes back through `PatRecord`'s expected-known path. Similarly, a `let` binding's `infer_pattern` call site (`typecheck.ml`'s `ELet`/`infer_block` arms) never threads `~expected` either — the binding IS what establishes the type, so there is nothing to drive from — meaning `let { x: px } = p` still requires naming every field of `p`'s type; confirmed by direct compile (partial `let` destructure against both a record literal and a nominal record type both still reject with the pre-existing exact-match error). Neither gap was in the brief's file list or its Step 1 TDD tests (which cover only match arms), so left unchanged; flagged here rather than silently over- or under-claimed. `test/native/record_pattern_partial.march`'s golden was adjusted accordingly: `classify` tests the match-arm case (two arms mentioning disjoint field subsets), and `width` tests the `PatTuple`-threading case with two ANNOTATED parameters matched via an explicit `match (dims, scale) do ({w:w}, s) -> … end` — NOT a bare `{ w: w }` parameter as the brief's literal text showed, for the reason above. New tests: `test_partial_record_pattern_typechecks`/`test_record_pattern_unknown_field_rejected` in `test/test_compiler.ml`'s `match_diagnostics` group, `test_eval_record_pattern_partial` in `test/test_eval.ml`'s `record_patterns` group (this one already passed before the typecheck fix, for a legitimate reason — `eval.ml`'s tree-walking interpreter's own `PatRecord` matcher, `eval.ml:1178`, looks fields up by name and was already open-field-list-tolerant independent of the typechecker; only the compiled path, gated by typecheck, actually exercises the fix). Docs updated in the same commit: `specs/lang/pattern-matching.md` + `docs/pattern-matching.md` (rewrote "Record Patterns" — open field lists in `match`, the `unknown_record_field` error, and the two still-closed positions with a worked example for each; also fixed a pre-existing Task 3 doc bug found in passing: `fn area({ w: w, h: h } : { w : Int, h : Int })` is not valid March syntax — a bare pattern parameter cannot carry a `: Type` annotation — confirmed via direct parse failure, replaced with a valid example); `specs/lang/core-march-types.md` (split `(P-Record)` into "expected known"/"expected unknown" rules plus a dated note explaining both the fix and the fn-parameter/`let` limitations). `scripts/check-docs.sh` green. Full suite: no new failures beyond the pre-existing machine-wide ASAN 30s livelock (`adversarial-regressions 38 MARCH_SANITIZE`).
 
 - ✅ **Or-patterns (`p1 | p2 | p3`), non-binding alternatives — Task 5 of `specs/plans/2026-07-24-pattern-matching-gaps.md` (`lib/ast/ast.ml`, `lib/parser/parser.mly`, `lib/typecheck/typecheck.ml`, `lib/eval/eval.ml`, `lib/tir/lower_match.ml`, + one mechanical arm each in `lib/ast/span_remap.ml`, `lib/desugar/desugar.ml`, `lib/dump/ast_json.ml`, `lib/format/format.ml`, `lib/refactor/refactor.ml`, `lib/refinecheck/refine_check.ml`, `lsp/lib/analysis.ml`, `lsp/lib/workspace.ml`, 2026-07-24).** The only task in this plan that adds a genuinely NEW `Ast.pattern` constructor rather than wiring up one that already existed — `PatOr of pattern list * span`. Grammar: `pattern_no_as` gained an or layer beneath the existing `as`-alias layer (`pattern: pattern_no_as AS lower_name`, Task 2), with the pre-existing `pattern_no_as` alternatives (constructor/atom/`simple_pattern`) renamed down to a new `pattern_alt`: `pattern_no_as: pattern_alt PIPE separated_nonempty_list(PIPE, pattern_alt) | pattern_alt`. `PIPE` is already `arm_sep` (`NL | PIPE` between match arms), but an arm separator only ever follows a COMPLETE branch (post-`->`), so LR(1) distinguishes the two uses with no conflict — verified empirically before writing the production and reconfirmed after: menhir's shift/reduce conflict count is unchanged at 9. Adding the AST constructor forced the OCaml compiler to enumerate every non-exhaustive `match` over `Ast.pattern` (warning-8-as-error): 8 files needed a one-line arm mirroring the neighbouring `PatTuple`/`PatAs` arm (span_remap, desugar's `pat_binds_conn`/`respan_pat`/`add_pat_vars`, ast_json's `pattern_to_json`, format's `fmt_pat`, refactor's `iter_names`, refine_check's `structural_subvars`, lsp's `workspace.ml`/`analysis.ml` — several `analysis.ml` sites already had a `_ ->` catch-all from before this task and needed no change, since an or-pattern binds nothing valid programs could reach there anyway). **Scope: alternatives that bind no variables** (`1 | 2 | 3`, `:get | :head`, `Red | Blue`). Binding alternatives (`A(x) | B(x)`) are rejected at typecheck with a dedicated diagnostic (`` Or-pattern alternatives cannot bind variables (`x`). ``, code `or_pattern_binding`) — not a workaround, a hard restriction: the arm body is shared across every alternative via `lower_match.ml`'s existing 0-arg join point (`hoist_fallback_jp`), which has nowhere to put a per-alternative binding (`A(x)`'s `x` and `B(x)`'s `x` would need to be bound to DIFFERENT values depending on which alternative matched, but the shared body has only one call site). Lifting this needs n-ary join points (hoist the body as a function of the bound variables, have each split row call it with its own bindings) — filed as a follow-up below, not attempted here; duplicating the arm body per alternative instead was explicitly rejected as a workaround since it reintroduces exactly the exponential TIR blowup `hoist_fallback_jp` exists to prevent. Interpreter: `match_pattern`'s new `PatOr` case tries each alternative in order, first match wins. Exhaustiveness/redundancy: `norm_pat` maps `PatOr` to `SPWild` (conservative, matching the existing `PatRecord` carve-out) but a new `norm_pat_rows` wrapper expands an or-pattern into one `spat` row per alternative — both `check_exhaustiveness`'s matrices and `check_redundant_arms`' prefix now flat-map through it, so `Red | Green` plus a `Blue` arm is correctly seen as exhaustive for a three-constructor type, and `check_redundant_arms` flags an arm redundant only if **every** alternative is already subsumed (`List.exists ... is_useful`, not "any"). Lowering (`lib/tir/lower_match.ml`): new `expand_or_rows` (next to `strip_as_column`) splits a row whose first column is a `PatOr` into one row per alternative sharing the same body; `pat_tag_and_subs` returns `None` for `PatOr` (split before tag dispatch, so it never sees one, like `PatRecord`). To avoid emitting N copies of a shared body once `expand_or_rows` splits it across N leaf positions in the decision tree, both `lower_match`'s no-guard fast path and its guarded path now hoist an or-bearing arm's body into a shared 0-arg join point (`hoist_fallback_jp`) BEFORE the row reaches `expand_or_rows`, referencing the cheap `EApp(clo_var, [])` call at each split position instead of the full body. New `or_patterns` group in `test/test_eval.ml` (2 tests: literal alternatives, nullary-constructor alternatives) plus `test_or_pattern_binding_rejected`/`test_or_pattern_nonbinding_accepted`/`test_or_pattern_exhaustiveness` in `test/test_compiler.ml`'s `match_diagnostics` group, plus a compiled round-trip (`test/native/or_pattern.march`/`.expected`). Grammar conformance corpus: `specs/lang/grammar/parse/p32_or_pattern.march` added (32 parse + 12 reject = 44 total, `grammar-check` green). The binding-rejection witness is a **type** error, not a parse error (`A(x) | B(x)` parses fine), so it lives in the types corpus instead of grammar/reject: `specs/lang/types/reject/t82_or_pattern_binding.march` (82 reject + 90 accept = 172 total, `types-check` green). Docs updated in the same commit: `specs/lang/grammar.md` (new §6.4 for `PatOr`, plus the §6.2 EBNF rewritten to show the full `pattern`/`pattern_no_as`/`pattern_alt` three-layer hierarchy and the `PIPE`-dual-use finding), `specs/lang/core-march-types.md` (new `(P-Or)` typing rule alongside `(P-Record)`/`(P-As)`), `specs/lang/pattern-matching.md` + `docs/pattern-matching.md` (new "Or Patterns" section — syntax, first-match-wins semantics, the no-bindings restriction and its two workarounds), `specs/lang/surface-syntax.md` + `.claude/skills/march-lang/SKILL.md` (quick-reference examples), `CHANGELOG.md`. `scripts/check-docs.sh` green. Full suite: no new failures beyond the pre-existing machine-wide ASAN 30s livelock (`adversarial-regressions 38 MARCH_SANITIZE`).
+- Record field preconditions **integrated with `main`** (String refinements,
+  ADT constructor tags, the predicate-vocabulary foundation, and the two
+  solver-robustness fixes), 2026-07-24. `sig_of_clause` now collects through
+  `main`'s `refined_param_ty` — a record IS a registered 1-constructor ADT, so
+  one predicate admits all four refinable bases; a new `is_record_sort` picks
+  the record-specific path (field selectors) out of the three things
+  `rparam.sort` can now name. The branch's dedicated record preamble was
+  dropped: the record path seeds its sort into `main`'s `adt_sorts` and
+  inherits the existing deduplication against the measure and `$Str`
+  preambles, so a VC mentioning a record AND a tester AND a string declares
+  each sort once. Two real defects found and fixed during the sweep:
+  `term_fits_sort` was shallow, so `history: Cons(1, Nil)` (an `Int` in the
+  generic `List`'s opaque `Elem` field) built a malformed VC; and z3's
+  multi-line `(error …)` reply left a continuation line in the pipe that was
+  read as the NEXT query's verdict, shifting every later answer by one and
+  turning correct calls into reported violations. `term_fits_sort` now
+  recurses into constructor arguments; `read_verdict` consumes the whole error
+  s-expression. `test_refinecheck` 124 → 137, all green on a cold VC cache.
+- Record field **preconditions**: a refinement over a record's fields
+  (`{v : Config | v.port >= 1}`) is now checked on parameters at every call
+  site, closing the half that return-type record refinements already covered.
+  `rparam` carries the record's SMT sort, `sig_of_clause` collects record
+  params through `refined_scope_ty`, and `check_call` reflects a record actual
+  (a literal, with fields reordered by name to the declaration order; or a
+  variable carrying a record-refined local's own predicate) and passes the
+  existing `make_field_resolver` plus the record datatype preamble to
+  `smt_of`. Definite-failure stance preserved: the record path uses the same
+  two-discharge procedure as the Int path, NOT `check_post`'s report-on-SAT
+  branch, so a weaker forwarded refinement is skipped while a contradictory
+  one is caught; an unrefined record, an unknown field value, or any field
+  that cannot be placed at its declared sort skips the whole call.
+  Also fixed a pre-existing solver-poisoning bug found while sweeping: a
+  non-`Int` record field bound to a variable built a sort-mismatched VC, and
+  Z3's error desynchronised the shared `z3 -in` channel, silently disabling
+  refinement checking for the rest of the compilation (a `take_n(-3)` two
+  functions later went unreported). `reflect_record_literal` is now
+  sort-checked against `ctor_field_sorts`; this also closes the same hole on
+  the return side. `test_refinecheck` 86 → 97, all green on a cold VC cache.
+- String refinements integrated with the predicate-vocabulary foundation and
+  ADT constructor-tag refinements (`lib/refinecheck/refine_check.ml`,
+  2026-07-24). `rparam` now carries a single `sort : string option` covering
+  `Int`/`String`/ADT instead of the two branches' parallel flags; `smt_of`
+  carries both `?resolve_tester` and `?resolve_str_lit`; path conditions
+  resolve in the caller's namespace *and* see the string-literal table. One
+  hazard existed only in the combination: `path_resolve_var` would declare a
+  `$Str`-sorted caller variable a second time as `Int`, which makes z3 emit an
+  error line and silently disables refinement checking for the rest of the
+  compilation — it now yields the string-sorted constant, with a
+  drop-`Int`-decls-for-`$Str`-symbols guard at VC assembly as backstop. The
+  measure, ADT-datatype and `$Str` preambles compose in any combination
+  (verified by teeing the solver channel: zero `(error` lines, and a later
+  violation in the same file still reported). `test_refinecheck` = 124 tests,
+  19/19 suites registered.
+
+- String refinements: `{String | len(_) > 0}` and `{String | _ != ""}` are
+  checkable contracts. `String` is encoded as an uninterpreted SMT sort, `len`
+  as an uninterpreted `Str -> Int` with a non-negativity axiom, and each
+  distinct string literal in a VC as a constant with its BYTE length pinned
+  (matching `string_length`, which aliases `march_string_byte_length`) and
+  pairwise distinctness asserted — deliberately inside EUF + linear arithmetic,
+  with no SMT string theory. `len` overload resolution keys on the value's
+  DECLARED base type, never on inference, so list `len` is unchanged. Two
+  encoding hazards found and fixed during the work: the SMT symbols now carry a
+  `$` (illegal in a March identifier) so a program variable named `len` cannot
+  collide with the `len` function declaration, and ill-sorted terms mixing a
+  string with an Int are dropped — either one made z3 emit an error line, which
+  desynchronised the shared long-lived `z3 -in` channel and silently disabled
+  refinement checking for the REST of the compilation. Known gaps (documented):
+  an `s == ""` guard establishes no length in the else-branch (no injectivity
+  axiom), no prefix/suffix/contains/regex, and String return refinements are
+  checked at the definition but do not propagate to call sites.
+
+- Refinement path-fact shadowing + caller/callee namespace split
+  (`lib/refinecheck/refine_check.ml`, 2026-07-24). Three review-found false
+  positives, all "a fact about a *name* read where that name changed meaning".
+  (1) `path_shadow` (+ `expr_mentions`) is the path-context companion to
+  `scope_shadow`: it drops any path condition mentioning a name a binding
+  construct rebinds, applied at all five sites in `visit` (`EBlock` `let`
+  threading, `ELam`, `ELetFn`, `EMatch` arm binders, `ELetQ`) and the two in
+  `tails`. Fixes both the ADT case (`None -> let x = Some(1); unwrap(x)`) and
+  the pre-existing `Int`/`if`-guard case. Over-approximate by design —
+  discarding a fact can only produce silence. (2) `check_call` gained
+  caller-namespace `path_resolve_var`/`path_resolve_measure`/
+  `path_resolve_tester` for the path context, so a path condition is no longer
+  re-pointed at the callee's actuals through `rp.binder`/`actual_of_name`; a
+  caller variable reflects to `Const name`, the same term an `EVar` actual
+  reflects to, so narrowing still links. Predicate translation unchanged.
+  (3) `register_builtin_adts`/`register_adt_names`/`register_field_sorts`
+  hoisted out of the `measure_axioms` guard — with the flag off, `adt_ctors`
+  was empty and the vocabulary warning falsely called `is_Some` unknown.
+  Plus: removed `is_adt_base`'s stale `[@@warning "-32"]`; documented the
+  `as`-pattern narrowing limit; replaced the vacuous "narrowing does not leak
+  past a rebinding pattern binder" test (both arms were `-> 0`, so nothing was
+  checked). `test_refinecheck.exe`: 112 tests, exit 0 (was 104); nine new
+  cases, each confirmed RED first. Open follow-up: `check_post`'s `resolve_var`
+  has the same caller/callee conflation for a *named* return binder.
+
+- ADT constructor-tag refinements (`lib/refinecheck/refine_check.ml`,
+  `lib/refine/smt.ml`, 2026-07-24). Every constructor of every registered ADT
+  implicitly gains an `is_<Ctor>` tester the refinement checker understands
+  (`ctor_of_tester`, folded into `known_predicate_fn`), reflected to the Z3
+  datatype tester `((_ is Ctor) x)` via a new `Smt.IsCtor`. Two fact sources:
+  a constructor literal at the call site (`unwrap(None)`), and `match`-arm
+  narrowing, which pushes a synthetic `is_Ctor(s)` path condition so it flows
+  through the existing `smt_of` translation. `rparam` gained a `sort` field and
+  `refined_param_ty` admits any registered-ADT base type; `check_call` reflects
+  the subject with the existing `reflect_dt` and attaches the datatype
+  declarations (`adt_vc_preamble`, deduplicated against `measure_preamble`).
+  `Option`/`Result` are seeded in `register_builtin_adts` alongside `List` —
+  the plan assumed they came from stdlib `DType`s, but they have NO `type`
+  declaration anywhere; the typechecker pre-registers them (`builtin_ctors`)
+  and the refinement checker must do the same or `is_Some` names nothing.
+  Deliberately NOT extended: `refined_scope_ty` / `return_refine_ext` /
+  `check_post`, so a tag refinement is discharged at the call site and not
+  carried through a binding — extending `scope_facts` would have flipped
+  `check_post` into its "SAT = definite error" mode for ADT scope entries whose
+  sorts the record preamble does not declare, a false-positive risk with no
+  test coverage. Narrowing is skipped for a non-variable scrutinee, an arm that
+  rebinds the scrutinee's name, and an ambiguous constructor name (shared by
+  two ADTs). `test_refinecheck.exe`: 104 tests, exit 0 (was 94);
+  `run_compiler`/`run_eval`/`run_stdlib -q` all exit 0; zero new diagnostics on
+  stdlib-using programs.
+
+- Refinement predicate-vocabulary warning: `lib/refinecheck/refine_check.ml`
+  names the predicate vocabulary in one place (`predicate_operators`,
+  `is_predicate_operator`, `known_predicate_fn` = operators ∪ `len` ∪
+  registered `@[measure]`s) instead of leaving it scattered across
+  `is_measure`/`is_nonneg_measure`/inline `"len"` checks, and adds
+  `is_string_base`/`is_adt_base` base-type predicates for the ADT-tag and
+  String-refinement features to dispatch on (no consumer yet). A predicate
+  applying a name outside that vocabulary — e.g. `{Int | totally_bogus_fn(_) >
+  0}`, which previously compiled clean and enforced nothing — now draws a
+  Warning (never an Error; `--check` still exits 0) covering parameter,
+  return, and local-binding refinements. Verified zero spurious warnings on a
+  real stdlib-using program. `test_refinecheck.exe`: 94 tests, exit 0 (was
+  86); `run_compiler`/`run_eval` both exit 0.
+
 - Tier 0 postcondition propagation: a callee's closed return refinement is
   recorded in `fn_sig.ret` and consumed at call sites, for both `let`-bound and
   inline-argument forms. Relational (parameter-mentioning) postconditions

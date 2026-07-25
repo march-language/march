@@ -439,7 +439,20 @@ let alloc_size n = 16 + n * 8
     inline code. Returns the final `ptr` register. *)
 let emit_tag_scalar ctx ~sh ~tag ~ptr (i64v : string) : string =
   let shifted = fresh ctx sh in
-  emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
+  (* nsw is a deliberate optimization enabler, not decoration: it asserts the
+     shift cannot signed-overflow, which is exactly the existing tagging
+     convention (values must survive the (v<<1)|1 / ashr-1 round trip, i.e.
+     fit in 63 bits — the same assumption the trampoline and every erased
+     slot already make).  With nsw, InstCombine folds the whole
+     tag-then-conditionally-untag round trip away (ashr(or(shl nsw x,1),1)
+     -> x); without it, a sign-truncating sbfx survives on every scalar
+     round trip and, worse, blocks LLVM's accumulator TRE on recursive
+     functions whose result feeds the tag.  Measured: bench/fib.march
+     465 -> 385 ms.  Trade-off, documented deliberately: an Int outside
+     [-2^62, 2^62) passed through an erased slot was ALREADY silently
+     corrupted by the round trip; under nsw that same out-of-convention
+     value is poison instead of a deterministic wrong value. *)
+  emit ctx (Printf.sprintf "%s = shl nsw i64 %s, 1" shifted i64v);
   let tagged = fresh ctx tag in
   emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged shifted);
   let as_ptr = fresh ctx ptr in
@@ -656,25 +669,42 @@ let repr_audit_report () =
    non-llvm_emit.ml consumer now exists. Re-exported bare in llvm_emit.ml,
    which still calls it unqualified from emit_fn. *)
 
-(** Emit an inline reduction-count check at the current position in [ctx.buf].
-    Decrements [@march_tls_reductions]; when it reaches zero calls
-    [@march_yield_from_compiled()] (which resets the budget and yields).
+(** Emit an inline preemption check at the current position in [ctx.buf].
+    Tests [@march_preempt_request] (set by the SIGUSR1 preemption handler
+    once per quantum) and, when set, calls [@march_yield_from_compiled()]
+    (which clears the request, refills the budget, and yields).
     Leaves the IR positioned at the start of a fresh basic block so the
     caller can continue emitting the function body. *)
 let emit_reduction_check ctx =
-  (* In REPL mode, skip the reduction check: ORC JIT cannot resolve
-     march_tls_reductions (a TLS var) on macOS via emutls, and the REPL is
-     always single-threaded so the scheduler yield is a no-op anyway. *)
+  (* In REPL mode, skip the check entirely: the REPL is single-threaded, so
+     the scheduler yield is a no-op, and skipping keeps the ORC JIT from
+     having to resolve the scheduler globals at all. *)
   if not ctx.repl then begin
   let yield_blk = fresh_block ctx "sched_yield" in
   let cont_blk  = fresh_block ctx "sched_cont"  in
   let red       = fresh ctx "red" in
-  let red_dec   = fresh ctx "red_dec" in
   let need_yield = fresh ctx "need_yield" in
-  emit ctx (Printf.sprintf "%s = load i64, ptr @march_tls_reductions" red);
-  emit ctx (Printf.sprintf "%s = sub i64 %s, 1" red_dec red);
-  emit ctx (Printf.sprintf "store i64 %s, ptr @march_tls_reductions" red_dec);
-  emit ctx (Printf.sprintf "%s = icmp sle i64 %s, 0" need_yield red_dec);
+  (* A single load of a PLAIN global, then a predictable not-taken branch.
+     This used to load/decrement/store the _Thread_local march_tls_reductions
+     instead, which is not a plain load on either supported platform: on
+     Darwin/arm64 a TLS symbol access compiles to `adrp; ldr; blr` — an
+     indirect call into the TLV resolver — and on Linux/arm64 PIE it goes
+     through a TLSDESC call.  A non-inlinable call on every function entry
+     also forced a stack frame and register spills.  Measured on
+     bench/fib.march (~330M calls): 0.63s -> 0.36s.  Keeping the hot path
+     READ-ONLY also matters: a per-call store to a shared global would
+     ping-pong its cache line across scheduler threads. *)
+  (* VOLATILE is load-bearing, not decoration.  A plain load of a global that
+     nothing in the loop writes is loop-invariant, so LLVM hoists it out of a
+     TCO loop body entirely and the loop then never re-reads the flag —
+     preemption silently stops working for exactly the tail-recursive loops
+     that need it most.  (Caught by the starvation test: a CPU-bound TCO loop
+     starved a sibling green thread on a single scheduler thread, while the
+     old load/decrement/STORE sequence could not be hoisted and so kept
+     working.)  Volatile matches the C declaration and forces a re-read on
+     every iteration. *)
+  emit ctx (Printf.sprintf "%s = load volatile i64, ptr @march_preempt_request" red);
+  emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" need_yield red);
   emit_term ctx
     (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
        need_yield yield_blk cont_blk);

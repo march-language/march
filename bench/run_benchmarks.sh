@@ -75,10 +75,10 @@ bold "Compiling..."
 
 # March (native via LLVM backend)
 printf '  March... '
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/fib.march            -o "$TMP/march_fib"  2>/dev/null) && printf 'fib ' || printf '(fib FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"   2>/dev/null) && printf 'bt '  || printf '(bt FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"   2>/dev/null) && printf 'tt '  || printf '(tt FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"   2>/dev/null) && printf 'lo '  || printf '(lo FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/fib.march            -o "$TMP/march_fib"  2>/dev/null) && printf 'fib ' || printf '(fib FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"   2>/dev/null) && printf 'bt '  || printf '(bt FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"   2>/dev/null) && printf 'tt '  || printf '(tt FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"   2>/dev/null) && printf 'lo '  || printf '(lo FAILED) '
 printf '\n'
 
 # OCaml (ocamlopt native compiler)

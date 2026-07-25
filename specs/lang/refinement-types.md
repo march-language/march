@@ -82,7 +82,10 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
-connectives `&& || not`, integer/bool literals, and **measures** (below).
+connectives `&& || not`, integer/bool literals, **measures**, and ADT
+**constructor tags** (both below). `String` values are supported to the
+narrower extent described in [String Refinements](#string-refinements): `len`
+and `==`/`!=` against literals.
 
 ---
 
@@ -242,6 +245,119 @@ Measures may call **other measures** and be **mutually recursive** (e.g. a
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons structurally just like `size`.
 
+### Refining a record over its fields
+
+A refinement may also range over a **record** type, with the predicate reading
+its fields. This works on **both** sides of a signature — as a postcondition on
+the return type, and as a precondition on a parameter:
+
+```march
+type Config = { port : Int, retries : Int }
+
+-- precondition: callers must pass a config with a usable port
+fn serve(c : {v : Config | v.port >= 1 && v.retries >= 0}) : Int do c.port end
+
+-- postcondition: this function promises a valid config
+fn defaults() : {v : Config | v.port >= 1} do { port: 8080, retries: 3 } end
+```
+
+At a call site the argument is checked against the field predicate:
+
+```march
+serve({ port: 8080, retries: 3 })   -- fine
+serve({ port: 0, retries: 3 })      -- error: `v.port >= 1` can never hold
+serve({ retries: 0, port: 0 })      -- same error; field order doesn't matter
+```
+
+What counts as a **fact** about a record argument:
+
+- **A record literal.** Its field values are known, so the predicate is decided
+  against them. Fields may be written in any order — they are matched to the
+  declaration by name, not position.
+- **A variable holding a record-refined parameter or local.** Its own
+  refinement travels with it, so a call forwards:
+
+  ```march
+  fn fwd(c : {v : Config | v.port >= 1}) : Int do serve(c) end   -- fine
+  ```
+
+  Forwarding obeys the same definite-failure rule as everything else: a
+  *weaker* incoming refinement (`v.port >= 0`) neither proves nor contradicts
+  the callee's, so it is **skipped**, not reported. Only a *contradictory* one
+  (`v.port <= 0`) is an error.
+
+Everything else about a record is **skipped**:
+
+- an **unrefined record variable** — nothing is known about its fields;
+- a record literal with an **unknown field value** (`{ port: p }` for a
+  parameter `p`) — the checker will not assert facts about fields it cannot
+  see, so the *whole* record is skipped rather than partially reflected;
+- a record literal with a field whose type is outside the reflected fragment
+  (a `String`, a function, a nested record) bound to anything but a literal
+  data constructor;
+- a record literal with a **list field holding concrete elements**
+  (`history: Cons(1, Nil)`). The built-in `List` is generic, so the checker
+  models its element type as an opaque sort — an `Int` cannot be placed there,
+  and rather than build a query the solver would reject, the whole record is
+  skipped. An **empty** list (`history: Nil`) has no elements and reflects
+  fine, which is what the `len(v.history) == v.count` examples above rely on.
+
+Records also compose with measures — `{v : State | len(v.history) == v.count}`
+reasons about a `List` field structurally, exactly as `len` does elsewhere.
+
+## String Refinements
+
+`len` also measures a **String**, so an emptiness contract is expressible and
+checkable:
+
+```march
+fn slug(s : {String | len(_) > 0}) : String do ... end
+fn code(s : {String | len(_) <= 3}) : String do ... end
+
+fn main() do
+  slug("")        -- rejected: len("") is 0, so the predicate can never hold
+  slug("hello")   -- fine
+  code("abcd")    -- rejected: len("abcd") is 4
+end
+```
+
+Equality against a **string literal** works too, so the contract can be written
+the other way round:
+
+```march
+fn slug(s : {String | _ != ""}) : String do ... end
+```
+
+`len` is **overloaded** — the same name measures a list and a String. Which one
+applies is decided by the *declared* base type of the value being measured, never
+guessed from context, so `{Int | _ < len(xs)}` over a `List` and
+`{String | len(_) > 0}` over a `String` coexist without ambiguity. If the checker
+cannot tell, it skips the obligation rather than assume.
+
+`len` counts **bytes**, matching the `string_length` builtin exactly (March has no
+codepoint-length primitive). For non-ASCII text a character is several bytes:
+`len("é")` is 2, not 1.
+
+### What String refinements do *not* do
+
+The encoding models `String` as an **opaque sort** with `len` as an uninterpreted
+function — deliberately outside any SMT string theory, so queries stay decidable
+and cheap. Two consequences are worth stating plainly:
+
+- **A `== ""` guard does not establish a length.** In
+
+  ```march
+  if s == "" do 0 else nonempty(s) end
+  ```
+
+  the else-branch knows only that `s` is *distinct from* the empty literal. There
+  is no axiom relating a string's identity to its length, so `len(s) > 0` does not
+  follow and the call is silently skipped. This is a real gap, not an oversight:
+  closing it needs an injectivity axiom whose cost was judged not worth it.
+- **No prefix, suffix, contains, concatenation, or regex reasoning.** Only `len`
+  and `==`/`!=` against literals are understood. Any other string operation in a
+  predicate makes the obligation unreflectable, and unreflectable means skipped.
+
 ### The measure soundness gate
 
 A `@[measure]` is a *promise* that the function is a **total, terminating, pure**
@@ -259,6 +375,81 @@ mathematical function — the solver trusts it, so a broken one would let it
 A measure that is sound but outside what the encoding can model (see
 limitations) isn't an error — it simply falls back to weaker, symbolic
 reasoning.
+
+---
+
+## Constructor Tags — Refining over ADT Variants
+
+Every constructor of every ADT — your own types, and the built-in `Option`,
+`Result` and `List` — implicitly gains an `is_<Ctor>` **tester** the checker
+understands inside a predicate. Nothing declares them; `type Shape = Circle(Int)
+| Square(Int)` gives you `is_Circle` and `is_Square` for free.
+
+```march
+-- a contract that says "this Option is definitely populated"
+fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do ... end
+
+unwrap(Some(1))   -- fine
+unwrap(None)      -- error: `None` can never satisfy `is_Some(_)`
+```
+
+The name is **exact-case**: `is_Some` is the tester for the constructor `Some`;
+`is_some` is not a tester at all (it happens to be the lowercase stdlib helper
+`Option.is_some`), so a misspelling draws the unrecognized-predicate warning
+rather than silently meaning something else.
+
+There are two sources of tag facts.
+
+**A constructor literal at the call site**, as above — the argument's tag is
+known exactly, so the tester decides.
+
+**A `match` arm**, which is where the realistic bug lives. Entering an arm
+narrows the scrutinee's tag for everything inside it:
+
+```march
+fn f(x : Option(Int)) : Int do
+  match x do
+    None    -> unwrap(x)   -- error: inside this arm, `x` is definitely `None`
+    Some(v) -> unwrap(x)   -- fine: inside this arm, `x` is definitely `Some`
+  end
+end
+```
+
+Narrowing is deliberately conservative, and where it stops is where the checker
+goes quiet rather than guessing:
+
+- **The scrutinee must be a bare variable.** `match mk() do …` matches an
+  expression with no stable name to attach a fact to, so no narrowing happens
+  and calls inside the arms are skipped. Bind it to a `let` first if you want
+  the fact.
+- **A rebinding pattern binder ends it.** Matching `y` with `Some(x) ->` says
+  nothing about `x` — that `x` is a fresh binder for the payload, not the
+  scrutinee — so no fact is recorded against the name it shadows.
+- **An `as` pattern is not narrowed.** `None as z ->` binds the whole scrutinee
+  under a second name, but the arm's head is a `PatAs`, not a bare constructor
+  pattern, so no tag fact is recorded — for `z` or for the scrutinee. Write
+  `None ->` if you want the narrowing.
+- **An ambiguous constructor name is skipped.** If two ADTs in scope both
+  declare a constructor `Row`, `is_Row` identifies no particular datatype and is
+  not checked.
+- **Rebinding the name retires the fact.** A narrowing is recorded against a
+  *name*, so any construct that rebinds that name inside the arm — a `let`, a
+  `let?`, a lambda parameter, an inner `match` binder — discards it. In
+
+  ```march
+  match x do
+    None ->
+      let x = Some(1)
+      unwrap(x)     -- fine: this `x` is a different value
+    Some(v) -> v
+  end
+  ```
+
+  the fact `is_None(x)` does not survive the `let`. The same rule applies to
+  scalar facts from an `if` guard.
+
+As everywhere else, these are checked under the definite-failure stance: an
+`Option` whose tag isn't known is simply not an error.
 
 ---
 
@@ -290,9 +481,23 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
-  encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
-  it's deliberately omitted. Predicates over other types aren't supported.
+- **`Int`/`Bool` values, record fields, `String` (narrowly), plus ADT
+  constructor *tags*.** There are **no `Float` value-refinements** — encoding
+  floats as mathematical reals is unsound for IEEE-754 arithmetic, so it's
+  deliberately omitted. A predicate may range over the `Int`/`Bool` **fields of
+  a record** (see [above](#refining-a-record-over-its-fields)); a record field
+  of an unreflected type makes the whole record opaque. `String` supports only
+  `len` and literal equality (see
+  [String Refinements](#string-refinements)). Over a **variant**
+  (multi-constructor) ADT the checker reasons about the constructor tag only
+  (`is_Some(_)`), never the payload: `{Option(Int) | is_Some(_)}` is checkable,
+  a predicate about the `Int` inside is not. Refinements over other types
+  aren't supported.
+- **A tag refinement is discharged at the call site, not carried through a
+  binding.** A constructor literal or a `match` narrowing establishes the fact
+  where the call is written. Forwarding a `{Option(Int) | is_Some(_)}`
+  *parameter* to another function expecting the same contract is not yet
+  recognized — the checker stays silent rather than assuming it.
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
@@ -323,6 +528,17 @@ edges:
   content-addressed and cached (warm rebuilds are fast), and the cost is
   isolated to call sites that actually mention a measure — but a cold build of
   measure-heavy code pays for it. See the flag below.
+- **A predicate can call a name the checker doesn't understand — it now says
+  so.** Predicate bodies aren't typechecked, so `{Int | totally_bogus_fn(_) >
+  0}` used to compile clean and enforce nothing. The checker now warns when a
+  predicate applies a function outside its known vocabulary: the comparison,
+  arithmetic, and boolean operators (`==`, `!=`, `<`, `<=`, `>`, `>=`, `+`,
+  `-`, `*`, `negate`, `not`, `&&`, `||`), the built-in `len`, every ADT's
+  `is_<Ctor>` tester, and any function annotated `@[measure]`. This is a
+  Warning, not an Error — the program still
+  compiles — but it tells you the refinement it's attached to is not actually
+  checked, so you can annotate the function `@[measure]` or switch to a
+  supported predicate.
 
 ---
 
