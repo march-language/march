@@ -10195,6 +10195,40 @@ let test_compiled_check_property_passes () =
     Alcotest.(check int)
       "compiled trivially-true Check.all property exits 0" 0 run_rc
 
+(* ── `march --compile` must locate runtime/march_runtime.c regardless of CWD ─
+   Every `compile_march*` helper in this suite already `cd`s to a scratch
+   tmp dir before invoking main_exe (so relative `-o`/src paths resolve
+   inside the tmp dir), which means EVERY Slow compiled-regression test in
+   this file exercises this path. Assert it directly and cheaply: a
+   trivial program, compiled from a CWD that is neither the March project
+   root nor exe-relative to it, must still find the runtime C sources
+   (exe-relative candidate resolution — see `find_runtime_file` in
+   bin/main.ml) rather than failing with "cannot find
+   runtime/march_runtime.c". *)
+let test_compile_succeeds_from_other_cwd () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_othercwd" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "o_test.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod OtherCwd do\n\
+    \  fn main() do\n\
+    \    println(\"hi\")\n\
+    \  end\n\
+     end\n";
+  close_out oc;
+  let bin = Filename.concat tmp "obin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_rc = Sys.command (Printf.sprintf "%s >/dev/null 2>&1"
+                                (Filename.quote bin)) in
+    Alcotest.(check int)
+      "compile from a non-project-root CWD succeeds and runs" 0 run_rc
+
 (* ── __try_call_val: heap Ok payload round-trips + panic caught ──────────────
    __try_call_val : (Bool -> a) -> Result(a, String) is the value-carrying
    sibling of __try_call.  Where __try_call must tag its Bool Ok field,
@@ -12647,6 +12681,8 @@ let stdlib_suites =
           test_dmod_test_body_qualifies_helper_refs;
         Alcotest.test_case "__try_call tags Bool result: compiled Check.all property passes" `Slow
           test_compiled_check_property_passes;
+        Alcotest.test_case "march --compile succeeds from a non-project-root CWD" `Slow
+          test_compile_succeeds_from_other_cwd;
         Alcotest.test_case "__try_call_val: heap Ok payload round-trips + panic caught (compiled)" `Slow
           test_compiled_try_call_val_heap_roundtrip;
         Alcotest.test_case "recursive nested closure with captured loop bound returns correct value" `Slow

@@ -136,6 +136,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march --compile` no longer fails with "cannot find runtime/march_runtime.c"
+  when invoked from a working directory other than the project root. Six
+  independent lookups for files under `runtime/` were each missing an
+  exe-relative candidate that resolves the actual dune build layout, so any
+  invocation outside the repo root (or a `_build/default/bin/main.exe` build)
+  fell through to a dead CWD-relative fallback.
+
 - Refinement checking: a **named return binder** that collides with a parameter
   no longer misattributes the guards reaching a return. `fn f(v : Int, k : Int)
   : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as a
