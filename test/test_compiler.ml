@@ -8615,6 +8615,56 @@ let test_nested_record_pattern_non_exhaustive_is_reported () =
    above and then didn't pass it, so a partial destructure was a type error
    even though the type was right there. *)
 
+(* A record pattern inside a CONSTRUCTOR payload must open its field list too.
+   [instantiate_ctor] hands back fresh vars for the parent type's parameters,
+   so `Some`'s argument was still an unbound var while its sub-pattern was
+   being inferred — the link to the scrutinee's payload was only made by a
+   unify afterwards. The record pattern saw a bare var, fell back to closed
+   synthesis, and a partial pattern failed. A FULL one happened to unify
+   anyway, which is why this survived earlier tests. *)
+let test_partial_record_pattern_in_ctor_payload () =
+  let ctx = typecheck {|mod T do
+    type Reply = { status : Int, body : String }
+    fn f(r : Option(Reply)) : String do
+      match r do
+        Some({ status: s }) -> int_to_string(s)
+        None                -> "none"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "partial record in ctor payload: no errors" false
+    (has_errors ctx)
+
+(* The full-field form has to keep working — it took a different route
+   (closed synthesis that unified by luck) and must not regress. *)
+let test_full_record_pattern_in_ctor_payload () =
+  let ctx = typecheck {|mod T do
+    type Reply = { status : Int, body : String }
+    fn f(r : Option(Reply)) : String do
+      match r do
+        Some({ status: s, body: b }) -> b ++ int_to_string(s)
+        None                         -> "none"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "full record in ctor payload: no errors" false
+    (has_errors ctx)
+
+(* Nested record-in-record, where the inner field's type is nominal rather
+   than structural. *)
+let test_nested_nominal_record_pattern () =
+  let ctx = typecheck {|mod T do
+    type Origin = { host : String, port : Int }
+    type Route  = { origin : Origin, secure : Bool }
+    fn f(r : Route) : String do
+      match r do
+        { origin: { host: h } } -> h
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested nominal record pattern: no errors" false
+    (has_errors ctx)
+
 let test_partial_record_destructure_in_let () =
   let ctx = typecheck {|mod T do
     type P = { code : Int, msg : String }
@@ -8749,6 +8799,12 @@ let compiler_suites =
             test_or_pattern_binding_type_mismatch_rejected;
           Alcotest.test_case "record field mismatch note polarity" `Quick
             test_record_field_mismatch_note_polarity;
+          Alcotest.test_case "partial record pattern in ctor payload" `Quick
+            test_partial_record_pattern_in_ctor_payload;
+          Alcotest.test_case "full record pattern in ctor payload" `Quick
+            test_full_record_pattern_in_ctor_payload;
+          Alcotest.test_case "nested nominal record pattern" `Quick
+            test_nested_nominal_record_pattern;
           Alcotest.test_case "partial record destructure in let" `Quick
             test_partial_record_destructure_in_let;
           Alcotest.test_case "partial record destructure in top-level let" `Quick

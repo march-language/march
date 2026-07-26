@@ -176,6 +176,76 @@ This record has no field `xx`.
   Available fields: x, y
 ```
 
+#### Composing with other patterns
+
+Record patterns nest anywhere a pattern can appear, which is where they earn
+their keep. A record inside a record:
+
+```march
+type Origin = { host : String, port : Int }
+type Route  = { origin : Origin, secure : Bool }
+
+fn where_to(r : Route) : String do
+  match r do
+    { origin: { host: "localhost", port: p } } -> "local:" ++ int_to_string(p)
+    { origin: { host: h } }                    -> "remote:" ++ h
+  end
+end
+```
+
+A record inside a constructor payload — the common shape when a record comes
+back wrapped in `Option` or `Result`:
+
+```march
+type Reply = { status : Int, body : String }
+
+fn handle(r : Option(Reply)) : String do
+  match r do
+    Some({ status: 200, body: b }) -> "ok " ++ b
+    Some({ status: s })            -> "http " ++ int_to_string(s)
+    None                           -> "no response"
+  end
+end
+```
+
+As or-pattern alternatives, binding the same name from either side:
+
+```march
+match reply do
+  { status: 404, body: b } | { status: 410, body: b } -> "gone: " ++ b
+  { body: b }                                         -> b
+end
+```
+
+Under an `as` pattern, to name the whole record while still destructuring it:
+
+```march
+match reply do
+  { status: 500 } as whole -> "ALERT " ++ whole.body
+  { body: b }              -> b
+end
+```
+
+With a guard, when the interesting condition is a range rather than a value:
+
+```march
+match reply do
+  { status: s } when s >= 500 -> "server error"
+  { status: s } when s >= 400 -> "client error"
+  _                           -> "ok"
+end
+```
+
+And inside a tuple, which is how you dispatch on two values at once:
+
+```march
+match (reply, retries) do
+  ({ status: 200 }, _) -> "done"
+  (_, 0)               -> "giving up"
+  (_, n)               -> "retrying, " ++ int_to_string(n) ++ " left"
+end
+```
+
 #### The one exception: a bare pattern as a parameter
 
 A pattern written directly as a parameter — `fn get_w({ w: w })` — is the one

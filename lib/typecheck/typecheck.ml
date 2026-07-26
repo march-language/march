@@ -3542,6 +3542,25 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
          end
        end);
        let arg_tys, result_ty = instantiate_ctor env ci in
+       (* Resolve the constructor's own type against the expected type BEFORE
+          walking its arguments.  [instantiate_ctor] hands back fresh vars for
+          the parent type's parameters, so `Some`'s argument is still an
+          unbound var here and is only linked to the scrutinee's payload by the
+          caller's unify, AFTER the arguments have been inferred.  A sub-pattern
+          that needs a CONCRETE expected type — a record pattern, which uses it
+          to open its field list — would see that bare var and fall back to
+          closed synthesis, so `Some({ status: s })` against
+          `Option({status, body})` failed while the full
+          `Some({ status: s, body: b })` happened to unify anyway.  Binding the
+          parameter first makes [arg_tys] repr to real types. *)
+       (match expected with
+        | Some exp_ty ->
+          unify env ~span:name.span
+            ~reason:(Some (RBuiltin
+              (Printf.sprintf "I'm checking the pattern for constructor `%s`."
+                 name.txt)))
+            result_ty exp_ty
+        | None -> ());
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
        if n_expected <> n_got then begin
