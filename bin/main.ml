@@ -175,6 +175,19 @@ let stdlib_file_list = [
   "math.march";
   "string.march";
   "iolist.march";
+  (* deque.march must load EAGERLY (full body typecheck), not lazily.  A
+     lazily-loaded module's call sites leave the caller's let-binders as
+     unresolved '_ tvars in the type_map, so monomorphization cannot
+     specialize a generic function like Deque.pop_front : Deque(a) ->
+     (Option(a), Deque(a)) — the generic body then allocates a BOXED
+     Some cell while the concrete caller decodes the tuple field as a
+     NICHE Option(Int), reading the box's heap ADDRESS as the payload.
+     Symptom: bench/deque_ops.march printed a raw pointer for a popped
+     Int interpreted correctly, and its drain loop never terminated
+     ("deque_ops hangs compiled").  The lazy-vs-eager split changing
+     REPRESENTATION decisions is a compiler bug class of its own, filed
+     in specs/todos.md; eager-loading Deque removes this instance. *)
+  "deque.march";
   "html.march";
   "sigil.march";
   "http.march";

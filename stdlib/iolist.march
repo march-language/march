@@ -130,38 +130,39 @@ mod IOList do
   Cost: O(total bytes across all segments).
   """
   fn to_string(iol : IOList) : String do
-    -- list_append: concatenate two List(String) in forward order.
-    -- Must be defined before collect_list which calls it.
-    fn list_append(a : List(String), b : List(String)) : List(String) do
-      match a do
-      Nil        -> b
-      Cons(h, t) -> Cons(h, list_append(t, b))
+    -- Stack-safe flatten via an explicit worklist, so arbitrarily deep IOList
+    -- trees (e.g. long `append(acc, x)` chains, which build a left spine one
+    -- level deeper per append) never overflow the native stack.
+    --
+    -- `stack` is a list of sibling-frames — one frame per tree level, holding
+    -- the not-yet-visited nodes at that level.  Descending into a Segments node
+    -- pushes its children as a new top frame.  `go` is fully tail-recursive
+    -- (self-call in tail position in every arm) and keeps the whole traversal
+    -- on the heap.  Leaf strings are prepended to `acc`, so `acc` ends up in
+    -- reverse visitation order; `rev` restores document order at the end.
+    fn rev(xs : List(String), acc : List(String)) : List(String) do
+      match xs do
+      Nil        -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
       end
     end
-    -- collect_list: flatten a List(IOList) to a forward List(String).
-    -- Defined before collect so collect can call it.
-    fn collect_list(nodes : List(IOList)) : List(String) do
-      match nodes do
-      Nil        -> Nil
-      Cons(h, t) -> do
-        let parts = match h do
-          Empty        -> Nil
-          Str(s)       -> Cons(s, Nil)
-          Segments(ys) -> collect_list(ys)
+    fn go(stack : List(List(IOList)), acc : List(String)) : List(String) do
+      match stack do
+      Nil -> acc
+      Cons(frame, rest) ->
+        match frame do
+        Nil -> go(rest, acc)
+        Cons(h, siblings) ->
+          match h do
+          Empty        -> go(Cons(siblings, rest), acc)
+          Str(s)       -> go(Cons(siblings, rest), Cons(s, acc))
+          Segments(ys) -> go(Cons(ys, Cons(siblings, rest)), acc)
           end
-        list_append(parts, collect_list(t))
-      end
-      end
-    end
-    -- collect: flatten one IOList node to a List(String).
-    fn collect(node : IOList) : List(String) do
-      match node do
-      Empty        -> Nil
-      Str(s)       -> Cons(s, Nil)
-      Segments(xs) -> collect_list(xs)
+        end
       end
     end
-    string_join(collect(iol), "")
+    let segs = go(Cons(Cons(iol, Nil), Nil), Nil)
+    string_join(rev(segs, Nil), "")
   end
 
   doc """
@@ -174,24 +175,24 @@ mod IOList do
   Cost: O(number of nodes in the tree).
   """
   fn byte_size(iol : IOList) : Int do
-    fn size_list(nodes : List(IOList)) : Int do
-      match nodes do
-      Nil        -> 0
-      Cons(h, t) -> do
-        let hs = match h do
-          Empty        -> 0
-          Str(s)       -> string_byte_length(s)
-          Segments(ys) -> size_list(ys)
+    -- Stack-safe worklist walk (see `to_string` for the frame-stack scheme):
+    -- deep append chains must not overflow the native stack.
+    fn go(stack : List(List(IOList)), acc : Int) : Int do
+      match stack do
+      Nil -> acc
+      Cons(frame, rest) ->
+        match frame do
+        Nil -> go(rest, acc)
+        Cons(h, siblings) ->
+          match h do
+          Empty        -> go(Cons(siblings, rest), acc)
+          Str(s)       -> go(Cons(siblings, rest), acc + string_byte_length(s))
+          Segments(ys) -> go(Cons(ys, Cons(siblings, rest)), acc)
           end
-        hs + size_list(t)
-      end
+        end
       end
     end
-    match iol do
-    Empty        -> 0
-    Str(s)       -> string_byte_length(s)
-    Segments(xs) -> size_list(xs)
-    end
+    go(Cons(Cons(iol, Nil), Nil), 0)
   end
 
   doc """
@@ -204,24 +205,24 @@ mod IOList do
   Cost: O(1) for `Empty` and `Str`; O(n) for `Segments`.
   """
   fn is_empty(iol : IOList) : Bool do
-    fn all_empty_list(nodes : List(IOList)) : Bool do
-      match nodes do
-      Nil        -> true
-      Cons(h, t) -> do
-        let he = match h do
-          Empty        -> true
-          Str(s)       -> string_is_empty(s)
-          Segments(ys) -> all_empty_list(ys)
+    -- Stack-safe worklist walk (see `to_string`): short-circuits to `false`
+    -- on the first non-empty leaf, and never recurses through the native stack.
+    fn go(stack : List(List(IOList))) : Bool do
+      match stack do
+      Nil -> true
+      Cons(frame, rest) ->
+        match frame do
+        Nil -> go(rest)
+        Cons(h, siblings) ->
+          match h do
+          Empty        -> go(Cons(siblings, rest))
+          Str(s)       -> if string_is_empty(s) do go(Cons(siblings, rest)) else false end
+          Segments(ys) -> go(Cons(ys, Cons(siblings, rest)))
           end
-        he && all_empty_list(t)
-      end
+        end
       end
     end
-    match iol do
-    Empty        -> true
-    Str(s)       -> string_is_empty(s)
-    Segments(xs) -> all_empty_list(xs)
-    end
+    go(Cons(Cons(iol, Nil), Nil))
   end
 
   doc """

@@ -26,11 +26,17 @@ pfn double_str(s : String) : String do
   end
 end
 
+-- Tail-recursive map: accumulate into `acc` (which reverses order), then
+-- reverse once at the end.  A naive `Cons(double_str(h), map_strings(t))`
+-- is non-tail and overflows the stack at 100k elements.
 pfn map_strings(xs : List(String)) : List(String) do
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) -> Cons(double_str(h), map_strings(t))
+  fn go(ys : List(String), acc : List(String)) : List(String) do
+    match ys do
+    Nil        -> List.reverse(acc)
+    Cons(h, t) -> go(t, Cons(double_str(h), acc))
+    end
   end
+  go(xs, Nil)
 end
 
 pfn main() : Unit do

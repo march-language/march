@@ -8111,6 +8111,44 @@ let test_compiled_no_opt_prunes_unreachable () =
       true
       (run_out = "hi\nEXIT:0")
 
+(** String.from_codepoint/to_codepoints must be usable COMPILED (2026-07-14,
+    restored 2026-07-24 from lost commit 4a1c2ee3).  They were interpreter-only
+    builtin wrappers: string_from_codepoint / string_to_codepoints exist in
+    eval.ml but have no native runtime impl and no llvm_emit mapping, so any
+    compiled program calling them failed at link time with
+    `Undefined symbols: _string_from_codepoint`.  Now pure-March UTF-8 codecs
+    over Bytes + the int_* bitwise builtins — one definition, every backend.
+    Covers the 1/2/3/4-byte encode widths, the rejection cases (negative,
+    > 0x10FFFF handled via range check, UTF-16 surrogates), and decode. *)
+let test_string_codepoint_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_string_codepoint"
+    ~src:"mod StringCodepoint do\n\
+         \  pfn opt(o) do\n\
+         \    match o do\n\
+         \      Some(x) -> x\n\
+         \      None -> \"<none>\"\n\
+         \    end\n\
+         \  end\n\
+         \  pfn ints_go(xs, acc) do\n\
+         \    match xs do\n\
+         \      Nil -> acc\n\
+         \      Cons(h, Nil) -> acc ++ int_to_string(h)\n\
+         \      Cons(h, t) -> ints_go(t, acc ++ int_to_string(h) ++ \",\")\n\
+         \    end\n\
+         \  end\n\
+         \  pfn ints(xs) do ints_go(xs, \"\") end\n\
+         \  fn main() do\n\
+         \    println(opt(String.from_codepoint(65)) ++ opt(String.from_codepoint(233)))\n\
+         \    println(opt(String.from_codepoint(-1)) ++ opt(String.from_codepoint(55296)))\n\
+         \    println(ints(String.to_codepoints(\"AB\")))\n\
+         \    println(ints(String.to_codepoints(\"é\")))\n\
+         \    println(ints(String.to_codepoints(opt(String.from_codepoint(128512)))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"Aé\n<none><none>\n65,66\n233\n128512"
+    ()
+
 (** int_div_euclid: native codegen must route through march_checked_ediv and
     match the interpreter's Euclidean quotient across all four sign quadrants.
     Pre-fix the builtin had no llvm_emit mapping, so compiling ANY caller failed
@@ -8143,6 +8181,65 @@ let test_compiled_int_mod_euclid_parity () =
          \  end\n\
           end\n"
     ~expected:"[1, 2, 2, 1]"
+    ()
+
+(** Deque.pop_front decode parity (2026-07-24).  deque.march loaded LAZILY
+    (it was missing from bin/main.ml's stdlib_file_list), so the caller's
+    let-binders stayed unresolved '_ tvars and monomorphization could not
+    specialize the generic pop_front : Deque(a) -> (Option(a), Deque(a)).
+    The generic body allocates a BOXED Some cell; the concrete caller decodes
+    the tuple field as a NICHE Option(Int) — so `Some(v)` bound v to the box's
+    heap ADDRESS.  Interpreted printed 1; compiled printed a raw pointer, and
+    bench/deque_ops's drain loop never terminated.  Fixed by eager-loading
+    deque.march; the lazy-vs-eager repr-divergence CLASS is filed in
+    specs/todos.md.  This pins the decode plus a push/pop/drain round trip. *)
+let test_compiled_deque_pop_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_deque_pop"
+    ~src:"mod DequePop do\n\
+         \  pfn drain(d, acc : Int) : Int do\n\
+         \    match Deque.pop_front(d) do\n\
+         \    (None, _)    -> acc\n\
+         \    (Some(v), r) -> drain(r, acc + v)\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let d = Deque.push_back(Deque.push_front(Deque.empty(), 1), 2)\n\
+         \    match Deque.pop_front(d) do\n\
+         \      (Some(v), _) -> println(int_to_string(v))\n\
+         \      (None, _) -> println(\"empty\")\n\
+         \    end\n\
+         \    println(int_to_string(drain(d, 0)))\n\
+         \  end\n\
+          end\n"
+    ~expected:"1\n3"
+    ()
+
+(** Deep-tree flatten regression.  `IOList.append(acc, x)` in a loop builds a
+    left-spine `Segments([Segments([...], x_{n-1}]), x_n])` tree one level
+    deeper per append.  The old `to_string`/`byte_size` walked this with a
+    non-tail native recursion, so flattening a deep chain overflowed the 1 MiB
+    green-thread stack and crashed with SIGBUS (rc138) — even though the module
+    documents flattening as stack-safe.  The fix rewrote those walkers as
+    tail-recursive explicit-worklist traversals.  The pre-fix crash threshold on
+    this shape was measured between 15k and 20k deep; 25000 sits comfortably
+    past it (and far below `bench/iolist_template`'s 50k) so the test crashes
+    reliably pre-fix while keeping the interpreter leg cheap. *)
+let test_compiled_iolist_deep_flatten_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_iolist_deep_flatten"
+    ~src:"mod IOListDeepFlatten do\n\
+         \  pfn build(n : Int, acc : IOList) : IOList do\n\
+         \    if n == 0 do acc\n\
+         \    else build(n - 1, IOList.append(acc, IOList.from_string(\"x\"))) end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    let t = build(25000, IOList.empty())\n\
+         \    println(int_to_string(IOList.byte_size(t)))\n\
+         \    println(int_to_string(string_byte_length(IOList.to_string(t))))\n\
+         \  end\n\
+          end\n"
+    ~expected:"25000\n25000"
     ()
 
 (** Self-referencing block-`let` shadowing (`let x = x + 5`) must compile to
@@ -10147,6 +10244,10 @@ let codegen_suites =
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
+          Alcotest.test_case "compiled IOList deep-tree flatten parity (stack-safe)" `Slow
+            test_compiled_iolist_deep_flatten_parity;
+          Alcotest.test_case "compiled Deque.pop_front decode parity (eager stdlib load)" `Quick
+            test_compiled_deque_pop_parity;
           Alcotest.test_case "compiled self-referencing let-shadowing parity (cprop)" `Quick
             test_compiled_let_shadowing_parity;
           Alcotest.test_case "compiled entry-module self-qualification parity" `Quick
@@ -10211,6 +10312,10 @@ let codegen_suites =
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
             test_msgpack_cross_module_ctor_resolution_compiled;
+        ] );
+      ( "string_codepoint", [
+          Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
+            test_string_codepoint_parity;
         ] );
       ( "llvm_builtins_preamble_golden", [
           Alcotest.test_case "native, non-repl preamble byte-identical (W3C2.4 / H2)" `Quick
