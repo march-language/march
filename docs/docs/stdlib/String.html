@@ -1960,16 +1960,7 @@ Cost: O(n * m) worst case, where n = byte_size(s) and m = byte_size(substring).<
     String.ends_with(&quot;hello&quot;, &quot;&quot;)    -- true
 
 Cost: O(|suffix|).</code></pre></div></div>
-<div class="item" id="fn-from_codepoint"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_codepoint</span><span class="sig">from_codepoint(cp) do string_from_codepoint(cp) end</span><a class="anchor-link" href="#fn-from_codepoint" title="Link">#</a></div><div class="ib"><p>Encode a Unicode codepoint as a UTF-8 string. Returns <code>Some(string)</code> if the codepoint is valid, <code>None</code> otherwise.</p><pre><code>Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
-(0xD800 to 0xDFFF).
-
-    String.from_codepoint(0x41)    -- Some(&quot;A&quot;)
-    String.from_codepoint(0xE9)    -- Some(&quot;é&quot;)
-    String.from_codepoint(0x1F600) -- Some(&quot;😀&quot;)
-    String.from_codepoint(-1)      -- None  (out of range)
-    String.from_codepoint(0xD800)  -- None  (surrogate pair)
-
-Cost: O(1).</code></pre></div></div>
+<div class="item" id="fn-from_codepoint"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_codepoint</span><span class="sig">from_codepoint(cp : Int) : Option(String)</span><a class="anchor-link" href="#fn-from_codepoint" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-from_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_float</span><span class="sig">from_float(f) do float_to_string(f) end</span><a class="anchor-link" href="#fn-from_float" title="Link">#</a></div><div class="ib"><p>Convert a float to a string using OCaml's default float formatting.</p><pre><code>    String.from_float(3.14)  -- &quot;3.14&quot;
     String.from_float(1.0)   -- &quot;1.&quot;
     String.from_float(1e10)  -- &quot;10000000000.&quot;
@@ -2068,16 +2059,7 @@ Cost: O(n) scan.</code></pre></div></div>
     String.starts_with(&quot;hello&quot;, &quot;&quot;)    -- true
 
 Cost: O(|prefix|).</code></pre></div></div>
-<div class="item" id="fn-to_codepoints"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_codepoints</span><span class="sig">to_codepoints(s) do string_to_codepoints(s) end</span><a class="anchor-link" href="#fn-to_codepoints" title="Link">#</a></div><div class="ib"><p>Extract all Unicode codepoints from a string as an Int list. Each codepoint is yielded as a separate integer in the range 0x0 to 0x10FFFF.</p><pre><code>Returns a list ordered left-to-right. Invalid UTF-8 sequences are treated
-as individual byte values (0x0 to 0xFF); well-formed March strings will not
-encounter this case.
-
-    String.to_codepoints(&quot;A&quot;)    -- [65]
-    String.to_codepoints(&quot;é&quot;)    -- [233]
-    String.to_codepoints(&quot;AB&quot;)   -- [65, 66]
-    String.to_codepoints(&quot;😀&quot;)    -- [128512]
-
-Cost: O(n) where n is the byte length of the string.</code></pre></div></div>
+<div class="item" id="fn-to_codepoints"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_codepoints</span><span class="sig">to_codepoints(s : String) : List(Int)</span><a class="anchor-link" href="#fn-to_codepoints" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-to_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_float</span><span class="sig">to_float(s)</span><a class="anchor-link" href="#fn-to_float" title="Link">#</a></div><div class="ib"><p>Parse <code>s</code> as a floating-point number. Returns <code>Ok(f)</code> on success, <code>Err(msg)</code> if the string is not a valid float.</p><pre><code>    String.to_float(&quot;3.14&quot;)  -- Ok(3.14)
     String.to_float(&quot;1e10&quot;)  -- Ok(10000000000.0)
     String.to_float(&quot;abc&quot;)   -- Err(&quot;not a valid float&quot;)
