@@ -1246,10 +1246,12 @@ let tier0_suite =
               end\n\
               end\n"));
 
-    gated "relational postcondition is NOT propagated (Tier 1 boundary)" (fun () ->
-        (* `_ < n` mentions the parameter `n`, so pred_is_closed rejects it and
-           the call site learns nothing.  Silence here is correct, not a bug. *)
-        Alcotest.(check bool) "no error" false
+    (* Tier 1 superseded this: `_ < n` mentions the parameter `n`, and the call
+       `below(0)` instantiates it as `_ < 0`, which contradicts `_ >= 0`.  Until
+       relational postconditions propagated, this case asserted SILENCE and was
+       the marker for the Tier 0/Tier 1 boundary. *)
+    gated "relational postcondition IS propagated after substitution" (fun () ->
+        Alcotest.(check bool) "error" true
           (has_refine_error
              (t0 "  fn below(n : Int) : {Int | _ < n} do n - 1 end\n\
                  \  fn f() : Int do let c = below(0)\n    takepos(c) end")));
@@ -1757,6 +1759,209 @@ let adt_suite =
              \  end\n\
               end\n")) ]
 
+(* ── Tier 1: relational postconditions ──────────────────────────────────────
+   Direct unit tests for the predicate classifier.  These need no solver, so
+   they are NOT gated: they exercise pure AST analysis. *)
+
+module RC = March_refinecheck.Refine_check
+
+(* Parse `fn g(<params>) : {Int | <pred>} do 0 end` and hand back the
+   refinement's (binder, predicate) so the classifier can be probed directly. *)
+let ret_refinement_of (fn_src : string) : string * March_ast.Ast.expr =
+  let m = parse (Printf.sprintf "mod M do\n  %s\nend\n" fn_src) in
+  let rec find (ds : March_ast.Ast.decl list) =
+    match ds with
+    | March_ast.Ast.DFn (fd, _) :: _ -> (
+      match fd.March_ast.Ast.fn_ret_ty with
+      | Some (March_ast.Ast.TyRefine (_, binder, pred)) ->
+        ((match binder with Some b -> b.March_ast.Ast.txt | None -> "_"), pred)
+      | _ -> Alcotest.fail "function has no return refinement")
+    | _ :: rest -> find rest
+    | [] -> Alcotest.fail "no function declaration found"
+  in
+  find m.March_ast.Ast.mod_decls
+
+let classify fn_src params =
+  let binder, pred = ret_refinement_of fn_src in
+  RC.classify_pred binder params pred
+
+let scope_str = function
+  | RC.Closed -> "Closed"
+  | RC.Relational ps -> "Relational[" ^ String.concat ";" (List.sort compare ps) ^ "]"
+  | RC.Unusable -> "Unusable"
+
+let check_scope name expected actual =
+  Alcotest.(check string) name expected (scope_str actual)
+
+let classifier_suite =
+  [ Alcotest.test_case "a closed predicate mentions no parameter" `Quick (fun () ->
+        check_scope "closed" "Closed"
+          (classify "fn g(n : Int) : {Int | _ >= 0} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "a predicate mentioning one parameter is relational" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[n]"
+          (classify "fn g(n : Int) : {Int | _ < n} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "a predicate mentioning two parameters lists both" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[m;n]"
+          (classify "fn g(n : Int, m : Int) : {Int | _ < n + m} do 0 end" [ "n"; "m" ]));
+
+    Alcotest.test_case "a measure applied to a parameter is relational in that parameter"
+      `Quick (fun () ->
+        (* `len` is the application HEAD — a function name, not a value — so it
+           must not itself register as a free name. *)
+        check_scope "relational" "Relational[xs]"
+          (classify "fn g(xs : List(Int)) : {Int | _ < len(xs)} do 0 end" [ "xs" ]));
+
+    Alcotest.test_case "a predicate mentioning an unknown name is unusable" `Quick
+      (fun () ->
+        check_scope "unusable" "Unusable"
+          (classify "fn g(n : Int) : {Int | _ < q} do 0 end" [ "n" ]));
+
+    Alcotest.test_case "unrecognised syntax is unusable" `Quick (fun () ->
+        (* A field projection is syntax [classify_pred] does not traverse, so it
+           falls through to the conservative catch-all rather than being read as
+           a bare mention of `r`. *)
+        check_scope "unusable" "Unusable"
+          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]))
+  ]
+
+(* Integration tests for propagating a relational postcondition to call sites.
+   NOTE: `use` and `opaque` are reserved words in March, so the caller here is
+   named `usit` and the unanalysable callee `blackbox`. *)
+let tier1_suite =
+  [ gated "relational postcondition propagates through an inline call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(below(0)) end
+end|}));
+
+    gated "relational postcondition propagates through a let" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do
+    let c = below(0)
+    takepos(c)
+  end
+end|}));
+
+    gated "a satisfiable instantiation stays silent" (fun () ->
+        (* below(10) < 10 does not contradict >= 0 — it might be 5. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(below(10)) end
+end|}));
+
+    gated "an unknown actual stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(q : Int) : Int do takepos(below(q)) end
+end|}));
+
+    gated "simultaneous substitution: an actual naming another formal" (fun () ->
+        (* f(m, 1) must instantiate `_ < n + m` as `_ < m + 1`, NOT `_ < 1 + 1`.
+           With m unknown the result is unprovable either way, so silence here
+           is the correct outcome — this pins that we do not CRASH or invent a
+           fact from a sequential rewrite. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn f(n : Int, m : Int) : {Int | _ < n + m} do n + m - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(m : Int) : Int do takepos(f(m, 1)) end
+end|}));
+
+    gated "an unverified relational postcondition does not propagate" (fun () ->
+        (* `_ < n` is not provable from an unanalysable body, so the gate clears
+           it and callers learn nothing.  The Tier 0 guarantee, inherited. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn blackbox(n : Int) : Int do n end
+  fn shady(n : Int) : {Int | _ < n} do blackbox(n) end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(shady(0)) end
+end|}));
+
+    (* A callee formal `n` whose name equals a CALLER variable that is not the
+       actual passed for it.  Substitution must use the actual (`hi`), giving
+       `_ < hi` with `hi` unconstrained.  Reading the caller's own `n` instead
+       would give `_ < n` with `n <= 0`, contradicting `_ >= 0` and flagging
+       correct code — the caller/callee conflation that has produced false
+       positives in this subsystem before. *)
+    gated "a caller variable sharing a callee formal's name is not conflated"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(n : {Int | _ <= 0}, hi : Int) : Int do takepos(below(hi)) end
+end|}));
+
+    (* The predicate mentions only the THIRD formal.  These two cases differ
+       solely in which actual sits at index 2, so together they pin that the
+       formal->actual map is positional: taking the first actual would flag the
+       silent case, and ignoring position entirely would miss the loud one. *)
+    gated "substitution picks the actual positionally (satisfiable)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn pick(a : Int, b : Int, hi : Int, c : Int) : {Int | _ < hi} do hi - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(pick(0, 0, 50, 0)) end
+end|}));
+
+    gated "substitution picks the actual positionally (violating)" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod M do
+  fn pick(a : Int, b : Int, hi : Int, c : Int) : {Int | _ < hi} do hi - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit() : Int do takepos(pick(50, 50, 0, 50)) end
+end|}));
+
+    (* `len` is an application HEAD — a measure, not a value — so it must not be
+       rewritten even when a formal shares its name.  Substituting the head would
+       turn `len(xs)` into `40(xs)`. *)
+    gated "a formal sharing a measure's name does not rewrite the measure"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn odd(len : Int, xs : List(Int)) : {Int | _ < len(xs) + len} do len - 1 end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(ys : List(Int)) : Int do takepos(odd(40, ys)) end
+end|}));
+
+    (* postcond_of is consulted for `countdown` from inside `countdown`'s own
+       body: confirms neither the gate nor the substitution loops forever. *)
+    gated "a recursive relational postcondition terminates" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn countdown(n : {Int | _ >= 0}) : {Int | _ <= n} do
+    if n == 0 do 0 else countdown(n - 1) end
+  end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn usit(m : {Int | _ >= 0}) : Int do takepos(countdown(m)) end
+end|})) ]
+
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -1778,5 +1983,7 @@ let () =
       ("tier0-postcond", tier0_suite);
       ("string-refinements", string_suite);
       ("predicate-vocab", vocab_suite);
-      ("adt-tags", adt_suite) ]
+      ("adt-tags", adt_suite);
+      ("pred-classifier", classifier_suite);
+      ("tier1-relational", tier1_suite) ]
 

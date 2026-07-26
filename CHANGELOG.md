@@ -32,6 +32,18 @@ git log is authoritative for exact commits.
   Nothing may be concluded *about* the stand-in in either direction, and the
   return side keeps the conservative whole-record skip.
 
+- Refinement checking now propagates **relational** return refinements — those
+  that mention a parameter — by substituting the call's arguments for the
+  callee's parameters. Given `fn below(n : Int) : {Int | _ < n}`, the call
+  `takepos(below(0))` is a compile error because `_ < 0` can never satisfy
+  `_ >= 0`, while `takepos(below(10))` stays silent. Arguments are matched
+  positionally and substituted simultaneously, so `f(m, 1)` against
+  `{Int | _ < n + m}` yields `_ < m + 1`, not `_ < 1 + 1`. As before, only a
+  postcondition the definition side actually *proved* propagates, and
+  instantiation is skipped entirely rather than done partially when an argument
+  is missing, the predicate mentions an unknown name, or the callee takes a
+  pattern parameter — correct code is still never flagged.
+
 - As-patterns: `Some(x) as whole -> ...` binds a name to the entire matched
   value while the inner pattern continues to destructure it. Works in match
   arms, `let` bindings, and function parameters. `PatAs` had been implemented
