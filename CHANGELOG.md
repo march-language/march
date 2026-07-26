@@ -13,6 +13,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- A **guard on a record field** now reaches the refinement checker. `if
+  c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}`
+  precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported
+  as a definite failure. The variable needs no refinement of its own — a plain
+  `c : Config` parameter works, since an unrefined record is modelled as an
+  unconstrained value that the guard then decides. With no guard the call is
+  still skipped. Field facts obey the same rebinding rule as tag and scalar
+  facts: a `let`, `let?`, lambda parameter or `match` binder that rebinds the
+  name retires the fact.
+
+- An **unreflectable record field no longer hides its siblings** at a call
+  site. `serve({ port: 0, name: n })` and `serve({ port: 0, history:
+  Cons(1, Nil) })` used to be skipped whole, because a `String` field bound to a
+  variable and a list literal with concrete elements cannot be placed at their
+  declared SMT sorts. The offending field is now replaced by an unconstrained
+  stand-in of the right sort, so `port` is checked and both calls are reported.
+  Nothing may be concluded *about* the stand-in in either direction, and the
+  return side keeps the conservative whole-record skip.
+
 - Refinement checking now propagates **relational** return refinements — those
   that mention a parameter — by substituting the call's arguments for the
   callee's parameters. Given `fn below(n : Int) : {Int | _ < n}`, the call
@@ -49,6 +68,7 @@ git log is authoritative for exact commits.
   matches; use separate arms or a `when` guard instead. The rest of the arm is
   free to bind (`P(x, 1 | 2) -> x + 100`). Exhaustiveness and redundancy
   checking see through or-patterns at any nesting depth.
+
 - A refinement over a **record's fields** is now checked on **parameters**, not
   just return types. Given `fn serve(c : {v : Config | v.port >= 1})`, the call
   `serve({ port: 0 })` is a compile error. A record literal argument is a fact
@@ -94,6 +114,16 @@ git log is authoritative for exact commits.
   comparison/arithmetic/boolean operators, `len`, and `@[measure]` functions.
 
 ### Fixed
+
+- Refinement checking: a **named return binder** that collides with a parameter
+  no longer misattributes the guards reaching a return. `fn f(v : Int, k : Int)
+  : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as a
+  violation with the counterexample `k = -1` — the guard `v < 0` is about the
+  *parameter*, but the path conditions were translated with the resolver in
+  which `v` denotes the *return value*, so it became `k < 0`. Path conditions
+  now resolve in the function body's namespace; only the return predicate reads
+  the binder as the return value. The same conflation also suppressed genuine
+  violations, which are now reported.
 
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock

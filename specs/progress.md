@@ -284,6 +284,47 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
+## Current State (as of 2026-07-24, refinement postconditions: a named return binder no longer captures body variables in the path context)
+
+**A live false positive, reproduced against the built compiler before the fix.** `fn f(v : Int, k : Int) : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as "does not satisfy its return type constraint" with the counterexample `k = -1`. The guard `v < 0` is about the PARAMETER `v`; `check_post` translated the path conditions with the SAME `resolve_var` as the return predicate, in which the binder `v` denotes the RETURN value, so the guard became `k < 0` and made `v > 0` (i.e. `k > 0`) definitely false.
+
+This is the same caller/callee conflation already fixed for `check_call`'s path conditions (`path_resolve_var`), reaching the postcondition side by the same route: a path condition is collected from the function BODY, so every name in it is a body name and denotes itself, while the return binder is not a body name at all — it exists only inside the refinement predicate.
+
+**The bug cut both ways.** With the tail `0` instead of `k`, the same collision turned `v < 0` into `0 < 0`: a contradictory assumption, under which the goal discharges vacuously and a GENUINE violation went unreported. That shape is pinned as a second test and was silent before the fix.
+
+Path conditions now go through a `path_resolve_var` / `path_resolve_field` pair resolving through the enclosing scope (`var_const` and `scope_field_resolver`). `_` is deliberately left pointing at the return term: it is not a legal variable in body code, so it can only have come from a predicate, and routing it through `var_const` would declare a constant named `_`. Four tests in `post_suite` — the false positive, the suppressed-violation control, a control that a non-colliding named binder still denotes the return value in the PREDICATE, and one that a guard on the colliding parameter still discharges when the tail IS that parameter (the case the binder reading got right only by accident).
+
+Practical exposure was low — return binders are almost always `_` — but it was a live misattribution path, and a false positive is this subsystem's cardinal sin.
+
+## Current State (as of 2026-07-24, refinement types: an unreflectable record field no longer sinks its siblings)
+
+**`serve({ port: 9, history: Cons(1, Nil) })` was skipped whole.** `term_fits_sort` rejects `Cons(1, Nil)`: the built-in `List` is generic, so its element field carries the opaque sort `Elem` and the scalar reflection's integer `1` cannot sit there. `reflect_record_literal` then returned `None` for the ENTIRE record, so the perfectly checkable `port` field was lost along with the one field nobody could see. The same happened for `{ port: 0, name: n }` with a `String`-typed `n`.
+
+**Fix: an opaque stand-in, not a coerced term.** `reflect_record_literal` gained an OPTIONAL `~opaque` that mints a fresh constant at the offending field's DECLARED sort. The ill-sorted `(Cons 1 Nil)` is still never built — the channel-poisoning hazard the original skip existed to prevent (a malformed VC makes z3 emit an `(error …)` that desynchronises the shared `z3 -in` channel and silently disables refinement checking for the rest of the compilation) is untouched. This is deliberately NOT the "make `Int` fit `Elem`" route.
+
+**Soundness.** The stand-in carries no assumptions, so it denotes an arbitrary value of its sort. The call-site decision procedure reports only when `¬goal` is VERIFIED — valid under EVERY assignment — so a goal that depends on the stand-in is never reported *and* never discharged, while a goal that depends only on the reflected siblings is decided exactly as if the record were fully known. Pinned in both directions: a predicate about the opaque field stays silent whether its real value satisfies it (`{count: 1, history: Cons(1, Nil)}` against `len(v.history) == v.count`) or violates it (`count: 5`).
+
+**Call-site only, on purpose.** `check_post` switches to "a SAT model over a concrete record in scope is a definite violation"; a model free to assign the stand-in a bad value would be reported as a counterexample although the real field holds a fine value — a false positive. The return side therefore never passes `~opaque`, and a test pins that it still skips the whole record.
+
+Two existing tests flipped from asserting silence to asserting an error (`{ port: 0, name: n }` and `{ port: 0, history: Cons(1, Nil) }` against `{v : Config | v.port >= 1}`). Both are genuine violations that were being lost to a sibling field, and both test comments were rewritten to state why the channel-safety rationale still holds.
+
+Feature list addition:
+
+- A record argument with an **unreflectable field** (a `String` bound to a variable, a list literal with concrete elements) is still checked on its reflectable fields at a call site; only the unreflectable field is opaque.
+
+## Current State (as of 2026-07-24, refinement types: record FIELD facts flow into path conditions)
+
+**A guard on a record field now reaches the call it guards.** `if c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}` precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported as a definite failure. The condition was already being collected into the `path` context — it was dropped at translation time, because the path translation in `check_call` passed no `~resolve_field` to `smt_of`, so `c.port` reflected to `None` and the whole condition went away. (`make_field_resolver` already existed; only `check_post` consulted it.)
+
+**Two halves were missing, and each is useless without the other.** (1) A new `recenv` — `name -> SMT sort` for variables whose DECLARED type is a registered record, refined or not — because `scope` carries only *refined* locals and a plain `c : Config` parameter was invisible to it. Populated from fn/lambda parameters, annotated `let`s, an unannotated `let c = d` aliasing a known record, and a bare `PatVar` `match` binder on a record-typed variable scrutinee (each denotes the same value as its source, so sharing one SMT constant is correct). It carries no predicate: an entry is a wholly unconstrained datatype constant, so on its own it proves nothing in either direction — an entry can only turn a *skip* into a check the guards actually decide, never into a guess. (2) `check_call`'s `record_self` now also reflects an UNREFINED record variable to that same constant. Previously it required a `scope` entry and returned `None` otherwise, which set `mode = \`Skip\`` and built no goal at all — so a guarded call could never discharge, *and* a guard that made the call a definite failure was never reported.
+
+**The delicate part was sort collisions, not the fact plumbing.** A record name is declared into its datatype sort by the new `path_resolve_field`, so every other producer must refuse to declare it `Int`: `path_resolve_var` and `resolve_var`'s caller-scope fallback both now return `None` for such a name. One symbol declared at two sorts makes z3 answer with an `(error …)`, and that error desynchronises the long-lived `z3 -in` channel — silently disabling refinement checking for the remainder of the compilation, which is the worst failure this subsystem has (its symptom is silence). A dedicated co-occurrence test asserts a record field guard and an unrelated Int violation in one module still yield exactly one reported violation.
+
+**Shadow discipline was verified by negative control, not by assertion.** The path context is the channel that produced false positives in the ADT round, and this adds a new fact source to it. New `record-path-facts` group in `test/test_refinecheck.ml` (11 tests). With `path_shadow` stubbed to the identity, the `let`, lambda-parameter and `match`-binder cases all FAIL — they report a violation on correct code — and pass again with it restored, so those three are genuine false-positive detectors rather than tests that would pass either way. The `let?` case is honestly non-discriminating and is labelled as such in the test source: a `let?` binder can carry no type annotation (`let? x : T = …` is a dedicated parse error) and March has no annotated-expression form, so the payload's record type is never visible to `recenv`; the inner call is skipped for that unrelated reason and the case would stay silent whatever `ELetQ` did. `recenv_shadow` is defense-in-depth rather than load-bearing — stubbing it alone changes no verdict, since `path_shadow` drops any condition *mentioning* the name, a strict superset — but it is kept because the identity channel is what would bite if a fact ever reached the callee by another route.
+
+Feature list addition:
+
+- Refinement checking uses **record field guards** as path facts: `if c.port >= 1 do serve(c)` discharges a record precondition on a plainly-typed `c : Config`, and a contradictory guard is reported.
 ## Current State (as of 2026-07-24, Tier 1 relational postconditions — a return refinement mentioning a parameter now propagates to call sites)
 
 **`pred_is_closed` became `classify_pred`; `postcond_of` instantiates.** Tier 0 recorded a callee's *closed* return refinement in `fn_sig.ret` and consumed it at call sites, but `pred_is_closed` rejected any predicate mentioning a parameter, so `fn below(n : Int) : {Int | _ < n}` told callers nothing. The filter lived in exactly one place by design (`postcond_of`, consulted by both propagation sites), so this was a bounded change to a 2900-line file. `classify_pred : string -> string list -> A.expr -> pred_scope` now returns `Closed` (mentions only the binder — Tier 0, returned unchanged), `Relational of string list` (mentions the binder plus these parameters), or `Unusable` (mentions anything else, or syntax the checker cannot reflect — the conservative `_ -> bad := true` catch-all is retained verbatim from `pred_is_closed`). `postcond_of` gained the call's actual arguments and returns a predicate already restated in the **caller's** namespace, so `scope_add_binding` (a `let` bound to a call) and `reflect_scalar` (an inline call argument) needed only to thread `args` through — no substitution logic of their own, and the existing scope/reflection machinery is untouched.
@@ -357,6 +398,7 @@ Feature list addition:
 Feature list addition:
 
 - Redundant (unreachable) match-arm warnings on both the inference and checking typecheck paths
+
 ## Current State (as of 2026-07-24, record field preconditions integrated with String + ADT-tag refinements)
 
 **The record-precondition branch is merged with `main`'s predicate-vocabulary foundation, ADT constructor tags, String refinements, and the two solver-robustness fixes.** The branch had forked before all five and edited the same functions in `lib/refinecheck/refine_check.ml` (7 conflicts), so the integration was resolved on meaning rather than by taking a side. The substantive decisions:
@@ -6094,6 +6136,7 @@ Feature list addition:
 - `(p | q) as n` and `(p as a) as b` compile.
 - Exhaustiveness and redundancy checking see through or-patterns at any nesting depth.
 - `<record pattern> as name` typechecks against the scrutinee's full type.
+
 ## Current State (as of 2026-07-24, Perceus FBIP reuse restored from a SECOND merge loss; oracle ledger pruned; benchmarks re-run)
 
 **Perceus FBIP in-place reuse had been disabled program-wide, and the golden snapshot written to catch exactly that had the regression pinned in as its expected output.** Found from the outside in: a routine benchmark re-run showed `bench/tree_transform.march` — the FBIP showcase — at 3842.5 ms against the 513.3 ms recorded on 2026-03-24, i.e. *slower than OCaml* on the workload FBIP exists to win. OCaml and Rust were within noise of their own 2026-03-24 figures on the same host, which ruled out the machine before any compiler work started.

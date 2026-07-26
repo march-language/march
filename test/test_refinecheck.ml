@@ -207,7 +207,57 @@ let post_suite =
         Alcotest.(check bool) "error" true
           (has_refine_error
              (post
-                "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end"))) ]
+                "  fn f(n : Int) : {Int | _ >= 0} do if n < 0 do n else 0 end end")));
+
+    (* ── The return binder is a CALLEE-side name, not a body name ────────────
+       `check_post` translated the path conditions with the SAME resolver as the
+       return predicate, in which the binder denotes the RETURN value.  A path
+       condition was collected from the function BODY, so every name in it is a
+       body name; when a parameter happens to share the binder's spelling the
+       fact was re-pointed at the returned expression — the same caller/callee
+       conflation already fixed for `check_call`'s path conditions.
+
+       Here the guard `v < 0` is about the PARAMETER `v`; misread as the return
+       value it becomes `k < 0`, which makes `v > 0` (i.e. `k > 0`) definitely
+       false and reports correct code.  The right answer is SILENCE: `k` is
+       unconstrained, so the postcondition is neither proven nor refuted. *)
+    gated "a named return binder colliding with a parameter is not misattributed" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
+                \    if v < 0 do k else 1 end\n\
+                \  end")));
+
+    (* Control: the SAME collision, with a tail that definitely violates.  Had
+       the fix worked by simply dropping the path conditions (or the binder),
+       this would go silent too. *)
+    gated "the same collision still reports a definitely violating tail" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post
+                "  fn f(v : Int, k : Int) : {v : Int | v > 0} do\n\
+                \    if v < 0 do 0 else 1 end\n\
+                \  end")));
+
+    (* Control: a named binder with NO collision still denotes the return value
+       in the PREDICATE — the fix must change only the path context. *)
+    gated "a named return binder still denotes the return value" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (post "  fn f() : {v : Int | v >= 0} do 0 - 1 end")));
+
+    (* …and a guard on the colliding parameter must still discharge the
+       postcondition when the tail IS that parameter, which is the case the
+       body-namespace reading gets right and the binder reading only got right
+       by accident. *)
+    gated "a guard on the colliding parameter still discharges" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (post
+                "  fn f(v : Int) : {v : Int | v > 0} do\n\
+                \    if v > 0 do v else 1 end\n\
+                \  end"))) ]
 
 (* P1c: `assert(p)` acts as an assume — it extends the path context. *)
 let assume_suite =
@@ -782,17 +832,74 @@ end|}));
 end|}));
 
     (* A record field whose declared type is NOT Int, bound to a variable.  The
-       scalar reflection declares every variable SInt, so reflecting it anyway
-       would build a constructor application with mismatched argument sorts —
-       and Z3 answers a malformed VC with an error that DESYNCS the long-lived
-       `z3 -in` channel, silently disabling refinement checking for the rest of
-       the compilation.  So the record must be skipped instead. *)
-    gated "record precondition: non-Int field bound to a variable is skipped" (fun () ->
-        Alcotest.(check bool) "no error" false
+       scalar reflection declares every variable SInt, so reflecting the
+       variable's own term there would build a constructor application with
+       mismatched argument sorts — and Z3 answers a malformed VC with an error
+       that DESYNCS the long-lived `z3 -in` channel, silently disabling
+       refinement checking for the rest of the compilation.
+
+       The record is no longer skipped for it: the ill-sorted field is replaced
+       by a FRESH constant at the field's DECLARED sort, carrying no
+       assumptions, so the VC is well-sorted and the checkable `port` field
+       survives.  `port: 0` against `v.port >= 1` is therefore now reported —
+       a violation that used to be lost to a sibling field. *)
+    gated "record precondition: an unreflectable sibling field no longer hides `port`" (fun () ->
+        Alcotest.(check bool) "has error" true
           (has_refine_error {|mod M do
   type Config = { port : Int, name : String }
   fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
   fn f(n : String) : Int do serve({ port: 0, name: n }) end
+end|}));
+
+    (* The other direction, and the one that matters for soundness: a
+       SATISFYING `port` alongside the same unreflectable field must stay
+       silent, i.e. the opaque stand-in must not make anything provable. *)
+    gated "record precondition: a satisfying `port` beside an opaque field passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type Config = { port : Int, name : String }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f(n : String) : Int do serve({ port: 8080, name: n }) end
+end|}));
+
+    (* Nothing may be concluded ABOUT the opaque field.  Here the predicate is
+       entirely about the unreflectable list field and its true value (`len` of
+       `Cons(1, Nil)` is 1) does NOT satisfy `== 5` — a real violation, which we
+       must nevertheless stay SILENT about, because the stand-in constant is
+       unconstrained and proves nothing in either direction.  If this ever
+       reports, the substitution has started concluding things about a value it
+       cannot see. *)
+    gated "record precondition: a predicate about the opaque field is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | len(v.history) == v.count}) : Int do s.count end
+  fn f() : Int do take({ count: 5, history: Cons(1, Nil) }) end
+end|}));
+
+    (* …and the same predicate whose value the opaque field DOES satisfy is
+       equally silent — the stand-in is symmetric, not a one-way ratchet. *)
+    gated "record precondition: an opaque field cannot discharge either" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn take(s : {v : State | len(v.history) == v.count}) : Int do s.count end
+  fn f() : Int do take({ count: 1, history: Cons(1, Nil) }) end
+end|}));
+
+    (* The opaque stand-in is a CALL-SITE-only device.  [check_post] switches to
+       "a SAT model is a definite violation" whenever a concrete record is in
+       scope, and under that rule a model that assigned an unconstrained field a
+       bad value would be reported as a counterexample even though the real
+       field holds a perfectly good value — a false positive.  So the return
+       side keeps the conservative skip, and this pins it. *)
+    gated "record postcondition: an unreflectable field still skips the whole record" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn mk() : {v : State | v.count >= 0} do
+    { count: -1, history: Cons(1, Nil) }
+  end
 end|}));
 
     (* The channel-survival half: an unrelated Int violation AFTER such a record
@@ -814,9 +921,11 @@ end|}));
        `1` there.  A top-level-only fit check passes this and builds
        `(Cons 1 Nil)`, which z3 rejects with a MULTI-LINE `(error …)` — the
        exact shape that used to leave a continuation line in the pipe and shift
-       every later verdict by one.  The record must be skipped instead. *)
-    gated "record precondition: a concrete list element is a nested sort mismatch" (fun () ->
-        Alcotest.(check bool) "no error" false
+       every later verdict by one.  `(Cons 1 Nil)` is therefore still never
+       built; the field is replaced by a fresh `M_List` constant instead, which
+       is well-sorted, and `port: 0` is now caught rather than lost. *)
+    gated "record precondition: a concrete list element becomes an opaque stand-in" (fun () ->
+        Alcotest.(check bool) "has error" true
           (has_refine_error {|mod M do
   type Config = { port : Int, history : List(Int) }
   fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
@@ -845,6 +954,164 @@ end|}));
     a + b + c + d
   end
 end|})) ]
+
+(* ── Record FIELD facts in the path context ────────────────────────────────
+   A guard on a record field (`if c.port >= 1`) lands in the path context like
+   any other condition, but until the path translation grew a record field
+   resolver `c.port` translated to None and the fact was silently dropped.
+
+   Only the CONTRADICTION direction is observable through this API: under the
+   definite-failure stance a fact that merely *discharges* a precondition turns
+   an error into silence, and silence is also what a skipped call produces.  So
+   the RED cases below are the ones where a guard makes a call a DEFINITE
+   failure, and they are paired with silence assertions covering the satisfying
+   guard and the unguarded (still skipped) shape.
+
+   The four shadowing cases assert SILENCE.  A path fact is recorded against a
+   NAME; when an inner scope rebinds that name the fact is about the OUTER
+   value, and attributing it to the inner binding is a false positive — the one
+   failure this subsystem must never have.  Each is written so the inner call is
+   still REFLECTABLE (the binder is re-established as a record), because a
+   shadowing test whose inner call is skipped for an unrelated reason would pass
+   no matter what the shadowing code did. *)
+let record_path_suite =
+  let prog body =
+    Printf.sprintf
+      {|mod M do
+  type Config = { port : Int }
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn mk() : Result(Config, String) do Ok({ port: 1 }) end
+%s
+end|}
+      body
+  in
+  [ gated "a satisfying field guard leaves the call silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "a field guard contradicting the precondition is caught" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port <= 0 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "the else-branch negates a field guard" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do 0 else serve(c) end\n\
+                \  end")));
+
+    (* The guard narrows a refinement that on its own is merely WEAKER (and so
+       correctly silent — see the record-postconditions group) into a definite
+       failure.  This is the case that proves the guard's fact and the carried
+       record refinement land on the SAME SMT constant. *)
+    gated "a field guard narrows a weaker record refinement into a failure" (fun () ->
+        Alcotest.(check bool) "has error" true
+          (has_refine_error
+             (prog
+                "  fn f(c : {v : Config | v.port >= 0}) : Int do\n\
+                \    if c.port == 0 do serve(c) else 0 end\n\
+                \  end")));
+
+    gated "an unguarded unrefined record argument is still skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error (prog "  fn f(c : Config) : Int do serve(c) end")));
+
+    (* ── Shadow discipline ──────────────────────────────────────────────────
+       The guard is CONTRADICTORY, so a fact that survived the rebinding would
+       be reported as a violation of correct code. *)
+    gated "an inner `let` rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      let c = d\n\
+                \      serve(c)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    gated "a lambda parameter rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      let g = fn (c : Config) -> serve(c)\n\
+                \      g(d)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* `let?` is the one rebinding this group cannot make DISCRIMINATING: its
+       binder can carry no type annotation (`let? x : T = …` is a dedicated
+       parse error) and March has no annotated-expression form, so the payload's
+       record type is never declared anywhere [recenv] can see it.  The inner
+       `c` is therefore not a known record, the call is skipped for that reason,
+       and this case would stay silent even if `let?` retired nothing.  It is
+       kept as a safety assertion — `visit`'s `ELetQ` arm does call both
+       [path_shadow] and [recenv_shadow], and this pins that it stays silent —
+       but it does NOT prove the retirement the way the other three do. *)
+    gated "a `let?` binder rebinding the record stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config) : Result(Int, String) do\n\
+                \    if c.port <= 0 do\n\
+                \      let? c = mk()\n\
+                \      Ok(serve(c))\n\
+                \    else Ok(0) end\n\
+                \  end")));
+
+    gated "a match binder rebinding the record retires the field fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port <= 0 do\n\
+                \      match d do\n\
+                \        c -> serve(c)\n\
+                \      end\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* The same four rebindings, but with the guard SATISFYING the callee's
+       precondition: the outer fact must not travel in this direction either,
+       so these stay silent for the right reason (no fact, not a masked one).
+       Paired with the contradictory versions above they pin that the retirement
+       is unconditional rather than direction-dependent. *)
+    gated "a rebinding retires a SATISFYING field fact too" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (prog
+                "  fn f(c : Config, d : Config) : Int do\n\
+                \    if c.port >= 1 do\n\
+                \      let c = d\n\
+                \      serve(c)\n\
+                \    else 0 end\n\
+                \  end")));
+
+    (* Channel survival: a record path fact in the same module as an unrelated
+       Int violation.  A malformed VC (a symbol declared at two sorts, say) is
+       answered with an `(error …)` that desynchronises the shared `z3 -in`
+       channel and silently disables checking for the rest of the compilation —
+       so the failure mode is SILENCE, and only this shape catches it. *)
+    gated "a record field guard does not poison the solver channel" (fun () ->
+        Alcotest.(check int) "exactly one violation" 1
+          (refine_error_count
+             (prog
+                "  fn take_n(n : {Int | _ >= 0}) : Int do n end\n\
+                \  fn f(c : Config) : Int do\n\
+                \    if c.port >= 1 do serve(c) else 0 end\n\
+                \  end\n\
+                \  fn g() : Int do take_n(-3) end"))) ]
 
 (* Guard path sensitivity for EMatch arms: `when` guards establish facts
    that discharge call-site VCs and postconditions. *)
@@ -1711,6 +1978,7 @@ let () =
       ("flag-gating", flag_suite);
       ("resolution", resolution_suite);
       ("record-postconditions", record_suite);
+      ("record-path-facts", record_path_suite);
       ("guard-path-sensitivity", guard_suite);
       ("tier0-postcond", tier0_suite);
       ("string-refinements", string_suite);

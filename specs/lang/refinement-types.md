@@ -219,6 +219,9 @@ end
 Use `assert` as the escape hatch for facts the checker can't derive on its own
 (it's the place a hand-proved lemma lives).
 
+A guard may also read a **record field** (`if c.port >= 1 do serve(c)`) — see
+[Refining a record over its fields](#refining-a-record-over-its-fields).
+
 ---
 
 ## Postconditions
@@ -312,21 +315,69 @@ What counts as a **fact** about a record argument:
   the callee's, so it is **skipped**, not reported. Only a *contradictory* one
   (`v.port <= 0`) is an error.
 
+- **A guard on a field.** A field comparison in an enclosing `if`, `when` or
+  `assert` is a path condition like any other, so it reaches the call:
+
+  ```march
+  fn f(c : Config) : Int do
+    if c.port >= 1 do serve(c)          -- fine: the guard discharges it
+    else 0 end
+  end
+
+  fn g(c : Config) : Int do
+    if c.port <= 0 do serve(c)          -- error: the guard makes it definite
+    else 0 end
+  end
+  ```
+
+  The variable does not need a refinement of its own — a plainly-typed
+  `c : Config` works, because an unrefined record variable is modelled as an
+  unconstrained value and it is the *guard* that decides it. With no guard
+  nothing is known and the call is skipped, exactly as before.
+
+  Field facts obey the same rebinding rule as tag facts and scalar facts: a
+  fact is recorded against a *name*, so a `let`, a `let?`, a lambda parameter
+  or a `match` binder that rebinds that name retires it.
+
 Everything else about a record is **skipped**:
 
-- an **unrefined record variable** — nothing is known about its fields;
+- an **unrefined record variable with no guard on the field** — nothing is
+  known about its fields;
 - a record literal with an **unknown field value** (`{ port: p }` for a
-  parameter `p`) — the checker will not assert facts about fields it cannot
-  see, so the *whole* record is skipped rather than partially reflected;
-- a record literal with a field whose type is outside the reflected fragment
-  (a `String`, a function, a nested record) bound to anything but a literal
-  data constructor;
-- a record literal with a **list field holding concrete elements**
-  (`history: Cons(1, Nil)`). The built-in `List` is generic, so the checker
-  models its element type as an opaque sort — an `Int` cannot be placed there,
-  and rather than build a query the solver would reject, the whole record is
-  skipped. An **empty** list (`history: Nil`) has no elements and reflects
-  fine, which is what the `len(v.history) == v.count` examples above rely on.
+  parameter `p`) — nothing is known about that field, so a predicate over it
+  is neither proven nor refuted.
+
+An **unreflectable field does not sink its siblings.** A field whose type is
+outside the reflected fragment (a `String`, a function, a nested record bound
+to anything but a literal), or a **list field holding concrete elements**
+(`history: Cons(1, Nil)` — the built-in `List` is generic, so the checker models
+its element type as an opaque sort an `Int` cannot be placed in), is replaced by
+an unconstrained stand-in of the right shape. The rest of the record is checked
+normally:
+
+```march
+type Config = { port : Int, name : String }
+
+serve({ port: 0, name: n })    -- error: `port` is still checked
+```
+
+Nothing may be concluded *about* the stand-in, in either direction — a predicate
+over that field is skipped, whether it happens to hold or not:
+
+```march
+type State = { count : Int, history : List(Int) }
+fn take(s : {v : State | len(v.history) == v.count}) : Int do s.count end
+
+take({ count: 5, history: Cons(1, Nil) })   -- silent, though `len` is really 1
+```
+
+An **empty** list (`history: Nil`) has no elements and reflects exactly, which is
+what the `len(v.history) == v.count` examples above rely on.
+
+The stand-in applies to a **call site** only. On the return side an
+unreflectable field still skips the whole record: postcondition checking treats a
+counterexample over a concrete record as definite, and a counterexample free to
+pick the stand-in's value would not be one.
 
 Records also compose with measures — `{v : State | len(v.history) == v.count}`
 reasons about a `List` field structurally, exactly as `len` does elsewhere.
@@ -512,7 +563,8 @@ edges:
   floats as mathematical reals is unsound for IEEE-754 arithmetic, so it's
   deliberately omitted. A predicate may range over the `Int`/`Bool` **fields of
   a record** (see [above](#refining-a-record-over-its-fields)); a record field
-  of an unreflected type makes the whole record opaque. `String` supports only
+  of an unreflected type is opaque, but only that field — its siblings are
+  still checked at a call site. `String` supports only
   `len` and literal equality (see
   [String Refinements](#string-refinements)). Over a **variant**
   (multi-constructor) ADT the checker reasons about the constructor tag only
