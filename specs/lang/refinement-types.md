@@ -581,10 +581,28 @@ edges:
   every true property; quantified/measure facts in particular sometimes return
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
-- **Direct calls only — no higher-order or interface dispatch.** A precondition
-  on a function passed as a value, called through a variable, or dispatched
-  through an `interface`/`impl` is **not** checked. (True higher-order checking
-  needs refinement subtyping in unification, which isn't implemented.)
+- **Two higher-order shapes are checked; the rest are not.** A call made
+  *through* a refined function-typed parameter is checked —
+  `fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end` is now rejected,
+  exactly like a direct call to a function whose parameter carries that same
+  refinement. So is a call through a **local alias** of a named function:
+  `let g = takepos  g(-3)` is rejected when `takepos`'s parameter is refined.
+  Both are single-argument shapes only (a curried or tupled multi-argument
+  callback type is out of scope, and fails typecheck on any call regardless).
+  Still **not** checked:
+  - a callback parameter whose *declared* type is unrefined, even when the
+    concrete function passed as an argument is itself refined — `apply(f :
+    Int -> Int, x : Int) : Int do f(x) end` called as `apply(take_n, -3)`
+    stays silent, because `apply` never declared a contract on `f` for the
+    checker to enforce (see `accept/t77_refine_hof_bypass_limitation.march`).
+    The existing workaround still applies: refine the higher-order function's
+    *own* parameter type (`f : ({Int | _ >= 0}) -> Int`) to make the caller's
+    obligation explicit and checkable;
+  - inferring a higher-order function's own requirement from its body — the
+    checker never looks inside `f` to derive what `f` needs, it only checks
+    what the caller's own declared type or a resolvable alias already states;
+  - dispatch through an `interface`/`impl` — which concrete implementation
+    runs is not resolved by this pass, so no refinement travels through it.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
@@ -676,6 +694,16 @@ check is confirmed as a second, independent `Refine.discharge` consumer
 footprint property this transparency implies: a program whose obligations
 all provably hold at `--check` time runs byte-identically interpreted and
 compiled, since neither backend inserts any runtime predicate check.
+
+Two higher-order call shapes have since been closed (183 refinecheck tests):
+a call through a refined function-typed *parameter*, and a call through a
+*local alias* of a named refined function — both previously fell through
+`resolve_call`'s named-callee-only resolution and were silently skipped.
+`accept/t77_refine_hof_bypass_limitation.march` remains a passing, UNCHANGED
+fact of the corpus: its `apply`'s callback parameter is declared `Int -> Int`
+(unrefined), so it still demonstrates the boundary that *is* still out of
+reach — a caller's own contract is only enforced when it is actually
+declared refined, never inferred from what the callback happens to point to.
 
 ## Next Steps
 

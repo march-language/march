@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Two higher-order refinement checks.** A call made *through* a refined
+  function-typed parameter — `fn ap(f : ({Int | _ >= 0}) -> Int) : Int do
+  f(-3) end` — is now rejected, and so is a call through a **local alias** of
+  a named refined function — `let g = takepos  g(-3)`. Both previously fell
+  through the checker's named-callee-only call resolution and were silently
+  skipped. Single-argument callback types only; a callback parameter whose
+  own declared type is unrefined is unaffected — see
+  `specs/lang/refinement-types.md`'s Limitations section for the exact
+  boundary.
+
 - A **guard on a record field** now reaches the refinement checker. `if
   c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}`
   precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported
