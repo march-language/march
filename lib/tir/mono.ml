@@ -260,6 +260,96 @@ let atom_ty : Tir.atom -> Tir.ty = function
   | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
   | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TUnit
 
+(** Retype occurrences of variables whose binding has already become concrete.
+    Lowering can assign distinct, unified type-variable IDs to a function
+    parameter and its occurrences; an ID-based substitution then updates the
+    binding but misses the occurrences.  Variable identity in TIR is the
+    lowered name, so propagating only known concrete bindings by name repairs
+    that representation gap while respecting lexical shadowing. *)
+let retype_known_vars (vars : Tir.var list) (body : Tir.expr) : Tir.expr =
+  let initial =
+    List.fold_left
+      (fun env (v : Tir.var) ->
+        if has_tvar v.Tir.v_ty then env else (v.Tir.v_name, v.Tir.v_ty) :: env)
+      [] vars
+  in
+  let inferred = ref [] in
+  let remove name env =
+    List.filter (fun (bound, _) -> not (String.equal bound name)) env
+  in
+  let rv env (v : Tir.var) =
+    match List.assoc_opt v.Tir.v_name env with
+    | Some ty ->
+      inferred := match_ty v.Tir.v_ty ty !inferred;
+      { v with Tir.v_ty = ty }
+    | None -> v
+  in
+  let ra env = function
+    | Tir.AVar v -> Tir.AVar (rv env v)
+    | atom -> atom
+  in
+  let ral env = List.map (ra env) in
+  let rfields env =
+    List.map (fun (name, atom) -> (name, ra env atom))
+  in
+  let rec go env = function
+    | Tir.EAtom atom -> Tir.EAtom (ra env atom)
+    | Tir.EApp (fn, args) ->
+      Tir.EApp (rv env fn, ral env args)
+    | Tir.ECallPtr (fn, args) ->
+      Tir.ECallPtr (ra env fn, ral env args)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, go env e1, go (remove v.Tir.v_name env) e2)
+    | Tir.ELetRec (fns, cont) ->
+      let fn_names =
+        List.map (fun fn -> fn.Tir.fn_name) fns
+      in
+      let inner_env =
+        List.fold_left (fun acc name -> remove name acc) env fn_names
+      in
+      let fns' =
+        List.map
+          (fun fn ->
+            let fn_env =
+              List.fold_left
+                (fun acc param -> remove param.Tir.v_name acc)
+                inner_env fn.Tir.fn_params
+            in
+            { fn with Tir.fn_body = go fn_env fn.Tir.fn_body })
+          fns
+      in
+      Tir.ELetRec (fns', go inner_env cont)
+    | Tir.ECase (atom, branches, default) ->
+      Tir.ECase
+        (ra env atom,
+         List.map
+           (fun branch ->
+             let branch_env =
+               List.fold_left
+                 (fun acc var -> remove var.Tir.v_name acc)
+                 env branch.Tir.br_vars
+             in
+             { branch with Tir.br_body = go branch_env branch.Tir.br_body })
+           branches,
+         Option.map (go env) default)
+    | Tir.ETuple atoms -> Tir.ETuple (ral env atoms)
+    | Tir.ERecord fields -> Tir.ERecord (rfields env fields)
+    | Tir.EField (atom, name) -> Tir.EField (ra env atom, name)
+    | Tir.EUpdate (atom, fields) ->
+      Tir.EUpdate (ra env atom, rfields env fields)
+    | Tir.EAlloc (ty, args) -> Tir.EAlloc (ty, ral env args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, ral env args)
+    | Tir.EFree atom -> Tir.EFree (ra env atom)
+    | Tir.EIncRC atom -> Tir.EIncRC (ra env atom)
+    | Tir.EDecRC atom -> Tir.EDecRC (ra env atom)
+    | Tir.EAtomicIncRC atom -> Tir.EAtomicIncRC (ra env atom)
+    | Tir.EAtomicDecRC atom -> Tir.EAtomicDecRC (ra env atom)
+    | Tir.EReuse (atom, ty, args) -> Tir.EReuse (ra env atom, ty, ral env args)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go env e1, go env e2)
+  in
+  let body' = go initial body in
+  subst_expr !inferred body'
+
 (** [find_first_call fn_name expr] scans [expr] for the first direct call
     ([EApp] or [ECallPtr]) to a function named [fn_name] and returns the
     argument types of that call, or [None] if no such call is found.
@@ -860,6 +950,10 @@ let rec rewrite_calls
         let local_subst = match List.assoc_opt fn.Tir.fn_name per_fn_substs with
           | Some s -> s | None -> [] in
         let fn' = if local_subst = [] then fn else subst_fn_def local_subst fn in
+        let fn' =
+          { fn' with
+            Tir.fn_body = retype_known_vars fn'.Tir.fn_params fn'.Tir.fn_body }
+        in
         { fn' with Tir.fn_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
               inner_shadowed fn'.Tir.fn_body }
@@ -1091,6 +1185,10 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         (* Apply substitution to get the specialized version *)
         let fn' = subst_fn_def subst orig_fn in
         let fn' = { fn' with Tir.fn_name = target_name } in
+        let fn' =
+          { fn' with
+            Tir.fn_body = retype_known_vars fn'.Tir.fn_params fn'.Tir.fn_body }
+        in
         (* Resolve record-field projections against the now-concrete record so
            callees fed a projection specialise on the concrete field type rather
            than a stale row-poly var (see [refine_field_types]). *)
