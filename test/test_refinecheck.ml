@@ -13,10 +13,22 @@ let z3_available () =
   | Some s -> March_refine.Solver.close s; true
 
 (* True iff the refinement pass reports at least one error on [src]. *)
-let has_refine_error src =
+let has_refine_error ?root src =
   let ctx = March_errors.Errors.create () in
-  March_refinecheck.Refine_check.check_module ctx (parse src);
+  March_refinecheck.Refine_check.check_module ?root ctx (parse src);
   March_errors.Errors.has_errors ctx
+
+let with_temp_root prefix f =
+  let root = Filename.temp_dir prefix "" in
+  let rec remove_tree path =
+    if Sys.is_directory path then begin
+      Sys.readdir path
+      |> Array.iter (fun name -> remove_tree (Filename.concat path name));
+      Unix.rmdir path
+    end
+    else Sys.remove path
+  in
+  Fun.protect ~finally:(fun () -> remove_tree root) (fun () -> f root)
 
 (* Same, but DESUGARED first — required for qualified calls (`M.f(x)`), which the
    parser produces as `EField` and desugar flattens to a single dotted `EVar`,
@@ -953,7 +965,23 @@ end|}));
     let d = takepos(-3)
     a + b + c + d
   end
-end|})) ]
+end|}));
+
+    gated "sequential modules may redefine a qualified record shape" (fun () ->
+        with_temp_root "march_refine_redefine_" (fun root ->
+          Alcotest.(check bool) "first shape has no error" false
+            (has_refine_error ~root {|mod M do
+  type State = { count : Int }
+  fn valid() : {v : State | v.count >= 0} do { count: 0 } end
+end|});
+          Alcotest.(check bool)
+            "second incompatible shape still reports violation" true
+            (has_refine_error ~root {|mod M do
+  type State = { count : Int, history : List(Int) }
+  fn invalid() : {v : State | len(v.history) == v.count} do
+    { count: 1, history: Nil }
+  end
+end|}))) ]
 
 (* ── Record FIELD facts in the path context ────────────────────────────────
    A guard on a record field (`if c.port >= 1`) lands in the path context like
@@ -2090,4 +2118,3 @@ let () =
       ("pred-classifier", classifier_suite);
       ("tier1-relational", tier1_suite);
       ("higher-order", hof_suite) ]
-

@@ -9022,7 +9022,7 @@ declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
 declare void @march_actor_set_call_base(ptr %actor, i64 %base)
 declare ptr  @getenv(ptr)
-declare ptr  @march_alloc(i64 %sz)
+declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
 declare i64  @march_decrc_freed(ptr %p)
@@ -9470,6 +9470,31 @@ let test_preamble_byte_identical_wasm () =
     ^ golden_preamble ~is_wasm:true ~repl:false
   in
   Alcotest.(check string) "WASM preamble byte-identical to historical blob" expected actual
+
+(** [march_alloc] returns fresh storage or terminates on OOM, and its sole
+    argument is the allocation size.  Keep those optimizer facts on the
+    canonical declaration for every target. *)
+let test_preamble_march_alloc_attributes () =
+  let buf = Buffer.create 4096 in
+  March_tir.Llvm_builtins.emit_preamble
+    ~is_wasm:false ~triple:"x86_64-unknown-linux-gnu" ~repl:false buf;
+  Alcotest.(check bool) "march_alloc carries verified return and size attributes" true
+    (Test_helpers.contains
+       "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)"
+       (Buffer.contents buf))
+
+(** A closure trampoline contains only ABI adaptation and a forwarding call,
+    so keeping it out of line adds overhead without preserving a semantic
+    boundary.  Pin the canonical generator rather than one emitter call site. *)
+let test_clo_wrap_is_alwaysinline () =
+  let ir =
+    March_tir.Llvm_calls.clo_wrap_define
+      "pred$clo_wrap" ["i64"] "i64" "pred"
+  in
+  Alcotest.(check bool) "closure trampoline is alwaysinline" true
+    (Test_helpers.contains
+       "define ptr @pred$clo_wrap(ptr %_clo, ptr %a0) alwaysinline {"
+       ir)
 
 (** [Llvm_emit.emit_preamble] (the thin wrapper) must delegate to
     [Llvm_builtins.emit_preamble] with no behavior change: same output for
@@ -10326,6 +10351,10 @@ let codegen_suites =
             test_preamble_byte_identical_native_repl;
           Alcotest.test_case "WASM preamble byte-identical (W3C2.4 / H2)" `Quick
             test_preamble_byte_identical_wasm;
+          Alcotest.test_case "march_alloc has verified return and size attributes" `Quick
+            test_preamble_march_alloc_attributes;
+          Alcotest.test_case "closure trampolines are alwaysinline" `Quick
+            test_clo_wrap_is_alwaysinline;
           Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
             test_preamble_wrapper_delegates;
         ] );

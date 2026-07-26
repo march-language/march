@@ -3145,6 +3145,14 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    compiled artifact, so it is not part of the CAS cache key. *)
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.ctx)
     (m : A.module_) : unit =
+  (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
+     retract datatype declarations on [pop], even with [:global-decls false]:
+     checking a later module that reuses a qualified type name with a different
+     shape then yields declaration errors and silently downgrades its VCs to
+     [Unknown].  Start each module with a fresh process while retaining solver
+     reuse for every VC within the module; the content-addressed VC cache still
+     preserves cross-module results. *)
+  March_refine.Refine.shutdown ();
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

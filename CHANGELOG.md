@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- Native and WASM LLVM output now describes `march_alloc` as a fresh,
+  non-null allocation whose argument is its allocation size, and marks
+  generated closure ABI trampolines `alwaysinline`. This gives LLVM useful
+  alias and call-boundary facts without changing TIR or ownership semantics.
+
 ### Added
 
 - **Two higher-order refinement checks.** A call made *through* a refined

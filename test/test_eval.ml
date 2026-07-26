@@ -476,6 +476,61 @@ let test_mono_pipeline_no_tvar () =
   List.iter (fun fn -> check_expr_no_tvar fn.March_tir.Tir.fn_body)
     m.March_tir.Tir.tm_fns
 
+let test_mono_nested_generic_pattern_vars_are_concrete () =
+  let m = mono_module {|mod Test do
+    type IntList(a) = Nil | Cons(a, IntList(a))
+    fn reverse(xs : IntList(a)) : IntList(a) do
+      fn go(lst : IntList(a), acc : IntList(a)) : IntList(a) do
+        match lst do
+        Nil -> acc
+        Cons(h, t) -> go(t, Cons(h, acc))
+        end
+      end
+      go(xs, Nil)
+    end
+    fn main() : IntList(Int) do reverse(Cons(1, Nil)) end
+  end|} in
+  let residual =
+    collect_all_vars_in_module m
+    |> List.filter_map (fun (v : March_tir.Tir.var) ->
+           if March_tir.Mono.has_tvar v.March_tir.Tir.v_ty then
+             Some
+               (Printf.sprintf "%s : %s" v.March_tir.Tir.v_name
+                  (March_tir.Pp.string_of_ty v.March_tir.Tir.v_ty))
+           else None)
+  in
+  Alcotest.(check (list string))
+    "nested generic constructor-pattern variables are concrete after mono"
+    [] residual
+
+let test_mono_preserves_declared_variant_parameter_order () =
+  let m = mono_module {|mod Test do
+    type Reordered(a, b) = Reordered(b, a)
+    fn unpack(x : Reordered(a, b)) : (b, a) do
+      match x do
+      Reordered(left, right) -> (left, right)
+      end
+    end
+    fn main() : (String, Int) do
+      unpack(Reordered("left", 7))
+    end
+  end|} in
+  let vars = collect_all_vars_in_module m in
+  let ty_of name =
+    vars
+    |> List.find_opt (fun (v : March_tir.Tir.var) ->
+           String.equal v.March_tir.Tir.v_name name)
+    |> Option.map (fun v -> v.March_tir.Tir.v_ty)
+  in
+  Alcotest.(check (option string))
+    "first constructor field follows declared (a, b) argument order"
+    (Some "String")
+    (Option.map March_tir.Pp.string_of_ty (ty_of "left"));
+  Alcotest.(check (option string))
+    "second constructor field follows declared (a, b) argument order"
+    (Some "Int")
+    (Option.map March_tir.Pp.string_of_ty (ty_of "right"))
+
 let test_mono_subst_ty () =
   let open March_tir.Tir in
   let open March_tir.Mono in
@@ -4805,6 +4860,10 @@ let eval_suites =
           Alcotest.test_case "mono has_tvar"        `Quick test_mono_has_tvar;
           Alcotest.test_case "mono match_ty"        `Quick test_mono_match_ty;
           Alcotest.test_case "mono pipeline"        `Quick test_mono_pipeline_no_tvar;
+          Alcotest.test_case "mono nested generic pattern vars"
+            `Quick test_mono_nested_generic_pattern_vars_are_concrete;
+          Alcotest.test_case "mono variant parameter order"
+            `Quick test_mono_preserves_declared_variant_parameter_order;
           Alcotest.test_case "mono identity"         `Quick test_mono_identity;
           Alcotest.test_case "mono no TVar after"    `Quick test_mono_no_tvar_after_mono;
           Alcotest.test_case "mono two instances"    `Quick test_mono_two_instantiations;
@@ -5042,4 +5101,3 @@ let eval_suites =
           Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
         ] );
   ]
-

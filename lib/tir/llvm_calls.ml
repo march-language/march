@@ -176,22 +176,22 @@ let clo_wrap_define wrap_name (param_ltys : string list) target_ret fn_name =
   let pro = Buffer.contents prologue in
   if target_ret = "void" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n%s  call void @%s(%s)\n  ret ptr null\n}\n\n"
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  call void @%s(%s)\n  ret ptr null\n}\n\n"
       wrap_name decl_str pro fn_name call_args
   else if target_ret = "ptr" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n%s  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
       wrap_name decl_str pro fn_name call_args
   else if target_ret = "double" then
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n%s  %%r = call double @%s(%s)\n  \
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call double @%s(%s)\n  \
        %%rp = call ptr @march_alloc_float(double %%r)\n  \
        ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro fn_name call_args
   else
     (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
     Printf.sprintf
-      "define ptr @%s(%s) {\nentry:\n%s  %%r = call %s @%s(%s)\n  \
+      "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call %s @%s(%s)\n  \
        %%rs = shl nsw i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
        %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro target_ret fn_name call_args

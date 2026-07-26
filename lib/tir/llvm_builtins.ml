@@ -784,7 +784,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
   ("march_actor_set_call_base", "declare void @march_actor_set_call_base(ptr %actor, i64 %base)");
   ("getenv", "declare ptr  @getenv(ptr)");
-  ("march_alloc", "declare ptr  @march_alloc(i64 %sz)");
+  ("march_alloc", "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)");
   ("march_incrc", "declare void @march_incrc(ptr %p)");
   ("march_decrc", "declare void @march_decrc(ptr %p)");
   ("march_decrc_freed", "declare i64  @march_decrc_freed(ptr %p)");
