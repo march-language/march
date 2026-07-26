@@ -1961,6 +1961,109 @@ end|}));
   fn usit(m : {Int | _ >= 0}) : Int do takepos(countdown(m)) end
 end|})) ]
 
+(* ── Higher-order refinement checking ──────────────────────────────────────
+   Two call shapes [resolve_call] cannot see because it only resolves NAMED
+   callees: a call made THROUGH a refined function-typed parameter, and a
+   call through a LOCAL ALIAS of a named function.  Most of these cases
+   assert SILENCE — the whole risk in this file is a shadowed name leaking an
+   outer fact into an inner binding, and only a silence-asserting test can
+   catch that. *)
+let hof_suite =
+  [ gated "a call through a refined callback type is checked" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(-3) end\n\
+              end\n"));
+
+    gated "a valid call through a refined callback type passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(1) end\n\
+              end\n"));
+
+    gated "an unknown argument through a callback type is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn ap(f : ({Int | _ >= 0}) -> Int, k : Int) : Int do f(k) end\n\
+              end\n"));
+
+    gated "an UNREFINED callback type checks nothing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn ap(f : (Int) -> Int) : Int do f(-3) end\n\
+              end\n"));
+
+    gated "a shadowing let retires the callback fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn other(n : Int) : Int do n end\n\
+             \  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do\n\
+             \    let f = other\n\
+             \    f(-3)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a shadowing lambda param retires the callback fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do\n\
+             \    let h = fn f -> 0\n\
+             \    h(1)\n\
+             \  end\n\
+              end\n"));
+
+    (* ── Task 2: local function aliases ── *)
+    gated "a call through a local alias is checked" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn probe() : Int do\n\
+             \    let g = takepos\n\
+             \    g(-3)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a valid call through a local alias passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn probe() : Int do\n\
+             \    let g = takepos\n\
+             \    g(5)\n\
+             \  end\n\
+              end\n"));
+
+    gated "an alias to an unrefined function checks nothing" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn plain(k : Int) : Int do k end\n\
+             \  fn probe() : Int do\n\
+             \    let g = plain\n\
+             \    g(-3)\n\
+             \  end\n\
+              end\n"));
+
+    gated "a rebound alias no longer resolves to the original" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn plain(k : Int) : Int do k end\n\
+             \  fn probe() : Int do\n\
+             \    let g = takepos\n\
+             \    let g = plain\n\
+             \    g(-3)\n\
+             \  end\n\
+              end\n")) ]
 
 let () =
   Alcotest.run "march-refinecheck"
@@ -1985,5 +2088,6 @@ let () =
       ("predicate-vocab", vocab_suite);
       ("adt-tags", adt_suite);
       ("pred-classifier", classifier_suite);
-      ("tier1-relational", tier1_suite) ]
+      ("tier1-relational", tier1_suite);
+      ("higher-order", hof_suite) ]
 
