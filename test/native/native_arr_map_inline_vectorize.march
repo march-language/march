@@ -1,0 +1,30 @@
+-- Regression: P10 Phase 2 — Native_map_inline.run rewrites
+-- NativeArray.map_int/map_float(arr, <fresh non-capturing lambda>) into a
+-- direct call to the lifted apply fn (llvm_emit.ml's inline loop) instead of
+-- going through the C runtime's closure-pointer indirection. Exercises the
+-- cases the pass must get right without corrupting results:
+--   - odd AND even int inputs, arithmetic beyond a single op
+--   - float map
+--   - empty array (loop must not execute the body)
+--   - a CAPTURING lambda (must NOT take the inline path — falls back to the
+--     general closure-call path, which must still be correct)
+mod Main do
+  fn main() : () do
+    let ints = NativeArray.from_list_int(Cons(-3, Cons(-1, Cons(0, Cons(1, Cons(3, Nil))))))
+    let ints2 = NativeArray.map_int(ints, fn x -> x * x * 3 + x * 7 - 5)
+    println(NativeArray.to_list_int(ints2))   -- [1, -9, -5, 5, 43]
+
+    let empty = NativeArray.from_list_int(Nil)
+    let empty2 = NativeArray.map_int(empty, fn x -> x + 1)
+    println(NativeArray.to_list_int(empty2))  -- []
+
+    let floats = NativeArray.from_list_float(Cons(1.5, Cons(-2.25, Cons(0.0, Nil))))
+    let floats2 = NativeArray.map_float(floats, fn x -> x *. 2.0 +. 1.0)
+    println(NativeArray.to_list_float(floats2))  -- [4., -3.5, 1.]
+
+    let captured = 10
+    let ints3 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let ints4 = NativeArray.map_int(ints3, fn x -> x + captured)
+    println(NativeArray.to_list_int(ints4))   -- [11, 12, 13]
+  end
+end

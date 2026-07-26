@@ -2191,6 +2191,24 @@ let compile filename =
        symbols".  When opt IS enabled the DCE pass already pruned inside
        Opt.run, so this is an idempotent no-op there. *)
     let tir = March_tir.Dce.prune_unreachable tir in
+    (* P10 Phase 2: inline non-capturing NativeArray.map closures so
+       llvm_emit.ml can emit a direct-call loop instead of going through the
+       C runtime's opaque closure-pointer indirection (never inlinable across
+       that translation-unit boundary, so never vectorizable). Runs after Opt
+       (not right after Defun) because the pattern it looks for only appears
+       once Inline has flattened the NativeArray.map_int/map_float stdlib
+       wrapper into its call site — at Defun time the closure allocation and
+       the native_int_arr_map/native_float_arr_map call are still in two
+       different function bodies. Native/wasm compile only (guarded on
+       is_js_target) — Js_emit.ml has no codegen arm for the synthetic call
+       this pass introduces, since this shared pipeline reaches the JS
+       backend too (target dispatch happens later, at the emit stage below).
+       Its single-use-of-the-closure-var check is also what makes running
+       this late safe: if Perceus (which ran before Opt) left any RC op
+       referencing the closure var, that counts as an extra use and the
+       pass silently declines, falling back to the existing correct path. *)
+    let tir = if is_js_target then tir else March_tir.Native_map_inline.run tir in
+    snap_tir "tir-native-map-inline" tir;
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
     stamp "opt";
