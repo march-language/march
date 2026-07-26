@@ -1963,6 +1963,80 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (ret_ty, r)
        end)
 
+  (* ── Native array map inline loop (P10 Phase 2) ──────────────────────
+     native_map_inline.ml rewrites EApp(native_int_arr_map/native_float_arr_map,
+     [arr; clo]) into this synthetic call whenever the closure is a fresh,
+     non-capturing lambda used nowhere else: the 2nd arg becomes a direct
+     reference to the lifted apply fn instead of a heap closure, so there is
+     no closure to allocate or dispatch through indirectly.
+     Every March closure (including this one) uses the tagged/boxed generic
+     ptr ABI (see [is_apply_fn]) — Int wire-tags (n<<1)|1, Float wire-boxes
+     via march_alloc_float/march_unbox_float — so this loop still pays that
+     per-element tag/box cost.  What changes is that the call to the apply fn
+     is now a DIRECT call to a function defined in this same LLVM module
+     (not an indirect call through an opaque C-runtime function pointer,
+     which cannot be inlined across the runtime/generated-IR translation-
+     unit boundary): LLVM's own inliner can fold simple apply-fn bodies in,
+     and for Int, instcombine can then cancel the tag/untag round-trip
+     entirely, leaving a plain scalar loop the vectorizer can pack into SIMD.
+     Float keeps the alloc/unbox calls (real heap allocations) in the loop
+     body, which blocks vectorization — see specs/optimizations.md P10. *)
+  | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
+    when f.Tir.v_name = "__native_int_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline" ->
+    let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
+    let elem_ty = if is_float then "double" else "i64" in
+    let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
+    let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    (* Open a dedicated preheader so its label is known for the loop phi,
+       regardless of what block was open before this arm ran. *)
+    let preheader = fresh_block ctx "nmap_pre" in
+    emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+    emit_label ctx preheader;
+    let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
+    let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
+    let len = fresh ctx "nmap_len" in
+    emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
+    let new_arr = fresh ctx "nmap_out" in
+    emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
+    let cond_lbl = fresh_block ctx "nmap_cond" in
+    let body_lbl = fresh_block ctx "nmap_body" in
+    let exit_lbl = fresh_block ctx "nmap_exit" in
+    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+    emit_label ctx cond_lbl;
+    let i = fresh ctx "nmap_i" in
+    let i_next = fresh ctx "nmap_inext" in
+    emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+    let cmp = fresh ctx "nmap_cmp" in
+    emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+    emit_label ctx body_lbl;
+    (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
+       (march_runtime.c), so one offset serves both GEPs. *)
+    let soff = fresh ctx "nmap_soff" in
+    emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+    let byte_off = fresh ctx "nmap_off" in
+    emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+    let sptr = fresh ctx "nmap_sptr" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
+    let x = fresh ctx "nmap_x" in
+    emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
+    let wire_arg = coerce ctx elem_ty x "ptr" in
+    let y = fresh ctx "nmap_y" in
+    emit ctx (Printf.sprintf "%s = call ptr @%s(ptr null, ptr %s)" y apply_name wire_arg);
+    let y_native = coerce ctx "ptr" y elem_ty in
+    let dptr = fresh ctx "nmap_dptr" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
+    emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
+    emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+    emit_label ctx exit_lbl;
+    ("ptr", new_arr)
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     (* Emit each arg once, collecting both type and value strings. *)

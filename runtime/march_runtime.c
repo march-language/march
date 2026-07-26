@@ -4154,20 +4154,22 @@ static void typed_array_check_bounds(int64_t i, int64_t len) {
 }
 
 /* Dispatch a 1-argument closure stored in a March closure object.
- * Layout: fn ptr at byte offset +8 of the closure; closure is passed as
- * the first argument so the function can access its captured environment. */
+ * Layout: fn ptr at byte offset +16 of the closure (field[0]; see
+ * march_hdr's 16-byte header ahead of the closure's own fields — the same
+ * offset clo_apply_ptr below uses); closure is passed as the first argument
+ * so the function can access its captured environment. */
 static inline void *call_closure_1(void *clo, void *arg) {
-    void *(*fn)(void*, void*) = *(void *(**)(void*, void*))((char *)clo + 8);
+    void *(*fn)(void*, void*) = *(void *(**)(void*, void*))((char *)clo + 16);
     return fn(clo, arg);
 }
 
 static inline int64_t call_closure_1_int(void *clo, void *arg) {
-    int64_t (*fn)(void*, void*) = *(int64_t (**)(void*, void*))((char *)clo + 8);
+    int64_t (*fn)(void*, void*) = *(int64_t (**)(void*, void*))((char *)clo + 16);
     return fn(clo, arg);
 }
 
 static inline void *call_closure_2(void *clo, void *a, void *b) {
-    void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 8);
+    void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 16);
     return fn(clo, a, b);
 }
 
@@ -4450,6 +4452,13 @@ static inline double clo_call_dbl_dbl(void *clo, double x) {
     void *wire_ret = clo_apply_ptr(clo, march_alloc_float(x));
     return march_unbox_float(wire_ret);
 }
+
+/* Uninitialized allocation for llvm_emit's inline map loop (native_map_inline.ml):
+ * every slot is written by the loop before any read, so leaving them
+ * uninitialized (unlike native_int_arr_make/native_float_arr_make, which
+ * fill with a default) is safe and avoids a redundant full pass. */
+void *native_int_arr_alloc_raw(int64_t len) { return native_arr_alloc(len); }
+void *native_float_arr_alloc_raw(int64_t len) { return native_arr_alloc(len); }
 
 void *native_int_arr_make(int64_t len, int64_t def) {
     void *arr = native_arr_alloc(len);

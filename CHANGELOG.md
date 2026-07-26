@@ -193,6 +193,14 @@ git log is authoritative for exact commits.
   eagerly; the underlying hazard — lazy loading changing representation
   decisions — is tracked separately.
 
+- `NativeArray.map_int`/`map_float` (compiled builds) no longer allocate a
+  closure or call it indirectly when the mapped function is a plain,
+  non-capturing `fn x -> ...`: the compiler now calls it directly, which
+  clang can then inline and, for arithmetic-heavy element functions,
+  vectorize. A capturing closure is unaffected. Workloads whose map step is
+  dominated by array read/write bandwidth (the common case) won't see a
+  wall-clock difference — the win is in the per-element compute cost.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

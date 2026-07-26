@@ -603,6 +603,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_to_list(ptr %arr)" };
   { march_name = "native_float_arr_filter_mask"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)" };
+  (* Uninitialized-allocation helpers used only by llvm_emit's inline map-loop
+     codegen (native_map_inline.ml) — never called from March source. *)
+  { march_name = "native_int_arr_alloc_raw"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_alloc_raw(i64 %len)" };
+  { march_name = "native_float_arr_alloc_raw"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_alloc_raw(i64 %len)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -1215,6 +1221,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_from_list";
   PDeclare "native_float_arr_to_list";
   PDeclare "native_float_arr_filter_mask";
+  PDeclare "native_int_arr_alloc_raw";
+  PDeclare "native_float_arr_alloc_raw";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_tcp_connect";

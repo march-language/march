@@ -3348,6 +3348,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/closure_scalar_abi.expected native_closure_scalar_abi.out)))
 
 (rule
+ (targets native_arr_map_inline_vectorize native_arr_map_inline_vectorize.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_vectorize.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_vectorize
+        native/native_arr_map_inline_vectorize.march)
+   (with-stdout-to native_arr_map_inline_vectorize.out
+        (system "./native_arr_map_inline_vectorize")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_vectorize.expected native_arr_map_inline_vectorize.out)))
+
+(rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})
        (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
