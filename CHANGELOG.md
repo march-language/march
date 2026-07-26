@@ -82,6 +82,14 @@ git log is authoritative for exact commits.
   dominated by array read/write bandwidth (the common case) won't see a
   wall-clock difference — the win is in the per-element compute cost.
 
+- `typed_array_map`/`typed_array_fold` (compiled builds) no longer segfault.
+  `call_closure_1`/`call_closure_2` read a closure's function pointer at byte
+  offset +8 of the closure object — the object's `tag` field (plus 4 bytes of
+  padding), not the fn pointer, which actually lives at offset +16. This broke
+  every DataFrame boolean-column negation/is-not-null check compiled (e.g.
+  `typed_array_map(data, fn b -> !b)` in `stdlib/dataframe.march`). New
+  regression test `test/native/typed_array_map_closure_abi.march`.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and
