@@ -1,0 +1,28 @@
+-- Regression: call_closure_1/call_closure_2 (runtime/march_runtime.c) read a
+-- closure's fn pointer at byte offset +8 of the closure object. The actual
+-- layout (lib/tir/defun.ml TDClosure, field offsets `16 + i*8` per
+-- lib/tir/llvm_data.ml emit_load_field) puts fn_ptr at field 0 = offset 16;
+-- offset 8 is the march_hdr `tag` field (+ 4 bytes of padding). Reading it
+-- reinterpreted 4 bytes of the tag as a function pointer -> SIGSEGV compiled
+-- only (the interpreter never executes this C code).
+--
+-- typed_array_map (call_closure_1) and typed_array_fold (call_closure_2) both
+-- dispatch through the broken helpers; this exercises both, including the
+-- DataFrame-style boolean-column negation pattern
+-- (`typed_array_map(data, fn b -> !b)`).
+mod Main do
+  fn main() : () do
+    let arr = typed_array_create(4, false)
+    let negated = typed_array_map(arr, fn b -> !b)
+    println(bool_to_string(typed_array_get(negated, 0)))   -- true
+    println(bool_to_string(typed_array_get(negated, 3)))   -- true
+
+    let ints = typed_array_create(4, 0)
+    let ints2 = typed_array_set(ints, 0, 10)
+    let ints3 = typed_array_set(ints2, 1, 20)
+    let ints4 = typed_array_set(ints3, 2, 30)
+    let ints5 = typed_array_set(ints4, 3, 40)
+    let sum = typed_array_fold(ints5, 0, fn (acc, x) -> acc + x)
+    println(int_to_string(sum))                              -- 100
+  end
+end
