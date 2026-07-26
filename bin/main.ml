@@ -111,6 +111,32 @@ let find_stdlib_dir () =
     ] in
     List.find_opt looks_like_stdlib_dir candidates
 
+(** Locate a file under the project's `runtime/` directory (e.g.
+    "march_runtime.c"), independent of CWD.
+    Mirrors [find_stdlib_dir]'s exe-relative resolution order:
+      1. bin/../runtime/<name>        (source-tree / opam switch layout)
+      2. bin/../../runtime/<name>     (nested build layout)
+      3. bin/../../../runtime/<name>  (dune's _build/default/bin/ layout,
+                                        exe invoked with a CWD other than
+                                        the project root)
+      4. runtime/<name> relative to CWD (works when running from the repo root)
+    Every call site previously tried only (2)+(3)+CWD-relative, which meant
+    the exe-relative candidates never covered the actual `_build/default/bin/
+    main.exe` layout dune produces — resolvable only via the CWD-relative
+    fallback, so a `march --compile` invoked from any other directory failed
+    with "cannot find runtime/march_runtime.c" even though the sources were
+    right there, three levels up from the exe. *)
+let find_runtime_file name =
+  let exe_path = resolve_exe_path Sys.executable_name in
+  let exe_dir = Filename.dirname exe_path in
+  let candidates = [
+    Filename.concat exe_dir (Filename.concat "../runtime" name);
+    Filename.concat exe_dir (Filename.concat "../../runtime" name);
+    Filename.concat exe_dir (Filename.concat "../../../runtime" name);
+    Filename.concat "runtime" name;
+  ] in
+  List.find_opt Sys.file_exists candidates
+
 (** Parse a stdlib source file and return its top-level declarations.
     Each stdlib file is a single [mod Name do ... end] wrapper.
     - For "prelude.march": the inner declarations are returned directly,
@@ -522,12 +548,7 @@ let ensure_runtime_so () =
     with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   ) [dot_cache; cache_dir];
   (* Find runtime source *)
-  let candidates = [
-    "runtime/march_runtime.c";
-    Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-  ] in
-  let runtime_c_opt = List.find_opt Sys.file_exists candidates in
+  let runtime_c_opt = find_runtime_file "march_runtime.c" in
   match runtime_c_opt with
   | None ->
     (* No sources (e.g. installed binary without a source tree): fall back
@@ -748,14 +769,7 @@ let setup_interpreter_ffi () =
     if not (Sys.file_exists so_path) then begin
       (* Find the runtime dir for the -I flag (march_ffi.h lives there) *)
       let runtime_dir_opt =
-        let candidates = [
-          "runtime/march_runtime.c";
-          Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-          Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-        ] in
-        match List.find_opt Sys.file_exists candidates with
-        | Some p -> Some (Filename.dirname p)
-        | None -> None
+        Option.map Filename.dirname (find_runtime_file "march_runtime.c")
       in
       let inc_flag = match runtime_dir_opt with
         | Some d -> Printf.sprintf " -I%s" (Filename.quote d)
@@ -2204,6 +2218,24 @@ let compile filename =
        symbols".  When opt IS enabled the DCE pass already pruned inside
        Opt.run, so this is an idempotent no-op there. *)
     let tir = March_tir.Dce.prune_unreachable tir in
+    (* P10 Phase 2: inline non-capturing NativeArray.map closures so
+       llvm_emit.ml can emit a direct-call loop instead of going through the
+       C runtime's opaque closure-pointer indirection (never inlinable across
+       that translation-unit boundary, so never vectorizable). Runs after Opt
+       (not right after Defun) because the pattern it looks for only appears
+       once Inline has flattened the NativeArray.map_int/map_float stdlib
+       wrapper into its call site — at Defun time the closure allocation and
+       the native_int_arr_map/native_float_arr_map call are still in two
+       different function bodies. Native/wasm compile only (guarded on
+       is_js_target) — Js_emit.ml has no codegen arm for the synthetic call
+       this pass introduces, since this shared pipeline reaches the JS
+       backend too (target dispatch happens later, at the emit stage below).
+       Its single-use-of-the-closure-var check is also what makes running
+       this late safe: if Perceus (which ran before Opt) left any RC op
+       referencing the closure var, that counts as an extra use and the
+       pass silently declines, falling back to the existing correct path. *)
+    let tir = if is_js_target then tir else March_tir.Native_map_inline.run tir in
+    snap_tir "tir-native-map-inline" tir;
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
     stamp "opt";
@@ -2293,12 +2325,7 @@ let compile filename =
             let out_dir = Filename.dirname out_bin in
             let copy_runtime name =
               let dest = Filename.concat out_dir name in
-              let candidates = [
-                Filename.concat "runtime" name;
-                Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../runtime" name);
-                Filename.concat (Filename.dirname Sys.executable_name) (Filename.concat "../../runtime" name);
-              ] in
-              match List.find_opt Sys.file_exists candidates with
+              match find_runtime_file name with
               | Some src ->
                 let ic = open_in src in
                 let content = really_input_string ic (in_channel_length ic) in
@@ -2438,21 +2465,11 @@ let compile filename =
           close_out oc;
           if is_wasm then begin
             (* ── WASM compilation path ──────────────────────────────────── *)
-            let wasm_runtime_candidates = [
-              "runtime/march_runtime_wasm.c";
-              Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime_wasm.c";
-              Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime_wasm.c";
-            ] in
-            let wasm_runtime = match List.find_opt Sys.file_exists wasm_runtime_candidates with
+            let wasm_runtime = match find_runtime_file "march_runtime_wasm.c" with
               | Some p -> p
               | None ->
                 (* Fall back to main runtime with -DMARCH_WASM *)
-                let candidates = [
-                  "runtime/march_runtime.c";
-                  Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-                  Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-                ] in
-                (match List.find_opt Sys.file_exists candidates with
+                (match find_runtime_file "march_runtime.c" with
                  | Some p -> p
                  | None ->
                    Printf.eprintf "march: cannot find runtime for WASM target\n"; exit 1)
@@ -2509,12 +2526,7 @@ let compile filename =
             end
           end else begin
             (* ── Native compilation path ────────────────────────────────── *)
-            let candidates = [
-              "runtime/march_runtime.c";
-              Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-              Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-            ] in
-            let runtime = match List.find_opt Sys.file_exists candidates with
+            let runtime = match find_runtime_file "march_runtime.c" with
               | Some p -> p
               | None ->
                 Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1

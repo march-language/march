@@ -20,6 +20,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Two higher-order refinement checks.** A call made *through* a refined
+  function-typed parameter — `fn ap(f : ({Int | _ >= 0}) -> Int) : Int do
+  f(-3) end` — is now rejected, and so is a call through a **local alias** of
+  a named refined function — `let g = takepos  g(-3)`. Both previously fell
+  through the checker's named-callee-only call resolution and were silently
+  skipped. Single-argument callback types only; a callback parameter whose
+  own declared type is unrefined is unaffected — see
+  `specs/lang/refinement-types.md`'s Limitations section for the exact
+  boundary.
+
 - A **guard on a record field** now reaches the refinement checker. `if
   c.port >= 1 do serve(c)` discharges a `{v : Config | v.port >= 1}`
   precondition, and the contradictory `if c.port <= 0 do serve(c)` is reported
@@ -143,6 +153,30 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `march --compile` no longer fails with "cannot find runtime/march_runtime.c"
+  when invoked from a working directory other than the project root. Six
+  independent lookups for files under `runtime/` were each missing an
+  exe-relative candidate that resolves the actual dune build layout, so any
+  invocation outside the repo root (or a `_build/default/bin/main.exe` build)
+  fell through to a dead CWD-relative fallback.
+
+- **The compiled-artifact cache could return a different program's binary.**
+  It stored the *path* the compiler wrote to rather than the binary itself, so
+  nothing owned that file. Compiling one program, then another to the same
+  `-o` path, then the first again to a new path served the second program's
+  binary — reported as `(cached)`, with no error:
+
+      march --compile a.march -o /tmp/x    # cached: key(a) -> "/tmp/x"  (AAA)
+      march --compile b.march -o /tmp/x    # cached: key(b) -> "/tmp/x"  (BBB)
+      march --compile a.march -o /tmp/y    # -> BBB
+
+  Reusing one `-o` across several sources is ordinary in build scripts and
+  test harnesses, so this was reachable in normal use. Artifacts are now
+  copied into the cache by content and served from there; deleting or
+  overwriting a compiled output can no longer affect what the cache returns.
+  Cache entries live in a new directory, so stale entries from the old scheme
+  are ignored rather than misread.
+
 - Refinement checking: a **named return binder** that collides with a parameter
   no longer misattributes the guards reaching a return. `fn f(v : Int, k : Int)
   : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as a
@@ -199,6 +233,14 @@ git log is authoritative for exact commits.
   draining a deque whose elements never matched. Fixed by loading `Deque`
   eagerly; the underlying hazard — lazy loading changing representation
   decisions — is tracked separately.
+
+- `NativeArray.map_int`/`map_float` (compiled builds) no longer allocate a
+  closure or call it indirectly when the mapped function is a plain,
+  non-capturing `fn x -> ...`: the compiler now calls it directly, which
+  clang can then inline and, for arithmetic-heavy element functions,
+  vectorize. A capturing closure is unaffected. Workloads whose map step is
+  dominated by array read/write bandwidth (the common case) won't see a
+  wall-clock difference — the win is in the per-element compute cost.
 
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock

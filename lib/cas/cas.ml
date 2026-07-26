@@ -57,10 +57,30 @@ let object_path root hash =
   let rest   = String.sub hash 2 (String.length hash - 2) in
   root ^ "/objects/" ^ prefix ^ "/" ^ rest
 
+(* Artifacts live under artifacts-v2/ and hold the compiled binary ITSELF.
+   v1 (`artifacts/`) stored a POINTER — the text of whatever path the compiler
+   happened to write the binary to — which made the "cache" an index of file
+   paths rather than a content-addressed store. Nothing owned the pointed-to
+   file, so overwriting it silently poisoned every later hit for the original
+   key:
+
+     march --compile a.march -o /tmp/x     # store: key(a) -> "/tmp/x"  (AAA)
+     march --compile b.march -o /tmp/x     # store: key(b) -> "/tmp/x"  (BBB)
+     march --compile a.march -o /tmp/y     # hit key(a) -> copies /tmp/x = BBB
+
+   i.e. compiling a program returned a DIFFERENT program's binary, reported as
+   "(cached)", with no error. Found while building the bench gate: three
+   benches produced an unrelated program's output because an earlier
+   verification loop had reused one -o path for several sources.
+
+   The directory is versioned rather than reused so stale v1 pointer files are
+   never read as binaries (that would copy a text file to the output path and
+   produce a non-executable "binary"). Old `artifacts/` trees are inert and can
+   simply be deleted. *)
 let artifact_path root ch =
   let prefix = String.sub ch 0 2 in
   let rest   = String.sub ch 2 (String.length ch - 2) in
-  root ^ "/artifacts/" ^ prefix ^ "/" ^ rest
+  root ^ "/artifacts-v2/" ^ prefix ^ "/" ^ rest
 
 (* ── Serialization helpers for stored objects ───────────────────────────── *)
 
@@ -208,18 +228,39 @@ let compilation_hash (impl_hash : string) ~(target : string) ~(flags : string li
   in
   Blake3.hash_string (String.concat "\x00" parts)
 
+(* Copy [src] to [dest] preserving the executable bit, replacing [dest] if it
+   exists.  Returns false on any failure so callers can treat it as a cache
+   miss rather than reporting a success they did not achieve. *)
+let copy_file_exec ~(src : string) ~(dest : string) : bool =
+  try
+    mkdir_p (Filename.dirname dest);
+    match read_file src with
+    | None -> false
+    | Some data ->
+      (* Write via a temp file in the destination directory and rename, so a
+         concurrent reader never observes a half-written binary and a crash
+         mid-copy cannot leave a truncated artifact in the cache. *)
+      let tmp = dest ^ ".tmp." ^ string_of_int (Unix.getpid ()) in
+      write_file tmp data;
+      (try Unix.chmod tmp 0o755 with Unix.Unix_error _ -> ());
+      Sys.rename tmp dest;
+      true
+  with Sys_error _ | Unix.Unix_error _ -> false
+
+(* Store the compiled binary IN the cache (by content), not a pointer to it.
+   See [artifact_path] for why a pointer is unsound. A failed copy simply
+   leaves no entry — a future compile misses and rebuilds, which is correct. *)
 let store_artifact (t : t) (ch : string) (path : string) : unit =
-  Hashtbl.replace t.artifacts ch path;
-  (* Also write a pointer file so the store is persistent across processes *)
-  let ptr = artifact_path t.local_root ch in
-  write_file ptr path
+  let blob = artifact_path t.local_root ch in
+  if copy_file_exec ~src:path ~dest:blob then
+    Hashtbl.replace t.artifacts ch blob
 
 (* Copy a cached artifact to [dest], returning false if the artifact file is
    gone or the copy fails — callers must treat that as a cache miss and
    recompile, instead of reporting "(cached)" with no output written.
-   Stored artifact pointers hold the ORIGINAL output path, so recompiling
-   with the same -o makes [src] and [dest] the same file; `cp x x` exits
-   non-zero, so that case is detected and treated as success without copying. *)
+   [src] is now always a blob inside the cache, so it can never alias [dest];
+   the same-file guard is kept as a cheap defence for any caller that passes a
+   path of its own. *)
 let copy_artifact ~(src : string) ~(dest : string) : bool =
   if not (Sys.file_exists src) then false
   else
@@ -229,18 +270,19 @@ let copy_artifact ~(src : string) ~(dest : string) : bool =
         a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
       with Unix.Unix_error _ -> false
     in
-    same_file
-    || Sys.command (Printf.sprintf "cp %s %s"
-                      (Filename.quote src) (Filename.quote dest)) = 0
+    same_file || copy_file_exec ~src ~dest
 
 let lookup_artifact (t : t) (ch : string) : string option =
-  match Hashtbl.find_opt t.artifacts ch with
-  | Some p -> Some p
-  | None ->
-    let ptr = artifact_path t.local_root ch in
-    match read_file ptr with
-    | None -> None
-    | Some p -> Some p
+  let blob = artifact_path t.local_root ch in
+  if Sys.file_exists blob then begin
+    (* Keep the memo in step with the on-disk truth. *)
+    Hashtbl.replace t.artifacts ch blob;
+    Some blob
+  end else begin
+    (* A memo entry whose blob has been removed (gc, manual rm) is stale. *)
+    Hashtbl.remove t.artifacts ch;
+    None
+  end
 
 let lookup_name (t : t) (name : string) : def_id option =
   Hashtbl.find_opt t.index name
@@ -268,8 +310,8 @@ let gc (t : t) ~(keep_defs : string list) ~(keep_artifacts : string list) : int 
           end) files
       with Sys_error _ -> ())) prefixes
   with Sys_error _ -> ());
-  (* Walk artifacts/ directory *)
-  let art_root = t.local_root ^ "/artifacts" in
+  (* Walk artifacts-v2/ (the content-addressed binaries; see artifact_path) *)
+  let art_root = t.local_root ^ "/artifacts-v2" in
   let keep_art_set = Hashtbl.create (List.length keep_artifacts) in
   List.iter (fun h -> Hashtbl.replace keep_art_set h ()) keep_artifacts;
   (try

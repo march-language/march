@@ -231,16 +231,77 @@ let test_cas_name_index () =
   let found = Option.get result in
   Alcotest.(check string) "resolves to correct hash" (String.make 64 'b') found.March_cas.Cas.did_hash
 
+let write_file_str path data =
+  let oc = open_out_bin path in
+  output_string oc data;
+  close_out oc
+
+let read_file_str path =
+  let ic = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in ic) (fun () ->
+    let n = in_channel_length ic in
+    really_input_string ic n)
+
 let test_cas_store_artifact_and_lookup () =
   with_tmpdir @@ fun root ->
   let store = March_cas.Cas.create ~project_root:root in
   let ch = March_cas.Cas.compilation_hash (String.make 64 'c')
              ~target:"aarch64-darwin" ~flags:["-O2"] in
-  let fake_path = "/tmp/fake.o" in
-  March_cas.Cas.store_artifact store ch fake_path;
-  let result = March_cas.Cas.lookup_artifact store ch in
-  Alcotest.(check bool) "artifact found after store" true (Option.is_some result);
-  Alcotest.(check string) "artifact path correct" fake_path (Option.get result)
+  (* An artifact must be real: the store copies its CONTENT into the cache. *)
+  let src = Filename.concat root "prog_a.bin" in
+  write_file_str src "AAA";
+  March_cas.Cas.store_artifact store ch src;
+  match March_cas.Cas.lookup_artifact store ch with
+  | None -> Alcotest.fail "artifact not found after store"
+  | Some blob ->
+    (* The blob lives INSIDE the cache — not at the path we compiled to.
+       (This assertion is the point: the previous implementation handed back
+       the caller's own path, which is what made the cache poisonable.) *)
+    Alcotest.(check bool) "blob is stored inside the cache, not the source path"
+      true (blob <> src);
+    Alcotest.(check string) "artifact content round-trips" "AAA" (read_file_str blob)
+
+(** Regression: overwriting the file an artifact was stored FROM must not
+    change what the cache serves for the original key.
+
+    v1 stored a POINTER (the text of the -o path) rather than the binary, so
+    this sequence silently returned the wrong program:
+
+      march --compile a.march -o /tmp/x     # key(a) -> "/tmp/x"  (AAA)
+      march --compile b.march -o /tmp/x     # key(b) -> "/tmp/x"  (BBB)
+      march --compile a.march -o /tmp/y     # hit key(a) -> copies BBB
+
+    reported as "(cached)", with no error. Reusing one -o path across several
+    sources is completely ordinary (build scripts, test harnesses, the
+    verification loops in this repo), so this was reachable in normal use. *)
+let test_cas_artifact_survives_source_overwrite () =
+  with_tmpdir @@ fun root ->
+  let store = March_cas.Cas.create ~project_root:root in
+  let ch_a = March_cas.Cas.compilation_hash (String.make 64 'a')
+               ~target:"aarch64-darwin" ~flags:["-O2"] in
+  let shared = Filename.concat root "shared_out.bin" in
+  (* Compile "A" to the shared output path and cache it. *)
+  write_file_str shared "AAA";
+  March_cas.Cas.store_artifact store ch_a shared;
+  (* Now compile "B" to the SAME output path — overwriting A's binary. *)
+  write_file_str shared "BBB";
+  (* A later hit on A's key must still yield A. *)
+  (match March_cas.Cas.lookup_artifact store ch_a with
+   | None -> Alcotest.fail "artifact A vanished after the shared path was overwritten"
+   | Some blob ->
+     let dest = Filename.concat root "restored_a.bin" in
+     Alcotest.(check bool) "copy_artifact succeeds" true
+       (March_cas.Cas.copy_artifact ~src:blob ~dest);
+     Alcotest.(check string)
+       "cached artifact A is still A after its source path was overwritten"
+       "AAA" (read_file_str dest));
+  (* And removing the original output entirely must not dangle the entry. *)
+  Sys.remove shared;
+  (match March_cas.Cas.lookup_artifact store ch_a with
+   | None -> Alcotest.fail "artifact A vanished after its source file was deleted"
+   | Some blob ->
+     Alcotest.(check string) "artifact survives deletion of the compiled output"
+       "AAA" (read_file_str blob))
 
 let test_cas_runtime_identity_changes_with_sources () =
   with_tmpdir @@ fun dir ->
@@ -551,7 +612,10 @@ let test_compile_scc_cache_hit_skips_compiler () =
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let h_scc = List.hd hmod in
   let calls = ref 0 in
-  let fake_compile _scc = incr calls; "/tmp/f.o" in
+  (* The fake compiler must produce a REAL file: the store caches artifact
+     CONTENT, so a path pointing at nothing is (correctly) not cacheable. *)
+  let out = Filename.concat root "f.o" in
+  let fake_compile _scc = incr calls; write_file_str out "OBJ"; out in
   (* First call — populates cache *)
   let _ = March_cas.Pipeline.compile_scc store ~target:"test" ~flags:[]
             ~compile:fake_compile h_scc in
@@ -580,13 +644,18 @@ let test_compile_scc_cache_hit_returns_cached_path () =
   let hmod = March_cas.Pipeline.hash_module
                { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] } in
   let h_scc = List.hd hmod in
-  let original = "/tmp/original.o" in
+  let original = Filename.concat root "original.o" in
   let _ = March_cas.Pipeline.compile_scc store ~target:"test" ~flags:[]
-            ~compile:(fun _ -> original) h_scc in
-  (* Second call with a *different* fake path — must still return original *)
+            ~compile:(fun _ -> write_file_str original "ORIGINAL"; original) h_scc in
+  (* Overwrite the compiler's output path, exactly as a second compile to the
+     same -o would. The cached artifact must be unaffected (v1 stored a
+     pointer here, so this returned the OVERWRITTEN bytes — see
+     test_cas_artifact_survives_source_overwrite). *)
+  write_file_str original "CLOBBERED";
   let hit_path = March_cas.Pipeline.compile_scc store ~target:"test" ~flags:[]
-                   ~compile:(fun _ -> "/tmp/should_not_be_used.o") h_scc in
-  Alcotest.(check string) "cache hit returns stored path" original hit_path
+                   ~compile:(fun _ -> Alcotest.fail "compiler must not run on a cache hit") h_scc in
+  Alcotest.(check string) "cache hit serves the artifact stored at first compile"
+    "ORIGINAL" (read_file_str hit_path)
 
 let test_changed_body_causes_cache_miss () =
   (* Two fns with same name but different bodies → different hashes → both miss *)
@@ -775,6 +844,8 @@ let () =
       Alcotest.test_case "lookup miss returns None"           `Quick test_cas_lookup_miss_returns_none;
       Alcotest.test_case "name index"                         `Quick test_cas_name_index;
       Alcotest.test_case "store and lookup artifact"          `Quick test_cas_store_artifact_and_lookup;
+      Alcotest.test_case "artifact survives its source path being overwritten (v1 poisoning)" `Quick
+        test_cas_artifact_survives_source_overwrite;
       Alcotest.test_case "runtime identity tracks sources"    `Quick test_cas_runtime_identity_changes_with_sources;
       Alcotest.test_case "runtime identity ignores non-C"     `Quick test_cas_runtime_identity_ignores_non_c_files;
       Alcotest.test_case "copy_artifact missing src fails"    `Quick test_cas_copy_artifact_missing_src_fails;

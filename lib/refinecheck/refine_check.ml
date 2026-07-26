@@ -1116,6 +1116,38 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some (adt_sort_name name))
   | _ -> None
 
+(* Positional placeholder name for a synthesized callback [fn_sig] — it is
+   only ever used to look up [rparam]/[param_names] by INDEX in [check_call],
+   never displayed or looked up by name, so it need not be a real identifier. *)
+let callback_param_name = "$cb_arg"
+
+(* Synthesize a one-parameter [fn_sig] from a callback's declared arrow type,
+   for checking a call made THROUGH a refined function-typed parameter (e.g.
+   `f : ({Int | _ >= 0}) -> Int`) exactly like a call to a named function.
+   Reuses [refined_param_ty] on the arrow's domain so Int/String/ADT/record
+   domains all behave identically to a directly-refined parameter.
+
+   Returns [None] for anything but a single-argument arrow with a REFINED
+   domain — a non-arrow, an unrefined domain (nothing to check), or a
+   multi-argument callback (a tupled domain, which [refined_param_ty] does not
+   recognize as Int/String/ADT and so already falls through to [None]; a
+   CURRIED arrow `(Int) -> (Int) -> Int` has an unrefined `Int` domain at this
+   level for the same reason).  Per plan fact 2, multi-argument callbacks are
+   out of scope and calling one fails typecheck anyway. *)
+let callback_sig_of_ty (t : A.ty) : fn_sig option =
+  match t with
+  | A.TyArrow (dom, _) ->
+    (match refined_param_ty (Some dom) with
+     | Some (binder, pred, sort) ->
+       Some
+         { param_names = [ callback_param_name ]
+         ; param_str = [ sort = Some str_sort ]
+         ; refined = [ { idx = 0; binder; pred; sort } ]
+         ; ret = None
+         }
+     | None -> None)
+  | _ -> None
+
 (* True when a parameter's declared type is String, refined or not. *)
 let is_string_param_ty : A.ty option -> bool = function
   | Some (A.TyRefine (base, _, _)) -> is_string_base base
@@ -1253,6 +1285,33 @@ type recenv = (string * string) list
 
 let recenv_shadow (re : recenv) (names : string list) : recenv =
   if names = [] then re else List.filter (fun (n, _) -> not (List.mem n names)) re
+
+(* ── Callee environment: variable name -> synthesized [fn_sig] ────────────
+   [resolve_call] only resolves a NAMED callee.  This third fact channel
+   covers the two shapes that fall through it: a call made THROUGH a refined
+   function-typed parameter (`f(-3)` where `f : ({Int | _ >= 0}) -> Int`), and
+   a call through a LOCAL ALIAS of a named function (`let g = takepos
+   g(-3)`).  [EApp]'s `resolve_call` path is tried first; only when it finds
+   nothing does [visit] consult this env.
+
+   Exactly like [scope] and [recenv], every binding construct must retire a
+   shadowed name here — an outer callback/alias fact attributed to an inner,
+   unrelated binding of the same name is a false positive. *)
+type cbenv = (string * fn_sig) list
+
+let cb_shadow (cb : cbenv) (names : string list) : cbenv =
+  if names = [] then cb else List.filter (fun (n, _) -> not (List.mem n names)) cb
+
+(* Populate from a refined function-typed PARAMETER (Task 1). *)
+let cb_add_param (cb : cbenv) (p : A.param) : cbenv =
+  let cb = cb_shadow cb [ p.A.param_name.A.txt ] in
+  match Option.bind p.A.param_ty callback_sig_of_ty with
+  | Some sg -> (p.A.param_name.A.txt, sg) :: cb
+  | None -> cb
+
+let cb_add_fnparam (cb : cbenv) : A.fn_param -> cbenv = function
+  | A.FPNamed p | A.FPDefault (p, _) -> cb_add_param cb p
+  | A.FPPat pat -> cb_shadow cb (pat_binders pat)
 
 (* The SMT sort of a declared type when it names a registered record — through
    a refinement wrapper too, so `c : {v : Config | …}` is tracked as well (its
@@ -1451,6 +1510,22 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
              in
              if imported then lookup (qualify m fname) else None)
            ctx.uses)
+
+(* Populate [cbenv] from a LOCAL ALIAS of a named refined function (Task 2):
+   only a bare-variable RHS that [resolve_call] resolves to a refined function
+   counts — a call, a field access, or a lambda RHS is never chased, so the
+   alias fact is only ever a straight rename of a known callee, never a guess
+   about the shape of a computed value.  Shadowing happens FIRST, matching
+   [scope_add_binding]/[recenv_add_binding]. *)
+let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb : cbenv)
+    (b : A.binding) : cbenv =
+  let cb = cb_shadow cb (pat_binders b.A.bind_pat) in
+  match b.A.bind_pat, b.A.bind_expr with
+  | A.PatVar n, A.EVar { A.txt = fname; _ } ->
+    (match resolve_call ctx defs fname with
+     | Some (Some sg) -> (n.A.txt, sg) :: cb
+     | _ -> cb)
+  | _ -> cb
 
 (* Resolve a call name and its actual arguments to the callee's return
    refinement, expressed entirely in the CALLER's namespace, or None.  This is
@@ -2733,9 +2808,9 @@ let gate_unverified_posts ~root errctx (defs : (string, fn_sig option) Hashtbl.t
 (* ── Walk expressions, threading the refined-local scope, the record-typed
    variables ([recenv]) and the path context ─────────────────────────────── *)
 let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc : scope)
-    (re : recenv) (e : A.expr) : unit =
-  let go = visit ~root errctx defs ctx path sc re in
-  let go_path p = visit ~root errctx defs ctx p sc re in
+    (re : recenv) (cb : cbenv) (e : A.expr) : unit =
+  let go = visit ~root errctx defs ctx path sc re cb in
+  let go_path p = visit ~root errctx defs ctx p sc re cb in
   match e with
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     (match resolve_call ctx defs fname with
@@ -2744,23 +2819,45 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        List.iter
          (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
          sg.refined
-     | _ -> ());
+     | _ ->
+       (* Not a resolvable NAMED callee: fall back to the callee env — a call
+          made through a refined function-typed parameter, or through a local
+          alias of a named function (see [cbenv]). *)
+       (match List.assoc_opt fname cb with
+        | Some sg ->
+          let postcond = postcond_of ctx defs in
+          List.iter
+            (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+            sg.refined
+        | None -> ()));
     List.iter go args
   | A.EApp (f, args, _) -> go f; List.iter go args
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.EBlock (es, _) ->
-    (* Thread BOTH the path context and the refined-local scope left-to-right:
-       a `let` extends the scope; an `assert(p)` (used as an `assume`) extends
-       the path so a later call can rely on p. *)
+    (* Thread the path context, the refined-local scope AND the callee env
+       left-to-right: a `let` extends the scope (and, for a bare-alias RHS,
+       the callee env); an `assert(p)` (used as an `assume`) extends the path
+       so a later call can rely on p.
+
+       A block-level `fn f(...) do ... end` (ELetFn) is itself a SIBLING
+       block statement, not nested inside — [visit]'s dedicated [A.ELetFn]
+       case only descends into that local function's OWN body, so its bound
+       name must ALSO be retired here for the statements that follow it in
+       this block.  It carries no [scope]/[recenv] fact of its own (those
+       channels track Int/String/ADT VALUES, and a function name is never
+       one), but it always shadows [cbenv]: a same-named outer refined
+       callback parameter must not keep being checked against calls to this
+       new, unrelated local function. *)
     ignore
       (List.fold_left
-         (fun (path, sc, re) e ->
-           visit ~root errctx defs ctx path sc re e;
+         (fun (path, sc, re, cb) e ->
+           visit ~root errctx defs ctx path sc re cb e;
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
              (* A `let` REBINDS its names: retire any fact about them. *)
              | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
+             | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
              | _ -> path
            in
            let sc' =
@@ -2769,22 +2866,31 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | _ -> sc
            in
            let re' = match e with A.ELet (b, _) -> recenv_add_binding re b | _ -> re in
-           (path', sc', re'))
-         (path, sc, re) es)
+           let cb' =
+             match e with
+             | A.ELet (b, _) -> cb_add_binding ctx defs cb b
+             | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
+             | _ -> cb
+           in
+           (path', sc', re', cb'))
+         (path, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
+      (List.fold_left cb_add_param cb ps)
       body
   | A.ELetFn (n, ps, _, body, _) ->
     let names = n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
     let sc = scope_shadow sc [ n.A.txt ] in
     let re = recenv_shadow re [ n.A.txt ] in
+    let cb = cb_shadow cb [ n.A.txt ] in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
+      (List.fold_left cb_add_param cb ps)
       body
   | A.EMatch (subj, branches, _) ->
     go subj;
@@ -2795,6 +2901,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let sc = scope_shadow sc binders in
         (* …and a same-named fact in the path context, for the same reason. *)
         let path = path_shadow path binders in
+        (* …and a same-named callback/alias fact — see [cbenv]. *)
+        let cb = cb_shadow cb binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
            reflected as the outer record's SMT constant.  A bare `PatVar`
            binder on a record-typed variable scrutinee then re-enters the env
@@ -2837,7 +2945,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
             (tester, false) :: p
           | _ -> p
         in
-        visit ~root errctx defs ctx p sc re br.A.branch_body)
+        visit ~root errctx defs ctx p sc re cb br.A.branch_body)
       branches
   | A.EIf (c, t, e, _) ->
     go c;
@@ -2859,7 +2967,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let binders = pat_binders p in
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
-    visit ~root errctx defs ctx (path_shadow path binders) sc re e2
+    let cb = cb_shadow cb binders in
+    visit ~root errctx defs ctx (path_shadow path binders) sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
 
@@ -2967,8 +3076,9 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
+      let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
-      visit ~root errctx defs ctx path sc re c.A.fc_body)
+      visit ~root errctx defs ctx path sc re cb c.A.fc_body)
     fd.A.fn_clauses
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
