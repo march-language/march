@@ -4419,14 +4419,36 @@ static void *native_arr_alloc(int64_t len) {
     return arr;
 }
 
-/* Closure calling helpers (fn_ptr at field[0] = offset 16 from object). */
+/* Closure calling helpers (fn_ptr at field[0] = offset 16 from object).
+ *
+ * All March closures — including a bare `fn x -> ...` lambda — present the
+ * uniform erased-ptr ABI documented at llvm_calls.ml's clo_wrap_define /
+ * is_apply_fn: the fn pointer takes/returns `ptr`, with scalars (Int/Bool)
+ * wire-tagged `(n<<1)|1` and Float args/returns boxed via
+ * march_alloc_float/march_unbox_float. There is no native-typed variant to
+ * call into — a closure is never compiled with a `double(void*,double)` or
+ * raw `int64_t(void*,int64_t)` signature.
+ *
+ * Reinterpreting the fn pointer as such a native signature (the previous
+ * implementation here) happened to limp along for ints, because a raw
+ * untagged int64 and a tagged wire value both occupy one GPR-width slot at
+ * the C ABI level — silently wrong for odd inputs/outputs, since the callee
+ * unconditionally treats the low bit as the tag. For doubles it is not even
+ * register-compatible: floats pass in FP/vector registers while the wire
+ * ABI expects a boxed pointer in a GPR, so the argument and return value are
+ * both total garbage — this is what crashed native_float_arr_map. */
+static inline void *clo_apply_ptr(void *clo, void *arg) {
+    void *(*fn)(void*, void*) = *(void *(**)(void*, void*))((char *)clo + 16);
+    return fn(clo, arg);
+}
 static inline int64_t clo_call_int_int(void *clo, int64_t x) {
-    int64_t (*fn)(void*, int64_t) = *(int64_t (**)(void*, int64_t))((char *)clo + 16);
-    return fn(clo, x);
+    void *wire_arg = (void *)(intptr_t)((x << 1) | 1);
+    void *wire_ret = clo_apply_ptr(clo, wire_arg);
+    return (int64_t)(intptr_t)wire_ret >> 1;
 }
 static inline double clo_call_dbl_dbl(void *clo, double x) {
-    double (*fn)(void*, double) = *(double (**)(void*, double))((char *)clo + 16);
-    return fn(clo, x);
+    void *wire_ret = clo_apply_ptr(clo, march_alloc_float(x));
+    return march_unbox_float(wire_ret);
 }
 
 void *native_int_arr_make(int64_t len, int64_t def) {
@@ -4525,7 +4547,16 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
 double native_float_arr_sum(void *arr) {
     int64_t len = native_float_arr_length(arr);
     double s = 0.0;
-    for (int64_t i = 0; i < len; i++) { double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); s += v; }
+    /* Strict IEEE 754 forbids the compiler from reassociating float adds, which
+     * blocks auto-vectorization of this reduction (LLVM emits vector loads but
+     * scalar fadds). Scope reassociation to just this loop -- not a blanket
+     * -ffast-math -- so it vectorizes to packed NEON/SSE fadds; the multi-lane
+     * (effectively pairwise) summation order this produces changes rounding in
+     * the last bit vs. strict left-to-right but is no less accurate. */
+    {
+#pragma clang fp reassociate(on)
+        for (int64_t i = 0; i < len; i++) { double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); s += v; }
+    }
     return s;
 }
 

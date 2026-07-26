@@ -138,6 +138,21 @@ git log is authoritative for exact commits.
   the binder as the return value. The same conflation also suppressed genuine
   violations, which are now reported.
 
+- `NativeArray.map_float` (compiled builds) no longer segfaults, and
+  `NativeArray.map_int` (compiled builds) no longer silently returns wrong
+  results. Both called a closure through the wrong calling convention — a
+  native `int64_t`/`double` C signature instead of the tagged/boxed `ptr` ABI
+  every March closure actually uses. Floats landed in the wrong CPU register
+  class entirely (crash); ints happened to land in the right register but
+  skipped the tag/untag step (wrong answer for every element).
+
+- `NativeArray.sum_float` (compiled builds) now vectorizes. Strict IEEE 754
+  float semantics were silently blocking clang's auto-vectorizer on this
+  reduction loop — it emitted vector loads but scalar adds. Scoping float
+  reassociation to just this loop (not a program-wide `-ffast-math`) restores
+  SIMD summation; results match prior output to the last bit of rounding,
+  roughly 3x less CPU time on large arrays.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

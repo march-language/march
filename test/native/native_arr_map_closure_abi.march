@@ -1,0 +1,29 @@
+-- Regression: native_int_arr_map / native_float_arr_map compiled-mode
+-- SIGSEGV (float) and silent wrong-answer (int).
+--
+-- clo_call_int_int / clo_call_dbl_dbl (runtime/march_runtime.c) reinterpreted
+-- a closure's fn pointer as a native `int64_t(void*,int64_t)` /
+-- `double(void*,double)` C signature. Every March closure actually presents
+-- the uniform erased-ptr ABI (llvm_calls.ml's clo_wrap_define / is_apply_fn):
+-- scalar args/returns are wire-tagged `(n<<1)|1`, Float args/returns are
+-- boxed via march_alloc_float/march_unbox_float. Calling through the wrong
+-- native signature put Float arguments in the wrong register class entirely
+-- (XMM vs GPR) -> SIGSEGV; for Int it happened to occupy the right register
+-- but skipped the tag/untag round-trip -> silently wrong results for ANY
+-- input (the return is always tag-shifted by the callee, so even values that
+-- correctly survive the argument side come back doubled by the untouched
+-- tag bit).
+--
+-- Exercises: odd AND even int inputs (both were wrong pre-fix, not just odd
+-- ones), plus a float map/sum round-trip that previously crashed outright.
+mod Main do
+  fn main() : () do
+    let ints = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+    let ints2 = NativeArray.map_int(ints, fn x -> x * 2)
+    println(int_to_string(NativeArray.sum_int(ints2)))   -- 20
+
+    let floats = NativeArray.make_float(4, 1.5)
+    let floats2 = NativeArray.map_float(floats, fn x -> x *. 2.0)
+    println(float_to_string(NativeArray.sum_float(floats2)))   -- 12.
+  end
+end

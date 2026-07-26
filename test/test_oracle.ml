@@ -269,6 +269,7 @@ let test_native_allowlist =
     "bare_none_print"; "lazy_niche"; "let_shadow_rebind"; "let_tuple_destructure";
     "let_tuple_nested"; "task_race_cancel";
     "march_prefixed_local"; "nested_mod_qualcall"; "newtype_counter";
+    "native_arr_map_closure_abi";
     "niche_reuse_closure"; "option_niche"; "qualified_ctor_pattern";
     "shadow_selfref_let"; "to_string_show"; "tuple_scalar_fields";
     "tuple_show"; "zero_arg_closure_default" ]
