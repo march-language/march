@@ -153,6 +153,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `NativeArray.map_int`/`map_float` now inlines even when the
+  mapped array is reused afterward.** The Phase 2 closure-inlining
+  optimization (P10) silently never fired whenever code used the array
+  again after mapping it — e.g. a self-recursive loop that maps `arr` and
+  then passes `arr` on to its own tail call — because an unrelated Perceus
+  reference-count operation sitting between the closure allocation and its
+  alias binding made the pass bail out and fall back to the slower,
+  unoptimized closure-call path. That "map an array you're about to use
+  again" shape is extremely common, so this covered the large majority of
+  real `map` call sites. Purely a missed-optimization fix; behavior was
+  already correct, just slower than it should have been.
+
 - `march --compile` no longer fails with "cannot find runtime/march_runtime.c"
   when invoked from a working directory other than the project root. Six
   independent lookups for files under `runtime/` were each missing an

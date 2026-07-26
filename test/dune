@@ -3388,6 +3388,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_map_inline_vectorize.expected native_arr_map_inline_vectorize.out)))
 
+; Regression: P10 Phase 2b — the inline path used to silently never fire
+; when the mapped array is reused afterward (e.g. a self-recursive loop
+; function that maps `arr` and then passes `arr` on to its own tail call),
+; because Perceus inserts an unrelated `inc_rc arr;` ESeq wrapper between
+; the closure alloc and the alias-let that strip_alias_chain didn't see
+; through. Assert both correctness (the .expected diff below) and that the
+; fast path actually fires for this shape (grep the emitted LLVM IR for the
+; inline codegen arm's `nmap_pre`/`nmap_cond` block-label prefixes).
+(rule
+ (targets native_arr_map_inline_reuse native_arr_map_inline_reuse.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_reuse
+        native/native_arr_map_inline_reuse.march)
+   (with-stdout-to native_arr_map_inline_reuse.out
+        (system "./native_arr_map_inline_reuse")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_reuse.expected native_arr_map_inline_reuse.out)))
+
+(rule
+ (targets native_arr_map_inline_reuse_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_reuse.march)
+   (with-stdout-to native_arr_map_inline_reuse_llvm_check.out
+    (run bash -c
+     "grep -c 'nmap_pre\\|nmap_cond' native/native_arr_map_inline_reuse.ll")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_reuse_llvm_check.out)
+ (action
+  (run bash -c
+   "test \"$(cat native_arr_map_inline_reuse_llvm_check.out)\" -gt 0 || { echo 'inline path (nmap_pre/nmap_cond) did not fire for the self-recursive array-reuse shape' >&2; exit 1; }")))
+
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})
