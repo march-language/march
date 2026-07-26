@@ -118,17 +118,33 @@ let apply_fn_table (m : Tir.tir_module) : (string, Tir.fn_def) Hashtbl.t =
    pass through one or more transparent `let f = clo in ...` copies rather
    than being referenced directly.  Walk past a chain of those before doing
    the eligibility check, so [effective_name] is the name actually used at
-   the call site. *)
-let rec strip_alias_chain (name : string) (e : Tir.expr) : string * Tir.expr =
+   the call site.
+
+   Perceus also frequently inserts an unrelated RC op (e.g. `inc_rc arr;`
+   for some OTHER live variable, not the closure) as an `ESeq` between the
+   alloc and the alias-let — e.g. when the array being mapped is used again
+   later, such as in a self-recursive loop that both maps `arr` and passes
+   `arr` on to its own tail call.  See past it too, but only when it does
+   not itself mention [name]: an RC op on the closure var being tracked
+   (rather than some other var) would mean our "used exactly once" analysis
+   can't just skip over it, so bail out of peeling in that case instead of
+   risking a miscount. Every wrapper we peel is returned (in original
+   order) so the caller can re-wrap the rewritten body in the same
+   `ESeq`s — dropping or reordering one would be an RC correctness bug
+   (UAF / premature free), not just a missed optimization. *)
+let rec strip_alias_chain (name : string) (e : Tir.expr) : string * Tir.expr list * Tir.expr =
   match e with
   | Tir.ELet (v2, Tir.EAtom (Tir.AVar v3), cont) when v3.Tir.v_name = name ->
     strip_alias_chain v2.Tir.v_name cont
-  | _ -> (name, e)
+  | Tir.ESeq (other, cont) when count_uses name other = 0 ->
+    let (final_name, wrappers, final_e) = strip_alias_chain name cont in
+    (final_name, other :: wrappers, final_e)
+  | _ -> (name, [], e)
 
 let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t) (e : Tir.expr) : Tir.expr =
   match e with
   | Tir.ELet (v, (Tir.EAlloc (Tir.TCon (_clo_name, []), [ Tir.AVar apply_var ]) as alloc_e), rest) ->
-    let (effective_name, inner) = strip_alias_chain v.Tir.v_name rest in
+    let (effective_name, wrappers, inner) = strip_alias_chain v.Tir.v_name rest in
     let inner' = rewrite_expr apply_fns inner in
     let eligible =
       Hashtbl.mem apply_fns apply_var.Tir.v_name
@@ -137,7 +153,9 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t) (e : Tir.expr)
     if not eligible then Tir.ELet (v, alloc_e, rewrite_expr apply_fns rest)
     else
       (match find_target_call effective_name inner' with
-       | Some target_name -> subst_call target_name effective_name apply_var inner'
+       | Some target_name ->
+         let substituted = subst_call target_name effective_name apply_var inner' in
+         List.fold_right (fun w acc -> Tir.ESeq (rewrite_expr apply_fns w, acc)) wrappers substituted
        | None -> Tir.ELet (v, alloc_e, rewrite_expr apply_fns rest))
   | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rewrite_expr apply_fns e1, rewrite_expr apply_fns e2)
   | Tir.ELetRec (fns, body) ->

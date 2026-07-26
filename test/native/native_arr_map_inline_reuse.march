@@ -1,0 +1,29 @@
+-- Regression: P10 Phase 2b — Native_map_inline.strip_alias_chain must see
+-- through an `ESeq` wrapper (an unrelated Perceus RC op, e.g. `inc_rc arr;`)
+-- sitting between the closure alloc and the alias-let, without dropping or
+-- reordering that RC op. This shape shows up whenever the mapped array is
+-- used again after the map call — e.g. a self-recursive loop function that
+-- maps `arr` and then passes `arr` on to its own tail call. Before the fix,
+-- strip_alias_chain only pattern-matched a bare `let v2 = v3 in ...` alias
+-- copy immediately after the alloc, so ANY intervening RC op silently
+-- disabled the inline path for this (extremely common) shape and it fell
+-- back to the slower closure-indirection path — still correct, just
+-- unoptimized. Correctness is what this test enforces; the dune rule below
+-- also greps the emitted LLVM IR for the inline path's `nmap_` block labels
+-- to confirm the fast path actually fires for this shape.
+mod Main do
+  pfn go(arr, i, acc) : Int do
+    if i >= NativeArray.length_int(arr) do
+      acc
+    else
+      let arr2 = NativeArray.map_int(arr, fn x -> x + 1)
+      let v = NativeArray.get_int(arr2, i)
+      go(arr, i + 1, acc + v)
+    end
+  end
+
+  fn main() : () do
+    let ints = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    println(go(ints, 0, 0))   -- (1+1) + (2+1) + (3+1) = 9
+  end
+end
