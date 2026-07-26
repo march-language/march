@@ -170,6 +170,19 @@ let mangle_name (base : string) (tys : Tir.ty list) : string =
     compatible after lowering). *)
 let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
   match poly, conc with
+  | Tir.TVar "_", _ ->
+    (* The wildcard "_" is lower.ml's fallback for a param whose span is absent
+       from the type_map (stdlib fns lowered in a REPL/test context with an
+       incomplete map) — NOT a genuine type parameter.  EVERY such param shares
+       the single name "_", so binding it to a concrete arg type collapses
+       UNRELATED params: [list_len(xs, n)] lowers to [(_, _)], and the [Int] of
+       the [n=0] arg would bind {_ → Int}, retyping [xs] as [Int] too — then
+       [match xs { Cons(h,t) -> … }] destructures a scalar (type-incorrect TIR,
+       caught by llvm_case's non-pointer guard).  Leave "_" unbound: the fn stays
+       generic and codegen treats a TVar scrutinee as the heap ptr it always is.
+       (Real `--compile` has a complete type_map, so params carry their true
+       types and this arm never fires.) *)
+    acc
   | Tir.TVar name, t ->
     (* Prefer concrete bindings over TVar-to-TVar bindings.  Without this,
        first-wins merging loses information when arg types are a mix of

@@ -389,7 +389,45 @@ mod String do
 
   Cost: O(1).
   """
-  fn from_codepoint(cp) do string_from_codepoint(cp) end
+  -- Encode a validated codepoint to its UTF-8 byte list (1-4 bytes).
+  -- Types are annotated so monomorphization pins concrete types even when the
+  -- function is reachable but not driven by a concrete call site (an unpinned
+  -- List(a) would otherwise mono to a non-pointer scrutinee — the mono
+  -- dangling-TVar hazard).
+  pfn encode_cp(cp : Int) : List(Int) do
+    if cp <= 127 do
+      Cons(cp, Nil)
+    else if cp <= 2047 do
+      Cons(int_or(192, int_shr(cp, 6)),
+      Cons(int_or(128, int_and(cp, 63)), Nil))
+    else if cp <= 65535 do
+      Cons(int_or(224, int_shr(cp, 12)),
+      Cons(int_or(128, int_and(int_shr(cp, 6), 63)),
+      Cons(int_or(128, int_and(cp, 63)), Nil)))
+    else
+      Cons(int_or(240, int_shr(cp, 18)),
+      Cons(int_or(128, int_and(int_shr(cp, 12), 63)),
+      Cons(int_or(128, int_and(int_shr(cp, 6), 63)),
+      Cons(int_or(128, int_and(cp, 63)), Nil))))
+    end end end
+  end
+
+  -- Pure-March UTF-8 encode. Reject out-of-range (> 0x10FFFF, < 0) and UTF-16
+  -- surrogate codepoints (0xD800-0xDFFF). Compiled-safe: no runtime extern
+  -- (the old `string_from_codepoint` builtin had no native impl, so any
+  -- compiled program calling this failed to link).
+  fn from_codepoint(cp : Int) : Option(String) do
+    if cp < 0 do
+      None
+    else if cp > 1114111 do
+      None
+    else if cp >= 55296 do
+      if cp <= 57343 do None
+      else Some(Bytes.to_string(Bytes.from_list(encode_cp(cp)))) end
+    else
+      Some(Bytes.to_string(Bytes.from_list(encode_cp(cp))))
+    end end end
+  end
 
   doc """
   Extract all Unicode codepoints from a string as an Int list.
@@ -406,6 +444,46 @@ mod String do
 
   Cost: O(n) where n is the byte length of the string.
   """
-  fn to_codepoints(s) do string_to_codepoints(s) end
+  -- Decode UTF-8 bytes to codepoints, accumulating in reverse (tail-recursive
+  -- so the top-level pfn gets TCO). A truncated multi-byte sequence at the end
+  -- falls back to the lead byte's raw value (mirrors the interpreter builtin).
+  pfn decode_go(b : Bytes, n : Int, i : Int, acc : List(Int)) : List(Int) do
+    if i >= n do
+      List.reverse(acc)
+    else
+      let byte = Bytes.get(b, i)
+      if byte < 128 do
+        decode_go(b, n, i + 1, Cons(byte, acc))
+      else if byte < 224 do
+        if i + 1 < n do
+          let b2 = Bytes.get(b, i + 1)
+          decode_go(b, n, i + 2, Cons(int_or(int_shl(byte - 192, 6), b2 - 128), acc))
+        else decode_go(b, n, i + 1, Cons(byte, acc)) end
+      else if byte < 240 do
+        if i + 2 < n do
+          let b2 = Bytes.get(b, i + 1)
+          let b3 = Bytes.get(b, i + 2)
+          decode_go(b, n, i + 3,
+            Cons(int_or(int_or(int_shl(byte - 224, 12), int_shl(b2 - 128, 6)), b3 - 128), acc))
+        else decode_go(b, n, i + 1, Cons(byte, acc)) end
+      else
+        if i + 3 < n do
+          let b2 = Bytes.get(b, i + 1)
+          let b3 = Bytes.get(b, i + 2)
+          let b4 = Bytes.get(b, i + 3)
+          decode_go(b, n, i + 4,
+            Cons(int_or(int_or(int_or(int_shl(byte - 240, 18), int_shl(b2 - 128, 12)),
+                 int_shl(b3 - 128, 6)), b4 - 128), acc))
+        else decode_go(b, n, i + 1, Cons(byte, acc)) end
+      end end end
+    end
+  end
+
+  -- Pure-March UTF-8 decode. Compiled-safe (the old `string_to_codepoints`
+  -- builtin had no native impl).
+  fn to_codepoints(s : String) : List(Int) do
+    let b = Bytes.from_string(s)
+    decode_go(b, Bytes.length(b), 0, Nil)
+  end
 
 end

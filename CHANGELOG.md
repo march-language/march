@@ -59,6 +59,38 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`String.from_codepoint` and `String.to_codepoints` now work in compiled
+  programs.** They were interpreter-only builtin wrappers — the underlying
+  `string_from_codepoint`/`string_to_codepoints` have no native
+  implementation — so *any* compiled program calling them failed at link time
+  with `Undefined symbols: _string_from_codepoint`. Both are now pure-March
+  UTF-8 codecs built on `Bytes` and the integer bitwise builtins: one
+  definition for every backend, with no interpreter-vs-compiled divergence.
+  Encoding rejects negative values, values above U+10FFFF, and UTF-16
+  surrogates.
+
+- **`IOList.to_string`/`byte_size`/`is_empty` no longer overflow the stack on
+  deep segment trees.** All three walked the tree with non-tail recursion, so
+  a deque of appends — `IOList.append(acc, x)` in a loop builds a left spine
+  one level deeper per append — crashed with SIGBUS past roughly 15–20k
+  depth, despite the module documenting flattening as stack-safe. Rewritten
+  as tail-recursive explicit-worklist traversals that keep the frame stack on
+  the heap, so depth and branching are bounded only by memory.
+  `bench/iolist_template.march` and `bench/string_pipeline.march` both crashed
+  on this and now run clean.
+
+- **A `Deque` element popped in compiled code came back as a garbage
+  pointer.** `deque.march` was missing from the compiler's eagerly-loaded
+  stdlib list, so it loaded lazily — signatures only, no body typecheck. That
+  left callers' bindings as unresolved type variables, monomorphization could
+  not specialize the generic `pop_front : Deque(a) -> (Option(a), Deque(a))`,
+  and the generic body's *boxed* `Some` was decoded by the concrete caller as
+  a *niche* `Option(Int)` — yielding the box's heap address instead of the
+  value. `bench/deque_ops.march` printed a pointer and then looped forever
+  draining a deque whose elements never matched. Fixed by loading `Deque`
+  eagerly; the underlying hazard — lazy loading changing representation
+  decisions — is tracked separately.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

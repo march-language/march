@@ -31,20 +31,48 @@ to_string-via-Show scores 0% but was superseded by `6d2eed85`, and to_string
 on containers verifiably works). Every claim below is a *behavioural* probe,
 not a line count.
 
-**CONFIRMED LIVE BREAKAGE ON `main` (2026-07-24):**
+**CONFIRMED LIVE BREAKAGE — ALL THREE FIXED 2026-07-25:**
 
-- [ ] **`4a1c2ee3` — compiled `String.from_codepoint` does not LINK.**
-  `Undefined symbols: "_string_from_codepoint", referenced from
-  _String.from_codepoint`. Interpreted it works and prints `Some(A)` /
-  `Some(☃)`. Any compiled program touching the codepoint codec fails to
-  build. This is precisely what the lost commit's subject line says it
-  unblocked.
-- [ ] **`61ce42b0` — two bench programs crash compiled (exit 138/SIGBUS).**
-  `bench/iolist_template.march` and `bench/string_pipeline.march` both die
-  with no output. The lost commit is titled "make IOList flatten stack-safe;
-  kill two bench stack overflows" — the same two.
-- [ ] **`bench/deque_ops.march` does not terminate compiled** (killed at 180s,
-  produces nothing). Not yet mapped to a specific lost commit.
+- ✅ **`4a1c2ee3` RESTORED — compiled `String.from_codepoint`/`to_codepoints`
+  link and run.** Restored BOTH halves of the lost commit: the pure-March
+  UTF-8 codec in `stdlib/string.march` (replacing the interpreter-only
+  builtin wrappers that had no native impl) AND — critically — the
+  `mono.ml` `match_ty` fix that leaves the `TVar "_"` lowering placeholder
+  unbound. Restoring only the stdlib half turned four codegen tests red with
+  `constructor pattern Cons(...) destructures a non-pointer scrutinee`,
+  exactly the failure the commit's title names: the new codec's reach into
+  `Bytes.*` re-triggered the wildcard collapse in the test-emission path
+  (`emit_tco_ir` runs lower→mono→emit with an incomplete type_map, so every
+  such param shares the name `_` and binding it retypes unrelated params).
+  Pinned by `test_string_codepoint_parity`.
+- ✅ **`61ce42b0` RESTORED — the two SIGBUS benches run clean.**
+  `IOList.to_string`/`byte_size`/`is_empty` rewritten as tail-recursive
+  explicit-worklist traversals, plus `bench/string_pipeline`'s own non-tail
+  `map_strings`. `iolist_template` → 2092654, `string_pipeline` → 644449,
+  both matching the lost commit's recorded values. Pinned by
+  `test_compiled_iolist_deep_flatten_parity` (Slow, depth 25000).
+- ✅ **`bench/deque_ops.march` FIXED — it was never mapped to a lost commit
+  because it is a DIFFERENT bug: a lazy-stdlib-load representation
+  divergence.** `deque.march` was absent from `bin/main.ml`'s
+  `stdlib_file_list`, so it loaded lazily (signatures only, no body
+  typecheck); callers' let-binders stayed unresolved `'_` tvars, mono could
+  not specialize `Deque.pop_front : Deque(a) -> (Option(a), Deque(a))`, and
+  the generic body's BOXED `Some` was decoded by the concrete caller as a
+  NICHE `Option(Int)` — so `Some(v)` bound `v` to the box's heap ADDRESS.
+  The bench printed a pointer, then its drain loop never terminated because
+  no popped value ever matched. Minimal repro was 2 pushes + 1 pop (it never
+  worked at ANY size — the "hang" was a wrong-decode symptom, not a scale
+  problem). Fixed by eager-loading `deque.march`. Pinned by
+  `test_compiled_deque_pop_parity`.
+- [ ] **CLASS BUG behind the deque case, still open: lazy vs eager stdlib
+  loading changes REPRESENTATION decisions.** Eager-loading one module is a
+  point fix; any other lazily-loaded module exporting a generic function over
+  a niche-able type (`Option`/`Result`) has the same latent
+  boxed-vs-niche decode mismatch, and it fails SILENTLY (wrong value, no
+  diagnostic). Either make lazy loading typecheck enough to resolve caller
+  binders, or make mono refuse to emit a call it could not specialize
+  instead of falling back to the generic body. Audit the rest of
+  `stdlib_file_list`'s complement for the same shape.
 
 **Probed and NOT reproducing** (superseded, or the probe doesn't hit it):
 `d2d0a3a3` (`examples/stats_basic.march` interp==compiled parity ok),
