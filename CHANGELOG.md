@@ -143,6 +143,23 @@ git log is authoritative for exact commits.
   invocation outside the repo root (or a `_build/default/bin/main.exe` build)
   fell through to a dead CWD-relative fallback.
 
+- **The compiled-artifact cache could return a different program's binary.**
+  It stored the *path* the compiler wrote to rather than the binary itself, so
+  nothing owned that file. Compiling one program, then another to the same
+  `-o` path, then the first again to a new path served the second program's
+  binary — reported as `(cached)`, with no error:
+
+      march --compile a.march -o /tmp/x    # cached: key(a) -> "/tmp/x"  (AAA)
+      march --compile b.march -o /tmp/x    # cached: key(b) -> "/tmp/x"  (BBB)
+      march --compile a.march -o /tmp/y    # -> BBB
+
+  Reusing one `-o` across several sources is ordinary in build scripts and
+  test harnesses, so this was reachable in normal use. Artifacts are now
+  copied into the cache by content and served from there; deleting or
+  overwriting a compiled output can no longer affect what the cache returns.
+  Cache entries live in a new directory, so stale entries from the old scheme
+  are ignored rather than misread.
+
 - Refinement checking: a **named return binder** that collides with a parameter
   no longer misattributes the guards reaching a return. `fn f(v : Int, k : Int)
   : {v : Int | v > 0} do if v < 0 do k else 1 end end` was reported as a

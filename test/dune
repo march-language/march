@@ -502,6 +502,30 @@
  (modules test_cas)
  (libraries march_tir march_ast march_cas alcotest unix))
 
+; ── Bench gate ────────────────────────────────────────────────────────────
+; Compiles and runs every bench/*.march and checks its known answer. Nothing
+; else in the suite ever compiled a benchmark, which is how a program-wide
+; FBIP regression, two SIGBUS crashes and a non-terminating drain loop all
+; survived. Deliberately checks ANSWERS, never wall-clock, so it cannot be
+; flaky on a loaded machine.
+;
+; Own alias, not `runtest`: it compiles ~26 native binaries (~45s cold, much
+; less warm via the CAS artifact cache). Run it with
+;   dune build @test/bench_gate
+; The manifest-exhaustiveness case is `Quick`; the per-bench cases are `Slow`,
+; so `-q` runs only the "is every bench accounted for?" check.
+(executable
+ (name test_bench_gate)
+ (modules test_bench_gate)
+ (libraries march_test_helpers alcotest str unix))
+
+(rule
+ (alias bench_gate)
+ (deps (file %{exe:./test_bench_gate.exe})
+       (source_tree ../bench) (source_tree ../stdlib) (source_tree ../runtime)
+       (file %{exe:../bin/main.exe}))
+ (action (run %{exe:./test_bench_gate.exe} -e)))
+
 (test
  (name test_hot_reload)
  (modules test_hot_reload)
