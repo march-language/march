@@ -2721,7 +2721,16 @@ let test_cas_cache_hit () =
   let compile_count = ref 0 in
   let fake_compile _scc =
     incr compile_count;
-    tmp_dir ^ "/fake_artifact"
+    (* Must produce a REAL file: the CAS stores artifact CONTENT, so a path
+       pointing at nothing is (correctly) not cacheable. It used to store the
+       path text itself, which is what let a later overwrite of that path
+       serve one program's binary for another — see
+       test_cas_artifact_survives_source_overwrite. *)
+    let path = tmp_dir ^ "/fake_artifact" in
+    let oc = open_out_bin path in
+    output_string oc "OBJ";
+    close_out oc;
+    path
   in
   (* First pass: all misses — compile is called for each SCC *)
   List.iter (fun h_scc ->

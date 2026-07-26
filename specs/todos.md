@@ -104,10 +104,31 @@ not a line count.
   invisible. The sweep reported **0 divergences** on the same day three bench
   programs were broken compiled. Give these an expected-stdout anchor and
   compare the compiled run against it directly, with no interpreter leg.
-- [ ] **Nothing runs the benchmarks.** `bench/*.march` is not in `dune
-  runtest`; the FBIP regression, both SIGBUS crashes and the `deque_ops` hang
-  would all have been caught by a cheap "every bench program compiles, runs,
-  exits 0, and prints its known answer" gate. That gate does not exist.
+- ✅ **DONE (2026-07-25) — the bench gate exists: `dune build @test/bench_gate`.**
+  `test/test_bench_gate.ml` compiles and runs all 26 runnable `bench/*.march`
+  and checks each against its known answer (~55s cold, much less warm). It
+  checks ANSWERS, never wall-clock, so it cannot be flaky on a loaded machine
+  and makes no performance claim. Four network/server benches are excluded by
+  name with reasons; four timing-bearing benches are value-checked with
+  wall-clock masked rather than dropped. A manifest-exhaustiveness case
+  enumerates the directory and fails by name if a bench is in neither bucket,
+  so a new benchmark cannot be silently ungated — the failure mode of
+  forgetting is red, not silence. Verified by negative control: reverting the
+  `deque.march` eager-load turns the gate red with a diagnostic naming the
+  cause, and the 180s per-bench bound means a hang fails loudly instead of
+  wedging CI (a hung bench previously ate a 6h job ceiling).
+  - Its own alias, not `runtest`, because it compiles ~26 native binaries.
+    Wire it into CI as a separate job.
+  - **Found two real bugs while being built:** the CAS wrong-binary bug (see
+    below) and that `march --compile` writes its intermediate `<source>.ll`
+    beside the SOURCE — which litters the tree (`bench/*.ll` is gitignored, so
+    nobody noticed) and hard-fails with "Permission denied" wherever the
+    source dir is read-only, e.g. dune's sandbox. The gate compiles from a
+    temp copy to sidestep it; the compiler behaviour itself is unfixed.
+- [ ] **`march --compile` should write its intermediate `.ll` next to the
+  OUTPUT, not next to the source.** Writing beside the source pollutes the
+  tree and makes compiling from a read-only directory impossible. Found by
+  the bench gate failing inside dune's sandbox.
 - [ ] **Process gap, not just a backlog.** Two separate audits of this branch
   have now each declared completion while leaving real fixes behind. Before
   the next one, decide on a mechanical check (e.g. a CI job asserting no
