@@ -1,0 +1,14 @@
+-- Or-pattern alternatives MAY bind, provided every alternative binds the same
+-- names at the same types. Lowering splits the row per alternative and each
+-- path passes its own binding to the one shared arm body via an n-ary join
+-- point. The disagreeing case is reject/t82_or_pattern_binding.march.
+mod M do
+  type E = A(Int) | B(Int) | C
+  fn f(e : E) : Int do
+    match e do
+      A(x) | B(x) -> x * 10
+      C           -> 0
+    end
+  end
+  fn main() do () end
+end
