@@ -30,18 +30,29 @@
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
-  (* Desugar a string interpolation into concatenation + to_string calls.
+  (* Desugar a string interpolation into a single string_join call over all
+     parts, rather than a left-deep chain of `++`.  A `++` chain re-copies
+     the growing prefix on every append (O(k^2) total bytes copied for a
+     k-part interpolation, since march_string_concat allocates+copies fresh
+     each call); string_join does one pass to sum lengths and one pass to
+     copy, so building the equivalent list once is O(n) instead.
      desugar_interp prefix [(e1, s1); (e2, s2); ...] sp  produces:
-       prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+       string_join([prefix, to_string(e1), s1, to_string(e2), s2, ...], "")
      where to_string is the polymorphic builtin. *)
   let desugar_interp prefix parts sp =
-    let cat a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
-    let to_s e  = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
-    List.fold_left (fun acc (e, seg) ->
-        let with_e = cat acc (to_s e) in
-        if seg = "" then with_e
-        else cat with_e (ELit (LitString seg, sp))
-      ) prefix parts
+    let to_s e = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
+    let elems =
+      List.concat_map (fun (e, seg) ->
+          if seg = "" then [to_s e] else [to_s e; ELit (LitString seg, sp)]
+        ) parts
+    in
+    let list_expr =
+      List.fold_right
+        (fun e acc -> ECon ({ txt = "Cons"; span = sp }, [e; acc], sp))
+        (prefix :: elems)
+        (ECon ({ txt = "Nil"; span = sp }, [], sp))
+    in
+    EApp (EVar { txt = "string_join"; span = sp }, [list_expr; ELit (LitString "", sp)], sp)
 
   (** Join a dotted module path into a single name, e.g. [A; B; C] → "A.B.C".
       Used for `mod A.B.C do ... end` declarations. *)

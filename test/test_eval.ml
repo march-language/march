@@ -1081,11 +1081,14 @@ let test_parse_use_names () =
 let test_parse_string_interp () =
   let lexbuf = Lexing.from_string {|"hi ${name}!"|} in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-  (* Should desugar to: "hi " ++ to_string(name) ++ "!" *)
+  (* Should desugar to a single string_join([...], "") call over the parts,
+     not a chain of ++ (see lib/parser/parser.mly:desugar_interp — a ++ chain
+     re-copies the growing prefix on every append, O(k^2) for k parts). *)
   match expr with
-  | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
-    when cat2.txt = "++" -> ()
-  | _ -> Alcotest.fail "expected ++ desugaring from string interpolation"
+  | March_ast.Ast.EApp
+      (March_ast.Ast.EVar join, [_; March_ast.Ast.ELit (March_ast.Ast.LitString "", _)], _)
+    when join.txt = "string_join" -> ()
+  | _ -> Alcotest.fail "expected string_join desugaring from string interpolation"
 
 let test_eval_string_interp () =
   let env = eval_module {|mod Test do

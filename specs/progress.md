@@ -1,5 +1,21 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-26, string interpolation desugars to a single string_join call)
+
+String interpolation (`"${a}${b}"`) previously desugared to a left-deep chain
+of `++` calls (`prefix ++ to_string(e1) ++ s1 ++ ...`), which re-copies the
+growing prefix on every append — O(k²) total bytes copied for a k-part
+interpolation, since `march_string_concat` allocates and copies fresh on each
+call. `desugar_interp` (`lib/parser/parser.mly`) now builds a `Cons`/`Nil`
+list of all parts and desugars to a single `string_join(parts, "")` call,
+which is already a proper two-pass O(n) join (`march_string_join`) — no
+runtime change needed. `test/test_eval.ml:test_parse_string_interp` updated
+to assert the new desugared shape. `specs/lang/surface-syntax.md`'s operator
+reference now notes that `++` itself is still O(n) per call (so accumulating
+via `acc = acc ++ x` in a loop is still O(n²)) and points at `IOList` for
+that case — `stdlib/string.march`'s `String.concat` doc already carried the
+same note.
+
 ## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
 
 LLVM output now declares `march_alloc` with the conservative facts proven by
