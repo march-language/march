@@ -1,5 +1,17 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
+
+LLVM output now declares `march_alloc` with the conservative facts proven by
+the runtime implementation: a successful return is fresh (`noalias`), non-null
+(`nonnull`), and sized by argument zero (`allocsize(0)`). The canonical
+`$clo_wrap` generator marks its ABI-adaptation trampolines `alwaysinline`.
+These are backend-only optimizer facts: TIR, pass ordering, Perceus ownership,
+the generic closure pointer ABI, and hot-reload boundaries are unchanged.
+Exact emitted-IR tests cover both declarations, and the native fixture corpus
+passes the LLVM verifier. Broad runtime `nounwind` annotation remains deferred
+pending a helper-by-helper audit.
+
 ## What Is March
 
 A statically-typed functional programming language. The compiler is implemented in OCaml 5.3.0. The name is "March."
