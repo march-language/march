@@ -62,6 +62,14 @@ git log is authoritative for exact commits.
   reported unreachable. Previously the checker's internal pattern shape had no
   record case, so any arm containing a record pattern read as a wildcard.
 
+- Record patterns nested inside a constructor payload may name a subset of the
+  record's fields: `Some({ status: s })` against an `Option` of a two-field
+  record now typechecks. The constructor's argument types were only linked to
+  the scrutinee's payload *after* its sub-patterns were inferred, so a nested
+  record pattern saw an unresolved type variable and fell back to requiring
+  every field. The full-field form happened to unify anyway, which is why this
+  went unnoticed.
+
 - Record patterns in `let` and `let?` bindings may also name a subset of the
   record's fields — `let { code: c } = p` no longer requires naming every
   field of `p`. The binding's right-hand side supplies the expected type; it
