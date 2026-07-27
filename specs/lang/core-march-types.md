@@ -102,7 +102,11 @@ per-role local `session_ty` a protocol PROJECTS onto (`project_steps`/
 `project_protocol`), binary duality (`dual_session_ty`, the `dual(A) == B`
 check), MPST send/recv-pair consistency (documented as TYPING-ONLY — the
 compiled MPST runtime is broken, a separate finding filed by the operational
-widening task), and the `Chan(Role, Proto)` linear endpoint type. Also files
+widening task — **F3 was re-verified 2026-07-27 and no longer reproduces:** a
+3-role and a 4-role MPST protocol both compile and run correctly,
+interp == compiled; what genuinely remains unimplemented is multiparty
+`choose`/`offer` — see §2.7.4), and the `Chan(Role, Proto)` linear endpoint
+type. Also files
 **F4**: a real typing bug where the MPST merge rule (meant to let a
 non-chooser role skip an irrelevant choice) leaks into the BINARY duality
 check, wrongly rejecting a legal binary protocol whose two `choose` branches
@@ -5527,13 +5531,15 @@ FIRST session-type content — `protocol` declaration (three step forms,
 binary duality (`dual_session_ty`, `:5935`, the `dual(A) == B` check,
 `:5972–5986`); MPST send/recv-pair consistency (documented as TYPING-ONLY —
 the compiled MPST runtime segfaults, F3, filed by the operational widening
-task, not this one); and the `Chan(Role, Proto)` linear surface type
+task, not this one — **F3 is now RE-VERIFIED (2026-07-27) and no longer
+reproduces**, see §2.7.4); and the `Chan(Role, Proto)` linear surface type
 (`surface_ty`'s `TyCon("Chan", ...)` special case, `:2285–2311`). Filed **F4**
 (§2.7.5, §4.1 finding 20): the MPST merge rule (`:5906–5919`) leaks into the
 binary duality check, wrongly rejecting a legal binary `choose` protocol whose
 two branches carry the same payload type — reproduced live both ways
 (rejected identical-type / accepted type-distinct), not fixed (docs-only
-slice). Two new `accept/` programs: `accept/t41_binary_protocol_chan_new` (a
+slice at the time). **F4 is now FIXED** — see §2.7.5 and §4.1 finding 20.
+Two new `accept/` programs: `accept/t41_binary_protocol_chan_new` (a
 binary `Echo` protocol, `Chan.new`, straight-line send/recv/close, run-
 witnessed printing `43`) and `accept/t42_mpst_protocol_new` (a 3-role `Relay`
 protocol, `MPST.new`, run-witnessed printing a confirmation string) — after
@@ -5552,7 +5558,9 @@ its own `typecheck.ml` arm, cited in §2.7.8). Filed **F5** (§2.7.9):
 `Chan.offer` always returns the FIRST branch's continuation type regardless of
 which branch the peer actually chose at runtime — a documented conservative
 approximation that is a real (if narrow) soundness gap for `offer` over
-branches with DIFFERENT continuations. Six new `reject/` programs
+branches with DIFFERENT continuations (at the time; **F5 is now FIXED**,
+session-types correctness fixes Task 4, 2026-07-24 — see §2.7.9 and §4.1
+finding 21). Six new `reject/` programs
 (`t30`–`t35`) pin the live per-op violation messages (send-at-wrong-state,
 close-before-`End`, invalid `choose` label, wrong payload type, recv-at-
 wrong-state, a linear channel continuation used twice), plus one new
