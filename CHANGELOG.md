@@ -18,6 +18,29 @@ git log is authoritative for exact commits.
   mismatch) and Int→Float widening helper, for numeric ops over two
   `NativeArray`s at once. `DataFrame.col_add_col` (column-column arithmetic)
   now uses these instead of round-tripping through `List.zip`/`List.map`.
+- **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
+  do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
+  until now, had no way back out — every step inside the body, including
+  every `choose` branch, looped back to the start, so a looping channel could
+  only be abandoned, never actually `Chan.close`d. Writing `stop` inside a
+  `loop` body (directly, or nested in a `choose` branch within one) exits the
+  loop instead of repeating it, e.g.:
+  ```march
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  ```
+  `stop` is a contextual keyword (a plain identifier everywhere else, not
+  reserved). `stop` written outside any `loop`, or steps written after a
+  `stop`, are both compile errors.
+
 - **`Bool` and `Float` refinement types are now enforced.** Both previously
   parsed and type-checked while checking nothing at all, so
   `fn needTrue(b : {Bool | _ == true})` accepted `needTrue(false)` and
@@ -41,6 +64,22 @@ git log is authoritative for exact commits.
   scope and are silently skipped rather than approximated.
 
 ### Fixed
+
+- **Discarding a container no longer leaks its contents.** March reclaimed an
+  aggregate only by *destructuring* it; releasing one that was never pattern-
+  matched freed the top cell alone and orphaned everything under it. This hit
+  the ordinary way to consume a `String.split` result — passing it to a
+  function that borrows it — so bulk text processing leaked in proportion to
+  its input (a 60-iteration split/consume loop peaked at 585 MB, growing
+  linearly; it now holds flat at 16 MB). It was never about how the container
+  was traversed: a consumer that ignored its list argument entirely leaked
+  just the same. Compiled targets only — the interpreter was unaffected.
+  `bench/binary_trees.march` drops from 157 MB to 6 MB peak as a result.
+- **A tail-recursive `Cons(_, t)` walk no longer strands a reference on every
+  cell.** The self-TCO back-edge skipped *every* refcount op on a forwarded
+  argument, to fix a use-after-free on a freshly allocated one. A list walk's
+  tail is not freshly allocated — it is dup'd from the matched cell, and that
+  dup's matching release was being skipped, leaving each cons cell pinned.
 
 - **`DataFrame.eval_agg`'s `Min`/`Max`/`Std`/`Variance` no longer materialize
   a boxed `List(Float)` per call.** These aggregates previously converted the

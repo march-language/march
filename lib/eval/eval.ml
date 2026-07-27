@@ -9520,6 +9520,7 @@ let rec eval_decl (env : env) (d : decl) : env =
         let branch_roles = List.concat_map (fun (_, steps) ->
             collect_roles [] steps) branches in
         collect_roles (ch.txt :: branch_roles @ acc) rest
+      | ProtoStop _ :: rest -> collect_roles acc rest
     in
     let roles = List.sort_uniq String.compare
         (collect_roles [] pdef.proto_steps) in

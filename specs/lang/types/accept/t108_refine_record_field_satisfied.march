@@ -1,0 +1,15 @@
+-- Refinement types: record refinements naming a FIELD through a bound
+-- variable, `{v : T | v.port >= 1}` (§2.14). A record-typed refinement
+-- carries an extra binder `v` that names the value itself, so the predicate
+-- can reach into its fields. For a DIRECT call with a record LITERAL
+-- argument, refinecheck reflects the literal's field values into the Z3
+-- model (a record sort alongside Int/Bool/String/measure sorts in the same
+-- VC) and discharges `v.port >= 1` against the concrete field. Reject
+-- companion: reject/t86 (`serve({ port: 0 })`).
+mod M do
+  type Cfg = { port : Int }
+  fn serve(c : {v : Cfg | v.port >= 1}) : Int do c.port end
+  fn main() do
+    println(int_to_string(serve({ port: 8080 })))
+  end
+end

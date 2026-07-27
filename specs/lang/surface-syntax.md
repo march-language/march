@@ -950,6 +950,19 @@ protocol Negotiation do
     | reject -> Client -> Server : Bool
   end
 end
+
+-- `stop` exits an enclosing `loop` instead of repeating it; legal only
+-- inside a `loop` body, directly or inside a `choose` branch nested in one.
+protocol Stream do
+  loop do
+    Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
+  end
+end
 ```
 
 ---

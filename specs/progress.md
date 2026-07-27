@@ -27,6 +27,56 @@ closure-inlining/vectorization treatment `map_int`/`map_float` have; each elemen
 still dispatches through the C runtime's closure-pointer call. That inlining is a
 natural follow-up, not started. See `specs/optimizations.md` §P10 "Phase 3".
 
+## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
+
+Compiled March now reclaims an aggregate that is released WITHOUT being
+pattern-matched. Previously only destructuring reclaimed one: `llvm_case.ml`'s
+owned-scrutinee path frees the box via `march_decrc_freed` and lets the
+extracted fields inherit its child references, while a bare `EDecRC` lowered to
+`march_decrc_local` — a shallow `free(p)` that never decremented the children.
+Perceus emits that bare drop whenever the consumer BORROWS the container, which
+is the ordinary shape of `let parts = String.split(…)` followed by a call, so
+bulk text processing leaked proportionally to its input (60-iteration loop:
+9,000,126 string allocations / 3 frees, 585 MB peak, linear in iterations).
+
+The new post-Perceus pass `lib/tir/drop.ml` synthesizes one
+`__drop$T(x) = case x of C(f…) -> if march_decrc_freed(x) then drop f…` per
+heap-owning variant type and rewrites bare aggregate `EDecRC`s into calls to
+it. Synthesizing in TIR (rather than emitting LLVM by hand) means the RC
+protocol and Boxed/Niche/Newtype representation handling come from the existing
+case lowering, and the recursive field's drop — left in tail position — becomes
+a `llvm_tco` loop, so a 150K-element spine does not recurse in C. The
+shared-box early exit is load-bearing twice over: descending into a cell whose
+refcount did not reach zero would free children still owned by the surviving
+reference, and would make every drop quadratic.
+
+`Llvm_tco.dup_bound_vars` additionally narrows the self-TCO back-edge's
+skip-RC-ops-on-forwarded-arguments rule (commit `eafbd71a`) to arguments with
+no compensating IncRC — a `Cons(_, t)` walk's forwarded tail is dup-bound, and
+skipping its release stranded a `+1` on every cons cell, which would have
+pinned the whole list even with deep drop in place.
+
+Repro 585 MB → 16 MB and flat across iteration counts; tree build-and-discard
+shows 0 net live objects under `MARCH_TRACE_GC`; `bench/binary_trees.march`
+157 MB → 6 MB peak with unchanged output. Oracle 0 divergences over 96
+comparable programs; compiler/eval/snapshots/codegen/stdlib_march green,
+stdlib green but for a pre-existing machine-wide ASAN hang. Interpreted mode is
+untouched (the pass runs only in the compile pipeline, and is skipped for the
+GC'd JS target). Known gaps, all pre-existing and unchanged: Newtype/Niche-repr
+types (a dropped `Option(String)` still leaks its payload), tuples and records
+(`Rc_types.needs_rc` is FALSE for both, so no aggregate-level dec exists to
+rewrite), deep LEFT spines (only the last field's drop is a tail call), and
+`EAtomicDecRC`.
+## Current State (as of 2026-07-27, session types: `stop` lets a `choose` branch inside a `loop` exit it)
+
+A `loop do … end` protocol projects to the µ-type `Rec X. S[X]` and, before this fix, had no way to reach `SEnd`: every step inside the body — including every `choose` branch — took the loop's own back-reference as its continuation, so a looping channel could only be *abandoned* via `Chan.close`, never actually closed. `stop` is a new `protocol_step` (`Ast.ProtoStop of span`), legal only inside a `loop` body directly or nested inside a `choose` branch within one; `project_steps`' new arm projects it to `SEnd` for every role unconditionally — the literature shape `Rec X. choose { more: S;X, done: end }`.
+
+Surface syntax is contextual rather than a reserved word: `protocol_step`'s existing alternatives all start with an upper-case role name, `LOOP`, or `CHOOSE`, so a bare `lower_name` alternative in `parser.mly` is unambiguous — it reduces to `ProtoStop` only when the identifier's text is `"stop"`, and raises a positioned parse error naming `stop` as the only valid step otherwise. Confirmed zero new menhir shift/reduce conflicts.
+
+Two validation rules keep `stop` from meaning something it doesn't: `stop` outside any `loop` is rejected (a no-op there — writing nothing already ends the protocol), and steps written after `stop` in the same list are unreachable, extending the existing `check_unreachable_after_loop` walker rather than duplicating it. Duality needs no special handling — `dual_session_ty` already maps `SEnd` to `SEnd` — verified live with a two-role protocol whose `done` branch dualizes cleanly against the peer's `SEnd`.
+
+4 new unit tests in `test/test_compiler.ml` (`run_compiler` quick suite: 604 total). Corpus: `specs/lang/types/accept/t105_loop_stop_two_iterations_close` (loops twice, exits via `stop`, closes both endpoints — run interpreted AND `--compile`d, byte-identical output `3`) and `reject/t106_stop_outside_loop` / `t107_steps_after_stop_unreachable`; `check_types.sh` 187/187 → **190/190** (94 accept, 96 reject). `specs/lang/golden/verify.sh` 46/46 unchanged (no golden witness needed — compile-time-only feature). `scripts/check-docs.sh` clean. Docs: `specs/lang/session-types.md` (new "Exiting a loop: `stop`" subsection), `specs/lang/core-march-types.md` §2.7.1/§2.7.3, `specs/lang/surface-syntax.md`.
+
 ## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
 
 Compiled string literals are now emitted as one immortal cell per literal
@@ -222,6 +272,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Actors** — share-nothing message passing with private state, isolation guaranteed by linear types
 - **Actor state updates** use record spread: `{ state with field = new_value }`
 - **Binary session types** for v1 — typed two-party protocols verified at compile time (catches deadlocks, protocol violations, missing cases). Multi-party deferred post-v1.
+- **`loop`/`stop` protocol repetition and termination** — `loop do … end` projects to the recursive µ-type `Rec X. S[X]`; a `stop` step inside the loop (directly, or nested in a `choose` branch) exits it by projecting to `SEnd`, so a looping protocol can reach `End` and `Chan.close` cleanly instead of only ever being abandoned.
 - **Capability-secure messaging** — actors can only message actors they hold an unforgeable capability reference to; linear capabilities enable ownership transfer
 - **Content-addressed message schemas** — messages reference their schema by hash for safe distributed communication
 - **Location-transparent `Pid`** (Erlang model) — you don't know or care which node an actor lives on

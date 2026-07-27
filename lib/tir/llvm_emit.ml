@@ -158,6 +158,7 @@ type ctx = Llvm_ctx.ctx = {
   mutable tco_param_info : (string * string * string) list;
   mutable tco_stack_save : string;
   mutable tco_in_tail   : bool;
+  mutable tco_dup_bound : string list;
   mutable mutual_tco_group      : string list;
   mutable mutual_tco_tag_slot   : string;
   mutable mutual_tco_loop_label : string;
@@ -805,19 +806,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           drop a freshly-owned, uncompensated value (no matching prior IncRC) to
           refcount 0 immediately before it is reused as the next iteration's
           value — a use-after-free. Skip RC ops on these variables; ownership is
-          transferred into the new slot instead. *)
+          transferred into the new slot instead.
+          EXCEPTION TO THE EXCEPTION: a forwarded argument that is DUP-BOUND
+          (its binding RHS is `inc_rc x; x` — see Llvm_tco.dup_bound_vars) does
+          have a matching prior IncRC, so its DecRC is the closing half of a
+          balanced pair rather than an early release. Skipping it strands the
+          +1 and leaks one cell per iteration (a `Cons(_, t)` list walk leaks
+          the entire list). Emit those. *)
     let arg_var_names =
-      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+      List.filter_map (fun a -> match a with
+        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
+          Some v.Tir.v_name
+        | _ -> None) args
     in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
+    let skip op =
+      match Llvm_tco.cleanup_target op with
+      | Some n -> List.mem n arg_var_names
+      | None -> false
+    in
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
-        when List.mem v.Tir.v_name arg_var_names ->
-        emit_dec_chain rest
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
-        ignore (emit_expr ctx op);
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op);
         emit_dec_chain rest
       | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
     in
@@ -869,28 +880,31 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           variables so a freshly-owned, uncompensated argument (e.g. the
           result of a fresh allocation with no prior IncRC, as opposed to a
           borrowed field promoted via IncRC) isn't dropped to refcount 0 and
-          freed immediately before being reused as the next iteration's value. *)
+          freed immediately before being reused as the next iteration's value.
+          The "as opposed to" half of that sentence is the DUP-BOUND case, and
+          it must NOT be skipped: there the DecRC balances the IncRC that
+          materialised the local, so dropping it leaks one cell per iteration
+          (see Llvm_tco.dup_bound_vars — this is the `Cons(_, t)` walk that
+          leaked its whole list). *)
     let arg_var_names =
-      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+      List.filter_map (fun a -> match a with
+        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
+          Some v.Tir.v_name
+        | _ -> None) args
     in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
+    let skip op =
+      match Llvm_tco.cleanup_target op with
+      | Some n -> List.mem n arg_var_names
+      | None -> false
+    in
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
-        when List.mem v.Tir.v_name arg_var_names ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op);
         emit_dec_chain rest
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | (Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-        | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v))
-        when List.mem v.Tir.v_name arg_var_names ->
-        ()
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
+      | op when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op)
       | _ -> ()
     in
     emit_dec_chain dec_chain;
@@ -947,7 +961,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
       | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
@@ -1000,13 +1014,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
+      | op when Llvm_tco.is_cleanup_op op -> ignore (emit_expr ctx op)
       | _ -> ()
     in
     emit_dec_chain dec_chain;
@@ -1062,7 +1073,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ctx.tco_in_tail <- saved_tail;
     (match e2 with
      | Tir.EDecRC _ | Tir.EIncRC _
-     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _ ->
+     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _
+     (* A synthesized deep-drop call stands in for exactly the EDecRC above
+        (Drop.run rewrites one into the other), returns Unit, and is likewise
+        evaluated only for effect — so it must propagate e1's value too. See
+        Tir_names.is_drop_fn. *)
+     | Tir.EApp ({ Tir.v_name = _; _ }, _)
+       when (match e2 with
+             | Tir.EApp (f, _) -> Tir_names.is_drop_fn f.Tir.v_name
+             | _ -> false) ->
        (* e2 is a pure side-effect (no meaningful value). Return e1's value so
           that ELet(v, ESeq(call, dec_rc), body) binds the call result, not 0.
           Perceus emits this pattern for borrowed-arg post-call decrements. *)

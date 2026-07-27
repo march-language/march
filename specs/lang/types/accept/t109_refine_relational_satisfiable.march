@@ -1,0 +1,15 @@
+-- Refinement types: Tier 1 relational postconditions -- `{Int | _ < n}` where
+-- `n` names a PARAMETER of the returning function, not a constant (§2.14).
+-- Calling `below(10)` instantiates the postcondition as `_ < 10` at the call
+-- site; `takepos` demands `_ >= 0`. `_ < 10` does NOT contradict `_ >= 0` (the
+-- result could be anywhere from 0 to 9 -- `below` itself proves `n - 1`, and
+-- Z3 finds no model where both the postcondition and `_ < 0` hold, i.e. no
+-- refutation of `_ >= 0` exists), so refinecheck stays silent. This is the
+-- companion to reject/t87, where `below(0)` DOES force a negative result.
+mod M do
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn main() do
+    println(int_to_string(takepos(below(10))))
+  end
+end

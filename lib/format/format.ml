@@ -1135,6 +1135,8 @@ and emit_proto_step ctx = function
     line ctx "loop do";
     indented ctx (fun () -> List.iter (emit_proto_step ctx) steps);
     line ctx "end"
+  | ProtoStop _ ->
+    line ctx "stop"
   | ProtoChoice (role, choices) ->
     line ctx (Printf.sprintf "choose by %s:" role.txt);
     indented ctx (fun () ->

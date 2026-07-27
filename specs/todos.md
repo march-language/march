@@ -1,8 +1,64 @@
 # March — TODO List
 
-**Last updated:** 2026-07-25 (LLVM allocation and closure-trampoline attributes verified; see Done.)
+**Last updated:** 2026-07-27 (deep drop for containers released without destructuring; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## Deep drop for aggregates released without destructuring (FIXED 2026-07-27)
+
+**Symptom.** A compiled `String.split` result passed to a function that borrows
+it leaked its entire contents: 9,000,126 string allocations against 3 frees,
+peak RSS growing ~9.3 MB per iteration (5/20/60 iterations → 52/199/585 MB).
+Interpreted mode unaffected (OCaml GC).
+
+**Root cause.** March reclaims an aggregate only by DESTRUCTURING it —
+`llvm_case.ml`'s owned-scrutinee path frees the box with `march_decrc_freed`
+and lets the extracted fields inherit its child references. A bare `EDecRC` on
+a container that is never pattern-matched lowered to `march_decrc_local`, a
+shallow `free(p)` that never decrements the children (`runtime/march_runtime.c`).
+Perceus emits exactly that whenever the consumer BORROWS and the owner is left
+holding the drop. Not specific to traversal: a consumer that ignored its list
+argument entirely leaked identically, which is what ruled out the original
+"the `Cons(h, t)` walk loses the head's ownership" hypothesis.
+
+**Fix.** New post-Perceus pass `lib/tir/drop.ml` synthesizes, per heap-owning
+variant type, `__drop$T(x) = case x of C(f…) -> if march_decrc_freed(x) then
+drop f…`, and rewrites bare aggregate `EDecRC`s into calls to it. Synthesized
+in TIR rather than hand-emitted LLVM so the existing case-lowering supplies the
+RC protocol and representation handling, and so the recursive field's drop sits
+in tail position and becomes a TCO loop (a 150K-element spine must not recurse
+in C). The shared-box early exit is load-bearing for both correctness and
+complexity: descending into a cell whose refcount did not reach zero would free
+children still owned elsewhere, and is quadratic.
+
+Also fixed, and a prerequisite for the above actually reclaiming anything: the
+self-TCO back-edge skipped every RC op on a forwarded argument (commit
+`eafbd71a`, guarding a freshly-allocated one against an eager release). A
+`Cons(_, t)` walk's forwarded tail is DUP-BOUND — `let t = inc_rc $f; $f` — so
+skipping its release stranded the `+1` on every cons cell. `eafbd71a` predicted
+this case and judged that it "survives by accident (a compensating IncRC keeps
+it alive)"; it survives by leaking. `Llvm_tco.dup_bound_vars` now narrows the
+skip to genuinely uncompensated arguments.
+
+**Verified.** Repro 585 MB → 16 MB, flat across 5/20/60 iterations. Tree
+build-and-discard: 0 net live objects under `MARCH_TRACE_GC`.
+`bench/binary_trees.march` 157 MB → 6 MB peak; tree_transform/list_ops/
+binary_trees outputs and timings unchanged. Oracle: 0 divergences over 96
+comparable programs. Full suite green except two pre-existing failures
+(a machine-wide ASAN hang, reproduced with a trivial unrelated C program; and
+`cli: timings`, which fails identically on a pristine baseline).
+
+**Known limits (not regressions — the same gaps existed before, unfixed):**
+- Newtype- and Niche-repr types are skipped, so a dropped `Option(String)`
+  still leaks its payload. Widening to Niche is a separate step; Newtype is
+  riskier (`Bytes` is newtype-shaped and runtime-built).
+- Tuples and records are untouched: `Rc_types.needs_rc` is FALSE for both by
+  design, so Perceus emits no aggregate-level dec for this pass to rewrite.
+- Only the LAST heap field's drop is a tail call, so a deep LEFT spine still
+  recurses in C.
+- `EAtomicDecRC` (actor-shared values) is left alone.
 
 ---
 
@@ -2567,3 +2623,4 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - **Not fixed (out of scope, flagged separately):** `docs/cookbook/parallel-data.md` still has 6 bare `Vec(...)`/`Map(...)` annotations (fn params/returns + the one `let`) that would now surface real errors if copy-pasted, plus unrelated pre-existing issues in the same file (a `Float` module referenced that doesn't exist in stdlib, a `Map.merge_with` arity mismatch) — needs a separate docs pass. Also flagged: `llvm_ir_validity_gate` fails on `signal_watch.march`/`signal_term_suppress.march` ("Unknown module `Signal`") — reproduces identically on pristine `origin/main`, confirmed unrelated to this fix.
 - ✅ **FIXED (2026-07-26): `march --compile` fails with "cannot find runtime/march_runtime.c" when invoked from a CWD other than the project root.** This is the follow-up flagged in the 2026-07-21 `Signal` fix above (same bug class, `runtime/` sources instead of `stdlib/`) — the 15 `run_stdlib` "Slow" `adversarial-regressions` failures that only show up under a full (non-`-q`) test run. Reproduced deterministically on current main tip and on the pre-existing commit `322c3d1c` (well before any recent work), with `MARCH_NO_RUNTIME_CACHE=1` set or unset — unrelated to the Stage A runtime-object cache. **Root cause:** all six call sites in `bin/main.ml` that locate a file under `runtime/` (`ensure_runtime_so`, the FFI shim `-I` flag lookup, the JS `.mjs` runtime copy, the WASM runtime + its `-DMARCH_WASM` fallback, and the native compilation path) built their own duplicate 3-candidate list — a bare CWD-relative `"runtime/<name>"` plus only *two* exe-relative candidates (`bin/../runtime/<name>`, `bin/../../runtime/<name>`) via raw `Filename.dirname Sys.executable_name` — missing the third exe-relative candidate, `bin/../../../runtime/<name>`, that resolves the actual `_build/default/bin/main.exe` dune-build layout (dune's `_build/default/runtime/` does not mirror the full C source tree, so candidates (2) were always dead in that layout too); `find_stdlib_dir` right above it in the same file already had all three levels plus CWD-normalization via `resolve_exe_path`, so the runtime-file candidate lists had silently drifted out of sync with it. Every `compile_march*` test helper `cd`s to a scratch tmp dir before invoking `main_exe`, so any Slow compiled-regression test hit this. **Fix:** added a single `find_runtime_file name` helper (mirrors `find_stdlib_dir`'s resolution order: `resolve_exe_path`-normalized exe dir, 1/2/3 levels up, then CWD-relative fallback) and replaced all six duplicate candidate lists with calls to it. **Regression:** new `test_compile_succeeds_from_other_cwd` (`adversarial-regressions`, `Slow`, `test/test_stdlib_suite.ml`) compiles and runs a trivial program with `cmd_prefix` `cd`'d to a scratch tmp dir — RED pre-fix (`march: cannot find runtime/march_runtime.c`, confirmed via direct repro before writing the fix), GREEN post-fix. Verified the exact reported repro (`cd /tmp && main.exe --compile --test -o bin src.march`) now succeeds and runs.
 - ✅ **`typed_array_map`/`typed_array_fold` compiled SIGSEGV — `call_closure_1`/`call_closure_2` read a closure's fn pointer at the wrong offset (2026-07-26).** `runtime/march_runtime.c`'s `call_closure_1`/`call_closure_1_int`/`call_closure_2` read the fn pointer at byte offset +8 of the closure object — the `march_hdr.tag` field (plus 4 bytes of padding), not the fn pointer, which lives at field 0 = offset +16 (matching `clo_apply_ptr`'s existing correct offset a few hundred lines below). This crashed every `typed_array_map`/`typed_array_fold` call compiled, including `stdlib/dataframe.march`'s boolean-column negation/is-not-null checks (`typed_array_map(data, fn b -> !b)`). The offset bug was actually already fixed as an uncredited side-effect of commit `4aa74c4c` (a SIMD/perf commit); this entry adds the missing regression coverage: `test/native/typed_array_map_closure_abi.march`, registered in `test_oracle.ml`'s curated allowlist (interp/compiled parity now MATCHes). Full oracle sweep (143 programs) and `run_compiler`/`run_eval`/`run_codegen`/`run_stdlib` all pass.
+- ✅ **Loop termination for session-type protocols: a new `stop` step (2026-07-27).** A `loop do … end` protocol projects to the µ-type `Rec X. S[X]` and, before this fix, had no way to reach `SEnd` — every step inside the body, including every `choose` branch, took the loop's own back-reference as its continuation, so a looping channel could only ever be *abandoned* via `Chan.close`, never actually closed. `stop` is a new `protocol_step` (`Ast.ProtoStop of span`) legal only inside a `loop` body (directly, or nested inside a `choose` branch within one); `project_steps`' new `ProtoStop` arm projects it to `SEnd` for every role unconditionally, discarding both the loop's back-reference and any following steps in its own list — the literature shape `Rec X. choose { more: S;X, done: end }`. **Surface syntax is contextual, not a reserved word:** `protocol_step`'s existing alternatives all start with an upper-case role name, `LOOP`, or `CHOOSE`, so a bare `lower_name` alternative in `parser.mly` is unambiguous — it reduces to `ProtoStop` only when the identifier's text is `"stop"`, and raises a positioned parse error naming `stop` as the only valid step otherwise; confirmed zero new menhir shift/reduce conflicts (`dune build` warning count unchanged, `0` before and after). **Validation (`typecheck.ml`'s `DProtocol` arm):** `validate_step` now threads an `~in_loop` flag through `ProtoLoop`/`ProtoChoice` and rejects `stop` reached with `in_loop = false` ("`stop` outside of a `loop` has no effect — the protocol already ends here if you just write nothing"); `check_unreachable_after_loop` (the existing `loop`-tail-unreachability walker) gained a `ProtoStop` arm treated identically to `ProtoLoop` — steps after `stop` in the same list, or in an enclosing `choose`'s post-choice tail, are rejected as unreachable, reusing the machinery rather than duplicating it. `roles_of_steps`, `gather_msgs` (MPST consistency), and every other exhaustive walker over `protocol_step` (`lib/tir/lower.ml`, `lib/eval/eval.ml`, `lib/dump/ast_json.ml`, `lib/format/format.ml`, `lsp/lib/analysis.ml`) gained a `ProtoStop` arm. **Duality needs no special handling:** `dual_session_ty` already maps `SEnd` to `SEnd`; verified live with the corpus witness below (two-role protocol, `done` branch on one side dualizes cleanly against the matching `SEnd` on the other). **4 new unit tests** in `test/test_compiler.ml` (`typecheck` group #105–108): projection is `SEnd`-terminated for the `done` branch vs. `SVar`-looping for `more`; a program that runs the loop body twice, chooses `done`, and `Chan.close`s both endpoints typechecks clean; `stop` outside a loop errors; steps after `stop` error. **Corpus:** `specs/lang/types/accept/t105_loop_stop_two_iterations_close` (two iterations, exit via `stop`, close both endpoints — run interpreted AND `--compile`d, byte-identical output `3`) and `specs/lang/types/reject/t106_stop_outside_loop` / `t107_steps_after_stop_unreachable`; `check_types.sh` 187/187 → **190/190** (94 accept, 96 reject). Docs: `specs/lang/session-types.md` (new "Exiting a loop: `stop`" subsection), `specs/lang/core-march-types.md` §2.7.1/§2.7.3 (grammar + projection prose), `specs/lang/surface-syntax.md`.

@@ -1,0 +1,40 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types, Tier 2: structural induction over recursive functions
+-- (§2.14; see the "Tier 2: structural induction" block in
+-- test/test_refinecheck.ml). A relational postcondition on a RECURSIVE
+-- function cannot be discharged by Z3 alone -- `ins`'s `Node` arm recurses on
+-- `ins(l, x)`, a structurally SMALLER argument than the matched `t`, so
+-- refinecheck may soundly assume the induction hypothesis (that the
+-- recursive call already satisfies the postcondition) only at that call.
+-- Under that IH, `size(_) == size(t) + 1` is provable for both match arms,
+-- so the postcondition is PROVEN, not merely declared, and it propagates to
+-- `needEmpty(ins(Leaf, 5))`: the instantiated postcondition says the result
+-- has `size == size(Leaf) + 1 == 1`, which contradicts `needEmpty`'s
+-- `size(t) < 1`. This fires ONLY because the induction proof succeeded --
+-- if a future change broke structural induction (e.g. by no longer
+-- recognizing `ins(l, x)` as a smaller argument than `t`), the
+-- postcondition would fail to propagate and this call would go unreported,
+-- silently losing Tier 2 coverage. Accept-side companion of the underlying
+-- safety property: accept/t97 (an UNPROVEN postcondition must not propagate
+-- at all -- this file's counterpart shows a PROVEN one propagating exactly
+-- as it should).
+mod M do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn ins(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(ins(l, x), v, r)
+    end
+  end
+  fn needEmpty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn main() do
+    println(int_to_string(needEmpty(ins(Leaf, 5))))
+  end
+end

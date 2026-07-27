@@ -2231,6 +2231,17 @@ let compile filename =
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";
+    (* Deep-drop synthesis: route Perceus's bare EDecRC on a heap-owning
+       aggregate through a generated destructuring drop, so releasing a
+       container that was never pattern-matched also releases its children
+       (see lib/tir/drop.ml).  Skipped for the JS target, whose runtime is
+       GC'd and ignores RC ops entirely — there the generated drop would be a
+       pure-overhead walk of every dropped structure. *)
+    let tir =
+      if parse_target !target_str = March_tir.Llvm_emit.Js then tir
+      else March_tir.Drop.run tir in
+    snap_tir "tir-drop" tir;
+    stamp "drop";
     let tir = March_tir.Escape.escape_analysis tir in
     snap_tir "tir-escape" tir;
     stamp "escape";

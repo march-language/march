@@ -8050,7 +8050,13 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
              first_ty   (* role not involved — merged/transparent *)
            else
              SOffer branch_tys
-       end)
+       end
+     | Ast.ProtoStop _ ->
+       (* `stop` exits the enclosing `loop` for every role: it projects to
+          `SEnd` unconditionally, discarding both the surrounding [cont] and
+          any steps that follow it (those are rejected as unreachable at
+          protocol-declaration time — see [check_unreachable_after_loop]). *)
+       SEnd)
 
 (** Substitute occurrences of [SVar x] with [replacement] inside [s]. *)
 and subst_svar x replacement s =
@@ -8096,6 +8102,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
       chooser.Ast.txt ::
       List.concat_map (fun (_, steps) -> roles_of_steps steps) branches @
       roles_of_steps rest
+    | Ast.ProtoStop _ :: rest -> roles_of_steps rest
   in
   let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
   let multiparty = List.length roles > 2 in
@@ -8136,6 +8143,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
          let branch_msgs = List.concat_map (fun (_, steps) ->
              gather_msgs [] steps) branches in
          gather_msgs (branch_msgs @ acc) rest
+       | Ast.ProtoStop _ :: rest -> gather_msgs acc rest
      in
      let msgs = gather_msgs [] pdef.proto_steps in
      List.iter (fun (sender, receiver, msg_ty) ->
@@ -9418,8 +9426,10 @@ let rec check_decl env (d : Ast.decl) : env =
       Err.warning env.errors ~span:sp
         (Printf.sprintf "Protocol `%s` has no steps — it describes no communication."
            name.txt);
-    (* Validate each step for structural correctness. *)
-    let rec validate_step = function
+    (* Validate each step for structural correctness. [in_loop] tracks
+       whether we're nested (directly, or via a `choose` branch) inside a
+       `loop` block — `stop` is only meaningful there. *)
+    let rec validate_step ~in_loop = function
       | Ast.ProtoMsg (sender, receiver, msg_ty) ->
         if sender.txt = receiver.txt then
           Err.error env.errors ~span:sender.span
@@ -9433,16 +9443,23 @@ let rec check_decl env (d : Ast.decl) : env =
           Err.error env.errors ~span:sp
             (Printf.sprintf "Protocol `%s`: a `loop` block must contain at least one step."
                name.txt);
-        List.iter validate_step steps
+        List.iter (validate_step ~in_loop:true) steps
       | Ast.ProtoChoice (participant, branches) ->
         if List.length branches < 2 then
           Err.error env.errors ~span:participant.span
             (Printf.sprintf
                "Protocol `%s`: `choice` by `%s` must have at least 2 branches."
                name.txt participant.txt);
-        List.iter (fun (_, steps) -> List.iter validate_step steps) branches
+        List.iter (fun (_, steps) -> List.iter (validate_step ~in_loop) steps) branches
+      | Ast.ProtoStop stop_sp ->
+        if not in_loop then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
+                protocol already ends here if you just write nothing."
+               name.txt)
     in
-    List.iter validate_step pdef.proto_steps;
+    List.iter (validate_step ~in_loop:false) pdef.proto_steps;
     (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
        follows one at the same nesting level is unreachable. *)
     (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's
@@ -9465,6 +9482,25 @@ let rec check_decl env (d : Ast.decl) : env =
           Err.error env.errors ~span:sp
             (Printf.sprintf
                "Protocol `%s`: this `choose` branch ends in a `loop`, but the \
+                protocol continues after the `choose` — those following steps \
+                are projected into EVERY branch, so they can never run in this \
+                one. Move them inside the branches that can reach them."
+               name.txt)
+      | Ast.ProtoStop stop_sp :: rest ->
+        (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
+           discarding both [rest] here and the enclosing [tail] — same
+           unreachability shape as `loop`, just via early exit instead of
+           looping forever. *)
+        if rest <> [] then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: the steps after `stop` can never run — `stop` \
+                exits the loop immediately, so it must be the last step."
+               name.txt)
+        else if tail <> [] then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: this `choose` branch ends in `stop`, but the \
                 protocol continues after the `choose` — those following steps \
                 are projected into EVERY branch, so they can never run in this \
                 one. Move them inside the branches that can reach them."

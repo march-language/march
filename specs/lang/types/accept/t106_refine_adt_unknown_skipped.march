@@ -1,0 +1,15 @@
+-- Refinement types: an ADT-tag predicate applied to an UNKNOWN value (a
+-- variable, not a constructor literal) must be SKIPPED, not guessed. The
+-- definite-failure stance means refinecheck only reports when it has a
+-- concrete counterexample or a Z3-provable contradiction; a bare `Option(Int)`
+-- parameter carries no constructor information at all, so `is_Some(_)` is
+-- neither provably true nor provably false at `f`'s call to `unwrap`. Silence
+-- is correct here -- this is what distinguishes the checker from an
+-- over-eager one that would flag every unconstrained forward.
+mod M do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do unwrap(x) end
+  fn main() do
+    println(int_to_string(f(Some(1))))
+  end
+end
