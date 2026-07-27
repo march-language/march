@@ -3599,6 +3599,41 @@ let body_of name module_ =
   |> List.find (fun fn -> String.equal fn.March_tir.Tir.fn_name name)
   |> fun fn -> fn.March_tir.Tir.fn_body
 
+let test_opt_runs_single_use_inline_after_inline () =
+  let helper = impure_identity "single_use_helper" in
+  let main = mk_fn "main" (call_string "single_use_helper" (slit "seven")) in
+  let snapshots = ref [] in
+  let result =
+    March_tir.Opt.run
+      ~snap:(fun label _module_ -> snapshots := label :: !snapshots)
+      (mk_module [helper; main])
+  in
+  (match body_of "main" result with
+   | March_tir.Tir.EApp (fn, _)
+     when String.equal fn.March_tir.Tir.v_name "single_use_helper" ->
+       Alcotest.fail "optimizer left the one-use impure helper call intact"
+   | _ -> ());
+  Alcotest.(check bool) "DCE removes the inlined helper definition" false
+    (List.exists
+       (fun fn -> String.equal fn.March_tir.Tir.fn_name "single_use_helper")
+       result.March_tir.Tir.tm_fns);
+  let labels = List.rev !snapshots in
+  let index_of target =
+    let rec loop index = function
+      | [] -> None
+      | label :: rest ->
+          if String.equal label target then Some index else loop (index + 1) rest
+    in
+    loop 0 labels
+  in
+  match (index_of "tir-opt-1-inline",
+         index_of "tir-opt-1-single-use-inline",
+         index_of "tir-opt-1-cprop") with
+  | Some inline_index, Some single_use_index, Some cprop_index ->
+      Alcotest.(check bool) "single-use pass is between inline and cprop" true
+        (inline_index < single_use_index && single_use_index < cprop_index)
+  | _ -> Alcotest.fail "optimizer snapshots omitted the single-use inline phase"
+
 let test_single_use_impure_inlined () =
   let helper = impure_identity "helper" in
   let main = mk_fn "main" (call_string "helper" (slit "seven")) in
@@ -10853,6 +10888,8 @@ let codegen_suites =
       ("opt", [
         Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
         Alcotest.test_case "no_infinite_loop" `Quick test_opt_no_infinite_loop;
+        Alcotest.test_case "single-use inline phase" `Quick
+          test_opt_runs_single_use_inline_after_inline;
       ]);
       ("cprop", [
         Alcotest.test_case "simple_literal"       `Quick test_cprop_simple_literal;
