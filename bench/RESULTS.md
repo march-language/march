@@ -1,8 +1,11 @@
 # Cross-Language Benchmark Results
 
 **Date:** 2026-07-24 (after restoring Perceus FBIP reuse + removing the per-call TLS preemption check);
-simd-sum/simd-map/simd-map2 added 2026-07-27.
-**Machine:** Apple M-series (darwin 25.5.0, 14 cores)
+simd-sum/simd-map/simd-map2 added and last refreshed 2026-07-27.
+**Machine:** Apple M3 Max, 14 cores (10P+4E), 36 GB, macOS 26.5.2 (Darwin 25.5.0, arm64). This is a
+shared development machine, not a dedicated benchmark box — load average was 8.5 (1-minute) at the
+time of the simd-* refresh. See [docs/simd-benchmarks.md](../docs/simd-benchmarks.md) for the fuller
+write-up and per-source-file links.
 **Methodology:** `RUNS=10 bash bench/run_benchmarks.sh`; median, min, max reported. fib/binary-trees/
 tree-transform/list-ops measure subprocess wall-clock; the simd-* benchmarks self-time (see their
 section below for why).
@@ -15,7 +18,7 @@ section below for why).
 | OCaml    | 5.3.0   | `ocamlopt` native |
 | Rust     | 1.94.0  | `rustc -O` native |
 | Elixir   | 1.20.1-otp-29 | BEAM JIT (script mode) |
-| Python   | 3.14    | CPython, interpreted |
+| Python   | 3.14.3  | CPython, interpreted |
 | NumPy    | 2.5.1   | vectorized/BLAS reference (simd-* only, needs `bench/.venv`) |
 
 ---
@@ -31,9 +34,9 @@ section below for why).
 
 | SIMD benchmark (N=5M, self-timed) | March    | OCaml   | Rust    | Elixir   | Python   | NumPy   |
 |------------------------------------|----------|---------|---------|----------|----------|---------|
-| simd-sum                           | **1.2 ms** | 4.8 ms | 5.3 ms | 81.8 ms  | 289.4 ms | 1.0 ms  |
-| simd-map                           | 5.1 ms   | 5.5 ms  | **3.9 ms** | 248.2 ms | 192.2 ms | 2.2 ms  |
-| simd-map2                          | 287.5 ms | 7.0 ms  | **6.1 ms** | 102.0 ms | 197.2 ms | 1.7 ms  |
+| simd-sum                           | **1.3 ms** | 4.8 ms | 5.4 ms | 84.2 ms  | 308.8 ms | 1.0 ms  |
+| simd-map                           | 6.4 ms   | 5.5 ms  | **4.3 ms** | 252.8 ms | 193.5 ms | 2.4 ms  |
+| simd-map2                          | 299.2 ms | 7.0 ms  | **6.3 ms** | 105.9 ms | 201.8 ms | 1.7 ms  |
 
 Bold = fastest for that benchmark.
 
@@ -154,30 +157,30 @@ at parity (zero-cost abstraction, as advertised).
 
 | simd-sum(5M) | Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| **March**    | **1.2 ms** | 1.1 ms | 1.7 ms |
-| OCaml        | 4.8 ms   | 4.7 ms  | 5.3 ms  |
-| Rust         | 5.3 ms   | 5.3 ms  | 5.4 ms  |
-| Elixir       | 81.8 ms  | 78.3 ms | 86.1 ms |
-| Python       | 289.4 ms | 281.4 ms| 308.3 ms|
-| NumPy        | 1.0 ms   | 0.9 ms  | 1.0 ms  |
+| **March**    | **1.3 ms** | 0.9 ms | 3.2 ms |
+| OCaml        | 4.8 ms   | 4.7 ms  | 5.0 ms  |
+| Rust         | 5.4 ms   | 5.2 ms  | 5.5 ms  |
+| Elixir       | 84.2 ms  | 83.1 ms | 97.2 ms |
+| Python       | 308.8 ms | 288.1 ms| 391.3 ms|
+| NumPy        | 1.0 ms   | 0.9 ms  | 1.5 ms  |
 
 | simd-map(5M) | Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| March        | 5.1 ms   | 4.8 ms  | 5.4 ms  |
-| OCaml        | 5.5 ms   | 5.4 ms  | 5.8 ms  |
-| **Rust**     | **3.9 ms** | 3.8 ms | 4.1 ms |
-| Elixir       | 248.2 ms | 240.1 ms| 277.6 ms|
-| Python       | 192.2 ms | 188.8 ms| 195.9 ms|
-| NumPy        | 2.2 ms   | 2.1 ms  | 2.8 ms  |
+| March        | 6.4 ms   | 5.3 ms  | 7.6 ms  |
+| OCaml        | 5.5 ms   | 5.4 ms  | 5.6 ms  |
+| **Rust**     | **4.3 ms** | 3.9 ms | 5.1 ms |
+| Elixir       | 252.8 ms | 242.2 ms| 323.6 ms|
+| Python       | 193.5 ms | 191.3 ms| 202.2 ms|
+| NumPy        | 2.4 ms   | 2.1 ms  | 3.7 ms  |
 
 | simd-map2(5M)| Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| March        | 287.5 ms | 284.0 ms| 290.5 ms|
-| OCaml        | 7.0 ms   | 6.9 ms  | 7.0 ms  |
-| **Rust**     | **6.1 ms** | 4.6 ms | 6.4 ms |
-| Elixir       | 102.0 ms | 97.1 ms | 105.5 ms|
-| Python       | 197.2 ms | 187.8 ms| 200.7 ms|
-| NumPy        | 1.7 ms   | 1.5 ms  | 1.9 ms  |
+| March        | 299.2 ms | 296.8 ms| 315.6 ms|
+| OCaml        | 7.0 ms   | 7.0 ms  | 7.7 ms  |
+| **Rust**     | **6.3 ms** | 5.7 ms | 7.8 ms |
+| Elixir       | 105.9 ms | 101.7 ms| 140.6 ms|
+| Python       | 201.8 ms | 196.0 ms| 206.4 ms|
+| NumPy        | 1.7 ms   | 1.6 ms  | 1.9 ms  |
 
 **simd-sum and simd-map: the SIMD claim holds up.** March ties NumPy (a
 hand-tuned, BLAS-backed reference implementation) for the reduction, and is
@@ -189,7 +192,7 @@ rather than a hand-rolled numeric kernel.
 2026-07-27 to unblock `DataFrame.col_add_col`) has no inlining/vectorization
 treatment yet — every element dispatches through the boxed closure-call path
 (`march_alloc_float` per element, indirect call through the closure
-pointer). At 287.5 ms it is **slower than naive interpreted Python** (197.2
+pointer). At 299.2 ms it is **slower than naive interpreted Python** (201.8
 ms) for the same operation, and 47x slower than March's own `simd-map`. This
 is not a regression to fix reactively — it's a known, already-documented
 limitation (`docs/simd-vectorization.md` "Known limitations", added the same

@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: SIMD & Native Arrays
-nav_order: 9.6
+nav_order: 11.5
 permalink: /docs/simd/
 ---
 
@@ -74,16 +74,15 @@ your_file.march` and grepping the output for vector types (`<2 x double>`,
 
 ## Benchmarks
 
-`bench/run_benchmarks.sh` (also compares fib/binary-trees/tree-transform/list-ops
-against OCaml, Rust and Elixir) includes three Float-array benchmarks over 5M
-elements — March vs. hand-written OCaml/Rust, idiomatic Elixir, naive Python,
-and NumPy (a hand-tuned, BLAS-backed reference implementation):
+March vs. hand-written OCaml/Rust, idiomatic Elixir, naive Python, and NumPy
+(a hand-tuned, BLAS-backed reference implementation) on three Float-array
+operations over 5M elements:
 
 | Benchmark (N=5M)                       | March    | OCaml   | Rust    | NumPy   |
 |-----------------------------------------|----------|---------|---------|---------|
-| `sum(arr)`                              | **1.2 ms** | 4.8 ms | 5.3 ms | 1.0 ms |
-| `map(x -> x * 2.0 + 1.0)`                | 5.1 ms   | 5.5 ms  | 3.9 ms  | 2.2 ms |
-| `map2(a, b, (x, y) -> x + y)`            | 287.5 ms | 7.0 ms  | 6.1 ms  | 1.7 ms |
+| `sum(arr)`                              | **1.3 ms** | 4.8 ms | 5.4 ms | 1.0 ms |
+| `map(x -> x * 2.0 + 1.0)`                | 6.4 ms   | 5.5 ms  | 4.3 ms  | 2.4 ms |
+| `map2(a, b, (x, y) -> x + y)`            | 299.2 ms | 7.0 ms  | 6.3 ms  | 1.7 ms |
 
 `sum` and `map` are genuine wins — March ties a hand-tuned, BLAS-backed
 reference implementation (NumPy) and is competitive with hand-written
@@ -92,9 +91,9 @@ hand-rolled numeric kernel. `map2` is the honest counterpoint: it has none of
 the inlining/vectorization treatment described above yet, and the number
 shows it — slower even than naive interpreted Python for the same operation.
 
-Full methodology, per-language notes, and the Elixir/Python-naive rows are in
-[`bench/RESULTS.md`](https://github.com/march-language/march/blob/main/bench/RESULTS.md).
-Reproduce locally with `bash bench/run_benchmarks.sh` from a checkout.
+Full write-up (machine profile, methodology, per-language source links) at
+[SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/). Reproduce
+locally with `bash bench/run_benchmarks.sh` from a checkout.
 
 ## Known limitations
 
