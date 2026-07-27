@@ -3503,6 +3503,49 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r pre gen < native_arr_map_inline_capture_llvm_check.out; \
     test \"$pre\" -eq 9 -a \"$gen\" -eq 1 || { echo \"expected 3 inlined map calls (nmap_pre x3 = 9) and 1 general-path call (found nmap_pre=$pre general-calls=$gen)\" >&2; exit 1; }")))
 
+; P10 Stage 4 "Option A" — the map_float inline loop's wire-argument box
+; (march_alloc_float) must be allocated ONCE before the loop and reused
+; (a GEP+store into its .val field per iteration), not allocated fresh once
+; per element. Assert both correctness (the .expected diff below) and, via
+; -emit-llvm, that no march_alloc_float call appears inside the nmap_bodyN
+; loop-body block (only in the nmap_preN preheader that precedes it).
+(rule
+ (targets native_arr_map_inline_float_box_reuse native_arr_map_inline_float_box_reuse.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_float_box_reuse
+        native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse.out
+        (system "./native_arr_map_inline_float_box_reuse")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_float_box_reuse.expected native_arr_map_inline_float_box_reuse.out)))
+
+(rule
+ (targets native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse_llvm_check.out
+    (run bash -c
+     "awk '/^nmap_body[0-9]+:/{flag=1; next} /^[a-zA-Z_][a-zA-Z0-9_]*:/{flag=0} flag' native/native_arr_map_inline_float_box_reuse.ll | (grep -c march_alloc_float || true)")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (action
+  (run bash -c
+   "test \"$(cat native_arr_map_inline_float_box_reuse_llvm_check.out)\" -eq 0 || { echo 'march_alloc_float still called inside the map_float loop body -- the wire-argument box is no longer being reused across iterations' >&2; exit 1; }")))
+
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})

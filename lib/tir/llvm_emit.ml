@@ -631,6 +631,28 @@ let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
   emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
   let new_arr = fresh ctx "nmap_out" in
   emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
+  (* Float only: allocate ONE reusable wire-argument box before the loop,
+     instead of a fresh march_alloc_float per element. Safe because every
+     apply function unconditionally unboxes its argument as its very first
+     instruction and never touches the pointer again — the generated
+     prologue is always `call double @march_unbox_float(ptr %x.arg)`
+     before any user code runs (verified via -emit-llvm on a compiled
+     lambda), so nothing can observe or retain this box's identity across
+     calls. Overwriting its .val field between iterations is therefore
+     indistinguishable from fresh-boxing each time, at 1/N the allocation
+     cost. march_float_box layout is [rc:8][tag:4][pad:4][val:8] (24 bytes,
+     runtime/march_runtime.h) — val is at byte offset 16. The return-value
+     box (the apply body's OWN fresh allocation for its result) is not
+     reused here — that would require the callee's own codegen to
+     cooperate (an out-parameter or FBIP-style hint), a larger change than
+     this loop controls; see specs/optimizations.md P10 Stage 4 "Option B".
+     Int has no equivalent box — its wire value is a tagged immediate
+     (coerce's "i64"/"ptr" arm), not an allocation. *)
+  let arg_box = if is_float then begin
+      let b = fresh ctx "nmap_argbox" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b);
+      Some b
+    end else None in
   let cond_lbl = fresh_block ctx "nmap_cond" in
   let body_lbl = fresh_block ctx "nmap_body" in
   let exit_lbl = fresh_block ctx "nmap_exit" in
@@ -655,7 +677,14 @@ let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
   let x = fresh ctx "nmap_x" in
   emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
-  let wire_arg = coerce ctx elem_ty x "ptr" in
+  let wire_arg = match arg_box with
+    | Some b ->
+      let vfield = fresh ctx "nmap_argval" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
+      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
+      b
+    | None -> coerce ctx elem_ty x "ptr"
+  in
   let y = fresh ctx "nmap_y" in
   emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
   let y_native = coerce ctx "ptr" y elem_ty in

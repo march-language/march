@@ -1,0 +1,24 @@
+-- Regression: P10 Phase "Stage 4 Option A" — the map_float inline loop
+-- (Native_map_inline.ml + llvm_emit.ml's emit_native_map_inline_loop)
+-- allocates ONE reusable march_alloc_float wire-argument box before the
+-- loop and overwrites its .val field each iteration, instead of a fresh
+-- march_alloc_float call per element. Safe because every apply function
+-- unconditionally unboxes its argument as its very first instruction and
+-- never retains the pointer (verified via -emit-llvm on a compiled
+-- lambda) — nothing can observe the box's identity across calls.
+--
+-- Correctness is checked below; the dune rule also greps the emitted LLVM
+-- IR to confirm the box allocation is OUTSIDE the loop body block
+-- (nmap_body), not inside it, i.e. it happens once per call, not once per
+-- element.
+mod Main do
+  fn main() : () do
+    let arr = NativeArray.from_list_float(Cons(-3.5, Cons(-1.0, Cons(0.0, Cons(1.0, Cons(3.5, Nil))))))
+    let arr2 = NativeArray.map_float(arr, fn x -> x *. 2.0 +. 1.0)
+    println(NativeArray.to_list_float(arr2))   -- [-6., -1., 1., 3., 8.]
+
+    let f = 10.0
+    let arr3 = NativeArray.map_float(arr, fn x -> x +. f)
+    println(NativeArray.to_list_float(arr3))   -- [6.5, 9., 10., 11., 13.5]
+  end
+end

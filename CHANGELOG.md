@@ -27,6 +27,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Compiled `NativeArray.map_float` now allocates one boxed-float cell per
+  call and reuses it across all elements, instead of one per element. Cuts
+  allocation traffic and GC pressure substantially for large arrays (a
+  stress-test benchmark measured roughly 2x less wall-clock time); no
+  observable behavior change.
+
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,
   non-null allocation whose argument is its allocation size, and marks
   generated closure ABI trampolines `alwaysinline`. This gives LLVM useful
