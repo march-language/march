@@ -382,6 +382,123 @@ git log is authoritative for exact commits.
   every DataFrame boolean-column negation/is-not-null check compiled (e.g.
   `typed_array_map(data, fn b -> !b)` in `stdlib/dataframe.march`). New
   regression test `test/native/typed_array_map_closure_abi.march`.
+- Session types: steps that follow a `choose ... end` block are no longer
+  dropped from every role's projection. Both roles previously lost the
+  protocol's tail consistently enough that duality still passed and the
+  trailing message went silently unenforced; in multi-party protocols a
+  legal choice-then-message protocol could even be rejected with a spurious
+  role-mismatch error. A program that closes a session channel instead of
+  driving the post-choice steps is now correctly rejected.
+
+- Session types: `loop do ... end` protocols now genuinely loop. The
+  projection previously substituted the post-loop continuation into the
+  recursion point, so a `loop` was silently one unrolled iteration — a
+  second send/recv round was rejected with `` channel is at `End` ``. `loop`
+  now projects to the standard recursive µ-type, so a channel may run the
+  loop body any number of times. Since such a loop never exits, a protocol
+  step written after a `loop` block is now a compile error instead of
+  unreachable, silently-accepted dead code.
+
+- Session types: `Chan.new` on a protocol with more than two roles is now a
+  compile error instead of silently handing back the first two roles'
+  (non-dual) endpoints as a pair. `Chan.new` is the binary-only channel
+  constructor; `MPST.new` already existed for 3+-role protocols but nothing
+  stopped `Chan.new` from being called on one too. The error names the
+  protocol's actual role count and points at `MPST.new`.
+
+- **Session types: an unrefined `Chan.offer` continuation is no longer a live
+  soundness hole.** `match`-ing the label `Chan.offer` returns already refined
+  the paired channel's type per arm, but only when such a `match` existed —
+  driving the channel without one still typed it at the FIRST branch's
+  continuation, an unsound guess whenever the branches continue differently.
+  Interpreted, that guess could die with a dynamic type error; **compiled, it
+  was silent type confusion** — a peer that chose the other branch and sent a
+  `String` had that value's heap pointer read as an `Int`. A `Chan.offer`
+  whose branches continue identically is unaffected and still needs no
+  `match` to drive. `specs/lang/types/accept/t43_choose_offer_roundtrip.march`
+  and `specs/lang/golden/g39_chan_choose_offer.march`, both of which relied on
+  the old guess, are migrated to match on the label first (`g39`'s printed
+  output is unchanged).
+
+- **Session types: the `Chan.offer` fix above was also bypassable by
+  unification** — an ordinary type annotation was enough. The compiler marks
+  the exact channel `Chan.offer` hands back and rejects operations on it by
+  identity, but unifying two channel types only compared their protocol
+  states, never linked them. So `let ch : Chan(Role, Proto) = offered` — or an
+  `if`/`match` join with another channel, a record field, or passing the
+  channel to a function with an annotated parameter — produced a *different*,
+  unmarked channel at the same state, and every later check passed. The
+  annotation form typechecked clean and, compiled, printed the other branch's
+  `String` payload as an `Int`. Unifying an unrefined `Chan.offer`
+  continuation with any other channel type is now itself an error; only a
+  `match` on the paired label can make the channel usable. Reported at the
+  unification rather than propagating the mark, so the function-parameter form
+  is caught at the call site, where the mistake is.
+
+- **Lambda and nested-`fn` parameter type annotations are now enforced.** A
+  parameter annotation on a `fn ... -> ...` lambda — or on a named `fn`
+  declared inside a function body — was checked against nothing at all: the
+  lambda's function type was built from fresh type variables that were never
+  reconciled with the annotations, so the body was checked against the
+  annotation while every call site checked its argument against the unrelated
+  variable. `fn (x : String) -> ...` applied to `42` typechecked. For session
+  types this was the last soundness hole *found* in the `Chan.offer` fixes
+  above (the enforced routes are enumerated, not proved — see
+  `specs/lang/session-types.md`):
+  passing an unrefined continuation to `fn (c : Chan(Role, Proto)) -> ...`
+  reached neither the per-operation check nor the unification check, and the
+  compiled program read one branch's `String` payload as the other's `Int`.
+  Both are now rejected. Top-level `fn` parameters were never affected. If
+  this newly rejects code you had, the annotation and the actual argument type
+  genuinely disagree — the annotation was simply not being checked before.
+
+- **Session types: the `Chan.offer` fix above was itself bypassable by
+  shadowing the offer's label variable.** Rebinding the label name
+  (`let lbl = :ok`) after `let (lbl, ch) = Chan.offer(...)` left the OLD
+  name→channel linkage reachable, so `match`-ing the shadowed name still
+  refined (and un-marked) the original channel as if the peer had returned
+  that label — reopening the identical type-confusion hole through a
+  shadowed name instead of a missing `match`. Rebinding a name — via a plain
+  `let`, a lambda/`fn` parameter, or a `match` pattern — now always retires
+  any stale linkage for that name first.
+
+- **Session types: `match`-ing the label `Chan.offer` returns now checks
+  exhaustiveness against the protocol's actual branches, not the open `Atom`
+  universe.** A `match` handling every branch the peer could choose used to
+  warn `` missing case: _ `` anyway (`Atom` is open, so the checker could
+  never see the label as fully covered) — and a `match` that genuinely
+  omitted a branch produced the exact same warning, never an error. The one
+  signal meant to catch "you forgot a protocol branch" was indistinguishable
+  noise either way. Covering every branch (with or without a catch-all) is
+  now silent; a missing branch with no catch-all is a compile error naming
+  the branch. A `match` arm naming a label the protocol does *not* offer
+  (`:okk` alongside `:ok`) used to be accepted in silence and could never be
+  taken; it is now a warning naming the unknown label and the valid set —
+  a warning, not an error, since a redundant arm is dead code rather than a
+  soundness problem.
+
+- Session types: driving an unrefined `Chan.offer` channel from inside a `_`
+  catch-all arm no longer advises "Match on the label first", which read as
+  plainly wrong to anyone who had just written a `match`. The message now
+  explains the real problem: a catch-all does not identify which branch the
+  peer chose, so every label needs its own arm.
+
+- Session types: a `choose` branch that ends in a `loop` is now rejected when
+  the protocol continues after the `choose`. Those trailing steps are
+  projected into every branch, so in a branch that loops forever they can
+  never run — the same unreachable-step defect already rejected when the
+  steps are written directly after a `loop`, but reached through the
+  post-`choose` tail instead.
+
+- Session types: a protocol role that isn't also a declared type or actor no
+  longer produces a "not a known actor or type" hint. Roles are their own
+  namespace, so the hint was wrong by construction — it fired on the
+  reference chapter's own `Echo` example, and the conformance corpus worked
+  around it by declaring dummy `type` aliases for every role. Separately,
+  `MPST.choose`/`MPST.offer` (multi-party branching, not yet implemented) no
+  longer fall through to a misleading `` Unknown module `MPST` `` error;
+  the diagnostic now names the real problem and lists the supported
+  `Chan.*`/`MPST.*` operations.
 
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
@@ -601,6 +718,18 @@ git log is authoritative for exact commits.
   detail (source citations, golden-test IDs, dated findings) for compiler
   contributors, while the published pages state each caveat once, in plain
   language, without implementation citations.
+
+- The session-types reference chapters (`specs/lang/session-types.md`,
+  `specs/lang/core-march-types.md`, `specs/lang/core-march.md`) are
+  reconciled with the correctness fixes above. Most notably, the claim that
+  every `MPST.*` program segfaults compiled (exit 139) is corrected: a
+  3-role and a 4-role protocol both compile, run, and print output
+  identical to the interpreter, exit 0 — what remains genuinely
+  unimplemented is multiparty `choose`/`offer`, and MPST still has no
+  golden conformance witness. Also documented: `Chan.new(Proto)` returns
+  its endpoint pair ordered by alphabetically-sorted role name (not
+  declaration order), and `loop do ... end` projects to a genuine
+  recursive session type and must be a protocol's last step.
 
 ## [0.2.0] - 2026-07-23
 

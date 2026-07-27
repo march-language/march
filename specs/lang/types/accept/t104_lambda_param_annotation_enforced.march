@@ -1,0 +1,58 @@
+mod Main do
+  -- ACCEPT twin of `t102`/`t103` (2026-07-27) -- the false-positive direction
+  -- of enforcing lambda / nested-`fn` parameter annotations.
+  --
+  -- `bind_lam_param` now unifies an annotated parameter with the type the
+  -- caller expects it to have, closing the laundering route `t102` and `t103`
+  -- document. That is a GENERAL typechecker change (before it, every lambda
+  -- parameter annotation was checked against nothing), so this witness pins
+  -- the shapes that must keep typechecking:
+  --   * ordinary annotated lambda parameters, one and several, including one
+  --     passed as a higher-order argument where the callee supplies the
+  --     expected arrow (the `check_expr` lambda-peel path, the OTHER caller of
+  --     `bind_lam_param`);
+  --   * an annotated parameter of a named `fn` NESTED in a function body;
+  --   * a `Chan.offer` continuation that HAS been refined by a `match` on its
+  --     paired label, then passed through an annotated lambda parameter --
+  --     the mark is cleared for the arm, so the unify guard must stay silent.
+  needs IO.Console
+  type C = C
+  type S = S
+
+  protocol D2 do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  protocol E do
+    S -> C : Int
+  end
+
+  fn main() do
+    let inc  = fn (x : Int) -> x + 1
+    let join = fn (a : Int, b : String) -> string_concat(b, int_to_string(a))
+    let len  = fn (xs : List(Int)) -> List.length(xs)
+    let doubled = List.map([1, 2, 3], fn (x : Int) -> x * 2)
+    fn triple(y : Int) do y * 3 end
+
+    let (cc, sc) = Chan.new(D2)
+    let sc2 = Chan.choose(sc, :ok)
+    let sc3 = Chan.send(sc2, 7)
+    Chan.close(sc3)
+    let (lbl, cc2) = Chan.offer(cc)
+    match lbl do
+      :ok ->
+        -- Refined by this arm, so the annotated lambda parameter is fine.
+        let recv_int = fn (c : Chan(C, E)) -> Chan.recv(c)
+        let (v, cx) = recv_int(cc2)
+        Chan.close(cx)
+        println(int_to_string(v + inc(1) + triple(2) + len(doubled)))
+      :err ->
+        let (s, cy) = Chan.recv(cc2)
+        Chan.close(cy)
+        println(join(0, s))
+    end
+  end
+end
