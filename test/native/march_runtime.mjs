@@ -90,6 +90,10 @@ export function march_string_from_chars(list) {
   return s;
 }
 
+export function march_string_concat3(a, b, c) {
+  return a + b + c;
+}
+
 export function march_string_join(list, sep) {
   const parts = [];
   while (list.$ === "Cons") { parts.push(list._0); list = list._1; }

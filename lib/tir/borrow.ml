@@ -88,6 +88,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_eq",            [true; true]);
   ("string_concat",        [true; true]);
   ("++",                   [true; true]);
+  ("string_concat3",       [true; true; true]);
   ("string_byte_length",   [true]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);

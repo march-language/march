@@ -1980,6 +1980,7 @@ let builtin_bindings : (string * scheme) list =
     ("string_replace",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
+    ("string_concat3",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_join",         Mono (TArrow (t_list t_string, TArrow (t_string, t_string))));
     ("string_trim",         Mono (TArrow (t_string, t_string)));
     ("string_trim_start",   Mono (TArrow (t_string, t_string)));

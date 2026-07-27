@@ -9417,6 +9417,7 @@ declare i64    @march_hash_bool(i64 %x)
 declare i64  @march_string_byte_length(ptr %s)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
+declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)
 declare ptr  @march_string_join(ptr %list, ptr %sep)
 ; Float builtins
 declare double @march_float_abs(double %f)

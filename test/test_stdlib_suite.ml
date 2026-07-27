@@ -11515,6 +11515,78 @@ let test_string_search_edge_cases () =
     Alcotest.(check string) "compiled matches interpreted"
       search_edge_expected out
 
+(* A chain of `++` must produce ONE string, not one per link.
+   `a ++ b ++ c ++ d ++ e` parses left-deep, so evaluating it naively allocates
+   four strings and copies the growing prefix at every step -- O(k^2) bytes for
+   k parts. Collapsed into a single n-ary concat it is one allocation and one
+   copy pass.
+
+   Asserting on the ALLOCATION COUNT rather than on elapsed time makes this a
+   real regression gate: timing on this machine is not comparable across runs
+   (see the phase 2 plan's global constraints), while allocation counts are
+   exact and load-independent. *)
+let test_concat_chain_single_allocation () =
+  with_compiled_program ~tag:"march_catn"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod CatN do\n\
+      \  pfn go(a : String, b : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = a ++ b ++ a ++ b ++ a\n\
+      \      go(a, b, i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
+       end\n"
+    (fun err_file ->
+       let allocs = string_stat_of ~stderr_file:err_file "allocs" in
+       (* 100_000 iterations of a 5-part chain.
+            left-deep `++`:        4 allocations each (3 intermediates + result)
+                                   -> measured 400_004 before this change
+            concat3 folding:       2 each — concat3(concat3(a,b,a), b, a)
+                                   -> measured 200_004 after
+          The bound is 250_000: comfortably below the old 4-per-iteration and
+          above the 2-per-iteration the fixed-arity fold actually achieves.
+          Not 1 per iteration: string_concat3 is fixed-arity because March
+          builtin signatures are `Mono (TArrow ...)` and cannot be variadic, so
+          a 5-part chain needs two of them. *)
+       Alcotest.(check bool)
+         (Printf.sprintf
+            "5-part chain allocates ~2 per iteration, not 4 (got %d)"
+            allocs)
+         true (allocs < 250_000))
+
+(* The collapse must not change the VALUE, only the allocation count. Chains of
+   every length from 2 to 6, with empty operands mixed in, since an n-ary copy
+   loop that mishandles a zero-length part corrupts the result silently. *)
+let test_concat_chain_values () =
+  let src =
+    "mod CatVal do\n\
+    \  fn main() do\n\
+    \    let a = \"a\"\n\
+    \    let e = \"\"\n\
+    \    println(a ++ a)\n\
+    \    println(a ++ a ++ a)\n\
+    \    println(a ++ a ++ a ++ a)\n\
+    \    println(a ++ a ++ a ++ a ++ a ++ a)\n\
+    \    println(e ++ a ++ e ++ a ++ e)\n\
+    \    println(a ++ e ++ e)\n\
+    \    println(e ++ e ++ e)\n\
+    \  end\n\
+     end\n"
+  in
+  (* The final line is the empty string (e ++ e ++ e), which the stdout helper
+     trims -- so the expectation ends at the single "a". *)
+  let expected = "aa\naaa\naaaa\naaaaaa\naa\na" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_catval" ~src_text:src
+  in
+  Alcotest.(check string) "interpreted concat chain values" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -13077,6 +13149,10 @@ let stdlib_suites =
           test_string_index_of_from;
         Alcotest.test_case "substring search: edge cases, compiled + interpreted" `Slow
           test_string_search_edge_cases;
+        Alcotest.test_case "concat chain: one allocation, not one per link" `Slow
+          test_concat_chain_single_allocation;
+        Alcotest.test_case "concat chain: values unchanged at every length" `Slow
+          test_concat_chain_values;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);

@@ -4581,6 +4581,9 @@ let base_env : env =
           List.fold_right (fun p acc -> VCon ("Cons", [VString p; acc]))
             parts (VCon ("Nil", []))
         | _ -> eval_error "string_split: expected two strings"))
+  ; ("string_concat3", VBuiltin ("string_concat3", function
+        | [VString a; VString b; VString c] -> VString (a ^ b ^ c)
+        | _ -> eval_error "string_concat3: expected three strings"))
   ; ("string_join", VBuiltin ("string_join", function
         | [lst; VString sep] ->
           let rec to_strings = function
