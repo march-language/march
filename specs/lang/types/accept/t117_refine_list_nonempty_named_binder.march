@@ -1,0 +1,23 @@
+-- The NAMED-binder spelling of the same contract, satisfied. `{v : List(Int) |
+-- len(v) > 0}` and `{List(Int) | len(_) > 0}` denote the same value and must
+-- resolve to the same term; this file plus t115 pin that they agree on the
+-- accepting side, and reject/t114 and t115 pin that they agree on rejection.
+--
+-- The three spellings diverging is not hypothetical: `_` and `v` both resolved
+-- to a fresh constant while only the parameter's own name resolved to the
+-- actual, so renaming a parameter silently unenforced a working contract.
+mod T117 do
+
+  fn last(xs : {v : List(Int) | len(v) > 0}) : Int do
+    match xs do
+      Cons(h, Nil) -> h
+      Cons(_, t)   -> last(t)
+      Nil          -> panic("empty")
+    end
+  end
+
+  fn main() : Int do
+    last([4, 5, 6])
+  end
+
+end

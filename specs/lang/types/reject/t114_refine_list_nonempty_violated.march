@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: refinement violation
+-- The catch that the anonymous spelling could not make before 2026-07-27: an
+-- empty list literal passed to a `len(_) > 0` precondition. `len([])` folds to
+-- the concrete 0, so `0 > 0` is unsatisfiable — a DEFINITE failure, which is
+-- exactly the bar March requires before reporting.
+--
+-- If this file ever starts exiting 0, the `_` binder has stopped resolving to
+-- the call's actual argument and every `{List(a) | len(_) > 0}` contract in the
+-- stdlib has silently become a no-op. That is the regression this pins.
+mod T114 do
+
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn main() : Int do
+    head([])
+  end
+
+end
