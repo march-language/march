@@ -1465,6 +1465,33 @@ let test_session_chan_send_wrong_arity_error () =
   end|} in
   Alcotest.(check bool) "Chan.send wrong arity: error" true (has_errors ctx)
 
+(** A user `mod Chan` may legally name a member `new`/`recv`/`close` (they are
+    not lexer keywords, unlike `send`/`choose`/`offer`) with an arity that
+    doesn't match the builtin op of the same name — the catch-all arm must
+    recognize the name as SHADOWED (not "the compiler's own untouched
+    placeholder, called wrong") and stay silent, letting normal call
+    resolution typecheck the user's own function. This is the exact shape
+    that regressed when the catch-all's guard was a hand-kept name list
+    instead of a structural (physical-equality-against-`builtin_bindings`)
+    check: `Chan.recv/2` here has nothing to do with the builtin 1-arg
+    `Chan.recv(ch)` op, and must not be misdiagnosed as a wrong-arity call to
+    it. *)
+let test_session_user_chan_new_recv_close_shadow_not_swallowed () =
+  let ctx = typecheck {|mod App do
+    mod Chan do
+      fn new(a, b) do a end
+      fn recv(a, b) do a end
+      fn close(a, b) do a end
+    end
+    fn main() do
+      let x = Chan.new(1, 2)
+      let y = Chan.recv(x, 2)
+      let z = Chan.close(y, 2)
+      if z > 0 do println("ok") else println("no") end
+    end
+  end|} in
+  Alcotest.(check bool) "user Chan.new/recv/close (2-arity): no errors" false (has_errors ctx)
+
 (* ── Phase 1: Session type projection + duality ──────────────────────────── *)
 
 let test_session_projection_simple () =
@@ -8988,6 +9015,7 @@ let compiler_suites =
           Alcotest.test_case "session user MPST module not swallowed" `Quick test_session_user_mpst_module_not_swallowed;
           Alcotest.test_case "session user Chan module not swallowed" `Quick test_session_user_chan_module_not_swallowed;
           Alcotest.test_case "session Chan.send wrong arity error" `Quick test_session_chan_send_wrong_arity_error;
+          Alcotest.test_case "session user Chan.new/recv/close shadow not swallowed" `Quick test_session_user_chan_new_recv_close_shadow_not_swallowed;
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;

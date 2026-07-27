@@ -4721,37 +4721,47 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* Any other `MPST.*` / `Chan.*` spelling reaching this point either (a) is
        one of the six real `Chan.*` ops called with the wrong shape (the
        arity-specific arms above only match the CORRECT arg count, so falling
-       through to here with one of these six exact names means the call is
-       malformed) or (b) does not resolve as an ordinary bound name at all (a
-       misspelling, an unimplemented `MPST.choose`/`MPST.offer`, etc). Both are
-       treated as a session-op diagnostic rather than a library-lookup
-       failure — falling through to the generic qualified-name path would
-       otherwise produce a misleading "Unknown module `MPST`".
-       `chan_placeholder_ops` MUST be excluded from the `lookup_var` probe: the
-       six `Chan.*` ops are pre-registered in the builtin-vars table (a
-       generic curried placeholder purely to put the name in scope — see the
-       comment there) so `lookup_var` finds them regardless of how many
-       arguments the call actually passed, and would otherwise defeat this
-       arm's OWN advertised "wrong number of arguments" coverage for exactly
-       the names it exists to check (e.g. `Chan.send(1)`, one arg instead of
-       two, silently falling through to the generic placeholder's curried
-       type instead of erroring). MPST has no such placeholder table entries,
-       so `MPST.*` names are never in this set and always go through the
-       ordinary `lookup_var`/`resolve_qualified_var` resolution probe, which
-       mirrors the two steps the ordinary `EVar` fallthrough (above) tries
-       first — a genuinely-defined `MPST.helper` or `Chan.something_real` (a
-       user module actually named `MPST`/`Chan`) is left alone and reaches
-       that path unharmed; only names that would ALSO fail there get the
-       session-op message. *)
+       through to here with one of these six exact names, still bound to the
+       compiler's OWN untouched placeholder, means the call is malformed) or
+       (b) does not resolve as an ordinary bound name at all (a misspelling,
+       an unimplemented `MPST.choose`/`MPST.offer`, etc). Both are treated as
+       a session-op diagnostic rather than a library-lookup failure — falling
+       through to the generic qualified-name path would otherwise produce a
+       misleading "Unknown module `MPST`".
+
+       The distinction between "still the compiler's placeholder" and "a user
+       module shadowed this name" is made STRUCTURALLY, not by a hand-kept
+       name list: `builtin_bindings` (the table a few hundred lines above
+       that seeds `Chan.new`/`send`/`recv`/`close`/`choose`/`offer` into
+       `base_env` as generic curried placeholders — see the comment there,
+       "these entries just put the names in scope; the real typing is done in
+       the Chan.* EApp branches") is evaluated exactly once at program
+       startup, so each entry's `scheme` is a single fixed heap object. A
+       fresh top-level `env` starts with that EXACT object bound under each
+       name (`bind_vars` calls `StrMap.add`, which stores the value, not a
+       copy). If a user later writes `mod Chan do fn recv(a, b) do ... end
+       end`, module-export folding REBINDS "Chan.recv" in `env.vars` to a
+       brand-new scheme built while typechecking that function — a different
+       heap object. So `sch == placeholder_sch` (physical equality) is true
+       iff the name was never shadowed: exactly the "still a bare, unshadowed
+       compiler builtin, and we already fell through its arity-specific arm"
+       case this branch needs to catch, with no risk of a false positive on a
+       real user binding and no separate list to keep in sync with the table.
+       MPST has no placeholder table entries at all, so `MPST.*` names always
+       take the `None`-from-`lookup_var` branch below (mirroring the two
+       resolution steps the ordinary `EVar` fallthrough, above, tries first)
+       — a genuinely-defined `MPST.helper` (a user module actually named
+       `MPST`) is left alone and reaches that path unharmed; only names that
+       would ALSO fail there get the session-op message. *)
     | Ast.EApp (Ast.EVar ({ txt = op; _ } as n), _, sp)
       when ((String.length op > 5 && String.sub op 0 5 = "MPST.")
          || (String.length op > 5 && String.sub op 0 5 = "Chan."))
-        && (let chan_placeholder_ops =
-              [ "Chan.new"; "Chan.send"; "Chan.recv";
-                "Chan.close"; "Chan.choose"; "Chan.offer" ] in
-            List.mem op chan_placeholder_ops
-            || ((match lookup_var op env with Some _ -> false | None -> true)
-                && (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true))) ->
+        && (match lookup_var op env with
+            | None -> (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true)
+            | Some sch ->
+              (match List.assoc_opt op builtin_bindings with
+               | Some placeholder_sch -> sch == placeholder_sch
+               | None -> false)) ->
       Err.error env.errors ~span:sp
         (Printf.sprintf
            "`%s` is not a session-channel operation I know, or it was called \
