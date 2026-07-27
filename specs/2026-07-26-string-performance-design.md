@@ -138,6 +138,14 @@ Tallied:
   `memcpy` calls in string operations, so copying is attributable per-operation
   rather than as one lump.
 - **frees** and **peak live string bytes**
+- **non-string heap allocations** (`obj_allocs`, `obj_alloc_bytes`) from
+  `march_alloc`. Added during implementation, not in the original design: the
+  cost of a list-returning string operation lives almost entirely in cons
+  cells, which are *not* strings and so never reach `march_string_alloc`.
+  Without this counter `string_split_large` and `string_slice_walk` report
+  near-identical `allocs` (measured 9,000,126 vs 9,000,006) and the pair cannot
+  attribute anything to the list structure — defeating the comparison the two
+  benchmarks exist to make. With it, the same pair reads 9,000,120 vs 0.
 
 **Reporting:** an `atexit` handler prints a table to stderr when the flag is on.
 Deliberately *not* a March builtin — a new builtin would mean touching

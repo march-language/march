@@ -118,6 +118,17 @@ static _Atomic int64_t str_copy_bytes;
 static _Atomic int64_t str_live_bytes;
 static _Atomic int64_t str_peak_bytes;
 static _Atomic int64_t str_hist[MARCH_STR_NBUCKETS];
+/* Non-string heap objects (march_alloc): cons cells, tuples, ADT payloads.
+ * Needed because the cost of a list-returning string operation lives almost
+ * entirely here, NOT in the string counters — String.split allocates one
+ * string AND one cons cell per field, but the cons cell goes through
+ * march_alloc and is invisible to str_alloc_count.  Without this,
+ * bench/string_split_large and bench/string_slice_walk report near-identical
+ * `allocs` (measured: 9_000_126 vs 9_000_006) and the pair cannot attribute
+ * cost to the list structure at all — which is the comparison they exist to
+ * make. */
+static _Atomic int64_t obj_alloc_count;
+static _Atomic int64_t obj_alloc_bytes;
 
 static const char *str_hist_names[MARCH_STR_NBUCKETS] = {
     "hist_le7", "hist_le15", "hist_le23", "hist_le31",
@@ -148,6 +159,10 @@ static void str_stats_dump(void) {
             (long long)atomic_load_explicit(&str_copy_bytes, memory_order_relaxed));
     fprintf(stderr, "march_string_stats peak_live_bytes %lld\n",
             (long long)atomic_load_explicit(&str_peak_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats obj_allocs %lld\n",
+            (long long)atomic_load_explicit(&obj_alloc_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats obj_alloc_bytes %lld\n",
+            (long long)atomic_load_explicit(&obj_alloc_bytes, memory_order_relaxed));
     for (int i = 0; i < MARCH_STR_NBUCKETS; i++)
         fprintf(stderr, "march_string_stats %s %lld\n", str_hist_names[i],
                 (long long)atomic_load_explicit(&str_hist[i], memory_order_relaxed));
@@ -279,6 +294,10 @@ void *march_alloc(int64_t sz) {
     h->tag = 0;
     h->pad = 0;
     MARCH_ALLOC_BUMP();
+    if (str_stats_on()) {
+        atomic_fetch_add_explicit(&obj_alloc_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&obj_alloc_bytes, sz, memory_order_relaxed);
+    }
     if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
     return p;
 }

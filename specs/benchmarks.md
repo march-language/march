@@ -161,6 +161,38 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_split_large.march — Split an 800KB CSV-shaped buffer
+
+**Command:** 60 × `String.split(buf, ",")` over 800KB (50K rows, 150K fields)
+**Expected output:** `checksum=39000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.split` | One string + one cons cell + one copy per field |
+| Cons-cell allocation | ~150K cells per iteration |
+| Peak memory | Every field is live simultaneously |
+
+**Comparison baseline:** C (in-place `strtok`, zero copy), Rust (`split` iterator, zero copy), Go (`strings.Split`), Python (`str.split`).
+**What to watch:** **Paired with `string_slice_walk`** — same buffer, same field shape, same field count, on purpose. Changing one file's size knob without the other invalidates the comparison. Measured together (60 iterations): `obj_allocs` 9,000,120 vs 0 (the cons cells), `copy_bytes` 39.8MB vs 27.8MB, `peak_live_bytes` **39.8MB vs 800KB**. Note that `allocs` — the *string* counter — is nearly identical for the two (9,000,126 vs 9,000,006), because cons cells go through `march_alloc` rather than `march_string_alloc`; use `obj_allocs` for list overhead.
+
+---
+
+## bench/string_slice_walk.march — Slice 150K fields out of 800KB, no list
+
+**Command:** 60 × 150K `String.slice` calls over 800KB, building no list
+**Expected output:** `checksum=27000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.slice` | Allocates and copies off a large owner — no view representation exists |
+| Zero cons cells | The controlled difference vs `string_split_large` |
+| Flat peak memory | One field live at a time |
+
+**Comparison baseline:** C (pointer walk, zero copy), Rust (`&str` slices, zero copy), Go (slicing, zero copy), Python (`str` slicing, copies).
+**What to watch:** See `string_split_large`. Languages with string views do this with no allocation at all, so the gap is the size of the prize. This benchmark walks by arithmetic rather than by searching: the natural formulation (`index_of` the separator, slice off the tail, recurse) is O(n²) in bytes copied, since `String.index_of` has no start-offset variant and the tail must be re-sliced every step. Search cost is measured separately by `string_scan`.
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
