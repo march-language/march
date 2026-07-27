@@ -10,9 +10,21 @@ mod Main do
   -- protocol as "not duals." The chooser (Client) picks `:ok` and sends an
   -- Int (42 + 1 = 43, the same Task-1-fixed odd-payload class as g38); the
   -- offerer (Server) receives the label, then the Int, and prints both.
-  -- Roles are declared as their own nullary types to keep the undeclared-
-  -- participant HINT (F8) quiet; every send precedes its matching recv in
-  -- program order (no scheduler — F6).
+  -- Roles are declared as their own nullary types (originally to keep the
+  -- undeclared-participant HINT, F8, quiet — that hint was REMOVED on
+  -- 2026-07-24, so the declarations are now only documentation); every send
+  -- precedes its matching recv in program order (no scheduler — F6).
+  --
+  -- Session-types Task 4 (2026-07-24, F5 residual): because `Decision`'s two
+  -- branches continue DIFFERENTLY (`Int` vs `String`), the channel `Chan.offer`
+  -- hands back is no longer usable at the first branch's guessed type — it
+  -- must be refined by matching on the returned label first. The offering
+  -- side below matches on `lbl` and drives the channel inside the matched
+  -- arm; each arm's `println`s reproduce the pre-Task-4 output byte-for-byte
+  -- (`:ok` then `43`) since the peer always chooses `:ok`. A `_` catch-all
+  -- arm added during Task 4 (to silence the then-open-universe Atom
+  -- exhaustiveness warning) was dropped once Task 5 made the offer-label
+  -- universe CLOSED; the arm was unreachable, so the output is unchanged.
   type Client = Client
   type Server = Server
 
@@ -29,9 +41,17 @@ mod Main do
     let cc3 = Chan.send(cc2, 42 + 1)
     Chan.close(cc3)
     let (lbl, sc2) = Chan.offer(sc)
-    let (n, sc3) = Chan.recv(sc2)
-    Chan.close(sc3)
-    println(lbl)
-    println(int_to_string(n))
+    match lbl do
+      :ok ->
+        let (n, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(int_to_string(n))
+      :err ->
+        let (s, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(s)
+    end
   end
 end

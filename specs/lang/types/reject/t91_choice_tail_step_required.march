@@ -1,0 +1,39 @@
+-- EXPECT-ERROR: Chan.close: channel is at
+mod Main do
+  -- Session types: a step AFTER a `choose ... end` block is part of every
+  -- branch's continuation (project_steps' ProtoChoice arm, 2026-07-24 fix).
+  -- Pre-fix the trailing `Client -> Server : String` was dropped from BOTH
+  -- roles' projections — consistently, so duality still passed — and this
+  -- program (which closes instead of sending the trailing String) was
+  -- wrongly ACCEPTED. Post-fix `cc4` is at `Send(String, End)` and closing
+  -- it is a session-state error.
+  needs IO.Console
+  type Client = Client
+  type Server = Server
+
+  protocol Tail do
+    Client -> Server : Int
+    choose by Server:
+      ok  -> Server -> Client : Bool
+      err -> Server -> Client : Bool
+    end
+    Client -> Server : String
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Tail)
+    let cc2 = Chan.send(cc, 1)
+    let (n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.choose(sc2, :ok)
+    let sc4 = Chan.send(sc3, true)
+    let (lbl, cc3) = Chan.offer(cc2)
+    match lbl do
+      :ok ->
+        let (b, cc4) = Chan.recv(cc3)
+        Chan.close(cc4)
+      :err ->
+        let (b, cc4) = Chan.recv(cc3)
+        Chan.close(cc4)
+    end
+  end
+end
