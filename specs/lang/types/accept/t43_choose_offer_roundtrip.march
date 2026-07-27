@@ -13,6 +13,14 @@ mod Main do
   -- longer usable at the guessed first-branch type -- driving it without a
   -- `match` on the paired label is now a hard error (reject/t95). This
   -- witness matches on `lbl` and drives the channel inside the matched arm.
+  --
+  -- Task 5's closed-label exhaustiveness check (reject/t96) makes this the
+  -- ACCEPT twin: every protocol branch has its own arm and NO `_` catch-all,
+  -- so the closed-label check passes on the strength of the arms themselves.
+  -- (A `_` arm was added here during Task 4 to silence the pre-Task-5 open-
+  -- universe Atom warning; it made `has_catch_all` true, which short-circuits
+  -- the very property this program is credited with witnessing, so it was
+  -- removed once Task 5 landed.)
   type Client = Client
   type Server = Server
 
@@ -40,7 +48,6 @@ mod Main do
         Chan.close(sc3)
         println(lbl)
         println(s)
-      _ -> println("other")
     end
   end
 end
