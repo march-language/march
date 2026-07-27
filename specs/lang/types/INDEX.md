@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t92 accept, t01–t97 reject)
+# Typing corpus index (t01–t92 accept, t01–t97 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool with no reuse across sides, so the highest id on each side is NOT that side's file count (91 accept, 87 reject; see the Result line below) -->
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -239,7 +239,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 171/171 — 90 accept, 81
+Exit 0 iff every program behaves as declared (currently 178/178 — 91 accept, 87
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness

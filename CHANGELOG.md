@@ -333,6 +333,18 @@ git log is authoritative for exact commits.
   contributors, while the published pages state each caveat once, in plain
   language, without implementation citations.
 
+- The session-types reference chapters (`specs/lang/session-types.md`,
+  `specs/lang/core-march-types.md`, `specs/lang/core-march.md`) are
+  reconciled with the correctness fixes above. Most notably, the claim that
+  every `MPST.*` program segfaults compiled (exit 139) is corrected: a
+  3-role and a 4-role protocol both compile, run, and print output
+  identical to the interpreter, exit 0 — what remains genuinely
+  unimplemented is multiparty `choose`/`offer`, and MPST still has no
+  golden conformance witness. Also documented: `Chan.new(Proto)` returns
+  its endpoint pair ordered by alphabetically-sorted role name (not
+  declaration order), and `loop do ... end` projects to a genuine
+  recursive session type and must be a protocol's last step.
+
 ## [0.2.0] - 2026-07-23
 
 ### Fixed

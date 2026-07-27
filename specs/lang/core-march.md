@@ -2538,14 +2538,29 @@ programs (§5) witness this directly:
   does not spuriously reject the protocol), the chooser picking `:ok` and
   sending an odd Int (`43`) after the label. `MATCH` under `verify.sh`.
 
-**MPST DIVERGES compiled and is explicitly NOT golden (F3).** Every `MPST.*`
-program this task tried — including an all-`String`-payload, correctly
-interleaved, cleanly-typechecking 3-role relay — segfaults compiled (exit
-139) while running correctly interpreted. The compiled MPST C runtime
-(`runtime/march_extras.c:1463+`) is not correctly wired to the lowered
-representation (see the filed finding for the live repro). So: binary
-channels are IN the golden corpus after F1/F2; MPST is interp-only and stays
-OUT of the golden corpus until its own fix lands.
+**F3 RE-VERIFIED 2026-07-24: MPST send/recv/close runs correctly compiled.**
+An earlier version of this document reported that every `MPST.*` program
+segfaulted compiled (exit 139) while running correctly interpreted, and
+attributed it to the compiled MPST C runtime
+(`runtime/march_extras.c:1463+`) not being correctly wired to the lowered
+representation. Re-run live for this task: a 3-role and a 4-role MPST
+protocol (`Int`/`Bool`/`String` payloads, `MPST.new`/`send`/`recv`/`close`
+only) both compile, run, and print output identical to the interpreter,
+exit 0 (full transcript in `specs/todos.md`) — the segfault does not
+reproduce. **MPST is still NOT in the golden corpus**, though: the property
+above is verified only by this ad hoc transcript, not by a mechanically-
+pinned `specs/lang/golden/` witness the way binary channels are (§5) — a
+golden MPST program is future work, not a claim this re-verification makes.
+Separately, **multiparty `choose`/`offer` remain unimplemented** — there is
+no `MPST.choose`/`MPST.offer` typing arm at all (§2.7.8 of the typing
+reference only defines the binary `Chan.*` six and the multi-party
+`new`/`send`/`recv`/`close` four). Calling either name now gets a clear,
+explicit compile error (`typecheck.ml:4756–4773`) — `` `MPST.choose` is not
+a session-channel operation I know, or it was called with the wrong number
+of arguments. Binary channels: Chan.new/send/recv/close/choose/offer.
+Multi-party: MPST.new/send/recv/close — multi-party `choose`/`offer` are not
+implemented yet. `` — rather than the misleading "Unknown module `MPST`"
+one might otherwise expect, or a runtime crash.
 
 #### 4.11.6 Two scope boundaries, both filed as findings, neither "fixed" here
 
@@ -3202,11 +3217,15 @@ Phase-1 tasks did):**
   (`VChan`/`chan_endpoint`), `Chan.new`/`send`/`recv`/`close`,
   `Chan.choose`/`offer` as literal send/recv of a label atom, the
   interp==compiled property for the binary channel plane now that the
-  concurrent F1/F2 codegen fix lands (witnessed by `g38`/`g39`), and the MPST
-  compiled-segfault (F3), no-scheduler-deadlock (F6), partial-linearity (F7),
-  and HINT-noise (F8) findings. The typing side (`protocol`/projection/
-  duality/per-op session-state typing) is `core-march-types.md` §2.7;
-  MPST remains interp-only and out of the golden corpus (F3);
+  concurrent F1/F2 codegen fix lands (witnessed by `g38`/`g39`), and the
+  no-scheduler-deadlock (F6) and partial-linearity (F7 residual) findings.
+  MPST's compiled-segfault finding (F3) was RE-VERIFIED 2026-07-24 and no
+  longer reproduces — see §4.11.5 — and the HINT-noise finding (F8) was
+  removed the same day (protocol roles are their own namespace, no "unknown
+  participant" hint fires). The typing side (`protocol`/projection/duality/
+  per-op session-state typing) is `core-march-types.md` §2.7; MPST still has
+  no golden corpus witness (§4.11.5) — that's a coverage gap, not a known
+  divergence;
 - sigils.
 
 (This is the same deferred set §0 now names. Everything that was on the ORIGINAL
