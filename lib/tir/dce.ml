@@ -69,48 +69,38 @@ let rec called_fns : Tir.expr -> StringSet.t = function
 (** Transitive reachability from entry points.
     Uses [free_vars] (not [called_fns]) so that closure apply-function
     pointers stored in EAlloc args are also treated as references. *)
+let root_names (m : Tir.tir_module) : string list =
+  let roots = ref StringSet.empty in
+  let add name = roots := StringSet.add name !roots in
+  let is_main_name name =
+    name = "main"
+    || let suffix = ".main" in
+       let name_len = String.length name
+       and suffix_len = String.length suffix in
+       name_len >= suffix_len
+       && String.sub name (name_len - suffix_len) suffix_len = suffix
+  in
+  List.iter
+    (fun (fn : Tir.fn_def) ->
+      if is_main_name fn.Tir.fn_name then add fn.Tir.fn_name;
+      if fn.Tir.fn_name = Tir_names.setup_fn_name
+         || fn.Tir.fn_name = Tir_names.setup_all_fn_name
+         || Tir_names.is_migrate_fn_name fn.Tir.fn_name
+      then add fn.Tir.fn_name)
+    m.Tir.tm_fns;
+  List.iter add m.Tir.tm_exports;
+  List.iter (fun (name, _) -> add name) m.Tir.tm_tests;
+  if StringSet.is_empty !roots then
+    List.iter (fun (fn : Tir.fn_def) -> add fn.Tir.fn_name) m.Tir.tm_fns;
+  StringSet.elements !roots
+
 let reachable_fns (m : Tir.tir_module) : StringSet.t =
   let fn_map : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun fd -> Hashtbl.add fn_map fd.Tir.fn_name fd) m.Tir.tm_fns;
   let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
-  (* Seed with main / *.main (module-prefixed) + any explicit exports
-     (e.g. WASM island functions) + any test functions registered in
-     tm_tests (test-mode entry points).  If no seeds found, seed with all
-     functions. *)
-  let has_seeds = ref false in
-  let is_main_name (name : string) =
-    name = "main" ||
-    (let suf = ".main" in
-     let ln = String.length name and ls = String.length suf in
-     ln >= ls && String.sub name (ln - ls) ls = suf)
-  in
-  List.iter (fun (fd : Tir.fn_def) ->
-    if is_main_name fd.Tir.fn_name then begin
-      Queue.push fd.Tir.fn_name queue; has_seeds := true
-    end
-  ) m.Tir.tm_fns;
-  List.iter (fun name -> Queue.push name queue; has_seeds := true) m.Tir.tm_exports;
-  List.iter (fun (fn_name, _) ->
-    Queue.push fn_name queue; has_seeds := true
-  ) m.Tir.tm_tests;
-  (* Test-mode setup/setup_all are called from the generated @main — seed them. *)
-  List.iter (fun (fd : Tir.fn_def) ->
-    if fd.Tir.fn_name = Tir_names.setup_fn_name || fd.Tir.fn_name = Tir_names.setup_all_fn_name
-    then begin Queue.push fd.Tir.fn_name queue; has_seeds := true end
-  ) m.Tir.tm_fns;
-  (* Hot-reload migration entry points: seeded like exports so the __migrate_<Actor>
-     alias in llvm_emit survives DCE.  Not reachable from main but dlsym'd at
-     deploy time by march_reload.c. *)
-  List.iter (fun (fd : Tir.fn_def) ->
-    let n = fd.Tir.fn_name in
-    if Tir_names.is_migrate_fn_name n then begin
-      Queue.push n queue; has_seeds := true
-    end
-  ) m.Tir.tm_fns;
-  if not !has_seeds then
-    List.iter (fun fd -> Queue.push fd.Tir.fn_name queue) m.Tir.tm_fns;
+  List.iter (fun name -> Queue.push name queue) (root_names m);
   while not (Queue.is_empty queue) do
     let name = Queue.pop queue in
     if not (StringSet.mem name !visited) then begin

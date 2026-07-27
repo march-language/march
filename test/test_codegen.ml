@@ -3847,6 +3847,34 @@ let test_dce_unreachable_topfn () =
   Alcotest.(check bool) "unused removed" false (List.mem "unused" fn_names);
   Alcotest.(check bool) "main kept"      true  (List.mem "main" fn_names)
 
+let test_dce_root_names () =
+  let plain = mk_fn "plain" (March_tir.Tir.EAtom (ilit 0)) in
+  let main = mk_fn "App.main" (March_tir.Tir.EAtom (ilit 0)) in
+  let exported = mk_fn "rpc__rpc_stub" (March_tir.Tir.EAtom (ilit 0)) in
+  let setup = mk_fn March_tir.Tir_names.setup_fn_name
+      (March_tir.Tir.EAtom (ilit 0)) in
+  let migrate = mk_fn "actor_migrate_state" (March_tir.Tir.EAtom (ilit 0)) in
+  let module_ =
+    { (mk_module [plain; main; exported; setup; migrate]) with
+      March_tir.Tir.tm_exports = ["rpc__rpc_stub"];
+      tm_tests = [("plain", "plain test")] }
+  in
+  let roots = March_tir.Dce.root_names module_ in
+  List.iter
+    (fun name ->
+      Alcotest.(check bool) (name ^ " is rooted") true (List.mem name roots))
+    ["plain"; "App.main"; "rpc__rpc_stub";
+     March_tir.Tir_names.setup_fn_name; "actor_migrate_state"]
+
+let test_dce_root_names_no_seed_falls_back_to_all () =
+  let module_ =
+    mk_module
+      [mk_fn "a" (March_tir.Tir.EAtom (ilit 0));
+       mk_fn "b" (March_tir.Tir.EAtom (ilit 1))]
+  in
+  Alcotest.(check (list string)) "all functions are roots"
+    ["a"; "b"] (March_tir.Dce.root_names module_)
+
 (* ── Optimizer coordinator ───────────────────────────────────────── *)
 
 let test_opt_fixpoint () =
@@ -10152,6 +10180,9 @@ let codegen_suites =
         Alcotest.test_case "impure_let_kept"     `Quick test_dce_impure_let_kept;
         Alcotest.test_case "used_let_kept"       `Quick test_dce_used_let_kept;
         Alcotest.test_case "unreachable_top_fn"  `Quick test_dce_unreachable_topfn;
+        Alcotest.test_case "root_names"           `Quick test_dce_root_names;
+        Alcotest.test_case "root_names_no_seed_falls_back_to_all" `Quick
+          test_dce_root_names_no_seed_falls_back_to_all;
       ]);
       ("opt", [
         Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
