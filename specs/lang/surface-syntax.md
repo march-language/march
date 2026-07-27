@@ -521,9 +521,10 @@ Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list, so chaining
 it as a loop accumulator (`acc = acc ++ x`) copies `acc` again on every
-iteration — O(n²) total. String interpolation (`"${a}${b}"`) does not have
-this problem: it desugars to a single `string_join` call, not a chain of
-`++`. For accumulating many string segments yourself (e.g. across loop
+iteration — O(n²) total. String interpolation (`"${a}${b}${c}${d}"`) does not
+have this problem: past a few segments it desugars to a single `string_join`
+call rather than a chain of `++`. For accumulating many string segments
+yourself (e.g. across loop
 iterations), use `IOList` (`stdlib/iolist.march`), which builds a tree and
 defers concatenation to a single O(n) pass at the end.
 

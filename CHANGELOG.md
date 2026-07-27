@@ -13,11 +13,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
-- String interpolation (`"${a}${b}"`) now desugars to a single `string_join`
-  call over all parts instead of a left-deep chain of `++`, which re-copied
-  the growing prefix on every append. This makes a k-part interpolation O(n)
-  instead of O(k²) in total bytes copied, with no change in the resulting
-  string value.
+- String interpolation with many parts (`"${a}${b}${c}${d}"`) now desugars to
+  a single `string_join` call over all parts instead of a left-deep chain of
+  `++`, which re-copied the growing prefix on every append. This makes a
+  k-part interpolation O(n) instead of O(k²) in total bytes copied, with no
+  change in the resulting string value. Short interpolations (up to three
+  segments, e.g. `"count: ${n}"`) keep the `++` chain, which measures faster
+  at that size than materializing a list to join.
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,
   non-null allocation whose argument is its allocation size, and marks
   generated closure ABI trampolines `alwaysinline`. This gives LLVM useful

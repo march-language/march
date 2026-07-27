@@ -314,8 +314,12 @@ let rec try_collect_list acc = function
   | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> try_collect_list (hd :: acc) tl
   | _ -> None
 
-(** Try to reconstruct string interpolation from desugared
-    prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+(** Try to reconstruct string interpolation from its desugared form:
+      string_join([prefix, to_string(e1), s1, to_string(e2), s2, ...], "")
+    (what [desugar_interp] in [lib/parser/parser.mly] emits), or the
+    equivalent left-deep chain
+      prefix ++ to_string(e1) ++ s1 ++ ...
+    which user code can still write by hand.
     Returns Some (prefix_str, [(expr, suffix_str); ...]) if the pattern matches,
     where the original source was "prefix${e1}s1${e2}s2". *)
 let try_collect_interp expr =
@@ -325,7 +329,14 @@ let try_collect_interp expr =
       flatten (rhs :: acc) lhs
     | e -> e :: acc
   in
-  let segments = flatten [] expr in
+  let segments =
+    match expr with
+    | EApp (EVar { txt = "string_join"; _ }, [list_expr; ELit (LitString "", _)], _) ->
+      (match try_collect_list [] list_expr with
+       | Some elems -> elems
+       | None -> [expr])
+    | _ -> flatten [] expr
+  in
   (* Pattern: LitString, to_string(e), LitString, to_string(e), LitString, ...
      The first segment must be a LitString (the prefix).
      Then alternating to_string(expr) and LitString pairs.
@@ -358,8 +369,9 @@ let rec expr_inline = function
        let[@warning "-8"] ECon ({ txt; _ }, args, _) = e in
        Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args)))
   | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
-  (* Reconstruct string interpolation: ++ / to_string chain → "${expr}" *)
-  | EApp (EVar { txt = "++"; _ }, [_; _], _) as e when try_collect_interp e <> None ->
+  (* Reconstruct string interpolation: string_join / ++ chain → "${expr}" *)
+  | EApp (EVar { txt = "string_join" | "++"; _ }, [_; _], _) as e
+    when try_collect_interp e <> None ->
     let[@warning "-8"] Some (prefix, parts) = try_collect_interp e in
     let needs_triple = String.contains prefix '\n' ||
       List.exists (fun (_, s) -> String.contains s '\n') parts in
