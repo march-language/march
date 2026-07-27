@@ -692,6 +692,17 @@ edges:
   So: the answer to "does the structural test recognise a child fetched from a
   `List` by index?" is **no** — and obstacle (1) stops the measure from existing
   before that question is even reached.
+- **`Bool` predicates are accepted but not enforced.** `{Bool | _ == true}`
+  parses and type-checks, but no verification condition is produced, so
+  `needTrue(false)` is not reported. Verified 2026-07-27 against an `Int`
+  control of identical shape, which does report.
+- **A measure applied to the refined value itself is reasoned about by axiom,
+  not evaluated on a literal.** `{v : Tree | size(v) < 0}` is caught for any
+  argument (it contradicts the non-negativity axiom), but
+  `{v : Tree | size(v) > 2}` applied to `Leaf` is NOT — the checker does not
+  concretely evaluate `size(Leaf) = 0` in that position. A measure applied to a
+  *different* parameter IS evaluated concretely, which is why the
+  `get(Node(Leaf, 5, Leaf), 3)` example above works.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is

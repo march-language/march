@@ -16,7 +16,15 @@ mod DataFrame do
   -- ── Phase 1: Core types ────────────────────────────────────────────────────
 
   -- Value: used at row boundaries only (from_rows / to_rows / with_column).
-  -- Internal column operations always work on typed Lists.
+  -- Int/Float columns are backed by NativeArray (flat, contiguous storage);
+  -- String/Bool columns by TypedArray. `Sum`/`Mean` aggregation reads the
+  -- NativeArray directly (native_int_arr_sum/native_float_arr_sum — the
+  -- same primitives auto-vectorize in --compile builds; see
+  -- stdlib/native_array.march). Most other per-column operations
+  -- (column-column arithmetic, ColExpr Add/Sub/Mul/Div, fill_null) still
+  -- round-trip through List(Value)/List(Float) rather than staying in
+  -- NativeArray form throughout — correct, just not yet on the fast path;
+  -- see specs/optimizations.md P10 for the current state.
   type Value =
       IntVal(Int)
     | FloatVal(Float)

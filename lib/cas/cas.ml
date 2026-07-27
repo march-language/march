@@ -206,24 +206,73 @@ let runtime_identity_of_dir (dir : string) : string =
   ) files;
   Blake3.hash_string (Buffer.contents buf)
 
-(* Computed once per process (Lazy), like compiler_identity.  Resolves the
-   runtime directory with the same candidates bin/main.ml uses to find
-   runtime/march_runtime.c.  Falls back to "" if no runtime dir is found
-   (e.g. unit tests) — the hash then simply carries no runtime component. *)
-let runtime_identity : string Lazy.t = lazy (
-  let candidates = [
-    "runtime";
-    Filename.concat (Filename.dirname Sys.executable_name) "../runtime";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../runtime";
-  ] in
-  let is_dir d = (try Sys.is_directory d with Sys_error _ -> false) in
-  match List.find_opt is_dir candidates with
-  | Some dir -> runtime_identity_of_dir dir
-  | None -> "")
+(* Which runtime directory this process compiles against.
+   ────────────────────────────────────────────────────────
+   The digest MUST cover the directory whose sources are ACTUALLY handed to
+   clang, which only the compiler driver knows.  This used to be resolved here
+   with an independent, cwd-FIRST candidate list while bin/main.ml resolved the
+   sources it compiles exe-relative-first ("independent of CWD").  The two
+   disagree exactly when cwd is the repo root and the exe is dune's
+   _build/default/bin/main.exe: the key digested the edited ./runtime/*.c while
+   the compile used the (not necessarily refreshed) _build/default/runtime/*.c.
+   Editing a runtime source then produced `compiled <out> (cached)` with none of
+   the new code in the binary — and compiler_identity does not save us, since
+   the march executable's bytes do not change when only runtime C changes.
+
+   So the driver registers its resolved directory via [set_runtime_dir] and
+   that is the single source of truth.  The fallback below (for callers that
+   never register one — unit tests, library embeddings) now mirrors
+   bin/main.ml's find_runtime_file order: exe-relative first, cwd last, and a
+   candidate only counts if it actually holds march_runtime.c. *)
+let runtime_dir_override : string option ref = ref None
+
+(* Memoized like compiler_identity — the runtime sources do not change
+   underneath a live process — but keyed on the resolved directory, so a
+   [set_runtime_dir] to a different directory recomputes instead of returning
+   the previous directory's digest. *)
+let runtime_identity_memo : (string * string) option ref = ref None
+
+let resolve_runtime_dir () : string option =
+  match !runtime_dir_override with
+  | Some _ as d -> d
+  | None ->
+    let exe_dir = Filename.dirname Sys.executable_name in
+    let candidates = [
+      Filename.concat exe_dir "../runtime";
+      Filename.concat exe_dir "../../runtime";
+      Filename.concat exe_dir "../../../runtime";
+      "runtime";
+    ] in
+    List.find_opt
+      (fun d -> Sys.file_exists (Filename.concat d "march_runtime.c"))
+      candidates
+
+(* Registering (or re-registering) a directory also drops the memo, so the
+   digest is re-read from disk rather than answered from a previous
+   registration's snapshot. *)
+let set_runtime_dir (dir : string) : unit =
+  runtime_dir_override := Some dir;
+  runtime_identity_memo := None
+
+(* Drop a registration and go back to the fallback search (tests). *)
+let clear_runtime_dir () : unit =
+  runtime_dir_override := None;
+  runtime_identity_memo := None
+
+(* Falls back to "" if no runtime dir is found (e.g. unit tests) — the hash
+   then simply carries no runtime component. *)
+let runtime_identity () : string =
+  let dir = match resolve_runtime_dir () with Some d -> d | None -> "" in
+  match !runtime_identity_memo with
+  | Some (d, h) when String.equal d dir -> h
+  | _ ->
+    let h = if dir = "" then "" else runtime_identity_of_dir dir in
+    runtime_identity_memo := Some (dir, h);
+    h
 
 let compilation_hash (impl_hash : string) ~(target : string) ~(flags : string list) : string =
   let parts =
-    [impl_hash; target; Lazy.force compiler_identity; Lazy.force runtime_identity]
+    [impl_hash; target; Lazy.force compiler_identity; runtime_identity ()]
     @ flags
   in
   Blake3.hash_string (String.concat "\x00" parts)
