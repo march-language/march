@@ -95,6 +95,36 @@ The stdlib HAMT remains out of reach behind three stacked obstacles, the first
 of which is the built-in `List`'s opaque element sort — see the Limitations
 section of `specs/lang/refinement-types.md`.
 
+## 2026-07-27 — `DataFrame.eval_agg` native-reduction fix for Min/Max/Std/Variance
+
+`eval_agg`'s `Min`/`Max`/`Std`/`Variance` branches materialized a boxed
+`List(Float)` from the column's `NativeArray` (`float_list`) before folding
+with `Stats.*`, an O(n) allocation on top of the O(n) reduction — reported as
+"~40ms fixed per-call overhead" on `Sum` but actually O(n), confirmed scaling
+linearly from ~8ms/call at 100K rows to ~43ms/call at 500K. `Sum`/`Mean` were
+already fixed via `native_float_arr_sum`/`native_int_arr_sum`
+(`f4301ac0`, same session); this extends the fix. A March-level recursive
+index loop over `native_float_arr_get` looked allocation-free but wasn't —
+`get`'s return value is boxed at the call site under the generic calling
+convention, so it paid the same O(n) boxing cost. The real fix stays inside a
+single C-level reduction loop like `native_float_arr_sum`: six new builtins,
+`native_{float,int}_arr_{min,max}` and `native_{float,int}_arr_sumsq_dev(arr,
+mean)` (the stable second pass of the standard two-pass variance algorithm),
+each touching all five sites a native-array builtin needs
+(`runtime/march_runtime.c`, `lib/tir/llvm_builtins.ml`, `lib/tir/defun.ml`,
+`lib/eval/eval.ml`, `lib/typecheck/typecheck.ml`). `Median` is untouched — it
+needs a full sort, a separate and larger problem. Min/Std at 500K rows went
+from ~33-42ms/call to ~0.5-0.6ms/call (60-80x), verified numerically
+matching `Stats.variance_safe`/`std_dev_safe` bit-for-bit on a test vector.
+New regression benchmark `bench/dataframe_bench.march`'s `bench_agg_overhead`
+compares direct `NativeArray.sum_float` against `DataFrame.eval_agg(Sum)` and
+panics if the ratio exceeds 20x while eval_agg takes ≥5ms — verified it fires
+by temporarily reintroducing the old `float_list`-based `Sum` branch.
+Full suite: 817 stdlib tests, 1 pre-existing failure (the same machine-wide
+ASAN altstack livelock documented elsewhere in this file — reproduced with a
+trivial unrelated `clang -fsanitize=address` hello-world hanging identically
+under the same load), unrelated to this change.
+
 ## 2026-07-26 — SCC-aware inliner candidate selection
 
 The inliner formerly applied a conservative second candidate filter that

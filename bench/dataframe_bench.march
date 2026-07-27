@@ -125,6 +125,50 @@ pfn bench_inner_join(left : DataFrame, right : DataFrame) : Unit do
   report("Inner join", ms)
 end
 
+-- Regression guard: eval_agg's Sum/Min/Std must ride the column's
+-- NativeArray via a true native reduction (native_float_arr_sum/min/
+-- sumsq_dev — tight C loops, see runtime/march_runtime.c), not materialize a
+-- boxed List(Float) first. The boxing path is O(n) allocation on top of the
+-- O(n) reduction, and used to cost ~40ms/call at 500K rows regardless of
+-- which aggregate ran. Compare against a direct NativeArray.sum_float call
+-- over the same backing array; if eval_agg regresses to boxing again this
+-- ratio blows up from ~1x to 100x+.
+pfn bench_agg_overhead(n : Int) : Unit do
+  banner("eval_agg native-reduction overhead (" ++ int_to_string(n) ++ "-row Float column)")
+  fn gen(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 do acc else gen(i - 1, Cons(int_to_float(i % 97), acc)) end
+  end
+  let arr = native_float_arr_from_list(gen(n - 1, Nil))
+  let df = DataFrame.make_df(Cons(FloatCol("y", arr), Nil))
+
+  let t0 = unix_time(())
+  let direct = NativeArray.sum_float(arr)
+  let t1 = unix_time(())
+  let direct_ms = elapsed_ms(t0, t1)
+
+  let t2 = unix_time(())
+  let agg = DataFrame.eval_agg(df, DataFrame.Sum("y"), "s")
+  let t3 = unix_time(())
+  let agg_ms = elapsed_ms(t2, t3)
+
+  println("Direct NativeArray.sum_float: " ++ int_to_string(direct_ms) ++ " ms (sum=" ++ float_to_string(direct) ++ ")")
+  println("DataFrame.eval_agg(Sum):      " ++ int_to_string(agg_ms) ++ " ms")
+
+  -- Both calls are sub-millisecond at this size on a healthy build, so a
+  -- millisecond-granularity elapsed_ms often reads 0 for both; guard against
+  -- a false-positive ratio by flooring the direct-call denominator at 1ms
+  -- and only failing when eval_agg is both slow in absolute terms (>= 5ms)
+  -- and far slower than the direct call (>= 20x).
+  let floor_ms = if direct_ms < 1 do 1 else direct_ms end
+  if agg_ms >= 5 && agg_ms >= floor_ms * 20 do
+    panic("REGRESSION: DataFrame.eval_agg(Sum) is " ++ int_to_string(agg_ms)
+          ++ "ms vs direct NativeArray.sum_float's " ++ int_to_string(direct_ms)
+          ++ "ms -- eval_agg is likely materializing a boxed List(Float) again")
+  else
+    println("OK: eval_agg overhead within bounds")
+  end
+end
+
 -- ── Main ────────────────────────────────────────────────────────────────────
 
 fn main() : Unit do
@@ -140,6 +184,7 @@ fn main() : Unit do
   bench_sort(df1k)
   bench_groupby(df1k)
   bench_inner_join(left200, right200)
+  bench_agg_overhead(500000)
   println("")
   println("Done.")
 end
