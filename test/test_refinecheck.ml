@@ -2965,6 +2965,93 @@ end|}));
 end|}))
   ]
 
+(* ── Bool refinements ──────────────────────────────────────────────────────
+   `{Bool | _ == true}` used to parse, type-check and check NOTHING.  These pin
+   both halves of the contract: a definite violation reports, and everything
+   the checker cannot settle (an unknown Bool) stays silent. *)
+let bool_suite =
+  [ gated "a Bool precondition rejects the wrong literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(false) end\n\
+              end\n"));
+
+    gated "a Bool precondition accepts the right literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(true) end\n\
+              end\n"));
+
+    gated "an unknown Bool is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v(k : Bool) : Int do needTrue(k) end\n\
+              end\n"));
+
+    gated "a Bool postcondition propagates" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn always_false() : {Bool | _ == false} do false end\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(always_false()) end\n\
+              end\n"))
+  ]
+
+(* ── Float refinements ─────────────────────────────────────────────────────
+   Discharged through Z3's BIT-PRECISE FloatingPoint theory (`Float64`,
+   `fp.geq`, `fp.eq`), never through `Real`.  Over reals trichotomy makes
+   `¬(x >= 0) ∧ ¬(x <= 0)` unsatisfiable, so a reals encoding would conclude
+   "this can never hold" and report a violation on correct code; over floats it
+   is satisfiable, witnessed by NaN.  The NaN case below pins that. *)
+let float_suite =
+  [ gated "a Float precondition rejects a violating literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v() : Float do sqrtish(0.0 -. 1.0) end\n\
+              end\n"));
+
+    gated "a Float precondition accepts a satisfying literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v() : Float do sqrtish(4.0) end\n\
+              end\n"));
+
+    gated "an unknown Float is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v(k : Float) : Float do sqrtish(k) end\n\
+              end\n"));
+
+    gated "a non-zero Float divisor contract rejects 0.0" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn nonzero(d : {Float | _ != 0.0}) : Float do d end\n\
+             \  fn v() : Float do nonzero(0.0) end\n\
+              end\n"));
+
+    gated "float arithmetic in a predicate is skipped, not guessed" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(x : {Float | _ +. 1.0 > 0.0}) : Float do x end\n\
+             \  fn v() : Float do f(0.0 -. 100.0) end\n\
+              end\n"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2993,4 +3080,6 @@ let () =
       ("tier2-induction", tier2_suite);
       ("callee-shadowing", shadow_suite);
       ("anon-binder-measures", b1_suite);
-      ("record-postcond-propagation", b2_suite) ]
+      ("record-postcond-propagation", b2_suite);
+      ("bool-refinements", bool_suite);
+      ("float-refinements", float_suite) ]

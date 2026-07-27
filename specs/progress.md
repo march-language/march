@@ -35,6 +35,41 @@ emission.
 Interpreted execution was never affected (OCaml GC). Native benchmarks show
 no regression and a measurable improvement where literals are hot —
 `bench/iolist_template.march` peak RSS 52.6MB → 45.4MB.
+## Current State (as of 2026-07-27, verified Bool and Float refinements)
+
+`{Bool | _ == true}` and `{Float | _ >= 0.0}` used to parse, type-check and
+check **nothing** — no error, no warning, confirmed against the built compiler
+before any change. Both are now enforced at preconditions, postconditions and
+through path-sensitive guards. Bool needed only the missing `is_bool_base`
+dispatch and reflection at `Smt.SBool`; Float is a new sort in
+`lib/refine/smt.ml`.
+
+**Float uses Z3's bit-precise IEEE-754 FloatingPoint theory (`Float64`,
+`fp.geq`/`fp.gt`/`fp.leq`/`fp.lt`, `fp.eq`, `((_ to_fp 11 53) RNE …)`), never
+reals** — a correctness requirement, not a preference. `¬(x >= 0.0) ∧ ¬(x <=
+0.0)` is **sat** over floats (witness `NaN`) and **unsat** over reals
+(trichotomy); since the checker reports exactly when it proves a predicate can
+never hold, a reals encoding would flag that ordinary contract on every
+argument. Verified end-to-end: a predicate whose only witness is NaN is skipped,
+not reported. Equality is `fp.eq` rather than bitwise `=`, so `{Float | _ !=
+0.0}` rejects `-0.0` as well as `+0.0`.
+
+March spells float comparison with the ordinary operators, so `smt_of` builds
+`Smt.Ge` for Int and Float alike; a new `fp_rewrite` pass converts only
+comparisons whose *both* operands are float-sorted, once the declarations are
+final. Three containment guards keep a malformed VC off the shared `z3 -in`
+channel: `sort_conflict` (one symbol at two sorts), `float_wellsorted` (a float
+left in an Int position), and `formula_wellsorted` (a non-formula in Boolean
+position) — the last of which fixed a **pre-existing** malformed query, a bare
+Bool guard `if j do … end` asserted as an integer.
+
+Out of scope and deliberately silent: symbolic float arithmetic in a predicate
+(`_ +. 1.0 > 0.0`), `Float` record fields and ADT payloads, and special-value
+predicates. Literal-only float arithmetic (`0.0 -. 1.0`) is constant-folded and
+fully checked. 245 refinecheck tests (was 236), exit 0 on a cold VC cache;
+`test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
+An adversarial sweep and a 12-violation-kind file both run with **zero**
+`(error` lines on a tee'd solver channel.
 
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 

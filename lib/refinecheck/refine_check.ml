@@ -45,6 +45,14 @@ let is_string_base : A.ty -> bool = function
   | A.TyCon ({ A.txt = "String"; _ }, []) -> true
   | _ -> false
 
+let is_bool_base : A.ty -> bool = function
+  | A.TyCon ({ A.txt = "Bool"; _ }, []) -> true
+  | _ -> false
+
+let is_float_base : A.ty -> bool = function
+  | A.TyCon ({ A.txt = "Float"; _ }, []) -> true
+  | _ -> false
+
 (* ── The String encoding ───────────────────────────────────────────────────
    `String` is modelled as an UNINTERPRETED SORT and `len` as an uninterpreted
    function `Str -> Int` constrained only by non-negativity.  Each distinct
@@ -86,6 +94,58 @@ let string_preamble =
    of [sort] treats a `Some _` it does not recognise as an ADT sort name. *)
 let rp_is_str (rp : rparam) : bool = rp.sort = Some str_sort
 
+(* ── Bool and Float: markers for BUILT-IN SMT sorts ───────────────────────
+   The `sort` marker channel ([rparam.sort], [scope]'s third component,
+   [fn_sig.ret_sort]) was originally "None = Int, Some s = a DECLARED sort
+   name" — an ADT's `M_Foo`, or the opaque `$Str`.  Bool and Float need a third
+   shape: a scalar that is neither Int nor a declared sort, but one of Z3's
+   BUILT-IN sorts (`Bool`, `Float64`).
+
+   They travel as markers in the same channel, so every consumer that reads a
+   `Some s` it does not recognise as an ADT sort name MUST test [is_scalar_sort]
+   first.  Handing `$Bool` to the ADT path would emit `(declare-const b $Bool)`
+   for a sort nobody declared, and a z3 `(error …)` on the shared `z3 -in`
+   channel is the failure this subsystem guards hardest against (it used to
+   desynchronise the channel outright; since the containment fix it merely
+   makes the VC silently undecidable, which is a quieter but equally real loss).
+
+   Like [str_sort] both names contain `$`, which is a legal SMT-LIB simple
+   symbol character but cannot occur in a March identifier or in
+   [adt_sort_name]'s output, so neither can ever collide with a real sort. *)
+let bool_sort = "$Bool"
+let float_sort = "$Float"
+
+let is_scalar_sort (s : string) : bool = s = bool_sort || s = float_sort
+
+(* The BUILT-IN SMT sort a marker denotes, or [None] when the marker names a
+   declared sort (an ADT, a record, `$Str`) and so is not a scalar at all.
+   [None] marker = Int is the original, unchanged meaning. *)
+let scalar_sort_of_marker : string option -> Smt.sort option = function
+  | None -> Some Smt.SInt
+  | Some s when s = bool_sort -> Some Smt.SBool
+  | Some s when s = float_sort -> Some Smt.SFloat
+  | Some _ -> None
+
+(* Same, defaulted to `Int` — for the many sites whose pre-existing behaviour
+   for an unrecognised marker was "declare it Int". *)
+let scalar_sort_or_int (m : string option) : Smt.sort =
+  match scalar_sort_of_marker m with Some s -> s | None -> Smt.SInt
+
+(* The full SMT sort a marker denotes, scalar or declared. *)
+let smt_sort_of_marker (m : string option) : Smt.sort =
+  match scalar_sort_of_marker m with
+  | Some s -> s
+  | None -> (match m with Some s -> Smt.SData s | None -> Smt.SInt)
+
+(* A VC that declares one symbol at two different sorts is REJECTED by z3.  Each
+   producer is supposed to agree with every other on a name's sort, and the
+   [str_names] / [is_recvar] guards enforce that for the two sorts that existed
+   before; this is the belt-and-braces check over the finished declaration list,
+   so a path nobody anticipated costs a silent SKIP rather than an `(error …)`
+   line on the shared solver channel. *)
+let sort_conflict (ds : (string * Smt.sort) list) : bool =
+  List.exists (fun (n, s) -> List.exists (fun (n', s') -> n = n' && s <> s') ds) ds
+
 (* ── Well-sortedness guard ────────────────────────────────────────────────
    `$Str` is a sort apart, and the rest of the VC language is Int/Bool.  A term
    that mixes them (`(= caller_var $str0)` where the caller variable was
@@ -105,17 +165,19 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
      "mentions a string" if its subject somehow does. *)
   | Smt.IsCtor (_, a) -> m a
-  | Smt.IntLit _ | Smt.BoolLit _ -> false
+  | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
-  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> m a || m b
+  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
+  | Smt.FpGe (a, b) -> m a || m b
 
 let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   let w = wellsorted is_str and m = mentions_str is_str in
   let int_side a = (not (m a)) && w a in
   match t with
-  | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ -> true
+  | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> true
   | Smt.App (f, [ a ]) when f = strlen_fn ->
     (match a with Smt.Const c -> is_str c | _ -> false)
   | Smt.App (_, args) -> List.for_all int_side args
@@ -132,6 +194,104 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
   | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
+  (* Floats and `$Str` are disjoint sorts; an `fp.*` term is well-sorted here
+     exactly when neither operand drags a string in.  Whether its operands are
+     genuinely FLOATS is [float_wellsorted]'s job, not this guard's. *)
+  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
+  | Smt.FpGe (a, b) -> (not (m a)) && not (m b)
+
+(* ── Float: the IEEE rewrite and its well-sortedness guard ─────────────────
+   March spells float comparison with the ORDINARY operators — `x >= 0.0`, not a
+   float-specific `>=.` — so [smt_of] cannot tell an Int comparison from a Float
+   one and builds [Smt.Ge] for both.  This pass runs over the finished term and
+   rewrites a comparison whose operands are both float-sorted into its IEEE
+   form.  Integer comparisons are untouched: [float_term] is true only of a
+   float literal or a constant this VC declared at `Float64`.
+
+   `==` becomes `fp.eq` (and `!=` its negation), NOT `=`.  `=` on Float64 is
+   BITWISE identity, under which `-0.0 ≠ 0.0`; the contract `{Float | _ != 0.0}`
+   would then accept `-0.0`, a divisor every bit as bad as `+0.0`.  `fp.eq` is
+   IEEE equality: `+0.0 = -0.0`, and NaN equals nothing including itself. *)
+let float_term (is_float : string -> bool) (t : Smt.term) : bool =
+  match t with Smt.FloatLit _ -> true | Smt.Const c -> is_float c | _ -> false
+
+let rec fp_rewrite (is_float : string -> bool) (t : Smt.term) : Smt.term =
+  let f = fp_rewrite is_float and fl = float_term is_float in
+  let both a b = fl a && fl b in
+  match t with
+  | Smt.Ge (a, b) when both a b -> Smt.FpGe (a, b)
+  | Smt.Gt (a, b) when both a b -> Smt.FpGt (a, b)
+  | Smt.Le (a, b) when both a b -> Smt.FpLe (a, b)
+  | Smt.Lt (a, b) when both a b -> Smt.FpLt (a, b)
+  | Smt.Eq (a, b) when both a b -> Smt.FpEq (a, b)
+  | Smt.Ne (a, b) when both a b -> Smt.Not (Smt.FpEq (a, b))
+  | Smt.Not a -> Smt.Not (f a)
+  | Smt.And (a, b) -> Smt.And (f a, f b)
+  | Smt.Or (a, b) -> Smt.Or (f a, f b)
+  | Smt.Implies (a, b) -> Smt.Implies (f a, f b)
+  | t -> t
+
+(* Does [t] mention a float anywhere? *)
+let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
+  let m = mentions_float is_float in
+  match t with
+  | Smt.FloatLit _ -> true
+  | Smt.Const c -> is_float c
+  | Smt.IntLit _ | Smt.BoolLit _ -> false
+  | Smt.App (_, args) -> List.exists m args
+  | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+  | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
+  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
+  | Smt.FpGe (a, b) -> m a || m b
+
+(* After [fp_rewrite], a float may appear ONLY as a direct operand of an `fp.*`
+   comparison.  Anywhere else — an Int comparison [fp_rewrite] declined because
+   only one side was float, an arithmetic term, a measure argument — the term
+   mixes sorts, and z3 REJECTS such a query.  Before the error containment that
+   desynchronised the shared `z3 -in` channel outright; it now costs only this
+   VC, but silently, so the mixing is caught here instead of being emitted.
+
+   The direction is the safe one: a term that fails this is DROPPED (an
+   assumption) or abandons the VC (a goal), i.e. silence. *)
+let rec float_wellsorted (is_float : string -> bool) (t : Smt.term) : bool =
+  let w = float_wellsorted is_float in
+  match t with
+  | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
+  | Smt.FpGe (a, b) -> float_term is_float a && float_term is_float b
+  | Smt.Not a -> w a
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
+  (* A bare float where the enclosing context wants a Bool or an Int. *)
+  | t -> not (mentions_float is_float t)
+
+(* ── Boolean-position guard ────────────────────────────────────────────────
+   A term asserted as a hypothesis, or used as a goal, must actually BE a
+   formula.  March lets a bare Bool variable stand as a condition — `if j do …`,
+   `{Bool | _}` — and [smt_of] reflects that to `Const "j"`.  If the variable
+   was declared `Int` (the historical default for any caller-scope name), the
+   VC contains `(assert j)` over an integer and z3 answers
+   `invalid assert command, term is not Boolean`.
+
+   Now that a symbol CAN be declared `Bool`, the honest test is possible: a bare
+   constant is a formula exactly when this VC declared it at `Bool`.  Anything
+   else is dropped — an assumption is discarded (weaker hypotheses, so only more
+   silence) and a goal abandons the VC.  Both directions are skips, never
+   reports. *)
+let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) : bool =
+  let w = formula_wellsorted sort_of in
+  match t with
+  | Smt.BoolLit _ | Smt.IsCtor _ -> true
+  | Smt.Const c -> sort_of c = Some Smt.SBool
+  | Smt.Not a -> w a
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
+  | Smt.Eq _ | Smt.Ne _ | Smt.Lt _ | Smt.Le _ | Smt.Gt _ | Smt.Ge _
+  | Smt.FpEq _ | Smt.FpLt _ | Smt.FpLe _ | Smt.FpGt _ | Smt.FpGe _ -> true
+  (* Nothing in this checker declares an uninterpreted function at `Bool`
+     (measures and selectors return Int or a datatype), so an application in
+     Boolean position is a sort error just as arithmetic and literals are. *)
+  | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
+  | Smt.MulLit _ | Smt.Neg _ -> false
 
 (* How a return refinement's predicate relates to the callee's parameters.
 
@@ -221,6 +381,14 @@ type fn_sig = {
      String (bare or refined).  This is what makes the `len` OVERLOAD safe — the
      string meaning is chosen only from a declared type, never guessed. *)
   param_str : bool list;
+  (* Parallel to [param_names]: the SCALAR SMT sort each parameter's declared
+     base type reflects into — `Bool` for a (refined or bare) `Bool`, `Float64`
+     for a `Float`, `Int` for everything else including the sorts that are not
+     scalars at all (a String or ADT parameter is routed by [param_str] /
+     [rparam.sort] before its scalar sort is ever consulted).  This is what lets
+     an argument at a Bool/Float position be DECLARED at that sort rather than
+     silently at `Int`, which z3 rejects the moment the predicate uses it. *)
+  param_scalar : Smt.sort list;
   refined : rparam list;
   ret : (string * A.expr) option;
   (* SMT sort of the refined RETURN value: [None] for an Int return (the Tier 0
@@ -272,7 +440,12 @@ let string_len_available () : bool = not (List.mem "len" !registered_measures)
    `every operator is known vocabulary` test in test_refinecheck.ml. *)
 let predicate_operators =
   [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"
-  ; "=="; "!="; "<"; "<="; ">"; ">=" ]
+  ; "=="; "!="; "<"; "<="; ">"; ">="
+  (* The float operators are vocabulary even though [smt_of] translates them
+     only over LITERALS: a predicate using one symbolically is skipped by
+     design, and warning "this has no effect" about a deliberate scope boundary
+     would be misleading. *)
+  ; "+."; "-."; "*."; "/." ]
 
 let is_predicate_operator (m : string) : bool = List.mem m predicate_operators
 
@@ -923,6 +1096,43 @@ let measure_gate_errors (fd : A.fn_def) : string list =
 (* [resolve_var] maps a scalar variable to its SMT term; [resolve_measure]
    maps a (measure-name, argument-name) to its measure term.  None => outside
    the supported Int/Bool linear fragment. *)
+(* ── Float constant folding ────────────────────────────────────────────────
+   The VALUE of an expression built only from float literals and the float
+   operators.  `0.0 -. 1.0` is how March spells the negative literal `-1.0`, so
+   without this an obviously-violating argument would be untranslatable and the
+   call skipped.
+
+   Deliberately literal-only.  SYMBOLIC float arithmetic (`_ +. 1.0`, where one
+   operand is the refined binder) is OUT of scope: modelling it needs Z3's
+   rounding-mode surface, and this returns [None] for it, which makes the whole
+   predicate untranslatable and the check silently skipped.  Skipping costs
+   completeness; guessing at rounding would cost correctness.
+
+   Division by zero yields [None] rather than an infinity — an infinity has no
+   SMT-LIB decimal form, and inventing one would be a fact nobody stated. *)
+let rec float_const_of (e : A.expr) : float option =
+  let bin op a b =
+    match float_const_of a, float_const_of b with
+    | Some x, Some y -> op x y
+    | _ -> None
+  in
+  match e with
+  | A.ELit (A.LitFloat f, _) -> Some f
+  | A.EAnnot (inner, _, _) -> float_const_of inner
+  | A.EApp (A.EVar { A.txt = "+."; _ }, [ a; b ], _) -> bin (fun x y -> Some (x +. y)) a b
+  | A.EApp (A.EVar { A.txt = "-."; _ }, [ a; b ], _) -> bin (fun x y -> Some (x -. y)) a b
+  | A.EApp (A.EVar { A.txt = "*."; _ }, [ a; b ], _) -> bin (fun x y -> Some (x *. y)) a b
+  | A.EApp (A.EVar { A.txt = "/."; _ }, [ a; b ], _) ->
+    bin (fun x y -> if y = 0.0 then None else Some (x /. y)) a b
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+    Option.map (fun x -> -.x) (float_const_of a)
+  | _ -> None
+
+(* A folded float value as an SMT term, or [None] when it has no exact
+   plain-decimal form (see [Smt.float_decimal]). *)
+let float_lit_term (f : float) : Smt.term option =
+  Option.map (fun (neg, d) -> Smt.FloatLit (neg, d)) (Smt.float_decimal f)
+
 let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
@@ -933,6 +1143,15 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
   match e with
   | A.ELit (A.LitInt n, _) -> Some (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Some (Smt.BoolLit b)
+  (* A float literal, and float arithmetic over literals ONLY, folded to one.
+     A `+.` with a non-literal operand falls through to [None] here, which makes
+     the enclosing predicate untranslatable — the documented skip for symbolic
+     float arithmetic. *)
+  | A.ELit (A.LitFloat _, _)
+  | A.EApp (A.EVar { A.txt = "+." | "-." | "*." | "/."; _ }, [ _; _ ], _) ->
+    (match float_const_of e with Some f -> float_lit_term f | None -> None)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) when float_const_of a <> None ->
+    (match float_const_of e with Some f -> float_lit_term f | None -> None)
   (* A string literal reflects to its per-VC constant, when the caller supplies
      a table.  Callers that cannot model strings leave [resolve_str_lit] at its
      default and the literal stays untranslatable — i.e. skipped. *)
@@ -995,6 +1214,11 @@ let rec pred_str (e : A.expr) : string =
   match e with
   | A.ELit (A.LitInt n, _) -> string_of_int n
   | A.ELit (A.LitBool b, _) -> if b then "true" else "false"
+  (* `%h`-free rendering that always keeps the point, so `{Float | _ != 0.0}`
+     reads back as it was written rather than as `<predicate>`. *)
+  | A.ELit (A.LitFloat f, _) ->
+    let s = Printf.sprintf "%.12g" f in
+    if String.exists (fun c -> c = '.' || c = 'e' || c = 'E') s then s else s ^ ".0"
   | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m || ctor_of_tester m <> None ->
     m ^ "(" ^ pred_str a ^ ")"
   | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
@@ -1002,7 +1226,9 @@ let rec pred_str (e : A.expr) : string =
     ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.EVar { A.txt; _ } -> txt
   | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
-  | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!=" | "+" | "-" | "*") as op; _ }, [ a; b ], _) ->
+  | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
+                             | "+" | "-" | "*" | "+." | "-." | "*." | "/.") as op; _ },
+            [ a; b ], _) ->
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
@@ -1126,6 +1352,10 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
     Some (binder_name binder, pred, Some str_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
+    Some (binder_name binder, pred, Some bool_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
+    Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
     when is_adt_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -1145,6 +1375,10 @@ let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) opt
   match fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
+  | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
+    Some (binder_name binder, pred, Some bool_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
+    Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
     when is_adt_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -1176,6 +1410,7 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
        Some
          { param_names = [ callback_param_name ]
          ; param_str = [ sort = Some str_sort ]
+         ; param_scalar = [ scalar_sort_or_int sort ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
          ; ret = None
          ; ret_sort = None
@@ -1189,6 +1424,18 @@ let is_string_param_ty : A.ty option -> bool = function
   | Some t -> is_string_base t
   | None -> false
 
+(* The SCALAR SMT sort a parameter's declared base type reflects into, refined
+   or not.  Anything that is not a recognised scalar answers `Int` — the sort
+   every parameter was declared at before, so nothing but Bool (and later
+   Float) changes behaviour.  Driven by the DECLARED type, never by the actual:
+   an unknown must stay unknown rather than be guessed from its argument. *)
+let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
+  let base = match t with Some (A.TyRefine (b, _, _)) -> Some b | t -> t in
+  match base with
+  | Some b when is_bool_base b -> Smt.SBool
+  | Some b when is_float_base b -> Smt.SFloat
+  | _ -> Smt.SInt
+
 (* Like refined_param_ty but for the refined-LOCAL scope: admits Int, String
    ([str_sort]) and record TyCon params, reporting the SMT sort name — Some
    "M_…" for a record, Some [str_sort] for a String, None for an Int.  NOTE for
@@ -1199,6 +1446,10 @@ let refined_scope_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, None)
   | Some (A.TyRefine (base, binder, pred)) when is_string_base base ->
     Some (binder_name binder, pred, Some str_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
+    Some (binder_name binder, pred, Some bool_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
+    Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -1429,10 +1680,11 @@ let scope_add_binding
           variant fact is carried only by [reflect_dt], which reaches it
           through the expression, not through [scope]. *)
        (match postcond fname args with
-        | Some (binder, pred, None) -> (n.A.txt, (binder, pred, None)) :: sc
+        | Some (binder, pred, m) when scalar_sort_of_marker m <> None ->
+          (n.A.txt, (binder, pred, m)) :: sc
         | Some (binder, pred, Some srt) when is_record_sort srt ->
           (n.A.txt, (binder, pred, Some srt)) :: sc
-        | Some (_, _, Some _) | None -> sc)
+        | Some _ | None -> sc)
      | _ -> sc)
   | _ -> sc
 
@@ -1448,6 +1700,9 @@ let param_ty_of : A.fn_param -> A.ty option = function
 let sig_of_clause (c : A.fn_clause) : fn_sig =
   let param_names = List.map param_name_of c.A.fc_params in
   let param_str = List.map (fun fp -> is_string_param_ty (param_ty_of fp)) c.A.fc_params in
+  let param_scalar =
+    List.map (fun fp -> scalar_sort_of_param_ty (param_ty_of fp)) c.A.fc_params
+  in
   let refined =
     List.mapi (fun idx fp -> (idx, fp)) c.A.fc_params
     |> List.filter_map (fun (idx, fp) ->
@@ -1464,7 +1719,7 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; param_str; refined; ret = None; ret_sort = None }
+  { param_names; param_str; param_scalar; refined; ret = None; ret_sort = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -1483,7 +1738,8 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
             match fd.A.fn_clauses with
             | c :: _ -> sig_of_clause c
             | [] ->
-              { param_names = []; param_str = []; refined = []; ret = None; ret_sort = None }
+              { param_names = []; param_str = []; param_scalar = []; refined = []
+              ; ret = None; ret_sort = None }
           in
           let sg =
             match return_refine_sorted fd with
@@ -1789,6 +2045,11 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
   in
   match sort with
   | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
+  (* Float RECORD FIELDS are out of scope: [smt_sort_of_field] never produces
+     `SFloat` (a `Float` field is opaque `Elem`), so this arm is unreachable —
+     and if a later change makes it reachable, refusing the fit makes the record
+     unreflectable and the call skipped, which is the safe direction. *)
+  | Smt.SFloat -> false
   | Smt.SData s ->
     (match t with
      | Smt.App (ctor, args) ->
@@ -1857,9 +2118,15 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
   | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
+(* [sort] is the SCALAR SMT sort the reflected value lives at — `Int` (the
+   original and still the default), `Bool`, or `Float64`.  It is chosen from a
+   DECLARED type by the caller, never inferred from the actual, and it governs
+   both the declaration emitted for a variable and the one for a propagated
+   postcondition's constant.  Getting it wrong puts one symbol at a sort its
+   uses disagree with, which z3 rejects. *)
 let reflect_scalar
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
-    (sc : scope) (actual : A.expr)
+    ?(sort : Smt.sort = Smt.SInt) (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   (* Reflect an expression with no scope help — also the fallback for a call
      whose callee has no usable postcondition. *)
@@ -1872,30 +2139,34 @@ let reflect_scalar
   | A.EVar { A.txt = x; _ } ->
     let xc = Smt.Const x in
     (match List.assoc_opt x sc with
-     | Some (b, q, None) ->
-       (* A refined local (Int): carry its own refinement as an assumption. *)
+     (* A refined local at the SAME scalar sort we are reflecting into (Int for
+        the original `None` marker, Bool for `$Bool`): carry its own refinement
+        as an assumption.  A scope entry at a DIFFERENT sort says nothing about
+        the value at this one, and loading it would be ill-sorted, so it falls
+        through to the unconstrained constant below. *)
+     | Some (b, q, m) when scalar_sort_of_marker m = Some sort ->
        let rv n = if n = b || n = "_" then Some xc else None in
        let assumptions =
          match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
          | Some qa -> [ qa ]
          | None -> []
        in
-       Some (xc, [ (x, Smt.SInt) ], assumptions)
+       Some (xc, [ (x, sort) ], assumptions)
      | Some _ | None ->
        (* An ordinary variable: reflect it as a constant so a path-context
           guard about it can constrain it.  Without a guard it stays
           unconstrained and the definite-failure check keeps us silent. *)
-       Some (xc, [ (x, Smt.SInt) ], []))
+       Some (xc, [ (x, sort) ], []))
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)
   | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) ->
-    (* An ADT-sorted postcondition is NOT a scalar fact: standing it up as an
-       `Int` constant here would declare one symbol at two sorts.  It is carried
-       by [reflect_dt] instead; here it falls through to [plain]. *)
+    (* A postcondition at any OTHER sort than the one we are reflecting into is
+       not a fact about this value: an ADT-sorted one (carried by [reflect_dt]
+       instead), or a Bool one where an Int is expected.  Standing it up here
+       would declare one symbol at two sorts, so it falls through to [plain]. *)
     (match postcond fname cargs with
-     | Some (_, _, Some _) -> plain actual
-     | Some (b, q, None) ->
+     | Some (b, q, m) when scalar_sort_of_marker m = Some sort ->
        incr ret_ctr;
        let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
        let c = Smt.Const nm in
@@ -1905,8 +2176,8 @@ let reflect_scalar
          | Some qa -> [ qa ]
          | None -> []
        in
-       Some (c, [ (nm, Smt.SInt) ], assumptions)
-     | None -> plain actual)
+       Some (c, [ (nm, sort) ], assumptions)
+     | Some _ | None -> plain actual)
   | _ -> plain actual
 
 (* The registered ADT sort a constructor belongs to.  None when the name is
@@ -1949,10 +2220,42 @@ let check_call ~root errctx ~span
     | Some i -> (match List.assoc_opt i str_pos with Some b -> b | None -> false)
     | None -> false
   in
+  (* The SCALAR sort a callee parameter (and hence the actual passed to it)
+     lives at.  `Int` unless the callee declared it `Bool`. *)
+  let scalar_at_idx i =
+    match List.nth_opt sg.param_scalar i with Some s -> s | None -> Smt.SInt
+  in
+  let scalar_of_name name =
+    match List.assoc_opt name name_pos with Some i -> scalar_at_idx i | None -> Smt.SInt
+  in
+  (* The refined value's own scalar sort, read from its refinement's base type.
+     [rp.sort] and [sg.param_scalar] are computed from the same declared type,
+     so they agree; this spelling also covers a synthesized callback sig. *)
+  let self_scalar = scalar_sort_or_int rp.sort in
   match List.nth_opt args rp.idx with
   | None -> ()
   | Some self_actual ->
     let decls = ref [] and assume = ref [] in
+    (* ── Caller-scope scalar sorts ─────────────────────────────────────────
+       A path condition mentions CALLER variables and reflects each to
+       `Const name`; so does an argument that IS that variable.  The two must
+       agree on a sort, or the VC declares one symbol twice and z3 rejects it.
+       The only names whose sort this call pins are the ones it passes to a
+       parameter of known scalar sort, so those are recorded here and consulted
+       by every caller-namespace producer.  A name not listed keeps the
+       pre-existing default, `Int`. *)
+    let caller_scalar : (string, Smt.sort) Hashtbl.t = Hashtbl.create 4 in
+    List.iteri
+      (fun i a ->
+        match a with
+        | A.EVar { A.txt = x; _ } ->
+          let s = scalar_at_idx i in
+          if s <> Smt.SInt then Hashtbl.replace caller_scalar x s
+        | _ -> ())
+      args;
+    let caller_scalar_of name =
+      match Hashtbl.find_opt caller_scalar name with Some s -> s | None -> Smt.SInt
+    in
     (* Attach the (expensive) datatype/quantifier preamble ONLY to VCs that
        actually reference an axiomatised measure; a plain Int/Bool VC pays no
        axiom cost.  Set when [resolve_measure] reflects an axiom measure. *)
@@ -2244,10 +2547,15 @@ let check_call ~root errctx ~span
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
       else if is_self name then
-        absorb (reflect_cached "$self" (fun () -> reflect_scalar ~postcond sc self_actual))
+        absorb
+          (reflect_cached "$self" (fun () ->
+               reflect_scalar ~postcond ~sort:self_scalar sc self_actual))
       else
         match actual_of_name name with
-        | Some a -> absorb (reflect_cached name (fun () -> reflect_scalar ~postcond sc a))
+        | Some a ->
+          absorb
+            (reflect_cached name (fun () ->
+                 reflect_scalar ~postcond ~sort:(scalar_of_name name) sc a))
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
@@ -2256,7 +2564,7 @@ let check_call ~root errctx ~span
              the sub-term instead just loses a fact (silence). *)
           else if is_recvar name then None
           else begin
-            decls := (name, Smt.SInt) :: !decls;
+            decls := (name, caller_scalar_of name) :: !decls;
             Some (Smt.Const name)
           end
     in
@@ -2516,7 +2824,8 @@ let check_call ~root errctx ~span
       else
         absorb
           (reflect_cached ("$path$" ^ name) (fun () ->
-               reflect_scalar ~postcond sc (A.EVar { A.txt = name; A.span })))
+               reflect_scalar ~postcond ~sort:(caller_scalar_of name) sc
+                 (A.EVar { A.txt = name; A.span })))
     in
     (* `c.port` in a PATH CONDITION.  The name is a CALLER variable, so it
        denotes itself: the record's SMT selector applied to `Const c` — the very
@@ -2599,10 +2908,28 @@ let check_call ~root errctx ~span
            (fun (n, s) -> not (s = Smt.SInt && Hashtbl.mem str_names n))
            decls
        in
+       if sort_conflict decls then ()
+       else
        (* Drop ill-sorted assumptions.  Weakening the hypothesis set can only
           make BOTH discharges harder, so this can only turn a report into a
           skip — never the reverse. *)
        let assumptions = List.filter (wellsorted (Hashtbl.mem str_names)) !assume in
+       (* Now the declarations are final, so which symbols are floats is known:
+          rewrite every ordinary comparison over two floats into its IEEE form,
+          then drop anything that still mixes a float with an Int. *)
+       let sort_of n = List.assoc_opt n decls in
+       let is_float n = sort_of n = Some Smt.SFloat in
+       let goal = fp_rewrite is_float goal in
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then ()
+       else
+       let assumptions =
+         List.filter_map
+           (fun a ->
+             let a = fp_rewrite is_float a in
+             if float_wellsorted is_float a && formula_wellsorted sort_of a then Some a
+             else None)
+           assumptions
+       in
        let vc = { Smt.decls; assumptions; goal } in
        (* Attach the (expensive) axiom preamble only when an axiomatised
           measure was reflected, the datatype declarations only when a
@@ -2663,6 +2990,10 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
   match fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
     Some (binder_name binder, pred, None)
+  | Some (A.TyRefine (base, binder, pred)) when is_bool_base base ->
+    Some (binder_name binder, pred, Some bool_sort)
+  | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
+    Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
@@ -2713,13 +3044,20 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
   List.fold_left
     (fun (ds, asm, has_rec) (name, (b, q, sort)) ->
       match sort with
-      | None ->
+      (* Every SCALAR entry — the original Int (`None`) and now Bool — declares
+         one constant at its own sort and loads its predicate over it.  The sort
+         must come from the marker, not be assumed `Int`: a Bool constant used
+         where the VC says `Int` is exactly the one-symbol-two-sorts rejection
+         the string and record paths already guard against. *)
+      | _ when scalar_sort_of_marker sort <> None ->
+        let s = scalar_sort_or_int sort in
         let c = Smt.Const name in
         let rv n = if n = b || n = "_" then Some c else Some (Smt.Const n) in
-        let ds = (name, Smt.SInt) :: ds in
+        let ds = (name, s) :: ds in
         (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None) q with
          | Some qa -> (ds, qa :: asm, has_rec)
          | None -> (ds, asm, has_rec))
+      | None -> (ds, asm, has_rec)
       (* A String-refined entry declares a `Str` constant and loads its
          predicate, but MUST NOT set [has_rec]: that flag switches check_post
          onto the "a SAT model is a definite violation" path, which is only
@@ -2769,7 +3107,12 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
    [~emit:false] so it cannot double-report; the in-walk [check_fn_post] runs
    with the default and is the single reporting site.  The repeated discharge
    is served from the content-addressed VC cache. *)
+(* [scalar_env] gives the SCALAR SMT sort of body names whose declared type
+   fixes one — the clause's `Bool` parameters.  [sc] only carries REFINED
+   locals, so without this a bare `fn f(b : Bool) : {Bool | _ == true} do b end`
+   would declare `b` at `Int` and use it as a Bool. *)
 let check_post ~root errctx ~span ?(record_sort : string option = None)
+    ?(scalar_env : (string * Smt.sort) list = [])
     ?(fn_name : string option = None) ?(emit = true) (sc : scope)
     (binder : string) (ret_pred : A.expr)
     ((path, tail_e) : (A.expr * bool) list * A.expr) : bool =
@@ -2786,9 +3129,18 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
      measure preamble (axioms + datatypes).  False => type_preamble only suffices
      (no quantified axioms → Z3 answers sat/unsat without returning `unknown`). *)
   let needs_axiom_preamble = ref false in
+  (* The sort a body name is declared at: the refined-local scope decides first
+     (it has already declared the name in [scope_facts]), then the declared-type
+     environment, then the historical default of `Int`. *)
+  let scalar_of name =
+    match List.assoc_opt name sc with
+    | Some (_, _, m) when scalar_sort_of_marker m <> None -> scalar_sort_or_int m
+    | Some _ -> Smt.SInt
+    | None -> (match List.assoc_opt name scalar_env with Some s -> s | None -> Smt.SInt)
+  in
   let var_const name =
     if is_str_scope name then Some (Smt.Const name)
-    else begin decls := (name, Smt.SInt) :: !decls; Some (Smt.Const name) end
+    else begin decls := (name, scalar_of name) :: !decls; Some (Smt.Const name) end
   in
   let resolve_measure m name =
     (* `len` over a String-sorted scope name is the string `len`, applied to the
@@ -2840,9 +3192,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
     List.fold_left
       (fun rf (name, (_b, _q, sort)) ->
         match sort with
-        (* `Str` is opaque — it has no fields and no selectors. *)
+        (* `Str` is opaque — it has no fields and no selectors; nor is a
+           scalar (`$Bool`) a declared record sort. *)
         | None -> rf
-        | Some s when s = str_sort -> rf
+        | Some s when s = str_sort || is_scalar_sort s -> rf
         | Some sort_name ->
           let rf_param = make_field_resolver name sort_name (Smt.Const name) in
           fun varname fname ->
@@ -2909,7 +3262,24 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
        let decls =
          List.fold_left (fun acc d -> if List.mem d acc then acc else d :: acc) [] !decls
        in
-       let vc = { Smt.decls; assumptions = !assume; goal } in
+       if sort_conflict decls then false
+       else
+       (* See [check_call] for why the IEEE rewrite runs here, once the
+          declarations — and hence which symbols are `Float64` — are final. *)
+       let sort_of n = List.assoc_opt n decls in
+       let is_float n = sort_of n = Some Smt.SFloat in
+       let goal = fp_rewrite is_float goal in
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then false
+       else
+       let assumptions =
+         List.filter_map
+           (fun a ->
+             let a = fp_rewrite is_float a in
+             if float_wellsorted is_float a && formula_wellsorted sort_of a then Some a
+             else None)
+           !assume
+       in
+       let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string then string_preamble else "" in
        let preamble = str_pre ^
          if record_sort <> None || scope_has_record then
@@ -3265,9 +3635,20 @@ let check_post_induction ~root (fd : A.fn_def) : bool =
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
   match return_refine_ext fd with
   | None -> check_post_induction ~root fd
-  | Some (binder, ret_pred, record_sort) ->
+  | Some (binder, ret_pred, marker) ->
+    (* [record_sort] must carry only a DECLARED sort name.  A scalar marker
+       (`$Bool`) is not one: handing it here would send the return value down
+       the record-literal reflection and the datatype preamble, for a sort
+       nobody declares. *)
+    let record_sort =
+      match marker with Some s when not (is_scalar_sort s) -> Some s | _ -> None
+    in
     let clause_ok (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
+      let scalar_env =
+        List.map (fun fp -> (param_name_of fp, scalar_sort_of_param_ty (param_ty_of fp)))
+          c.A.fc_params
+      in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
       let ts = tails base c.A.fc_body in
       (* Fold (not List.for_all): every tail must be checked so every
@@ -3275,7 +3656,7 @@ let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
       ts <> []
       && List.fold_left
            (fun acc t ->
-             check_post ~root errctx ~span:c.A.fc_span ~record_sort
+             check_post ~root errctx ~span:c.A.fc_span ~record_sort ~scalar_env
                ~fn_name:(Some fd.A.fn_name.A.txt) ~emit sc binder ret_pred t
              && acc)
            true ts
