@@ -11190,6 +11190,117 @@ let test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union () =
     Alcotest.(check string) "writer caps = IO.FileWrite ONLY (not the artifact union)"
       "IO.FileWrite" (find_caps "writer")
 
+(* ── String measurement counters (MARCH_STRING_STATS) ─────────────────────
+   Phase 1 of the string performance work (see
+   specs/2026-07-26-string-performance-design.md).  The representation
+   decision — small-string optimisation vs. borrowed views vs. neither —
+   rests on these numbers, so they are validated rather than trusted: a
+   histogram that miscounts would silently produce the wrong architecture. *)
+
+(* Parse the `march_string_stats <key> <value>` lines a stats-enabled binary
+   writes to stderr at exit.  Fails the test (rather than defaulting to 0) if
+   a key is absent, since a missing counter and a zero counter mean very
+   different things. *)
+let string_stat_of ~stderr_file key =
+  let contents = read_file_contents stderr_file in
+  let lines = String.split_on_char '\n' contents in
+  let prefix = "march_string_stats " ^ key ^ " " in
+  let plen = String.length prefix in
+  match List.find_opt (fun l ->
+      String.length l > plen && String.sub l 0 plen = prefix) lines with
+  | Some l -> int_of_string (String.trim (String.sub l plen (String.length l - plen)))
+  | None ->
+    Alcotest.failf "no `march_string_stats %s` line in stderr (got: %s)"
+      key (String.concat " | " (List.filter (fun l -> l <> "") lines))
+
+(* Compile [src_text] as a standalone program, run it with the given env
+   prefix, and hand the caller the stderr path.  Returns None only on the
+   legitimate clang-absent skip. *)
+let with_compiled_program ~tag ~src_text ~env_prefix f =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file tag "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (tag ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp (tag ^ "_bin") in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let err_file = Filename.concat tmp "err.txt" in
+    let rc =
+      Sys.command
+        (Printf.sprintf "%s%s > /dev/null 2> %s"
+           env_prefix (Filename.quote bin) (Filename.quote err_file))
+    in
+    Alcotest.(check int) "compiled program exits 0" 0 rc;
+    f err_file
+
+(* The size histogram must be EXACT, not approximate: the SSO criterion is a
+   fraction of allocations in the small buckets, so an off-by-N histogram
+   changes the architectural verdict.  String.repeat allocates exactly one
+   string per call, so 100 calls producing 12 bytes and 100 producing 40 must
+   appear as exactly 100 in hist_le15 and 100 in hist_le63.  The loops keep
+   each string live only briefly, which also exercises the free path.
+
+   Deliberately NOT 4-byte strings: println, to_string and stdlib internals
+   allocate their own short-lived strings, which the counter correctly counts,
+   so the <=7 bucket carries unrelated traffic (measured: 302 for 100 loop
+   allocations) and could not support an exact assertion.  12 and 40 bytes sit
+   in buckets nothing else in this program touches, which is what lets both
+   checks stay exact rather than degrading to >=. *)
+let test_string_stats_histogram_exact () =
+  with_compiled_program ~tag:"march_strstats"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrStats do\n\
+      \  pfn small(i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.repeat(\"abcd\", 3)\n\
+      \      small(i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  pfn big(i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.repeat(\"abcd\", 10)\n\
+      \      big(i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    println(to_string(small(0, 100, 0) + big(0, 100, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let get k = string_stat_of ~stderr_file:err_file k in
+       Alcotest.(check int) "hist_le15 counts the 100 twelve-byte strings"
+         100 (get "hist_le15");
+       Alcotest.(check int) "hist_le63 counts the 100 forty-byte strings"
+         100 (get "hist_le63");
+       Alcotest.(check bool) "allocs covers both loops" true (get "allocs" >= 200);
+       Alcotest.(check bool) "peak_live_bytes is positive" true
+         (get "peak_live_bytes" > 0))
+
+(* Control: stats stay OFF unless the env var is set.  Without this, the test
+   above could pass against an always-on implementation that would corrupt
+   every other test's stderr expectations and tax the hot allocation path. *)
+let test_string_stats_off_by_default () =
+  with_compiled_program ~tag:"march_strstats_off" ~env_prefix:""
+    ~src_text:
+      "mod Off do\n  fn main() do println(String.repeat(\"x\", 3)) end\nend\n"
+    (fun err_file ->
+       let contents = read_file_contents err_file in
+       Alcotest.(check bool) "no stats emitted without the env var" false
+         (List.exists
+            (fun l ->
+               let p = "march_string_stats" in
+               String.length l >= String.length p
+               && String.sub l 0 (String.length p) = p)
+            (String.split_on_char '\n' contents)))
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -12740,6 +12851,10 @@ let stdlib_suites =
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
+        Alcotest.test_case "string stats: size histogram is exact" `Slow
+          test_string_stats_histogram_exact;
+        Alcotest.test_case "string stats: off unless MARCH_STRING_STATS is set" `Slow
+          test_string_stats_off_by_default;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);

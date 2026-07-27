@@ -19,6 +19,7 @@
 - Benchmarks live in `bench/`, are documented in `specs/benchmarks.md`, and print a **deterministic checksum** so the harness can prove the work actually happened.
 - The benchmark corpus is **not** part of `dune runtest`.
 - Build with `dune build --root .` and named targets. A bare `dune build --root .` with no target hangs in this repo.
+- **After editing any `runtime/*.c`, run `dune build --root . @warm-cache` before compiling a March program**, and clear `.march/cas/artifacts-v2` if a compile prints `(cached)`. Compiled programs resolve the runtime exe-relative from `_build/default/runtime`, which a targeted `dune build test/... bin/main.exe` does **not** refresh — so a runtime edit silently links the stale copy and tests fail with the instrumentation apparently absent. Note the CAS artifact directory is `artifacts-v2`, not `artifacts`.
 - Do **not** use `git stash` (the stash stack is shared across worktrees), and stage files explicitly by name — never `git add -A`/`.`.
 - Size knobs are named constants at the top of each benchmark so CI can run small and profiling can run large.
 

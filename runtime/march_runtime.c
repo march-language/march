@@ -93,6 +93,106 @@ static inline int gc_trace_on(void) {
     return gc_trace_state > 0;
 }
 
+/* ── String statistics (MARCH_STRING_STATS=1) ────────────────────────────
+ * Opt-in profiling counters for the phase 1 string measurement — see
+ * specs/2026-07-26-string-performance-design.md.  They exist to answer one
+ * question with data instead of intuition: whether march_string's single
+ * contiguous representation should grow a small-string optimisation, a
+ * borrowed-view variant, or neither.
+ *
+ * OFF by default.  When off the cost is one predictable branch inside
+ * functions that are already calling malloc or memcpy; `--verify-overhead`
+ * in bench/run_string_bench.sh asserts that stays under 2%.
+ *
+ * Relaxed atomics throughout, mirroring march_live_alloc_count: these are a
+ * profiling aid, not a synchronisation mechanism, and stronger ordering
+ * would distort the very timings being measured. */
+static pthread_mutex_t str_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int str_stats_state = 0;  /* 0 = uninit, 1 = on, -1 = off */
+
+#define MARCH_STR_NBUCKETS 7
+static _Atomic int64_t str_alloc_count;
+static _Atomic int64_t str_alloc_bytes;
+static _Atomic int64_t str_free_count;
+static _Atomic int64_t str_copy_bytes;
+static _Atomic int64_t str_live_bytes;
+static _Atomic int64_t str_peak_bytes;
+static _Atomic int64_t str_hist[MARCH_STR_NBUCKETS];
+
+static const char *str_hist_names[MARCH_STR_NBUCKETS] = {
+    "hist_le7", "hist_le15", "hist_le23", "hist_le31",
+    "hist_le63", "hist_le255", "hist_gt255"
+};
+
+/* Bucket bounds chosen for the SSO decision: 23 bytes is what would fit
+ * inline in the footprint the 24-byte march_string header already occupies,
+ * so the <=23 buckets are exactly the strings an SSO could make free. */
+static inline int str_bucket(int64_t len) {
+    if (len <=   7) return 0;
+    if (len <=  15) return 1;
+    if (len <=  23) return 2;
+    if (len <=  31) return 3;
+    if (len <=  63) return 4;
+    if (len <= 255) return 5;
+    return 6;
+}
+
+static void str_stats_dump(void) {
+    fprintf(stderr, "march_string_stats allocs %lld\n",
+            (long long)atomic_load_explicit(&str_alloc_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats alloc_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_alloc_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats frees %lld\n",
+            (long long)atomic_load_explicit(&str_free_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats copy_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_copy_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats peak_live_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_peak_bytes, memory_order_relaxed));
+    for (int i = 0; i < MARCH_STR_NBUCKETS; i++)
+        fprintf(stderr, "march_string_stats %s %lld\n", str_hist_names[i],
+                (long long)atomic_load_explicit(&str_hist[i], memory_order_relaxed));
+}
+
+static void str_stats_init_locked(void) {
+    const char *e = getenv("MARCH_STRING_STATS");
+    if (e && *e && strcmp(e, "0") != 0) {
+        str_stats_state = 1;
+        atexit(str_stats_dump);
+    } else {
+        str_stats_state = -1;
+    }
+}
+
+/* Lazy single-check, same shape as gc_trace_on. */
+static inline int str_stats_on(void) {
+    if (__builtin_expect(str_stats_state != 0, 1)) return str_stats_state > 0;
+    pthread_mutex_lock(&str_stats_mutex);
+    if (str_stats_state == 0) str_stats_init_locked();
+    pthread_mutex_unlock(&str_stats_mutex);
+    return str_stats_state > 0;
+}
+
+/* Tally one string allocation of [len] payload bytes, maintaining the running
+ * peak of live string bytes with a CAS loop (relaxed: the peak is a report,
+ * not a synchronisation point, so a racing under-observation is acceptable). */
+static void str_stats_alloc(int64_t len) {
+    atomic_fetch_add_explicit(&str_alloc_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&str_alloc_bytes, len, memory_order_relaxed);
+    atomic_fetch_add_explicit(&str_hist[str_bucket(len)], 1, memory_order_relaxed);
+    int64_t live = atomic_fetch_add_explicit(&str_live_bytes, len,
+                                             memory_order_relaxed) + len;
+    int64_t peak = atomic_load_explicit(&str_peak_bytes, memory_order_relaxed);
+    while (live > peak &&
+           !atomic_compare_exchange_weak_explicit(
+               &str_peak_bytes, &peak, live,
+               memory_order_relaxed, memory_order_relaxed)) { }
+}
+
+static void str_stats_free(int64_t len) {
+    atomic_fetch_add_explicit(&str_free_count, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&str_live_bytes, len, memory_order_relaxed);
+}
+
 static inline int64_t gc_ts_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -209,6 +309,9 @@ void march_decrc(void *p) {
     if (gc_trace_on())
         gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev == 1) {
+        /* Read ->len while the object is still alive. */
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
         free(p);
@@ -228,7 +331,13 @@ int64_t march_decrc_freed(void *p) {
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (gc_trace_on())
         gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
-    if (prev == 1) { march_run_resource_dtor(p); MARCH_FREE_BUMP(); free(p); return 1; }
+    if (prev == 1) {
+        /* Sibling of march_decrc's free path — must tally too, or frees are
+         * undercounted and peak_live_bytes is inflated. */
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
+        march_run_resource_dtor(p); MARCH_FREE_BUMP(); free(p); return 1;
+    }
     if (prev < 1) {
         /* RC underflow: decrement-on-zero (or worse) detected.  Without this
          * guard we'd silently double-free.  Mirror march_decrc's behaviour. */
@@ -381,6 +490,7 @@ void *march_string_alloc(int64_t len) {
     s->pad = 0;
     s->len = len;
     MARCH_ALLOC_BUMP();
+    if (str_stats_on()) str_stats_alloc(len);
     return s;
 }
 
