@@ -1848,12 +1848,30 @@ let classifier_suite =
         check_scope "unusable" "Unusable"
           (classify "fn g(n : Int) : {Int | _ < q} do 0 end" [ "n" ]));
 
-    Alcotest.test_case "unrecognised syntax is unusable" `Quick (fun () ->
-        (* A field projection is syntax [classify_pred] does not traverse, so it
-           falls through to the conservative catch-all rather than being read as
-           a bare mention of `r`. *)
+    (* A field projection is classified by its RECEIVER — the value reference —
+       with the field name treated as a selector.  This test previously pinned
+       the opposite (`Unusable`, via the conservative catch-all), which meant
+       NO record postcondition could ever reach a call site: every one of them
+       mentions a field, so `fn mk() : {v : Cfg | v.port >= 1}` was proven at
+       its definition and then silently discarded.  [subst_params] has the
+       mirror-image arm, so a relational one is rewritten wholly into the
+       caller's namespace rather than left half-translated. *)
+    Alcotest.test_case "a field projection on a parameter is relational in it" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[r]"
+          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]));
+
+    Alcotest.test_case "a field projection on the binder is closed" `Quick (fun () ->
+        check_scope "closed" "Closed"
+          (classify "fn g(n : Int) : {v : Cfg | v.port >= 1} do { port: 1 } end" [ "n" ]));
+
+    (* The catch-all still rejects genuinely untraversed syntax, and a field
+       projection on an UNKNOWN receiver is still unusable — the receiver's own
+       classification is what decides. *)
+    Alcotest.test_case "a field projection on an unknown name is unusable" `Quick
+      (fun () ->
         check_scope "unusable" "Unusable"
-          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]))
+          (classify "fn g(n : Int) : {Int | _ < q.port} do 0 end" [ "n" ]))
   ]
 
 (* Integration tests for propagating a relational postcondition to call sites.
@@ -2747,6 +2765,206 @@ let b1_suite =
       \  fn probe(ys : List(Int)) : Int do needl(ys) end"
   ]
 
+(* ── B2: a record-returning postcondition reaches the call site ────────────
+   Int, String and variant-ADT postconditions all propagated; only the record
+   shape was dropped, so `needLow(mk())` was silently skipped while the
+   identically-shaped Int version was caught.  Two things had to change: the
+   predicate classifier had to stop reading a field projection as unusable
+   syntax, and [record_self] had to learn the call shape.
+
+   The gate is NOT bypassed: [gate_unverified_posts] still clears [ret] on
+   every postcondition the definition side did not PROVE, so an unproven one
+   must stay put — that is the first negative test below.  The remaining ones
+   assert that the newly-propagated fact is retired by each binding form, each
+   with a control confirming it would otherwise have been reported. *)
+let b2_cfg body =
+  Printf.sprintf
+    "mod T do\n\
+    \  type Cfg = { port : Int }\n\
+    \  fn mk() : {v : Cfg | v.port >= 1} do { port: 8080 } end\n\
+    \  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end\n\
+     %s\n\
+     end\n"
+    body
+
+let b2_suite =
+  [ gated "a record postcondition propagates through a direct call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (b2_cfg "  fn probe() : Int do needLow(mk()) end")));
+
+    gated "a record postcondition propagates through a `let`" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe() : Int do\n\
+                \    let c = mk()\n\
+                \    needLow(c)\n\
+                \  end")));
+
+    (* THE GATE.  `mk_bad`'s body cannot establish `v.port >= 1` (x is
+       unknown), so the postcondition is never proven and must not travel.
+       Bypassing the gate here would turn a legal program into an error. *)
+    gated "an UNPROVEN record postcondition does not propagate" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: x } end
+  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
+  fn probe(y : Int) : Int do needLow(mk_bad(y)) end
+end|}));
+
+    gated "a record postcondition that SATISFIES the precondition is silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn mk() : {v : Cfg | v.port >= 1} do { port: 8080 } end
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn probe() : Int do needHigh(mk()) end
+end|}));
+
+    gated "an opaque record in the newly-checked position stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn probe(d : Cfg) : Int do needHigh(d) end
+end|}));
+
+    (* Retirement, one per binding form.  In each, the inner `c` is a
+       DIFFERENT, unknown record; carrying mk()'s postcondition onto it would
+       be a false positive.  The paired control renames the inner binder to
+       `e`, so the fact survives and the violation IS reported — without it
+       these could pass by the checker having gone blind. *)
+    gated "a re-`let` retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let c = d\n\
+                \    needLow(c)\n\
+                \  end")));
+
+    gated "a lambda parameter retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let f = fn c -> needLow(c)\n\
+                \    f(d)\n\
+                \  end")));
+
+    gated "control: lambda parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let f = fn e -> needLow(c)\n\
+                \    f(d)\n\
+                \  end")));
+
+    gated "a `match` binder retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(o : Option(Cfg)) : Int do\n\
+                \    let c = mk()\n\
+                \    match o do\n\
+                \      Some(c) -> needLow(c)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "control: `match` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(o : Option(Cfg)) : Int do\n\
+                \    let c = mk()\n\
+                \    match o do\n\
+                \      Some(e) -> needLow(c)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "a local-`fn` parameter retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    fn inner(c : Cfg) : Int do needLow(c) end\n\
+                \    inner(d)\n\
+                \  end")));
+
+    gated "control: local-`fn` parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    fn inner(e : Cfg) : Int do needLow(c) end\n\
+                \    inner(d)\n\
+                \  end")));
+
+    gated "a `let?` binder retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn src() : Result(Cfg, String) do Err(\"x\") end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let c = mk()\n\
+                \    let? c = src()\n\
+                \    Ok(needLow(c))\n\
+                \  end")));
+
+    gated "control: `let?` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn src() : Result(Cfg, String) do Err(\"x\") end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let c = mk()\n\
+                \    let? e = src()\n\
+                \    Ok(needLow(c))\n\
+                \  end")));
+
+    (* A RELATIONAL record postcondition over an opaque actual proves nothing
+       about the caller's value, so it must not decide the call either way. *)
+    gated "a relational record postcondition on an opaque actual is silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn bump(c : Cfg) : {v : Cfg | v.port >= c.port} do c end
+  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
+  fn probe(d : Cfg) : Int do needLow(bump(d)) end
+end|}));
+
+    (* Records + variant ADTs + strings + a relational postcondition, all
+       correct: the combination must stay entirely silent. *)
+    gated "records + ADTs + strings + relational postcondition: all silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int, name : String }
+  type Tag = Live | Dead
+  fn bump(c : Cfg) : {v : Cfg | v.port >= c.port} do c end
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn nonempty(s : {String | len(_) >= 1}) : Int do 0 end
+  fn live(t : {v : Tag | is_Live(v)}) : Int do 0 end
+  fn probe(base : Cfg) : Int do
+    let b = bump(base)
+    needHigh(b) + nonempty("hello") + live(Live)
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2774,4 +2992,5 @@ let () =
       ("higher-order", hof_suite);
       ("tier2-induction", tier2_suite);
       ("callee-shadowing", shadow_suite);
-      ("anon-binder-measures", b1_suite) ]
+      ("anon-binder-measures", b1_suite);
+      ("record-postcond-propagation", b2_suite) ]
