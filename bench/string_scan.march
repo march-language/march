@@ -1,0 +1,64 @@
+-- String scan benchmark: substring search over a large buffer.
+--
+-- Isolates SCAN THROUGHPUT.  index_of/contains are a byte-at-a-time loop
+-- calling memcmp (runtime/march_runtime.c), with no memchr and no SIMD; this
+-- benchmark measures what that costs and, later, what fixing it buys.
+--
+-- Two cases, because their profiles differ sharply:
+--   absent -- the needle never matches, so every byte of the buffer is
+--             examined on every call.  The O(n*m) worst case, and the honest
+--             number to quote.
+--   late   -- the needle sits at ~90% through: the realistic "found
+--             eventually" case that most real searches resemble.
+--
+-- Expected output: checksum=135000150
+-- (150 absent-scan misses at 1 each, plus 150 late hits at index 900000)
+-- Usage: march --compile --opt 2 bench/string_scan.march -o /tmp/string_scan
+
+mod StringScan do
+
+-- Size knob: 10 bytes per unit.  100_000 -> 1MB (CI); raise for profiling.
+pfn buffer_units() : Int do 100000 end
+pfn iterations() : Int do 150 end
+
+-- Needle absent from the buffer: index_of walks the whole thing and returns
+-- None every time.  Add 1 per miss so the result depends on the search
+-- actually running -- otherwise the call is dead code and can be optimized
+-- away, and the benchmark would measure nothing while looking fast.
+pfn scan_absent(buf : String, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else
+    let hit = match String.index_of(buf, "zzzzzzzz") do
+      Some(k) -> k
+      None    -> 1
+    end
+    scan_absent(buf, i + 1, n, acc + hit)
+  end
+end
+
+pfn scan_late(buf : String, needle : String, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else
+    let hit = match String.index_of(buf, needle) do
+      Some(k) -> k
+      None    -> 0
+    end
+    scan_late(buf, needle, i + 1, n, acc + hit)
+  end
+end
+
+fn main() do
+  let buf = String.repeat("abcdefghij", buffer_units())
+  -- Splice a unique marker in at ~90% so the "found late" case has something
+  -- to find.  Built once, outside the timed loops.
+  let size   = String.byte_size(buf)
+  let cut    = (size * 9) / 10
+  let marked = String.slice(buf, 0, cut) ++ "QQMARKERQQ"
+               ++ String.slice(buf, cut, size - cut)
+
+  let a = scan_absent(buf, 0, iterations(), 0)
+  let b = scan_late(marked, "QQMARKERQQ", 0, iterations(), 0)
+  println("checksum=" ++ to_string(a + b))
+end
+
+end

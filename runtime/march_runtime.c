@@ -209,6 +209,18 @@ static inline void march_str_copy(void *dst, const void *src, size_t n) {
                                   memory_order_relaxed);
 }
 
+/* Tally [n] bytes moved by a hand-written byte loop rather than a memcpy.
+ * to_lowercase/to_uppercase/reverse transform while they copy, so they cannot
+ * call march_str_copy — but they move exactly as many bytes, and a view
+ * representation would not help them either way.  Leaving them out made
+ * bench/string_case report ~1MB copied for 400MB of actual work, which would
+ * have understated the copy total by two orders of magnitude in precisely the
+ * benchmark built to measure transform cost. */
+static inline void str_stats_copied(int64_t n) {
+    if (str_stats_on())
+        atomic_fetch_add_explicit(&str_copy_bytes, n, memory_order_relaxed);
+}
+
 static inline int64_t gc_ts_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2938,6 +2950,7 @@ void *march_string_to_lowercase(void *s) {
         r->data[i] = (char)tolower((unsigned char)ss->data[i]);
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 
@@ -2948,6 +2961,7 @@ void *march_string_to_uppercase(void *s) {
         r->data[i] = (char)toupper((unsigned char)ss->data[i]);
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 
@@ -3002,6 +3016,7 @@ void *march_string_reverse(void *s) {
         r->data[i] = ss->data[ss->len - 1 - i];
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 

@@ -129,6 +129,38 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_scan.march — Substring search over a 1MB buffer
+
+**Command:** 150 absent-needle scans + 150 late-needle scans over 1MB
+**Expected output:** `checksum=135000150`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.index_of` | Byte-at-a-time loop calling `memcmp` — no `memchr`, no SIMD |
+| Absent needle | Full O(n·m) worst case: every byte examined on every call |
+| Late needle | Realistic "found at ~90% through" case |
+
+**Comparison baseline:** C (`memmem`), Rust (`str::find`), Go (`strings.Index`), Python (`str.find`).
+**What to watch:** Part of the phase 1 string measurement (`specs/2026-07-26-string-performance-design.md`). March is expected to trail C badly here until a `memchr`/SIMD search lands; the point of the benchmark is to size that gap. Once the fast path exists, a regression here points at it.
+
+---
+
+## bench/string_case.march — Case conversion over a 1MB buffer
+
+**Command:** 200 × (`to_uppercase` then `to_lowercase`) over 1MB
+**Expected output:** `checksum=200000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.to_uppercase` / `to_lowercase` | Full-size allocation + byte-loop transform per call |
+| Allocation throughput | 400 full-buffer allocations |
+| Memory bandwidth | Pure map-and-copy, no search |
+
+**Comparison baseline:** C (in-place `toupper` loop), Rust (`to_uppercase`), Go (`strings.ToUpper`), Python (`str.upper`).
+**What to watch:** Paired with `string_scan` — if both are slow the ceiling is memory bandwidth, not the search loop, and no cleverness in `index_of` will help. Under `MARCH_STRING_STATS=1` this should report ~400MB copied; a reading near 1MB means the byte-loop builders lost their copy accounting again (they don't call `memcpy`, so they're counted explicitly).
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled

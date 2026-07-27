@@ -11314,6 +11314,39 @@ let test_string_stats_copy_bytes () =
             copied)
          true (copied >= 100_000))
 
+(* Byte-loop builders must be counted too.  to_lowercase/to_uppercase/reverse
+   transform while they copy, so they write through a hand-rolled loop after
+   march_string_alloc rather than calling memcpy — and were therefore invisible
+   to the march_str_copy wrapper.  Caught by bench/string_case reporting ~1MB
+   copied for 400MB of real work: a two-orders-of-magnitude undercount in the
+   very benchmark built to measure transform cost, which would have been read
+   as "copying is negligible here" when the opposite is true.
+   50 round-trips of a 10_000-byte buffer move ~1_000_000 bytes. *)
+let test_string_stats_copy_bytes_byte_loops () =
+  with_compiled_program ~tag:"march_strcase"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrCase do\n\
+      \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let up = String.to_uppercase(buf)\n\
+      \      let lo = String.to_lowercase(up)\n\
+      \      go(buf, i + 1, n, acc + String.byte_size(lo))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
+      \    println(to_string(go(buf, 0, 50, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let copied = string_stat_of ~stderr_file:err_file "copy_bytes" in
+       Alcotest.(check bool)
+         (Printf.sprintf
+            "case conversions counted: copy_bytes >= 1_000_000 (got %d)" copied)
+         true (copied >= 1_000_000))
+
 (* Control: stats stay OFF unless the env var is set.  Without this, the test
    above could pass against an always-on implementation that would corrupt
    every other test's stderr expectations and tax the hot allocation path. *)
@@ -12887,6 +12920,8 @@ let stdlib_suites =
           test_string_stats_off_by_default;
         Alcotest.test_case "string stats: bytes copied are tallied" `Slow
           test_string_stats_copy_bytes;
+        Alcotest.test_case "string stats: byte-loop builders counted too" `Slow
+          test_string_stats_copy_bytes_byte_loops;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);
