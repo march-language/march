@@ -1082,23 +1082,32 @@ let parse_expr_str src =
   let lexbuf = Lexing.from_string src in
   March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
-(* Short interpolations keep the ++ chain: the cons cells a string_join needs
-   cost more than the extra copy at this size (see parser.mly:desugar_interp). *)
+(* Interpolation emits ONE shape: a `++` chain, at every length.  desugar then
+   collapses chains of 3+ into string_concat3, so the parser does not need a
+   second shape and deliberately does not have one.
+
+   An earlier version emitted `string_join` over a cons list past a part-count
+   threshold. That was a win against a raw `++` chain but a LOSS against
+   concat3 folding, which allocates no list: measured at 7 segments, 519ms via
+   string_join against 287ms via folding. It also meant every consumer of the
+   interpolation AST -- the formatter's reconstruction and the ~H sigil's
+   part-wise decomposition -- had to handle two shapes, and a missing case in
+   the latter silently disabled HTML escaping twice. *)
 let test_parse_string_interp () =
-  (* Should desugar to: "hi " ++ to_string(name) ++ "!" *)
+  (* "hi " ++ to_string(name) ++ "!" *)
   match parse_expr_str {|"hi ${name}!"|} with
   | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
     when cat2.txt = "++" -> ()
   | _ -> Alcotest.fail "expected ++ desugaring from short string interpolation"
 
-(* Past the threshold the ++ chain's O(k^2) re-copying of the growing prefix
-   dominates, so the parser emits one string_join over all the parts instead. *)
+(* Same shape at nine segments — no threshold, no second form. *)
 let test_parse_string_interp_many_parts () =
   match parse_expr_str {|"a${w}b${x}c${y}d${z}e"|} with
-  | March_ast.Ast.EApp
-      (March_ast.Ast.EVar join, [_; March_ast.Ast.ELit (March_ast.Ast.LitString "", _)], _)
-    when join.txt = "string_join" -> ()
-  | _ -> Alcotest.fail "expected string_join desugaring from many-part string interpolation"
+  | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
+    when cat2.txt = "++" -> ()
+  | _ ->
+    Alcotest.fail
+      "expected ++ desugaring from many-part interpolation too (one shape only)"
 
 let test_eval_string_interp () =
   let env = eval_module {|mod Test do
@@ -4459,15 +4468,19 @@ let test_h_sigil_get_form_not_injected_with_conn () =
   Alcotest.(check string) "GET form: no injection"
     {|<form method="get">x</form>|} (vstr result)
 
-(* ~H auto-escaping must hold for BOTH interpolation desugarings.
+(* ~H auto-escaping must hold at every interpolation length.
    `html_interp_to_iolist` finds the dynamic parts by matching `to_string(e)`
    per part, so it depends on `decompose_concat` seeing through whatever shape
-   the parser emitted (`++` chain below the join threshold, `string_join` above
-   it — lib/parser/parser.mly:desugar_interp).  When it can't, the template
-   collapses into one opaque part and escaping is silently skipped: the
-   many-part case below rendered raw `<script>` tags before decompose_concat
-   learned the join shape.  Asserting on ESCAPED output is the point — a shape
-   this pass doesn't recognize still renders, just unsafely. *)
+   reaches it: the parser emits a `++` chain, and desugar then collapses chains
+   of 3+ into `string_concat3` before ESigil hands the content over. When a
+   shape is not recognized the template collapses into ONE opaque part and
+   escaping is silently skipped.
+
+   That has now happened twice, from two different mechanisms — once when
+   interpolation briefly desugared to `string_join`, once when concat3 folding
+   was added — and the many-part case below rendered raw `<script>` tags both
+   times. Asserting on ESCAPED output is the whole point: an unrecognized shape
+   still renders, just unsafely, so nothing else fails. *)
 let eval_h_escape_page body_decl =
   let string_decl = load_stdlib_file_for_test "string.march" in
   let iolist_decl = load_stdlib_file_for_test "iolist.march" in
@@ -4477,7 +4490,7 @@ let eval_h_escape_page body_decl =
 end|} body_decl)
 
 let test_h_sigil_escapes_short_interp () =
-  (* Two segments → `++` chain. *)
+  (* Two segments → a bare `++`, below the concat3 folding threshold. *)
   let env = eval_h_escape_page {|
   fn page(evil) : String do
     IOList.to_string(~H"<p>${evil}</p>")
@@ -4487,7 +4500,7 @@ let test_h_sigil_escapes_short_interp () =
     "<p>&lt;script&gt;</p>" (vstr result)
 
 let test_h_sigil_escapes_many_part_interp () =
-  (* Seven segments → string_join. *)
+  (* Seven segments → `++` chain, folded to string_concat3 by desugar. *)
   let env = eval_h_escape_page {|
   fn page(evil) : String do
     IOList.to_string(~H"<p>${evil}</p><i>${evil}</i><b>${evil}</b>")

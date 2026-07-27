@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **String interpolation is ~1.45× faster** and allocates no intermediate list.
+  `"a${x}b${y}c"` now desugars to a plain `++` chain at every length, which the
+  compiler folds into three-way concats — where it previously switched to a
+  `string_join` over a cons list past a size threshold. Measured at seven
+  segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
+  interpolation dropping to zero.
+
+
 ### Added
 
 - **`String.index_of_from(s, sub, start)`** — substring search from a byte
