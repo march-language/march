@@ -20,6 +20,25 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement Tier 2: structural induction over recursive functions.** A
+  relational postcondition on a structurally recursive function —
+  `fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}` — is now
+  *proven* at its definition and therefore propagates to call sites, instead of
+  being silently skipped. Z3 still does no induction; the checker supplies the
+  **induction hypothesis** at each self-recursive call whose argument is a
+  proper component of the matched parameter, then discharges each `match` arm
+  against the `@[measure]`'s recursion equations. Relational and closed
+  predicates over a variant-ADT return both work, recursion may descend into
+  any recursive component, and a growing accumulator parameter is fine.
+  Unchanged and still silent: mutual recursion, the built-in `len` (declare a
+  user `@[measure]` instead), a recursive call inside a lambda or behind a
+  nested `match`, and any non-structural recursion — the hypothesis is gated by
+  the same `structural_subvars` test that makes `@[measure]` axiomatisation
+  sound, because an unsound hypothesis would manufacture false positives rather
+  than merely fail to help. `Int`-returning postconditions are untouched. See
+  `specs/lang/refinement-types.md` for the exact frontier, including the three
+  stacked obstacles that still separate this from the stdlib HAMT.
+
 - **Two higher-order refinement checks.** A call made *through* a refined
   function-typed parameter — `fn ap(f : ({Int | _ >= 0}) -> Int) : Int do
   f(-3) end` — is now rejected, and so is a call through a **local alias** of

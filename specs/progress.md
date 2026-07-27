@@ -1,5 +1,29 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
+
+A relational postcondition on a structurally recursive function —
+`fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}` — is now
+PROVEN at its definition and therefore propagates to call sites, where it was
+previously skipped. Z3 does no induction; `check_post_induction`
+(`lib/refinecheck/refine_check.ml`) supplies the **induction hypothesis** at
+each self-recursive call whose argument at the matched parameter's position is
+certified by `structural_subvars`, asserts the arm's pattern equation, and
+discharges each `match` arm against the `@[measure]` recursion equations. The
+path occupies the previously-inert variant-ADT-return case
+(`return_refine_ext` returned `None` for it), and is verdict-only: it never
+emits a diagnostic, so its sole observable effect is enabling propagation
+through `gate_unverified_posts`. `fn_sig` gained `ret_sort` so an ADT-sorted
+postcondition is carried only by `reflect_dt`, never by the `Int` consumers
+that would declare one symbol at two sorts. `Int`/record postconditions are
+untouched. `--no-measure-axioms` disables the path (it empties the sort
+declarations the VCs require). 200 refinecheck tests (was 184), exit 0 on a
+cold VC cache;
+`test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
+The stdlib HAMT remains out of reach behind three stacked obstacles, the first
+of which is the built-in `List`'s opaque element sort — see the Limitations
+section of `specs/lang/refinement-types.md`.
+
 ## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
 
 LLVM output now declares `march_alloc` with the conservative facts proven by
