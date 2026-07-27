@@ -16,7 +16,9 @@ emits a diagnostic, so its sole observable effect is enabling propagation
 through `gate_unverified_posts`. `fn_sig` gained `ret_sort` so an ADT-sorted
 postcondition is carried only by `reflect_dt`, never by the `Int` consumers
 that would declare one symbol at two sorts. `Int`/record postconditions are
-untouched. 199 refinecheck tests (was 184), exit 0 on a cold VC cache;
+untouched. `--no-measure-axioms` disables the path (it empties the sort
+declarations the VCs require). 200 refinecheck tests (was 184), exit 0 on a
+cold VC cache;
 `test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
 The stdlib HAMT remains out of reach behind three stacked obstacles, the first
 of which is the built-in `List`'s opaque element sort — see the Limitations

@@ -762,8 +762,8 @@ footprint property this transparency implies: a program whose obligations
 all provably hold at `--check` time runs byte-identically interpreted and
 compiled, since neither backend inserts any runtime predicate check.
 
-Two higher-order call shapes have since been closed (199 refinecheck tests,
-the latest 15 covering Tier 2 structural induction):
+Two higher-order call shapes have since been closed (200 refinecheck tests,
+the latest 16 covering Tier 2 structural induction):
 a call through a refined function-typed *parameter*, and a call through a
 *local alias* of a named refined function — both previously fell through
 `resolve_call`'s named-callee-only resolution and were silently skipped.

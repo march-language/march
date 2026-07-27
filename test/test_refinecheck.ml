@@ -2207,6 +2207,17 @@ let tier2_suite =
     gated "a proven relational postcondition propagates" (fun () ->
         Alcotest.(check bool) "error" true (has_refine_error tier2_src));
 
+    (* `--no-measure-axioms` empties [measure_preamble], and with it
+       [measure_preamble_sorts] — which [check_post_induction] requires to
+       contain both the return and matched-parameter ADT sorts before it will
+       build a VC (a VC naming an undeclared sort makes z3 emit an `(error …)`
+       and desynchronise the shared solver channel).  So the flag disables
+       Tier 2, exactly as it disables the measure reasoning it is an escape
+       hatch from.  Same fixture as the test above, which reports WITH axioms. *)
+    gated "--no-measure-axioms disables Tier 2 induction" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_no_axioms tier2_src));
+
     (* Definition-side must stay clean — proving it must not flag it. *)
     gated "the recursive definition itself reports nothing" (fun () ->
         Alcotest.(check bool) "no error" false (has_refine_error tier2_defn_only));
