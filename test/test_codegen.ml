@@ -3360,6 +3360,12 @@ let test_simplify_not_false () =
 
 (* ── Function inlining ───────────────────────────────────────────── *)
 
+let direct_call_to name =
+  March_tir.Tir.EApp
+    (mk_var name
+       (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+     [ilit 1])
+
 let test_inline_pure_small () =
   (* fn double(x) = x + x; fn main() = double(5) → call gets inlined *)
   let changed = ref false in
@@ -3433,6 +3439,49 @@ let test_inline_mutual_recursion_not_inlined () =
   let m = mk_module [f_fn; g_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
+
+let test_inline_acyclic_candidate_chain () =
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let leaf =
+    { March_tir.Tir.fn_name = "leaf";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let wrapper =
+    { March_tir.Tir.fn_name = "wrapper";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.EApp
+          (mk_var "leaf"
+             (March_tir.Tir.TFn
+                ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+           [March_tir.Tir.AVar x]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = direct_call_to "wrapper";
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let result =
+    March_tir.Inline.run ~changed (mk_module [leaf; wrapper; main])
+  in
+  let main_body =
+    result.March_tir.Tir.tm_fns
+    |> List.find (fun fn -> String.equal fn.March_tir.Tir.fn_name "main")
+    |> fun fn -> fn.March_tir.Tir.fn_body
+  in
+  match main_body with
+  | March_tir.Tir.EApp (fn, _)
+    when String.equal fn.March_tir.Tir.v_name "wrapper" ->
+    Alcotest.fail "acyclic wrapper remained excluded from candidates"
+  | _ -> ()
 
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
@@ -9907,6 +9956,7 @@ let codegen_suites =
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
+        Alcotest.test_case "acyclic_candidate_chain" `Quick test_inline_acyclic_candidate_chain;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;
@@ -10380,4 +10430,3 @@ let codegen_suites =
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
-
