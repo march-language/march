@@ -41,9 +41,18 @@ DIGEST_FILE="$OUT_DIR/.source-digest"
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
-}
+# Resolved as an ARGV array, not a shell function: `xargs` execs a real binary and cannot
+# see shell functions. A function named `sha256` silently resolved to macOS's /sbin/sha256
+# under xargs while failing outright on Linux ("xargs: sha256: No such file or directory"),
+# which made the digest both non-portable and green locally.
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  SHA=(shasum -a 256)
+else
+  echo "error: need either sha256sum or shasum on PATH" >&2
+  exit 1
+fi
 
 # A digest over every file that can affect what gets indexed: page content (*.md), the
 # generated stdlib API pages and the layouts/includes that wrap them (*.html). Paths are
@@ -58,12 +67,20 @@ source_digest() {
     -not -path 'docs/pagefind/*' \
     | LC_ALL=C sort \
     | tr '\n' '\0' \
-    | xargs -0 sha256 \
-    | sha256 \
+    | xargs -0 "${SHA[@]}" \
+    | "${SHA[@]}" \
     | cut -d' ' -f1
 }
 
 CURRENT="$(source_digest)"
+
+# Print the digest and stop. Useful for diagnosing a staleness failure, and for
+# re-stamping .source-digest when the digest ALGORITHM changed but the index contents did
+# not — regenerating would otherwise churn 193 content-hashed files for nothing.
+if [ "$MODE" = "--digest" ]; then
+  echo "$CURRENT"
+  exit 0
+fi
 
 if [ "$MODE" = "--check" ]; then
   if [ ! -f "$DIGEST_FILE" ]; then
