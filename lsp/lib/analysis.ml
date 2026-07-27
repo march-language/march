@@ -5906,7 +5906,9 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                       (List.map (fun (lbl, inner) ->
                            Printf.sprintf "%s  %s ->\n%s" indent lbl.Ast.txt
                              (steps_text (indent ^ "    ") inner)) branches))
-                   indent)
+                   indent
+               | Ast.ProtoStop _ ->
+                 Printf.sprintf "%s-- stop (loop exit)\n" indent)
              ss)
       in
       let body =

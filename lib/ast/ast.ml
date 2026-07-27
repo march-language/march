@@ -293,6 +293,7 @@ and protocol_step =
   | ProtoMsg of name * name * ty                          (** Sender -> Receiver : MsgType *)
   | ProtoLoop of protocol_step list                       (** loop do ... end *)
   | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
+  | ProtoStop of span                                     (** stop — exits an enclosing loop *)
 
 (** Interface (typeclass) definition:
     interface Eq(a) do ... end *)
