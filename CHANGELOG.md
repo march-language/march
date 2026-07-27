@@ -11,6 +11,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DataFrame.eval_agg`'s `Min`/`Max`/`Std`/`Variance` no longer materialize
+  a boxed `List(Float)` per call.** These aggregates previously converted the
+  column's `NativeArray` into a linked list before folding over it, an O(n)
+  allocation on top of the O(n) reduction that showed up as tens of
+  milliseconds per call on large columns regardless of which aggregate ran.
+  They now use dedicated native-array reduction builtins (mirroring `Sum`),
+  bringing them roughly in line with the already-fast `Sum`/`Mean` path —
+  60-80x faster at 500K rows in local measurement. `Median` still sorts and
+  is unaffected by this fix.
+
 ### Changed
 
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,

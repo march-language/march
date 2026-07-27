@@ -2275,6 +2275,12 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeIntArr", []))))));
     ("native_int_arr_sum",
        Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_min",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_max",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_sumsq_dev",
+       Mono (TArrow (TCon ("NativeIntArr", []), TArrow (t_float, t_float))));
     ("native_int_arr_map",
        Mono (TArrow (TCon ("NativeIntArr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeIntArr", [])))));
@@ -2298,6 +2304,12 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
     ("native_float_arr_sum",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_min",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_max",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_sumsq_dev",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TArrow (t_float, t_float))));
     ("native_float_arr_map",
        Mono (TArrow (TCon ("NativeFloatArr", []),
              TArrow (TArrow (t_float, t_float), TCon ("NativeFloatArr", [])))));

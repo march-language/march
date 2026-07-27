@@ -810,6 +810,77 @@ mod DataFrame do
     end
   end
 
+  doc """
+  Min and max of an IntCol/FloatCol, computed directly over the column's
+  NativeArray via native_{float,int}_arr_min/max (tight vectorizable C loops,
+  see runtime/march_runtime.c) instead of materializing a List(Float) and
+  folding, as float_list-based callers do. An earlier version of this helper
+  used a March-level recursive index loop over native_*_arr_get, which looked
+  allocation-free but wasn't: get()'s Float/Int return value is boxed at each
+  call site under the generic call convention, so it paid the same O(n)
+  boxing cost as float_list — the true fix has to stay inside a single C-level
+  reduction, exactly like col_native_sum's native_*_arr_sum. Err on an empty
+  column (matches Stats.min_safe/max_safe on Nil).
+  """
+  fn col_native_min_max(df : DataFrame, name : String) : Result((Float, Float), String) do
+    match get_column(df, name) do
+    Err(e) -> Err(e)
+    Ok(col) -> do
+      match col do
+      FloatCol(_, data) ->
+        if native_float_arr_length(data) == 0 do Err("DataFrame: column '" ++ name ++ "' is empty")
+        else Ok((native_float_arr_min(data), native_float_arr_max(data)))
+        end
+      IntCol(_, data) ->
+        if native_int_arr_length(data) == 0 do Err("DataFrame: column '" ++ name ++ "' is empty")
+        else Ok((int_to_float(native_int_arr_min(data)), int_to_float(native_int_arr_max(data))))
+        end
+      _ -> Err("DataFrame: column '" ++ name ++ "' cannot be converted to Float")
+      end
+      end
+    end
+  end
+
+  doc """
+  (count, mean, sum-of-squared-deviations) of an IntCol/FloatCol, computed via
+  two native C-level reduction passes (native_*_arr_sum for the mean, then
+  native_*_arr_sumsq_dev(arr, mean) for the deviations) instead of
+  materializing a List(Float) and folding — see col_native_min_max's doc for
+  why a March-level index loop can't do this allocation-free. This is the
+  standard two-pass variance algorithm rather than Stats' single-pass
+  Welford, so results may differ in the last bit or two but are equally
+  stable (no catastrophic cancellation) for any realistic column.
+  Sample variance is ssd / (count - 1); sample std dev is its square root.
+  """
+  fn col_native_moments(df : DataFrame, name : String) : Result((Int, Float), String) do
+    match get_column(df, name) do
+    Err(e) -> Err(e)
+    Ok(col) -> do
+      match col do
+      FloatCol(_, data) -> do
+        let n = native_float_arr_length(data)
+        if n == 0 do Ok((0, 0.0))
+        else do
+          let mean = native_float_arr_sum(data) /. int_to_float(n)
+          Ok((n, native_float_arr_sumsq_dev(data, mean)))
+          end
+        end
+        end
+      IntCol(_, data) -> do
+        let n = native_int_arr_length(data)
+        if n == 0 do Ok((0, 0.0))
+        else do
+          let mean = int_to_float(native_int_arr_sum(data)) /. int_to_float(n)
+          Ok((n, native_int_arr_sumsq_dev(data, mean)))
+          end
+        end
+        end
+      _ -> Err("DataFrame: column '" ++ name ++ "' cannot be converted to Float")
+      end
+      end
+    end
+  end
+
   -- ── Phase 1: Row access ────────────────────────────────────────────────────
 
   doc "Materializes row i as a Row snapshot. O(col_count × i). Slow path."
@@ -2111,45 +2182,39 @@ mod DataFrame do
 
       end
     Min(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_min_max(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) ->
-        match Stats.min_safe(xs) do
-        Err(_) -> NullVal
-        Ok(v)  -> FloatVal(v)
-        end
+      Ok((mn, _)) -> FloatVal(mn)
       end
 
       end
     Max(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_min_max(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) ->
-        match Stats.max_safe(xs) do
-        Err(_) -> NullVal
-        Ok(v)  -> FloatVal(v)
-        end
+      Ok((_, mx)) -> FloatVal(mx)
       end
 
       end
     Std(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_moments(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) ->
-        match Stats.std_dev_safe(xs) do
-        Err(_) -> NullVal
-        Ok(v)  -> FloatVal(v)
+      Ok((n, m2)) ->
+        if n < 2 do NullVal
+        else FloatVal(math_sqrt(m2 /. (int_to_float(n) -. 1.0)))
         end
       end
 
       end
     Variance(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_moments(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) ->
-        match Stats.variance_safe(xs) do
-        Err(_) -> NullVal
-        Ok(v)  -> FloatVal(v)
+      Ok((n, m2)) ->
+        if n == 0 do NullVal
+        else do
+          if n == 1 do FloatVal(0.0)
+          else FloatVal(m2 /. (int_to_float(n) -. 1.0))
+          end
+          end
         end
       end
 

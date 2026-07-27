@@ -4490,6 +4490,42 @@ int64_t native_int_arr_sum(void *arr) {
     return s;
 }
 
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+int64_t native_int_arr_min(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+int64_t native_int_arr_max(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. int elements promote to
+ * double for the deviation. */
+double native_int_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_int_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v = (double)(*(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8));
+        double d = v - mean;
+        s += d * d;
+    }
+    return s;
+}
+
 void *native_int_arr_map(void *arr, void *f) {
     int64_t len = native_int_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
@@ -4565,6 +4601,41 @@ double native_float_arr_sum(void *arr) {
     {
 #pragma clang fp reassociate(on)
         for (int64_t i = 0; i < len; i++) { double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); s += v; }
+    }
+    return s;
+}
+
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+double native_float_arr_min(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+double native_float_arr_max(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. */
+double native_float_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_float_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        double d = v - mean;
+        s += d * d;
     }
     return s;
 }
