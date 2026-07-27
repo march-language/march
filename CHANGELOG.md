@@ -186,6 +186,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `DataFrame`'s `Sum`/`Mean` aggregations (compiled builds) now compute
+  directly over the column's underlying array instead of first converting
+  the whole column to a list. Purely a missed-optimization fix — same
+  results, less work per call. `Min`/`Max`/`Std`/`Variance`/`Median` are
+  unaffected (no equivalent fast path yet).
+
 - **Compiled `NativeArray.map_int`/`map_float` now inlines closures that
   capture a variable**, not just plain `fn x -> ...` lambdas — e.g.
   `fn x -> x +. f` or `fn x -> x *. f`, the exact shape
@@ -194,6 +200,23 @@ git log is authoritative for exact commits.
   inlining optimization entirely, so this was a real, already-shipping
   workload getting none of the benefit. Purely a missed-optimization fix;
   behavior was already correct, just slower than it should have been.
+- **Refinement checker no longer flags correct code when a local reuses a
+  refined function's name.** A `let`, `let?`, lambda parameter, local-`fn`
+  name or parameter, `match` arm binder, or function parameter that happened
+  to share a name with a module-level refined function had its calls checked
+  against that function's precondition — even though the local is what
+  actually runs. `let takepos = fn n -> n` followed by `takepos(-3)` reported
+  a bogus violation. Callee resolution now obeys the same shadow discipline as
+  every other fact channel: a name an enclosing binder introduced never
+  resolves to a global function.
+
+- **`{T | size(_) < 0}` is now checked, like its named form `{v : T | size(v)
+  < 0}`.** The anonymous binder — the spelling the reference teaches — was
+  emitted verbatim as an SMT symbol when it appeared inside a measure
+  application. `_` is a reserved SMT-LIB token, so the solver rejected the
+  query and the predicate was silently never decided: the documented idiom
+  checked nothing while the named spelling worked. Both spellings now reflect
+  to one canonical symbol and produce identical verdicts.
 
 - **Compiled `NativeArray.map_int`/`map_float` now inlines even when the
   mapped array is reused afterward.** The Phase 2 closure-inlining

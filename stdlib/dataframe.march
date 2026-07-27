@@ -790,6 +790,26 @@ mod DataFrame do
     end
   end
 
+  doc """
+  Sum and element count of an IntCol/FloatCol, computed directly over the
+  column's NativeArray (native_int_arr_sum/native_float_arr_sum — already
+  vectorized in compiled builds) instead of materializing a List(Float) and
+  folding, as float_list-based callers do. Sum(0.0) on an empty column
+  matches Stats.sum's fold_left-over-Nil behavior.
+  """
+  fn col_native_sum(df : DataFrame, name : String) : Result((Float, Int), String) do
+    match get_column(df, name) do
+    Err(e) -> Err(e)
+    Ok(col) -> do
+      match col do
+      FloatCol(_, data) -> Ok((native_float_arr_sum(data), native_float_arr_length(data)))
+      IntCol(_, data)   -> Ok((int_to_float(native_int_arr_sum(data)), native_int_arr_length(data)))
+      _ -> Err("DataFrame: column '" ++ name ++ "' cannot be converted to Float")
+      end
+      end
+    end
+  end
+
   -- ── Phase 1: Row access ────────────────────────────────────────────────────
 
   doc "Materializes row i as a Row snapshot. O(col_count × i). Slow path."
@@ -2074,19 +2094,18 @@ mod DataFrame do
     Count -> IntVal(row_count(sub_df))
 
     Sum(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_sum(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) -> FloatVal(Stats.sum(xs))
+      Ok((s, _)) -> FloatVal(s)
       end
 
       end
     Mean(col_name_) -> do
-      match float_list(sub_df, col_name_) do
+      match col_native_sum(sub_df, col_name_) do
       Err(_) -> NullVal
-      Ok(xs) ->
-        match Stats.mean_safe(xs) do
-        Err(_) -> NullVal
-        Ok(v)  -> FloatVal(v)
+      Ok((s, n)) ->
+        if n == 0 do NullVal
+        else FloatVal(s /. int_to_float(n))
         end
       end
 
