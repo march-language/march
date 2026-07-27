@@ -2738,15 +2738,49 @@ static void *make_tuple2(void *a, void *b) {
     return tup;
 }
 
+/* Substring search shared by every string search site in this file.
+ *
+ * Two stages: memchr finds candidate first bytes, memcmp confirms.  libc's
+ * memchr is SIMD-optimised on every platform we target, so this gets vector
+ * scanning with no intrinsics and no per-architecture code — the same reasoning
+ * that keeps runtime/march_http_parse_simd.c's scalar fallback rather than
+ * requiring SSE4.2 everywhere.  The previous implementation called memcmp at
+ * every byte offset, which measured at roughly 0.5 GB/s.
+ *
+ * march_string is LENGTH-COUNTED and may contain NUL bytes, so nothing here may
+ * use strstr/strchr or treat NUL as a terminator.
+ *
+ * On a failed candidate the scan resumes at hit + 1, NOT hit + nlen: needles
+ * can overlap, and skipping the whole needle would miss the match in
+ * ("aaaa", "aa") starting at index 1.
+ *
+ * Returns a pointer into [hay], or NULL when there is no match. */
+static const char *march_memmem(const char *hay, int64_t haylen,
+                                const char *needle, int64_t nlen) {
+    if (nlen == 0) return hay;
+    if (nlen > haylen) return NULL;
+    const char first = needle[0];
+    const char *p = hay;
+    int64_t remaining = haylen;
+    while (remaining >= nlen) {
+        /* Only the first (remaining - nlen + 1) bytes can start a match; a hit
+         * beyond that could not be followed by a full needle. */
+        const char *hit =
+            (const char *)memchr(p, first, (size_t)(remaining - nlen + 1));
+        if (!hit) return NULL;
+        if (memcmp(hit, needle, (size_t)nlen) == 0) return hit;
+        remaining -= (hit - p) + 1;
+        p = hit + 1;
+    }
+    return NULL;
+}
+
 int64_t march_string_contains(void *s, void *sub) {
     march_string *ss = (march_string *)s;
     march_string *su = (march_string *)sub;
     if (su->len == 0) return 1;
     if (ss->len < su->len) return 0;
-    for (int64_t i = 0; i <= ss->len - su->len; i++) {
-        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) return 1;
-    }
-    return 0;
+    return march_memmem(ss->data, ss->len, su->data, su->len) != NULL;
 }
 
 int64_t march_string_starts_with(void *s, void *prefix) {
@@ -2842,13 +2876,17 @@ void *march_string_split(void *s, void *sep) {
     int64_t count = 0;
     void **parts = malloc(sizeof(void *) * (size_t)cap);
     int64_t start = 0;
-    for (int64_t i = 0; i <= ss->len - sp->len; i++) {
-        if (memcmp(ss->data + i, sp->data, (size_t)sp->len) == 0) {
-            if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
-            parts[count++] = march_string_lit(ss->data + start, i - start);
-            start = i + sp->len;
-            i = start - 1;  /* loop will increment */
-        }
+    /* memmem walk rather than a memcmp at every offset.  Separators are found
+     * by the SIMD-optimised memchr fast path; the emitted parts and the
+     * empty-field behaviour for adjacent separators are unchanged. */
+    while (start <= ss->len - sp->len) {
+        const char *hit = march_memmem(ss->data + start, ss->len - start,
+                                       sp->data, sp->len);
+        if (!hit) break;
+        int64_t i = hit - ss->data;
+        if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
+        parts[count++] = march_string_lit(ss->data + start, i - start);
+        start = i + sp->len;
     }
     if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
     parts[count++] = march_string_lit(ss->data + start, ss->len - start);
@@ -2913,16 +2951,16 @@ void *march_string_replace(void *s, void *old, void *new_) {
         /* Return a copy. */
         return march_string_lit(ss->data, ss->len);
     }
-    for (int64_t i = 0; i + so->len <= ss->len; i++) {
-        if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
-            int64_t newlen = ss->len - so->len + sn->len;
-            march_string *r = march_string_alloc(newlen);
-            march_str_copy(r->data, ss->data, (size_t)i);
-            march_str_copy(r->data + i, sn->data, (size_t)sn->len);
-            march_str_copy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
-            r->data[newlen] = '\0';
-            return r;
-        }
+    const char *hit = march_memmem(ss->data, ss->len, so->data, so->len);
+    if (hit) {
+        int64_t i = hit - ss->data;
+        int64_t newlen = ss->len - so->len + sn->len;
+        march_string *r = march_string_alloc(newlen);
+        march_str_copy(r->data, ss->data, (size_t)i);
+        march_str_copy(r->data + i, sn->data, (size_t)sn->len);
+        march_str_copy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
+        r->data[newlen] = '\0';
+        return r;
     }
     return march_string_lit(ss->data, ss->len);
 }
@@ -2940,22 +2978,29 @@ void *march_string_replace_all(void *s, void *old, void *new_) {
     char *buf = malloc((size_t)cap);
     int64_t out = 0;
     int64_t i = 0;
+    /* Jump between matches and bulk-copy the span in front of each, rather than
+     * testing and copying one byte at a time.  The old loop paid a memcmp per
+     * input byte in the common no-match case AND copied the literal text a byte
+     * at a time; this pays one memchr-driven search per match and one memcpy
+     * per span. */
     while (i <= ss->len - so->len) {
-        if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
-            /* Ensure capacity. */
-            while (out + sn->len >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-            march_str_copy(buf + out, sn->data, (size_t)sn->len);
-            out += sn->len;
-            i += so->len;
-        } else {
-            if (out + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-            buf[out++] = ss->data[i++];
-        }
+        const char *hit = march_memmem(ss->data + i, ss->len - i, so->data, so->len);
+        if (!hit) break;
+        int64_t at   = hit - ss->data;
+        int64_t span = at - i;                 /* literal bytes before the match */
+        while (out + span + sn->len + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
+        march_str_copy(buf + out, ss->data + i, (size_t)span);
+        out += span;
+        march_str_copy(buf + out, sn->data, (size_t)sn->len);
+        out += sn->len;
+        i = at + so->len;
     }
-    /* Copy remaining bytes. */
-    while (i < ss->len) {
-        if (out + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-        buf[out++] = ss->data[i++];
+    /* Copy the remaining tail in one go. */
+    {
+        int64_t rest = ss->len - i;
+        while (out + rest + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
+        march_str_copy(buf + out, ss->data + i, (size_t)rest);
+        out += rest;
     }
     void *result = march_string_lit(buf, out);
     free(buf);
@@ -3082,13 +3127,8 @@ void *march_string_index_of(void *s, void *sub) {
     march_string *ss = (march_string *)s;
     march_string *su = (march_string *)sub;
     if (su->len == 0) return make_some_i64(0);
-    if (su->len > ss->len) return make_none();
-    for (int64_t i = 0; i + su->len <= ss->len; i++) {
-        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) {
-            return make_some_i64(i);
-        }
-    }
-    return make_none();
+    const char *hit = march_memmem(ss->data, ss->len, su->data, su->len);
+    return hit ? make_some_i64(hit - ss->data) : make_none();
 }
 
 /* index_of starting at a byte offset.  Returns Option(Int).
@@ -3110,12 +3150,9 @@ void *march_string_index_of_from(void *s, void *sub, int64_t start) {
     if (start > ss->len) return make_none();
     if (su->len == 0) return make_some_i64(start);
     if (su->len > ss->len - start) return make_none();
-    for (int64_t i = start; i + su->len <= ss->len; i++) {
-        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) {
-            return make_some_i64(i);
-        }
-    }
-    return make_none();
+    const char *hit = march_memmem(ss->data + start, ss->len - start,
+                                   su->data, su->len);
+    return hit ? make_some_i64(hit - ss->data) : make_none();
 }
 
 /* Returns Option(Int). */

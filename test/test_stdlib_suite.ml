@@ -11453,6 +11453,68 @@ let test_string_index_of_from () =
     Alcotest.(check string) "compiled matches interpreted (builtin parity)"
       index_of_from_expected out
 
+(* ── Substring search edge cases ─────────────────────────────────────────
+   Pinned BEFORE the search implementation is rewritten to a memchr-based
+   two-stage scan, and asserted for compiled AND interpreted so the rewrite
+   cannot quietly change one of them.
+
+   These are the cases a fast scanner gets wrong:
+     * a candidate first byte that fails on the rest ("abcabd" / "abd") —
+       exercises the reject-and-resume path, where an off-by-one silently
+       skips a real match;
+     * a match at the very last possible offset, and a needle exactly as long
+       as the haystack — the boundary where `remaining >= nlen` decides;
+     * a needle LONGER than the haystack, which must not read past the end;
+     * an empty needle, which every March search treats as matching at 0;
+     * overlapping candidates ("aaaa" / "aa"), where a naive resume past the
+       whole needle rather than one byte reports the wrong index;
+     * an adjacent-separator split ("a,,b"), which must yield an empty field
+       rather than collapsing.
+
+   Not covered here, deliberately: embedded NUL bytes. March string literals
+   have no escape for them, so a test would need Bytes round-tripping and would
+   be testing that path as much as this one. The implementation must still
+   never use strstr/strchr — march_string is length-counted, and NUL is
+   ordinary data. *)
+let search_edge_probe_src =
+  "mod Search do\n\
+  \  fn render(o : Option(Int)) : String do\n\
+  \    match o do\n\
+  \    Some(k) -> to_string(k)\n\
+  \    None    -> \"none\"\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    println(render(String.index_of(\"abcabd\", \"abd\")))\n\
+  \    println(render(String.index_of(\"aaaa\", \"aaaa\")))\n\
+  \    println(render(String.index_of(\"aaa\", \"aaaa\")))\n\
+  \    println(render(String.index_of(\"xxxxy\", \"y\")))\n\
+  \    println(render(String.index_of(\"abc\", \"\")))\n\
+  \    println(render(String.index_of(\"aaaa\", \"aa\")))\n\
+  \    println(render(String.index_of_from(\"aaaa\", \"aa\", 1)))\n\
+  \    println(to_string(String.contains(\"abcabd\", \"abd\")))\n\
+  \    println(to_string(String.contains(\"abcabd\", \"abe\")))\n\
+  \    println(to_string(List.length(String.split(\"a,,b\", \",\"))))\n\
+  \    println(String.replace_all(\"aXbXc\", \"X\", \"--\"))\n\
+  \    println(render(String.last_index_of(\"abcabc\", \"bc\")))\n\
+  \  end\n\
+   end\n"
+
+let search_edge_expected =
+  "3\n0\nnone\n4\n0\n0\n1\ntrue\nfalse\n3\na--b--c\n4"
+
+let test_string_search_edge_cases () =
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_search" ~src_text:search_edge_probe_src
+  in
+  Alcotest.(check string) "interpreted search edge cases"
+    search_edge_expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled matches interpreted"
+      search_edge_expected out
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -13013,6 +13075,8 @@ let stdlib_suites =
           test_string_stats_copy_bytes_byte_loops;
         Alcotest.test_case "String.index_of_from: offsets, clamping, parity" `Slow
           test_string_index_of_from;
+        Alcotest.test_case "substring search: edge cases, compiled + interpreted" `Slow
+          test_string_search_edge_cases;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);
