@@ -620,11 +620,78 @@ edges:
   would. Propagation is also skipped when an argument is missing, when the
   predicate mentions anything that is neither the binder nor a parameter, or
   when the callee takes a pattern parameter. See the propagation section above.
-- **Properties needing induction are still out of reach.** Relating a measure
-  across an operation — `size(insert(t, x)) == size(t) + 1` — is not provable
-  automatically; these usually need induction the solver can't do by itself.
-  Substitution does not help here: the contract must be provable at the
-  definition for it to travel at all. Use an `assert` lemma where you need them.
+- **Structural induction (Tier 2): relating a measure across a recursive
+  operation now works, within a narrow shape.** `size(insert(t, x)) == size(t)
+  + 1` *is* provable automatically, and therefore propagates to call sites. Z3
+  still does no induction; what the checker supplies is the **induction
+  hypothesis** — at a self-recursive call whose argument is a *proper component*
+  of the matched parameter, the function's own postcondition is assumed about
+  that call's result, and each `match` arm is then discharged separately against
+  the measure's recursion equations.
+
+  **What is proven:**
+  - a single-clause, unguarded function whose whole body is a `match` on one
+    parameter, with flat constructor-pattern arms;
+  - a return refinement over a **variant ADT** (`{Tree | …}`, `{List(Int) | …}`)
+    whose predicate mentions a **`@[measure]`**;
+  - self-recursion into any recursive component (left or right, it is the
+    pattern that decides, not a position);
+  - **relational** (`size(_) == size(t) + 1`) and **closed** (`size(_) >= 1`)
+    predicates alike;
+  - an accumulator parameter that *grows* — the induction is on the matched
+    parameter alone, so the hypothesis is universally quantified over the rest.
+
+  **What is not, and stays silent:**
+  - **the built-in `len`.** Only a user `@[measure]` is axiomatised, so only a
+    user measure carries recursion equations for the induction to reduce
+    through. Declaring `@[measure] fn llen(xs : List(Int)) : Int` over the same
+    list is the workaround, and it does prove.
+  - **mutual recursion.** The hypothesis is minted only for a call to the
+    function's *own* name, so two functions that call each other prove nothing.
+  - **a recursive call inside a lambda, or behind a nested `match`.** Only the
+    top-level `match`'s pattern equation is asserted, so an arm whose tail sits
+    under a second `match` cannot see the inner scrutinee's shape.
+  - **non-structural recursion.** A recursive call on the whole parameter, on a
+    reconstructed value, or on anything `structural_subvars` does not certify as
+    a component gets **no** hypothesis. This is a correctness requirement, not a
+    completeness one: a proven postcondition is *added* to the assumption set
+    that call-site checks prove `¬goal` against, and adding assumptions makes a
+    violation easier to prove — so an unsound hypothesis would manufacture false
+    positives on correct code, not merely fail to help.
+  - **anything needing a lemma.** A true property the hypothesis alone cannot
+    reach returns unknown and is skipped. Use an `assert` lemma there.
+
+  Int-returning postconditions are unaffected: they still go down the Tier 0/1
+  path, which this does not touch.
+
+- **The stdlib HAMT (`Map`) is well beyond this.** `stdlib/map.march` stores
+  `HEntry(k,v) = HEmpty | HLeaf(Int,k,v) | HBranch(Int, List(HEntry(k,v))) |
+  HCollision(Int, List((k,v)))` and inserts via a hash-indexed descent. A local
+  reduced model shows **three stacked obstacles**, in the order they bite:
+  1. **The built-in `List`'s element sort is opaque.** The checker models
+     `List` as `Nil | Cons(Elem, List)` with `Elem` an uninterpreted sort, so a
+     count measure that must recurse *into* a list element (`lcount(Cons(h,t)) =
+     hcount(h) + lcount(t)`, where `h : Elem` but `hcount : HEntry -> Int`) is
+     ill-sorted and is dropped — neither measure gets axiomatised, and nothing
+     downstream can run. Substituting a *user-defined* child list for the
+     built-in one, changing nothing else, makes the same postcondition prove and
+     propagate. This obstacle precedes induction entirely.
+  2. **The nested `match`.** With (1) worked around, `node_insert` still reaches
+     its child by matching the child list, so the tail lives under a second
+     `match` whose pattern equation is not built (see above). Bounded and
+     addressable.
+  3. **The child is fetched by index, not bound by a pattern.** The real code
+     does `let child = list_nth_safe(children, idx)`. `structural_subvars`
+     certifies pattern binders only, so `child` is not structurally smaller by
+     any test the checker has — and it would need a length/termination lemma
+     the checker cannot currently state. On top of that the real `HEntry` is
+     generic in `k`/`v`, `Map` wraps it in a `ptype`, and `node_insert` carries
+     an `eq` callback and a `level` counter, none of which the measure
+     machinery models.
+
+  So: the answer to "does the structural test recognise a child fetched from a
+  `List` by index?" is **no** — and obstacle (1) stops the measure from existing
+  before that question is even reached.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
@@ -695,7 +762,8 @@ footprint property this transparency implies: a program whose obligations
 all provably hold at `--check` time runs byte-identically interpreted and
 compiled, since neither backend inserts any runtime predicate check.
 
-Two higher-order call shapes have since been closed (183 refinecheck tests):
+Two higher-order call shapes have since been closed (199 refinecheck tests,
+the latest 15 covering Tier 2 structural induction):
 a call through a refined function-typed *parameter*, and a call through a
 *local alias* of a named refined function — both previously fell through
 `resolve_call`'s named-callee-only resolution and were silently skipped.
