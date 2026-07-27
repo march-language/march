@@ -133,15 +133,6 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
   | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
 
-(* A function's declared return refinement, when its base type is Int.
-   Defined here (rather than beside the other postcondition helpers) because
-   [collect_all_defs] records it into every fn_sig. *)
-let return_refine (fd : A.fn_def) : (string * A.expr) option =
-  match fd.A.fn_ret_ty with
-  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
-    Some (binder_name binder, pred)
-  | _ -> None
-
 (* How a return refinement's predicate relates to the callee's parameters.
 
    [Closed]      — mentions only the refinement binder; usable as-is (Tier 0).
@@ -217,6 +208,15 @@ type fn_sig = {
   param_str : bool list;
   refined : rparam list;
   ret : (string * A.expr) option;
+  (* SMT sort of the refined RETURN value: [None] for an Int return (the Tier 0
+     / Tier 1 case), [Some "M_Tree"] for a value at a registered ADT sort
+     (Tier 2).  Consumers of a propagated postcondition MUST branch on this: the
+     Int consumers ([reflect_scalar], [scope_add_binding]) declare an `Int`
+     constant, and handing them an ADT-valued fact would put one symbol at two
+     sorts — the z3 `(error …)` that desynchronises the shared solver channel
+     and silently disables refinement checking for the rest of the
+     compilation. *)
+  ret_sort : string option;
 }
 
 (* Length of a list literal (a Cons/Nil ECon chain); None if not a literal. *)
@@ -1116,6 +1116,25 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some (adt_sort_name name))
   | _ -> None
 
+(* A function's declared RETURN refinement together with the SMT sort of the
+   returned value: [None] sort for an Int return (Tier 0 / Tier 1, unchanged),
+   [Some "M_…"] for a value at a registered ADT sort.
+
+   The ADT arm is what Tier 2 adds.  Widening it here is safe on its own
+   because nothing propagates until [gate_unverified_posts] has seen the
+   definition side PROVE the postcondition, and the definition side proves an
+   ADT-returning relational postcondition only through
+   [check_post_induction] — which applies the structural induction hypothesis
+   under [structural_subvars]. *)
+let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) option =
+  match fd.A.fn_ret_ty with
+  | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
+    Some (binder_name binder, pred, None)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+    when is_adt_base base ->
+    Some (binder_name binder, pred, Some (adt_sort_name name))
+  | _ -> None
+
 (* Positional placeholder name for a synthesized callback [fn_sig] — it is
    only ever used to look up [rparam]/[param_names] by INDEX in [check_call],
    never displayed or looked up by name, so it need not be a real identifier. *)
@@ -1144,6 +1163,7 @@ let callback_sig_of_ty (t : A.ty) : fn_sig option =
          ; param_str = [ sort = Some str_sort ]
          ; refined = [ { idx = 0; binder; pred; sort } ]
          ; ret = None
+         ; ret_sort = None
          }
      | None -> None)
   | _ -> None
@@ -1366,7 +1386,8 @@ let scope_add_fnparam (sc : scope) : A.fn_param -> scope = function
    callee's return refinement, already instantiated in the CALLER's namespace.
    An explicit annotation always wins; only an UNANNOTATED `let` whose RHS is a
    direct named call falls back to the callee's declared postcondition. *)
-let scope_add_binding ~(postcond : string -> A.expr list -> (string * A.expr) option)
+let scope_add_binding
+    ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sc : scope) (b : A.binding) : scope =
   (* Shadow first: `let c = neg()` followed by `let c = 5` must not leave the
      first `c`'s postcondition attached to the second. *)
@@ -1376,9 +1397,13 @@ let scope_add_binding ~(postcond : string -> A.expr list -> (string * A.expr) op
   | A.PatVar n, None ->
     (match b.A.bind_expr with
      | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
+       (* Only an INT-sorted postcondition may seed the refined-local scope:
+          [scope] entries with sort [None] are declared `Int` by [scope_facts]
+          and [reflect_scalar].  An ADT-sorted fact (Tier 2) is carried only by
+          [reflect_dt], which knows the datatype sort. *)
        (match postcond fname args with
-        | Some (binder, pred) -> (n.A.txt, (binder, pred, None)) :: sc
-        | None -> sc)
+        | Some (binder, pred, None) -> (n.A.txt, (binder, pred, None)) :: sc
+        | Some (_, _, Some _) | None -> sc)
      | _ -> sc)
   | _ -> sc
 
@@ -1410,7 +1435,7 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
               | None -> None)
            | A.FPPat _ -> None)
   in
-  { param_names; param_str; refined; ret = None }
+  { param_names; param_str; refined; ret = None; ret_sort = None }
 
 (* Every function definition keyed by its fully-qualified name (e.g. "A.B.foo"),
    mapping to Some sig when it carries a refinement, None when it does not.
@@ -1428,9 +1453,14 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
           let base =
             match fd.A.fn_clauses with
             | c :: _ -> sig_of_clause c
-            | [] -> { param_names = []; param_str = []; refined = []; ret = None }
+            | [] ->
+              { param_names = []; param_str = []; refined = []; ret = None; ret_sort = None }
           in
-          let sg = { base with ret = return_refine fd } in
+          let sg =
+            match return_refine_sorted fd with
+            | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
+            | None -> { base with ret = None; ret_sort = None }
+          in
           (* Record the signature when EITHER side carries a refinement: a
              function with only a refined *return* must be resolvable so its
              postcondition reaches call sites, even though it has no refined
@@ -1548,15 +1578,19 @@ let cb_add_binding (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (cb :
 
    The other half of the filter is applied earlier: [gate_unverified_posts]
    has already cleared [ret] on every signature whose postcondition the
-   definition side did not PROVE, so anything reaching here is a fact. *)
+   definition side did not PROVE, so anything reaching here is a fact.
+
+   The third component of the result is the returned value's SMT sort ([None]
+   for Int); see [fn_sig.ret_sort] for why every consumer must branch on it. *)
 let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname : string)
-    (args : A.expr list) : (string * A.expr) option =
+    (args : A.expr list) : (string * A.expr * string option) option =
   match resolve_call ctx defs fname with
   | Some (Some sg) ->
     (match sg.ret with
      | Some (b, p) ->
+       let srt = sg.ret_sort in
        (match classify_pred b sg.param_names p with
-        | Closed -> Some (b, p)
+        | Closed -> Some (b, p, srt)
         | Unusable -> None
         | Relational ps ->
           (* Positional formal -> actual.  A formal recorded as "_" is a
@@ -1570,7 +1604,7 @@ let postcond_of (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname :
                  | n, Some a -> Some (n, a))
           in
           if List.for_all (fun p -> List.mem_assoc p env) ps then
-            Some (b, subst_params env p)
+            Some (b, subst_params env p, srt)
           else None)
      | _ -> None)
   | _ -> None
@@ -1757,7 +1791,8 @@ let reflect_record_literal ?(opaque : (Smt.sort -> Smt.term) option)
   | _ -> None
 
 (* ── Reflect a scalar actual argument into (term, decls, assumptions) ─────── *)
-let reflect_scalar ~(postcond : string -> A.expr list -> (string * A.expr) option)
+let reflect_scalar
+    ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sc : scope) (actual : A.expr)
   : (Smt.term * (string * Smt.sort) list * Smt.term list) option =
   (* Reflect an expression with no scope help — also the fallback for a call
@@ -1789,8 +1824,12 @@ let reflect_scalar ~(postcond : string -> A.expr list -> (string * A.expr) optio
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)
   | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) ->
+    (* An ADT-sorted postcondition is NOT a scalar fact: standing it up as an
+       `Int` constant here would declare one symbol at two sorts.  It is carried
+       by [reflect_dt] instead; here it falls through to [plain]. *)
     (match postcond fname cargs with
-     | Some (b, q) ->
+     | Some (_, _, Some _) -> plain actual
+     | Some (b, q, None) ->
        incr ret_ctr;
        let nm = Printf.sprintf "%s$ret%d" fname !ret_ctr in
        let c = Smt.Const nm in
@@ -1821,7 +1860,7 @@ let sort_of_ctor (ctor : string) : string option =
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
 let check_call ~root errctx ~span
-    ~(postcond : string -> A.expr list -> (string * A.expr) option)
+    ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
   let name_pos = List.mapi (fun i n -> (n, i)) sg.param_names in
@@ -2124,6 +2163,53 @@ let check_call ~root errctx ~span
             args sorts (Some [])
           |> Option.map (fun ts -> Smt.App (ctor.A.txt, ts))
       | A.EVar { A.txt = x; _ } -> decls := (x, Smt.SData adt) :: !decls; Some (Smt.Const x)
+      (* ── Tier 2 propagation ────────────────────────────────────────────────
+         A CALL returning a value at this very datatype sort, whose callee has a
+         PROVEN postcondition (an unproven one has already been cleared by
+         [gate_unverified_posts]).  It becomes a fresh opaque constant of the
+         sort, carrying the instantiated postcondition as an assumption — the
+         datatype analogue of [reflect_scalar]'s call branch.
+         The sort equality test is load-bearing: a postcondition about a value
+         of some OTHER datatype says nothing about this one, and asserting it
+         about this constant would be ill-sorted. *)
+      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> (
+        match postcond fname cargs with
+        | Some (b, q, Some srt) when srt = adt ->
+          incr ret_ctr;
+          let nm = Printf.sprintf "%s$dt%d" fname !ret_ctr in
+          let c = Smt.Const nm in
+          decls := (nm, Smt.SData adt) :: !decls;
+          (* [q] is already in the CALLER's namespace (postcond_of substituted
+             the actuals), so every remaining variable denotes itself.  A
+             measure over the binder applies to [c]; a measure over any other
+             term is reflected at the measure's own ADT sort. *)
+          let rv n = if n = b || n = "_" then Some c else None in
+          let rm m x =
+            if not (is_axiom_measure m) then None
+            else begin
+              uses_axiom := true;
+              if x = b || x = "_" then Some (Smt.App (m, [ c ]))
+              else
+                let a = Hashtbl.find axiom_measures m in
+                Option.map
+                  (fun t -> Smt.App (m, [ t ]))
+                  (reflect_dt a (A.EVar { A.txt = x; A.span }))
+            end
+          in
+          let rma m arg_term =
+            if not (is_axiom_measure m) then None
+            else
+              match concrete_measure_app m arg_term with
+              | Some n -> Some (Smt.IntLit n)
+              | None -> uses_axiom := true; Some (Smt.App (m, [ arg_term ]))
+          in
+          (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_measure_app:rma q with
+           | Some qa -> assume := qa :: !assume
+           (* Untranslatable predicate: the constant stays unconstrained, which
+              proves nothing in either direction — the call is simply skipped. *)
+           | None -> ());
+          Some c
+        | _ -> None)
       | _ -> None
     and reflect_field a = function
       | Smt.SData sub when sub <> "Elem" -> reflect_dt sub a
@@ -2432,8 +2518,10 @@ let check_call ~root errctx ~span
    refinement.  We check each *tail* expression (a return position) under the
    path/scope reaching it, with the same definite-failure soundness stance. ── *)
 
-(* Like return_refine but also returns the SMT sort name when the return base
-   type is a registered TDRecord, enabling EField reflection in check_post. *)
+(* The return refinements [check_post] can discharge DIRECTLY: an Int return, or
+   a record return (whose SMT sort name is reported so [check_post] can reflect
+   `_.field`).  A variant-ADT return is deliberately absent — it is proven, when
+   it can be, by [check_post_induction] instead. *)
 let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option =
   match fd.A.fn_ret_ty with
   | Some (A.TyRefine (base, binder, pred)) when is_int_base base ->
@@ -2732,13 +2820,314 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
              refutation attempt said. *)
           false))
 
+(* ══ Tier 2: structural induction over a recursive function ═════════════════
+
+   A RELATIONAL postcondition on a recursive function — `fn insert(t, x) :
+   {Tree | size(_) == size(t) + 1}` — cannot be discharged by Z3 alone: Z3 does
+   not do induction.  But full induction is not needed.  For a function that
+   recurses structurally on one parameter it suffices to make the postcondition
+   available as an ASSUMPTION at each recursive call whose argument is a proper
+   component of the matched parameter — the induction hypothesis — and then
+   discharge each arm separately against the measure's recursion equations:
+
+     Leaf arm:        size(Node(Leaf,x,Leaf)) == size(Leaf) + 1
+                      reduces via the axioms to 1 + 0 + 0 == 0 + 1.  No IH needed.
+     Node(l,v,r) arm: size(Node(insert(l,x),v,r)) == size(t) + 1
+                      needs size(insert(l,x)) == size(l) + 1 — the postcondition
+                      instantiated at `l`, which IS structurally smaller.
+
+   ── THE SOUNDNESS PROPERTY ────────────────────────────────────────────────
+   The IH may be assumed ONLY at a recursive call whose recursion argument is
+   structurally smaller than the matched parameter.  Assuming it at an arbitrary
+   argument is circular — you would assume exactly what you are proving — and it
+   fails in the DANGEROUS direction: a proven postcondition is ADDED to the
+   assumption set that later call-site checks prove `¬goal` against, and adding
+   assumptions makes a violation EASIER to prove.  An unsound IH therefore does
+   not merely fail to help, it manufactures FALSE POSITIVES on correct code.
+   [structural_subvars] is the gate, unchanged and unwidened — the same gate that
+   makes `@[measure]` axiomatisation sound.
+
+   The induction is on the matched parameter alone, so only the argument at THAT
+   position must shrink; the IH is universally quantified over the others (an
+   accumulator may grow freely).
+
+   ── WHY THIS IS A SEPARATE PATH, AND WHY IT NEVER EMITS ────────────────────
+   [check_post] handles Int and record returns.  A VARIANT-ADT return was
+   previously inert: [return_refine_ext] returns None for it, so nothing at all
+   happened.  This function occupies exactly that previously-inert case, so it
+   cannot regress any existing verdict.  It is VERDICT-ONLY: it returns "proven"
+   or "not proven" and never reports a diagnostic, so the definition side of a
+   Tier 2 function stays silent no matter what the solver says.  Its only
+   observable effect is enabling PROPAGATION via [gate_unverified_posts].
+
+   Everything outside a narrow, recognised shape returns false (= not proven =
+   skipped): several clauses, a clause guard, a catch-all arm, a nested pattern,
+   a binder that shadows a parameter, a sort we cannot pin down.  Skipping costs
+   completeness; guessing would cost correctness. *)
+
+(* The SMT sort of a DECLARED March type; None when the checker has no model. *)
+let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
+  match t with
+  | A.TyRefine (base, _, _) -> smt_sort_of_ty base
+  | A.TyCon ({ A.txt = "Int"; _ }, []) -> Some Smt.SInt
+  | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Some Smt.SBool
+  | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
+    Some (Smt.SData (adt_sort_name txt))
+  | _ -> None
+
+let ctor_belongs (ctor : string) (adt : string) : bool =
+  match Hashtbl.find_opt adt_ctors adt with Some cs -> List.mem ctor cs | None -> false
+
+let check_post_induction ~root (fd : A.fn_def) : bool =
+  let self = fd.A.fn_name.A.txt in
+  let dummy_span = fd.A.fn_name.A.span in
+  let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
+  match fd.A.fn_ret_ty, fd.A.fn_clauses with
+  | Some (A.TyRefine ((A.TyCon (rn, _) as rbase), bnd, pred)), [ c ]
+    when is_adt_base rbase && (not (is_record_base rbase)) && c.A.fc_guard = None -> (
+    let ret_adt = adt_sort_name rn.A.txt in
+    let binder = binder_name bnd in
+    let params = List.map param_name_of c.A.fc_params in
+    let ps = match classify_pred binder params pred with
+      | Unusable -> None
+      | Closed -> Some []
+      | Relational ps -> Some ps
+    in
+    match ps, c.A.fc_body with
+    | None, _ -> false
+    (* The recognised shape: one clause whose whole body matches on a parameter. *)
+    | Some ps, A.EMatch (A.EVar sv, branches, _) when List.mem sv.A.txt params -> (
+      let mparam = sv.A.txt in
+      let mparam_idx =
+        let rec ix i = function
+          | [] -> -1
+          | x :: r -> if x = mparam then i else ix (i + 1) r
+        in
+        ix 0 params
+      in
+      let mparam_ty =
+        List.find_opt (fun fp -> param_name_of fp = mparam) c.A.fc_params
+        |> (fun o -> Option.bind o param_ty_of)
+        |> (fun o -> Option.bind o smt_sort_of_ty)
+      in
+      match mparam_ty with
+      | Some (Smt.SData madt) when madt <> "Elem" ->
+        (* Every sort this VC family mentions must already be declared by the
+           measure preamble; otherwise the VC would reference an undeclared sort
+           and z3 would answer with an `(error …)` line — the failure mode that
+           desynchronises the shared solver channel.  (`--no-measure-axioms`
+           empties the preamble, so this also disables Tier 2 under that flag.) *)
+        if not (Hashtbl.mem measure_preamble_sorts ret_adt
+                && Hashtbl.mem measure_preamble_sorts madt)
+        then false
+        else begin
+          (* Structurally smaller variables, computed over the WHOLE clause body
+             so a nested match contributes its components too. *)
+          let sset = structural_subvars mparam c.A.fc_body in
+          let rec check_branch (br : A.branch) : bool =
+            match br.A.branch_pat with
+            | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
+              let ctor = ct.A.txt in
+              let fsorts = try Hashtbl.find ctor_field_sorts ctor with Not_found -> [] in
+              if List.length subpats <> List.length fsorts then false
+              else
+                (* Only flat PatVar / PatWild sub-patterns: a nested pattern
+                   would need an equation we do not build. *)
+                let names =
+                  List.mapi
+                    (fun i p ->
+                      match p with
+                      | A.PatVar n -> Some n.A.txt
+                      | A.PatWild _ -> Some (Printf.sprintf "$w%s%d" ctor i)
+                      | _ -> None)
+                    subpats
+                in
+                if List.exists Option.is_none names then false
+                else
+                  let names = List.map Option.get names in
+                  (* A binder that reuses a parameter's name would be conflated
+                     with it (both reflect to `Const name`). *)
+                  if List.exists (fun n -> List.mem n params) names then false
+                  else
+                    let binder_sorts = List.combine names fsorts in
+                    let base_path =
+                      match br.A.branch_guard with Some g -> [ (g, false) ] | None -> []
+                    in
+                    let ts = tails base_path br.A.branch_body in
+                    (* Fold, not for_all: no short-circuit, so the VC cache is
+                       warmed uniformly and the verdict is order-independent. *)
+                    ts <> []
+                    && List.fold_left
+                         (fun acc t ->
+                           check_tail ~ctor ~binder_sorts t && acc)
+                         true ts)
+            (* A catch-all arm binds no constructor, so there is no pattern
+               equation pinning the scrutinee — nothing to prove from. *)
+            | _ -> false
+          and check_tail ~ctor ~binder_sorts ((path, tail_e) : (A.expr * bool) list * A.expr)
+              : bool =
+            (* ── Per-VC state ───────────────────────────────────────────────
+               [declare] is the well-sortedness guard: one symbol at two sorts
+               makes z3 emit an `(error …)`, which desynchronises the shared
+               `z3 -in` channel and silently disables refinement checking for the
+               rest of the compilation.  Any conflict abandons the whole VC. *)
+            let decls : (string, Smt.sort) Hashtbl.t = Hashtbl.create 16 in
+            let conflict = ref false in
+            let declare n s =
+              match Hashtbl.find_opt decls n with
+              | None -> Hashtbl.replace decls n s; true
+              | Some s' -> if s' = s then true else (conflict := true; false)
+            in
+            let assume = ref [] in
+            let ctr = ref 0 in
+            let fresh s =
+              incr ctr;
+              let n = Printf.sprintf "$t2f%d" !ctr in
+              Hashtbl.replace decls n s;
+              Smt.Const n
+            in
+            let ok = ref true in
+            if not (declare mparam (Smt.SData madt)) then ok := false;
+            List.iter
+              (fun (n, s) -> if not (declare n s) then ok := false)
+              binder_sorts;
+            List.iter
+              (fun fp ->
+                match Option.bind (param_ty_of fp) smt_sort_of_ty with
+                | Some s -> if not (declare (param_name_of fp) s) then ok := false
+                | None -> ())
+              c.A.fc_params;
+            (* ── Reflection, always at a KNOWN expected sort ─────────────── *)
+            let rec reflect_at (s : Smt.sort) (e : A.expr) : Smt.term option =
+              match s with
+              | Smt.SData d when d <> "Elem" -> reflect_dt d e
+              | Smt.SInt -> reflect_int e
+              (* An `Elem` or Bool field is invisible to a structural measure:
+                 an unconstrained constant of the right sort keeps the VC
+                 well-sorted and asserts nothing. *)
+              | _ -> Some (fresh s)
+            and reflect_dt (d : string) (e : A.expr) : Smt.term option =
+              match e with
+              | A.EVar { A.txt = x; _ } ->
+                if declare x (Smt.SData d) then Some (Smt.Const x) else None
+              | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
+                let fs = try Hashtbl.find ctor_field_sorts ct.A.txt with Not_found -> [] in
+                if List.length fs <> List.length args then None
+                else
+                  List.fold_right2
+                    (fun a s acc ->
+                      match reflect_at s a, acc with
+                      | Some t, Some ts -> Some (t :: ts)
+                      | _ -> None)
+                    args fs (Some [])
+                  |> Option.map (fun ts -> Smt.App (ct.A.txt, ts))
+              (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
+                 A self-recursive call returning this datatype.  It becomes a
+                 fresh opaque constant; the postcondition is assumed ABOUT that
+                 constant if and only if the argument at the MATCHED parameter's
+                 position is a variable in [structural_subvars].  Any other
+                 recursive call still reflects (so the arm can be attempted) but
+                 carries NO assumption — an unconstrained constant proves
+                 nothing, which is exactly the skip we want. *)
+              | A.EApp (A.EVar { A.txt = f; _ }, args, _) when f = self && d = ret_adt ->
+                incr ctr;
+                let nm = Printf.sprintf "$t2rec%d" !ctr in
+                Hashtbl.replace decls nm (Smt.SData ret_adt);
+                let cst = Smt.Const nm in
+                (match List.nth_opt args mparam_idx with
+                 | Some (A.EVar v) when Hashtbl.mem sset v.A.txt ->
+                   let env =
+                     List.mapi (fun i n -> (n, List.nth_opt args i)) params
+                     |> List.filter_map (function
+                          | "_", _ | _, None -> None
+                          | n, Some a -> Some (n, a))
+                   in
+                   if List.for_all (fun p -> List.mem_assoc p env) ps then
+                     (match pred_term cst (subst_params env pred) with
+                      | Some t -> assume := t :: !assume
+                      | None -> ())
+                 | _ -> ());
+                Some cst
+              | _ -> None
+            and reflect_int (e : A.expr) : Smt.term option =
+              smt_of ~resolve_var:rv_int ~resolve_measure:rm ~resolve_measure_app:rma e
+            and rv_int (x : string) : Smt.term option =
+              if declare x Smt.SInt then Some (Smt.Const x) else None
+            and rm (m : string) (x : string) : Smt.term option =
+              if not (is_axiom_measure m) then None
+              else
+                let a = Hashtbl.find axiom_measures m in
+                Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt a (evar x))
+            and rma (m : string) (arg : Smt.term) : Smt.term option =
+              if not (is_axiom_measure m) then None
+              else
+                match concrete_measure_app m arg with
+                | Some n -> Some (Smt.IntLit n)
+                | None -> Some (Smt.App (m, [ arg ]))
+            (* Reflect the return PREDICATE with its binder standing for [bt].
+               The binder is ADT-valued, so it can appear only under a measure
+               (`size(_)`) or as a bare occurrence; both route to [bt]. *)
+            and pred_term (bt : Smt.term) (p : A.expr) : Smt.term option =
+              let rv x = if x = binder || x = "_" then Some bt else rv_int x in
+              let rm' m x =
+                if not (is_axiom_measure m) then None
+                else if x = binder || x = "_" then Some (Smt.App (m, [ bt ]))
+                else rm m x
+              in
+              smt_of ~resolve_var:rv ~resolve_measure:rm' ~resolve_measure_app:rma p
+            in
+            (* The pattern equation.  Without it the arm knows nothing about the
+               scrutinee, and even the BASE case (`size(t) + 1` with `t = Leaf`)
+               is unprovable. *)
+            let pat_eq =
+              List.fold_right
+                (fun (n, _) acc -> Option.map (fun ts -> Smt.Const n :: ts) acc)
+                binder_sorts (Some [])
+              |> Option.map (fun ts -> Smt.Eq (Smt.Const mparam, Smt.App (ctor, ts)))
+            in
+            (match pat_eq with Some t -> assume := t :: !assume | None -> ok := false);
+            (* Reflecting the tail is what mints the IH assumptions, so it must
+               happen before the assumption list is read. *)
+            let tail_term = reflect_dt ret_adt tail_e in
+            List.iter
+              (fun (cond, negated) ->
+                match reflect_int cond with
+                | Some t -> assume := (if negated then Smt.Not t else t) :: !assume
+                | None -> ())
+              path;
+            match tail_term with
+            | None -> false
+            | Some tt -> (
+              match pred_term tt pred with
+              | None -> false
+              | Some goal ->
+                if (not !ok) || !conflict then false
+                else
+                  let decls =
+                    Hashtbl.fold (fun n s acc -> (n, s) :: acc) decls []
+                    |> List.sort compare
+                  in
+                  let vc = { Smt.decls; assumptions = !assume; goal } in
+                  Refine.discharge ~root ~preamble:!measure_preamble vc = Refine.Verified)
+          in
+          branches <> []
+          && List.fold_left (fun acc br -> check_branch br && acc) true branches
+        end
+      | _ -> false)
+    | Some _, _ -> false)
+  | _ -> false
+
 (* Check every return-position tail of every clause of [fd] against its declared
    return refinement.  Returns true iff ALL of them positively verified (a
    function with no clauses, or a clause with no reachable tail, counts as NOT
-   verified — silence is not proof).  [emit] threads through to [check_post]. *)
+   verified — silence is not proof).  [emit] threads through to [check_post].
+
+   A return refinement [check_post] cannot handle at all (a variant-ADT return)
+   falls through to [check_post_induction], the Tier 2 path.  That path never
+   emits, so this stays the single reporting site. *)
 let check_fn_post_verdict ~root errctx ?(emit = true) (fd : A.fn_def) : bool =
   match return_refine_ext fd with
-  | None -> false
+  | None -> check_post_induction ~root fd
   | Some (binder, ret_pred, record_sort) ->
     let clause_ok (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in

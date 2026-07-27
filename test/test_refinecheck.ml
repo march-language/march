@@ -2093,6 +2093,135 @@ let hof_suite =
              \  end\n\
               end\n")) ]
 
+(* ── Tier 2: structural induction over recursive functions ─────────────────
+   A relational postcondition on a RECURSIVE function (`insert` grows a tree by
+   exactly one node) cannot be discharged by Z3 alone — it needs the induction
+   hypothesis.  The IH is sound to assume ONLY at a recursive call whose
+   argument is structurally smaller than the matched parameter; assuming it
+   anywhere else is circular, and — because a propagated postcondition is ADDED
+   to the assumption set a call-site VC proves `¬goal` against — an unsound IH
+   manufactures FALSE POSITIVES on correct code rather than merely failing.
+   Hence three of the four cases below assert SILENCE.
+
+   Note also that under the definite-failure stance, exit-0 at a definition is
+   ambiguous between "proved" and "skipped".  The distinguishing observation is
+   PROPAGATION: only a proven postcondition survives [gate_unverified_posts] and
+   reaches a call site.  That is what the first test measures. *)
+
+(* `insert` adds exactly one node.  `needs_empty` demands `size < 1`, and the
+   proven postcondition says the result has size(Leaf) + 1 == 1 — a definite
+   violation, but ONLY if the postcondition was actually proven. *)
+let tier2_src =
+  {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(insert(l, x), v, r)
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(insert(Leaf, 5)) end
+end|}
+
+(* The same definition with no call site: proving a postcondition must never
+   make the definition itself report. *)
+let tier2_defn_only =
+  {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(insert(l, x), v, r)
+    end
+  end
+end|}
+
+(* SOUNDNESS GATE.  The recursive call passes the WHOLE matched parameter, not a
+   component of it, so no induction hypothesis may be assumed.  With an unsound
+   IH the Node arm would discharge trivially (assume the goal, prove the goal),
+   the postcondition would propagate, and `needs_empty(bad(Leaf, 5))` would be
+   reported — a false positive.  This test asserts that does not happen. *)
+let tier2_nonstructural =
+  {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn bad(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> bad(t, x)
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(bad(Leaf, 5)) end
+end|}
+
+(* A FALSE relational postcondition.  The IH makes the Node arm go through, but
+   the BASE case is `1 == 0 + 2`, which fails — so the postcondition is not
+   proven and must not travel.  The definition side stays silent (definite
+   failure reports only what can never hold, and this is checked with
+   diagnostics suppressed), and the call site learns nothing. *)
+let tier2_false_post =
+  {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn ins2(t : Tree, x : Int) : {Tree | size(_) == size(t) + 2} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(ins2(l, x), v, r)
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(ins2(Leaf, 5)) end
+end|}
+
+let tier2_suite =
+  [ (* The postcondition is now PROVEN, so it propagates: needs_empty demands
+       size < 1 while insert guarantees size == size(Leaf)+1 == 1. *)
+    gated "a proven relational postcondition propagates" (fun () ->
+        Alcotest.(check bool) "error" true (has_refine_error tier2_src));
+
+    (* Definition-side must stay clean — proving it must not flag it. *)
+    gated "the recursive definition itself reports nothing" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error tier2_defn_only));
+
+    (* Soundness gate: a recursive call on a NON-smaller argument must not get
+       the IH, or the checker could prove anything. *)
+    gated "a non-structural recursive call gets no induction hypothesis" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error tier2_nonstructural));
+
+    (* A FALSE relational postcondition must remain unproven and must not
+       propagate — the definition side stays silent (definite-failure), and the
+       call site learns nothing. *)
+    gated "a false relational postcondition does not propagate" (fun () ->
+        Alcotest.(check bool) "no error" false (has_refine_error tier2_false_post)) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2117,4 +2246,5 @@ let () =
       ("adt-tags", adt_suite);
       ("pred-classifier", classifier_suite);
       ("tier1-relational", tier1_suite);
-      ("higher-order", hof_suite) ]
+      ("higher-order", hof_suite);
+      ("tier2-induction", tier2_suite) ]
