@@ -3004,6 +3004,54 @@ let bool_suite =
               end\n"))
   ]
 
+(* ── Float refinements ─────────────────────────────────────────────────────
+   Discharged through Z3's BIT-PRECISE FloatingPoint theory (`Float64`,
+   `fp.geq`, `fp.eq`), never through `Real`.  Over reals trichotomy makes
+   `¬(x >= 0) ∧ ¬(x <= 0)` unsatisfiable, so a reals encoding would conclude
+   "this can never hold" and report a violation on correct code; over floats it
+   is satisfiable, witnessed by NaN.  The NaN case below pins that. *)
+let float_suite =
+  [ gated "a Float precondition rejects a violating literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v() : Float do sqrtish(0.0 -. 1.0) end\n\
+              end\n"));
+
+    gated "a Float precondition accepts a satisfying literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v() : Float do sqrtish(4.0) end\n\
+              end\n"));
+
+    gated "an unknown Float is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end\n\
+             \  fn v(k : Float) : Float do sqrtish(k) end\n\
+              end\n"));
+
+    gated "a non-zero Float divisor contract rejects 0.0" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn nonzero(d : {Float | _ != 0.0}) : Float do d end\n\
+             \  fn v() : Float do nonzero(0.0) end\n\
+              end\n"));
+
+    gated "float arithmetic in a predicate is skipped, not guessed" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn f(x : {Float | _ +. 1.0 > 0.0}) : Float do x end\n\
+             \  fn v() : Float do f(0.0 -. 100.0) end\n\
+              end\n"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3033,4 +3081,5 @@ let () =
       ("callee-shadowing", shadow_suite);
       ("anon-binder-measures", b1_suite);
       ("record-postcond-propagation", b2_suite);
-      ("bool-refinements", bool_suite) ]
+      ("bool-refinements", bool_suite);
+      ("float-refinements", float_suite) ]
