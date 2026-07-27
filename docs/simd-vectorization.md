@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: SIMD & Native Arrays
-nav_order: 9.6
+nav_order: 11.5
 permalink: /docs/simd/
 ---
 

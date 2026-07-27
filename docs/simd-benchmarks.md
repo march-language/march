@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: SIMD Benchmarks
-nav_order: 9.65
+nav_order: 11.6
 permalink: /docs/simd-benchmarks/
 ---
 
@@ -89,8 +89,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 ### `sum(arr)` — Float array reduction
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | **March** | **1.3 ms** | 0.9 ms | 3.2 ms |
@@ -99,8 +97,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 | Elixir | 84.2 ms | 83.1 ms | 97.2 ms |
 | Python | 308.8 ms | 288.1 ms | 391.3 ms |
 | NumPy | 1.0 ms | 0.9 ms | 1.5 ms |
-
-</div>
 
 `native_float_arr_sum` auto-vectorizes under `clang -O2` — see
 [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/#what-vectorizes) for the
@@ -115,8 +111,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 ### `map(x -> x * 2.0 + 1.0)` — elementwise Float map
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | March | 6.4 ms | 5.3 ms | 7.6 ms |
@@ -125,8 +119,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 | Elixir | 252.8 ms | 242.2 ms | 323.6 ms |
 | Python | 193.5 ms | 191.3 ms | 202.2 ms |
 | NumPy | 2.4 ms | 2.1 ms | 3.7 ms |
-
-</div>
 
 This one needs a compiler-side trick, not just clang: March's closure-call
 ABI heap-boxes every `Float` crossing a call boundary, which blocks
@@ -145,8 +137,6 @@ with hand-written OCaml/Rust and within 3x of NumPy.
 
 ### `map2(a, b, (x, y) -> x + y)` — elementwise two-array zip
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | March | 299.2 ms | 296.8 ms | 315.6 ms |
@@ -155,8 +145,6 @@ with hand-written OCaml/Rust and within 3x of NumPy.
 | Elixir | 105.9 ms | 101.7 ms | 140.6 ms |
 | Python | 201.8 ms | 196.0 ms | 206.4 ms |
 | NumPy | 1.7 ms | 1.6 ms | 1.9 ms |
-
-</div>
 
 **The honest gap.** `NativeArray.map2_int`/`map2_float` — added to unblock
 `DataFrame.col_add_col` (column-column arithmetic) — has none of the

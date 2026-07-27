@@ -113,6 +113,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
+  three tables under "Results" on
+  [/docs/simd-benchmarks/](https://march-lang.org/docs/simd-benchmarks/) were
+  wrapped in `<div style="overflow-x:auto">`. Kramdown does not parse markdown
+  inside a raw HTML block unless the element carries `markdown="1"`, so each
+  table was emitted verbatim as text. The wrapper was also redundant — the docs
+  layout already sets `display:block; overflow-x:auto` on content tables, which
+  is why the same page's other two tables were fine — so it is simply removed.
+
 - **Discarding a container no longer leaks its contents.** March reclaimed an
   aggregate only by *destructuring* it; releasing one that was never pattern-
   matched freed the top cell alone and orphaned everything under it. This hit
