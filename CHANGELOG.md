@@ -77,6 +77,15 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- Compiled `NativeArray.map_float` with a plain, concretely-typed
+  callback (`fn x -> x *. 2.0 +. 1.0`, a captured scalar, or similar — no
+  generic/unresolved types involved) no longer allocates at all for each
+  element crossing the callback boundary, and the resulting loop can
+  actually be vectorized by the backend compiler on suitable inputs. A
+  callback whose type isn't fully known at this point still allocates one
+  reusable cell per call (an earlier improvement over one per element) and
+  is unaffected by this change. No observable behavior change either way.
+
 - Compiled `NativeArray.map_float` now allocates one boxed-float cell per
   call and reuses it across all elements, instead of one per element. Cuts
   allocation traffic and GC pressure substantially for large arrays (a
