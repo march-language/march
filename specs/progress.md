@@ -1,5 +1,41 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
+
+Compiled string literals are now emitted as one immortal cell per literal
+SITE, cached in a per-site LLVM global by `march_string_lit_static`
+(`runtime/march_runtime.c`, plus a single-threaded counterpart in
+`march_runtime_wasm.c`), instead of a fresh `rc=1` allocation on every
+evaluation.
+
+This closes a compiled-only leak. A string literal carries no RC obligation
+in TIR — `perceus.ml`'s `EAtom (ALit _)` arm returns the expression
+untouched, exactly as it does for a global `ADefRef` — so a per-evaluation
+allocation was owned by nobody and no pass ever emitted a matching
+decrement. The leak was invisible in the two neighbouring shapes (a
+let-bound literal gets an ordinary Perceus dec; a literal argument to a
+non-allocating call is hoisted out of the loop) and showed up only when a
+literal was evaluated repeatedly as a direct operand — canonically of `++`.
+`let s = buf ++ "xyz"` over 2M iterations leaked 2M strings, peaking at
+64.2MB RSS where the same loop with two variable operands used 2.9MB; after
+the fix that program matches the variable-operand control exactly. Literal
+sharing is safe because March strings are immutable and the runtime never
+mutates a string cell in place; the immortal refcount
+(`MARCH_RC_IMMORTAL`) also makes the FBIP `rc == 1` uniqueness test always
+false, so a shared cell is never reused in place, and `march_free` skips
+immortal cells so the `EFree` path cannot free static-lifetime memory.
+
+Guarded by `test_string_literal_operand_no_leak_compiled`
+(`string_literal_codegen` group, `test/test_codegen.ml`), which reads the
+runtime's own `march_live_allocs` gauge through an extern and asserts the
+live-object count does not grow with the iteration count. Verified
+non-vacuous: the same program prints `LEAKED 20001` against the previous
+emission.
+
+Interpreted execution was never affected (OCaml GC). Native benchmarks show
+no regression and a measurable improvement where literals are hot —
+`bench/iolist_template.march` peak RSS 52.6MB → 45.4MB.
+
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 
 A relational postcondition on a structurally recursive function —

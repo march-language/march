@@ -13,6 +13,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled string literals no longer leak once per evaluation.** A literal
+  used as a direct operand — most commonly `acc ++ ", "` or `s ++ "\n"` inside
+  a loop — allocated a fresh string every time it was evaluated, and nothing
+  ever freed it, so ordinary string-building loops grew memory without bound
+  (a 2M-iteration concat peaked at 64MB of RSS against 2.9MB for the same loop
+  with both operands bound to variables). Each literal now allocates one shared
+  string for the whole program, matching how the compiler's ownership analysis
+  has always treated literals: as constants that no binding owns. Only the
+  compiled backend was affected; the interpreter was always correct.
+
 - **The compiled-binary cache no longer serves a stale binary after a
   `runtime/*.c` edit.** The CAS key digested a runtime directory it resolved
   itself, searching the current directory *first*, while the compiler picks the

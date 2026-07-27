@@ -126,6 +126,29 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * site can leave the discriminator tag unset. */
 void *march_string_alloc(int64_t len);
 void *march_string_lit(const char *utf8, int64_t len);
+/* An "immortal" refcount: a starting rc so far above any reachable reference
+ * count that no sequence of decrements can drive the cell to zero, so it is
+ * never freed and never mistaken for uniquely-owned.  Used for cells that
+ * belong to the program image rather than to any March binding — currently
+ * only compiled-in string literals (march_string_lit_static).  Chosen so
+ * that (a) the free-on-zero paths in march_decrc/march_decrc_local can never
+ * be reached, (b) the `rc == 1` uniqueness test the FBIP reuse path emits
+ * (llvm_emit.ml) is always false, so an immortal cell is never reused in
+ * place, and (c) it stays far from INT64_MAX so ordinary increments cannot
+ * overflow it. */
+#define MARCH_RC_IMMORTAL (INT64_C(1) << 40)
+/* One shared, never-freed march_string per compiled-in string literal SITE.
+ * [cell] points at a per-site static `void *` slot (emitted as an LLVM global
+ * initialised to null); the first call fills it with an immortal string built
+ * from [utf8]/[len] and every later call returns that same cell.
+ *
+ * This exists because a string literal is a CONSTANT in the TIR ownership
+ * model: Perceus gives `EAtom (ALit _)` no RC obligation at all (same as a
+ * global ADefRef), so codegen must not hand back a fresh rc=1 allocation per
+ * evaluation — nothing owns it and nothing ever drops it.  Returning a fresh
+ * cell leaked one string per evaluation, so `let s = buf ++ "xyz"` inside a
+ * loop grew RSS linearly with the iteration count. */
+void *march_string_lit_static(const char *utf8, int64_t len, void **cell);
 void *march_int_to_string(int64_t n);
 void *march_float_to_string(double f);
 void *march_bool_to_string(int64_t b);
