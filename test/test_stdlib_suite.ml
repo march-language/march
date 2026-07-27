@@ -11238,6 +11238,41 @@ let with_compiled_program ~tag ~src_text ~env_prefix f =
     Alcotest.(check int) "compiled program exits 0" 0 rc;
     f err_file
 
+(* Compile [src_text] and return its STDOUT, both compiled and interpreted.
+   A builtin has two implementations — the runtime C function and eval.ml's
+   VBuiltin — and nothing forces them to agree, so they drift silently unless a
+   test runs the same program both ways. *)
+let compiled_and_interpreted_stdout ~tag ~src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file tag "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (tag ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (* Interpreted first: it needs no clang, so it still runs on a toolchain-less
+     machine where the compiled half legitimately skips. *)
+  let interp_out = Filename.concat tmp "interp.txt" in
+  let irc =
+    Sys.command
+      (Printf.sprintf "%s %s > %s 2>/dev/null"
+         (Filename.quote main_exe) (Filename.quote src) (Filename.quote interp_out))
+  in
+  Alcotest.(check int) "interpreted run exits 0" 0 irc;
+  let interpreted = String.trim (read_file_contents interp_out) in
+  let bin = Filename.concat tmp (tag ^ "_bin") in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> (interpreted, None)   (* legitimate, counted skip: no clang *)
+  | Some bin ->
+    let out = Filename.concat tmp "compiled.txt" in
+    let rc =
+      Sys.command
+        (Printf.sprintf "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out))
+    in
+    Alcotest.(check int) "compiled run exits 0" 0 rc;
+    (interpreted, Some (String.trim (read_file_contents out)))
+
 (* The size histogram must be EXACT, not approximate: the SSO criterion is a
    fraction of allocations in the small buckets, so an off-by-N histogram
    changes the architectural verdict.  String.repeat allocates exactly one
@@ -11363,6 +11398,60 @@ let test_string_stats_off_by_default () =
                String.length l >= String.length p
                && String.sub l 0 (String.length p) = p)
             (String.split_on_char '\n' contents)))
+
+(* ── String.index_of_from ────────────────────────────────────────────────
+   Offset-aware search.  Without it, tokenizing means slicing off the tail and
+   searching again, re-copying the remaining bytes at every step — O(n²) for a
+   full pass.  That is not hypothetical: it forced bench/string_slice_walk to
+   walk by arithmetic instead of by searching, and bench/string_parallel_scan
+   to count hits via replace_all rather than by scanning.
+
+   The result is an index in S's OWN coordinates, not relative to `start`, so a
+   caller can feed it straight back in as the next start.  Returning a relative
+   index would make every caller add offsets by hand, which is precisely the
+   kind of thing that is wrong in the third caller.
+
+   Clamping is pinned deliberately: negative start clamps to 0, start past the
+   end yields None, and an empty needle matches AT start (clamped) — mirroring
+   how march_string_index_of already treats an empty needle as matching at 0. *)
+let index_of_from_probe_src =
+  (* The helper is called `render`, NOT `show`: `show` is the built-in Show
+     dispatch method, and a user function of that name does not win the call --
+     the probe silently reaches the builtin instead and the match fails on a
+     bare Int. *)
+  "mod IdxFrom do\n\
+  \  fn render(o : Option(Int)) : String do\n\
+  \    match o do\n\
+  \    Some(k) -> to_string(k)\n\
+  \    None    -> \"none\"\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    let s = \"a,b,c\"\n\
+  \    println(render(String.index_of_from(s, \",\", 0)))\n\
+  \    println(render(String.index_of_from(s, \",\", 2)))\n\
+  \    println(render(String.index_of_from(s, \",\", 4)))\n\
+  \    println(render(String.index_of_from(s, \"\", 3)))\n\
+  \    println(render(String.index_of_from(s, \",\", 0 - 5)))\n\
+  \    println(render(String.index_of_from(s, \",\", 99)))\n\
+  \    println(render(String.index_of_from(\"aaaa\", \"aa\", 1)))\n\
+  \  end\n\
+   end\n"
+
+let index_of_from_expected = "1\n3\nnone\n3\n1\nnone\n1"
+
+let test_string_index_of_from () =
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_idxfrom"
+      ~src_text:index_of_from_probe_src
+  in
+  Alcotest.(check string) "interpreted offsets and clamping"
+    index_of_from_expected interpreted;
+  match compiled with
+  | None -> ()  (* clang absent: interpreted half still asserted above *)
+  | Some out ->
+    Alcotest.(check string) "compiled matches interpreted (builtin parity)"
+      index_of_from_expected out
 
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
@@ -12922,6 +13011,8 @@ let stdlib_suites =
           test_string_stats_copy_bytes;
         Alcotest.test_case "string stats: byte-loop builders counted too" `Slow
           test_string_stats_copy_bytes_byte_loops;
+        Alcotest.test_case "String.index_of_from: offsets, clamping, parity" `Slow
+          test_string_index_of_from;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);

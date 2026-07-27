@@ -140,6 +140,20 @@ export function march_string_index_of(s, sub) {
   return i < 0 ? { $: "None" } : { $: "Some", _0: i };
 }
 
+export function march_string_index_of_from(s, sub, start) {
+  // Clamping must mirror march_string_index_of_from in runtime/march_runtime.c:
+  // negative start -> 0, start past the end -> None, empty needle matches AT
+  // the clamped start.  JS indexOf already clamps a negative start to 0 and
+  // returns start for an empty needle, but only up to s.length -- the explicit
+  // guards below make the three edge cases match the C and OCaml versions
+  // rather than relying on that coincidence.
+  if (start < 0) start = 0;
+  if (start > s.length) return { $: "None" };
+  if (sub.length === 0) return { $: "Some", _0: start };
+  const i = s.indexOf(sub, start);
+  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+}
+
 export function march_string_last_index_of(s, sub) {
   const i = s.lastIndexOf(sub);
   return i < 0 ? { $: "None" } : { $: "Some", _0: i };

@@ -269,6 +269,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_grapheme_count(ptr %s)" };
   { march_name = "string_index_of"; c_name = Some "march_string_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of(ptr %s, ptr %sub)" };
+  { march_name = "string_index_of_from"; c_name = Some "march_string_index_of_from"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of_from(ptr %s, ptr %sub, i64 %start)" };
   { march_name = "string_last_index_of"; c_name = Some "march_string_last_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)" };
   { march_name = "string_to_float"; c_name = Some "march_string_to_float"; ret_ty = Some (Tir.TCon ("Option", [Tir.TFloat]));
@@ -1020,6 +1022,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_pad_right";
   PDeclare "march_string_grapheme_count";
   PDeclare "march_string_index_of";
+  PDeclare "march_string_index_of_from";
   PDeclare "march_string_last_index_of";
   PDeclare "march_string_to_float";
   PComment "; List builtins";

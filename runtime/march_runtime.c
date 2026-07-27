@@ -3091,6 +3091,33 @@ void *march_string_index_of(void *s, void *sub) {
     return make_none();
 }
 
+/* index_of starting at a byte offset.  Returns Option(Int).
+ *
+ * The index is in S's OWN coordinates, not relative to [start], so a caller can
+ * feed the result straight back in as the next start when tokenizing.  Without
+ * this entry point the only way to find the next separator is to slice off the
+ * tail and search that, which re-copies the remaining bytes at every step and
+ * makes a full tokenize O(n^2) — bench/string_slice_walk and
+ * bench/string_parallel_scan both had to be written around exactly that.
+ *
+ * Clamping mirrors march_string_index_of: an empty needle matches immediately
+ * (here, at the clamped start), a negative start is treated as 0, and a start
+ * past the end finds nothing. */
+void *march_string_index_of_from(void *s, void *sub, int64_t start) {
+    march_string *ss = (march_string *)s;
+    march_string *su = (march_string *)sub;
+    if (start < 0) start = 0;
+    if (start > ss->len) return make_none();
+    if (su->len == 0) return make_some_i64(start);
+    if (su->len > ss->len - start) return make_none();
+    for (int64_t i = start; i + su->len <= ss->len; i++) {
+        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) {
+            return make_some_i64(i);
+        }
+    }
+    return make_none();
+}
+
 /* Returns Option(Int). */
 void *march_string_last_index_of(void *s, void *sub) {
     march_string *ss = (march_string *)s;

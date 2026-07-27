@@ -9474,6 +9474,7 @@ declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
 declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
 declare i64  @march_string_grapheme_count(ptr %s)
 declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_index_of_from(ptr %s, ptr %sub, i64 %start)
 declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
 declare ptr  @march_string_to_float(ptr %s)
 ; List builtins

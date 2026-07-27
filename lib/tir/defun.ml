@@ -59,7 +59,8 @@ let builtin_names : StringSet.t =
       "string_trim"; "string_trim_start"; "string_trim_end";
       "string_repeat"; "string_reverse";
       "string_pad_left"; "string_pad_right";
-      "string_grapheme_count"; "string_index_of"; "string_last_index_of";
+      "string_grapheme_count"; "string_index_of"; "string_index_of_from";
+      "string_last_index_of";
       "string_to_float";
       (* List builtins *)
       "list_append"; "list_concat";

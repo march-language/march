@@ -105,6 +105,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_split",         [true; true]);
   ("string_split_first",   [true; true]);
   ("string_index_of",      [true; true]);
+  ("string_index_of_from", [true; true; true]);
   ("string_last_index_of", [true; true]);
   ("string_replace",       [true; true; true]);
   ("string_replace_all",   [true; true; true]);

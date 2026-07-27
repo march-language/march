@@ -4492,6 +4492,30 @@ let base_env : env =
             | None   -> VCon ("None", [])
           end
         | _ -> eval_error "string_index_of: expected two strings"))
+  (* Offset-aware search.  Clamping must mirror march_string_index_of_from in
+     runtime/march_runtime.c exactly — negative start to 0, start past the end
+     to None, empty needle matching AT the clamped start — or interpreted and
+     compiled runs disagree and the divergence surfaces far from here. *)
+  ; ("string_index_of_from", VBuiltin ("string_index_of_from", function
+        | [VString s; VString sub; VInt start] ->
+          let ls = String.length s and lsub = String.length sub in
+          let start = if start < 0 then 0 else start in
+          if start > ls then VCon ("None", [])
+          else if lsub = 0 then VCon ("Some", [VInt start])
+          else if lsub > ls - start then VCon ("None", [])
+          else begin
+            let result = ref None in
+            (try
+               for i = start to ls - lsub do
+                 if String.sub s i lsub = sub then
+                   (result := Some i; raise Exit)
+               done
+             with Exit -> ());
+            match !result with
+            | Some i -> VCon ("Some", [VInt i])
+            | None   -> VCon ("None", [])
+          end
+        | _ -> eval_error "string_index_of_from: expected (String, String, Int)"))
   ; ("string_replace", VBuiltin ("string_replace", function
         | [VString s; VString old_; VString new_] ->
           let lold = String.length old_ in
