@@ -11284,6 +11284,36 @@ let test_string_stats_histogram_exact () =
        Alcotest.(check bool) "peak_live_bytes is positive" true
          (get "peak_live_bytes" > 0))
 
+(* Bytes-copied is the counter that discriminates "borrowed views would help"
+   from "allocation volume is the problem" — the two have different fixes, and
+   wall time alone cannot tell them apart.  100 slices of 1000 bytes must
+   report at least 100_000 copied bytes; a zero here would mean the memcpy
+   sites were never converted, and the views decision would rest on a blank
+   number that looks like evidence. *)
+let test_string_stats_copy_bytes () =
+  with_compiled_program ~tag:"march_strcopy"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrCopy do\n\
+      \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.slice(buf, i, 1000)\n\
+      \      go(buf, i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
+      \    println(to_string(go(buf, 0, 100, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let copied = string_stat_of ~stderr_file:err_file "copy_bytes" in
+       Alcotest.(check bool)
+         (Printf.sprintf "copy_bytes >= 100_000 for 100 x 1000-byte slices (got %d)"
+            copied)
+         true (copied >= 100_000))
+
 (* Control: stats stay OFF unless the env var is set.  Without this, the test
    above could pass against an always-on implementation that would corrupt
    every other test's stderr expectations and tax the hot allocation path. *)
@@ -12855,6 +12885,8 @@ let stdlib_suites =
           test_string_stats_histogram_exact;
         Alcotest.test_case "string stats: off unless MARCH_STRING_STATS is set" `Slow
           test_string_stats_off_by_default;
+        Alcotest.test_case "string stats: bytes copied are tallied" `Slow
+          test_string_stats_copy_bytes;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);

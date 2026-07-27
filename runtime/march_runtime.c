@@ -193,6 +193,22 @@ static void str_stats_free(int64_t len) {
     atomic_fetch_sub_explicit(&str_live_bytes, len, memory_order_relaxed);
 }
 
+/* memcpy with opt-in byte accounting.  Every string-BUILDING copy in this
+ * file routes through here, so copy_bytes measures exactly the work a
+ * borrowed-view representation could eliminate.  Copies outside the string
+ * operations (scheduler, HTTP, actor mailboxes) deliberately keep plain
+ * memcpy: counting them would make the number mean nothing.
+ *
+ * Called once per operation, never per byte — a per-byte call would put the
+ * str_stats_on() branch inside the copy loop and break the <2% off-path
+ * budget that bench/run_string_bench.sh --verify-overhead enforces. */
+static inline void march_str_copy(void *dst, const void *src, size_t n) {
+    memcpy(dst, src, n);
+    if (str_stats_on())
+        atomic_fetch_add_explicit(&str_copy_bytes, (int64_t)n,
+                                  memory_order_relaxed);
+}
+
 static inline int64_t gc_ts_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -496,7 +512,7 @@ void *march_string_alloc(int64_t len) {
 
 void *march_string_lit(const char *utf8, int64_t len) {
     march_string *s = march_string_alloc(len);
-    memcpy(s->data, utf8, (size_t)len);
+    march_str_copy(s->data, utf8, (size_t)len);
     s->data[len] = '\0';
     return s;
 }
@@ -584,8 +600,8 @@ void *march_string_concat(void *a, void *b) {
         fputs("march: runtime error: string too large (concat overflow)\n", stderr); exit(1);
     }
     march_string *s = march_string_alloc(total);
-    memcpy(s->data, sa->data, (size_t)sa->len);
-    memcpy(s->data + sa->len, sb->data, (size_t)sb->len);
+    march_str_copy(s->data, sa->data, (size_t)sa->len);
+    march_str_copy(s->data + sa->len, sb->data, (size_t)sb->len);
     s->data[total] = '\0';
     return s;
 }
@@ -789,10 +805,10 @@ void *march_string_join(void *list, void *sep) {
         void *head = *(void **)((char *)cur + 16);
         march_string *hs = (march_string *)head;
         if (!first && sep_len > 0) {
-            memcpy(dst, sep_s->data, (size_t)sep_len);
+            march_str_copy(dst, sep_s->data, (size_t)sep_len);
             dst += sep_len;
         }
-        memcpy(dst, hs->data, (size_t)hs->len);
+        march_str_copy(dst, hs->data, (size_t)hs->len);
         dst += hs->len;
         first = 0;
         cur = *(void **)((char *)cur + 24);
@@ -2849,7 +2865,7 @@ void *march_string_from_chars(void *lst) {
         int32_t tag = *(int32_t *)((char *)cur + 8);
         if (tag == 0) break; /* Nil */
         march_string *ch = *(march_string **)((char *)cur + 16);
-        memcpy(r->data + off, ch->data, (size_t)ch->len);
+        march_str_copy(r->data + off, ch->data, (size_t)ch->len);
         off += ch->len;
         cur = *(void **)((char *)cur + 24);
     }
@@ -2870,9 +2886,9 @@ void *march_string_replace(void *s, void *old, void *new_) {
         if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
             int64_t newlen = ss->len - so->len + sn->len;
             march_string *r = march_string_alloc(newlen);
-            memcpy(r->data, ss->data, (size_t)i);
-            memcpy(r->data + i, sn->data, (size_t)sn->len);
-            memcpy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
+            march_str_copy(r->data, ss->data, (size_t)i);
+            march_str_copy(r->data + i, sn->data, (size_t)sn->len);
+            march_str_copy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
             r->data[newlen] = '\0';
             return r;
         }
@@ -2897,7 +2913,7 @@ void *march_string_replace_all(void *s, void *old, void *new_) {
         if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
             /* Ensure capacity. */
             while (out + sn->len >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-            memcpy(buf + out, sn->data, (size_t)sn->len);
+            march_str_copy(buf + out, sn->data, (size_t)sn->len);
             out += sn->len;
             i += so->len;
         } else {
@@ -2973,7 +2989,7 @@ void *march_string_repeat(void *s, int64_t n) {
     }
     march_string *r = march_string_alloc(total);
     for (int64_t i = 0; i < n; i++) {
-        memcpy(r->data + i * ss->len, ss->data, (size_t)ss->len);
+        march_str_copy(r->data + i * ss->len, ss->data, (size_t)ss->len);
     }
     r->data[total] = '\0';
     return r;
@@ -2998,7 +3014,7 @@ void *march_string_pad_left(void *s, int64_t width, void *fill) {
     march_string *r = march_string_alloc(total);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data, fc, (size_t)pad);
-    memcpy(r->data + pad, ss->data, (size_t)ss->len);
+    march_str_copy(r->data + pad, ss->data, (size_t)ss->len);
     r->data[total] = '\0';
     return r;
 }
@@ -3010,7 +3026,7 @@ void *march_string_pad_right(void *s, int64_t width, void *fill) {
     int64_t pad = width - ss->len;
     int64_t total = width;
     march_string *r = march_string_alloc(total);
-    memcpy(r->data, ss->data, (size_t)ss->len);
+    march_str_copy(r->data, ss->data, (size_t)ss->len);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data + ss->len, fc, (size_t)pad);
     r->data[total] = '\0';
