@@ -1,0 +1,39 @@
+-- ***** SOUNDNESS WITNESS -- read before touching the Float/Z3 encoding *****
+--
+-- Refinement types, Float encoding (§2.14; see specs/progress.md "Float
+-- refinements via Z3 bit-precise FloatingPoint" and the float_suite comment
+-- in test/test_refinecheck.ml: "Discharged through Z3's BIT-PRECISE
+-- FloatingPoint theory ... never through Real. Over reals trichotomy makes
+-- `not(x >= 0) && not(x <= 0)` unsatisfiable ... over floats it is
+-- satisfiable, witnessed by NaN.").
+--
+-- `weird`'s precondition is `not (_ >= 0.0) && not (_ <= 0.0)`. Over the REAL
+-- numbers this is a contradiction: trichotomy guarantees every real is `>= 0`
+-- or `<= 0` (or both, at exactly 0), so no real value can fail both
+-- disjuncts. If refinecheck encoded `Float` as Z3's `Real` sort, this
+-- predicate would be UNSATISFIABLE, and an unconstrained argument passed to
+-- `weird` would let Z3 prove `not (feasible)` -- i.e. report a refinement
+-- violation on code that never supplies a violating value, because no value
+-- of the DECLARED type can even reach `weird` without already being
+-- impossible. That is a false positive baked into the encoding itself, not a
+-- bug in any particular call.
+--
+-- Under IEEE-754 semantics (Z3's bit-precise `FloatingPoint`/`Float64` sort,
+-- `fp.geq`/`fp.leq`), the predicate IS satisfiable: `NaN` compares `false`
+-- against every ordered relation, including `>=` and `<=`, so `NaN` satisfies
+-- BOTH `not (_ >= 0.0)` and `not (_ <= 0.0)` simultaneously. Because the
+-- argument here is an unconstrained parameter `k` (not a literal), Z3 cannot
+-- rule out `k = NaN` reaching `weird`, so refinecheck correctly stays SILENT
+-- -- this file must `--check` exit 0.
+--
+-- WHAT BREAKS IF THIS EVER FLIPS: if a future change "simplifies" the Float
+-- encoding to Z3's `Real` sort (dropping NaN/infinity semantics because they
+-- seem like an edge case), this exact file -- calling `weird` with an
+-- ordinary unconstrained `Float` parameter -- would start being reported as
+-- a refinement violation, even though the call is correct and the compiler
+-- accepted the same shape as accept/t99 moments earlier. This witness exists
+-- to fail the moment that simplification lands.
+mod M do
+  fn weird(x : {Float | not (_ >= 0.0) && not (_ <= 0.0)}) : Float do x end
+  fn v(k : Float) : Float do weird(k) end
+end

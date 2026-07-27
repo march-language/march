@@ -1,0 +1,12 @@
+-- Refinement types: `Float` refinements (§2.14). Discharged through Z3's
+-- bit-precise `FloatingPoint` theory (`Float64` sort, `fp.geq`), not `Real`
+-- -- see accept/t100 for why that distinction is load-bearing. For a DIRECT
+-- call with a float LITERAL argument, refinecheck evaluates `4.0 >= 0.0`
+-- against the bit-precise encoding and discharges it without ambiguity.
+-- Reject companion: reject/t91 (`sqrtish(0.0 -. 1.0)`).
+mod M do
+  fn sqrtish(x : {Float | _ >= 0.0}) : Float do x end
+  fn main() do
+    println(float_to_string(sqrtish(4.0)))
+  end
+end

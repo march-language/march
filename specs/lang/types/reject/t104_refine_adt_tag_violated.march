@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: ADT constructor-tag predicates (§2.14). `unwrap` demands
+-- `is_Some(_)`. `None` is a constructor LITERAL whose head tag refinecheck
+-- reads syntactically -- no Z3 needed to see it is not `Some`. This is a
+-- definite counterexample, not a skip. Accept companion: accept/t92
+-- (`unwrap(Some(1))`).
+mod M do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn main() do
+    println(int_to_string(unwrap(None)))
+  end
+end

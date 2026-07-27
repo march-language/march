@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: `Bool` refinements (§2.14) -- one of the features landed
+-- in the last two days; `{Bool | _ == true}` used to parse and typecheck but
+-- check NOTHING. `needTrue(false)` passes the literal `false`, definitely
+-- refuting `_ == true`. Accept companion: accept/t101 (`needTrue(true)`).
+mod M do
+  fn needTrue(b : {Bool | _ == true}) : Int do 1 end
+  fn main() do
+    println(int_to_string(needTrue(false)))
+  end
+end
