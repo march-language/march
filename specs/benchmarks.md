@@ -193,6 +193,23 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_small_churn.march — 2M short-string build/compare cycles
+
+**Command:** 2M × (build two short strings, concat twice, prefix-compare, discard)
+**Expected output:** `checksum=17793810`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| Small-string allocation | Every string is a `malloc` + refcount, even 4 bytes |
+| `++` on short operands | Three concatenations per iteration |
+| `String.starts_with` | Short-prefix compare, consumes the concatenation |
+| Allocate-and-free churn | Nothing escapes the loop |
+
+**Comparison baseline:** Rust (`String` — no SSO either), C++ (`std::string` — has SSO), Go, Python (interns short strings).
+**What to watch:** The size histogram under `MARCH_STRING_STATS=1` is the SSO evidence. Measured: 24,000,004 allocations, of which **91.7% are ≤23 bytes** (13.2M ≤7, 6.9M ≤15, 1.9M ≤23) — 23 being what fits in the footprint the 24-byte header already occupies. Doubling `pairs()` doubles both allocations (24M → 48M) and wall time (0.80s → 1.58s), confirming allocation is the bottleneck rather than incidental. The C++ comparison is the informative one, since it is the baseline that *has* the optimization under consideration.
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
