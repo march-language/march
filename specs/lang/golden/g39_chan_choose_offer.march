@@ -13,6 +13,14 @@ mod Main do
   -- Roles are declared as their own nullary types to keep the undeclared-
   -- participant HINT (F8) quiet; every send precedes its matching recv in
   -- program order (no scheduler — F6).
+  --
+  -- Session-types Task 4 (2026-07-24, F5 residual): because `Decision`'s two
+  -- branches continue DIFFERENTLY (`Int` vs `String`), the channel `Chan.offer`
+  -- hands back is no longer usable at the first branch's guessed type — it
+  -- must be refined by matching on the returned label first. The offering
+  -- side below matches on `lbl` and drives the channel inside the matched
+  -- arm; each arm's `println`s reproduce the pre-Task-4 output byte-for-byte
+  -- (`:ok` then `43`) since the peer always chooses `:ok`.
   type Client = Client
   type Server = Server
 
@@ -29,9 +37,18 @@ mod Main do
     let cc3 = Chan.send(cc2, 42 + 1)
     Chan.close(cc3)
     let (lbl, sc2) = Chan.offer(sc)
-    let (n, sc3) = Chan.recv(sc2)
-    Chan.close(sc3)
-    println(lbl)
-    println(int_to_string(n))
+    match lbl do
+      :ok ->
+        let (n, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(int_to_string(n))
+      :err ->
+        let (s, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(s)
+      _ -> println("other")
+    end
   end
 end

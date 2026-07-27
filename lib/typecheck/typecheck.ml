@@ -680,6 +680,17 @@ type env = {
       typing ([infer_match] / the [check_expr] EMatch arm): when the scrutinee
       is such a [lbl] and an arm matches label `:L`, the shared ref is
       transiently set to [branches[L]] while that arm body is checked. *)
+  offer_unrefined : session_ty ref list ref;
+  (** Offer continuations awaiting per-arm refinement (F5 residual, 2026-07-24).
+      [Chan.offer] registers the session ref it hands back here IFF the offer's
+      branch continuations are not all identical — in that case the returned
+      channel's real state depends on which label the peer chose at runtime, so
+      operating on it before a `match` on the paired label refines it would type
+      the channel at the FIRST branch (silent type confusion: compiled, a
+      String payload gets read as an Int).  [with_offer_refinement] transiently
+      removes the ref while checking a refined arm; the [Chan.*] operation arms
+      reject any channel still listed here.  A shared mutable ref for the same
+      reason [offer_conts] is one. *)
 }
 
 let make_env errors type_map = {
@@ -713,6 +724,7 @@ let make_env errors type_map = {
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
+  offer_unrefined = ref [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -4143,6 +4155,21 @@ let rec unfold_srec s =
     unfold_srec (subst_inner body)
   | _ -> s
 
+(** Reject a [Chan.*] operation on a channel whose session ref came from an
+    [offer] with differing branch continuations and has not been refined by a
+    `match` on the paired label (F5 residual). *)
+let offer_unrefined_error env span (r : session_ty ref) op =
+  if List.exists (fun r' -> r' == r) !(env.offer_unrefined) then begin
+    Err.error env.errors ~span
+      (Printf.sprintf
+         "%s: this channel came from `Chan.offer`, and the protocol's branches \
+          continue differently, so I don't know which one the peer chose.\n\
+          Match on the label first — `match lbl do :ok -> ... :err -> ... end` — \
+          and use the channel inside each arm."
+         op);
+    true
+  end else false
+
 (** Type constructor names that cannot appear in actor message payloads.
     These types carry mutable state that must remain owned by a single actor. *)
 let non_sendable_types = ["RingBuf"]
@@ -4328,6 +4355,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.send" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SSend (payload_ty, cont) ->
@@ -4358,6 +4386,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.recv" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SRecv (payload_ty, cont) ->
@@ -4386,6 +4415,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.close" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SEnd -> t_unit
@@ -4418,6 +4448,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | _ -> None
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.choose" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SChoose branches ->
@@ -4463,6 +4494,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.offer" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SOffer branches ->
@@ -4477,6 +4509,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   taken (F5 path-dependent refinement). *)
                let cont_ref = ref sty in
                env.offer_conts := (cont_ref, branches) :: !(env.offer_conts);
+               (* If the branches continue differently, the first-branch type is
+                  a GUESS — mark the ref as needing a `match`-driven refinement
+                  before any operation may use it. *)
+               (match branches with
+                | (_, first) :: rest
+                  when not (List.for_all (fun (_, s) -> session_ty_exact_equal s first) rest) ->
+                  env.offer_unrefined := cont_ref :: !(env.offer_unrefined)
+                | _ -> ());
                TTuple [t_atom; TLin (Ast.Linear, TChan cont_ref)]
              | [] ->
                TTuple [t_atom; TError])
@@ -5463,7 +5503,12 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     | _ -> None
   in
   match applied with
-  | Some (r, saved) -> Fun.protect ~finally:(fun () -> r := saved) f
+  | Some (r, saved) ->
+    let saved_unrefined = !(env.offer_unrefined) in
+    env.offer_unrefined := List.filter (fun r' -> not (r' == r)) saved_unrefined;
+    Fun.protect
+      ~finally:(fun () -> r := saved; env.offer_unrefined := saved_unrefined)
+      f
   | None            -> f ()
 
 (** Check each match arm as a mutually-exclusive path with respect to

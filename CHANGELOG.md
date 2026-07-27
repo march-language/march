@@ -83,6 +83,20 @@ git log is authoritative for exact commits.
   stopped `Chan.new` from being called on one too. The error names the
   protocol's actual role count and points at `MPST.new`.
 
+- **Session types: an unrefined `Chan.offer` continuation is no longer a live
+  soundness hole.** `match`-ing the label `Chan.offer` returns already refined
+  the paired channel's type per arm, but only when such a `match` existed —
+  driving the channel without one still typed it at the FIRST branch's
+  continuation, an unsound guess whenever the branches continue differently.
+  Interpreted, that guess could die with a dynamic type error; **compiled, it
+  was silent type confusion** — a peer that chose the other branch and sent a
+  `String` had that value's heap pointer read as an `Int`. A `Chan.offer`
+  whose branches continue identically is unaffected and still needs no
+  `match` to drive. `specs/lang/types/accept/t43_choose_offer_roundtrip.march`
+  and `specs/lang/golden/g39_chan_choose_offer.march`, both of which relied on
+  the old guess, are migrated to match on the label first (`g39`'s printed
+  output is unchanged).
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

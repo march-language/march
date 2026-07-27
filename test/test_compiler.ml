@@ -1827,6 +1827,58 @@ let test_session_offer_at_wrong_state_error () =
   end|} in
   Alcotest.(check bool) "Chan.offer at non-offer state: error" true (has_errors ctx)
 
+(** An `offer` whose branches continue DIFFERENTLY may not be driven without a
+    `match` on the returned label: the checker would otherwise assume the first
+    branch.  Live pre-fix behavior: the peer chose `:err` (String) and the
+    compiled binary read that String pointer as an Int. *)
+let test_session_offer_unrefined_continuation_error () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D2 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D2)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let (v, cc3) = Chan.recv(cc2)
+      Chan.close(cc3)
+      println(int_to_string(v))
+    end
+  end|} in
+  Alcotest.(check bool) "unrefined offer continuation: error" true (has_errors ctx)
+
+(** When every branch continues IDENTICALLY the first-branch continuation is
+    exact, so driving the offer without a `match` stays legal. *)
+let test_session_offer_identical_branches_no_match_ok () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol Same do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : Int
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(Same)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let (v, cc3) = Chan.recv(cc2)
+      Chan.close(cc3)
+      println(int_to_string(v))
+    end
+  end|} in
+  Alcotest.(check bool) "identical-branch offer without match: no error" false (has_errors ctx)
+
 (* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
 
 let test_srec_pingpong_loop_typechecks () =
@@ -8679,6 +8731,8 @@ let compiler_suites =
           Alcotest.test_case "session choose wrong state"        `Quick test_session_choose_at_wrong_state_error;
           Alcotest.test_case "session offer ok"                  `Quick test_session_offer_ok;
           Alcotest.test_case "session offer wrong state"         `Quick test_session_offer_at_wrong_state_error;
+          Alcotest.test_case "session offer unrefined continuation error" `Quick test_session_offer_unrefined_continuation_error;
+          Alcotest.test_case "session offer identical branches no match ok" `Quick test_session_offer_identical_branches_no_match_ok;
           (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;

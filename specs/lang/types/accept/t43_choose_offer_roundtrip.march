@@ -5,11 +5,14 @@ mod Main do
   -- core-march-types.md finding 20) does not collapse Server's projection --
   -- this protocol's binary duality holds cleanly. `Chan.choose` (typecheck.ml
   -- :3564) requires SChoose and advances to the chosen branch's continuation;
-  -- `Chan.offer` (:3614) requires SOffer and returns (Atom, Chan at the
-  -- FIRST branch's continuation -- F5/finding 21's conservative
-  -- approximation). Because the chooser always picks `:ok` here and `:ok` IS
-  -- the first branch, the approximation happens to be exact for this
-  -- witness -- see F5 for why that isn't true in general.
+  -- `Chan.offer` (:3614) requires SOffer and returns (Atom, Chan at some
+  -- continuation).
+  --
+  -- Session-types Task 4 (2026-07-24, F5 residual): because `Decision`'s
+  -- branches continue DIFFERENTLY, the channel `Chan.offer` returns is no
+  -- longer usable at the guessed first-branch type -- driving it without a
+  -- `match` on the paired label is now a hard error (reject/t95). This
+  -- witness matches on `lbl` and drives the channel inside the matched arm.
   type Client = Client
   type Server = Server
 
@@ -26,9 +29,18 @@ mod Main do
     let cc3 = Chan.send(cc2, 42)
     Chan.close(cc3)
     let (lbl, sc2) = Chan.offer(sc)
-    let (n, sc3) = Chan.recv(sc2)
-    Chan.close(sc3)
-    println(lbl)
-    println(int_to_string(n))
+    match lbl do
+      :ok ->
+        let (n, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(int_to_string(n))
+      :err ->
+        let (s, sc3) = Chan.recv(sc2)
+        Chan.close(sc3)
+        println(lbl)
+        println(s)
+      _ -> println("other")
+    end
   end
 end
