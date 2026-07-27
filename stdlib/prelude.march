@@ -74,7 +74,7 @@ mod Prelude do
   -- ---- List basics ----
 
   doc "Returns the first element of the list. Panics if empty."
-  fn head(xs : List(a)) : a do
+  fn head(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Cons(h, _) -> h
     Nil        -> panic("head: empty list")
@@ -82,7 +82,7 @@ mod Prelude do
   end
 
   doc "Returns all but the first element. Panics if empty."
-  fn tail(xs : List(a)) : List(a) do
+  fn tail(xs : {List(a) | len(_) > 0}) : List(a) do
     match xs do
     Cons(_, t) -> t
     Nil        -> panic("tail: empty list")

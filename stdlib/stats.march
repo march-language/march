@@ -24,7 +24,7 @@ mod Stats do
   end
 
   doc "Arithmetic mean. Panics on empty list."
-  fn mean(xs : List(Float)) : Float do
+  fn mean(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.mean: empty list")
     _   -> do
@@ -35,7 +35,7 @@ mod Stats do
   end
 
   doc "Minimum value. Panics on empty list."
-  fn min_val(xs : List(Float)) : Float do
+  fn min_val(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.min_val: empty list")
     Cons(h, t) ->
@@ -44,7 +44,7 @@ mod Stats do
   end
 
   doc "Maximum value. Panics on empty list."
-  fn max_val(xs : List(Float)) : Float do
+  fn max_val(xs : {List(Float) | len(_) > 0}) : Float do
     match xs do
     Nil -> panic("Stats.max_val: empty list")
     Cons(h, t) ->
