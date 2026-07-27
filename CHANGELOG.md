@@ -13,6 +13,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
+  mismatch) and Int→Float widening helper, for numeric ops over two
+  `NativeArray`s at once. `DataFrame.col_add_col` (column-column arithmetic)
+  now uses these instead of round-tripping through `List.zip`/`List.map`.
 - **`Bool` and `Float` refinement types are now enforced.** Both previously
   parsed and type-checked while checking nothing at all, so
   `fn needTrue(b : {Bool | _ == true})` accepted `needTrue(false)` and

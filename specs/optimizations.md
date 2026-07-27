@@ -702,14 +702,25 @@ What's left is making the *operations* on those columns actually use the fast
   (P10 Phase 2 correction, above) for free. `Min`/`Max`/`Std`/`Variance`/`Median`
   unchanged: no vectorized reduction primitive exists for those (would need new
   runtime builtins), and `Median` needs the full sorted list regardless.
-- **Investigated, deferred:** `col_add_col`/`ColExpr::Add/Sub/Mul/Div` (column-column
-  arithmetic) and `fill_null` (data array zipped against a null-bitmap array) both
-  round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped
-  ops, but are actually **two-array** operations — `NativeArray.map_int`/`map_float`
-  only take one array, so neither can use the Phase 2b/2c inlining without a new
-  `map2`/zip-with `NativeArray` primitive (new runtime builtin + LLVM codegen support,
-  likely needing its own Phase-2b/2c-style closure-inlining treatment). Real,
-  scoped, compiler-side work — not started.
+- **Done (2026-07-27):** `NativeArray.map2_int`/`map2_float` — a genuine two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length mismatch),
+  plus `NativeArray.to_float_arr` (widen a `NativeIntArr` to `NativeFloatArr`) for
+  mixed-type column arithmetic. Full stack: runtime C (`native_{int,float}_arr_map2`
+  in `runtime/march_runtime.c`, using the same wire-tagged/boxed closure-call ABI as
+  `map`'s `clo_call_*` helpers, plus 2-arg variants `clo_call_int_int_int`/
+  `clo_call_dbl_dbl_dbl`), interpreter (`lib/eval/eval.ml`), typechecker
+  (`lib/typecheck/typecheck.ml`), and compiled-path registration (`llvm_builtins.ml`
+  table + preamble `PDeclare`s, `defun.ml`'s `builtin_names`). `DataFrame.col_add_col`
+  now uses these instead of `List.zip`/`List.map`/`native_*_arr_from_list` for all
+  four `IntCol`/`FloatCol` combinations. Regression test: `test/native/native_arr_map2.march`.
+  Deliberately scoped to *correctness* only — `map2` does not (yet) get its own
+  Phase-2b/2c/Option-A/B-style closure-inlining or vectorization treatment; it still
+  dispatches through the C runtime's opaque closure-pointer call per element. That
+  inlining is a natural follow-up, not started.
+- **Still out of scope:** `ColExpr::Add/Sub/Mul/Div` (the lazy-expression path, as
+  opposed to `col_add_col`'s eager one) and `fill_null` (data array zipped against a
+  `TypedArray(Bool)` null-bitmap, not another `NativeArray` — a different shape than
+  `map2` covers) have not been rewired.
 - **Found, filed separately, not fixed:** `DataFrame.eval_agg` has ~40ms of fixed
   per-call overhead in compiled builds, unrelated to the actual aggregation —
   confirmed via isolated benchmark and confirmed pre-existing (not caused by the
@@ -727,11 +738,11 @@ two-array-arithmetic gap above is the main remaining piece.
 
 ---
 
-**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, not started
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, `map2` primitive done, inlining not started
 **Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
 **Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
 **Benchmark:** `bench/array_numeric.march`
-**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops not started
+**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops: `map2` primitive + `col_add_col` rewiring done, inlining/vectorization not started
 
 ---
 

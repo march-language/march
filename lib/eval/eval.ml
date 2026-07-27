@@ -7393,6 +7393,23 @@ let base_env : env =
           done;
           VNativeIntArr b
         | _ -> eval_error "native_int_arr_map: expected (NativeIntArr, fn)"))
+  ; ("native_int_arr_map2", VBuiltin ("native_int_arr_map2", function
+        | [VNativeIntArr a; VNativeIntArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_int_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i); VInt b.(i)] with
+             | VInt v -> out.(i) <- v
+             | v -> eval_error "native_int_arr_map2: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeIntArr out
+        | _ -> eval_error "native_int_arr_map2: expected (NativeIntArr, NativeIntArr, fn)"))
+  ; ("native_int_arr_to_float_arr", VBuiltin ("native_int_arr_to_float_arr", function
+        | [VNativeIntArr a] -> VNativeFloatArr (Array.map float_of_int a)
+        | _ -> eval_error "native_int_arr_to_float_arr: expected NativeIntArr"))
   ; ("native_int_arr_fold", VBuiltin ("native_int_arr_fold", function
         | [acc0; VNativeIntArr a; f] ->
           let acc = ref acc0 in
@@ -7480,6 +7497,20 @@ let base_env : env =
           done;
           VNativeFloatArr b
         | _ -> eval_error "native_float_arr_map: expected (NativeFloatArr, fn)"))
+  ; ("native_float_arr_map2", VBuiltin ("native_float_arr_map2", function
+        | [VNativeFloatArr a; VNativeFloatArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_float_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i); VFloat b.(i)] with
+             | VFloat v -> out.(i) <- v
+             | v -> eval_error "native_float_arr_map2: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeFloatArr out
+        | _ -> eval_error "native_float_arr_map2: expected (NativeFloatArr, NativeFloatArr, fn)"))
   ; ("native_float_arr_fold", VBuiltin ("native_float_arr_fold", function
         | [acc0; VNativeFloatArr a; f] ->
           let acc = ref acc0 in
