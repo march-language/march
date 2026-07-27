@@ -6,9 +6,10 @@ mod Main do
   -- the payload at the send call site so `march_chan_recv`'s conditional
   -- erased-i64 untag (ashr iff odd) is symmetric instead of corrupting every
   -- odd Int (43 used to come back as 21 compiled). Roles are declared as
-  -- their own nullary types so the undeclared-participant HINT (F8) does not
-  -- fire — not required for a golden MATCH (the HINT lands on stderr only),
-  -- but keeps this program's `--check`/run output quiet. Every `send` is
+  -- their own nullary types. That was originally to silence an
+  -- undeclared-participant HINT (F8); that hint was REMOVED on 2026-07-24 and
+  -- no longer exists, so the declarations are now just the ordinary way to
+  -- name roles. Every `send` is
   -- textually before its matching `recv` (the runtime has no scheduler —
   -- F6): Client sends 42, Server receives it, replies with 43 (odd), Client
   -- receives 43 and prints it.

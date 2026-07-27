@@ -112,6 +112,21 @@ git log is authoritative for exact commits.
   unification rather than propagating the mark, so the function-parameter form
   is caught at the call site, where the mistake is.
 
+- **Lambda and nested-`fn` parameter type annotations are now enforced.** A
+  parameter annotation on a `fn ... -> ...` lambda — or on a named `fn`
+  declared inside a function body — was checked against nothing at all: the
+  lambda's function type was built from fresh type variables that were never
+  reconciled with the annotations, so the body was checked against the
+  annotation while every call site checked its argument against the unrelated
+  variable. `fn (x : String) -> ...` applied to `42` typechecked. For session
+  types this was the last live soundness hole in the `Chan.offer` fixes above:
+  passing an unrefined continuation to `fn (c : Chan(Role, Proto)) -> ...`
+  reached neither the per-operation check nor the unification check, and the
+  compiled program read one branch's `String` payload as the other's `Int`.
+  Both are now rejected. Top-level `fn` parameters were never affected. If
+  this newly rejects code you had, the annotation and the actual argument type
+  genuinely disagree — the annotation was simply not being checked before.
+
 - **Session types: the `Chan.offer` fix above was itself bypassable by
   shadowing the offer's label variable.** Rebinding the label name
   (`let lbl = :ok`) after `let (lbl, ch) = Chan.offer(...)` left the OLD
