@@ -248,17 +248,33 @@ dependent typing. Know the edges:
   every true property; quantified/measure facts in particular sometimes return
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
-- **Direct calls only — no higher-order or interface dispatch.** A precondition
-  on a function passed as a value, called through a variable, or dispatched
-  through an `interface`/`impl` is **not** checked. (True higher-order checking
-  needs refinement subtyping in unification, which isn't implemented.)
+- **Higher-order: two shapes are checked, the rest are not.** A call made
+  through a parameter whose declared type carries a refinement —
+  `f : ({Int | _ >= 0}) -> Int` — is checked, and so is a call through a local
+  alias of a named refined function (`let g = takepos` then `g(-3)`). NOT
+  checked: a callback parameter whose own type is unrefined (so
+  `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` still passes),
+  inferring a higher-order function's requirement from its body, dispatch
+  through an `interface`/`impl`, and multi-argument callback types. To
+  constrain a caller today, refine the higher-order function's *own* parameter.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
-- **No relational postconditions yet.** Properties that *relate* a measure
-  across an operation — `size(insert(t, x)) == size(t) + 1` — are not yet
-  provable automatically (they often need induction the solver can't do by
-  itself). Use an `assert` lemma where you need them.
+- **Relational postconditions work, within structural recursion.** A predicate
+  that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
+  — is proven by supplying the induction hypothesis at each recursive call whose
+  argument is a proper component of the matched parameter, then discharging each
+  `match` arm against the measure's recursion equations. Only a postcondition
+  actually *proved* propagates, so an unprovable one stays legal but tells
+  callers nothing. Still silent: mutual recursion, a recursive call inside a
+  lambda or behind a nested `match`, and any non-structural recursion.
+- **A measure over a built-in `List` with a non-scalar element does not
+  axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
+  opaque sort and the measure is never usable. A user-defined list type with the
+  same shape works. This is the first obstacle between this machinery and the
+  stdlib's HAMT-based `Map`.
+- **`Bool` predicates are accepted but not enforced.** `{Bool | _ == true}`
+  parses and type-checks; no verification condition is produced for it.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
