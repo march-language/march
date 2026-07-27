@@ -1387,6 +1387,36 @@ let test_protocol_known_participant_no_hint () =
   end|} in
   Alcotest.(check bool) "known participant types: no errors" false (has_errors ctx)
 
+(** Protocol roles live in their own namespace — an undeclared role name must
+    not produce the "not a known actor or type" hint (F8). *)
+let test_session_no_participant_hint () =
+  let (ctx, _env) = typecheck_full {|mod Test do
+    protocol Echo do
+      Alice -> Bob : String
+      Bob -> Alice : String
+    end
+  end|} in
+  Alcotest.(check bool) "no participant hint" false
+    (has_hint_with ctx "is not a known actor or type");
+  Alcotest.(check bool) "undeclared roles: no errors" false (has_errors ctx)
+
+(** `MPST.choose` is not implemented; the diagnostic must say so instead of
+    claiming the MPST module doesn't exist. *)
+let test_session_mpst_choose_unsupported_message () =
+  let ctx = typecheck {|mod Test do
+    protocol Tri do
+      A -> B : Int
+      B -> C : Int
+      C -> A : Bool
+    end
+    fn main() do
+      let (ea, eb, ec) = MPST.new(Tri)
+      let eb2 = MPST.choose(eb, :yes)
+      println("unused")
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.choose: error" true (has_errors ctx)
+
 (* ── Phase 1: Session type projection + duality ──────────────────────────── *)
 
 let test_session_projection_simple () =
@@ -8905,6 +8935,8 @@ let compiler_suites =
           Alcotest.test_case "protocol duplicate"            `Quick test_protocol_duplicate_error;
           Alcotest.test_case "protocol unknown participant"  `Quick test_protocol_unknown_participant_hint;
           Alcotest.test_case "protocol known participant"    `Quick test_protocol_known_participant_no_hint;
+          Alcotest.test_case "session no participant hint"   `Quick test_session_no_participant_hint;
+          Alcotest.test_case "session mpst choose unsupported message" `Quick test_session_mpst_choose_unsupported_message;
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;

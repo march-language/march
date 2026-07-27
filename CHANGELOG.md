@@ -118,6 +118,16 @@ git log is authoritative for exact commits.
   now silent; a missing branch with no catch-all is a compile error naming
   the branch.
 
+- Session types: a protocol role that isn't also a declared type or actor no
+  longer produces a "not a known actor or type" hint. Roles are their own
+  namespace, so the hint was wrong by construction — it fired on the
+  reference chapter's own `Echo` example, and the conformance corpus worked
+  around it by declaring dummy `type` aliases for every role. Separately,
+  `MPST.choose`/`MPST.offer` (multi-party branching, not yet implemented) no
+  longer fall through to a misleading `` Unknown module `MPST` `` error;
+  the diagnostic now names the real problem and lists the supported
+  `Chan.*`/`MPST.*` operations.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

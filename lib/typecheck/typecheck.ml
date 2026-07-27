@@ -4718,6 +4718,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (pp_ty ch_ty));
          TError)
 
+    (* Any other `MPST.*` / `Chan.*` spelling: these are compiler builtins, not
+       library modules, so falling through to the qualified-name path produces a
+       misleading "Unknown module `MPST`".  Name the real problem instead. *)
+    | Ast.EApp (Ast.EVar ({ txt = op; _ } as n), _, sp)
+      when (String.length op > 5 && String.sub op 0 5 = "MPST.")
+        || (String.length op > 5 && String.sub op 0 5 = "Chan.") ->
+      Err.error env.errors ~span:sp
+        (Printf.sprintf
+           "`%s` is not a session-channel operation I know, or it was called \
+            with the wrong number of arguments.\n\
+            Binary channels: Chan.new/send/recv/close/choose/offer. \
+            Multi-party: MPST.new/send/recv/close — multi-party `choose`/`offer` \
+            are not implemented yet."
+           n.txt);
+      TError
+
     (* Restrict cap_narrow (Part 1): its result must never be a nominal proof
        cap. cap_narrow is the ONLY polymorphic cap producer, so closing this
        closes the proof-cap forge in every expression position (inline arg,
@@ -8905,17 +8921,10 @@ let rec check_decl env (d : Ast.decl) : env =
            "Protocol `%s` only names one participant (`%s`). \
             A protocol usually involves at least two parties."
            name.txt (List.hd participants));
-    (* Hint if participant names are not known actor/type names. *)
-    List.iter (fun p ->
-        let is_actor = StrMap.exists (fun _ cis -> List.exists (fun ci -> ci.ci_type = p) cis) env.ctors in
-        let is_type  = StrMap.mem p env.types in
-        if not (is_actor || is_type) then
-          Err.hint env.errors ~span:sp
-            (Printf.sprintf
-               "Protocol `%s`: participant `%s` is not a known actor or type. \
-                Did you forget to declare `actor %s ...`?"
-               name.txt p p)
-      ) participants;
+    (* Protocol roles are their own namespace — they are NOT type or actor
+       names, so no "unknown participant" hint is emitted (F8, removed
+       2026-07-24: it fired on every ordinary protocol, including the
+       reference chapter's own Echo example). *)
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
     let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
     let new_env = { env with protocols = StrMap.add name.txt pi env.protocols } in
