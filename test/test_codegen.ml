@@ -3483,6 +3483,98 @@ let test_inline_acyclic_candidate_chain () =
     Alcotest.fail "acyclic wrapper remained excluded from candidates"
   | _ -> ()
 
+let live_add_chain param count tail =
+  let rec build index current =
+    if index = count then tail current
+    else
+      let next =
+        mk_var (Printf.sprintf "grow_%d" index) March_tir.Tir.TInt
+      in
+      March_tir.Tir.ELet
+        (next,
+         app "+" [March_tir.Tir.AVar current; March_tir.Tir.AVar param],
+         build (index + 1) next)
+  in
+  build 0 param
+
+let test_inline_acyclic_growth_removes_outer_from_llvm () =
+  let int_fn_ty =
+    March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)
+  in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let inner_first = mk_var "inner_first" March_tir.Tir.TInt in
+  let inner_second = mk_var "inner_second" March_tir.Tir.TInt in
+  let inner_growth =
+    { March_tir.Tir.fn_name = "inner_growth";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.ELet
+          (inner_first,
+           app "+" [March_tir.Tir.AVar x; March_tir.Tir.AVar x],
+           March_tir.Tir.ELet
+             (inner_second,
+              app "+" [March_tir.Tir.AVar inner_first; March_tir.Tir.AVar x],
+              March_tir.Tir.EAtom (March_tir.Tir.AVar inner_second)));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let outer_x = mk_var "outer_x" March_tir.Tir.TInt in
+  let outer_growth =
+    { March_tir.Tir.fn_name = "outer_growth";
+      fn_params = [outer_x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        live_add_chain outer_x 11 (fun current ->
+          March_tir.Tir.EApp
+            (mk_var "inner_growth" int_fn_ty, [March_tir.Tir.AVar current]));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = March_tir.Tir.EApp (mk_var "outer_growth" int_fn_ty, [ilit 1]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  Alcotest.(check int) "inner_growth fixture node count" 9
+    (March_tir.Inline.node_count inner_growth.March_tir.Tir.fn_body);
+  Alcotest.(check int) "outer_growth fixture node count" 46
+    (March_tir.Inline.node_count outer_growth.March_tir.Tir.fn_body);
+  let module_ = mk_module [inner_growth; outer_growth; main] in
+  let contains haystack needle =
+    let needle_len = String.length needle in
+    let rec search index =
+      index + needle_len <= String.length haystack
+      && (String.sub haystack index needle_len = needle || search (index + 1))
+    in
+    search 0
+  in
+  let count_substring haystack needle =
+    let needle_len = String.length needle in
+    let rec count index total =
+      if index + needle_len > String.length haystack then total
+      else if String.sub haystack index needle_len = needle then
+        count (index + needle_len) (total + 1)
+      else count (index + 1) total
+    in
+    count 0 0
+  in
+  let ir_before = March_tir.Llvm_emit.emit_module module_ in
+  let optimized = March_tir.Opt.run module_ in
+  let ir = March_tir.Llvm_emit.emit_module optimized in
+  let metrics =
+    Printf.sprintf " (calls before=%d after=%d; ir bytes before=%d after=%d)"
+      (count_substring ir_before " call ")
+      (count_substring ir " call ")
+      (String.length ir_before) (String.length ir)
+  in
+  Alcotest.(check bool)
+    ("no residual call to outer_growth" ^ metrics) false
+    (contains ir "call i64 @outer_growth(");
+  Alcotest.(check bool)
+    ("DCE removes outer_growth definition" ^ metrics) false
+    (contains ir "define i64 @outer_growth(")
+
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
 (** Helper: build an EAlloc for a Defun-style closure struct.
@@ -9957,6 +10049,8 @@ let codegen_suites =
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
         Alcotest.test_case "acyclic_candidate_chain" `Quick test_inline_acyclic_candidate_chain;
+        Alcotest.test_case "acyclic_growth_removes_outer_from_llvm" `Quick
+          test_inline_acyclic_growth_removes_outer_from_llvm;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;
