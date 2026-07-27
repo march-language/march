@@ -60,6 +60,12 @@ git log is authoritative for exact commits.
   prefix, so multi-word prose queries return prose results alone. The API
   reference pages keep their own `⌘K` for now.
 
+  The index is committed at `docs/pagefind/` because march-lang.org is served
+  by GitHub's own Jekyll running over `docs/`, which has no post-build hook —
+  the same reason the generated stdlib API pages are committed. A CI check
+  fails the build if a docs change lands without a regenerated index, since a
+  stale index means the live search silently returns outdated results.
+
 - **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
   do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
   until now, had no way back out — every step inside the body, including

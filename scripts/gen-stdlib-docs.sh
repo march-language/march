@@ -2,11 +2,19 @@
 #
 # gen-stdlib-docs.sh — regenerate the committed stdlib API-reference HTML.
 #
-# The site at march-lang.org serves pre-generated HTML committed to the repo. CI
-# (deploy-pages.yml) only runs Jekyll over that committed HTML — it never runs the doc
-# generator. So whenever a stdlib module is added/changed, these pages must be
-# regenerated and committed, or the live site goes stale (which is exactly how the 11
-# modules added after 2026-04-13 went missing from the reference).
+# The site at march-lang.org serves pre-generated HTML committed to the repo. Nothing in
+# CI runs the doc generator. So whenever a stdlib module is added/changed, these pages
+# must be regenerated and committed, or the live site goes stale (which is exactly how
+# the 11 modules added after 2026-04-13 went missing from the reference).
+#
+# WHICH SITE IS PRODUCTION: march-lang.org is served by THIS repo's own GitHub Pages —
+# `cname march-lang.org, source {branch: main, path: /docs}`, i.e. GitHub's own legacy
+# Jekyll running over docs/ with no post-build hook. It is NOT served by
+# deploy-pages.yml, which publishes a separately-built copy to the
+# march-language.github.io repo (reachable at https://march-language.github.io/). An
+# earlier version of this comment claimed deploy-pages.yml served march-lang.org; it does
+# not, and that mistake is why docs/pagefind/ initially shipped missing from production.
+# Anything that must appear on march-lang.org has to be committed under docs/.
 #
 # OUTPUT PATH: the generated reference is served at the URL /docs/stdlib/. Jekyll's
 # source root is the `docs/` directory, and a directory's URL is its path *relative to
