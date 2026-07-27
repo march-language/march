@@ -332,10 +332,15 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     Hashtbl.replace ctx.atom_names h name;
     ("i64", Int64.to_string h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
-    let gname = intern_string ctx s in
+    (* One immortal string per literal SITE, not one per evaluation: a
+       literal is RC-free in TIR (see [intern_string_site]), so a fresh
+       rc=1 cell here would be owned by nobody and leak every time the
+       site is evaluated. *)
+    let (gname, cell) = Llvm_ctx.intern_string_site ctx s in
     let tmp = fresh ctx "sl" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
-                tmp gname (String.length s));
+    emit ctx (Printf.sprintf
+                "%s = call ptr @march_string_lit_static(ptr %s, i64 %d, ptr %s)"
+                tmp gname (String.length s) cell);
     ("ptr", tmp)
   | Tir.ADefRef did ->
     (* Reference to a top-level def by content hash — emit as a function pointer *)
