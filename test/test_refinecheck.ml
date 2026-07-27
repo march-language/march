@@ -1848,12 +1848,30 @@ let classifier_suite =
         check_scope "unusable" "Unusable"
           (classify "fn g(n : Int) : {Int | _ < q} do 0 end" [ "n" ]));
 
-    Alcotest.test_case "unrecognised syntax is unusable" `Quick (fun () ->
-        (* A field projection is syntax [classify_pred] does not traverse, so it
-           falls through to the conservative catch-all rather than being read as
-           a bare mention of `r`. *)
+    (* A field projection is classified by its RECEIVER — the value reference —
+       with the field name treated as a selector.  This test previously pinned
+       the opposite (`Unusable`, via the conservative catch-all), which meant
+       NO record postcondition could ever reach a call site: every one of them
+       mentions a field, so `fn mk() : {v : Cfg | v.port >= 1}` was proven at
+       its definition and then silently discarded.  [subst_params] has the
+       mirror-image arm, so a relational one is rewritten wholly into the
+       caller's namespace rather than left half-translated. *)
+    Alcotest.test_case "a field projection on a parameter is relational in it" `Quick
+      (fun () ->
+        check_scope "relational" "Relational[r]"
+          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]));
+
+    Alcotest.test_case "a field projection on the binder is closed" `Quick (fun () ->
+        check_scope "closed" "Closed"
+          (classify "fn g(n : Int) : {v : Cfg | v.port >= 1} do { port: 1 } end" [ "n" ]));
+
+    (* The catch-all still rejects genuinely untraversed syntax, and a field
+       projection on an UNKNOWN receiver is still unusable — the receiver's own
+       classification is what decides. *)
+    Alcotest.test_case "a field projection on an unknown name is unusable" `Quick
+      (fun () ->
         check_scope "unusable" "Unusable"
-          (classify "fn g(r : Cfg) : {Int | _ < r.port} do 0 end" [ "r" ]))
+          (classify "fn g(n : Int) : {Int | _ < q.port} do 0 end" [ "n" ]))
   ]
 
 (* Integration tests for propagating a relational postcondition to call sites.
@@ -2543,6 +2561,410 @@ end|}));
   end
 end|})) ]
 
+(* ── A1: callee resolution obeys the shadow discipline ─────────────────────
+   [resolve_call] matches a call's function name against the GLOBAL definition
+   table.  That table is a fact channel exactly like [scope]/[path]/[recenv]/
+   [cbenv] — "the name `f` denotes this contract" — so every binding construct
+   must retire a name it rebinds here too.  A local binder that happens to
+   reuse a refined global's name otherwise gets its calls checked against a
+   contract that never runs: a FALSE POSITIVE.
+
+   Each case below asserts SILENCE.  Each is paired with a CONTROL that
+   renames the local away from the collision, so the global really is called
+   and the violation really is reported — without the control a test could
+   pass by the checker having gone blind. *)
+let shadow_src body =
+  Printf.sprintf "mod S do\n  fn takepos(k : {Int | _ >= 0}) : Int do k end\n%s\nend\n" body
+
+let shadow_suite =
+  [ gated "a `let`-bound local shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let takepos = fn n -> n\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "control: `let` renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let other = fn n -> n\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "a `let?` binder shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn srcf() : Result((Int) -> Int, String) do Ok(fn n -> n) end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let? takepos = srcf()\n\
+                \    Ok(takepos(-3))\n\
+                \  end")));
+
+    gated "control: `let?` renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn srcf() : Result((Int) -> Int, String) do Ok(fn n -> n) end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let? other = srcf()\n\
+                \    Ok(takepos(-3))\n\
+                \  end")));
+
+    gated "a lambda parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let f = fn takepos -> takepos(-3)\n\
+                \    f(fn n -> n)\n\
+                \  end")));
+
+    gated "control: lambda parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let f = fn other -> takepos(-3)\n\
+                \    f(0)\n\
+                \  end")));
+
+    gated "a local-`fn` parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn inner(takepos : (Int) -> Int) : Int do takepos(-3) end\n\
+                \    inner(fn n -> n)\n\
+                \  end")));
+
+    gated "control: local-`fn` parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn inner(other : (Int) -> Int) : Int do takepos(-3) end\n\
+                \    inner(fn n -> n)\n\
+                \  end")));
+
+    (* The local `fn`'s own NAME, not its parameters: a block-level `fn` is a
+       SIBLING statement, so the name must be retired for what follows it. *)
+    gated "a local-`fn` name shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn takepos(n : Int) : Int do n end\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "a `match` arm binder shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe(o : Option((Int) -> Int)) : Int do\n\
+                \    match o do\n\
+                \      Some(takepos) -> takepos(-3)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "control: `match` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe(o : Option((Int) -> Int)) : Int do\n\
+                \    match o do\n\
+                \      Some(other) -> takepos(-3)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "a function parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src "  fn probe(takepos : (Int) -> Int) : Int do takepos(-3) end")));
+
+    gated "control: function parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src "  fn probe(other : (Int) -> Int) : Int do takepos(-3) end")))
+  ]
+
+(* ── B1: `size(_)` and `size(v)` are the SAME predicate ────────────────────
+   The anonymous binder is the DOCUMENTED idiom (`{Int | _ >= 0}` is the form
+   the reference teaches), so a gap that only affects `_` matters more than
+   ordinary incompleteness: the natural spelling silently checks nothing while
+   the named one works.
+
+   In MEASURE-APPLICATION position `_` used to be emitted verbatim as an SMT
+   symbol — and `_` is a RESERVED SMT-LIB token, so z3 answered `(error …)`
+   and the predicate was never decided.  Every case below is asserted as a
+   PAIR: the two spellings must agree, whatever the verdict is. *)
+let b1_src body =
+  Printf.sprintf
+    "mod B do\n\
+    \  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+    \  @[measure]\n\
+    \  fn size(t : Tree) : Int do\n\
+    \    match t do\n\
+    \      Leaf -> 0\n\
+    \      Node(l, _, r) -> 1 + size(l) + size(r)\n\
+    \    end\n\
+    \  end\n\
+     %s\n\
+     end\n"
+    body
+
+(* [both] runs the same program in both spellings and asserts one verdict. *)
+let b1_pair name ~expect anon named =
+  gated name (fun () ->
+      Alcotest.(check bool) "anonymous `_`" expect (has_refine_error (b1_src anon));
+      Alcotest.(check bool) "named binder" expect (has_refine_error (b1_src named)))
+
+let b1_suite =
+  [ (* A violating call: `size` is a measure, hence always >= 0, so `size < 0`
+       can never hold.  Both spellings must report it. *)
+    b1_pair "violating measure call: both spellings report" ~expect:true
+      "  fn need(t : {Tree | size(_) < 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Leaf) end"
+      "  fn need(t : {v : Tree | size(v) < 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Leaf) end";
+
+    (* A satisfiable call: `size >= 0` always holds — silence, both ways. *)
+    b1_pair "satisfiable measure call: both spellings stay silent" ~expect:false
+      "  fn need(t : {Tree | size(_) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Node(Leaf, 1, Leaf)) end"
+      "  fn need(t : {v : Tree | size(v) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Node(Leaf, 1, Leaf)) end";
+
+    (* An UNKNOWN argument settles nothing in either direction: the definite
+       failure stance skips it.  This is the negative-space guard — the fix
+       must not start guessing about opaque values. *)
+    b1_pair "unknown argument: both spellings stay silent" ~expect:false
+      "  fn need(t : {Tree | size(_) > 3}) : Int do 0 end\n\
+      \  fn probe(u : Tree) : Int do need(u) end"
+      "  fn need(t : {v : Tree | size(v) > 3}) : Int do 0 end\n\
+      \  fn probe(u : Tree) : Int do need(u) end";
+
+    (* `len` over a list — the measure path with no axioms. *)
+    b1_pair "list `len` measure: both spellings stay silent" ~expect:false
+      "  fn needl(xs : {List(Int) | len(_) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do needl([1, 2]) end"
+      "  fn needl(xs : {v : List(Int) | len(v) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do needl([1, 2]) end";
+
+    b1_pair "list `len` on an opaque list: both spellings stay silent" ~expect:false
+      "  fn needl(xs : {List(Int) | len(_) >= 3}) : Int do 0 end\n\
+      \  fn probe(ys : List(Int)) : Int do needl(ys) end"
+      "  fn needl(xs : {v : List(Int) | len(v) >= 3}) : Int do 0 end\n\
+      \  fn probe(ys : List(Int)) : Int do needl(ys) end"
+  ]
+
+(* ── B2: a record-returning postcondition reaches the call site ────────────
+   Int, String and variant-ADT postconditions all propagated; only the record
+   shape was dropped, so `needLow(mk())` was silently skipped while the
+   identically-shaped Int version was caught.  Two things had to change: the
+   predicate classifier had to stop reading a field projection as unusable
+   syntax, and [record_self] had to learn the call shape.
+
+   The gate is NOT bypassed: [gate_unverified_posts] still clears [ret] on
+   every postcondition the definition side did not PROVE, so an unproven one
+   must stay put — that is the first negative test below.  The remaining ones
+   assert that the newly-propagated fact is retired by each binding form, each
+   with a control confirming it would otherwise have been reported. *)
+let b2_cfg body =
+  Printf.sprintf
+    "mod T do\n\
+    \  type Cfg = { port : Int }\n\
+    \  fn mk() : {v : Cfg | v.port >= 1} do { port: 8080 } end\n\
+    \  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end\n\
+     %s\n\
+     end\n"
+    body
+
+let b2_suite =
+  [ gated "a record postcondition propagates through a direct call" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error (b2_cfg "  fn probe() : Int do needLow(mk()) end")));
+
+    gated "a record postcondition propagates through a `let`" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe() : Int do\n\
+                \    let c = mk()\n\
+                \    needLow(c)\n\
+                \  end")));
+
+    (* THE GATE.  `mk_bad`'s body cannot establish `v.port >= 1` (x is
+       unknown), so the postcondition is never proven and must not travel.
+       Bypassing the gate here would turn a legal program into an error. *)
+    gated "an UNPROVEN record postcondition does not propagate" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn mk_bad(x : Int) : {v : Cfg | v.port >= 1} do { port: x } end
+  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
+  fn probe(y : Int) : Int do needLow(mk_bad(y)) end
+end|}));
+
+    gated "a record postcondition that SATISFIES the precondition is silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn mk() : {v : Cfg | v.port >= 1} do { port: 8080 } end
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn probe() : Int do needHigh(mk()) end
+end|}));
+
+    gated "an opaque record in the newly-checked position stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn probe(d : Cfg) : Int do needHigh(d) end
+end|}));
+
+    (* Retirement, one per binding form.  In each, the inner `c` is a
+       DIFFERENT, unknown record; carrying mk()'s postcondition onto it would
+       be a false positive.  The paired control renames the inner binder to
+       `e`, so the fact survives and the violation IS reported — without it
+       these could pass by the checker having gone blind. *)
+    gated "a re-`let` retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let c = d\n\
+                \    needLow(c)\n\
+                \  end")));
+
+    gated "a lambda parameter retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let f = fn c -> needLow(c)\n\
+                \    f(d)\n\
+                \  end")));
+
+    gated "control: lambda parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    let f = fn e -> needLow(c)\n\
+                \    f(d)\n\
+                \  end")));
+
+    gated "a `match` binder retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(o : Option(Cfg)) : Int do\n\
+                \    let c = mk()\n\
+                \    match o do\n\
+                \      Some(c) -> needLow(c)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "control: `match` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(o : Option(Cfg)) : Int do\n\
+                \    let c = mk()\n\
+                \    match o do\n\
+                \      Some(e) -> needLow(c)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "a local-`fn` parameter retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    fn inner(c : Cfg) : Int do needLow(c) end\n\
+                \    inner(d)\n\
+                \  end")));
+
+    gated "control: local-`fn` parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn probe(d : Cfg) : Int do\n\
+                \    let c = mk()\n\
+                \    fn inner(e : Cfg) : Int do needLow(c) end\n\
+                \    inner(d)\n\
+                \  end")));
+
+    gated "a `let?` binder retires the propagated record fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (b2_cfg
+                "  fn src() : Result(Cfg, String) do Err(\"x\") end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let c = mk()\n\
+                \    let? c = src()\n\
+                \    Ok(needLow(c))\n\
+                \  end")));
+
+    gated "control: `let?` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (b2_cfg
+                "  fn src() : Result(Cfg, String) do Err(\"x\") end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let c = mk()\n\
+                \    let? e = src()\n\
+                \    Ok(needLow(c))\n\
+                \  end")));
+
+    (* A RELATIONAL record postcondition over an opaque actual proves nothing
+       about the caller's value, so it must not decide the call either way. *)
+    gated "a relational record postcondition on an opaque actual is silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int }
+  fn bump(c : Cfg) : {v : Cfg | v.port >= c.port} do c end
+  fn needLow(c : {v : Cfg | v.port <= 0}) : Int do 0 end
+  fn probe(d : Cfg) : Int do needLow(bump(d)) end
+end|}));
+
+    (* Records + variant ADTs + strings + a relational postcondition, all
+       correct: the combination must stay entirely silent. *)
+    gated "records + ADTs + strings + relational postcondition: all silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod T do
+  type Cfg = { port : Int, name : String }
+  type Tag = Live | Dead
+  fn bump(c : Cfg) : {v : Cfg | v.port >= c.port} do c end
+  fn needHigh(c : {v : Cfg | v.port >= 1}) : Int do 0 end
+  fn nonempty(s : {String | len(_) >= 1}) : Int do 0 end
+  fn live(t : {v : Tag | is_Live(v)}) : Int do 0 end
+  fn probe(base : Cfg) : Int do
+    let b = bump(base)
+    needHigh(b) + nonempty("hello") + live(Live)
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2568,4 +2990,7 @@ let () =
       ("pred-classifier", classifier_suite);
       ("tier1-relational", tier1_suite);
       ("higher-order", hof_suite);
-      ("tier2-induction", tier2_suite) ]
+      ("tier2-induction", tier2_suite);
+      ("callee-shadowing", shadow_suite);
+      ("anon-binder-measures", b1_suite);
+      ("record-postcond-propagation", b2_suite) ]

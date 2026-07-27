@@ -163,6 +163,15 @@ let classify_pred (binder : string) (params : string list) (pred : A.expr) : pre
     | A.EApp (A.EVar _, args, _) -> List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
     | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.iter go es
+    (* A field projection is classified by its RECEIVER: `v.port` on the binder
+       is closed, `c.port` on a parameter is relational, anything else is
+       unusable — exactly the variable's own classification.  Without this arm
+       every record postcondition fell to the catch-all below and was reported
+       [Unusable], so a record-returning function's postcondition could never
+       reach a call site even though the definition side had proven it.
+       [subst_params] has the mirror-image arm, so a relational one is
+       rewritten into the caller's namespace rather than left half-translated. *)
+    | A.EField (r, _, _) -> go r
     | A.EAnnot (e, _, _) -> go e
     | A.ELit _ -> ()
     | _ -> bad := true
@@ -192,6 +201,12 @@ let rec subst_params (env : (string * A.expr) list) (e : A.expr) : A.expr =
   | A.ETuple (es, sp) -> A.ETuple (List.map go es, sp)
   | A.ECon (c, es, sp) -> A.ECon (c, List.map go es, sp)
   | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
+  (* Mirrors [classify_pred]'s [EField] arm: the RECEIVER is the value
+     reference, the field name is a selector.  Rewriting the receiver is what
+     keeps a relational record postcondition entirely in the caller's
+     namespace; leaving it would mix the two, the conflation that has produced
+     false positives here before. *)
+  | A.EField (r, n, sp) -> A.EField (go r, n, sp)
   | A.EAnnot (inner, t, sp) -> A.EAnnot (go inner, t, sp)
   | _ -> e
 
@@ -1397,12 +1412,26 @@ let scope_add_binding
   | A.PatVar n, None ->
     (match b.A.bind_expr with
      | A.EApp (A.EVar { A.txt = fname; _ }, args, _) ->
-       (* Only an INT-sorted postcondition may seed the refined-local scope:
-          [scope] entries with sort [None] are declared `Int` by [scope_facts]
-          and [reflect_scalar].  An ADT-sorted fact (Tier 2) is carried only by
-          [reflect_dt], which knows the datatype sort. *)
+       (* An INT-sorted postcondition seeds the refined-local scope: [scope]
+          entries with sort [None] are declared `Int` by [scope_facts] and
+          [reflect_scalar].
+
+          A RECORD-sorted one may too.  [record_self]'s variable branch already
+          knows how to read such an entry — it declares the name at the
+          record's datatype sort and resolves the carried predicate's
+          `b.field` projections against that same term — it simply never saw
+          one, because an annotated `let c : {v : Cfg | …} = …` was the only
+          way to produce it.  So `let c = mk()` followed by `needLow(c)` was
+          skipped even though the direct `needLow(mk())` is now checked; the
+          two spellings must agree.
+
+          Any OTHER ADT sort (a plain variant, a String) is still refused: a
+          variant fact is carried only by [reflect_dt], which reaches it
+          through the expression, not through [scope]. *)
        (match postcond fname args with
         | Some (binder, pred, None) -> (n.A.txt, (binder, pred, None)) :: sc
+        | Some (binder, pred, Some srt) when is_record_sort srt ->
+          (n.A.txt, (binder, pred, Some srt)) :: sc
         | Some (_, _, Some _) | None -> sc)
      | _ -> sc)
   | _ -> sc
@@ -1489,9 +1518,40 @@ type rctx = {
   modpath : string;                       (* enclosing module prefix, "" at top *)
   aliases : (string * string) list;       (* (alias short, original dotted prefix) *)
   uses : (string * A.use_selector) list;  (* (exporting module dotted, selector) *)
+  (* Names bound by an ENCLOSING BINDER (parameter, `let`, `let?`, lambda
+     parameter, local `fn` name/parameter, `match` arm binder).  See
+     [local_shadow]. *)
+  locals : string list;
 }
 
-let rctx0 = { modpath = ""; aliases = []; uses = [] }
+let rctx0 = { modpath = ""; aliases = []; uses = []; locals = [] }
+
+(* ── The FOURTH fact channel: callee resolution ────────────────────────────
+   [scope], [path], [recenv] and [cbenv] each carry facts keyed by a variable
+   NAME, and each one already retires a name a binding construct rebinds.  The
+   GLOBAL DEFINITION TABLE consulted by [resolve_call] is a fact channel of
+   exactly the same shape — "the name `f` denotes this contract" — and it needs
+   exactly the same discipline:
+
+     fn takepos(k : {Int | _ >= 0}) : Int do k end
+     fn probe() : Int do
+       let takepos = fn n -> n     -- a LOCAL, unrefined, that runs
+       takepos(-3)                 -- must NOT be checked against the global
+     end
+
+   Resolving that call to the module-level `takepos` checks correct code
+   against a contract it never touches — a false positive, the one failure
+   this subsystem must never have.  So [rctx.locals] records every name an
+   enclosing binder introduced, and [resolve_call] refuses to resolve one.
+
+   Retiring a name here can only turn a check into a SKIP, never the reverse,
+   so over-approximating [locals] is always safe. *)
+let local_shadow (ctx : rctx) (names : string list) : rctx =
+  if names = [] then ctx else { ctx with locals = names @ ctx.locals }
+
+let fnparam_binders : A.fn_param -> string list = function
+  | A.FPNamed p | A.FPDefault (p, _) -> [ p.A.param_name.A.txt ]
+  | A.FPPat pat -> pat_binders pat
 
 (* Enclosing-module prefixes of [mp], innermost first: "A.B" -> ["A.B"; "A"; ""]. *)
 let modpath_prefixes (mp : string) : string list =
@@ -1509,6 +1569,12 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
   : fn_sig option option =
   let lookup k = Hashtbl.find_opt defs k in
   let qualify p n = if p = "" then n else p ^ "." ^ n in
+  (* 0. A name an enclosing binder introduced is a LOCAL, not this module's
+        function of that name — see [local_shadow].  Bail out before any
+        lookup: the local shadows the global at every one of the three
+        resolution steps below, alias- and `use`-imported names included. *)
+  if List.mem fname ctx.locals then None
+  else
   (* 1. Lexical scope: the nearest enclosing module that defines [fname] wins
         (shadowing any same-named function further out). *)
   match List.find_map (fun p -> lookup (qualify p fname)) (modpath_prefixes ctx.modpath) with
@@ -2079,6 +2145,45 @@ let check_call ~root errctx ~span
               decls := (x, Smt.SData sort_name) :: !decls;
               Some (Smt.Const x)
             | _ -> None))
+      (* A direct CALL returning a record, whose callee has a PROVEN
+         postcondition at this very record sort.  Records are a subset of the
+         ADT sorts, so the Int postcondition path ([reflect_scalar]) and the
+         variant path ([reflect_dt]) both already carried their return
+         refinements to call sites; only the record shape was dropped here, so
+         `needLow(mk())` was silently skipped while the identically-shaped Int
+         version was caught.
+
+         The result becomes a FRESH constant — never a name borrowed from the
+         caller, so it cannot collide with a symbol declared at another sort —
+         carrying the instantiated postcondition as an assumption.
+
+         Two guards keep this from guessing.  The sort equality test: a
+         postcondition about some OTHER record says nothing about this one and
+         asserting it here would be ill-sorted.  And [gate_unverified_posts]
+         has already cleared [ret] on every signature whose postcondition the
+         DEFINITION side did not prove, so anything [postcond] returns is a
+         fact rather than a trusted contract. *)
+      | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> (
+        match postcond fname cargs with
+        | Some (b, q, Some srt) when srt = sort_name ->
+          incr ret_ctr;
+          let nm = Printf.sprintf "%s$rec%d" fname !ret_ctr in
+          let c = Smt.Const nm in
+          decls := (nm, Smt.SData sort_name) :: !decls;
+          (* [q] is already in the CALLER's namespace ([postcond_of] substituted
+             the actuals).  Its binder — and its `b.field` projections — must
+             resolve against the SAME term the goal projects from. *)
+          let rv n = if n = b || n = "_" then Some c else None in
+          let rf = make_field_resolver b sort_name c in
+          (match smt_of ~resolve_var:rv ~resolve_measure:(fun _ _ -> None)
+                   ~resolve_field:rf q with
+           | Some qa -> assume := qa :: !assume
+           (* Untranslatable predicate: the constant stays unconstrained, so
+              neither the goal nor its negation is provable and the call is
+              simply skipped. *)
+           | None -> ());
+          Some c
+        | _ -> None)
       | _ -> None
     in
     (* [`Other] = every non-record subject — Int, String and variant ADT — each
@@ -2106,6 +2211,23 @@ let check_call ~root errctx ~span
        parameter's actual.  Path conditions live in the CALLER's namespace and
        must NOT come through here — see [path_resolve_var]. *)
     let is_self name = name = rp.binder || name = "_" in
+    (* The SMT symbol standing for the refined value in MEASURE position.
+       Both spellings of the binder — the anonymous `_` of `{Tree | size(_) < 0}`
+       and the named `v` of `{v : Tree | size(v) < 0}` — denote the same value,
+       so both must reflect to one canonical symbol.  Emitting the binder's
+       source name instead was wrong twice over:
+
+         - `_` is a RESERVED SMT-LIB token (it heads indexed identifiers such
+           as `(_ is Ctor)`), so `(declare-const _ M_Tree)` made z3 answer
+           `(error …)`.  The predicate was therefore never decided — and `_` is
+           the DOCUMENTED idiom, so the spelling the docs teach silently
+           checked nothing while the named spelling worked.  Worse, a malformed
+           VC on the shared `z3 -in` channel is not merely a missed check.
+         - a named binder that collides with a caller-scope Int variable would
+           put one symbol at two sorts, the same hazard [is_recvar] guards.
+
+       `$self` cannot collide with a March identifier. *)
+    let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     let resolve_var name =
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
@@ -2262,11 +2384,26 @@ let check_call ~root errctx ~span
       else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
-        match actual_of_name name with
-        | None ->
-          decls := (name, Smt.SData adt) :: !decls;
-          Some (Smt.App (m, [ Smt.Const name ]))
-        | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
+        (* The refined value itself, under EITHER spelling of the binder —
+           see [self_dt_sym].  It is an unconstrained datatype constant, so
+           only the measure's own axioms (e.g. `size` is non-negative) can
+           settle the goal; that is exactly what the named spelling already
+           did, and the anonymous one now does too. *)
+        if is_self name then begin
+          decls := (self_dt_sym, Smt.SData adt) :: !decls;
+          Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
+        end
+        else
+          match actual_of_name name with
+          | None ->
+            decls := (name, Smt.SData adt) :: !decls;
+            Some (Smt.App (m, [ Smt.Const name ]))
+          | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
+      else if is_self name then
+        (* A measure with no axioms (a user measure, or list `len`) over the
+           refined value: one fresh non-negative constant, again shared by both
+           spellings so `len(_)` and `len(v)` cannot diverge. *)
+        measure_of_var m self_dt_sym
       else
         match actual_of_name name with
         | Some a -> (
@@ -3239,8 +3376,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        new, unrelated local function. *)
     ignore
       (List.fold_left
-         (fun (path, sc, re, cb) e ->
+         (fun (ctx, path, sc, re, cb) e ->
            visit ~root errctx defs ctx path sc re cb e;
+           (* A `let`/local-`fn` binder also retires the name for CALLEE
+              RESOLUTION in the statements that follow — see [local_shadow]. *)
+           let ctx' =
+             match e with
+             | A.ELet (b, _) -> local_shadow ctx (pat_binders b.A.bind_pat)
+             | A.ELetFn (n, _, _, _, _) -> local_shadow ctx [ n.A.txt ]
+             | _ -> ctx
+           in
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
@@ -3261,11 +3406,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
              | _ -> cb
            in
-           (path', sc', re', cb'))
-         (path, sc, re, cb) es)
+           (ctx', path', sc', re', cb'))
+         (ctx, path, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+    let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
@@ -3276,6 +3422,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let sc = scope_shadow sc [ n.A.txt ] in
     let re = recenv_shadow re [ n.A.txt ] in
     let cb = cb_shadow cb [ n.A.txt ] in
+    let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
@@ -3292,6 +3439,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let path = path_shadow path binders in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
+        (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
+        let ctx = local_shadow ctx binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
            reflected as the outer record's SMT constant.  A bare `PatVar`
            binder on a record-typed variable scrutinee then re-enters the env
@@ -3306,6 +3455,41 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
             (match List.assoc_opt s.A.txt re_outer with
              | Some sort -> (n.A.txt, sort) :: re
              | None -> re)
+          | _ -> re
+        in
+        (* A record DESTRUCTURED OUT OF AN ADT PAYLOAD — `match b do Wrap(c) ->
+           …` where `Wrap` carries a record.  Such a binder is a record-typed
+           variable exactly like a record-typed PARAMETER, and [recenv] is what
+           lets a field guard (`if c.port <= 0 do …`) attach to it; without an
+           entry the guard's `c.port` translated to nothing and every call
+           taking `c` was skipped.  The plain-parameter spelling of the same
+           code was checked, so the two disagreed.
+
+           The positional field's SMT sort is already recorded by ADT
+           registration, and [is_record_sort] distinguishes a record from a
+           plain variant — only records have selectors to project.  Only a
+           DIRECT `PatVar` sub-pattern is registered; a deeper nested pattern
+           has no single name to attach the identity to and is left alone
+           (silence).
+
+           Retirement needs no new code: the entry is added AFTER
+           [recenv_shadow] above, and every binding construct inside the arm
+           already retires a name it rebinds from [recenv].  Like a parameter's
+           entry it carries NO predicate — the constant is wholly
+           unconstrained, so on its own it proves nothing in either direction
+           and the call stays skipped unless the path context settles it. *)
+        let re =
+          match br.A.branch_pat with
+          | A.PatCon (ctor, subpats) ->
+            let sorts = try Hashtbl.find ctor_field_sorts ctor.A.txt with Not_found -> [] in
+            if List.length subpats <> List.length sorts then re
+            else
+              List.fold_left2
+                (fun re sub srt ->
+                  match sub, srt with
+                  | A.PatVar n, Smt.SData s when is_record_sort s -> (n.A.txt, s) :: re
+                  | _ -> re)
+                re subpats sorts
           | _ -> re
         in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
@@ -3357,6 +3541,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
+    let ctx = local_shadow ctx binders in
     visit ~root errctx defs ctx (path_shadow path binders) sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
@@ -3466,6 +3651,9 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
       let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
+      (* A PARAMETER named like a module-level function shadows it for callee
+         resolution inside this body too — see [local_shadow]. *)
+      let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
       visit ~root errctx defs ctx path sc re cb c.A.fc_body)
     fd.A.fn_clauses
