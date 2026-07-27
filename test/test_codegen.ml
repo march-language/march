@@ -3360,6 +3360,12 @@ let test_simplify_not_false () =
 
 (* ── Function inlining ───────────────────────────────────────────── *)
 
+let direct_call_to name =
+  March_tir.Tir.EApp
+    (mk_var name
+       (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+     [ilit 1])
+
 let test_inline_pure_small () =
   (* fn double(x) = x + x; fn main() = double(5) → call gets inlined *)
   let changed = ref false in
@@ -3433,6 +3439,141 @@ let test_inline_mutual_recursion_not_inlined () =
   let m = mk_module [f_fn; g_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
+
+let test_inline_acyclic_candidate_chain () =
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let leaf =
+    { March_tir.Tir.fn_name = "leaf";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let wrapper =
+    { March_tir.Tir.fn_name = "wrapper";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.EApp
+          (mk_var "leaf"
+             (March_tir.Tir.TFn
+                ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+           [March_tir.Tir.AVar x]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = direct_call_to "wrapper";
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let result =
+    March_tir.Inline.run ~changed (mk_module [leaf; wrapper; main])
+  in
+  let main_body =
+    result.March_tir.Tir.tm_fns
+    |> List.find (fun fn -> String.equal fn.March_tir.Tir.fn_name "main")
+    |> fun fn -> fn.March_tir.Tir.fn_body
+  in
+  match main_body with
+  | March_tir.Tir.EApp (fn, _)
+    when String.equal fn.March_tir.Tir.v_name "wrapper" ->
+    Alcotest.fail "acyclic wrapper remained excluded from candidates"
+  | _ -> ()
+
+let live_add_chain param count tail =
+  let rec build index current =
+    if index = count then tail current
+    else
+      let next =
+        mk_var (Printf.sprintf "grow_%d" index) March_tir.Tir.TInt
+      in
+      March_tir.Tir.ELet
+        (next,
+         app "+" [March_tir.Tir.AVar current; March_tir.Tir.AVar param],
+         build (index + 1) next)
+  in
+  build 0 param
+
+let test_inline_acyclic_growth_removes_outer_from_llvm () =
+  let int_fn_ty =
+    March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)
+  in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let inner_first = mk_var "inner_first" March_tir.Tir.TInt in
+  let inner_second = mk_var "inner_second" March_tir.Tir.TInt in
+  let inner_growth =
+    { March_tir.Tir.fn_name = "inner_growth";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.ELet
+          (inner_first,
+           app "+" [March_tir.Tir.AVar x; March_tir.Tir.AVar x],
+           March_tir.Tir.ELet
+             (inner_second,
+              app "+" [March_tir.Tir.AVar inner_first; March_tir.Tir.AVar x],
+              March_tir.Tir.EAtom (March_tir.Tir.AVar inner_second)));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let outer_x = mk_var "outer_x" March_tir.Tir.TInt in
+  let outer_growth =
+    { March_tir.Tir.fn_name = "outer_growth";
+      fn_params = [outer_x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        live_add_chain outer_x 11 (fun current ->
+          March_tir.Tir.EApp
+            (mk_var "inner_growth" int_fn_ty, [March_tir.Tir.AVar current]));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = March_tir.Tir.EApp (mk_var "outer_growth" int_fn_ty, [ilit 1]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  Alcotest.(check int) "inner_growth fixture node count" 9
+    (March_tir.Inline.node_count inner_growth.March_tir.Tir.fn_body);
+  Alcotest.(check int) "outer_growth fixture node count" 46
+    (March_tir.Inline.node_count outer_growth.March_tir.Tir.fn_body);
+  let module_ = mk_module [inner_growth; outer_growth; main] in
+  let contains haystack needle =
+    let needle_len = String.length needle in
+    let rec search index =
+      index + needle_len <= String.length haystack
+      && (String.sub haystack index needle_len = needle || search (index + 1))
+    in
+    search 0
+  in
+  let count_substring haystack needle =
+    let needle_len = String.length needle in
+    let rec count index total =
+      if index + needle_len > String.length haystack then total
+      else if String.sub haystack index needle_len = needle then
+        count (index + needle_len) (total + 1)
+      else count (index + 1) total
+    in
+    count 0 0
+  in
+  let ir_before = March_tir.Llvm_emit.emit_module module_ in
+  let optimized = March_tir.Opt.run module_ in
+  let ir = March_tir.Llvm_emit.emit_module optimized in
+  let metrics =
+    Printf.sprintf " (calls before=%d after=%d; ir bytes before=%d after=%d)"
+      (count_substring ir_before " call ")
+      (count_substring ir " call ")
+      (String.length ir_before) (String.length ir)
+  in
+  Alcotest.(check bool)
+    ("no residual call to outer_growth" ^ metrics) false
+    (contains ir "call i64 @outer_growth(");
+  Alcotest.(check bool)
+    ("DCE removes outer_growth definition" ^ metrics) false
+    (contains ir "define i64 @outer_growth(")
 
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
@@ -9907,6 +10048,9 @@ let codegen_suites =
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
+        Alcotest.test_case "acyclic_candidate_chain" `Quick test_inline_acyclic_candidate_chain;
+        Alcotest.test_case "acyclic_growth_removes_outer_from_llvm" `Quick
+          test_inline_acyclic_growth_removes_outer_from_llvm;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;
@@ -10380,4 +10524,3 @@ let codegen_suites =
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
-
