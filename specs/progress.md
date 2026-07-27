@@ -24,6 +24,22 @@ The stdlib HAMT remains out of reach behind three stacked obstacles, the first
 of which is the built-in `List`'s opaque element sort — see the Limitations
 section of `specs/lang/refinement-types.md`.
 
+## 2026-07-26 — SCC-aware inliner candidate selection
+
+The inliner formerly applied a conservative second candidate filter that
+discarded every small, pure candidate that directly called another candidate;
+that avoided recursive expansion but also excluded acyclic callers.  It now
+builds the same purity/size/hot-reload candidate pool, computes direct-call
+SCCs, and excludes only recursive components (including singleton self-edges).
+The emitted-LLVM regression uses a live body-growth fixture: a 9-node
+`inner_growth` inside a 46-node `outer_growth` (an 11-binding addition chain,
+55 nodes after inner expansion).  After optimization, LLVM has neither the
+named `call i64 @outer_growth(...)` nor its `define i64 @outer_growth(...)`:
+the fixture's direct-call count is 4 → 2 and its LLVM size is 22,633 → 22,215
+bytes.  Five warm repeated compile-and-emit fixture runs took 215–324 ms
+(median 232 ms).  These are regression and compiler-work measurements, not a
+runtime-speedup claim.
+
 ## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
 
 LLVM output now declares `march_alloc` with the conservative facts proven by
