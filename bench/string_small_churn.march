@@ -1,0 +1,45 @@
+-- Small-string churn benchmark: many short strings, request-shaped.
+--
+-- Isolates PER-ALLOCATION OVERHEAD.  Every March string is a malloc plus a
+-- refcount, even a 4-byte one, so this is the benchmark that says whether a
+-- small-string optimisation (inline bytes, no malloc) is worth building.
+-- Sizes are chosen to look like HTTP header names and values and to straddle
+-- the 23-byte bucket boundary an SSO would use -- 23 being what fits in the
+-- footprint the 24-byte march_string header already occupies.
+--
+-- The size knob is deliberately exposed and deliberately named: the SSO
+-- decision criterion requires checking that wall time scales with allocation
+-- count, so this benchmark is run twice, at pairs() and at 2 * pairs().  Flat
+-- time under doubled allocations would mean allocation is not the bottleneck
+-- and an SSO would buy little.  See
+-- specs/2026-07-26-string-performance-design.md.
+--
+-- Expected output: checksum=17793810
+-- Histogram at this size: 91.7% of allocations are <=23 bytes
+-- Usage: march --compile --opt 2 bench/string_small_churn.march -o /tmp/string_small_churn
+
+mod StringSmallChurn do
+
+pfn pairs() : Int do 2000000 end
+
+-- Build a short "name: value" pair, inspect it, and discard it.  Nothing
+-- escapes the loop, so this measures allocate-and-free churn rather than
+-- retention.  The prefix check consumes the concatenation so it cannot be
+-- optimized away, and byte_size(name) is folded into the accumulator so the
+-- result depends on the strings actually being built.
+pfn churn(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else
+    let name  = "x-req-" ++ to_string(i % 97)
+    let value = "v" ++ to_string(i) ++ "-abcdefgh"
+    let pair  = name ++ ": " ++ value
+    let bump  = if String.starts_with(pair, "x-req-") do 1 else 0 end
+    churn(i + 1, n, acc + String.byte_size(name) + bump)
+  end
+end
+
+fn main() do
+  println("checksum=" ++ to_string(churn(0, pairs(), 0)))
+end
+
+end

@@ -90,6 +90,10 @@ export function march_string_from_chars(list) {
   return s;
 }
 
+export function march_string_concat3(a, b, c) {
+  return a + b + c;
+}
+
 export function march_string_join(list, sep) {
   const parts = [];
   while (list.$ === "Cons") { parts.push(list._0); list = list._1; }
@@ -137,6 +141,14 @@ export function march_string_pad_right(s, n, c) {
 
 export function march_string_index_of(s, sub) {
   const i = s.indexOf(sub);
+  return i < 0 ? { $: "None" } : { $: "Some", _0: i };
+}
+
+export function march_string_index_of_from(s, sub, start) {
+  if (start < 0) start = 0;
+  if (start > s.length) return { $: "None" };
+  if (sub.length === 0) return { $: "Some", _0: start };
+  const i = s.indexOf(sub, start);
   return i < 0 ? { $: "None" } : { $: "Some", _0: i };
 }
 

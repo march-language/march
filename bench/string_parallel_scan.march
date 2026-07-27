@@ -1,0 +1,85 @@
+-- Parallel scan scaling benchmark: one big shared buffer, N workers.
+--
+-- Measures two things phase 3 depends on:
+--   1. the pre-parallelism baseline for chunked string operations, and
+--   2. REFCOUNT CONTENTION.  march_incrc/march_decrc are atomic (relaxed add,
+--      acq_rel sub), so N workers all holding references to one shared owner
+--      string ping-pong its cache line between cores.  If scaling is already
+--      poor here, chunked parallel string ops need a contention answer before
+--      they need a chunking algorithm -- see the phase 3 gate in
+--      specs/2026-07-26-string-performance-design.md.
+--
+-- Parallel.pmap operates on Vec, NOT List: chunk indices go in through
+-- RRB.from_list and results come back through RRB.to_list.  Passing a List is
+-- a type error, not a silent conversion.
+--
+-- Known limitation, deliberate: a needle straddling a chunk boundary is
+-- missed.  Every boundary here falls inside the repeated 10-byte unit, so the
+-- count stays deterministic and the benchmark stays valid as a *timing*
+-- comparison.  Handling boundaries correctly is exactly the problem phase 3
+-- must solve, and it is not solved here.
+--
+-- Expected output: checksum=16000000
+-- Usage: march --compile --opt 2 bench/string_parallel_scan.march -o /tmp/string_parallel_scan
+
+mod StringParallelScan do
+
+pfn buffer_units() : Int do 4000000 end  -- 10 bytes per unit -> 40MB
+
+-- Count non-overlapping "QQ" occurrences in one full pass.
+--
+-- Counting by repeated index_of + slice-the-remainder is O(n^2) in bytes
+-- copied -- String.index_of has no start-offset variant, so every hit
+-- re-copies the whole tail (~800GB for this buffer).  replace_all does ONE
+-- O(n) scan and ONE O(n) build, and since each "QQ" -> "Q" shrinks the result
+-- by exactly one byte, the length delta IS the hit count.  Same scanning work,
+-- linear cost.
+pfn count_hits(s : String) : Int do
+  String.byte_size(s) - String.byte_size(String.replace_all(s, "QQ", "Q"))
+end
+
+-- Each worker slices its own chunk out of the SAME owner string, which is
+-- what generates the shared-owner refcount traffic being measured.
+pfn count_in_chunk(buf : String, chunk : Int, chunks : Int) : Int do
+  let total = String.byte_size(buf)
+  let size  = total / chunks
+  let start = chunk * size
+  let len   = if chunk == chunks - 1 do total - start else size end
+  count_hits(String.slice(buf, start, len))
+end
+
+pfn sum_ints(xs : List(Int), acc : Int) : Int do
+  match xs do
+  Nil        -> acc
+  Cons(h, t) -> sum_ints(t, acc + h)
+  end
+end
+
+pfn range_list(i : Int, n : Int, acc : List(Int)) : List(Int) do
+  if i >= n do acc else range_list(i + 1, n, Cons(n - 1 - i, acc)) end
+end
+
+-- Run the scan split across `workers` chunks; report elapsed ms and return
+-- the hit count so the caller can fold it into the checksum.
+pfn run_at(buf : String, workers : Int) : Int do
+  let idxs = RRB.from_list(range_list(0, workers, []))
+  let t0   = System.monotonic_time()
+  let res  = Parallel.pmap(idxs, fn c -> count_in_chunk(buf, c, workers))
+  let hits = sum_ints(RRB.to_list(res), 0)
+  let t1   = System.monotonic_time()
+  println("workers=" ++ to_string(workers) ++ " ms=" ++ to_string(t1 - t0))
+  hits
+end
+
+fn main() do
+  -- One "QQ" per 10-byte unit gives a predictable, chunk-count-independent
+  -- hit total: 4_000_000 hits per pass, 4 passes = 16_000_000.
+  let buf = String.repeat("abcdefQQhi", buffer_units())
+  let a = run_at(buf, 1)
+  let b = run_at(buf, 2)
+  let c = run_at(buf, 4)
+  let d = run_at(buf, 8)
+  println("checksum=" ++ to_string(a + b + c + d))
+end
+
+end

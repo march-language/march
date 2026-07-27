@@ -104,18 +104,74 @@ let mk_named_param name : fn_param =
 
 (* ---- HTML IOList generation for ~H sigil ---- *)
 
-(** Decompose a [++] chain into a flat list of parts.
+(** Decompose an interpolation into a flat list of parts.
 
-    The parser builds interpolations as:
+    The parser emits one of two shapes for an interpolation, chosen by part
+    count (see [desugar_interp] in [lib/parser/parser.mly]):
       "prefix" ++ to_string(e1) ++ "mid" ++ to_string(e2) ++ "suffix"
-    represented as nested [EApp(EVar "++", [left; right], sp)].
+      string_join(["prefix", to_string(e1), "mid", to_string(e2), "suffix"], "")
+    so we flatten both — recursively, since a join's element list can itself
+    contain concatenations written by hand in user code.
 
-    We recursively flatten both sides of [++] into a list. *)
+    Keeping this in sync with the parser's interpolation shape is load-bearing:
+    [html_interp_to_iolist] identifies the dynamic parts by matching
+    [to_string(e)] *per part*, so a shape this function can't see through
+    collapses the whole template into one opaque part — silently disabling
+    HTML auto-escaping (and island/CSRF rewriting) rather than failing. *)
 let rec decompose_concat (e : expr) : expr list =
   match e with
   | EApp (EVar { txt = "++"; _ }, [left; right], _sp) ->
     decompose_concat left @ decompose_concat right
+  | EApp (EVar { txt = "string_join"; _ }, [list_expr; ELit (LitString "", _)], _sp) ->
+    (* Flatten Cons(a, Cons(b, Nil)) → [a; b]; leave the call alone if the
+       argument isn't a literal list (a user-written dynamic join). *)
+    let rec collect acc = function
+      | ECon ({ txt = "Nil"; _ }, [], _)        -> Some (List.rev acc)
+      | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> collect (hd :: acc) tl
+      | _ -> None
+    in
+    (match collect [] list_expr with
+     | Some elems -> List.concat_map decompose_concat elems
+     | None -> [e])
+  (* Also flatten three-way concats.  ESigil's arm calls [desugar_expr] on its
+     content before handing it here, and that pass collapses `++` chains into
+     [string_concat3] — so without this case a `~H` template with three or more
+     parts arrives as ONE opaque part, and html_interp_to_iolist stops matching
+     `to_string(e)` per part, silently disabling HTML auto-escaping.
+     That is the same failure PR #90 shipped, and it fails OPEN: the template
+     still renders, just unsafely. Caught here by the `~H sigil codegen` test. *)
+  | EApp (EVar { txt = "string_concat3"; _ }, [a; b; c], _sp) ->
+    decompose_concat a @ decompose_concat b @ decompose_concat c
   | _ -> [e]
+
+(** Number of operands in a [++] chain, without building the list. *)
+let concat_chain_len (e : expr) : int = List.length (decompose_concat e)
+
+(** Rebuild a flattened [++] chain using three-way concats, consuming three
+    operands per allocation instead of two.
+
+    [a;b;c;d;e] becomes [string_concat3(string_concat3(a,b,c), d, e)] — two
+    allocations where the left-deep [++] chain needed four.  A trailing pair
+    falls back to [++], and a trailing single operand is appended with [++],
+    since [string_concat3] is fixed-arity.
+
+    Left-associative, matching [++]'s own associativity, so evaluation order and
+    therefore the result string are unchanged. *)
+let fold_concat3 (parts : expr list) (sp : span) : expr =
+  let cat2 a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
+  let cat3 a b c =
+    EApp (EVar { txt = "string_concat3"; span = sp }, [a; b; c], sp) in
+  let rec go acc rest =
+    match rest with
+    | []            -> acc
+    | [x]           -> cat2 acc x
+    | x :: y :: tl  -> go (cat3 acc x y) tl
+  in
+  match parts with
+  | []            -> ELit (LitString "", sp)
+  | [x]           -> x
+  | [x; y]        -> cat2 x y
+  | x :: y :: z :: tl -> go (cat3 x y z) tl
 
 (* ── Island tag parsing in ~H ──────────────────────────────────────────── *)
 
@@ -549,6 +605,29 @@ let rec desugar_expr (e : expr) : expr =
   | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
   | EDbg (None, _) -> e
   | EDbg (Some inner, sp) -> EDbg (Some (desugar_expr inner), sp)
+
+  (* Collapse a `++` chain into three-way concats before the generic EApp path.
+     `a ++ b ++ c ++ d ++ e` parses left-deep, so evaluating it link by link
+     allocates k-1 intermediates and re-copies the growing prefix at each one --
+     O(k^2) bytes for k parts.  Folding in groups of three brings that to
+     ceil((k-1)/2) allocations, halving both at k=3 and k=5.
+
+     Placed HERE, in desugar, rather than in the parser or in TIR:
+       - the parser is the wrong place; PR #90 showed that changing the AST
+         interpolation shape silently broke the formatter's `"${...}"`
+         reconstruction and disabled `~H` HTML escaping;
+       - the formatter runs on the PARSED module, before desugar, so it never
+         sees this rewrite;
+       - `~H` lowering (html_interp_to_iolist) runs in the ESigil arm, which
+         decomposes the chain itself and never reaches this arm;
+       - TIR is ANF, so by then the chain is let-bound temporaries with dec_rc
+         interleaved -- a liveness analysis rather than a tree rewrite.
+
+     Two-part chains are left alone: `a ++ b` is already one allocation and one
+     copy pass, so there is nothing to save. *)
+  | EApp (EVar { txt = "++"; _ }, [_; _], sp) when concat_chain_len e >= 3 ->
+    let parts = List.map desugar_expr (decompose_concat e) in
+    fold_concat3 parts sp
 
   | EApp (f, args, sp) ->
     let f' = desugar_expr f in

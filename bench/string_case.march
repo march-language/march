@@ -1,0 +1,36 @@
+-- String case-conversion benchmark: to_uppercase/to_lowercase over a large
+-- buffer.
+--
+-- Isolates TRANSFORM THROUGHPUT.  A second SIMD target with a different shape
+-- from string_scan: no search, pure map-and-copy, one full-size allocation per
+-- call.  The pairing is the point -- if scan is slow but case is fast, the
+-- problem is the search loop; if both are slow, the ceiling is memory
+-- bandwidth and no amount of cleverness in the search will help.
+--
+-- Expected output: checksum=200000000
+-- (200 iterations x the 1,000,000-byte round-tripped buffer)
+-- Usage: march --compile --opt 2 bench/string_case.march -o /tmp/string_case
+
+mod StringCase do
+
+pfn buffer_units() : Int do 100000 end   -- 10 bytes per unit -> 1MB
+pfn iterations() : Int do 200 end
+
+-- Round-trip each iteration (up then down) so the result is a full-size
+-- string whose length is summed -- the sum keeps both conversions live
+-- against dead-code elimination.
+pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else
+    let up = String.to_uppercase(buf)
+    let lo = String.to_lowercase(up)
+    go(buf, i + 1, n, acc + String.byte_size(lo))
+  end
+end
+
+fn main() do
+  let buf = String.repeat("abcdefghij", buffer_units())
+  println("checksum=" ++ to_string(go(buf, 0, iterations(), 0)))
+end
+
+end

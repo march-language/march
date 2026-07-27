@@ -1,0 +1,47 @@
+-- Large-input split benchmark: a CSV-shaped buffer split into fields.
+--
+-- Isolates the REALISTIC MIX: one allocation, one cons cell, and one copy per
+-- field.
+--
+-- PAIRED WITH bench/string_slice_walk.march, which does the same copying with
+-- NO cons cells.  The difference between the two attributes cost to the list
+-- structure versus to the copying, which is exactly the fork between an
+-- array-returning split and a borrowed-view string representation.  The two
+-- files MUST stay in sync -- same buffer size, same field shape.  Changing one
+-- knob without the other silently invalidates the comparison that the phase 1
+-- decision criteria depend on (specs/2026-07-26-string-performance-design.md).
+--
+-- Expected output: checksum=39000000
+-- (60 iterations x 650,000 field bytes per pass)
+-- Usage: march --compile --opt 2 bench/string_split_large.march -o /tmp/string_split_large
+
+mod StringSplitLarge do
+
+-- 16 bytes per row -> 50_000 rows = 800KB.  Keep identical to slice_walk.
+pfn rows() : Int do 50000 end
+pfn iterations() : Int do 60 end
+
+pfn sum_lens(xs : List(String), acc : Int) : Int do
+  match xs do
+  Nil        -> acc
+  Cons(h, t) -> sum_lens(t, acc + String.byte_size(h))
+  end
+end
+
+-- Summing the field lengths keeps the split result live: without a consumer,
+-- the whole split is dead code the optimizer may remove, and the benchmark
+-- would report a wonderful number for doing nothing.
+pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else
+    let parts = String.split(buf, ",")
+    go(buf, i + 1, n, acc + sum_lens(parts, 0))
+  end
+end
+
+fn main() do
+  let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
+  println("checksum=" ++ to_string(go(buf, 0, iterations(), 0)))
+end
+
+end
