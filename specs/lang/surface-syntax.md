@@ -316,6 +316,9 @@ fields or pass the value to a measure.
 {v : Int | v >= 0 && v < 100}      -- named binder form
 {String | len(_) > 0}              -- a non-empty String
 {String | _ != ""}                 -- literal equality
+{Bool | _ == true}                 -- a Bool (operator form; `not _` won't parse)
+{Float | _ >= 0.0}                 -- a Float, via Z3's IEEE-754 theory
+{Float | _ != 0.0}                 -- a safe divisor (`-0.0` is rejected too)
 {Option(Int) | is_Some(_)}         -- an ADT constructor tag
 {v : Cfg | v.port >= 1}            -- a record field
 {v : Cfg | v.port > v.retries}     -- one field against another
@@ -355,11 +358,18 @@ are no false positives, and silence means "not disproved", never "verified".
 It runs only when `z3` is on `PATH`. A predicate calling a name the checker
 does not know produces a **warning** rather than silently enforcing nothing.
 
+`Float` predicates are **comparisons only** — float *arithmetic* in a predicate
+(`_ +. 1.0 > 0.0`) is out of scope and makes the obligation skipped rather than
+guessed at. They are discharged through Z3's bit-precise IEEE-754 theory, never
+by modelling floats as reals: over reals `not (x >= 0.0) && not (x <= 0.0)` is
+unsatisfiable and correct code would be flagged, while over floats it is
+satisfiable (witness: `NaN`) and correctly stays silent.
+
 See the [Refinement Types guide](refinement-types.md) for the full story and
-the exact limitations (no `Float` refinements; `Bool` predicates parse but are
-not enforced; strings support only `len` and literal equality; higher-order
-checking covers refined callback types and local aliases but not unrefined
-callbacks or `interface` dispatch).
+the exact limitations (float arithmetic, float record fields and special-value
+predicates are out of scope; strings support only `len` and literal equality;
+higher-order checking covers refined callback types and local aliases but not
+unrefined callbacks or `interface` dispatch).
 
 ---
 

@@ -11,7 +11,38 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`Bool` and `Float` refinement types are now enforced.** Both previously
+  parsed and type-checked while checking nothing at all, so
+  `fn needTrue(b : {Bool | _ == true})` accepted `needTrue(false)` and
+  `fn sqrtish(x : {Float | _ >= 0.0})` accepted `sqrtish(0.0 -. 1.0)` in
+  silence. `Bool` predicates now take the boolean operators against
+  `true`/`false` (the bare-binder `{Bool | not _}` remains a parse error — write
+  `{Bool | _ == false}`), and `Float` predicates take the comparisons `>= > <=
+  < == !=` against float literals or another float value. Preconditions,
+  postconditions, path-sensitive guards and postcondition propagation all work
+  for both, and float literal arithmetic (`0.0 -. 1.0`) is constant-folded so a
+  negative literal is recognised.
+
+  Float obligations are discharged through Z3's **bit-precise IEEE-754
+  FloatingPoint theory**, never by modelling floats as reals: over reals
+  `not (x >= 0.0) && not (x <= 0.0)` is unsatisfiable, so a reals encoding would
+  conclude the predicate can never hold and flag correct code, while over floats
+  it is satisfiable (witness: `NaN`) and correctly stays silent. Equality is
+  `fp.eq` rather than bitwise `=`, so `{Float | _ != 0.0}` rejects `-0.0` as
+  well as `+0.0`. Symbolic float arithmetic in a predicate (`_ +. 1.0 > 0.0`),
+  `Float` record fields and special-value predicates (`is_nan`) stay out of
+  scope and are silently skipped rather than approximated.
+
 ### Fixed
+
+- **A bare `Bool` variable used as a guard no longer produces a malformed
+  solver query.** `if j do … end` around a refined call reflected `j` as an
+  integer constant and asserted it as a formula, which z3 rejects; the
+  obligation was then silently undecidable. Such a variable is now declared at
+  the `Bool` sort, and a Boolean-position well-sortedness guard drops anything
+  that still is not a formula rather than emitting it.
 
 - **The compiled-binary cache no longer serves a stale binary after a
   `runtime/*.c` edit.** The CAS key digested a runtime directory it resolved
