@@ -182,6 +182,14 @@ git log is authoritative for exact commits.
   every other fact channel: a name an enclosing binder introduced never
   resolves to a global function.
 
+- **`{T | size(_) < 0}` is now checked, like its named form `{v : T | size(v)
+  < 0}`.** The anonymous binder — the spelling the reference teaches — was
+  emitted verbatim as an SMT symbol when it appeared inside a measure
+  application. `_` is a reserved SMT-LIB token, so the solver rejected the
+  query and the predicate was silently never decided: the documented idiom
+  checked nothing while the named spelling worked. Both spellings now reflect
+  to one canonical symbol and produce identical verdicts.
+
 - **Compiled `NativeArray.map_int`/`map_float` now inlines even when the
   mapped array is reused afterward.** The Phase 2 closure-inlining
   optimization (P10) silently never fired whenever code used the array

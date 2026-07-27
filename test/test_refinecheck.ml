@@ -2677,6 +2677,76 @@ let shadow_suite =
              (shadow_src "  fn probe(other : (Int) -> Int) : Int do takepos(-3) end")))
   ]
 
+(* ── B1: `size(_)` and `size(v)` are the SAME predicate ────────────────────
+   The anonymous binder is the DOCUMENTED idiom (`{Int | _ >= 0}` is the form
+   the reference teaches), so a gap that only affects `_` matters more than
+   ordinary incompleteness: the natural spelling silently checks nothing while
+   the named one works.
+
+   In MEASURE-APPLICATION position `_` used to be emitted verbatim as an SMT
+   symbol — and `_` is a RESERVED SMT-LIB token, so z3 answered `(error …)`
+   and the predicate was never decided.  Every case below is asserted as a
+   PAIR: the two spellings must agree, whatever the verdict is. *)
+let b1_src body =
+  Printf.sprintf
+    "mod B do\n\
+    \  type Tree = Leaf | Node(Tree, Int, Tree)\n\
+    \  @[measure]\n\
+    \  fn size(t : Tree) : Int do\n\
+    \    match t do\n\
+    \      Leaf -> 0\n\
+    \      Node(l, _, r) -> 1 + size(l) + size(r)\n\
+    \    end\n\
+    \  end\n\
+     %s\n\
+     end\n"
+    body
+
+(* [both] runs the same program in both spellings and asserts one verdict. *)
+let b1_pair name ~expect anon named =
+  gated name (fun () ->
+      Alcotest.(check bool) "anonymous `_`" expect (has_refine_error (b1_src anon));
+      Alcotest.(check bool) "named binder" expect (has_refine_error (b1_src named)))
+
+let b1_suite =
+  [ (* A violating call: `size` is a measure, hence always >= 0, so `size < 0`
+       can never hold.  Both spellings must report it. *)
+    b1_pair "violating measure call: both spellings report" ~expect:true
+      "  fn need(t : {Tree | size(_) < 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Leaf) end"
+      "  fn need(t : {v : Tree | size(v) < 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Leaf) end";
+
+    (* A satisfiable call: `size >= 0` always holds — silence, both ways. *)
+    b1_pair "satisfiable measure call: both spellings stay silent" ~expect:false
+      "  fn need(t : {Tree | size(_) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Node(Leaf, 1, Leaf)) end"
+      "  fn need(t : {v : Tree | size(v) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do need(Node(Leaf, 1, Leaf)) end";
+
+    (* An UNKNOWN argument settles nothing in either direction: the definite
+       failure stance skips it.  This is the negative-space guard — the fix
+       must not start guessing about opaque values. *)
+    b1_pair "unknown argument: both spellings stay silent" ~expect:false
+      "  fn need(t : {Tree | size(_) > 3}) : Int do 0 end\n\
+      \  fn probe(u : Tree) : Int do need(u) end"
+      "  fn need(t : {v : Tree | size(v) > 3}) : Int do 0 end\n\
+      \  fn probe(u : Tree) : Int do need(u) end";
+
+    (* `len` over a list — the measure path with no axioms. *)
+    b1_pair "list `len` measure: both spellings stay silent" ~expect:false
+      "  fn needl(xs : {List(Int) | len(_) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do needl([1, 2]) end"
+      "  fn needl(xs : {v : List(Int) | len(v) >= 0}) : Int do 0 end\n\
+      \  fn probe() : Int do needl([1, 2]) end";
+
+    b1_pair "list `len` on an opaque list: both spellings stay silent" ~expect:false
+      "  fn needl(xs : {List(Int) | len(_) >= 3}) : Int do 0 end\n\
+      \  fn probe(ys : List(Int)) : Int do needl(ys) end"
+      "  fn needl(xs : {v : List(Int) | len(v) >= 3}) : Int do 0 end\n\
+      \  fn probe(ys : List(Int)) : Int do needl(ys) end"
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2703,4 +2773,5 @@ let () =
       ("tier1-relational", tier1_suite);
       ("higher-order", hof_suite);
       ("tier2-induction", tier2_suite);
-      ("callee-shadowing", shadow_suite) ]
+      ("callee-shadowing", shadow_suite);
+      ("anon-binder-measures", b1_suite) ]

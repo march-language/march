@@ -2143,6 +2143,23 @@ let check_call ~root errctx ~span
        parameter's actual.  Path conditions live in the CALLER's namespace and
        must NOT come through here — see [path_resolve_var]. *)
     let is_self name = name = rp.binder || name = "_" in
+    (* The SMT symbol standing for the refined value in MEASURE position.
+       Both spellings of the binder — the anonymous `_` of `{Tree | size(_) < 0}`
+       and the named `v` of `{v : Tree | size(v) < 0}` — denote the same value,
+       so both must reflect to one canonical symbol.  Emitting the binder's
+       source name instead was wrong twice over:
+
+         - `_` is a RESERVED SMT-LIB token (it heads indexed identifiers such
+           as `(_ is Ctor)`), so `(declare-const _ M_Tree)` made z3 answer
+           `(error …)`.  The predicate was therefore never decided — and `_` is
+           the DOCUMENTED idiom, so the spelling the docs teach silently
+           checked nothing while the named spelling worked.  Worse, a malformed
+           VC on the shared `z3 -in` channel is not merely a missed check.
+         - a named binder that collides with a caller-scope Int variable would
+           put one symbol at two sorts, the same hazard [is_recvar] guards.
+
+       `$self` cannot collide with a March identifier. *)
+    let self_dt_sym = "$self" in
     let self_is_str = rp_is_str rp in
     let resolve_var name =
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
@@ -2299,11 +2316,26 @@ let check_call ~root errctx ~span
       else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
-        match actual_of_name name with
-        | None ->
-          decls := (name, Smt.SData adt) :: !decls;
-          Some (Smt.App (m, [ Smt.Const name ]))
-        | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
+        (* The refined value itself, under EITHER spelling of the binder —
+           see [self_dt_sym].  It is an unconstrained datatype constant, so
+           only the measure's own axioms (e.g. `size` is non-negative) can
+           settle the goal; that is exactly what the named spelling already
+           did, and the anonymous one now does too. *)
+        if is_self name then begin
+          decls := (self_dt_sym, Smt.SData adt) :: !decls;
+          Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
+        end
+        else
+          match actual_of_name name with
+          | None ->
+            decls := (name, Smt.SData adt) :: !decls;
+            Some (Smt.App (m, [ Smt.Const name ]))
+          | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
+      else if is_self name then
+        (* A measure with no axioms (a user measure, or list `len`) over the
+           refined value: one fresh non-negative constant, again shared by both
+           spellings so `len(_)` and `len(v)` cannot diverge. *)
+        measure_of_var m self_dt_sym
       else
         match actual_of_name name with
         | Some a -> (
