@@ -6001,9 +6001,30 @@ and bind_lam_params env params =
 
 and bind_lam_param env _sp (p : Ast.param) ann_ty =
   let t = match p.param_ty, ann_ty with
-    | Some ann, _ ->
+    | Some ann, expected ->
       let tvars = ref [] in
-      surface_ty env ~tvars ann
+      let ann_t = surface_ty env ~tvars ann in
+      (* RECONCILE the annotation with the type the caller expects this
+         parameter to have (F5 residual, 2026-07-27).  [bind_lam_params] mints a
+         fresh var per parameter, builds the lambda's ARROW type from those vars
+         and passes each one here; [check_expr]'s lambda-peel passes the arrow
+         component of the expected type.  Before this unify, an ANNOTATED
+         parameter simply ignored that type: the body was checked against the
+         annotation while the arrow — and therefore every call site — kept the
+         unrelated variable.  So a lambda (or a named `fn` nested in a function
+         body, which routes here too) had its parameter annotations checked
+         against NOTHING, and an argument flowing into an annotated parameter
+         reached neither the [Chan.*] operation arms nor [unify]'s `TChan`
+         laundering guard — letting an unrefined `Chan.offer` continuation be
+         washed clean by `fn (c : Chan(R, P)) -> ...`.  The top-level [check_fn]
+         `FPNamed` loop never had this gap, which is why only the inner forms
+         leaked. *)
+      (match expected with
+       | Some t0 ->
+         unify env ~span:p.param_name.Ast.span
+           ~reason:(Some (RAnnotation p.param_name.Ast.span)) t0 ann_t
+       | None -> ());
+      ann_t
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in

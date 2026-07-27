@@ -2324,6 +2324,137 @@ let test_session_offer_unrefined_laundered_by_record_field () =
   Alcotest.(check bool) "record-field-laundered offer continuation: error"
     true (has_error_with ctx "came from `Chan.offer`")
 
+(** Finding 1 RESIDUAL (2026-07-27): the LAMBDA-parameter laundering shape.
+    [check_fn]'s [FPNamed] loop binds a top-level parameter at its annotation
+    AND builds the declared arrow from the same type, so the fn-param test
+    above reaches the [unify] guard.  [bind_lam_params] did not: it minted a
+    fresh var per parameter, built the lambda's arrow from those vars, and then
+    bound an ANNOTATED parameter at [surface_ty ann] without ever unifying the
+    two — so the body was checked against the annotation's own fresh [TChan]
+    ref while the CALL SITE unified the marked argument against a bare
+    variable, touching neither chokepoint.  Pre-existing (reproduced at the
+    branch base); compiled it printed a `String` heap pointer as an `Int`.
+    Corpus witness: `specs/lang/types/reject/t102`. *)
+let test_session_offer_unrefined_laundered_by_lambda_param () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DL do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol EL do
+      S -> C : Int
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(DL)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let f = fn (c : Chan(C, EL)) -> Chan.recv(c)
+      let (v, cx) = f(cc2)
+      Chan.close(cx)
+      println(int_to_string(v + 1))
+    end
+  end|} in
+  Alcotest.(check bool) "lambda-param-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** Same residual, NESTED-`fn` spelling: a named `fn` declared inside a function
+    body is not checked by [check_fn] — its parameters go through
+    [bind_lam_params] exactly like a lambda's — so it inherited the identical
+    gap.  Corpus witness: `specs/lang/types/reject/t103`. *)
+let test_session_offer_unrefined_laundered_by_inner_fn_param () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DM do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol EM do
+      S -> C : Int
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(DM)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      fn f(c : Chan(C, EM)) do Chan.recv(c) end
+      let (v, cx) = f(cc2)
+      Chan.close(cx)
+      println(int_to_string(v + 1))
+    end
+  end|} in
+  Alcotest.(check bool) "inner-fn-param-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** SILENCE companion for the lambda/inner-`fn` fix.  Unifying an annotated
+    lambda parameter with the expected type is a GENERAL change — before it,
+    EVERY lambda parameter annotation was checked against nothing — so ordinary
+    annotated lambdas, an annotated lambda passed as a higher-order argument
+    (the [check_expr] lambda-peel, the other caller of [bind_lam_param]), an
+    annotated nested `fn`, and a REFINED offer continuation flowing through an
+    annotated lambda parameter must all stay clean.  Accept corpus twin:
+    `specs/lang/types/accept/t104`. *)
+let test_session_lambda_param_annotation_no_false_positive () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DN do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol EN do
+      S -> C : Int
+    end
+    fn main() do
+      let inc = fn (x : Int) -> x + 1
+      let doubled = List.map([1, 2, 3], fn (x : Int) -> x * 2)
+      fn triple(y : Int) do y * 3 end
+      let (cc, sc) = Chan.new(DN)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let f = fn (c : Chan(C, EN)) -> Chan.recv(c)
+          let (v, cx) = f(cc2)
+          Chan.close(cx)
+          println(int_to_string(v + inc(1) + triple(2) + List.length(doubled)))
+        :err ->
+          let (s, cy) = Chan.recv(cc2)
+          Chan.close(cy)
+          println(s)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "annotated lambda params (incl. refined channel): no error"
+    false (has_errors ctx)
+
+(** The lambda-parameter gap was GENERAL, not session-specific: because the
+    annotation was never reconciled with the arrow, a WRONG type on a lambda
+    parameter was accepted outright.  This is the non-channel half of the same
+    fix — `fn (x : String) -> ...` applied to an `Int` must now be rejected. *)
+let test_lambda_param_annotation_mismatch_rejected () =
+  let ctx = typecheck {|mod Test do
+    fn main() do
+      let f = fn (x : String) -> string_length(x)
+      println(int_to_string(f(42)))
+    end
+  end|} in
+  Alcotest.(check bool) "wrong-typed argument to annotated lambda param: error"
+    true (has_errors ctx)
+
 (** SILENCE companion for the laundering guard: unifying two ORDINARY channel
     types (neither marked) must stay clean, and a properly match-refined offer
     continuation must remain unifiable inside its arm — [with_offer_refinement]
@@ -9357,6 +9488,10 @@ let compiler_suites =
           Alcotest.test_case "session offer unrefined laundered by if-join" `Quick test_session_offer_unrefined_laundered_by_if_join;
           Alcotest.test_case "session offer unrefined laundered by fn param" `Quick test_session_offer_unrefined_laundered_by_fn_param;
           Alcotest.test_case "session offer unrefined laundered by record field" `Quick test_session_offer_unrefined_laundered_by_record_field;
+          Alcotest.test_case "session offer unrefined laundered by lambda param" `Quick test_session_offer_unrefined_laundered_by_lambda_param;
+          Alcotest.test_case "session offer unrefined laundered by inner fn param" `Quick test_session_offer_unrefined_laundered_by_inner_fn_param;
+          Alcotest.test_case "session lambda param annotation no false positive" `Quick test_session_lambda_param_annotation_no_false_positive;
+          Alcotest.test_case "lambda param annotation mismatch rejected" `Quick test_lambda_param_annotation_mismatch_rejected;
           Alcotest.test_case "session offer unify no false positive" `Quick test_session_offer_unify_no_false_positive;
           Alcotest.test_case "session offer unknown arm label warning" `Quick test_session_offer_unknown_arm_label_warning;
           Alcotest.test_case "session offer unrefined catch-all message" `Quick test_session_offer_unrefined_catch_all_message;
