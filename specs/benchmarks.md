@@ -129,6 +129,107 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_scan.march — Substring search over a 1MB buffer
+
+**Command:** 150 absent-needle scans + 150 late-needle scans over 1MB
+**Expected output:** `checksum=135000150`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.index_of` | Byte-at-a-time loop calling `memcmp` — no `memchr`, no SIMD |
+| Absent needle | Full O(n·m) worst case: every byte examined on every call |
+| Late needle | Realistic "found at ~90% through" case |
+
+**Comparison baseline:** C (`memmem`), Rust (`str::find`), Go (`strings.Index`), Python (`str.find`).
+**What to watch:** Part of the phase 1 string measurement (`specs/2026-07-26-string-performance-design.md`). March is expected to trail C badly here until a `memchr`/SIMD search lands; the point of the benchmark is to size that gap. Once the fast path exists, a regression here points at it.
+
+---
+
+## bench/string_case.march — Case conversion over a 1MB buffer
+
+**Command:** 200 × (`to_uppercase` then `to_lowercase`) over 1MB
+**Expected output:** `checksum=200000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.to_uppercase` / `to_lowercase` | Full-size allocation + byte-loop transform per call |
+| Allocation throughput | 400 full-buffer allocations |
+| Memory bandwidth | Pure map-and-copy, no search |
+
+**Comparison baseline:** C (in-place `toupper` loop), Rust (`to_uppercase`), Go (`strings.ToUpper`), Python (`str.upper`).
+**What to watch:** Paired with `string_scan` — if both are slow the ceiling is memory bandwidth, not the search loop, and no cleverness in `index_of` will help. Under `MARCH_STRING_STATS=1` this should report ~400MB copied; a reading near 1MB means the byte-loop builders lost their copy accounting again (they don't call `memcpy`, so they're counted explicitly).
+
+---
+
+## bench/string_split_large.march — Split an 800KB CSV-shaped buffer
+
+**Command:** 60 × `String.split(buf, ",")` over 800KB (50K rows, 150K fields)
+**Expected output:** `checksum=39000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.split` | One string + one cons cell + one copy per field |
+| Cons-cell allocation | ~150K cells per iteration |
+| Peak memory | Every field is live simultaneously |
+
+**Comparison baseline:** C (in-place `strtok`, zero copy), Rust (`split` iterator, zero copy), Go (`strings.Split`), Python (`str.split`).
+**What to watch:** **Paired with `string_slice_walk`** — same buffer, same field shape, same field count, on purpose. Changing one file's size knob without the other invalidates the comparison. Measured together (60 iterations): `obj_allocs` 9,000,120 vs 0 (the cons cells), `copy_bytes` 39.8MB vs 27.8MB, `peak_live_bytes` **39.8MB vs 800KB**. Note that `allocs` — the *string* counter — is nearly identical for the two (9,000,126 vs 9,000,006), because cons cells go through `march_alloc` rather than `march_string_alloc`; use `obj_allocs` for list overhead.
+
+---
+
+## bench/string_slice_walk.march — Slice 150K fields out of 800KB, no list
+
+**Command:** 60 × 150K `String.slice` calls over 800KB, building no list
+**Expected output:** `checksum=27000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `String.slice` | Allocates and copies off a large owner — no view representation exists |
+| Zero cons cells | The controlled difference vs `string_split_large` |
+| Flat peak memory | One field live at a time |
+
+**Comparison baseline:** C (pointer walk, zero copy), Rust (`&str` slices, zero copy), Go (slicing, zero copy), Python (`str` slicing, copies).
+**What to watch:** See `string_split_large`. Languages with string views do this with no allocation at all, so the gap is the size of the prize. This benchmark walks by arithmetic rather than by searching: the natural formulation (`index_of` the separator, slice off the tail, recurse) is O(n²) in bytes copied, since `String.index_of` has no start-offset variant and the tail must be re-sliced every step. Search cost is measured separately by `string_scan`.
+
+---
+
+## bench/string_small_churn.march — 2M short-string build/compare cycles
+
+**Command:** 2M × (build two short strings, concat twice, prefix-compare, discard)
+**Expected output:** `checksum=17793810`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| Small-string allocation | Every string is a `malloc` + refcount, even 4 bytes |
+| `++` on short operands | Three concatenations per iteration |
+| `String.starts_with` | Short-prefix compare, consumes the concatenation |
+| Allocate-and-free churn | Nothing escapes the loop |
+
+**Comparison baseline:** Rust (`String` — no SSO either), C++ (`std::string` — has SSO), Go, Python (interns short strings).
+**What to watch:** The size histogram under `MARCH_STRING_STATS=1` is the SSO evidence. Measured: 24,000,004 allocations, of which **91.7% are ≤23 bytes** (13.2M ≤7, 6.9M ≤15, 1.9M ≤23) — 23 being what fits in the footprint the 24-byte header already occupies. Doubling `pairs()` doubles both allocations (24M → 48M) and wall time (0.80s → 1.58s), confirming allocation is the bottleneck rather than incidental. The C++ comparison is the informative one, since it is the baseline that *has* the optimization under consideration.
+
+---
+
+## bench/string_parallel_scan.march — Shared-buffer scan at 1/2/4/8 workers
+
+**Command:** count `"QQ"` occurrences in a 40MB buffer, chunked across 1, 2, 4, 8 workers
+**Expected output:** `checksum=16000000`, plus one `workers=N ms=T` line per worker count
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `Parallel.pmap` | Vec-based — chunk indices via `RRB.from_list`, results via `RRB.to_list` |
+| Shared-owner refcounting | Every worker slices from the same string; atomic RC on one cache line |
+| `String.slice` + `replace_all` | Per-chunk copy, then one full O(n) scan |
+
+**Comparison baseline:** Rust (rayon over `&str` chunks, zero copy), Go (goroutines over slices), C (pthreads over pointer ranges).
+**What to watch:** The scaling *shape*, not absolute times. Measured on an M3 Max (10 performance + 4 efficiency cores), stable across three runs: **131ms → 66ms (1.97×) → 34ms (3.9×) → 33ms (3.97×)**. Scaling is near-perfect to 4 workers and then flat — 8 workers buy nothing. That ceiling is *not* explained by core count (8 performance cores were available) nor by memory bandwidth (~80MB of traffic in 33ms ≈ 2.4GB/s, far below this machine's capability), which leaves shared-owner refcount traffic and allocator contention as the candidates. Distinguishing those two is phase 3's first job; the gate in `specs/2026-07-26-string-performance-design.md` is triggered.
+
+**Known limitation, deliberate:** a needle straddling a chunk boundary is missed. Every boundary here falls inside the repeated 10-byte unit, so the count stays deterministic and the benchmark remains valid as a timing comparison. Handling boundaries correctly is precisely the problem phase 3 must solve, and it is not solved here.
+
+**Counting method:** hits are counted as the length delta from `replace_all("QQ", "Q")` — one O(n) scan plus one O(n) build. The natural formulation (`index_of`, slice off the tail, repeat) is O(n²) in bytes copied, since `String.index_of` has no start-offset variant; at this size that is ~800GB of copying.
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled

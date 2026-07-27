@@ -32,6 +32,57 @@ the join shape). `specs/lang/surface-syntax.md`'s operator reference now notes
 that `++` itself is still O(n) per call (so accumulating via `acc = acc ++ x`
 in a loop is still O(n²)) and points at `IOList` for that case —
 `stdlib/string.march`'s `String.concat` doc already carried the same note.
+## Current State (as of 2026-07-27, string performance phase 2 tasks 1-3)
+
+Three string optimizations landed against the phase 1 profile, each verified by
+a same-session A/B — absolute timings on this machine are not comparable across
+runs, so every claim below re-measured its baseline alongside the change.
+
+**`String.index_of_from`** (`runtime/march_runtime.c` + the nine builtin sites)
+takes a start offset and returns the index in the haystack's own coordinates.
+Its absence forced an O(n²) shape on any tokenizer — without it the only way to
+find the next separator is to slice off the tail and search again, re-copying
+the remainder every step, which is why two phase 1 benchmarks had to be written
+around it. Counting 150K fields in an 800KB buffer: `String.split` +
+`List.length` at 975ms against an `index_of_from` walk at **267ms**, with
+effectively zero allocation against ~9M strings plus ~9M cons cells.
+
+**memchr-based substring search.** A shared `march_memmem` two-stage helper —
+memchr for candidate first bytes, memcmp to confirm — now backs `index_of`,
+`index_of_from`, `contains`, `split`, `replace` and `replace_all`.
+`last_index_of` stays scalar because it scans backwards. libc's memchr is
+SIMD-optimised everywhere we target, so this gets vector scanning with no
+intrinsics and no per-arch code, the same reasoning behind
+`march_http_parse_simd.c`'s scalar fallback. `bench/string_scan` **809ms →
+20.8ms (39×)**, `string_parallel_scan` 390 → 171ms, `string_split_large` 1108 →
+928ms, and unchanged where no search is involved. Throughput went from ~0.5 GB/s
+to ~40 GB/s. A failed candidate resumes at `hit+1`, not `hit+nlen` — needles
+overlap, and skipping the whole needle loses the match in `("aaaa","aa")` at
+index 1. `replace_all` also stopped copying byte by byte between matches, which
+RAISES its reported `copy_bytes`: the old loop wrote through `buf[out++]` and
+bypassed the counter, so the previous figure undercounted.
+
+**Three-way concat folding** (`lib/desugar/desugar.ml`). A left-deep `++` chain
+allocates k-1 intermediates and re-copies the growing prefix at each link;
+folding in groups of three gives `ceil((k-1)/2)`. A 5-part chain over 100K
+iterations went 400,004 → 200,004 allocations, and `bench/string_small_churn`
+888.9 → 710.5ms with copying down 145.7 → 112.6MB. Fixed arity rather than a
+variadic n-ary concat because March builtin signatures are `Mono (TArrow ...)`;
+the only variable-length alternative is `string_join`, whose cons-list
+materialization measured at 59% of its cost at k=5.
+
+The concat rewrite lives in desugar rather than the parser or TIR, and the
+reason is load-bearing: the parser is where PR #90 broke the formatter's
+`"${...}"` reconstruction and silently disabled `~H` HTML escaping, while TIR is
+ANF — by then a chain is let-bound temporaries with `dec_rc` interleaved, a
+liveness analysis rather than a tree rewrite. **The `~H` bug was reintroduced
+anyway and caught by test**: `ESigil` desugars its content before HTML lowering,
+so the chain reached `html_interp_to_iolist` as one opaque `concat3` and it
+stopped matching `to_string(e)` per part. `decompose_concat` now flattens
+`concat3` as well as `++`. That failure mode fails open — the template still
+renders, just unsafely — which is why the codegen test guarding it earns its
+keep.
+
 ## Current State (as of 2026-07-27, NativeArray.map2 primitive + DataFrame.col_add_col rewiring)
 
 New two-array zip-with primitive, `NativeArray.map2_int`/`map2_float` (plus
@@ -179,6 +230,61 @@ fully checked. 245 refinecheck tests (was 236), exit 0 on a cold VC cache;
 `test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
 An adversarial sweep and a 12-violation-kind file both run with **zero**
 `(error` lines on a tee'd solver channel.
+## Current State (as of 2026-07-27, string performance phase 1: measurement)
+
+The measurement apparatus that decides March's string representation question,
+built so the decision rests on data rather than on asymptotic reasoning. Three
+parts: opt-in runtime counters, a six-program benchmark corpus, and a harness.
+
+**Counters** (`MARCH_STRING_STATS=1`, `runtime/march_runtime.c`): allocation
+count and payload bytes, a size histogram bucketed at 7/15/23/31/63/255 bytes,
+bytes copied, frees, peak live bytes, and non-string (`march_alloc`) object
+counts. Hooked into `march_string_alloc` and **both** `march_decrc` free paths.
+Off by default behind a lazy env check shaped like `gc_trace_on`, relaxed
+atomics throughout; the "zero cost when off" claim is measured at −0.34%, not
+assumed. 23 bytes is the load-bearing bucket boundary — what would fit inline in
+the footprint the 24-byte `march_string` header already occupies. The
+`obj_allocs` counter was added mid-implementation after the split/slice pair
+proved unable to attribute cons-cell cost without it: cons cells are not
+strings, so they never reach `march_string_alloc`, and the two benchmarks
+reported near-identical `allocs` (9,000,126 vs 9,000,006) where the real
+difference is 9,000,120 vs 0.
+
+**Corpus** (`bench/string_{scan,case,split_large,slice_walk,small_churn,parallel_scan}.march`,
+documented in `specs/benchmarks.md`): each isolates one cost. `split_large` and
+`slice_walk` are a matched pair — same buffer, same field shape, differing only
+in whether a list is built — and their difference is what separates cons-cell
+cost from copy cost.
+
+**Harness** (`bench/run_string_bench.sh` → `bench/STRING_RESULTS.md`): median of
+5, peak RSS via `getrusage` with per-platform unit normalization (bytes on
+macOS, kilobytes on Linux), cross-checked against `/usr/bin/time -l` to within
+0.2%. Checksums are asserted, not printed, so a benchmark whose work is
+optimized away fails rather than reporting a fast number; the gate was proved to
+fire by corrupting an expected value.
+
+**Verdicts** (`specs/2026-07-26-string-performance-profile.md`), against
+criteria fixed in the spec before measuring: small-string optimization
+**indicated** (91.7% of allocations ≤23 bytes; doubling allocations doubles wall
+time); array-returning `split` **indicated** (split is 1.82× slower than
+slice-walk while copying only 1.43× the bytes — the difference is 9M cons
+cells); borrowed views **not indicated** (copy volume is 0.55–0.79× of input,
+not the ≥2× the criterion required — every field is copied exactly once);
+SIMD search worth doing at ~0.5 GB/s but not the largest win; phase 3's
+contention gate **triggered** (parallel scan plateaus at 3.97× on 8 workers of a
+10-performance-core machine, unexplained by cores or bandwidth).
+
+**Blocker found — since FIXED on main.** The harness turned up two
+compiled-only RC leaks, both with minimal repros, both absent when interpreted:
+`x ++ "literal"` re-allocated and leaked the literal on every evaluation, and a
+container released without being destructured never freed its contents —
+`split_large` showed 9,000,126 allocations against **3** frees, RSS growing
+~9.3MB per iteration. Both were fixed independently (immortal cell per literal
+site; `fix(codegen): deep drop for containers released without destructuring`).
+The phase 1 peak-RSS and peak-live columns were measured against the leaky
+compiler and must be re-taken before any memory-based criterion is applied;
+timing, allocation counts and copy volumes were unaffected and carry the
+verdicts above.
 
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 

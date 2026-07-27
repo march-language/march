@@ -13,6 +13,29 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`String.index_of_from(s, sub, start)`** — substring search from a byte
+  offset, returning the index in `s`'s own coordinates so it can be fed
+  straight back in when tokenizing. Without it, scanning for successive
+  separators means slicing off the tail and searching again, which copies the
+  remaining bytes at every step and makes a full tokenize O(n²).
+
+### Changed
+
+- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
+  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
+  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
+  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
+  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
+  rather than one byte at a time.
+
+- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
+  longer chains are folded into three-way concats, so k parts cost
+  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
+  prefix at every link. Measured 20% faster on a short-string building
+  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
+
+
+### Added
 - **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
   zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
   mismatch) and Int→Float widening helper, for numeric ops over two
@@ -143,6 +166,19 @@ git log is authoritative for exact commits.
   the new code. The driver now resolves the runtime directory once and
   registers it with the CAS, so the key always digests the sources actually
   compiled; `MARCH_RUNTIME_DIR` overrides the search, mirroring `MARCH_STDLIB`.
+- **`MARCH_STRING_STATS=1`** — an opt-in profiling mode for compiled binaries.
+  Set the environment variable and the program prints string-allocation
+  statistics to stderr at exit: allocation count and bytes, a size histogram,
+  bytes copied, frees, peak live bytes, and non-string heap allocations. Off by
+  default and measured at −0.34% overhead when off. Intended for answering
+  "where is this program's string cost going?" without a profiler.
+
+- **String benchmark suite** — six benchmarks in `bench/` (`string_scan`,
+  `string_case`, `string_split_large`, `string_slice_walk`,
+  `string_small_churn`, `string_parallel_scan`), each isolating one cost, run
+  by `bash bench/run_string_bench.sh` into `bench/STRING_RESULTS.md`. Documented
+  in `specs/benchmarks.md`; findings in
+  `specs/2026-07-26-string-performance-profile.md`.
 
 ### Changed
 

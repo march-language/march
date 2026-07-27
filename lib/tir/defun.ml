@@ -20,7 +20,7 @@ let builtin_names : StringSet.t =
       "print"; "println"; "print_stderr"; "print_int"; "print_float";
       "int_to_string"; "float_to_string"; "bool_to_string"; "atom_to_string";
       "string_to_int"; "string_length"; "string_concat";
-      "string_byte_length"; "string_is_empty"; "string_join";
+      "string_byte_length"; "string_is_empty"; "string_join"; "string_concat3";
       "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
@@ -59,7 +59,8 @@ let builtin_names : StringSet.t =
       "string_trim"; "string_trim_start"; "string_trim_end";
       "string_repeat"; "string_reverse";
       "string_pad_left"; "string_pad_right";
-      "string_grapheme_count"; "string_index_of"; "string_last_index_of";
+      "string_grapheme_count"; "string_index_of"; "string_index_of_from";
+      "string_last_index_of";
       "string_to_float";
       (* List builtins *)
       "list_append"; "list_concat";

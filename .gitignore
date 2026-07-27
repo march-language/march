@@ -3,6 +3,7 @@ _build/
 .merlin
 *.byte
 *.native
+*.cmi
 *.cmo
 *.cmx
 *.cma
@@ -72,6 +73,7 @@ __pycache__/
 !/bench/ocaml/
 !/bench/elixir/
 !/bench/rust/
+!/bench/python/
 !/bench/tfb/
 
 # Runtime trace dumps

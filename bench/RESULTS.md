@@ -1,8 +1,11 @@
 # Cross-Language Benchmark Results
 
-**Date:** 2026-07-24 (after restoring Perceus FBIP reuse + removing the per-call TLS preemption check)
+**Date:** 2026-07-24 (after restoring Perceus FBIP reuse + removing the per-call TLS preemption check);
+simd-sum/simd-map/simd-map2 added 2026-07-27.
 **Machine:** Apple M-series (darwin 25.5.0, 14 cores)
-**Methodology:** `RUNS=10 bash bench/run_benchmarks.sh`; median, min, max wall-clock reported.
+**Methodology:** `RUNS=10 bash bench/run_benchmarks.sh`; median, min, max reported. fib/binary-trees/
+tree-transform/list-ops measure subprocess wall-clock; the simd-* benchmarks self-time (see their
+section below for why).
 
 ## Versions
 
@@ -12,6 +15,8 @@
 | OCaml    | 5.3.0   | `ocamlopt` native |
 | Rust     | 1.94.0  | `rustc -O` native |
 | Elixir   | 1.20.1-otp-29 | BEAM JIT (script mode) |
+| Python   | 3.14    | CPython, interpreted |
+| NumPy    | 2.5.1   | vectorized/BLAS reference (simd-* only, needs `bench/.venv`) |
 
 ---
 
@@ -23,6 +28,12 @@
 | binary-trees(15) | 164.7 ms | **24.1 ms** | 150.7 ms | 335.1 ms |
 | tree-transform   | **579.1 ms** | 3669.5 ms | 4902.3 ms | 2369.0 ms |
 | list-ops(1M)     | 64.3 ms  | 34.8 ms  | **5.4 ms** | 311.7 ms |
+
+| SIMD benchmark (N=5M, self-timed) | March    | OCaml   | Rust    | Elixir   | Python   | NumPy   |
+|------------------------------------|----------|---------|---------|----------|----------|---------|
+| simd-sum                           | **1.2 ms** | 4.8 ms | 5.3 ms | 81.8 ms  | 289.4 ms | 1.0 ms  |
+| simd-map                           | 5.1 ms   | 5.5 ms  | **3.9 ms** | 248.2 ms | 192.2 ms | 2.2 ms  |
+| simd-map2                          | 287.5 ms | 7.0 ms  | **6.1 ms** | 102.0 ms | 197.2 ms | 1.7 ms  |
 
 Bold = fastest for that benchmark.
 
@@ -119,14 +130,86 @@ regressed to 143.0 ms.
 
 ---
 
+## simd-sum(5M) / simd-map(5M) / simd-map2(5M) — Float array numeric ops
+
+See [docs/simd-vectorization.md](../docs/simd-vectorization.md) for what these
+operations are and why they vectorize (or don't).
+
+**Self-timed, not subprocess wall-clock.** Every other benchmark on this page
+measures the whole process. These three don't: each program times only the
+operation itself, excluding data generation and (for interpreters) startup —
+see `bench/simd_sum.march`'s header comment. That distinction matters here
+specifically because building the *input* is expensive relative to the
+operation: a March program that built a 5M-element `List` of boxed floats and
+then measured the whole process spent ~200ms on the list build and ~1ms on
+the actual (genuinely vectorized) sum — a wall-clock number that would have
+measured "how fast can March allocate a linked list," not the SIMD claim
+under test. Every language's benchmark generates its input data outside the
+timed region for the same reason. OCaml's version also uses a manual
+for-loop rather than `Array.fold_left`/`Array.map` — their polymorphic
+accumulator boxes every float (~5x slower), which is not what a
+performance-conscious OCaml numeric loop looks like; Rust's iterator-based
+version was checked against a manual-loop control and found to already be
+at parity (zero-cost abstraction, as advertised).
+
+| simd-sum(5M) | Median   | Min     | Max     |
+|--------------|----------|---------|---------|
+| **March**    | **1.2 ms** | 1.1 ms | 1.7 ms |
+| OCaml        | 4.8 ms   | 4.7 ms  | 5.3 ms  |
+| Rust         | 5.3 ms   | 5.3 ms  | 5.4 ms  |
+| Elixir       | 81.8 ms  | 78.3 ms | 86.1 ms |
+| Python       | 289.4 ms | 281.4 ms| 308.3 ms|
+| NumPy        | 1.0 ms   | 0.9 ms  | 1.0 ms  |
+
+| simd-map(5M) | Median   | Min     | Max     |
+|--------------|----------|---------|---------|
+| March        | 5.1 ms   | 4.8 ms  | 5.4 ms  |
+| OCaml        | 5.5 ms   | 5.4 ms  | 5.8 ms  |
+| **Rust**     | **3.9 ms** | 3.8 ms | 4.1 ms |
+| Elixir       | 248.2 ms | 240.1 ms| 277.6 ms|
+| Python       | 192.2 ms | 188.8 ms| 195.9 ms|
+| NumPy        | 2.2 ms   | 2.1 ms  | 2.8 ms  |
+
+| simd-map2(5M)| Median   | Min     | Max     |
+|--------------|----------|---------|---------|
+| March        | 287.5 ms | 284.0 ms| 290.5 ms|
+| OCaml        | 7.0 ms   | 6.9 ms  | 7.0 ms  |
+| **Rust**     | **6.1 ms** | 4.6 ms | 6.4 ms |
+| Elixir       | 102.0 ms | 97.1 ms | 105.5 ms|
+| Python       | 197.2 ms | 187.8 ms| 200.7 ms|
+| NumPy        | 1.7 ms   | 1.5 ms  | 1.9 ms  |
+
+**simd-sum and simd-map: the SIMD claim holds up.** March ties NumPy (a
+hand-tuned, BLAS-backed reference implementation) for the reduction, and is
+competitive with hand-written OCaml/Rust for both — genuine wins for a
+compiler doing this via general-purpose auto-vectorization (LLVM's, at `-O2`)
+rather than a hand-rolled numeric kernel.
+
+**simd-map2 is the honest gap.** `NativeArray.map2_int`/`map2_float` (added
+2026-07-27 to unblock `DataFrame.col_add_col`) has no inlining/vectorization
+treatment yet — every element dispatches through the boxed closure-call path
+(`march_alloc_float` per element, indirect call through the closure
+pointer). At 287.5 ms it is **slower than naive interpreted Python** (197.2
+ms) for the same operation, and 47x slower than March's own `simd-map`. This
+is not a regression to fix reactively — it's a known, already-documented
+limitation (`docs/simd-vectorization.md` "Known limitations", added the same
+day as `map2` itself) surfaced here with a concrete number instead of a
+qualitative "not yet vectorized." Extending the Phase 2b/2c/Stage-4-style
+inlining machinery that already exists for `map_int`/`map_float` to the
+two-array `map2` shape is the natural next step if this gap is worth closing.
+
+---
+
 ## Where March wins and trails
 
 **Wins:** FBIP-shaped workloads (tree-transform) — in-place reuse under
-Perceus RC beats every allocating implementation by a wide margin.
+Perceus RC beats every allocating implementation by a wide margin. Single-
+array vectorizable Float ops (simd-sum, simd-map) — ties or beats NumPy.
 
 **Trails:** allocation-heavy churn with short-lived objects (binary-trees),
-where a generational GC is structurally better than RC; and tight iterator
-pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched.
+where a generational GC is structurally better than RC; tight iterator
+pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched; and
+two-array Float ops (simd-map2), which have no vectorization treatment yet.
 
 **Preemption overhead:** compiled green threads stay preemptible via a
 per-function-entry check. It is now a single load of a plain global plus a
@@ -155,6 +238,16 @@ already produced one round of misleading "the fix changed nothing" numbers.
 
 Source files:
 - `bench/elixir/` — Elixir `.exs` scripts (idiomatic Elixir/BEAM)
-- `bench/ocaml/` — OCaml `.ml` sources (compiled with `ocamlopt`)
+- `bench/ocaml/` — OCaml `.ml` sources (compiled with `ocamlopt`; the `simd_*`
+  ones link `unix` via `ocamlfind` for `Unix.gettimeofday`)
 - `bench/rust/` — Rust `.rs` sources (compiled with `rustc -O`)
+- `bench/python/` — Python `.py` sources; the `_numpy` variants need NumPy
 - `bench/*.march` — March sources (compiled with `march --compile --opt 2`)
+
+The NumPy row needs a local venv (not committed):
+```bash
+python3 -m venv bench/.venv
+bench/.venv/bin/pip install numpy
+```
+Every other row and benchmark runs without it (the script detects `bench/.venv`
+and skips the NumPy row if it's absent).

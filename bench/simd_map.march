@@ -1,0 +1,38 @@
+-- SIMD cross-language benchmark: elementwise map (x * 2.0 + 1.0) over a Float array.
+-- Matches bench/ocaml/simd_map.ml, bench/rust/simd_map.rs,
+-- bench/elixir/simd_map.exs, bench/python/simd_map.py (+ _numpy.py).
+--
+-- native_float_arr_map with a concrete-Float, single-use callback gets the
+-- boxing-free inlined clone (Float-boxing Stage 4, Option B) and genuinely
+-- vectorizes under --compile --opt 2 (see docs/simd-vectorization.md).
+--
+-- Data generation is NOT part of the timed region -- see bench/simd_sum.march
+-- for why (building the source List dominates an otherwise-microsecond op).
+mod SimdMap do
+
+needs IO.Clock
+
+pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
+  (t1 -. t0) *. 1000.0
+end
+
+pfn make_float_list(n : Int) : List(Float) do
+  fn go(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 do acc
+    else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+fn main() : Unit do
+  let n = 5000000
+  let arr = NativeArray.from_list_float(make_float_list(n))
+  let t0 = unix_time(())
+  let mapped = NativeArray.map_float(arr, fn x -> x *. 2.0 +. 1.0)
+  let t1 = unix_time(())
+  let s = NativeArray.sum_float(mapped)
+  println("RESULT " ++ float_to_string(s))
+  println("TIME_MS " ++ float_to_string(elapsed_ms(t0, t1)))
+end
+
+end
