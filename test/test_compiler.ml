@@ -2014,6 +2014,73 @@ let test_session_offer_missing_label_error () =
   end|} in
   Alcotest.(check bool) "missing offer branch arm: error" true (has_errors ctx)
 
+(** A guarded arm does NOT count as handling its label — the guard can fail
+    at runtime, so `:ok when true -> ...` alone (no catch-all) must still
+    report `:ok` as missing.  Regression coverage for the `handled` list's
+    `br.branch_guard = None` filter in `check_offer_label_exhaustiveness`:
+    if that filter were dropped, this program would wrongly typecheck clean. *)
+let test_session_offer_guarded_arm_not_handled () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D5 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D5)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok when true ->
+          let (n, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+        :err ->
+          let (s, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "guarded arm alone: missing :ok error"
+    true (has_error_with ctx "missing: :ok")
+
+(** A guarded catch-all does NOT count as a catch-all — `_ when false -> ...`
+    can still fall through to no arm at runtime, so a protocol branch left
+    otherwise unhandled must still be reported missing.  Regression coverage
+    for the `has_catch_all` computation's `br.branch_guard = None` filter: if
+    that filter were dropped, this program would wrongly typecheck clean. *)
+let test_session_offer_guarded_catch_all_not_catch_all () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D6 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D6)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let (n, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+        _ when false ->
+          println("other")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "guarded catch-all alone: missing :err error"
+    true (has_error_with ctx "missing: :err")
+
 (* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
 
 let test_srec_pingpong_loop_typechecks () =
@@ -8872,6 +8939,8 @@ let compiler_suites =
           Alcotest.test_case "session offer label shadow no false positive" `Quick test_session_offer_label_shadow_no_false_positive;
           Alcotest.test_case "session offer all labels no warning" `Quick test_session_offer_all_labels_no_warning;
           Alcotest.test_case "session offer missing label error" `Quick test_session_offer_missing_label_error;
+          Alcotest.test_case "session offer guarded arm not handled" `Quick test_session_offer_guarded_arm_not_handled;
+          Alcotest.test_case "session offer guarded catch-all not catch-all" `Quick test_session_offer_guarded_catch_all_not_catch_all;
           (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;
