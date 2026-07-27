@@ -210,6 +210,26 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_parallel_scan.march — Shared-buffer scan at 1/2/4/8 workers
+
+**Command:** count `"QQ"` occurrences in a 40MB buffer, chunked across 1, 2, 4, 8 workers
+**Expected output:** `checksum=16000000`, plus one `workers=N ms=T` line per worker count
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `Parallel.pmap` | Vec-based — chunk indices via `RRB.from_list`, results via `RRB.to_list` |
+| Shared-owner refcounting | Every worker slices from the same string; atomic RC on one cache line |
+| `String.slice` + `replace_all` | Per-chunk copy, then one full O(n) scan |
+
+**Comparison baseline:** Rust (rayon over `&str` chunks, zero copy), Go (goroutines over slices), C (pthreads over pointer ranges).
+**What to watch:** The scaling *shape*, not absolute times. Measured on an M3 Max (10 performance + 4 efficiency cores), stable across three runs: **131ms → 66ms (1.97×) → 34ms (3.9×) → 33ms (3.97×)**. Scaling is near-perfect to 4 workers and then flat — 8 workers buy nothing. That ceiling is *not* explained by core count (8 performance cores were available) nor by memory bandwidth (~80MB of traffic in 33ms ≈ 2.4GB/s, far below this machine's capability), which leaves shared-owner refcount traffic and allocator contention as the candidates. Distinguishing those two is phase 3's first job; the gate in `specs/2026-07-26-string-performance-design.md` is triggered.
+
+**Known limitation, deliberate:** a needle straddling a chunk boundary is missed. Every boundary here falls inside the repeated 10-byte unit, so the count stays deterministic and the benchmark remains valid as a timing comparison. Handling boundaries correctly is precisely the problem phase 3 must solve, and it is not solved here.
+
+**Counting method:** hits are counted as the length delta from `replace_all("QQ", "Q")` — one O(n) scan plus one O(n) build. The natural formulation (`index_of`, slice off the tail, repeat) is O(n²) in bytes copied, since `String.index_of` has no start-offset variant; at this size that is ~800GB of copying.
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: REAL PARALLELISM (compiled) / SEQUENTIAL (interpreted)** — compiled
