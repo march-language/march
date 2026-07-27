@@ -11,6 +11,24 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Discarding a container no longer leaks its contents.** March reclaimed an
+  aggregate only by *destructuring* it; releasing one that was never pattern-
+  matched freed the top cell alone and orphaned everything under it. This hit
+  the ordinary way to consume a `String.split` result — passing it to a
+  function that borrows it — so bulk text processing leaked in proportion to
+  its input (a 60-iteration split/consume loop peaked at 585 MB, growing
+  linearly; it now holds flat at 16 MB). It was never about how the container
+  was traversed: a consumer that ignored its list argument entirely leaked
+  just the same. Compiled targets only — the interpreter was unaffected.
+  `bench/binary_trees.march` drops from 157 MB to 6 MB peak as a result.
+- **A tail-recursive `Cons(_, t)` walk no longer strands a reference on every
+  cell.** The self-TCO back-edge skipped *every* refcount op on a forwarded
+  argument, to fix a use-after-free on a freshly allocated one. A list walk's
+  tail is not freshly allocated — it is dup'd from the matched cell, and that
+  dup's matching release was being skipped, leaving each cons cell pinned.
+
 ### Changed
 
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,

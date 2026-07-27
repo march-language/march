@@ -20,6 +20,28 @@
     are pure structural recursion over [Tir.expr] with no dependency back on
     [emit_expr]/[emit_case]/anything else in [llvm_emit.ml]. *)
 
+(** True if [e] is a cleanup operation: an RC op, or a call to a synthesized
+    deep-drop function, which [Drop.run] substitutes for exactly such an op
+    (see [Tir_names.is_drop_fn]).  Both are evaluated only for effect. *)
+let is_cleanup_op (e : Tir.expr) : bool =
+  match e with
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
+  | Tir.EIncRC _ | Tir.EAtomicIncRC _ -> true
+  | Tir.EApp (f, _) -> Tir_names.is_drop_fn f.Tir.v_name
+  | _ -> false
+
+(** The variable a cleanup op releases, when it is a simple variable — so the
+    TCO back-edge emitters can ask "does this op target a forwarded argument?"
+    uniformly across an RC op and the deep-drop call that may stand in for it. *)
+let cleanup_target (e : Tir.expr) : string option =
+  match e with
+  | Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
+  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)
+  | Tir.EFree (Tir.AVar v) -> Some v.Tir.v_name
+  | Tir.EApp (f, [Tir.AVar v]) when Tir_names.is_drop_fn f.Tir.v_name ->
+    Some v.Tir.v_name
+  | _ -> None
+
 (** True iff [body] is a "trivial cleanup chain" that performs only
     [EDecRC] / [EAtomicDecRC] / [EFree] operations and finally returns
     the binding named [tmp_name].
@@ -42,7 +64,7 @@
 let rec is_trivial_dec_chain_returning (tmp_name : string) (body : Tir.expr) : bool =
   match body with
   | Tir.EAtom (Tir.AVar v) -> String.equal v.Tir.v_name tmp_name
-  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _), rest) ->
+  | Tir.ESeq (op, rest) when is_cleanup_op op ->
     is_trivial_dec_chain_returning tmp_name rest
   | _ -> false
 
@@ -63,12 +85,52 @@ let rec is_trivial_dec_chain_returning (tmp_name : string) (body : Tir.expr) : b
    and emit a back-edge instead. *)
 let rec is_trivial_dec_chain (e : Tir.expr) : bool =
   match e with
-  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-  | Tir.EIncRC _ | Tir.EAtomicIncRC _ -> true
-  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-              | Tir.EIncRC _ | Tir.EAtomicIncRC _), rest) ->
-    is_trivial_dec_chain rest
+  | _ when is_cleanup_op e -> true
+  | Tir.ESeq (op, rest) when is_cleanup_op op -> is_trivial_dec_chain rest
   | _ -> false
+
+(** Collect the locals in [expr] bound to a "dup" — [ELet (v, ESeq (EIncRC x,
+    EAtom x), _)], the shape Perceus uses to materialise an owned local from a
+    borrowed field (the `t` of a `Cons(_, t)` pattern, say).  Such a local
+    carries a +1 whose matching half is the post-call DecRC the dec-chain
+    emits.
+
+    This is the discriminator the TCO back-edge emitters need.  Commit
+    eafbd71a fixed a use-after-free by skipping every dec-chain RC op whose
+    target is one of the forwarded tail-call arguments: under real recursion
+    that DecRC fires only after the nested call fully returns, but the
+    flattened loop runs it immediately before the same value is stored into
+    the next iteration's parameter slot, freeing a freshly-allocated,
+    uncompensated value one instruction before its reuse.  That reasoning
+    holds only for an argument with no compensating IncRC.  A dup-bound
+    argument's DecRC is not an early release — it is the closing half of a
+    balanced pair, and skipping it strands the +1, leaking one cell (and its
+    payload) per iteration.  eafbd71a anticipated this case and judged it to
+    "survive by accident (a compensating IncRC keeps it alive)" — it does
+    survive, but only by leaking the whole list.
+
+    Emission-order-independent by construction: [emit_fn] runs this over the
+    whole function body up front rather than accumulating during emission, so
+    a dup binding is visible to the back-edge emitter no matter where the TIR
+    puts it relative to the tail call. *)
+let rec dup_bound_vars (expr : Tir.expr) : string list =
+  let here = match expr with
+    | Tir.ELet (v, Tir.ESeq (Tir.EIncRC (Tir.AVar a), Tir.EAtom (Tir.AVar b)), _)
+      when String.equal a.Tir.v_name b.Tir.v_name -> [v.Tir.v_name]
+    | _ -> []
+  in
+  let sub = match expr with
+    | Tir.ELet (_, rhs, body) -> dup_bound_vars rhs @ dup_bound_vars body
+    | Tir.ESeq (e1, e2) -> dup_bound_vars e1 @ dup_bound_vars e2
+    | Tir.ECase (_, branches, default_opt) ->
+      List.concat_map (fun br -> dup_bound_vars br.Tir.br_body) branches
+      @ (match default_opt with Some d -> dup_bound_vars d | None -> [])
+    | Tir.ELetRec (fns, body) ->
+      List.concat_map (fun f -> dup_bound_vars f.Tir.fn_body) fns
+      @ dup_bound_vars body
+    | _ -> []
+  in
+  here @ sub
 
 (* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
 

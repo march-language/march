@@ -1,8 +1,64 @@
 # March — TODO List
 
-**Last updated:** 2026-07-25 (LLVM allocation and closure-trampoline attributes verified; see Done.)
+**Last updated:** 2026-07-27 (deep drop for containers released without destructuring; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## Deep drop for aggregates released without destructuring (FIXED 2026-07-27)
+
+**Symptom.** A compiled `String.split` result passed to a function that borrows
+it leaked its entire contents: 9,000,126 string allocations against 3 frees,
+peak RSS growing ~9.3 MB per iteration (5/20/60 iterations → 52/199/585 MB).
+Interpreted mode unaffected (OCaml GC).
+
+**Root cause.** March reclaims an aggregate only by DESTRUCTURING it —
+`llvm_case.ml`'s owned-scrutinee path frees the box with `march_decrc_freed`
+and lets the extracted fields inherit its child references. A bare `EDecRC` on
+a container that is never pattern-matched lowered to `march_decrc_local`, a
+shallow `free(p)` that never decrements the children (`runtime/march_runtime.c`).
+Perceus emits exactly that whenever the consumer BORROWS and the owner is left
+holding the drop. Not specific to traversal: a consumer that ignored its list
+argument entirely leaked identically, which is what ruled out the original
+"the `Cons(h, t)` walk loses the head's ownership" hypothesis.
+
+**Fix.** New post-Perceus pass `lib/tir/drop.ml` synthesizes, per heap-owning
+variant type, `__drop$T(x) = case x of C(f…) -> if march_decrc_freed(x) then
+drop f…`, and rewrites bare aggregate `EDecRC`s into calls to it. Synthesized
+in TIR rather than hand-emitted LLVM so the existing case-lowering supplies the
+RC protocol and representation handling, and so the recursive field's drop sits
+in tail position and becomes a TCO loop (a 150K-element spine must not recurse
+in C). The shared-box early exit is load-bearing for both correctness and
+complexity: descending into a cell whose refcount did not reach zero would free
+children still owned elsewhere, and is quadratic.
+
+Also fixed, and a prerequisite for the above actually reclaiming anything: the
+self-TCO back-edge skipped every RC op on a forwarded argument (commit
+`eafbd71a`, guarding a freshly-allocated one against an eager release). A
+`Cons(_, t)` walk's forwarded tail is DUP-BOUND — `let t = inc_rc $f; $f` — so
+skipping its release stranded the `+1` on every cons cell. `eafbd71a` predicted
+this case and judged that it "survives by accident (a compensating IncRC keeps
+it alive)"; it survives by leaking. `Llvm_tco.dup_bound_vars` now narrows the
+skip to genuinely uncompensated arguments.
+
+**Verified.** Repro 585 MB → 16 MB, flat across 5/20/60 iterations. Tree
+build-and-discard: 0 net live objects under `MARCH_TRACE_GC`.
+`bench/binary_trees.march` 157 MB → 6 MB peak; tree_transform/list_ops/
+binary_trees outputs and timings unchanged. Oracle: 0 divergences over 96
+comparable programs. Full suite green except two pre-existing failures
+(a machine-wide ASAN hang, reproduced with a trivial unrelated C program; and
+`cli: timings`, which fails identically on a pristine baseline).
+
+**Known limits (not regressions — the same gaps existed before, unfixed):**
+- Newtype- and Niche-repr types are skipped, so a dropped `Option(String)`
+  still leaks its payload. Widening to Niche is a separate step; Newtype is
+  riskier (`Bytes` is newtype-shaped and runtime-built).
+- Tuples and records are untouched: `Rc_types.needs_rc` is FALSE for both by
+  design, so Perceus emits no aggregate-level dec for this pass to rewrite.
+- Only the LAST heap field's drop is a tail call, so a deep LEFT spine still
+  recurses in C.
+- `EAtomicDecRC` (actor-shared values) is left alone.
 
 ---
 

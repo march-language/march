@@ -1,5 +1,46 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
+
+Compiled March now reclaims an aggregate that is released WITHOUT being
+pattern-matched. Previously only destructuring reclaimed one: `llvm_case.ml`'s
+owned-scrutinee path frees the box via `march_decrc_freed` and lets the
+extracted fields inherit its child references, while a bare `EDecRC` lowered to
+`march_decrc_local` — a shallow `free(p)` that never decremented the children.
+Perceus emits that bare drop whenever the consumer BORROWS the container, which
+is the ordinary shape of `let parts = String.split(…)` followed by a call, so
+bulk text processing leaked proportionally to its input (60-iteration loop:
+9,000,126 string allocations / 3 frees, 585 MB peak, linear in iterations).
+
+The new post-Perceus pass `lib/tir/drop.ml` synthesizes one
+`__drop$T(x) = case x of C(f…) -> if march_decrc_freed(x) then drop f…` per
+heap-owning variant type and rewrites bare aggregate `EDecRC`s into calls to
+it. Synthesizing in TIR (rather than emitting LLVM by hand) means the RC
+protocol and Boxed/Niche/Newtype representation handling come from the existing
+case lowering, and the recursive field's drop — left in tail position — becomes
+a `llvm_tco` loop, so a 150K-element spine does not recurse in C. The
+shared-box early exit is load-bearing twice over: descending into a cell whose
+refcount did not reach zero would free children still owned by the surviving
+reference, and would make every drop quadratic.
+
+`Llvm_tco.dup_bound_vars` additionally narrows the self-TCO back-edge's
+skip-RC-ops-on-forwarded-arguments rule (commit `eafbd71a`) to arguments with
+no compensating IncRC — a `Cons(_, t)` walk's forwarded tail is dup-bound, and
+skipping its release stranded a `+1` on every cons cell, which would have
+pinned the whole list even with deep drop in place.
+
+Repro 585 MB → 16 MB and flat across iteration counts; tree build-and-discard
+shows 0 net live objects under `MARCH_TRACE_GC`; `bench/binary_trees.march`
+157 MB → 6 MB peak with unchanged output. Oracle 0 divergences over 96
+comparable programs; compiler/eval/snapshots/codegen/stdlib_march green,
+stdlib green but for a pre-existing machine-wide ASAN hang. Interpreted mode is
+untouched (the pass runs only in the compile pipeline, and is skipped for the
+GC'd JS target). Known gaps, all pre-existing and unchanged: Newtype/Niche-repr
+types (a dropped `Option(String)` still leaks its payload), tuples and records
+(`Rc_types.needs_rc` is FALSE for both, so no aggregate-level dec exists to
+rewrite), deep LEFT spines (only the last field's drop is a tail call), and
+`EAtomicDecRC`.
+
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 
 A relational postcondition on a structurally recursive function —
