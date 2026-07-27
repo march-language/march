@@ -1976,9 +1976,11 @@ let builtin_bindings : (string * scheme) list =
     ("string_starts_with",  Mono (TArrow (t_string, TArrow (t_string, t_bool))));
     ("string_ends_with",    Mono (TArrow (t_string, TArrow (t_string, t_bool))));
     ("string_index_of",     Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
+    ("string_index_of_from", Mono (TArrow (t_string, TArrow (t_string, TArrow (t_int, t_option t_int)))));
     ("string_replace",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
+    ("string_concat3",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_join",         Mono (TArrow (t_list t_string, TArrow (t_string, t_string))));
     ("string_trim",         Mono (TArrow (t_string, t_string)));
     ("string_trim_start",   Mono (TArrow (t_string, t_string)));

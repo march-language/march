@@ -163,6 +163,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_is_empty(ptr %s)" };
   { march_name = "string_to_int"; c_name = Some "march_string_to_int"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_int(ptr %s)" };
+  { march_name = "string_concat3"; c_name = Some "march_string_concat3"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)" };
   { march_name = "string_join"; c_name = Some "march_string_join"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_join(ptr %list, ptr %sep)" };
   { march_name = "float_abs"; c_name = Some "march_float_abs"; ret_ty = Some Tir.TFloat;
@@ -269,6 +271,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_grapheme_count(ptr %s)" };
   { march_name = "string_index_of"; c_name = Some "march_string_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of(ptr %s, ptr %sub)" };
+  { march_name = "string_index_of_from"; c_name = Some "march_string_index_of_from"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of_from(ptr %s, ptr %sub, i64 %start)" };
   { march_name = "string_last_index_of"; c_name = Some "march_string_last_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)" };
   { march_name = "string_to_float"; c_name = Some "march_string_to_float"; ret_ty = Some (Tir.TCon ("Option", [Tir.TFloat]));
@@ -969,6 +973,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_byte_length";
   PDeclare "march_string_is_empty";
   PDeclare "march_string_to_int";
+  PDeclare "march_string_concat3";
   PDeclare "march_string_join";
   PComment "; Float builtins";
   PDeclare "march_float_abs";
@@ -1026,6 +1031,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_pad_right";
   PDeclare "march_string_grapheme_count";
   PDeclare "march_string_index_of";
+  PDeclare "march_string_index_of_from";
   PDeclare "march_string_last_index_of";
   PDeclare "march_string_to_float";
   PComment "; List builtins";

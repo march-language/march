@@ -93,6 +93,149 @@ static inline int gc_trace_on(void) {
     return gc_trace_state > 0;
 }
 
+/* ── String statistics (MARCH_STRING_STATS=1) ────────────────────────────
+ * Opt-in profiling counters for the phase 1 string measurement — see
+ * specs/2026-07-26-string-performance-design.md.  They exist to answer one
+ * question with data instead of intuition: whether march_string's single
+ * contiguous representation should grow a small-string optimisation, a
+ * borrowed-view variant, or neither.
+ *
+ * OFF by default.  When off the cost is one predictable branch inside
+ * functions that are already calling malloc or memcpy; `--verify-overhead`
+ * in bench/run_string_bench.sh asserts that stays under 2%.
+ *
+ * Relaxed atomics throughout, mirroring march_live_alloc_count: these are a
+ * profiling aid, not a synchronisation mechanism, and stronger ordering
+ * would distort the very timings being measured. */
+static pthread_mutex_t str_stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int str_stats_state = 0;  /* 0 = uninit, 1 = on, -1 = off */
+
+#define MARCH_STR_NBUCKETS 7
+static _Atomic int64_t str_alloc_count;
+static _Atomic int64_t str_alloc_bytes;
+static _Atomic int64_t str_free_count;
+static _Atomic int64_t str_copy_bytes;
+static _Atomic int64_t str_live_bytes;
+static _Atomic int64_t str_peak_bytes;
+static _Atomic int64_t str_hist[MARCH_STR_NBUCKETS];
+/* Non-string heap objects (march_alloc): cons cells, tuples, ADT payloads.
+ * Needed because the cost of a list-returning string operation lives almost
+ * entirely here, NOT in the string counters — String.split allocates one
+ * string AND one cons cell per field, but the cons cell goes through
+ * march_alloc and is invisible to str_alloc_count.  Without this,
+ * bench/string_split_large and bench/string_slice_walk report near-identical
+ * `allocs` (measured: 9_000_126 vs 9_000_006) and the pair cannot attribute
+ * cost to the list structure at all — which is the comparison they exist to
+ * make. */
+static _Atomic int64_t obj_alloc_count;
+static _Atomic int64_t obj_alloc_bytes;
+
+static const char *str_hist_names[MARCH_STR_NBUCKETS] = {
+    "hist_le7", "hist_le15", "hist_le23", "hist_le31",
+    "hist_le63", "hist_le255", "hist_gt255"
+};
+
+/* Bucket bounds chosen for the SSO decision: 23 bytes is what would fit
+ * inline in the footprint the 24-byte march_string header already occupies,
+ * so the <=23 buckets are exactly the strings an SSO could make free. */
+static inline int str_bucket(int64_t len) {
+    if (len <=   7) return 0;
+    if (len <=  15) return 1;
+    if (len <=  23) return 2;
+    if (len <=  31) return 3;
+    if (len <=  63) return 4;
+    if (len <= 255) return 5;
+    return 6;
+}
+
+static void str_stats_dump(void) {
+    fprintf(stderr, "march_string_stats allocs %lld\n",
+            (long long)atomic_load_explicit(&str_alloc_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats alloc_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_alloc_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats frees %lld\n",
+            (long long)atomic_load_explicit(&str_free_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats copy_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_copy_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats peak_live_bytes %lld\n",
+            (long long)atomic_load_explicit(&str_peak_bytes, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats obj_allocs %lld\n",
+            (long long)atomic_load_explicit(&obj_alloc_count, memory_order_relaxed));
+    fprintf(stderr, "march_string_stats obj_alloc_bytes %lld\n",
+            (long long)atomic_load_explicit(&obj_alloc_bytes, memory_order_relaxed));
+    for (int i = 0; i < MARCH_STR_NBUCKETS; i++)
+        fprintf(stderr, "march_string_stats %s %lld\n", str_hist_names[i],
+                (long long)atomic_load_explicit(&str_hist[i], memory_order_relaxed));
+}
+
+static void str_stats_init_locked(void) {
+    const char *e = getenv("MARCH_STRING_STATS");
+    if (e && *e && strcmp(e, "0") != 0) {
+        str_stats_state = 1;
+        atexit(str_stats_dump);
+    } else {
+        str_stats_state = -1;
+    }
+}
+
+/* Lazy single-check, same shape as gc_trace_on. */
+static inline int str_stats_on(void) {
+    if (__builtin_expect(str_stats_state != 0, 1)) return str_stats_state > 0;
+    pthread_mutex_lock(&str_stats_mutex);
+    if (str_stats_state == 0) str_stats_init_locked();
+    pthread_mutex_unlock(&str_stats_mutex);
+    return str_stats_state > 0;
+}
+
+/* Tally one string allocation of [len] payload bytes, maintaining the running
+ * peak of live string bytes with a CAS loop (relaxed: the peak is a report,
+ * not a synchronisation point, so a racing under-observation is acceptable). */
+static void str_stats_alloc(int64_t len) {
+    atomic_fetch_add_explicit(&str_alloc_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&str_alloc_bytes, len, memory_order_relaxed);
+    atomic_fetch_add_explicit(&str_hist[str_bucket(len)], 1, memory_order_relaxed);
+    int64_t live = atomic_fetch_add_explicit(&str_live_bytes, len,
+                                             memory_order_relaxed) + len;
+    int64_t peak = atomic_load_explicit(&str_peak_bytes, memory_order_relaxed);
+    while (live > peak &&
+           !atomic_compare_exchange_weak_explicit(
+               &str_peak_bytes, &peak, live,
+               memory_order_relaxed, memory_order_relaxed)) { }
+}
+
+static void str_stats_free(int64_t len) {
+    atomic_fetch_add_explicit(&str_free_count, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&str_live_bytes, len, memory_order_relaxed);
+}
+
+/* memcpy with opt-in byte accounting.  Every string-BUILDING copy in this
+ * file routes through here, so copy_bytes measures exactly the work a
+ * borrowed-view representation could eliminate.  Copies outside the string
+ * operations (scheduler, HTTP, actor mailboxes) deliberately keep plain
+ * memcpy: counting them would make the number mean nothing.
+ *
+ * Called once per operation, never per byte — a per-byte call would put the
+ * str_stats_on() branch inside the copy loop and break the <2% off-path
+ * budget that bench/run_string_bench.sh --verify-overhead enforces. */
+static inline void march_str_copy(void *dst, const void *src, size_t n) {
+    memcpy(dst, src, n);
+    if (str_stats_on())
+        atomic_fetch_add_explicit(&str_copy_bytes, (int64_t)n,
+                                  memory_order_relaxed);
+}
+
+/* Tally [n] bytes moved by a hand-written byte loop rather than a memcpy.
+ * to_lowercase/to_uppercase/reverse transform while they copy, so they cannot
+ * call march_str_copy — but they move exactly as many bytes, and a view
+ * representation would not help them either way.  Leaving them out made
+ * bench/string_case report ~1MB copied for 400MB of actual work, which would
+ * have understated the copy total by two orders of magnitude in precisely the
+ * benchmark built to measure transform cost. */
+static inline void str_stats_copied(int64_t n) {
+    if (str_stats_on())
+        atomic_fetch_add_explicit(&str_copy_bytes, n, memory_order_relaxed);
+}
+
 static inline int64_t gc_ts_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -151,6 +294,10 @@ void *march_alloc(int64_t sz) {
     h->tag = 0;
     h->pad = 0;
     MARCH_ALLOC_BUMP();
+    if (str_stats_on()) {
+        atomic_fetch_add_explicit(&obj_alloc_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&obj_alloc_bytes, sz, memory_order_relaxed);
+    }
     if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
     return p;
 }
@@ -209,6 +356,9 @@ void march_decrc(void *p) {
     if (gc_trace_on())
         gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev == 1) {
+        /* Read ->len while the object is still alive. */
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
         march_run_resource_dtor(p);
         MARCH_FREE_BUMP();
         free(p);
@@ -228,7 +378,13 @@ int64_t march_decrc_freed(void *p) {
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (gc_trace_on())
         gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
-    if (prev == 1) { march_run_resource_dtor(p); MARCH_FREE_BUMP(); free(p); return 1; }
+    if (prev == 1) {
+        /* Sibling of march_decrc's free path — must tally too, or frees are
+         * undercounted and peak_live_bytes is inflated. */
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
+        march_run_resource_dtor(p); MARCH_FREE_BUMP(); free(p); return 1;
+    }
     if (prev < 1) {
         /* RC underflow: decrement-on-zero (or worse) detected.  Without this
          * guard we'd silently double-free.  Mirror march_decrc's behaviour. */
@@ -381,12 +537,13 @@ void *march_string_alloc(int64_t len) {
     s->pad = 0;
     s->len = len;
     MARCH_ALLOC_BUMP();
+    if (str_stats_on()) str_stats_alloc(len);
     return s;
 }
 
 void *march_string_lit(const char *utf8, int64_t len) {
     march_string *s = march_string_alloc(len);
-    memcpy(s->data, utf8, (size_t)len);
+    march_str_copy(s->data, utf8, (size_t)len);
     s->data[len] = '\0';
     return s;
 }
@@ -474,8 +631,8 @@ void *march_string_concat(void *a, void *b) {
         fputs("march: runtime error: string too large (concat overflow)\n", stderr); exit(1);
     }
     march_string *s = march_string_alloc(total);
-    memcpy(s->data, sa->data, (size_t)sa->len);
-    memcpy(s->data + sa->len, sb->data, (size_t)sb->len);
+    march_str_copy(s->data, sa->data, (size_t)sa->len);
+    march_str_copy(s->data + sa->len, sb->data, (size_t)sb->len);
     s->data[total] = '\0';
     return s;
 }
@@ -651,6 +808,32 @@ void *march_string_to_int(void *s) {
  *   Nil  tag=0, no fields → 16 bytes
  *   Cons tag=1, 2 ptr fields at offsets 16 (head String) and 24 (tail List)
  */
+/* Three-way concat: sum the lengths, allocate once, copy once.
+ *
+ * A left-deep `++` chain re-copies the growing prefix at every link, so k parts
+ * cost k-1 allocations and O(k^2) bytes copied.  Folding the chain in groups of
+ * three (desugar.ml) brings that to ceil((k-1)/2) allocations, halving both the
+ * allocation count and the intermediate copying at k=3 and k=5.
+ *
+ * Fixed arity rather than a variadic n-ary form on purpose: March builtin
+ * signatures are fixed-arity `Mono (TArrow ...)`, and the only variable-length
+ * alternative -- taking a List(String), i.e. march_string_join -- has to
+ * materialize cons cells first, which measured at 59% of its cost at k=5.
+ *
+ * All three operands are borrowed: this neither retains nor releases them. */
+void *march_string_concat3(void *a, void *b, void *c) {
+    march_string *sa = (march_string *)a;
+    march_string *sb = (march_string *)b;
+    march_string *sc = (march_string *)c;
+    int64_t total = sa->len + sb->len + sc->len;
+    march_string *r = march_string_alloc(total);
+    march_str_copy(r->data, sa->data, (size_t)sa->len);
+    march_str_copy(r->data + sa->len, sb->data, (size_t)sb->len);
+    march_str_copy(r->data + sa->len + sb->len, sc->data, (size_t)sc->len);
+    r->data[total] = '\0';
+    return r;
+}
+
 void *march_string_join(void *list, void *sep) {
     march_string *sep_s = (march_string *)sep;
     int64_t sep_len = sep_s ? sep_s->len : 0;
@@ -679,10 +862,10 @@ void *march_string_join(void *list, void *sep) {
         void *head = *(void **)((char *)cur + 16);
         march_string *hs = (march_string *)head;
         if (!first && sep_len > 0) {
-            memcpy(dst, sep_s->data, (size_t)sep_len);
+            march_str_copy(dst, sep_s->data, (size_t)sep_len);
             dst += sep_len;
         }
-        memcpy(dst, hs->data, (size_t)hs->len);
+        march_str_copy(dst, hs->data, (size_t)hs->len);
         dst += hs->len;
         first = 0;
         cur = *(void **)((char *)cur + 24);
@@ -2581,15 +2764,49 @@ static void *make_tuple2(void *a, void *b) {
     return tup;
 }
 
+/* Substring search shared by every string search site in this file.
+ *
+ * Two stages: memchr finds candidate first bytes, memcmp confirms.  libc's
+ * memchr is SIMD-optimised on every platform we target, so this gets vector
+ * scanning with no intrinsics and no per-architecture code — the same reasoning
+ * that keeps runtime/march_http_parse_simd.c's scalar fallback rather than
+ * requiring SSE4.2 everywhere.  The previous implementation called memcmp at
+ * every byte offset, which measured at roughly 0.5 GB/s.
+ *
+ * march_string is LENGTH-COUNTED and may contain NUL bytes, so nothing here may
+ * use strstr/strchr or treat NUL as a terminator.
+ *
+ * On a failed candidate the scan resumes at hit + 1, NOT hit + nlen: needles
+ * can overlap, and skipping the whole needle would miss the match in
+ * ("aaaa", "aa") starting at index 1.
+ *
+ * Returns a pointer into [hay], or NULL when there is no match. */
+static const char *march_memmem(const char *hay, int64_t haylen,
+                                const char *needle, int64_t nlen) {
+    if (nlen == 0) return hay;
+    if (nlen > haylen) return NULL;
+    const char first = needle[0];
+    const char *p = hay;
+    int64_t remaining = haylen;
+    while (remaining >= nlen) {
+        /* Only the first (remaining - nlen + 1) bytes can start a match; a hit
+         * beyond that could not be followed by a full needle. */
+        const char *hit =
+            (const char *)memchr(p, first, (size_t)(remaining - nlen + 1));
+        if (!hit) return NULL;
+        if (memcmp(hit, needle, (size_t)nlen) == 0) return hit;
+        remaining -= (hit - p) + 1;
+        p = hit + 1;
+    }
+    return NULL;
+}
+
 int64_t march_string_contains(void *s, void *sub) {
     march_string *ss = (march_string *)s;
     march_string *su = (march_string *)sub;
     if (su->len == 0) return 1;
     if (ss->len < su->len) return 0;
-    for (int64_t i = 0; i <= ss->len - su->len; i++) {
-        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) return 1;
-    }
-    return 0;
+    return march_memmem(ss->data, ss->len, su->data, su->len) != NULL;
 }
 
 int64_t march_string_starts_with(void *s, void *prefix) {
@@ -2685,13 +2902,17 @@ void *march_string_split(void *s, void *sep) {
     int64_t count = 0;
     void **parts = malloc(sizeof(void *) * (size_t)cap);
     int64_t start = 0;
-    for (int64_t i = 0; i <= ss->len - sp->len; i++) {
-        if (memcmp(ss->data + i, sp->data, (size_t)sp->len) == 0) {
-            if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
-            parts[count++] = march_string_lit(ss->data + start, i - start);
-            start = i + sp->len;
-            i = start - 1;  /* loop will increment */
-        }
+    /* memmem walk rather than a memcmp at every offset.  Separators are found
+     * by the SIMD-optimised memchr fast path; the emitted parts and the
+     * empty-field behaviour for adjacent separators are unchanged. */
+    while (start <= ss->len - sp->len) {
+        const char *hit = march_memmem(ss->data + start, ss->len - start,
+                                       sp->data, sp->len);
+        if (!hit) break;
+        int64_t i = hit - ss->data;
+        if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
+        parts[count++] = march_string_lit(ss->data + start, i - start);
+        start = i + sp->len;
     }
     if (count >= cap) { cap *= 2; parts = realloc(parts, sizeof(void *) * (size_t)cap); }
     parts[count++] = march_string_lit(ss->data + start, ss->len - start);
@@ -2739,7 +2960,7 @@ void *march_string_from_chars(void *lst) {
         int32_t tag = *(int32_t *)((char *)cur + 8);
         if (tag == 0) break; /* Nil */
         march_string *ch = *(march_string **)((char *)cur + 16);
-        memcpy(r->data + off, ch->data, (size_t)ch->len);
+        march_str_copy(r->data + off, ch->data, (size_t)ch->len);
         off += ch->len;
         cur = *(void **)((char *)cur + 24);
     }
@@ -2756,16 +2977,16 @@ void *march_string_replace(void *s, void *old, void *new_) {
         /* Return a copy. */
         return march_string_lit(ss->data, ss->len);
     }
-    for (int64_t i = 0; i + so->len <= ss->len; i++) {
-        if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
-            int64_t newlen = ss->len - so->len + sn->len;
-            march_string *r = march_string_alloc(newlen);
-            memcpy(r->data, ss->data, (size_t)i);
-            memcpy(r->data + i, sn->data, (size_t)sn->len);
-            memcpy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
-            r->data[newlen] = '\0';
-            return r;
-        }
+    const char *hit = march_memmem(ss->data, ss->len, so->data, so->len);
+    if (hit) {
+        int64_t i = hit - ss->data;
+        int64_t newlen = ss->len - so->len + sn->len;
+        march_string *r = march_string_alloc(newlen);
+        march_str_copy(r->data, ss->data, (size_t)i);
+        march_str_copy(r->data + i, sn->data, (size_t)sn->len);
+        march_str_copy(r->data + i + sn->len, ss->data + i + so->len, (size_t)(ss->len - i - so->len));
+        r->data[newlen] = '\0';
+        return r;
     }
     return march_string_lit(ss->data, ss->len);
 }
@@ -2783,22 +3004,29 @@ void *march_string_replace_all(void *s, void *old, void *new_) {
     char *buf = malloc((size_t)cap);
     int64_t out = 0;
     int64_t i = 0;
+    /* Jump between matches and bulk-copy the span in front of each, rather than
+     * testing and copying one byte at a time.  The old loop paid a memcmp per
+     * input byte in the common no-match case AND copied the literal text a byte
+     * at a time; this pays one memchr-driven search per match and one memcpy
+     * per span. */
     while (i <= ss->len - so->len) {
-        if (memcmp(ss->data + i, so->data, (size_t)so->len) == 0) {
-            /* Ensure capacity. */
-            while (out + sn->len >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-            memcpy(buf + out, sn->data, (size_t)sn->len);
-            out += sn->len;
-            i += so->len;
-        } else {
-            if (out + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-            buf[out++] = ss->data[i++];
-        }
+        const char *hit = march_memmem(ss->data + i, ss->len - i, so->data, so->len);
+        if (!hit) break;
+        int64_t at   = hit - ss->data;
+        int64_t span = at - i;                 /* literal bytes before the match */
+        while (out + span + sn->len + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
+        march_str_copy(buf + out, ss->data + i, (size_t)span);
+        out += span;
+        march_str_copy(buf + out, sn->data, (size_t)sn->len);
+        out += sn->len;
+        i = at + so->len;
     }
-    /* Copy remaining bytes. */
-    while (i < ss->len) {
-        if (out + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
-        buf[out++] = ss->data[i++];
+    /* Copy the remaining tail in one go. */
+    {
+        int64_t rest = ss->len - i;
+        while (out + rest + 1 >= cap) { cap *= 2; buf = realloc(buf, (size_t)cap); }
+        march_str_copy(buf + out, ss->data + i, (size_t)rest);
+        out += rest;
     }
     void *result = march_string_lit(buf, out);
     free(buf);
@@ -2812,6 +3040,7 @@ void *march_string_to_lowercase(void *s) {
         r->data[i] = (char)tolower((unsigned char)ss->data[i]);
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 
@@ -2822,6 +3051,7 @@ void *march_string_to_uppercase(void *s) {
         r->data[i] = (char)toupper((unsigned char)ss->data[i]);
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 
@@ -2863,7 +3093,7 @@ void *march_string_repeat(void *s, int64_t n) {
     }
     march_string *r = march_string_alloc(total);
     for (int64_t i = 0; i < n; i++) {
-        memcpy(r->data + i * ss->len, ss->data, (size_t)ss->len);
+        march_str_copy(r->data + i * ss->len, ss->data, (size_t)ss->len);
     }
     r->data[total] = '\0';
     return r;
@@ -2876,6 +3106,7 @@ void *march_string_reverse(void *s) {
         r->data[i] = ss->data[ss->len - 1 - i];
     }
     r->data[ss->len] = '\0';
+    str_stats_copied(ss->len);
     return r;
 }
 
@@ -2888,7 +3119,7 @@ void *march_string_pad_left(void *s, int64_t width, void *fill) {
     march_string *r = march_string_alloc(total);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data, fc, (size_t)pad);
-    memcpy(r->data + pad, ss->data, (size_t)ss->len);
+    march_str_copy(r->data + pad, ss->data, (size_t)ss->len);
     r->data[total] = '\0';
     return r;
 }
@@ -2900,7 +3131,7 @@ void *march_string_pad_right(void *s, int64_t width, void *fill) {
     int64_t pad = width - ss->len;
     int64_t total = width;
     march_string *r = march_string_alloc(total);
-    memcpy(r->data, ss->data, (size_t)ss->len);
+    march_str_copy(r->data, ss->data, (size_t)ss->len);
     char fc = (sf->len > 0) ? sf->data[0] : ' ';
     memset(r->data + ss->len, fc, (size_t)pad);
     r->data[total] = '\0';
@@ -2922,13 +3153,32 @@ void *march_string_index_of(void *s, void *sub) {
     march_string *ss = (march_string *)s;
     march_string *su = (march_string *)sub;
     if (su->len == 0) return make_some_i64(0);
-    if (su->len > ss->len) return make_none();
-    for (int64_t i = 0; i + su->len <= ss->len; i++) {
-        if (memcmp(ss->data + i, su->data, (size_t)su->len) == 0) {
-            return make_some_i64(i);
-        }
-    }
-    return make_none();
+    const char *hit = march_memmem(ss->data, ss->len, su->data, su->len);
+    return hit ? make_some_i64(hit - ss->data) : make_none();
+}
+
+/* index_of starting at a byte offset.  Returns Option(Int).
+ *
+ * The index is in S's OWN coordinates, not relative to [start], so a caller can
+ * feed the result straight back in as the next start when tokenizing.  Without
+ * this entry point the only way to find the next separator is to slice off the
+ * tail and search that, which re-copies the remaining bytes at every step and
+ * makes a full tokenize O(n^2) — bench/string_slice_walk and
+ * bench/string_parallel_scan both had to be written around exactly that.
+ *
+ * Clamping mirrors march_string_index_of: an empty needle matches immediately
+ * (here, at the clamped start), a negative start is treated as 0, and a start
+ * past the end finds nothing. */
+void *march_string_index_of_from(void *s, void *sub, int64_t start) {
+    march_string *ss = (march_string *)s;
+    march_string *su = (march_string *)sub;
+    if (start < 0) start = 0;
+    if (start > ss->len) return make_none();
+    if (su->len == 0) return make_some_i64(start);
+    if (su->len > ss->len - start) return make_none();
+    const char *hit = march_memmem(ss->data + start, ss->len - start,
+                                   su->data, su->len);
+    return hit ? make_some_i64(hit - ss->data) : make_none();
 }
 
 /* Returns Option(Int). */
