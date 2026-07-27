@@ -97,6 +97,16 @@ git log is authoritative for exact commits.
   the old guess, are migrated to match on the label first (`g39`'s printed
   output is unchanged).
 
+- **Session types: the `Chan.offer` fix above was itself bypassable by
+  shadowing the offer's label variable.** Rebinding the label name
+  (`let lbl = :ok`) after `let (lbl, ch) = Chan.offer(...)` left the OLD
+  name→channel linkage reachable, so `match`-ing the shadowed name still
+  refined (and un-marked) the original channel as if the peer had returned
+  that label — reopening the identical type-confusion hole through a
+  shadowed name instead of a missing `match`. Rebinding a name — via a plain
+  `let`, a lambda/`fn` parameter, or a `match` pattern — now always retires
+  any stale linkage for that name first.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

@@ -1331,9 +1331,23 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
    (module prebinds, check_decl's DFn rebind, check_fn's self-bind).
    Regression note: this fix (commit c6599af9) was lost in the PR #27/#38
    merge-conflict resolution and restored here. *)
+(* [offer_labels] shadowing discipline (F5 residual, 2026-07-24 review fix):
+   [offer_labels] links a NAME (e.g. `lbl` in `let (lbl, ch) = Chan.offer(...)`)
+   to a session ref, keyed on the string alone — the same name-keying hazard
+   [fn_arities] above is already guarded against.  `bind_var`/`bind_linear` are
+   the two chokepoints EVERY binding construct funnels through (plain `let`,
+   lambda/`fn` params, `match` pattern bindings all eventually call one of
+   these) so rebinding a name here retires any stale [offer_labels] entry for
+   it — otherwise `let lbl = :ok` after `let (lbl, ch) = Chan.offer(...)`
+   would leave the OLD entry reachable by `List.assoc_opt "lbl"`, and
+   `with_offer_refinement` would refine (and un-mark) an unrelated channel
+   based on a label the peer never actually returned: the exact `Chan.offer`
+   soundness hole this file's [offer_unrefined] field exists to close, just
+   reached through a shadowed name instead of a bare missing `match`. *)
 let bind_var name sch env =
   { env with vars = StrMap.add name sch env.vars;
-             fn_arities = StrMap.remove name env.fn_arities }
+             fn_arities = StrMap.remove name env.fn_arities;
+             offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
@@ -1344,7 +1358,8 @@ let bind_linear name lin ty env =
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
-    lin  = le :: env.lin }
+    lin  = le :: env.lin;
+    offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 (* =================================================================
    §8  Generalization and instantiation

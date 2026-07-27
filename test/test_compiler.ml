@@ -1879,6 +1879,82 @@ let test_session_offer_identical_branches_no_match_ok () =
   end|} in
   Alcotest.(check bool) "identical-branch offer without match: no error" false (has_errors ctx)
 
+(** Review fix (2026-07-27): [env.offer_labels] used to be keyed on the bare
+    NAME `lbl`, and rebinding that name (`let lbl = :ok`) left the OLD entry
+    reachable — so `match`-ing the shadowed `lbl` refined (and un-marked) a
+    channel the peer never actually confirmed via that atom.  Live pre-fix:
+    the peer chose `:err` (String) and sent it, but shadowing `lbl` to `:ok`
+    right after the offer let `Chan.recv` drive the channel typed `Int`
+    anyway — exactly the type confusion `t95`/`offer_unrefined` exists to
+    close, just reached through a shadowed name instead of a missing `match`.
+    `bind_var`/`bind_linear` now retire any [offer_labels] entry for a name
+    the moment it is rebound, so the shadowed `match` no longer finds the
+    stale linkage and the channel stays correctly marked unrefined. *)
+let test_session_offer_label_shadow_bypass_error () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D2 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D2)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let lbl = :ok
+      match lbl do
+        :ok ->
+          let (v, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+          println(int_to_string(v))
+        _ -> println("other")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "offer label shadow bypass: error" true (has_errors ctx)
+
+(** Companion silence test: an UNRELATED name rebound after a legitimately
+    match-refined offer must not itself trip the shadow-clearing fix above —
+    [bind_var]/[bind_linear] only retire the [offer_labels] entry for the
+    name they are actually rebinding, so `lbl` (never shadowed here) still
+    refines `sc2` correctly inside each arm. *)
+let test_session_offer_label_shadow_no_false_positive () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D2 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D2)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let unrelated = 1
+      let unrelated = unrelated + 1
+      match lbl do
+        :ok ->
+          let (v, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+          println(int_to_string(v))
+        :err ->
+          let (v, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+          println(v)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "offer label shadow (unrelated name): no error" false (has_errors ctx)
+
 (* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
 
 let test_srec_pingpong_loop_typechecks () =
@@ -8733,6 +8809,8 @@ let compiler_suites =
           Alcotest.test_case "session offer wrong state"         `Quick test_session_offer_at_wrong_state_error;
           Alcotest.test_case "session offer unrefined continuation error" `Quick test_session_offer_unrefined_continuation_error;
           Alcotest.test_case "session offer identical branches no match ok" `Quick test_session_offer_identical_branches_no_match_ok;
+          Alcotest.test_case "session offer label shadow bypass error" `Quick test_session_offer_label_shadow_bypass_error;
+          Alcotest.test_case "session offer label shadow no false positive" `Quick test_session_offer_label_shadow_no_false_positive;
           (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;
