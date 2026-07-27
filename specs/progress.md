@@ -36,9 +36,9 @@ The emitted-LLVM regression uses a live body-growth fixture: a 9-node
 55 nodes after inner expansion).  After optimization, LLVM has neither the
 named `call i64 @outer_growth(...)` nor its `define i64 @outer_growth(...)`:
 the fixture's direct-call count is 4 → 2 and its LLVM size is 22,633 → 22,215
-bytes.  Five warm repeated compile-and-emit fixture runs took 215–324 ms
-(median 232 ms).  These are regression and compiler-work measurements, not a
-runtime-speedup claim.
+bytes.  Five warm runs of the focused Dune/Alcotest command took 215–324 ms
+(median 232 ms), including process and test-runner startup.  These are
+regression-suite wall-time measurements, not a runtime-speedup claim.
 
 ## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
 
