@@ -107,6 +107,17 @@ git log is authoritative for exact commits.
   `let`, a lambda/`fn` parameter, or a `match` pattern — now always retires
   any stale linkage for that name first.
 
+- **Session types: `match`-ing the label `Chan.offer` returns now checks
+  exhaustiveness against the protocol's actual branches, not the open `Atom`
+  universe.** A `match` handling every branch the peer could choose used to
+  warn `` missing case: _ `` anyway (`Atom` is open, so the checker could
+  never see the label as fully covered) — and a `match` that genuinely
+  omitted a branch produced the exact same warning, never an error. The one
+  signal meant to catch "you forgot a protocol branch" was indistinguishable
+  noise either way. Covering every branch (with or without a catch-all) is
+  now silent; a missing branch with no catch-all is a compile error naming
+  the branch.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

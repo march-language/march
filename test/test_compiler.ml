@@ -1955,6 +1955,65 @@ let test_session_offer_label_shadow_no_false_positive () =
   end|} in
   Alcotest.(check bool) "offer label shadow (unrelated name): no error" false (has_errors ctx)
 
+(** A `match` covering every offer label is exhaustive — no warning.  It used
+    to warn "missing case: _" because Atom is an open universe. *)
+let test_session_offer_all_labels_no_warning () =
+  let (ctx, _env) = typecheck_full {|mod Test do
+    type C = C
+    type S = S
+    protocol D3 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D3)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let (n, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+        :err ->
+          let (s, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "all offer labels handled: no errors" false (has_errors ctx);
+  Alcotest.(check bool) "all offer labels handled: no exhaustiveness warning"
+    false (has_exhaust_warning ctx)
+
+(** An offer `match` that omits a protocol branch (and has no catch-all) is an
+    ERROR naming the branch — not the generic Atom warning. *)
+let test_session_offer_missing_label_error () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D4 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D4)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let (n, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "missing offer branch arm: error" true (has_errors ctx)
+
 (* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
 
 let test_srec_pingpong_loop_typechecks () =
@@ -8811,6 +8870,8 @@ let compiler_suites =
           Alcotest.test_case "session offer identical branches no match ok" `Quick test_session_offer_identical_branches_no_match_ok;
           Alcotest.test_case "session offer label shadow bypass error" `Quick test_session_offer_label_shadow_bypass_error;
           Alcotest.test_case "session offer label shadow no false positive" `Quick test_session_offer_label_shadow_no_false_positive;
+          Alcotest.test_case "session offer all labels no warning" `Quick test_session_offer_all_labels_no_warning;
+          Alcotest.test_case "session offer missing label error" `Quick test_session_offer_missing_label_error;
           (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;

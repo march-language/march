@@ -5391,7 +5391,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         with_offer_refinement env scrut br (fun () ->
           check_expr env' br.branch_body expected ~reason)
       );
-    check_exhaustiveness env msp scrut_ty branches
+    if not (check_offer_label_exhaustiveness env msp scrut branches) then
+      check_exhaustiveness env msp scrut_ty branches
 
   (* Constructor in check mode: when the bare constructor name is ambiguous
      across types, use the expected type to pick the candidate whose parent
@@ -5499,6 +5500,40 @@ and offer_arm_label (br : Ast.branch) =
   | Ast.PatLit (Ast.LitAtom l, _)   -> Some l
   | _                               -> None
 
+(** Exhaustiveness for a `match` whose scrutinee is an OFFER LABEL variable.
+    The label's universe is the protocol's branch set — closed — not the open
+    `Atom` universe the generic checker assumes.  Returns [true] when this
+    specialised check ran (so the caller skips the generic one). *)
+and check_offer_label_exhaustiveness env span scrut (branches : Ast.branch list) =
+  match scrut with
+  | Ast.EVar name ->
+    (match List.assoc_opt name.txt env.offer_labels with
+     | None -> false
+     | Some (_r, proto_branches) ->
+       let has_catch_all =
+         List.exists (fun (br : Ast.branch) ->
+             match br.branch_pat with
+             | Ast.PatWild _ | Ast.PatVar _ -> br.branch_guard = None
+             | _ -> false) branches
+       in
+       let handled =
+         List.filter_map (fun (br : Ast.branch) ->
+             if br.branch_guard = None then offer_arm_label br else None) branches
+       in
+       let missing =
+         List.filter (fun (lbl, _) -> not (List.mem lbl handled)) proto_branches
+       in
+       (if not has_catch_all && missing <> [] then
+          Err.error env.errors ~span
+            (Printf.sprintf
+               "This `match` doesn't handle every branch the peer can choose — \
+                missing: %s.\n\
+                The protocol's `offer` branches are: %s."
+               (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) missing))
+               (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) proto_branches))));
+       true)
+  | _ -> false
+
 (** Run [f] with the offer channel's session ref transiently refined to the
     branch [br] selects (F5).  When [scrut] is an offer label variable (linked
     in [env.offer_labels]) and [br]'s pattern names a known branch label, point
@@ -5566,7 +5601,8 @@ and infer_match env span scrut scrut_ty branches =
         check_expr env' br.branch_body result_ty
           ~reason:(Some (RMatchArm span)))
     );
-  check_exhaustiveness env span scrut_ty branches;
+  if not (check_offer_label_exhaustiveness env span scrut branches) then
+    check_exhaustiveness env span scrut_ty branches;
   check_redundant_arms env scrut_ty branches;
   result_ty
 
