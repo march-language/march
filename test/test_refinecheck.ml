@@ -2220,7 +2220,317 @@ let tier2_suite =
        propagate — the definition side stays silent (definite-failure), and the
        call site learns nothing. *)
     gated "a false relational postcondition does not propagate" (fun () ->
-        Alcotest.(check bool) "no error" false (has_refine_error tier2_false_post)) ]
+        Alcotest.(check bool) "no error" false (has_refine_error tier2_false_post));
+
+    (* ── Task 2: other shapes ───────────────────────────────────────────── *)
+
+    (* A user @[measure] over the BUILT-IN List ADT, not a user type.  Nothing
+       about the induction is tree-specific. *)
+    gated "a measure over List propagates" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod P do
+  @[measure]
+  fn llen(xs : List(Int)) : Int do
+    match xs do
+      Nil -> 0
+      Cons(_, t) -> 1 + llen(t)
+    end
+  end
+  fn push(xs : List(Int), x : Int) : {List(Int) | llen(_) == llen(xs) + 1} do
+    match xs do
+      Nil -> Cons(x, Nil)
+      Cons(h, t) -> Cons(h, push(t, x))
+    end
+  end
+  fn needs_empty(ys : {List(Int) | llen(ys) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(push(Nil, 5)) end
+end|}));
+
+    (* FRONTIER, pinned deliberately: the BUILT-IN `len` is not an axiomatised
+       measure ([is_axiom_measure] covers only user `@[measure]`s), so it has no
+       recursion equations for the induction to reduce through and the
+       postcondition stays unproven.  Silence, not a wrong answer.  Declaring a
+       user measure over the same list (above) is the workaround. *)
+    gated "the built-in `len` does not yet carry Tier 2 induction" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  fn push(xs : List(Int), x : Int) : {List(Int) | len(_) == len(xs) + 1} do
+    match xs do
+      Nil -> Cons(x, Nil)
+      Cons(h, t) -> Cons(h, push(t, x))
+    end
+  end
+  fn needs_empty(ys : {List(Int) | len(ys) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(push(Nil, 5)) end
+end|}));
+
+    (* The recursion descends into the SECOND recursive component.  The
+       structural set is computed from the pattern, not from a position. *)
+    gated "recursion on the second component propagates" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn insr(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(l, v, insr(r, x))
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(insr(Leaf, 5)) end
+end|}));
+
+    (* MUTUAL recursion is NOT supported: the IH is minted only for a call to
+       the function's OWN name, so `f`'s call to `g` reflects to nothing and
+       neither postcondition is proven.  Asserted as silence and documented in
+       specs/lang/refinement-types.md rather than made to work. *)
+    gated "mutual recursion gets no induction hypothesis (silent)" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type T = A | B(T)
+  @[measure]
+  fn sz(t : T) : Int do
+    match t do
+      A -> 0
+      B(x) -> 1 + sz(x)
+    end
+  end
+  fn f(t : T) : {T | sz(_) == sz(t) + 1} do
+    match t do
+      A -> B(A)
+      B(x) -> B(g(x))
+    end
+  end
+  fn g(t : T) : {T | sz(_) == sz(t) + 1} do
+    match t do
+      A -> B(A)
+      B(x) -> B(f(x))
+    end
+  end
+  fn needs_empty(t : {T | sz(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(f(A)) end
+end|}));
+
+    (* A CLOSED (non-relational) INT postcondition on a recursive function goes
+       down the pre-existing Tier 0 path, which Tier 2 does not touch:
+       [return_refine_ext] still claims an Int return, so [check_post_induction]
+       is never consulted.  The behaviour is unchanged — and it is SILENCE,
+       because the recursive tail `countdown(n - 1)` is not reflectable, so the
+       postcondition is not proven and does not propagate.  Pinned so a future
+       widening of Tier 2 onto Int returns cannot change it unnoticed. *)
+    gated "a closed Int postcondition on a recursive function is unaffected"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod M do
+  fn countdown(n : Int) : {Int | _ >= 0} do
+    if n <= 0 do 0 else countdown(n - 1) end
+  end
+  fn needsneg(k : {Int | _ < 0}) : Int do k end
+  fn probe() : Int do needsneg(countdown(5)) end
+end|}));
+
+    (* A CLOSED postcondition over an ADT return, by contrast, IS newly proven
+       by the induction (the base case gives size >= 1 outright, the step needs
+       only the measure's non-negativity), and so propagates. *)
+    gated "a closed ADT postcondition on a recursive function propagates"
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn ins(t : Tree, x : Int) : {Tree | size(_) >= 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(ins(l, x), v, r)
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(ins(Leaf, 5)) end
+end|}));
+
+    (* A recursive function with NO postcondition is untouched. *)
+    gated "a recursive function without a postcondition is unaffected" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn ins(t : Tree, x : Int) : Tree do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(ins(l, x), v, r)
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(ins(Leaf, 5)) end
+end|}));
+
+    (* ── Task 2: adversarial silence.  Every program below is CORRECT at
+       runtime, so any diagnostic is a false positive. ──────────────────── *)
+
+    (* An accumulator that GROWS across the recursive call.  The induction is on
+       `t` alone, so the IH is universally quantified over `acc`; the structural
+       gate must look at the MATCHED parameter's position, not at every
+       argument, or this correct function would go unproven and (worse) a looser
+       gate would be needed to rescue it. *)
+    gated "a growing accumulator does not disturb the induction" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn addall(t : Tree, acc : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, acc, Leaf)
+      Node(l, v, r) -> Node(addall(l, acc + 1), v, r)
+    end
+  end
+  fn needs_pos(t : {Tree | size(t) >= 1}) : Int do 0 end
+  fn probe() : Int do needs_pos(addall(Leaf, 0)) end
+end|}));
+
+    (* The recursive call is hidden inside a lambda / behind a nested match.
+       Neither is reflectable, so both stay unproven — silence, not a report. *)
+    gated "a recursive call inside a lambda or nested match stays silent"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn walk(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) ->
+        let f = fn z -> walk(z, x)
+        Node(f(l), v, r)
+    end
+  end
+  fn nest(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) ->
+        match r do
+          Leaf -> Node(nest(l, x), v, Leaf)
+          Node(a, b, c) -> Node(nest(l, x), v, r)
+        end
+    end
+  end
+  fn needs_pos(t : {Tree | size(t) >= 1}) : Int do 0 end
+  fn probe() : Int do needs_pos(walk(Leaf, 1)) + needs_pos(nest(Leaf, 1)) end
+end|}));
+
+    (* A TRUE postcondition the IH alone cannot discharge: the inner match's
+       pattern equation is not built, so the arm returns unknown.  Unproven is
+       fine; reporting it would not be. *)
+    gated "a true but unprovable postcondition stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn norm(t : Tree) : {Tree | size(_) == size(t)} do
+    match t do
+      Leaf -> Leaf
+      Node(l, v, r) ->
+        match l do
+          Leaf -> Node(Leaf, v, norm(r))
+          Node(a, b, c) -> Node(norm(l), v, norm(r))
+        end
+    end
+  end
+  fn needs_empty(t : {Tree | size(t) < 1}) : Int do 0 end
+  fn probe() : Int do needs_empty(norm(Leaf)) end
+end|}));
+
+    (* Tier 2 alongside records, strings, ADT testers, callbacks and Tier 1
+       relational propagation, every line correct. *)
+    gated "Tier 2 composes with records, strings, ADTs and callbacks" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             {|mod P do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  type Cfg = { port : Int, name : String }
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> 1 + size(l) + size(r)
+    end
+  end
+  fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do
+    match t do
+      Leaf -> Node(Leaf, x, Leaf)
+      Node(l, v, r) -> Node(insert(l, x), v, r)
+    end
+  end
+  fn below(hi : Int) : {Int | _ < hi} do hi - 1 end
+  fn takelt(k : {Int | _ < 100}) : Int do k end
+  fn takepos(n : {Int | _ >= 0}) : Int do n end
+  fn cfg_ok(c : {Cfg | c.port >= 1}) : Int do c.port end
+  fn nonempty(s : {String | len(s) > 0}) : Int do string_length(s) end
+  fn unwrap(o : {Option(Int) | is_Some(o)}) : Int do
+    match o do
+      Some(v) -> v
+      None -> 0
+    end
+  end
+  fn apply_cb(f : ({Int | _ >= 0}) -> Int) : Int do f(7) end
+  fn needs_pos(t : {Tree | size(t) >= 1}) : Int do 0 end
+  fn main2() : Int do
+    let a = needs_pos(insert(Leaf, 5))
+    let b = takelt(below(100))
+    let c = takepos(3)
+    let d = cfg_ok({ port: 8080, name: "svc" })
+    let e = nonempty("hello")
+    let g = unwrap(Some(9))
+    let h = apply_cb(fn z -> z)
+    a + b + c + d + e + g + h
+  end
+end|})) ]
 
 let () =
   Alcotest.run "march-refinecheck"
