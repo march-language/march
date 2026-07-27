@@ -2186,6 +2186,307 @@ let test_session_offer_guarded_catch_all_not_catch_all () =
   Alcotest.(check bool) "guarded catch-all alone: missing :err error"
     true (has_error_with ctx "missing: :err")
 
+(** Final-review Finding 1 (2026-07-27): the unrefined-offer mark was
+    LAUNDERABLE BY UNIFICATION.  The [Chan.*] guards test [env.offer_unrefined]
+    by PHYSICAL identity, but [unify]'s [TChan] arm never aliased refs — it only
+    compared states — so a `Chan(R, P)` ANNOTATION whose session state equals
+    the guessed FIRST branch minted a different, unmarked ref carrying that same
+    state and the guard could never fire again.  Live pre-fix: `--check` exit 0
+    and the compiled binary printed `40852523489`, the String payload's heap
+    pointer read as an Int.  Corpus witness `reject/t98`. *)
+let test_session_offer_unrefined_laundered_by_annotation () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D7 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol E7 do
+      S -> C : Int
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D7)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let ch : Chan(C, E7) = cc2
+      let (v, ch2) = Chan.recv(ch)
+      Chan.close(ch2)
+      println(int_to_string(v))
+    end
+  end|} in
+  Alcotest.(check bool) "annotation-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** The `if`-join shape of the same laundering, and the one a user could hit by
+    ACCIDENT — no annotation is written anywhere.  The join unifies the ordinary
+    `E8` endpoint's ref with the unrefined offer continuation's; pre-fix the
+    result was the unmarked ref.  Corpus witness `reject/t99`. *)
+let test_session_offer_unrefined_laundered_by_if_join () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D8 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol E8 do
+      S -> C : Int
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D8)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (ec, es) = Chan.new(E8)
+      let (lbl, cc2) = Chan.offer(cc)
+      let ch = if false do ec else cc2 end
+      let (v, ch2) = Chan.recv(ch)
+      Chan.close(ch2)
+      let es2 = Chan.send(es, 7)
+      Chan.close(es2)
+      println(int_to_string(v))
+    end
+  end|} in
+  Alcotest.(check bool) "if-join-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** The FUNCTION-BOUNDARY shape, and the reason the fix REPORTS in [unify]
+    instead of merely propagating the mark: the callee's parameter annotation
+    mints its own ref and the callee body was already checked against it, so a
+    propagated mark would arrive too late to diagnose anything.  Rejecting the
+    unification catches it at the call site.  Corpus witness `reject/t100`. *)
+let test_session_offer_unrefined_laundered_by_fn_param () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol D9 do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol E9 do
+      S -> C : Int
+    end
+    fn drain(ch : Chan(C, E9)) : Int do
+      let (v, ch2) = Chan.recv(ch)
+      Chan.close(ch2)
+      v
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(D9)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      println(int_to_string(drain(cc2)))
+    end
+  end|} in
+  Alcotest.(check bool) "fn-param-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** Storing the unrefined continuation in a RECORD FIELD whose declared type is
+    a fixed `Chan(R, P)` is the same laundering through a third route; the field
+    check unifies, so the same guard covers it. *)
+let test_session_offer_unrefined_laundered_by_record_field () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DA do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol EA do
+      S -> C : Int
+    end
+    type Box = { ch : Chan(C, EA), n : Int }
+    fn main() do
+      let (cc, sc) = Chan.new(DA)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      let b : Box = { ch: cc2, n: 1 }
+      let (v, ch2) = Chan.recv(b.ch)
+      Chan.close(ch2)
+      println(int_to_string(v))
+    end
+  end|} in
+  Alcotest.(check bool) "record-field-laundered offer continuation: error"
+    true (has_error_with ctx "came from `Chan.offer`")
+
+(** SILENCE companion for the laundering guard: unifying two ORDINARY channel
+    types (neither marked) must stay clean, and a properly match-refined offer
+    continuation must remain unifiable inside its arm — [with_offer_refinement]
+    removes the mark for the duration.  Without this, the Finding 1 fix could
+    be a blanket "no channel ever unifies with another" false positive and the
+    error-asserting tests above would not notice. *)
+let test_session_offer_unify_no_false_positive () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DB do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    protocol EB do
+      S -> C : Int
+    end
+    fn drain(ch : Chan(C, EB)) : Int do
+      let (v, ch2) = Chan.recv(ch)
+      Chan.close(ch2)
+      v
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(DB)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok -> println(int_to_string(drain(cc2)))
+        :err ->
+          let (s, cc3) = Chan.recv(cc2)
+          Chan.close(cc3)
+          println(s)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "refined offer continuation still unifies: no error"
+    false (has_errors ctx)
+
+(** Final-review Finding 6 (2026-07-27): [check_offer_label_exhaustiveness]
+    returned [true] unconditionally once the scrutinee was a linked offer label,
+    so an arm naming a label the protocol does NOT offer (a typo, `:okk` for
+    `:ok`) was neither reported nor ever taken.  Now a WARNING — a redundant
+    arm is dead code, not a soundness problem, so it must not break builds. *)
+let test_session_offer_unknown_arm_label_warning () =
+  let (ctx, _env) = typecheck_full {|mod Test do
+    type C = C
+    type S = S
+    protocol DC do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(DC)
+      let sc2 = Chan.choose(sc, :ok)
+      let sc3 = Chan.send(sc2, 7)
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let (n, a) = Chan.recv(cc2)
+          Chan.close(a)
+          println(int_to_string(n))
+        :okk -> println("typo")
+        :err ->
+          let (s, b) = Chan.recv(cc2)
+          Chan.close(b)
+          println(s)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "unknown offer arm label: no hard error"
+    false (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let warned =
+    List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Warning
+      && (try
+            ignore (Str.search_forward (Str.regexp_string "`:okk`")
+                      d.March_errors.Errors.message 0); true
+          with Not_found -> false)) diags
+  in
+  Alcotest.(check bool) "unknown offer arm label: warning naming :okk" true warned
+
+(** Final-review Finding 7 (2026-07-27): a 2-branch offer matched as
+    `:ok -> … / _ -> …` used to get the bare "Match on the label first" advice
+    INSIDE the `_` arm, where the user demonstrably DID match.  The diagnostic
+    now also explains why a catch-all does not count. *)
+let test_session_offer_unrefined_catch_all_message () =
+  let ctx = typecheck {|mod Test do
+    type C = C
+    type S = S
+    protocol DD do
+      choose by S:
+        ok  -> S -> C : Int
+        err -> S -> C : String
+      end
+    end
+    fn main() do
+      let (cc, sc) = Chan.new(DD)
+      let sc2 = Chan.choose(sc, :err)
+      let sc3 = Chan.send(sc2, "boom")
+      Chan.close(sc3)
+      let (lbl, cc2) = Chan.offer(cc)
+      match lbl do
+        :ok ->
+          let (n, a) = Chan.recv(cc2)
+          Chan.close(a)
+          println(int_to_string(n))
+        _ ->
+          let (m, b) = Chan.recv(cc2)
+          Chan.close(b)
+          println(int_to_string(m))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "catch-all arm on unrefined offer: error"
+    true (has_error_with ctx "came from `Chan.offer`");
+  Alcotest.(check bool) "catch-all arm: message explains why `_` is not enough"
+    true (has_error_with ctx "catch-all arm is not enough")
+
+(** Final-review Finding 4 (2026-07-27): Task 1 projects the post-`choose` tail
+    into EVERY branch, but Task 2's unreachable-after-`loop` rule walked each
+    branch's OWN step list (where `rest = []`), so a branch ending in a `loop`
+    never tripped it even though the projected tail is provably dead there.
+    Corpus witness `reject/t101`. *)
+let test_session_loop_branch_hides_post_choose_tail_error () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    protocol QT do
+      choose by B:
+        more -> loop do B -> A : Int end
+        done -> B -> A : Bool
+      end
+      A -> B : Bool
+    end
+  end|} in
+  Alcotest.(check bool) "loop-ending choose branch hides post-choose tail: error"
+    true (has_error_with ctx "can never run in this one")
+
+(** SILENCE companion: the same protocol WITHOUT a trailing step must stay
+    clean — the tail threading must not turn every loop-ending branch into an
+    error. *)
+let test_session_loop_branch_no_tail_ok () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    protocol QU do
+      choose by B:
+        more -> loop do B -> A : Int end
+        done -> B -> A : Bool
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "loop-ending choose branch, no tail: no error"
+    false (has_errors ctx)
+
 (* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
 
 let test_srec_pingpong_loop_typechecks () =
@@ -9052,6 +9353,15 @@ let compiler_suites =
           Alcotest.test_case "session offer missing label error" `Quick test_session_offer_missing_label_error;
           Alcotest.test_case "session offer guarded arm not handled" `Quick test_session_offer_guarded_arm_not_handled;
           Alcotest.test_case "session offer guarded catch-all not catch-all" `Quick test_session_offer_guarded_catch_all_not_catch_all;
+          Alcotest.test_case "session offer unrefined laundered by annotation" `Quick test_session_offer_unrefined_laundered_by_annotation;
+          Alcotest.test_case "session offer unrefined laundered by if-join" `Quick test_session_offer_unrefined_laundered_by_if_join;
+          Alcotest.test_case "session offer unrefined laundered by fn param" `Quick test_session_offer_unrefined_laundered_by_fn_param;
+          Alcotest.test_case "session offer unrefined laundered by record field" `Quick test_session_offer_unrefined_laundered_by_record_field;
+          Alcotest.test_case "session offer unify no false positive" `Quick test_session_offer_unify_no_false_positive;
+          Alcotest.test_case "session offer unknown arm label warning" `Quick test_session_offer_unknown_arm_label_warning;
+          Alcotest.test_case "session offer unrefined catch-all message" `Quick test_session_offer_unrefined_catch_all_message;
+          Alcotest.test_case "session loop branch hides post-choose tail" `Quick test_session_loop_branch_hides_post_choose_tail_error;
+          Alcotest.test_case "session loop branch no tail ok" `Quick test_session_loop_branch_no_tail_ok;
           (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;

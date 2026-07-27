@@ -730,6 +730,39 @@ let make_env errors type_map = {
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
 
+(** Is [r] an [offer] continuation still awaiting per-arm refinement?
+    Physical identity on purpose: [env.offer_unrefined] tracks the exact ref
+    [Chan.offer] minted, and the ref cell IS the channel's identity for the
+    duration of the session (every [Chan.*] op mints a FRESH ref for its
+    continuation, so a marked ref can never be confused with a later state of
+    the same channel). *)
+let offer_ref_unrefined env (r : session_ty ref) =
+  List.exists (fun r' -> r' == r) !(env.offer_unrefined)
+
+(** Depth of enclosing `match` arms that are a CATCH-ALL over an offer label
+    (`_ ->` / a variable pattern, where [with_offer_refinement] cannot refine
+    because the arm names no label).  Non-zero means the user did write a
+    `match`, so the bare "match the label first" advice would read as wrong —
+    the diagnostic appends the real explanation instead (a catch-all does not
+    identify WHICH branch the peer chose).  A global counter rather than an
+    [env] field because [env] is copied by every binding construct while this
+    must track dynamic nesting of the checking recursion. *)
+let offer_catchall_depth = ref 0
+
+(** The shared body of the "unrefined `Chan.offer` continuation" diagnostic.
+    [lead] names what is being attempted ("Chan.recv", "This channel"). *)
+let offer_unrefined_message lead =
+  Printf.sprintf
+    "%s came from `Chan.offer`, and the protocol's branches \
+     continue differently, so I don't know which one the peer chose.\n\
+     Match on the label first — `match lbl do :ok -> ... :err -> ... end` — \
+     and use the channel inside each arm.%s"
+    lead
+    (if !offer_catchall_depth > 0 then
+       "\nA `_` catch-all arm is not enough: it does not identify which branch \
+        the peer chose, so every label needs its own arm."
+     else "")
+
 (** Value restriction for capability-producer applications.  Lower every
     [Unbound] TVar reachable in [ty] to level 0 IN PLACE, so [generalize]
     (which quantifies vars at [l > level] for any [level >= 0]) can NEVER
@@ -2872,7 +2905,24 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   (* Session-typed channels unify by checking their current session states match. *)
   | TChan r1, TChan r2 ->
-    if not (session_ty_equal !r1 !r2) then
+    (* LAUNDERING GUARD (F5 residual, 2026-07-27).  The [Chan.*] operation arms
+       reject an unrefined `offer` continuation by PHYSICAL identity against
+       [env.offer_unrefined] — but unification does not alias refs, it only
+       compares states.  So any construct that mints a fresh [TChan] ref and
+       unifies it with the marked one (a `Chan(R, P)` type annotation, an
+       `if`/`match` join with another channel, a record field, an annotated
+       function parameter at a CALL SITE) would hand back a different, unmarked
+       ref carrying the same state — and the physical-identity guard would never
+       fire again.  Every such route goes through THIS arm, so reject here: an
+       unrefined offer continuation may not be unified with any other channel
+       type at all, only refined by a `match` on its paired label.  (Reporting
+       rather than propagating the mark is deliberate — propagation cannot help
+       across a function boundary, where the callee's body was already checked
+       against its own ref.) *)
+    if (not (r1 == r2))
+       && (offer_ref_unrefined env r1 || offer_ref_unrefined env r2) then
+      Err.error env.errors ~span (offer_unrefined_message "This channel")
+    else if not (session_ty_equal !r1 !r2) then
       Err.error env.errors ~span
         (Printf.sprintf
            "Session type mismatch: expected channel at `%s` but found `%s`."
@@ -4174,14 +4224,9 @@ let rec unfold_srec s =
     [offer] with differing branch continuations and has not been refined by a
     `match` on the paired label (F5 residual). *)
 let offer_unrefined_error env span (r : session_ty ref) op =
-  if List.exists (fun r' -> r' == r) !(env.offer_unrefined) then begin
+  if offer_ref_unrefined env r then begin
     Err.error env.errors ~span
-      (Printf.sprintf
-         "%s: this channel came from `Chan.offer`, and the protocol's branches \
-          continue differently, so I don't know which one the peer chose.\n\
-          Match on the label first — `match lbl do :ok -> ... :err -> ... end` — \
-          and use the channel inside each arm."
-         op);
+      (offer_unrefined_message (Printf.sprintf "%s: this channel" op));
     true
   end else false
 
@@ -5577,6 +5622,20 @@ and check_offer_label_exhaustiveness env span scrut (branches : Ast.branch list)
        let missing =
          List.filter (fun (lbl, _) -> not (List.mem lbl handled)) proto_branches
        in
+       (* An arm naming a label the protocol does not offer can never be taken —
+          almost always a typo (`:okk` for `:ok`).  A warning, not an error: a
+          redundant arm is dead code, not a soundness problem. *)
+       List.iter (fun (br : Ast.branch) ->
+           match offer_arm_label br with
+           | Some lbl when not (List.mem_assoc lbl proto_branches) ->
+             Err.warning env.errors ~span
+               (Printf.sprintf
+                  "This `match` has an arm for `:%s`, which is not one of the \
+                   protocol's `offer` branches — it can never be taken.\n\
+                   The branches are: %s."
+                  lbl
+                  (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) proto_branches)))
+           | _ -> ()) branches;
        (if not has_catch_all && missing <> [] then
           Err.error env.errors ~span
             (Printf.sprintf
@@ -5608,12 +5667,34 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
   in
   match applied with
   | Some (r, saved) ->
+    (* Snapshot-and-restore the WHOLE list rather than re-adding [r] on the way
+       out: safe because [Chan.offer] only ever PREPENDS, so anything registered
+       while [f] runs is a strictly newer, unrelated ref whose own scope ended
+       with [f] — restoring the snapshot cannot resurrect a stale mark or drop a
+       live one for a ref still reachable after this arm. *)
     let saved_unrefined = !(env.offer_unrefined) in
     env.offer_unrefined := List.filter (fun r' -> not (r' == r)) saved_unrefined;
     Fun.protect
       ~finally:(fun () -> r := saved; env.offer_unrefined := saved_unrefined)
       f
-  | None            -> f ()
+  | None ->
+    (* No refinement applied.  If the scrutinee IS an offer label but this arm
+       names no branch (a `_`/variable catch-all), the user demonstrably DID
+       write a `match` — record that so any unrefined-channel diagnostic raised
+       inside the arm explains why the catch-all does not count (F7). *)
+    let is_offer_catchall =
+      match scrut with
+      | Ast.EVar name ->
+        List.mem_assoc name.txt env.offer_labels
+        && (match br.branch_pat with
+            | Ast.PatWild _ | Ast.PatVar _ -> true
+            | _ -> false)
+      | _ -> false
+    in
+    if is_offer_catchall then begin
+      incr offer_catchall_depth;
+      Fun.protect ~finally:(fun () -> decr offer_catchall_depth) f
+    end else f ()
 
 (** Check each match arm as a mutually-exclusive path with respect to
     linear-value use.  Because at most one arm runs on any execution path, a
@@ -8933,23 +9014,38 @@ let rec check_decl env (d : Ast.decl) : env =
     List.iter validate_step pdef.proto_steps;
     (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
        follows one at the same nesting level is unreachable. *)
-    let rec check_unreachable_after_loop steps =
+    (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's
+       real continuation is its own steps FOLLOWED BY the post-`choose` tail
+       (`project_steps`' `ProtoChoice` arm projects `rest_ty ()` into every
+       branch), so a branch ending in a `loop` makes that projected tail
+       unreachable just as surely as a written-out step would — walking each
+       branch with `rest = []` and no tail missed exactly that case. *)
+    let rec check_unreachable_after_loop ~tail steps =
       match steps with
       | Ast.ProtoLoop inner :: rest ->
-        check_unreachable_after_loop inner;
+        check_unreachable_after_loop ~tail:[] inner;
         if rest <> [] then
           Err.error env.errors ~span:sp
             (Printf.sprintf
                "Protocol `%s`: the steps after this `loop` can never run — \
                 a `loop` block repeats forever, so it must be the last step."
                name.txt)
+        else if tail <> [] then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "Protocol `%s`: this `choose` branch ends in a `loop`, but the \
+                protocol continues after the `choose` — those following steps \
+                are projected into EVERY branch, so they can never run in this \
+                one. Move them inside the branches that can reach them."
+               name.txt)
       | Ast.ProtoChoice (_, branches) :: rest ->
-        List.iter (fun (_, arm) -> check_unreachable_after_loop arm) branches;
-        check_unreachable_after_loop rest
-      | _ :: rest -> check_unreachable_after_loop rest
+        List.iter (fun (_, arm) ->
+            check_unreachable_after_loop ~tail:(rest @ tail) arm) branches;
+        check_unreachable_after_loop ~tail rest
+      | _ :: rest -> check_unreachable_after_loop ~tail rest
       | [] -> ()
     in
-    check_unreachable_after_loop pdef.proto_steps;
+    check_unreachable_after_loop ~tail:[] pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
     let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
     let participants = List.map fst projections in
