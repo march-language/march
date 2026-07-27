@@ -1,5 +1,32 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, NativeArray.map2 primitive + DataFrame.col_add_col rewiring)
+
+New two-array zip-with primitive, `NativeArray.map2_int`/`map2_float` (plus
+`to_float_arr` for widening a `NativeIntArr`), unblocking `DataFrame.col_add_col`
+(column-column arithmetic) from a `List.zip`/`List.map`/`native_*_arr_from_list`
+round-trip — the last piece of the P10 Phase 3 "two-array ops" survey (aggregations
+were already done; `col_add_col`/`fill_null` were the two identified two-array
+shapes, `fill_null` remains out of scope since it zips against a `TypedArray(Bool)`
+mask, not another `NativeArray`).
+
+Full stack, all four layers: runtime C (`native_{int,float}_arr_map2` in
+`runtime/march_runtime.c`, reusing `map`'s wire-tagged/boxed closure-call ABI via
+new 2-arg helpers `clo_call_int_int_int`/`clo_call_dbl_dbl_dbl`), interpreter
+(`lib/eval/eval.ml`), typechecker (`lib/typecheck/typecheck.ml`), and
+compiled-path registration (`lib/tir/llvm_builtins.ml` table + preamble
+`PDeclare`s — matched in `test/test_codegen.ml`'s golden preamble string —
+plus `lib/tir/defun.ml`'s `builtin_names`). `stdlib/dataframe.march`'s
+`col_add_col` rewired for `IntCol+IntCol`, `IntCol+FloatCol`, `FloatCol+FloatCol`,
+`FloatCol+IntCol`. Verified byte-identical output between interpreted and
+compiled modes, including the length-mismatch error path. Regression test:
+`test/native/native_arr_map2.march`.
+
+Scoped to correctness only — `map2` does not (yet) get the Phase-2b/2c/Option-A/B
+closure-inlining/vectorization treatment `map_int`/`map_float` have; each element
+still dispatches through the C runtime's closure-pointer call. That inlining is a
+natural follow-up, not started. See `specs/optimizations.md` §P10 "Phase 3".
+
 ## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
 
 Compiled March now reclaims an aggregate that is released WITHOUT being

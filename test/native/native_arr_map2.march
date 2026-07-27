@@ -1,0 +1,34 @@
+-- Regression: NativeArray.map2_int / map2_float / to_float_arr.
+--
+-- These primitives unblock DataFrame.col_add_col (stdlib/dataframe.march)
+-- from round-tripping column-column arithmetic through List(Value)/List(Float)
+-- (List.zip + List.map + native_*_arr_from_list). Exercises: Int+Int,
+-- Int widened to Float, Float+Float, and col_add_col's Int/Int and Int/Float
+-- dispatch branches.
+mod Main do
+  fn main() : () do
+    let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = NativeArray.from_list_int(Cons(10, Cons(20, Cons(30, Nil))))
+    println(NativeArray.to_list_int(NativeArray.map2_int(a, b, fn (x, y) -> x + y)))
+    -- [11, 22, 33]
+
+    let fa = NativeArray.from_list_float(Cons(1.5, Cons(2.5, Cons(3.5, Nil))))
+    let fb = NativeArray.from_list_float(Cons(10.0, Cons(20.0, Cons(30.0, Nil))))
+    println(NativeArray.to_list_float(NativeArray.map2_float(fa, fb, fn (x, y) -> x +. y)))
+    -- [11.5, 22.5, 33.5]
+
+    let widened = NativeArray.to_float_arr(a)
+    println(NativeArray.to_list_float(NativeArray.map2_float(widened, fb, fn (x, y) -> x +. y)))
+    -- [11., 22., 33.]
+
+    match DataFrame.col_add_col(IntCol("x", a), IntCol("y", b)) do
+    Ok(IntCol(_, data)) -> println(NativeArray.to_list_int(data))   -- [11, 22, 33]
+    _ -> println("unexpected")
+    end
+
+    match DataFrame.col_add_col(IntCol("x", a), FloatCol("y", fb)) do
+    Ok(FloatCol(_, data)) -> println(NativeArray.to_list_float(data))   -- [11., 22., 33.]
+    _ -> println("unexpected")
+    end
+  end
+end

@@ -141,11 +141,12 @@ let builtin_names : StringSet.t =
       (* Native array builtins *)
       "native_int_arr_make"; "native_int_arr_get"; "native_int_arr_set";
       "native_int_arr_length"; "native_int_arr_from_list"; "native_int_arr_to_list";
-      "native_int_arr_map"; "native_int_arr_fold"; "native_int_arr_sum";
+      "native_int_arr_map"; "native_int_arr_map2"; "native_int_arr_to_float_arr";
+      "native_int_arr_fold"; "native_int_arr_sum";
       "native_int_arr_min"; "native_int_arr_max"; "native_int_arr_sumsq_dev";
       "native_float_arr_make"; "native_float_arr_get"; "native_float_arr_set";
       "native_float_arr_length"; "native_float_arr_from_list"; "native_float_arr_to_list";
-      "native_float_arr_map"; "native_float_arr_fold"; "native_float_arr_sum";
+      "native_float_arr_map"; "native_float_arr_map2"; "native_float_arr_fold"; "native_float_arr_sum";
       "native_float_arr_min"; "native_float_arr_max"; "native_float_arr_sumsq_dev";
       (* Typed array builtins *)
       "typed_array_create"; "typed_array_get"; "typed_array_set";
