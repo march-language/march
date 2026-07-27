@@ -3634,6 +3634,54 @@ let test_opt_runs_single_use_inline_after_inline () =
         (inline_index < single_use_index && single_use_index < cprop_index)
   | _ -> Alcotest.fail "optimizer snapshots omitted the single-use inline phase"
 
+let test_single_use_impure_eliminated_from_llvm () =
+  let x = mk_var "x" March_tir.Tir.TString in
+  let helper =
+    { March_tir.Tir.fn_name = "one_use_effect";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body =
+        March_tir.Tir.ESeq
+          (March_tir.Tir.EIncRC (March_tir.Tir.AVar x),
+           March_tir.Tir.ESeq
+             (app "println" [slit "effect"],
+              March_tir.Tir.ESeq
+                (March_tir.Tir.EDecRC (March_tir.Tir.AVar x),
+                 March_tir.Tir.EAtom (March_tir.Tir.AVar x))));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body = call_string "one_use_effect" (slit "payload");
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let module_ = mk_module [helper; main] in
+  let ir_before = March_tir.Llvm_emit.emit_module module_ in
+  Alcotest.(check bool) "fixture has named call before Opt" true
+    (Test_helpers.contains "call ptr @one_use_effect(" ir_before);
+  Alcotest.(check bool) "fixture has named definition before Opt" true
+    (Test_helpers.contains "define ptr @one_use_effect(" ir_before);
+  let ir_after =
+    module_ |> March_tir.Opt.run |> March_tir.Llvm_emit.emit_module
+  in
+  Alcotest.(check bool) "Opt removes named call" false
+    (Test_helpers.contains "call ptr @one_use_effect(" ir_after);
+  Alcotest.(check bool) "DCE removes named definition" false
+    (Test_helpers.contains "define ptr @one_use_effect(" ir_after);
+  let position needle =
+    try Str.search_forward (Str.regexp_string needle) ir_after 0
+    with Not_found ->
+      Alcotest.failf "optimized LLVM omitted %S" needle
+  in
+  let incrc = position "call void @march_incrc_local(" in
+  let println = position "call void @march_println(" in
+  let decrc = position "call void @march_decrc_local(" in
+  Alcotest.(check bool)
+    "inlined caller preserves IncRC, runtime effect, DecRC order" true
+    (incrc < println && println < decrc)
+
 let test_single_use_impure_inlined () =
   let helper = impure_identity "helper" in
   let main = mk_fn "main" (call_string "helper" (slit "seven")) in
@@ -10815,6 +10863,8 @@ let codegen_suites =
           test_inline_acyclic_growth_removes_outer_from_llvm;
       ]);
       ("single_use_inline", [
+        Alcotest.test_case "impure helper is eliminated from emitted LLVM"
+          `Quick test_single_use_impure_eliminated_from_llvm;
         Alcotest.test_case "impure single call is inlined" `Quick
           test_single_use_impure_inlined;
         Alcotest.test_case "two calls are not inlined" `Quick

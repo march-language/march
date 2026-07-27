@@ -1717,6 +1717,65 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/newtype_counter.expected native_newtype_counter.out)))
 
+; ── One-use impure helper: preserve List RC/effect order while eliminating ──
+; ── both the named call and definition from optimized emitted LLVM.       ──
+(rule
+ (targets native_single_use_inline_rc native_single_use_inline_rc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/single_use_inline_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_single_use_inline_rc
+        native/single_use_inline_rc.march)
+   (with-stdout-to native_single_use_inline_rc.out
+        (system "./native_single_use_inline_rc")))))
+
+(rule
+ (targets native_single_use_inline_rc_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/single_use_inline_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm
+        native/single_use_inline_rc.march)
+   (with-stdout-to native_single_use_inline_rc_llvm_check.out
+    (run bash -c
+     "if grep -Eq '(^|[[:space:]])(call|define)[^@]*@helper\\(' native/single_use_inline_rc.ll; then \
+        echo 'one-use helper call or definition remained in emitted LLVM' >&2; \
+        exit 1; \
+      fi; \
+      echo 'helper eliminated'")))))
+
+(rule
+ (alias runtest)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
+(rule
+ (alias single_use_inline_rc)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
 ; ── P6 Milestone 2: Option niche (None=0, Some(x)=x) — safe_div + greet. ──
 (rule
  (targets native_option_niche native_option_niche.out)
