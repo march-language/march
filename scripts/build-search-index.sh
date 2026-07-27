@@ -52,6 +52,13 @@ else
 fi
 
 # ── Build the index ───────────────────────────────────────────────────────────
+#
+# Clear any pre-existing output first. The committed docs/pagefind/ copy is served by
+# GitHub's Jekyll (see gen-docs-search-index.sh) and therefore lands in $SITE_DIR during
+# the Jekyll build. Pagefind's filenames are content-hashed, so without this the previous
+# generation's hashed .pf_meta / .pf_filter files would survive alongside the new ones.
+rm -rf "$SITE_DIR/pagefind"
+
 echo "==> Running Pagefind $PAGEFIND_VERSION over $SITE_DIR"
 npx -y "pagefind@$PAGEFIND_VERSION" --site "$SITE_DIR"
 

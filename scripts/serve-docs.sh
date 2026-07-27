@@ -2,10 +2,15 @@
 #
 # serve-docs.sh — build the docs site WITH its search index and serve it locally.
 #
-# Why not `jekyll serve`? The Pagefind index lives at _site/pagefind/, which Jekyll does
-# not know about and wipes on every rebuild. So a plain `jekyll serve` gives you a site
-# whose ⌘K box reports a missing index. This script does the full production sequence —
-# jekyll build -> pagefind -> serve the static output — which is what CI does too.
+# Why not `jekyll serve`? It regenerates _site on every rebuild, and the freshly-built
+# index is overwritten by whatever is committed at docs/pagefind/ — which may be stale.
+# This script rebuilds the index from current sources so you are testing what you wrote,
+# not what was last committed.
+#
+# Note that production (march-lang.org) serves the COMMITTED docs/pagefind/ verbatim, via
+# GitHub's own Jekyll over docs/ — see scripts/gen-docs-search-index.sh. So after changing
+# docs content, run `scripts/gen-docs-search-index.sh` and commit the result, or CI's
+# staleness check fails.
 #
 # Trade-off: no live reload. Re-run the script after editing.
 #
