@@ -19,6 +19,12 @@ module SSet = Set.Make (String)
     [None] (the default) keeps the inliner fully aggressive. *)
 let boundary_config : Hot_reload.config option ref = ref None
 
+let is_reloadable_name name =
+  match !boundary_config with
+  | Some config ->
+      Hot_reload.is_reloadable config (Hot_reload.module_of_name name)
+  | None -> false
+
 (** Count TIR nodes (approximate size). *)
 let rec node_count : Tir.expr -> int = function
   | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _
@@ -199,21 +205,31 @@ let subst_args ?(fn_name="?") params args body =
     Tir.ELet (param, Tir.EAtom arg, acc)
   ) params args body
 
+let expand_call (fd : Tir.fn_def) args =
+  if List.length fd.Tir.fn_params <> List.length args then None
+  else
+    let (new_params, new_body) =
+      alpha_rename fd.Tir.fn_params fd.Tir.fn_body
+    in
+    if List.length new_params <> List.length args then
+      failwith (Printf.sprintf
+        "inline: alpha_rename changed arity for '%s': %d params -> %d new_params vs %d args"
+        fd.Tir.fn_name (List.length fd.Tir.fn_params)
+        (List.length new_params) (List.length args));
+    Some (subst_args ~fn_name:fd.Tir.fn_name new_params args new_body)
+
 let inline_expr ~changed (fn_env : (string, Tir.fn_def) Hashtbl.t)
     : Tir.expr -> Tir.expr =
   let rec go = function
     | Tir.EApp (f, args) ->
       (match Hashtbl.find_opt fn_env f.Tir.v_name with
-       | Some fd when List.length fd.Tir.fn_params = List.length args ->
-         let (new_params, new_body) = alpha_rename fd.Tir.fn_params fd.Tir.fn_body in
-         if List.length new_params <> List.length args then
-           failwith (Printf.sprintf
-             "inline: alpha_rename changed arity for '%s': %d params -> %d new_params vs %d args"
-             fd.Tir.fn_name (List.length fd.Tir.fn_params) (List.length new_params) (List.length args));
-         let inlined = subst_args ~fn_name:fd.Tir.fn_name new_params args new_body in
-         changed := true;
-         inlined
-       | _ -> Tir.EApp (f, args))
+       | Some fd ->
+         (match expand_call fd args with
+          | Some inlined ->
+            changed := true;
+            inlined
+          | None -> Tir.EApp (f, args))
+       | None -> Tir.EApp (f, args))
     | Tir.ELet (v, rhs, body) -> Tir.ELet (v, go rhs, go body)
     | Tir.ELetRec (fns, body) ->
       Tir.ELetRec (List.map (fun fd ->
@@ -234,9 +250,7 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
     let is_small    = node_count fd.Tir.fn_body <= inline_size_threshold in
     (* Hot Code Reload: a reloadable (boundary) function must never be inlined,
        or its call sites would be fixed into callers and could not be swapped. *)
-    let is_reloadable = match !boundary_config with
-      | Some cfg -> Hot_reload.is_reloadable cfg (Hot_reload.module_of_name fd.Tir.fn_name)
-      | None     -> false in
+    let is_reloadable = is_reloadable_name fd.Tir.fn_name in
     if is_pure && is_small && not is_reloadable then
       Hashtbl.add fn_env fd.Tir.fn_name fd
   ) m.Tir.tm_fns;
