@@ -172,6 +172,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `NativeArray.map_int`/`map_float` now inlines closures that
+  capture a variable**, not just plain `fn x -> ...` lambdas — e.g.
+  `fn x -> x +. f` or `fn x -> x *. f`, the exact shape
+  `DataFrame`'s `col +. scalar` / `col *. scalar` use. Previously any
+  captured variable disqualified the closure from the Phase 2 (P10)
+  inlining optimization entirely, so this was a real, already-shipping
+  workload getting none of the benefit. Purely a missed-optimization fix;
+  behavior was already correct, just slower than it should have been.
+
 - **Compiled `NativeArray.map_int`/`map_float` now inlines even when the
   mapped array is reused afterward.** The Phase 2 closure-inlining
   optimization (P10) silently never fired whenever code used the array
