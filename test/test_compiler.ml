@@ -1445,6 +1445,26 @@ let test_session_user_chan_module_not_swallowed () =
   end|} in
   Alcotest.(check bool) "user Chan.helper: no errors" false (has_errors ctx)
 
+(** A wrong-arity call to one of the six real `Chan.*` builtin ops must still
+    get the session-op diagnostic, not silently typecheck against the generic
+    curried placeholder those names are pre-registered under in the builtin
+    vars table (`typecheck.ml`'s `Chan.new/send/recv/close/choose/offer`
+    entries — those exist only to put the name in scope; a `lookup_var` probe
+    used to gate the catch-all arm without excluding them would defeat the
+    arm's own advertised "wrong number of arguments" coverage). *)
+let test_session_chan_send_wrong_arity_error () =
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+      Server -> Client : Int
+    end
+    fn main() do
+      let x = Chan.send(1)
+      println("unused")
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.send wrong arity: error" true (has_errors ctx)
+
 (* ── Phase 1: Session type projection + duality ──────────────────────────── *)
 
 let test_session_projection_simple () =
@@ -8967,6 +8987,7 @@ let compiler_suites =
           Alcotest.test_case "session mpst choose unsupported message" `Quick test_session_mpst_choose_unsupported_message;
           Alcotest.test_case "session user MPST module not swallowed" `Quick test_session_user_mpst_module_not_swallowed;
           Alcotest.test_case "session user Chan module not swallowed" `Quick test_session_user_chan_module_not_swallowed;
+          Alcotest.test_case "session Chan.send wrong arity error" `Quick test_session_chan_send_wrong_arity_error;
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;

@@ -4718,21 +4718,40 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (pp_ty ch_ty));
          TError)
 
-    (* Any other `MPST.*` / `Chan.*` spelling that does NOT already resolve as
-       an ordinary bound name (a user module genuinely named `MPST`/`Chan`, or
-       a real qualified stdlib export) is treated as a misspelled/unimplemented
-       session-channel op, not a library-lookup failure: falling through to
-       the generic qualified-name path would otherwise produce a misleading
-       "Unknown module `MPST`". The `lookup_var`/`resolve_qualified_var` probe
-       below mirrors the same two resolution steps the ordinary `EVar`
-       fallthrough (above) tries first, so a genuinely-defined `MPST.helper`
-       or `Chan.something_real` is left alone and reaches that path unharmed;
-       only names that would ALSO fail there get the session-op message. *)
+    (* Any other `MPST.*` / `Chan.*` spelling reaching this point either (a) is
+       one of the six real `Chan.*` ops called with the wrong shape (the
+       arity-specific arms above only match the CORRECT arg count, so falling
+       through to here with one of these six exact names means the call is
+       malformed) or (b) does not resolve as an ordinary bound name at all (a
+       misspelling, an unimplemented `MPST.choose`/`MPST.offer`, etc). Both are
+       treated as a session-op diagnostic rather than a library-lookup
+       failure — falling through to the generic qualified-name path would
+       otherwise produce a misleading "Unknown module `MPST`".
+       `chan_placeholder_ops` MUST be excluded from the `lookup_var` probe: the
+       six `Chan.*` ops are pre-registered in the builtin-vars table (a
+       generic curried placeholder purely to put the name in scope — see the
+       comment there) so `lookup_var` finds them regardless of how many
+       arguments the call actually passed, and would otherwise defeat this
+       arm's OWN advertised "wrong number of arguments" coverage for exactly
+       the names it exists to check (e.g. `Chan.send(1)`, one arg instead of
+       two, silently falling through to the generic placeholder's curried
+       type instead of erroring). MPST has no such placeholder table entries,
+       so `MPST.*` names are never in this set and always go through the
+       ordinary `lookup_var`/`resolve_qualified_var` resolution probe, which
+       mirrors the two steps the ordinary `EVar` fallthrough (above) tries
+       first — a genuinely-defined `MPST.helper` or `Chan.something_real` (a
+       user module actually named `MPST`/`Chan`) is left alone and reaches
+       that path unharmed; only names that would ALSO fail there get the
+       session-op message. *)
     | Ast.EApp (Ast.EVar ({ txt = op; _ } as n), _, sp)
       when ((String.length op > 5 && String.sub op 0 5 = "MPST.")
          || (String.length op > 5 && String.sub op 0 5 = "Chan."))
-        && (match lookup_var op env with Some _ -> false | None -> true)
-        && (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true) ->
+        && (let chan_placeholder_ops =
+              [ "Chan.new"; "Chan.send"; "Chan.recv";
+                "Chan.close"; "Chan.choose"; "Chan.offer" ] in
+            List.mem op chan_placeholder_ops
+            || ((match lookup_var op env with Some _ -> false | None -> true)
+                && (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true))) ->
       Err.error env.errors ~span:sp
         (Printf.sprintf
            "`%s` is not a session-channel operation I know, or it was called \
