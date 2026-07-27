@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: `String` refinements over the builtin `len` measure
+-- (§2.14). `nonempty("")` calls the builtin string-length measure on a
+-- literal -- `len("")` is `0`, refuting `len(_) > 0` outright. Accept
+-- companion: accept/t94 (`nonempty("abc")`).
+mod M do
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn main() do
+    println(int_to_string(nonempty("")))
+  end
+end

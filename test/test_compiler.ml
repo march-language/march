@@ -1698,6 +1698,122 @@ let test_session_steps_after_loop_error () =
   end|} in
   Alcotest.(check bool) "steps after loop: error" true (has_errors ctx)
 
+(** `stop` (2026-07-27) lets a `choose` branch inside a `loop` exit the loop:
+    it projects to `SEnd` for every role, ignoring both the surrounding
+    continuation (the loop's own back-reference) and the rest of the step
+    list.  Here `done` must project to a `SEnd`-terminated branch while
+    `more` keeps looping back to the binder (`SVar`). *)
+let test_session_stop_projects_send_terminated () =
+  let (ctx, env) = typecheck_full {|mod Test do
+    type Prod = Prod
+    type Cons = Cons
+    protocol Stream do
+      loop do
+        Prod -> Cons : Int
+        choose by Cons:
+          more -> Cons -> Prod : Bool
+          done -> Cons -> Prod : Bool
+                  stop
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "stop protocol: no errors" false (has_errors ctx);
+  let pi = March_typecheck.Typecheck.StrMap.find "Stream" env.March_typecheck.Typecheck.protocols in
+  let cons_ty = List.assoc "Cons" pi.March_typecheck.Typecheck.pi_projections in
+  (match cons_ty with
+   | March_typecheck.Typecheck.SRec (x, March_typecheck.Typecheck.SRecv
+       (_, March_typecheck.Typecheck.SChoose
+         [("more", March_typecheck.Typecheck.SSend (_, March_typecheck.Typecheck.SVar y));
+          ("done", March_typecheck.Typecheck.SSend (_, March_typecheck.Typecheck.SEnd))]))
+     when x = y ->
+     Alcotest.(check bool)
+       "done branch is SEnd-terminated, more branch loops back to the binder"
+       true true
+   | other ->
+     Alcotest.fail
+       ("expected SRec(X, SRecv(_, SChoose[more: SSend(_, SVar X); \
+         done: SSend(_, SEnd)])) but got: " ^ pp_sty other))
+
+(** A loop protocol that runs the body TWICE, then chooses the exiting
+    `done` branch on the second iteration — both endpoints must reach `End`
+    and `Chan.close` cleanly, which was impossible before `stop` existed
+    (every branch used to loop back forever; see t92/t93 for the pre-`stop`
+    "can never close" behavior this supersedes). *)
+let test_session_loop_stop_two_iterations_close_ok () =
+  let ctx = typecheck {|mod Test do
+    type Prod = Prod
+    type Cons = Cons
+    protocol Stream do
+      loop do
+        Prod -> Cons : Int
+        choose by Cons:
+          more -> Cons -> Prod : Bool
+          done -> Cons -> Prod : Bool
+                  stop
+        end
+      end
+    end
+    fn main() do
+      let (cc, pp) = Chan.new(Stream)
+      let pp1 = Chan.send(pp, 1)
+      let (x1, cc1) = Chan.recv(cc)
+      let cc2 = Chan.choose(cc1, :more)
+      let (lbl1, pp1a) = Chan.offer(pp1)
+      match lbl1 do
+        :more ->
+          let cc3 = Chan.send(cc2, true)
+          let (ack1, pp2) = Chan.recv(pp1a)
+          let pp3 = Chan.send(pp2, 2)
+          let (x2, cc4) = Chan.recv(cc3)
+          let cc5 = Chan.choose(cc4, :done)
+          let (lbl2, pp3a) = Chan.offer(pp3)
+          match lbl2 do
+            :done ->
+              let cc6 = Chan.send(cc5, false)
+              let (ack2, pp4) = Chan.recv(pp3a)
+              Chan.close(cc6)
+              Chan.close(pp4)
+              println(int_to_string(x1 + x2))
+            :more -> println("unreachable")
+          end
+        :done -> println("unreachable")
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "two loop iterations + stop + close: no errors" false (has_errors ctx)
+
+(** `stop` outside any `loop` is rejected — writing nothing already ends the
+    protocol there, so `stop` there would just be a no-op the compiler flags
+    rather than silently accepts. *)
+let test_session_stop_outside_loop_error () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    protocol Bad do
+      A -> B : Int
+      stop
+    end
+  end|} in
+  Alcotest.(check bool) "stop outside loop: error" true (has_errors ctx)
+
+(** Steps written AFTER `stop` are unreachable — `stop` discards the rest of
+    its own step list just as surely as it discards the enclosing
+    continuation — and are a protocol-declaration error. *)
+let test_session_steps_after_stop_error () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    protocol Bad do
+      loop do
+        A -> B : Int
+        stop
+        B -> A : Bool
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "steps after stop: error" true (has_errors ctx)
+
 let test_session_chan_type_annotation () =
   (* Chan(Client, Ping) in a type annotation should resolve correctly — no errors *)
   let ctx = typecheck {|mod Test do
@@ -10012,6 +10128,10 @@ let compiler_suites =
           Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
           Alcotest.test_case "session loop two iterations ok" `Quick test_session_loop_two_iterations_ok;
           Alcotest.test_case "session steps after loop error" `Quick test_session_steps_after_loop_error;
+          Alcotest.test_case "session stop projects SEnd-terminated" `Quick test_session_stop_projects_send_terminated;
+          Alcotest.test_case "session loop stop two iterations close ok" `Quick test_session_loop_stop_two_iterations_close_ok;
+          Alcotest.test_case "session stop outside loop error" `Quick test_session_stop_outside_loop_error;
+          Alcotest.test_case "session steps after stop error" `Quick test_session_steps_after_stop_error;
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
           Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
           Alcotest.test_case "session Chan unknown role"     `Quick test_session_chan_unknown_role_error;

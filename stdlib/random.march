@@ -216,7 +216,7 @@ mod Random do
   Sample from the normal distribution N(mu, sigma^2).
   Panics if sigma < 0.  sigma=0 returns mu.
   """
-  fn normal(rng : Rng, mu : Float, sigma : Float) : (Float, Rng) do
+  fn normal(rng : Rng, mu : Float, sigma : {Float | _ >= 0.0}) : (Float, Rng) do
     if sigma < 0.0 do panic("Random.normal: sigma must be non-negative")
     else if sigma == 0.0 do (mu, rng)
     else do
@@ -231,7 +231,7 @@ mod Random do
   X = -ln(U) / lambda is Exp(lambda).
   Panics if lambda <= 0.
   """
-  fn exponential(rng : Rng, lambda : Float) : (Float, Rng) do
+  fn exponential(rng : Rng, lambda : {Float | _ > 0.0}) : (Float, Rng) do
     if lambda <= 0.0 do panic("Random.exponential: lambda must be positive")
     else do
       let (u, rng2) = next_float_open(rng)
@@ -243,7 +243,7 @@ mod Random do
   Sample from a Bernoulli distribution with success probability p.
   p must be in [0.0, 1.0]; panics otherwise.
   """
-  fn bernoulli(rng : Rng, p : Float) : (Bool, Rng) do
+  fn bernoulli(rng : Rng, p : {Float | _ >= 0.0 && _ <= 1.0}) : (Bool, Rng) do
     if p < 0.0 || p > 1.0 do panic("Random.bernoulli: p must be in [0, 1]")
     else do
       let (u, rng2) = next_float(rng)

@@ -3546,6 +3546,56 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "test \"$(cat native_arr_map_inline_float_box_reuse_llvm_check.out)\" -eq 0 || { echo 'march_alloc_float still called inside the map_float loop body -- the wire-argument box is no longer being reused across iterations' >&2; exit 1; }")))
 
+; P10 float-boxing Stage 4, Option B — unboxed apply-fn variant for an
+; all-Float map_float callback. Native_map_inline.ml clones the apply fn
+; under a name that does not contain "$apply$" (Tir_names.is_apply_fn's
+; marker), so llvm_toplevel.ml's UNMODIFIED function-emission code treats
+; it as an ordinary function: natural double params/return, no
+; march_alloc_float/march_unbox_float anywhere -- argument or return side,
+; loop or callee. Assert correctness (the .expected diff below), that
+; exactly 2 "$mapfast$"-named clones exist (one per qualifying call site in
+; the fixture), and that NEITHER clone's own function body contains a
+; boxing call (a stronger check than the box-reuse test's "not inside the
+; loop" -- this also covers the callee, which now takes/returns a raw
+; double so there is nothing left to box).
+(rule
+ (targets native_arr_map_inline_unboxed native_arr_map_inline_unboxed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_unboxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_unboxed
+        native/native_arr_map_inline_unboxed.march)
+   (with-stdout-to native_arr_map_inline_unboxed.out
+        (system "./native_arr_map_inline_unboxed")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_unboxed.expected native_arr_map_inline_unboxed.out)))
+
+(rule
+ (targets native_arr_map_inline_unboxed_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_unboxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_unboxed.march)
+   (with-stdout-to native_arr_map_inline_unboxed_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_map_inline_unboxed.ll) $(awk '/^define double @.*\\$mapfast\\$/{flag=1} flag{print} /^}/{flag=0}' native/native_arr_map_inline_unboxed.ll | (grep -c 'march_alloc_float\\|march_unbox_float' || true))\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_unboxed_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nclones boxcalls < native_arr_map_inline_unboxed_llvm_check.out; \
+    test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 || { echo \"expected 2 unboxed \\$mapfast\\$ clones with zero boxing calls in their bodies (found clones=$nclones boxcalls=$boxcalls)\" >&2; exit 1; }")))
+
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})

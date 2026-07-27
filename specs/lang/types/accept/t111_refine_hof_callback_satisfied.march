@@ -1,0 +1,9 @@
+-- Refinement types: a call made THROUGH a refined function-typed parameter
+-- (§2.14 higher-order shapes). `resolve_call` only resolves NAMED callees by
+-- default; a callback invoked via a parameter binding (`f(1)` where `f`'s
+-- declared type is `({Int | _ >= 0}) -> Int`) is a separate call shape that
+-- refinecheck must also check the argument against. `f(1)` satisfies
+-- `_ >= 0` trivially. Reject companion: reject/t89 (`f(-3)`).
+mod M do
+  fn ap(f : ({Int | _ >= 0}) -> Int) : Int do f(1) end
+end

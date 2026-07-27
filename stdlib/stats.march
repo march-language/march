@@ -64,7 +64,7 @@ mod Stats do
   Percentile using linear interpolation.
   p must be in [0.0, 100.0]. Panics on empty list or out-of-range p.
   """
-  fn percentile(xs : List(Float), p : Float) : Float do
+  fn percentile(xs : List(Float), p : {Float | _ >= 0.0 && _ <= 100.0}) : Float do
     match xs do
     Nil -> panic("Stats.percentile: empty list")
     _ -> do
@@ -248,7 +248,7 @@ mod Stats do
   existing `percentile(xs, p)` is equivalent to
   `quantile(xs, p / 100.0, Linear)`.
   """
-  fn quantile(xs : List(Float), q : Float, method : QuantileMethod) : Float do
+  fn quantile(xs : List(Float), q : {Float | _ >= 0.0 && _ <= 1.0}, method : QuantileMethod) : Float do
     match xs do
     Nil -> panic("Stats.quantile: empty list")
     _ -> do

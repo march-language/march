@@ -1,0 +1,40 @@
+-- ***** SOUNDNESS WITNESS -- read before touching postcondition propagation *****
+--
+-- Refinement types, Tier 0 postcondition-propagation gate (§2.14; see also
+-- specs/progress.md "Tier 0 postcondition propagation" and the "unverified
+-- relational postcondition does not propagate" case in test/test_refinecheck.ml).
+--
+-- `shady`'s declared postcondition `{Int | _ < n}` is checked against its own
+-- BODY at the definition site: `shady` just forwards to `opaque_id`, an
+-- unanalysable call (refinecheck does not inline or symbolically execute
+-- arbitrary callees -- only measures and a handful of known constructs are
+-- reflected into Z3). Because the body cannot be shown to satisfy `_ < n`,
+-- the proof obligation FAILS to discharge at the definition, and
+-- `gate_unverified_posts` (lib/refinecheck) strips the postcondition before
+-- it is recorded in `postcond_of` for callers. A postcondition is a FACT
+-- refinecheck itself proved, never a trusted contract taken on faith from the
+-- signature -- otherwise a function could declare an arbitrarily strong lie
+-- and every caller would inherit it unchecked.
+--
+-- The call `takepos(shady(0))` is therefore evaluated with NO knowledge of
+-- what `shady` returns beyond its erased base type `Int`. `takepos` demands
+-- `_ >= 0`; an unconstrained `Int` neither proves nor refutes that, so
+-- refinecheck stays silent -- this file must `--check` exit 0.
+--
+-- WHAT BREAKS IF THIS EVER FLIPS: if a future change makes an unverified
+-- postcondition propagate anyway (e.g. by treating any declared refinement
+-- as a trusted contract, or by weakening `gate_unverified_posts` to pass
+-- through partially-analysed bodies), `shady(0)`'s instantiated postcondition
+-- would read `_ < 0`, which DOES contradict `takepos`'s `_ >= 0` -- and this
+-- exact call, correct today, would start being reported. That is a false
+-- positive on code that was never wrong; this witness exists to catch it the
+-- moment it happens. Do not "fix" this file by editing `shady` to make its
+-- postcondition provable -- that would defeat the point of the test.
+mod M do
+  fn opaque_id(n : Int) : Int do n end
+  fn shady(n : Int) : {Int | _ < n} do opaque_id(n) end
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn main() do
+    println(int_to_string(takepos(shady(0))))
+  end
+end

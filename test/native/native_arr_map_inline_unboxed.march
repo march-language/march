@@ -1,0 +1,40 @@
+-- Regression: P10 float-boxing Stage 4, Option B — unboxed apply-fn variant
+-- for NativeArray.map_float.
+--
+-- Tir_names.is_apply_fn (what every box/unbox decision in
+-- llvm_toplevel.ml's function-emission code keys off) is a pure name
+-- check: does the name contain the literal substring "$apply$". It is not
+-- a structural/TIR-level marker. So Native_map_inline.ml, on finding a
+-- map_float callback whose signature is concretely all-Float (no
+-- captures needed for this to apply — a capturing all-Float lambda
+-- qualifies too, see the second case below), synthesizes a clone of the
+-- SAME already-lowered apply fn under a name that does NOT match
+-- "$apply$" ("$mapfast$" instead) — the existing, unmodified
+-- llvm_toplevel.ml emission code then treats it as an ordinary function:
+-- natural `double` params and return, no march_alloc_float/
+-- march_unbox_float anywhere, argument or return side. This is what
+-- actually lets the loop vectorize (Option A, box-reuse, only cut
+-- allocation traffic — it never unlocked vectorization).
+--
+-- Exercises: a non-capturing all-Float lambda and a capturing one (the
+-- exact DataFrame `col +. scalar` shape). Correctness is checked below;
+-- the dune rule also greps the emitted LLVM IR for ZERO
+-- march_alloc_float/march_unbox_float calls anywhere in the whole file
+-- (not just inside the loop body, unlike the box-reuse test's narrower
+-- check — the unboxed callee itself must be clean too) and confirms the
+-- unboxed clone's signature (`define double @...$mapfast$...(ptr
+-- %$clo.arg, double %x.arg)`) uses natural double params/return, not ptr.
+mod Main do
+  fn main() : () do
+    let arr = NativeArray.from_list_float(Cons(-3.5, Cons(-1.0, Cons(0.0, Cons(1.0, Cons(3.5, Nil))))))
+
+    -- Non-capturing, all-Float.
+    let arr2 = NativeArray.map_float(arr, fn x -> x *. 2.0 +. 1.0)
+    println(NativeArray.to_list_float(arr2))   -- [-6., -1., 1., 3., 8.]
+
+    -- Capturing, all-Float (the DataFrame `col +. scalar` shape).
+    let f = 10.0
+    let arr3 = NativeArray.map_float(arr, fn x -> x +. f)
+    println(NativeArray.to_list_float(arr3))   -- [6.5, 9., 10., 11., 13.5]
+  end
+end

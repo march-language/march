@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: path-sensitive ADT-tag narrowing (§2.14). Inside a
+-- `match x do ... end`, each arm's path context is refined with the
+-- scrutinee's constructor tag -- the `None` arm knows `x` is `None`. Calling
+-- `unwrap(x)` from inside that arm therefore hands `is_Some(_)` a definite
+-- counterexample even though `x`'s static type is the unrefined `Option(Int)`
+-- -- the narrowing comes from path sensitivity, not the parameter's own
+-- annotation. Accept companion: the `Some(v) ->` arm of the twin file
+-- (see test/test_refinecheck.ml "unwrap(o) inside a `Some(_) ->` arm passes").
+mod M do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn f(x : Option(Int)) : Int do
+    match x do
+      None -> unwrap(x)
+      Some(v) -> v
+    end
+  end
+  fn main() do
+    println(int_to_string(f(None)))
+  end
+end

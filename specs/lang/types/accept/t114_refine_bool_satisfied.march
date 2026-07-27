@@ -1,0 +1,11 @@
+-- Refinement types: `Bool` refinements (§2.14). `{Bool | _ == true}` used to
+-- parse and typecheck but check NOTHING -- Bool support in refinecheck is one
+-- of the features landed in the last two days. For a DIRECT call with a
+-- boolean LITERAL argument, refinecheck evaluates `true == true` and
+-- discharges it trivially. Reject companion: reject/t92 (`needTrue(false)`).
+mod M do
+  fn needTrue(b : {Bool | _ == true}) : Int do 1 end
+  fn main() do
+    println(int_to_string(needTrue(true)))
+  end
+end
