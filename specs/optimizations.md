@@ -680,19 +680,52 @@ Change clang invocation from `-msse4.2` to `-mavx2` (or `-march=native`) to unlo
 
 ---
 
-**Phase 3 — Auto-vectorize stdlib (planned):**
+**Phase 3 — Auto-vectorize stdlib:**
 
-Once Phase 2 is done, rewrite the hot paths in `stdlib/dataframe.march` to use
-`NativeArray` columns instead of `List`-backed `IntCol`/`FloatCol`.  Combined with P9
-(columnar layout), this makes March DataFrame queries competitive with Polars.
+`IntCol`/`FloatCol` were already migrated from `List`-backed to `NativeArray`-backed
+(`NativeIntArr`/`NativeFloatArr`) as part of the P10 Phase 3 column-representation
+work (see the "P10 Phase 3 — NativeArray-backed DataFrame columns" entry above) —
+that part of this note is done and predates the description here, which was stale.
+What's left is making the *operations* on those columns actually use the fast
+`NativeArray` primitives instead of round-tripping through `List` anyway:
+
+- **Done (2026-07-27):** `DataFrame.eval_agg`'s `Sum`/`Mean` now call
+  `native_int_arr_sum`/`native_float_arr_sum` directly (new `col_native_sum` helper)
+  instead of materializing the column to a `List(Float)` and folding with
+  `Stats.sum`/`Stats.mean_safe` — reuses the already-vectorized `sum_float` fix
+  (P10 Phase 2 correction, above) for free. `Min`/`Max`/`Std`/`Variance`/`Median`
+  unchanged: no vectorized reduction primitive exists for those (would need new
+  runtime builtins), and `Median` needs the full sorted list regardless.
+- **Investigated, deferred:** `col_add_col`/`ColExpr::Add/Sub/Mul/Div` (column-column
+  arithmetic) and `fill_null` (data array zipped against a null-bitmap array) both
+  round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped
+  ops, but are actually **two-array** operations — `NativeArray.map_int`/`map_float`
+  only take one array, so neither can use the Phase 2b/2c inlining without a new
+  `map2`/zip-with `NativeArray` primitive (new runtime builtin + LLVM codegen support,
+  likely needing its own Phase-2b/2c-style closure-inlining treatment). Real,
+  scoped, compiler-side work — not started.
+- **Found, filed separately, not fixed:** `DataFrame.eval_agg` has ~40ms of fixed
+  per-call overhead in compiled builds, unrelated to the actual aggregation —
+  confirmed via isolated benchmark and confirmed pre-existing (not caused by the
+  `col_native_sum` change above). Dwarfs any vectorization win for aggregations run
+  in a loop (e.g. `group_by`). Root cause not yet investigated.
+- Row filtering (`native_int_arr_filter_mask`/`native_float_arr_filter_mask`) and
+  `group_by`/`join`/`sort` (`Hamt`/`List`-based) were surveyed and are correctly
+  **not** SIMD targets — filtering is a branchy compaction loop clang won't
+  auto-vectorize at `-O2` without AVX-512-style compress instructions, and the
+  others are pointer/hash-heavy, not data-parallel.
+
+Combined with P9 (columnar layout), the column representation and the now-vectorized
+aggregations move March DataFrame queries closer to Polars-competitive — the
+two-array-arithmetic gap above is the main remaining piece.
 
 ---
 
-**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 high
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, not started
 **Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
 **Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
 **Benchmark:** `bench/array_numeric.march`
-**Status:** Phase 0–1 done
+**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops not started
 
 ---
 

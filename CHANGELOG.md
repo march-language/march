@@ -172,6 +172,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- `DataFrame`'s `Sum`/`Mean` aggregations (compiled builds) now compute
+  directly over the column's underlying array instead of first converting
+  the whole column to a list. Purely a missed-optimization fix — same
+  results, less work per call. `Min`/`Max`/`Std`/`Variance`/`Median` are
+  unaffected (no equivalent fast path yet).
+
 - **Compiled `NativeArray.map_int`/`map_float` now inlines closures that
   capture a variable**, not just plain `fn x -> ...` lambdas — e.g.
   `fn x -> x +. f` or `fn x -> x *. f`, the exact shape
