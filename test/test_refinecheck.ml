@@ -2543,6 +2543,140 @@ end|}));
   end
 end|})) ]
 
+(* ── A1: callee resolution obeys the shadow discipline ─────────────────────
+   [resolve_call] matches a call's function name against the GLOBAL definition
+   table.  That table is a fact channel exactly like [scope]/[path]/[recenv]/
+   [cbenv] — "the name `f` denotes this contract" — so every binding construct
+   must retire a name it rebinds here too.  A local binder that happens to
+   reuse a refined global's name otherwise gets its calls checked against a
+   contract that never runs: a FALSE POSITIVE.
+
+   Each case below asserts SILENCE.  Each is paired with a CONTROL that
+   renames the local away from the collision, so the global really is called
+   and the violation really is reported — without the control a test could
+   pass by the checker having gone blind. *)
+let shadow_src body =
+  Printf.sprintf "mod S do\n  fn takepos(k : {Int | _ >= 0}) : Int do k end\n%s\nend\n" body
+
+let shadow_suite =
+  [ gated "a `let`-bound local shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let takepos = fn n -> n\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "control: `let` renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let other = fn n -> n\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "a `let?` binder shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn srcf() : Result((Int) -> Int, String) do Ok(fn n -> n) end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let? takepos = srcf()\n\
+                \    Ok(takepos(-3))\n\
+                \  end")));
+
+    gated "control: `let?` renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn srcf() : Result((Int) -> Int, String) do Ok(fn n -> n) end\n\
+                \  fn probe() : Result(Int, String) do\n\
+                \    let? other = srcf()\n\
+                \    Ok(takepos(-3))\n\
+                \  end")));
+
+    gated "a lambda parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let f = fn takepos -> takepos(-3)\n\
+                \    f(fn n -> n)\n\
+                \  end")));
+
+    gated "control: lambda parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    let f = fn other -> takepos(-3)\n\
+                \    f(0)\n\
+                \  end")));
+
+    gated "a local-`fn` parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn inner(takepos : (Int) -> Int) : Int do takepos(-3) end\n\
+                \    inner(fn n -> n)\n\
+                \  end")));
+
+    gated "control: local-`fn` parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn inner(other : (Int) -> Int) : Int do takepos(-3) end\n\
+                \    inner(fn n -> n)\n\
+                \  end")));
+
+    (* The local `fn`'s own NAME, not its parameters: a block-level `fn` is a
+       SIBLING statement, so the name must be retired for what follows it. *)
+    gated "a local-`fn` name shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe() : Int do\n\
+                \    fn takepos(n : Int) : Int do n end\n\
+                \    takepos(-3)\n\
+                \  end")));
+
+    gated "a `match` arm binder shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src
+                "  fn probe(o : Option((Int) -> Int)) : Int do\n\
+                \    match o do\n\
+                \      Some(takepos) -> takepos(-3)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "control: `match` binder renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src
+                "  fn probe(o : Option((Int) -> Int)) : Int do\n\
+                \    match o do\n\
+                \      Some(other) -> takepos(-3)\n\
+                \      None -> 0\n\
+                \    end\n\
+                \  end")));
+
+    gated "a function parameter shadows a refined global" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             (shadow_src "  fn probe(takepos : (Int) -> Int) : Int do takepos(-3) end")));
+
+    gated "control: function parameter renamed away still reports" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             (shadow_src "  fn probe(other : (Int) -> Int) : Int do takepos(-3) end")))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2568,4 +2702,5 @@ let () =
       ("pred-classifier", classifier_suite);
       ("tier1-relational", tier1_suite);
       ("higher-order", hof_suite);
-      ("tier2-induction", tier2_suite) ]
+      ("tier2-induction", tier2_suite);
+      ("callee-shadowing", shadow_suite) ]

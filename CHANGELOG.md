@@ -172,6 +172,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement checker no longer flags correct code when a local reuses a
+  refined function's name.** A `let`, `let?`, lambda parameter, local-`fn`
+  name or parameter, `match` arm binder, or function parameter that happened
+  to share a name with a module-level refined function had its calls checked
+  against that function's precondition — even though the local is what
+  actually runs. `let takepos = fn n -> n` followed by `takepos(-3)` reported
+  a bogus violation. Callee resolution now obeys the same shadow discipline as
+  every other fact channel: a name an enclosing binder introduced never
+  resolves to a global function.
+
 - **Compiled `NativeArray.map_int`/`map_float` now inlines even when the
   mapped array is reused afterward.** The Phase 2 closure-inlining
   optimization (P10) silently never fired whenever code used the array

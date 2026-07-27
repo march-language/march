@@ -1489,9 +1489,40 @@ type rctx = {
   modpath : string;                       (* enclosing module prefix, "" at top *)
   aliases : (string * string) list;       (* (alias short, original dotted prefix) *)
   uses : (string * A.use_selector) list;  (* (exporting module dotted, selector) *)
+  (* Names bound by an ENCLOSING BINDER (parameter, `let`, `let?`, lambda
+     parameter, local `fn` name/parameter, `match` arm binder).  See
+     [local_shadow]. *)
+  locals : string list;
 }
 
-let rctx0 = { modpath = ""; aliases = []; uses = [] }
+let rctx0 = { modpath = ""; aliases = []; uses = []; locals = [] }
+
+(* ── The FOURTH fact channel: callee resolution ────────────────────────────
+   [scope], [path], [recenv] and [cbenv] each carry facts keyed by a variable
+   NAME, and each one already retires a name a binding construct rebinds.  The
+   GLOBAL DEFINITION TABLE consulted by [resolve_call] is a fact channel of
+   exactly the same shape — "the name `f` denotes this contract" — and it needs
+   exactly the same discipline:
+
+     fn takepos(k : {Int | _ >= 0}) : Int do k end
+     fn probe() : Int do
+       let takepos = fn n -> n     -- a LOCAL, unrefined, that runs
+       takepos(-3)                 -- must NOT be checked against the global
+     end
+
+   Resolving that call to the module-level `takepos` checks correct code
+   against a contract it never touches — a false positive, the one failure
+   this subsystem must never have.  So [rctx.locals] records every name an
+   enclosing binder introduced, and [resolve_call] refuses to resolve one.
+
+   Retiring a name here can only turn a check into a SKIP, never the reverse,
+   so over-approximating [locals] is always safe. *)
+let local_shadow (ctx : rctx) (names : string list) : rctx =
+  if names = [] then ctx else { ctx with locals = names @ ctx.locals }
+
+let fnparam_binders : A.fn_param -> string list = function
+  | A.FPNamed p | A.FPDefault (p, _) -> [ p.A.param_name.A.txt ]
+  | A.FPPat pat -> pat_binders pat
 
 (* Enclosing-module prefixes of [mp], innermost first: "A.B" -> ["A.B"; "A"; ""]. *)
 let modpath_prefixes (mp : string) : string list =
@@ -1509,6 +1540,12 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
   : fn_sig option option =
   let lookup k = Hashtbl.find_opt defs k in
   let qualify p n = if p = "" then n else p ^ "." ^ n in
+  (* 0. A name an enclosing binder introduced is a LOCAL, not this module's
+        function of that name — see [local_shadow].  Bail out before any
+        lookup: the local shadows the global at every one of the three
+        resolution steps below, alias- and `use`-imported names included. *)
+  if List.mem fname ctx.locals then None
+  else
   (* 1. Lexical scope: the nearest enclosing module that defines [fname] wins
         (shadowing any same-named function further out). *)
   match List.find_map (fun p -> lookup (qualify p fname)) (modpath_prefixes ctx.modpath) with
@@ -3239,8 +3276,16 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
        new, unrelated local function. *)
     ignore
       (List.fold_left
-         (fun (path, sc, re, cb) e ->
+         (fun (ctx, path, sc, re, cb) e ->
            visit ~root errctx defs ctx path sc re cb e;
+           (* A `let`/local-`fn` binder also retires the name for CALLEE
+              RESOLUTION in the statements that follow — see [local_shadow]. *)
+           let ctx' =
+             match e with
+             | A.ELet (b, _) -> local_shadow ctx (pat_binders b.A.bind_pat)
+             | A.ELetFn (n, _, _, _, _) -> local_shadow ctx [ n.A.txt ]
+             | _ -> ctx
+           in
            let path' =
              match e with
              | A.EAssert (p, _) -> (p, false) :: path
@@ -3261,11 +3306,12 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
              | A.ELetFn (n, _, _, _, _) -> cb_shadow cb [ n.A.txt ]
              | _ -> cb
            in
-           (path', sc', re', cb'))
-         (path, sc, re, cb) es)
+           (ctx', path', sc', re', cb'))
+         (ctx, path, sc, re, cb) es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.ELam (ps, body, _) ->
     let names = List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps in
+    let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
@@ -3276,6 +3322,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let sc = scope_shadow sc [ n.A.txt ] in
     let re = recenv_shadow re [ n.A.txt ] in
     let cb = cb_shadow cb [ n.A.txt ] in
+    let ctx = local_shadow ctx names in
     visit ~root errctx defs ctx (path_shadow path names)
       (List.fold_left scope_add_param sc ps)
       (List.fold_left recenv_add_param re ps)
@@ -3292,6 +3339,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         let path = path_shadow path binders in
         (* …and a same-named callback/alias fact — see [cbenv]. *)
         let cb = cb_shadow cb binders in
+        (* …and a same-named GLOBAL FUNCTION, for callee resolution. *)
+        let ctx = local_shadow ctx binders in
         (* …and a same-named record IDENTITY, so an inner binder is not
            reflected as the outer record's SMT constant.  A bare `PatVar`
            binder on a record-typed variable scrutinee then re-enters the env
@@ -3357,6 +3406,7 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
     let sc = scope_shadow sc binders in
     let re = recenv_shadow re binders in
     let cb = cb_shadow cb binders in
+    let ctx = local_shadow ctx binders in
     visit ~root errctx defs ctx (path_shadow path binders) sc re cb e2
   | A.EDbg (Some e, _) -> go e
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
@@ -3466,6 +3516,9 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let re = List.fold_left recenv_add_fnparam [] c.A.fc_params in
       let cb = List.fold_left cb_add_fnparam [] c.A.fc_params in
+      (* A PARAMETER named like a module-level function shadows it for callee
+         resolution inside this body too — see [local_shadow]. *)
+      let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
       visit ~root errctx defs ctx path sc re cb c.A.fc_body)
     fd.A.fn_clauses
