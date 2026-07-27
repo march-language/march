@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: refinement violation
+-- Refinement types: Tier 1 relational postconditions instantiated at a call
+-- site (§2.14). `below(n)` proves `{Int | _ < n}` from its body (`n - 1 < n`
+-- always holds), so the postcondition PROPAGATES to callers, instantiated
+-- with the actual argument. `below(0)` therefore gives a result satisfying
+-- `_ < 0` -- a definite contradiction of `takepos`'s `_ >= 0`. Accept
+-- companion: accept/t96, where `below(10)`'s `_ < 10` does NOT contradict
+-- `_ >= 0`.
+mod M do
+  fn takepos(k : {Int | _ >= 0}) : Int do k end
+  fn below(n : Int) : {Int | _ < n} do n - 1 end
+  fn main() do
+    println(int_to_string(takepos(below(0))))
+  end
+end
