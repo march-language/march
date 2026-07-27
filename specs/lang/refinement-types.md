@@ -85,7 +85,10 @@ The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 connectives `&& || not`, integer/bool literals, **measures**, and ADT
 **constructor tags** (both below). `String` values are supported to the
 narrower extent described in [String Refinements](#string-refinements): `len`
-and `==`/`!=` against literals.
+and `==`/`!=` against literals. `Bool` values take the boolean operators against
+`true`/`false` ([Bool Refinements](#bool-refinements)); `Float` values take
+comparisons against float literals, discharged through Z3's bit-precise IEEE-754
+theory rather than reals ([Float Refinements](#float-refinements)).
 
 ---
 
@@ -455,6 +458,105 @@ reasoning.
 
 ---
 
+## Bool Refinements
+
+A `Bool` parameter or return can carry a predicate over the ordinary boolean
+operators — `==`, `!=`, `&&`, `||`, `not` — against the literals `true` and
+`false`:
+
+```march
+fn commit(confirmed : {Bool | _ == true}) : Int do ... end
+
+fn main() do
+  commit(false)   -- rejected: `_ == true` can never hold at `false`
+  commit(true)    -- fine
+end
+```
+
+The predicate must use an **operator form**. The bare-binder spelling
+`{Bool | not _}` does not parse; write `{Bool | _ == false}`.
+
+A `Bool` postcondition propagates to call sites under the same rule as every
+other postcondition — only if the definition side **proved** it:
+
+```march
+fn always_false() : {Bool | _ == false} do false end
+fn v() : Int do commit(always_false()) end   -- rejected
+```
+
+An unknown `Bool` — a parameter, a value the checker cannot settle — is
+**skipped**, and a guard establishes the fact you would expect:
+`if k do commit(k) else 0 end` passes.
+
+---
+
+## Float Refinements
+
+A `Float` parameter or return can carry a **comparison** predicate — `>=`, `>`,
+`<=`, `<`, `==`, `!=` — against float literals or another float value:
+
+```march
+fn sqrtish(x : {Float | _ >= 0.0}) : Float do ... end
+fn ratio(n : Float, d : {Float | _ != 0.0}) : Float do n /. d end
+
+fn main() do
+  sqrtish(0.0 -. 1.0)   -- rejected: -1.0 is not >= 0.0
+  sqrtish(4.0)          -- fine
+  ratio(1.0, 0.0)       -- rejected: the divisor contract can never hold at 0.0
+end
+```
+
+March spells float comparison with the *ordinary* operators, the same ones
+integers use; which meaning applies is decided by the **declared** base type of
+the refinement, never guessed. `0.0 -. 1.0` and friends are constant-folded, so
+the negative literal March has no direct spelling for is still recognised.
+
+### Why the FloatingPoint theory, and not reals
+
+The predicates are discharged through Z3's **bit-precise IEEE-754
+FloatingPoint** theory: the sort is `Float64`, comparisons are `fp.geq` /
+`fp.gt` / `fp.leq` / `fp.lt`, equality is `fp.eq`, and a literal is
+`((_ to_fp 11 53) RNE 1.0)`.
+
+Modelling floats as mathematical **reals** would be unsound *in the
+false-positive direction* — the one failure this checker must never have.
+Consider
+
+```
+not (x >= 0.0) && not (x <= 0.0)
+```
+
+Over reals, trichotomy makes this **unsatisfiable**. The checker reports a
+violation exactly when it proves a predicate can never hold, so a reals encoding
+would flag this perfectly ordinary contract on *any* argument. Over floats it is
+**satisfiable**, witnessed by `NaN`, which compares false against everything —
+so the checker correctly stays silent. Do not "simplify" the encoding to `Real`.
+
+`==` is `fp.eq`, **not** SMT-LIB `=`. `=` on `Float64` is *bitwise* identity,
+under which `-0.0` differs from `0.0`; `{Float | _ != 0.0}` would then accept a
+negative zero, which is just as bad a divisor as a positive one. Under `fp.eq`,
+`-0.0 == 0.0` is true (so a negative-zero argument **is** reported) and `NaN`
+equals nothing, including itself.
+
+### What Float refinements do *not* do
+
+- **Arithmetic in a predicate is skipped, not guessed.** `{Float | _ +. 1.0 >
+  0.0}` mentions the binder under `+.`, which would need Z3's rounding-mode
+  surface to model. The whole predicate becomes unreflectable and the obligation
+  is silently skipped — including for an argument that plainly violates it.
+  Arithmetic over float **literals only** (`0.0 -. 1.0`) is different: it is
+  folded to a constant before reflection and is fully checked.
+- **Float record fields and ADT payloads are opaque.** A `Float` *parameter* or
+  *return* is modelled; a `Float` inside a record or constructor is not.
+- **No special values.** There is no `is_nan` or `is_finite` vocabulary, so a
+  predicate cannot mention them. NaN is nevertheless modelled correctly inside
+  the solver, which is what keeps the encoding from reporting correct code.
+- **A literal with no exact plain-decimal form is skipped.** SMT-LIB decimals
+  admit neither exponent notation nor infinities, so a magnitude that cannot be
+  written out exactly is not reflected at all.
+
+---
+
 ## Constructor Tags — Refining over ADT Variants
 
 Every constructor of every ADT — your own types, and the built-in `Option`,
@@ -558,11 +660,14 @@ elsewhere.
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
 edges:
 
-- **`Int`/`Bool` values, record fields, `String` (narrowly), plus ADT
-  constructor *tags*.** There are **no `Float` value-refinements** — encoding
-  floats as mathematical reals is unsound for IEEE-754 arithmetic, so it's
-  deliberately omitted. A predicate may range over the `Int`/`Bool` **fields of
-  a record** (see [above](#refining-a-record-over-its-fields)); a record field
+- **`Int`/`Bool`/`Float` values, record fields, `String` (narrowly), plus ADT
+  constructor *tags*.** `Float` refinements are **comparisons only** (`>= > <=
+  < == !=` against float literals or another float value); float **arithmetic**
+  inside a predicate (`_ +. 1.0 > 0.0`) is out of scope and makes the whole
+  predicate skipped rather than guessed at (see
+  [Float Refinements](#float-refinements)). A predicate may range over the
+  `Int`/`Bool` **fields of a record** (see
+  [above](#refining-a-record-over-its-fields)); a record field
   of an unreflected type is opaque, but only that field — its siblings are
   still checked at a call site. `String` supports only
   `len` and literal equality (see
@@ -692,6 +797,25 @@ edges:
   So: the answer to "does the structural test recognise a child fetched from a
   `List` by index?" is **no** — and obstacle (1) stops the measure from existing
   before that question is even reached.
+- **`Bool` predicates use the operator forms, not a bare binder.**
+  `{Bool | _ == true}`, `{Bool | _ != false}` and the connectives `&& || not`
+  are checked; the bare-binder spelling `{Bool | not _}` is a **parse error**,
+  so write `{Bool | _ == false}` instead.
+- **`Float` record fields and ADT payloads are opaque.** A `Float` *parameter*
+  or *return* is checked; a `Float` sitting inside a record or a constructor is
+  not reflected, and a record with such a field is skipped at the call site
+  rather than half-modelled.
+- **There is no special-value vocabulary.** No `is_nan`, no `is_finite`. You
+  cannot write a predicate that says "not NaN"; see
+  [Float Refinements](#float-refinements) for why NaN nevertheless never causes
+  a false report.
+- **A measure applied to the refined value itself is reasoned about by axiom,
+  not evaluated on a literal.** `{v : Tree | size(v) < 0}` is caught for any
+  argument (it contradicts the non-negativity axiom), but
+  `{v : Tree | size(v) > 2}` applied to `Leaf` is NOT — the checker does not
+  concretely evaluate `size(Leaf) = 0` in that position. A measure applied to a
+  *different* parameter IS evaluated concretely, which is why the
+  `get(Node(Leaf, 5, Leaf), 3)` example above works.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
@@ -762,8 +886,9 @@ footprint property this transparency implies: a program whose obligations
 all provably hold at `--check` time runs byte-identically interpreted and
 compiled, since neither backend inserts any runtime predicate check.
 
-Two higher-order call shapes have since been closed (200 refinecheck tests,
-the latest 16 covering Tier 2 structural induction):
+Two higher-order call shapes have since been closed (245 refinecheck tests —
+16 covering Tier 2 structural induction, and the latest 9 covering `Bool` and
+`Float` refinements):
 a call through a refined function-typed *parameter*, and a call through a
 *local alias* of a named refined function — both previously fell through
 `resolve_call`'s named-callee-only resolution and were silently skipped.

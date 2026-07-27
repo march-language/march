@@ -605,6 +605,33 @@ let intern_string ctx s =
        name (len + 1) (llvm_escape_string s));
   name
 
+(** Intern [s] as a literal SITE: the raw bytes (as [intern_string]) plus a
+    per-site cell — a null-initialised global that
+    [@march_string_lit_static] fills, once, with the immortal march_string
+    for this literal.  Every later evaluation of the site loads the same
+    pointer instead of allocating.
+
+    A string literal carries no RC obligation in TIR — Perceus's
+    [EAtom (ALit _)] arm treats it exactly like a global [ADefRef] — so
+    codegen must not return a fresh rc=1 cell per evaluation: no binding
+    owns that cell and no pass ever drops it.  It leaked once per
+    evaluation, which only showed up when a literal was evaluated
+    repeatedly *without* being let-bound (a let-bound literal gets an
+    ordinary Perceus dec, and a literal argument to a non-allocating call is
+    usually hoisted out of the loop) — canonically as a direct operand of
+    `++`, as in the extremely common `acc ++ ", "` / `s ++ "\n"`.
+
+    The cell is `internal global`, not `constant`: it is written on first
+    use, and keeping the string itself out of read-only memory means a stray
+    RC op on it can never fault. *)
+let intern_string_site ctx s =
+  let bytes = intern_string ctx s in
+  ctx.str_ctr <- ctx.str_ctr + 1;
+  let cell = Printf.sprintf "@.strcell%d" ctx.str_ctr in
+  Buffer.add_string ctx.preamble
+    (Printf.sprintf "%s = internal global ptr null\n" cell);
+  (bytes, cell)
+
 (* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
    Every site that COMMITS to a value representation (EAlloc, EReuse,
    emit_case, ensure_adt_eq_fn) records its decision here, keyed by

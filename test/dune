@@ -759,6 +759,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\n\\n  fn broken() : Int do\\n    double(1, 2, 3)\\n  end\\n\\nend\\n' > cas_stale_dir/cs_helper.march && \
 ! %{exe:../bin/main.exe} --check cas_stale_dir/cs_entry.march 2>/dev/null")))
 
+; ── Regression: CAS key must digest the runtime dir that is actually compiled ──
+; cas.ml resolved its own runtime-directory candidates cwd-FIRST while
+; bin/main.ml resolves the sources it compiles exe-relative-FIRST, so with cwd
+; at the repo root the key digested ./runtime/*.c and clang compiled
+; _build/default/runtime/*.c.  A targeted `dune build bin/main.exe` does not
+; refresh _build/default/runtime, so the two diverge and editing a runtime
+; source printed `compiled <out> (cached)` for a binary with none of the new
+; code (compiler_identity does not cover it — the exe's bytes are unchanged).
+; The script compiles one March program against two divergent runtime trees
+; through the same warm CAS store and requires each binary to come from the
+; runtime it was compiled against.  Native compiles, hence `Slow`-equivalent:
+; own alias, run with `dune build @test/cas-runtime-dir`.
+(rule
+ (alias cas-runtime-dir)
+ (deps (file %{exe:../bin/main.exe})
+       (file cas_runtime_dir_check.sh)
+       (source_tree ../runtime)
+       (source_tree ../stdlib))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{dep:cas_runtime_dir_check.sh}))))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be
@@ -3481,6 +3502,49 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r pre gen < native_arr_map_inline_capture_llvm_check.out; \
     test \"$pre\" -eq 9 -a \"$gen\" -eq 1 || { echo \"expected 3 inlined map calls (nmap_pre x3 = 9) and 1 general-path call (found nmap_pre=$pre general-calls=$gen)\" >&2; exit 1; }")))
+
+; P10 Stage 4 "Option A" — the map_float inline loop's wire-argument box
+; (march_alloc_float) must be allocated ONCE before the loop and reused
+; (a GEP+store into its .val field per iteration), not allocated fresh once
+; per element. Assert both correctness (the .expected diff below) and, via
+; -emit-llvm, that no march_alloc_float call appears inside the nmap_bodyN
+; loop-body block (only in the nmap_preN preheader that precedes it).
+(rule
+ (targets native_arr_map_inline_float_box_reuse native_arr_map_inline_float_box_reuse.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_float_box_reuse
+        native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse.out
+        (system "./native_arr_map_inline_float_box_reuse")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_float_box_reuse.expected native_arr_map_inline_float_box_reuse.out)))
+
+(rule
+ (targets native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse_llvm_check.out
+    (run bash -c
+     "awk '/^nmap_body[0-9]+:/{flag=1; next} /^[a-zA-Z_][a-zA-Z0-9_]*:/{flag=0} flag' native/native_arr_map_inline_float_box_reuse.ll | (grep -c march_alloc_float || true)")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (action
+  (run bash -c
+   "test \"$(cat native_arr_map_inline_float_box_reuse_llvm_check.out)\" -eq 0 || { echo 'march_alloc_float still called inside the map_float loop body -- the wire-argument box is no longer being reused across iterations' >&2; exit 1; }")))
 
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)

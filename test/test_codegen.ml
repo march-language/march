@@ -7865,6 +7865,80 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── String literals are constants, not per-evaluation allocations ──────
+   A string literal carries NO refcount obligation in TIR: perceus.ml's
+   [EAtom (ALit _)] arm returns the expression untouched, exactly as it does
+   for a global [ADefRef].  Codegen used to break that contract for
+   [LitString] by calling @march_string_lit — a fresh rc=1 malloc — on every
+   evaluation of the site.  Nothing owned that cell, so no pass ever emitted
+   a matching dec: each evaluation leaked one string.  `buf ++ "xyz"` in a
+   2M-iteration loop leaked 2M strings (peak RSS 64MB vs 2.9MB for the same
+   loop with both operands as variables).  This matters well beyond the
+   synthetic case — `acc ++ ", "` and `s ++ "\n"` are how ordinary string
+   building is written.  Fix: one immortal string per literal SITE, cached in
+   a per-site global by @march_string_lit_static.
+
+   Choosing the shape of this test is the whole trick, because two adjacent
+   shapes are VACUOUS:
+     * a let-bound literal (`let s = "xyz"` used later) gets an ordinary
+       Perceus dec on its binding, so it never leaked; and
+     * a literal passed straight to a non-allocating call (e.g.
+       `String.byte_size("xyz")` in a loop) is hoisted out of the loop by the
+       optimizer and evaluated twice in total.
+   Only a literal evaluated repeatedly as a direct OPERAND — canonically of
+   `++` — exercises the bug.  Verified non-vacuous by reverting just the
+   codegen arm: this program prints "LEAKED 20001" against the old emission
+   and "BOUNDED" against the fixed one.
+
+   The assertion reads the runtime's own live-object gauge
+   (march_live_allocs, alloc + / free-on-rc=0 -) through an extern rather
+   than sampling RSS, so it measures the leak directly and cannot flake on
+   allocator or platform behaviour.  It compares the SAME literal site across
+   two loop lengths: the growth is what must stay bounded, not the absolute
+   count (one immortal cell per site is the intended, and permanent, cost). *)
+let test_string_literal_operand_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_strlitleak"
+    "mod StrLitLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      let s = buf ++ \"xyz\"\n\
+    \      concat_loop(buf, i + 1, n, acc + String.byte_size(s))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the literal site first, so its one permanent cell is already\n\
+     -- allocated when the baseline is sampled and only per-iteration growth\n\
+     -- can move the gauge.\n\
+    \    let warm = concat_loop(\"abc\", 0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = concat_loop(\"abc\", 0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "strlitleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a string literal used as a `++` operand in a loop allocates once for \
+       the whole site, not once per iteration (live-object count must not \
+       grow with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -9301,6 +9375,7 @@ declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)
 declare ptr  @march_html_auto_escape(ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
 declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
@@ -9598,6 +9673,9 @@ declare i64    @native_int_arr_length(ptr %arr)
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare i64    @native_int_arr_sum(ptr %arr)
+declare i64    @native_int_arr_min(ptr %arr)
+declare i64    @native_int_arr_max(ptr %arr)
+declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
 declare ptr    @native_int_arr_from_list(ptr %lst)
 declare ptr    @native_int_arr_to_list(ptr %arr)
@@ -9608,6 +9686,9 @@ declare i64    @native_float_arr_length(ptr %arr)
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
+declare double @native_float_arr_min(ptr %arr)
+declare double @native_float_arr_max(ptr %arr)
+declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
 declare ptr    @native_float_arr_from_list(ptr %lst)
 declare ptr    @native_float_arr_to_list(ptr %arr)
@@ -10499,6 +10580,10 @@ let codegen_suites =
             test_float_lit_match_arm_compiled;
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
+        ] );
+      ( "string_literal_codegen", [
+          Alcotest.test_case "compiled string literal as `++` operand does not leak per evaluation" `Quick
+            test_string_literal_operand_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick

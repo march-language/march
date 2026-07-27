@@ -2,7 +2,9 @@ mod Main do
   -- Session-types widening, Task 2 -- BINARY protocol declaration + projection
   -- + duality + `Chan(Role, Proto)` typing (core-march-types.md §2.7).
   -- `protocol Echo` has exactly 2 roles (`Client`/`Server`), each declared as
-  -- its own nullary type to avoid the undeclared-role HINT (§2.7.1).
+  -- its own nullary type. That was originally to avoid an undeclared-role
+  -- HINT (§2.7.1); that hint was REMOVED on 2026-07-24 and no longer exists,
+  -- so the declarations are now just the ordinary way to name roles.
   -- `project_protocol` (`typecheck.ml:5952`) projects each role's local
   -- `session_ty` (`:105-116`) and verifies BINARY DUALITY:
   -- dual(Client's projection) == Server's projection (`dual_session_ty`,

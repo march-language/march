@@ -577,6 +577,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)" };
   { march_name = "native_int_arr_sum"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_sum(ptr %arr)" };
+  { march_name = "native_int_arr_min"; c_name = None; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_min(ptr %arr)" };
+  { march_name = "native_int_arr_max"; c_name = None; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_max(ptr %arr)" };
+  { march_name = "native_int_arr_sumsq_dev"; c_name = None; ret_ty = Some Tir.TFloat;
+    in_is_builtin = true; declare_sig = Some "declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_int_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_int_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
@@ -595,6 +601,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)" };
   { march_name = "native_float_arr_sum"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sum(ptr %arr)" };
+  { march_name = "native_float_arr_min"; c_name = None; ret_ty = Some Tir.TFloat;
+    in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_min(ptr %arr)" };
+  { march_name = "native_float_arr_max"; c_name = None; ret_ty = Some Tir.TFloat;
+    in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_max(ptr %arr)" };
+  { march_name = "native_float_arr_sumsq_dev"; c_name = None; ret_ty = Some Tir.TFloat;
+    in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_float_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_float_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
@@ -796,6 +808,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_test_setup_all", "declare void @march_test_setup_all(ptr %fn)");
   ("march_test_report", "declare i32  @march_test_report()");
   ("march_string_lit", "declare ptr  @march_string_lit(ptr %s, i64 %len)");
+  ("march_string_lit_static", "declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)");
   ("march_record_shape_intern", "declare i32  @march_record_shape_intern(ptr %desc)");
   ("march_record_set_shape", "declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)");
   ("march_record_put", "declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)");
@@ -908,6 +921,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_io_read_line";
   PDeclare "march_io_read_byte";
   PDeclare "march_string_lit";
+  PDeclare "march_string_lit_static";
   PDeclare "march_html_auto_escape";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
@@ -1207,6 +1221,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_int_arr_get";
   PDeclare "native_int_arr_set";
   PDeclare "native_int_arr_sum";
+  PDeclare "native_int_arr_min";
+  PDeclare "native_int_arr_max";
+  PDeclare "native_int_arr_sumsq_dev";
   PDeclare "native_int_arr_map";
   PDeclare "native_int_arr_from_list";
   PDeclare "native_int_arr_to_list";
@@ -1217,6 +1234,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_get";
   PDeclare "native_float_arr_set";
   PDeclare "native_float_arr_sum";
+  PDeclare "native_float_arr_min";
+  PDeclare "native_float_arr_max";
+  PDeclare "native_float_arr_sumsq_dev";
   PDeclare "native_float_arr_map";
   PDeclare "native_float_arr_from_list";
   PDeclare "native_float_arr_to_list";

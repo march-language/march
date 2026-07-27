@@ -241,6 +241,18 @@ int64_t march_decrc_freed(void *p) {
 }
 
 void march_free(void *p) {
+    /* Immortal cells (compiled-in string literals) belong to the program
+     * image and are shared by every evaluation of their literal site, so the
+     * unconditional free below must not reach them.  Defensive rather than a
+     * fix for a known reproducer: the RC paths can't free an immortal cell
+     * (its count never reaches zero), but march_free bypasses the count
+     * entirely — Perceus emits EFree instead of a decrement for a dead
+     * LINEAR/AFFINE binding (perceus.ml), and the shapes that produce such a
+     * binding are not obviously closed to a value that came from a literal.
+     * One predictable branch on an already-cold path is worth not risking a
+     * free() of static-lifetime memory that every later evaluation of that
+     * literal site still hands out. */
+    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
     if (gc_trace_on() && IS_HEAP_PTR(p))
         gc_emit("free", p, 0, 0, ((march_hdr *)p)->tag);
     free(p);
@@ -377,6 +389,28 @@ void *march_string_lit(const char *utf8, int64_t len) {
     memcpy(s->data, utf8, (size_t)len);
     s->data[len] = '\0';
     return s;
+}
+
+/* Get-or-create the single immortal march_string for one literal site.
+ * See march_runtime.h for why literals must not allocate per evaluation.
+ * Thread-safe: two threads reaching a cold cell both build a string, the
+ * CAS loser frees its copy and adopts the winner's, so every caller
+ * observes the same pointer. */
+void *march_string_lit_static(const char *utf8, int64_t len, void **cell) {
+    _Atomic(void *) *slot = (_Atomic(void *) *)cell;
+    void *cached = atomic_load_explicit(slot, memory_order_acquire);
+    if (cached) return cached;
+    march_string *s = march_string_alloc(len);
+    memcpy(s->data, utf8, (size_t)len);
+    s->data[len] = '\0';
+    s->rc = MARCH_RC_IMMORTAL;
+    void *winner = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            slot, &winner, (void *)s, memory_order_acq_rel, memory_order_acquire))
+        return s;
+    MARCH_FREE_BUMP();
+    free(s);
+    return winner;
 }
 
 void *march_int_to_string(int64_t n) {
@@ -4490,6 +4524,42 @@ int64_t native_int_arr_sum(void *arr) {
     return s;
 }
 
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+int64_t native_int_arr_min(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+int64_t native_int_arr_max(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. int elements promote to
+ * double for the deviation. */
+double native_int_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_int_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v = (double)(*(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8));
+        double d = v - mean;
+        s += d * d;
+    }
+    return s;
+}
+
 void *native_int_arr_map(void *arr, void *f) {
     int64_t len = native_int_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
@@ -4565,6 +4635,41 @@ double native_float_arr_sum(void *arr) {
     {
 #pragma clang fp reassociate(on)
         for (int64_t i = 0; i < len; i++) { double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); s += v; }
+    }
+    return s;
+}
+
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+double native_float_arr_min(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+double native_float_arr_max(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. */
+double native_float_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_float_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        double d = v - mean;
+        s += d * d;
     }
     return s;
 }
