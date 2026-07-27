@@ -11,6 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The compiled-binary cache no longer serves a stale binary after a
+  `runtime/*.c` edit.** The CAS key digested a runtime directory it resolved
+  itself, searching the current directory *first*, while the compiler picks the
+  sources it hands to clang exe-relative *first* ("independent of CWD"). Run
+  from the repo root against `_build/default/bin/main.exe`, those are two
+  different directories, so the key could be identical (or differ for reasons
+  unrelated to what was built) while the compiled output differed — a runtime
+  edit could print `compiled <out> (cached)` for a binary containing none of
+  the new code. The driver now resolves the runtime directory once and
+  registers it with the CAS, so the key always digests the sources actually
+  compiled; `MARCH_RUNTIME_DIR` overrides the search, mirroring `MARCH_STDLIB`.
+
 ### Changed
 
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,

@@ -110,10 +110,10 @@ MARCH_LIB_PATH=/path/to/dep1/lib:/path/to/dep2/src \
 
 March walks ALL `.march` files in each `MARCH_LIB_PATH` directory recursively and loads their modules automatically. The entry file is the single `.march` file passed on the command line.
 
-**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts/`. The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`), so editing the runtime or rebuilding the compiler invalidates it automatically — no manual clearing needed. If a cache ever looks wrong anyway, clear it with:
+**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts-v2/` (**not** `artifacts/` — that is the inert v1 pointer store; deleting only it clears nothing). The cache key includes digests of the compiler executable and the runtime C sources (`runtime/*.c`, `runtime/*.h`) **of the runtime directory the compiler actually compiles** — the driver resolves it once (exe-relative first, `MARCH_RUNTIME_DIR` overrides) and registers it with the CAS — so editing the runtime or rebuilding the compiler invalidates it automatically. Note that "the runtime the compiler compiles" is the *staged* one, `_build/default/runtime`, which a targeted `dune build bin/main.exe` does **not** refresh: after editing `runtime/*.c`, build a target that restages it (e.g. `dune build --root .` or any rule with a `runtime` dep) or the edit is simply not in the build at all. If a cache ever looks wrong anyway, clear it with:
 
 ```bash
-rm -rf /Users/80197052/code/march/.march/cas/artifacts/
+rm -rf /Users/80197052/code/march/.march/cas/artifacts-v2/
 ```
 
 **Example (test_conduit_app):**

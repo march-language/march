@@ -21,11 +21,8 @@
       - [Cas.runtime_identity] — content digest of every runtime/*.{c,h}
         (reused verbatim, so editing any runtime source invalidates this the
         same way it already invalidates the whole-binary CAS);
-      - [Cas.compiler_identity] — the march executable's own bytes.  Needed
-        because [runtime_identity] resolves the runtime directory cwd-first
-        and so can end up digesting an unrelated ./runtime/ rather than the
-        sources actually compiled; this component makes a march upgrade
-        invalidate the entry regardless;
+      - [Cas.compiler_identity] — the march executable's own bytes, so a march
+        upgrade invalidates the entry even when the runtime C is byte-identical;
       - the C toolchain's own [--version] output — NOT covered by
         [Cas.compiler_identity], which hashes only the march executable's
         bytes.  A runner-image clang bump with an unchanged march binary must
@@ -147,14 +144,14 @@ let ensure_exn ~(cc : string) ~(cflags : string) ~(sources : string list)
       Blake3.hash_string
         (String.concat "\x00"
            ([ "march-runtime-objs-v2";
-              Lazy.force Cas.runtime_identity;
-              (* The march executable's own identity.  [runtime_identity]
-                 resolves the runtime dir cwd-first, so it can digest an
-                 unrelated ./runtime/ instead of the one actually compiled;
-                 without this component, upgrading march (new runtime/*.c)
-                 would then NOT change the key and stale objects would be
-                 linked against the new IR.  The whole-binary CAS already
-                 folds this in (see Cas.compilation_hash) — match it. *)
+              Cas.runtime_identity ();
+              (* The march executable's own identity.  Not strictly required
+                 for runtime-source changes any more — [runtime_identity] now
+                 digests the very directory the driver compiles (registered via
+                 [Cas.set_runtime_dir]) — but a march upgrade can change how
+                 these objects are used even with byte-identical runtime C, and
+                 the whole-binary CAS folds it in (see Cas.compilation_hash), so
+                 match it. *)
               Lazy.force Cas.compiler_identity;
               cc_id;
               cflags ]
