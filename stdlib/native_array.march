@@ -19,12 +19,16 @@
 --     reused elsewhere, or one with more than one captured variable, still
 --     works correctly but falls back to the slower closure-dispatch path.
 --   - map_float: correct and (for capturing/non-capturing alike) gets the
---     same closure-inlining treatment as map_int, but does NOT vectorize —
---     every float crossing a closure-call boundary is heap-boxed
---     (march_alloc_float), which blocks the vectorizer regardless. This is
---     a known, tracked limitation (see specs/optimizations.md P10 and
---     specs/plans/2026-07-13-float-boxing-design.md's deferred Stage 4),
---     not something wrong with your code.
+--     same closure-inlining treatment as map_int. Float crossing a
+--     closure-call boundary is normally heap-boxed (march_alloc_float),
+--     which blocks vectorization — but when the callback's signature is
+--     concretely all-Float (no generic type variable), the compiler clones
+--     the inlined callback under natural double params/return with zero
+--     boxing, and the loop DOES vectorize (real NEON/SSE, confirmed via
+--     -emit-llvm). A callback whose signature is still generic at this
+--     point falls back to the boxed (correct, non-vectorized) path. See
+--     specs/optimizations.md P10 "Float-boxing Stage 4, Option B" and
+--     specs/plans/2026-07-13-float-boxing-design.md.
 --   - fold_int / fold_float have no compiled implementation yet — calling
 --     them from a --compile build will fail to link. Use sum/map or a
 --     manual index loop until this lands.
