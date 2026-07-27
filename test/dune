@@ -759,6 +759,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\n\\n  fn broken() : Int do\\n    double(1, 2, 3)\\n  end\\n\\nend\\n' > cas_stale_dir/cs_helper.march && \
 ! %{exe:../bin/main.exe} --check cas_stale_dir/cs_entry.march 2>/dev/null")))
 
+; ── Regression: CAS key must digest the runtime dir that is actually compiled ──
+; cas.ml resolved its own runtime-directory candidates cwd-FIRST while
+; bin/main.ml resolves the sources it compiles exe-relative-FIRST, so with cwd
+; at the repo root the key digested ./runtime/*.c and clang compiled
+; _build/default/runtime/*.c.  A targeted `dune build bin/main.exe` does not
+; refresh _build/default/runtime, so the two diverge and editing a runtime
+; source printed `compiled <out> (cached)` for a binary with none of the new
+; code (compiler_identity does not cover it — the exe's bytes are unchanged).
+; The script compiles one March program against two divergent runtime trees
+; through the same warm CAS store and requires each binary to come from the
+; runtime it was compiled against.  Native compiles, hence `Slow`-equivalent:
+; own alias, run with `dune build @test/cas-runtime-dir`.
+(rule
+ (alias cas-runtime-dir)
+ (deps (file %{exe:../bin/main.exe})
+       (file cas_runtime_dir_check.sh)
+       (source_tree ../runtime)
+       (source_tree ../stdlib))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{dep:cas_runtime_dir_check.sh}))))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be
