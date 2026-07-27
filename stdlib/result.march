@@ -29,7 +29,7 @@ mod Result do
   The panic message includes the underlying Err value so callers can
   see *why* the assumption was violated, not just that it was.
   """
-  fn expect(res : Result(a, e), msg : String) : a do
+  fn expect(res : {Result(a, e) | is_Ok(_)}, msg : String) : a do
     match res do
     Ok(x)  -> x
     Err(e) -> panic("Result.expect on Err(" ++ to_string(e) ++ "): " ++ msg)
@@ -37,7 +37,7 @@ mod Result do
   end
 
   doc "Extracts the Ok value, panicking if Err."
-  fn unwrap(res : Result(a, e)) : a do
+  fn unwrap(res : {Result(a, e) | is_Ok(_)}) : a do
     match res do
     Ok(x)  -> x
     Err(e) -> panic("Result.unwrap called on Err: " ++ to_string(e))
@@ -45,7 +45,7 @@ mod Result do
   end
 
   doc "Extracts the Err value, panicking if Ok."
-  fn unwrap_err(res : Result(a, e)) : e do
+  fn unwrap_err(res : {Result(a, e) | is_Err(_)}) : e do
     match res do
     Err(e) -> e
     Ok(_)  -> panic("Result.unwrap_err called on Ok")
