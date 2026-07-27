@@ -104,17 +104,35 @@ let mk_named_param name : fn_param =
 
 (* ---- HTML IOList generation for ~H sigil ---- *)
 
-(** Decompose a [++] chain into a flat list of parts.
+(** Decompose an interpolation into a flat list of parts.
 
-    The parser builds interpolations as:
+    The parser emits one of two shapes for an interpolation, chosen by part
+    count (see [desugar_interp] in [lib/parser/parser.mly]):
       "prefix" ++ to_string(e1) ++ "mid" ++ to_string(e2) ++ "suffix"
-    represented as nested [EApp(EVar "++", [left; right], sp)].
+      string_join(["prefix", to_string(e1), "mid", to_string(e2), "suffix"], "")
+    so we flatten both — recursively, since a join's element list can itself
+    contain concatenations written by hand in user code.
 
-    We recursively flatten both sides of [++] into a list. *)
+    Keeping this in sync with the parser's interpolation shape is load-bearing:
+    [html_interp_to_iolist] identifies the dynamic parts by matching
+    [to_string(e)] *per part*, so a shape this function can't see through
+    collapses the whole template into one opaque part — silently disabling
+    HTML auto-escaping (and island/CSRF rewriting) rather than failing. *)
 let rec decompose_concat (e : expr) : expr list =
   match e with
   | EApp (EVar { txt = "++"; _ }, [left; right], _sp) ->
     decompose_concat left @ decompose_concat right
+  | EApp (EVar { txt = "string_join"; _ }, [list_expr; ELit (LitString "", _)], _sp) ->
+    (* Flatten Cons(a, Cons(b, Nil)) → [a; b]; leave the call alone if the
+       argument isn't a literal list (a user-written dynamic join). *)
+    let rec collect acc = function
+      | ECon ({ txt = "Nil"; _ }, [], _)        -> Some (List.rev acc)
+      | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> collect (hd :: acc) tl
+      | _ -> None
+    in
+    (match collect [] list_expr with
+     | Some elems -> List.concat_map decompose_concat elems
+     | None -> [e])
   (* Also flatten three-way concats.  ESigil's arm calls [desugar_expr] on its
      content before handing it here, and that pass collapses `++` chains into
      [string_concat3] — so without this case a `~H` template with three or more

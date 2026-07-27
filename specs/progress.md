@@ -1,5 +1,37 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-26, many-part string interpolation desugars to one string_join call)
+
+String interpolation (`"${a}${b}"`) previously desugared to a left-deep chain
+of `++` calls (`prefix ++ to_string(e1) ++ s1 ++ ...`), which re-copies the
+growing prefix on every append — O(k²) total bytes copied for a k-part
+interpolation, since `march_string_concat` allocates and copies fresh on each
+call. `desugar_interp` (`lib/parser/parser.mly`) now switches on segment
+count: past `interp_join_threshold` (3) segments it builds a `Cons`/`Nil`
+list of the parts and emits a single `string_join(parts, "")` call, which is
+already a proper two-pass O(n) join (`march_string_join`) — no runtime change
+needed. At or below the threshold it keeps emitting the `++` chain, because
+materializing the cons cells costs more than the extra copy at that size:
+measured on arm64 over 2M iterations with short segments, `++` vs
+`string_join` is 231/303ms at 2 segments, 307/356ms at 3, and 589/564ms at 5,
+so the crossover sits just under 5.
+
+Both shapes therefore reach the rest of the pipeline, and two consumers pattern-match
+the desugared form and had to learn the join shape:
+`try_collect_interp` (`lib/format/format.ml`), which reconstructs `"${...}"`
+source for the formatter — without it the formatter printed a literal
+`string_join([...], "")` call and the stdlib idempotency tests failed — and
+`decompose_concat` (`lib/desugar/desugar.ml`), which splits a `~H` sigil into
+per-part IOList segments. The latter is the sharp edge: `html_interp_to_iolist`
+identifies dynamic parts by matching `to_string(e)` *per part*, so a shape it
+cannot see through collapses the template into one opaque part and silently
+disables HTML auto-escaping (verified: `~H"<p>${evil}</p>"` emitted raw
+`<script>` tags before the fix, escaped after). `test/test_eval.ml` asserts
+both desugarings (`parse interp` for the `++` shape, `parse interp many` for
+the join shape). `specs/lang/surface-syntax.md`'s operator reference now notes
+that `++` itself is still O(n) per call (so accumulating via `acc = acc ++ x`
+in a loop is still O(n²)) and points at `IOList` for that case —
+`stdlib/string.march`'s `String.concat` doc already carried the same note.
 ## Current State (as of 2026-07-27, string performance phase 2 tasks 1-3)
 
 Three string optimizations landed against the phase 1 profile, each verified by

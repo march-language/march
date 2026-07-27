@@ -1078,14 +1078,27 @@ let test_parse_use_names () =
   | _ -> Alcotest.fail "expected DUse UseNames"
 
 (* String interpolation *)
+let parse_expr_str src =
+  let lexbuf = Lexing.from_string src in
+  March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+
+(* Short interpolations keep the ++ chain: the cons cells a string_join needs
+   cost more than the extra copy at this size (see parser.mly:desugar_interp). *)
 let test_parse_string_interp () =
-  let lexbuf = Lexing.from_string {|"hi ${name}!"|} in
-  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   (* Should desugar to: "hi " ++ to_string(name) ++ "!" *)
-  match expr with
+  match parse_expr_str {|"hi ${name}!"|} with
   | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
     when cat2.txt = "++" -> ()
-  | _ -> Alcotest.fail "expected ++ desugaring from string interpolation"
+  | _ -> Alcotest.fail "expected ++ desugaring from short string interpolation"
+
+(* Past the threshold the ++ chain's O(k^2) re-copying of the growing prefix
+   dominates, so the parser emits one string_join over all the parts instead. *)
+let test_parse_string_interp_many_parts () =
+  match parse_expr_str {|"a${w}b${x}c${y}d${z}e"|} with
+  | March_ast.Ast.EApp
+      (March_ast.Ast.EVar join, [_; March_ast.Ast.ELit (March_ast.Ast.LitString "", _)], _)
+    when join.txt = "string_join" -> ()
+  | _ -> Alcotest.fail "expected string_join desugaring from many-part string interpolation"
 
 let test_eval_string_interp () =
   let env = eval_module {|mod Test do
@@ -4446,6 +4459,44 @@ let test_h_sigil_get_form_not_injected_with_conn () =
   Alcotest.(check string) "GET form: no injection"
     {|<form method="get">x</form>|} (vstr result)
 
+(* ~H auto-escaping must hold for BOTH interpolation desugarings.
+   `html_interp_to_iolist` finds the dynamic parts by matching `to_string(e)`
+   per part, so it depends on `decompose_concat` seeing through whatever shape
+   the parser emitted (`++` chain below the join threshold, `string_join` above
+   it — lib/parser/parser.mly:desugar_interp).  When it can't, the template
+   collapses into one opaque part and escaping is silently skipped: the
+   many-part case below rendered raw `<script>` tags before decompose_concat
+   learned the join shape.  Asserting on ESCAPED output is the point — a shape
+   this pass doesn't recognize still renders, just unsafely. *)
+let eval_h_escape_page body_decl =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  eval_with_stdlib [string_decl; iolist_decl]
+    (Printf.sprintf {|mod Page do
+%s
+end|} body_decl)
+
+let test_h_sigil_escapes_short_interp () =
+  (* Two segments → `++` chain. *)
+  let env = eval_h_escape_page {|
+  fn page(evil) : String do
+    IOList.to_string(~H"<p>${evil}</p>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VString "<script>"] in
+  Alcotest.(check string) "short ~H interpolation is HTML-escaped"
+    "<p>&lt;script&gt;</p>" (vstr result)
+
+let test_h_sigil_escapes_many_part_interp () =
+  (* Seven segments → string_join. *)
+  let env = eval_h_escape_page {|
+  fn page(evil) : String do
+    IOList.to_string(~H"<p>${evil}</p><i>${evil}</i><b>${evil}</b>")
+  end|} in
+  let result = call_fn env "page" [March_eval.Eval.VString "<script>"] in
+  Alcotest.(check string) "many-part ~H interpolation is HTML-escaped"
+    "<p>&lt;script&gt;</p><i>&lt;script&gt;</i><b>&lt;script&gt;</b>"
+    (vstr result)
+
 (* Signal.watch (7.2, Stage A): deferred green-thread dispatch of an OS-signal
    watcher.  Drive the drain directly — register an OCaml handler on the Usr1
    slot (code 3), raise SIGUSR1 to ourselves, pump [run_scheduler], and assert
@@ -4949,6 +5000,7 @@ let eval_suites =
       ( "string interp",
         [
           Alcotest.test_case "parse interp"         `Quick test_parse_string_interp;
+          Alcotest.test_case "parse interp many"    `Quick test_parse_string_interp_many_parts;
           Alcotest.test_case "eval interp"          `Quick test_eval_string_interp;
           Alcotest.test_case "eval interp int"      `Quick test_eval_string_interp_int;
           Alcotest.test_case "eval interp multi"    `Quick test_eval_string_interp_multi;
@@ -5099,5 +5151,7 @@ let eval_suites =
           Alcotest.test_case "conn param: CSRF token injected"         `Quick test_h_sigil_form_post_injects_with_conn_param;
           Alcotest.test_case "block let conn: CSRF token injected"     `Quick test_h_sigil_form_post_injects_with_conn_let;
           Alcotest.test_case "GET form with conn: no injection"        `Quick test_h_sigil_get_form_not_injected_with_conn;
+          Alcotest.test_case "short interp: escaped"                   `Quick test_h_sigil_escapes_short_interp;
+          Alcotest.test_case "many-part interp: escaped"               `Quick test_h_sigil_escapes_many_part_interp;
         ] );
   ]

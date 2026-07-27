@@ -182,6 +182,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- String interpolation with many parts (`"${a}${b}${c}${d}"`) now desugars to
+  a single `string_join` call over all parts instead of a left-deep chain of
+  `++`, which re-copied the growing prefix on every append. This makes a
+  k-part interpolation O(n) instead of O(k²) in total bytes copied, with no
+  change in the resulting string value. Short interpolations (up to three
+  segments, e.g. `"count: ${n}"`) keep the `++` chain, which measures faster
+  at that size than materializing a list to join.
 - Compiled `NativeArray.map_float` with a plain, concretely-typed
   callback (`fn x -> x *. 2.0 +. 1.0`, a captured scalar, or similar — no
   generic/unresolved types involved) no longer allocates at all for each
