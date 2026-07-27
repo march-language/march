@@ -2965,6 +2965,45 @@ end|}));
 end|}))
   ]
 
+(* ── Bool refinements ──────────────────────────────────────────────────────
+   `{Bool | _ == true}` used to parse, type-check and check NOTHING.  These pin
+   both halves of the contract: a definite violation reports, and everything
+   the checker cannot settle (an unknown Bool) stays silent. *)
+let bool_suite =
+  [ gated "a Bool precondition rejects the wrong literal" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(false) end\n\
+              end\n"));
+
+    gated "a Bool precondition accepts the right literal" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(true) end\n\
+              end\n"));
+
+    gated "an unknown Bool is skipped" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod M do\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v(k : Bool) : Int do needTrue(k) end\n\
+              end\n"));
+
+    gated "a Bool postcondition propagates" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod M do\n\
+             \  fn always_false() : {Bool | _ == false} do false end\n\
+             \  fn needTrue(b : {Bool | _ == true}) : Int do 1 end\n\
+             \  fn v() : Int do needTrue(always_false()) end\n\
+              end\n"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -2993,4 +3032,5 @@ let () =
       ("tier2-induction", tier2_suite);
       ("callee-shadowing", shadow_suite);
       ("anon-binder-measures", b1_suite);
-      ("record-postcond-propagation", b2_suite) ]
+      ("record-postcond-propagation", b2_suite);
+      ("bool-refinements", bool_suite) ]
