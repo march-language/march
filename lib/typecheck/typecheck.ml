@@ -4718,12 +4718,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (pp_ty ch_ty));
          TError)
 
-    (* Any other `MPST.*` / `Chan.*` spelling: these are compiler builtins, not
-       library modules, so falling through to the qualified-name path produces a
-       misleading "Unknown module `MPST`".  Name the real problem instead. *)
+    (* Any other `MPST.*` / `Chan.*` spelling that does NOT already resolve as
+       an ordinary bound name (a user module genuinely named `MPST`/`Chan`, or
+       a real qualified stdlib export) is treated as a misspelled/unimplemented
+       session-channel op, not a library-lookup failure: falling through to
+       the generic qualified-name path would otherwise produce a misleading
+       "Unknown module `MPST`". The `lookup_var`/`resolve_qualified_var` probe
+       below mirrors the same two resolution steps the ordinary `EVar`
+       fallthrough (above) tries first, so a genuinely-defined `MPST.helper`
+       or `Chan.something_real` is left alone and reaches that path unharmed;
+       only names that would ALSO fail there get the session-op message. *)
     | Ast.EApp (Ast.EVar ({ txt = op; _ } as n), _, sp)
-      when (String.length op > 5 && String.sub op 0 5 = "MPST.")
-        || (String.length op > 5 && String.sub op 0 5 = "Chan.") ->
+      when ((String.length op > 5 && String.sub op 0 5 = "MPST.")
+         || (String.length op > 5 && String.sub op 0 5 = "Chan."))
+        && (match lookup_var op env with Some _ -> false | None -> true)
+        && (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true) ->
       Err.error env.errors ~span:sp
         (Printf.sprintf
            "`%s` is not a session-channel operation I know, or it was called \

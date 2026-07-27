@@ -1417,6 +1417,34 @@ let test_session_mpst_choose_unsupported_message () =
   end|} in
   Alcotest.(check bool) "MPST.choose: error" true (has_errors ctx)
 
+(** The `MPST.*`/`Chan.*` catch-all must not swallow a genuinely user-defined
+    module named `MPST` — a call to one of its real members has to typecheck
+    exactly as it did before the catch-all arm existed. *)
+let test_session_user_mpst_module_not_swallowed () =
+  let ctx = typecheck {|mod App do
+    mod MPST do
+      fn helper(x) do x + 1 end
+    end
+    fn main() do
+      let y = MPST.helper(41)
+      if y > 0 do println("ok") else println("no") end
+    end
+  end|} in
+  Alcotest.(check bool) "user MPST.helper: no errors" false (has_errors ctx)
+
+(** Same non-swallowing property for a user module named `Chan`. *)
+let test_session_user_chan_module_not_swallowed () =
+  let ctx = typecheck {|mod App do
+    mod Chan do
+      fn helper(x) do x + 1 end
+    end
+    fn main() do
+      let y = Chan.helper(41)
+      if y > 0 do println("ok") else println("no") end
+    end
+  end|} in
+  Alcotest.(check bool) "user Chan.helper: no errors" false (has_errors ctx)
+
 (* ── Phase 1: Session type projection + duality ──────────────────────────── *)
 
 let test_session_projection_simple () =
@@ -8937,6 +8965,8 @@ let compiler_suites =
           Alcotest.test_case "protocol known participant"    `Quick test_protocol_known_participant_no_hint;
           Alcotest.test_case "session no participant hint"   `Quick test_session_no_participant_hint;
           Alcotest.test_case "session mpst choose unsupported message" `Quick test_session_mpst_choose_unsupported_message;
+          Alcotest.test_case "session user MPST module not swallowed" `Quick test_session_user_mpst_module_not_swallowed;
+          Alcotest.test_case "session user Chan module not swallowed" `Quick test_session_user_chan_module_not_swallowed;
           (* Phase 1: Session type projection + duality *)
           Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
           Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;
