@@ -2444,12 +2444,17 @@ end
 
 Roles (`Client`, `Server` above) are bare uppercase names — there is no
 separate "declare a role" syntax. A role does not need to be a declared type
-(a bound `type Client = Client` or similar); if it isn't, the typechecker
-emits a non-fatal HINT during `--check`/run (harmless to `--check`'s exit
-code, but the message shares a stream with program stdout when interpreted —
-a cosmetic finding filed by the operational widening task, not repeated here).
-This document's own corpus programs (§2.7.6) declare each role as its own
-nullary type to avoid the HINT.
+(a bound `type Client = Client` or similar), and nothing is reported when it
+isn't: protocol roles are their own namespace, not type or actor names.
+
+> **Changed 2026-07-24.** Until that date the typechecker emitted a non-fatal
+> HINT ("participant X is not a known actor or type") during `--check`/run for
+> any role without a matching declaration. It was removed: it fired on every
+> ordinary protocol, including this document's own examples, and roles were
+> never meant to resolve as types in the first place. This document's corpus
+> programs (§2.7.6) still declare each role as its own nullary type — that is
+> now stylistic, not a way to silence a diagnostic. See `core-march.md` §4.11.6
+> (finding F8) for the operational-side write-up.
 
 #### 2.7.2 `session_ty` — the local, per-role view
 
@@ -2773,9 +2778,11 @@ Three new `accept/` programs (§3's sibling harness, `specs/lang/types/`,
   correctly on both backends (transcript in `specs/todos.md`).
 
 Both new programs declare every role (`Client`/`Server`/`Logger`) as its own
-nullary type (`type Client = Client`, etc.) specifically to avoid the
-undeclared-role HINT noted in §2.7.1 — a deliberately clean `--check` run
-with no stderr noise at all.
+nullary type (`type Client = Client`, etc.), originally to avoid the
+undeclared-role HINT then described in §2.7.1 — a deliberately clean `--check`
+run with no stderr noise at all. That HINT was removed on 2026-07-24 (see the
+changed-note in §2.7.1), so the declarations are now stylistic; the programs
+were left as written.
 
 The F4 finding (§2.7.5) was NOT given its own `reject/` corpus program when
 this task first found it: unlike the corpus's usual reject witnesses (which

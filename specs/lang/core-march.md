@@ -2600,18 +2600,22 @@ witness (every witness here is written to avoid both shapes on purpose:
 every channel is closed, and every continuation is threaded through fresh
 `let` bindings rather than re-read from a stale parameter or `let`).
 
-**A third, purely cosmetic finding (F8) is worth naming so it is not
-mistaken for a golden-corpus hazard.** `protocol` participant names that
-aren't declared as an `actor` or a `type` produce a typecheck-time HINT to
-STDERR (`typecheck.ml:~7057–7066`) — e.g. naming bare `Sender`/`Receiver`
-roles with no corresponding declaration. This is diagnostic noise, not a
-runtime or golden-corpus issue: the HINT is emitted by the compiler's own
-typecheck pass, at compile time, to the *compiler's* stderr — it has no
-program-runtime representation on either backend, so it cannot appear in
-either side of `verify.sh`'s interp-stdout vs compiled-stdout+stderr
-comparison. Declaring protocol roles as their own nullary types (as `g38`/
-`g39` do, `type Client = Client`) silences it, but that is optional hygiene,
-not a golden requirement.
+**F8 REMOVED 2026-07-24: there is no undeclared-participant HINT any more.**
+A third finding used to be named here so it would not be mistaken for a
+golden-corpus hazard: `protocol` participant names not declared as an `actor`
+or a `type` produced a typecheck-time HINT to the compiler's stderr — e.g.
+bare `Sender`/`Receiver` roles with no corresponding declaration. It was
+always diagnostic noise rather than a runtime or golden-corpus issue (the
+HINT had no program-runtime representation on either backend, so it could
+never appear in either side of `verify.sh`'s interp-stdout vs
+compiled-stdout+stderr comparison) — and on 2026-07-24 the hint was deleted
+outright: protocol roles are their own namespace, not type or actor names, so
+the hint fired on essentially every ordinary protocol, including this
+document's own `Echo` example. The emitting code no longer exists (the former
+`typecheck.ml:~7057–7066` site now carries only a comment recording the
+removal). `g38`/`g39` still declare their roles as nullary types
+(`type Client = Client`); that is now stylistic, not a way to silence
+anything. Typing-side note: `core-march-types.md` §2.7.1.
 
 ### 4.12 Linearity at runtime (operational: there is none)
 

@@ -97,6 +97,21 @@ git log is authoritative for exact commits.
   the old guess, are migrated to match on the label first (`g39`'s printed
   output is unchanged).
 
+- **Session types: the `Chan.offer` fix above was also bypassable by
+  unification** — an ordinary type annotation was enough. The compiler marks
+  the exact channel `Chan.offer` hands back and rejects operations on it by
+  identity, but unifying two channel types only compared their protocol
+  states, never linked them. So `let ch : Chan(Role, Proto) = offered` — or an
+  `if`/`match` join with another channel, a record field, or passing the
+  channel to a function with an annotated parameter — produced a *different*,
+  unmarked channel at the same state, and every later check passed. The
+  annotation form typechecked clean and, compiled, printed the other branch's
+  `String` payload as an `Int`. Unifying an unrefined `Chan.offer`
+  continuation with any other channel type is now itself an error; only a
+  `match` on the paired label can make the channel usable. Reported at the
+  unification rather than propagating the mark, so the function-parameter form
+  is caught at the call site, where the mistake is.
+
 - **Session types: the `Chan.offer` fix above was itself bypassable by
   shadowing the offer's label variable.** Rebinding the label name
   (`let lbl = :ok`) after `let (lbl, ch) = Chan.offer(...)` left the OLD
@@ -116,7 +131,24 @@ git log is authoritative for exact commits.
   signal meant to catch "you forgot a protocol branch" was indistinguishable
   noise either way. Covering every branch (with or without a catch-all) is
   now silent; a missing branch with no catch-all is a compile error naming
-  the branch.
+  the branch. A `match` arm naming a label the protocol does *not* offer
+  (`:okk` alongside `:ok`) used to be accepted in silence and could never be
+  taken; it is now a warning naming the unknown label and the valid set —
+  a warning, not an error, since a redundant arm is dead code rather than a
+  soundness problem.
+
+- Session types: driving an unrefined `Chan.offer` channel from inside a `_`
+  catch-all arm no longer advises "Match on the label first", which read as
+  plainly wrong to anyone who had just written a `match`. The message now
+  explains the real problem: a catch-all does not identify which branch the
+  peer chose, so every label needs its own arm.
+
+- Session types: a `choose` branch that ends in a `loop` is now rejected when
+  the protocol continues after the `choose`. Those trailing steps are
+  projected into every branch, so in a branch that loops forever they can
+  never run — the same unreachable-step defect already rejected when the
+  steps are written directly after a `loop`, but reached through the
+  post-`choose` tail instead.
 
 - Session types: a protocol role that isn't also a declared type or actor no
   longer produces a "not a known actor or type" hint. Roles are their own
