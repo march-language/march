@@ -216,15 +216,44 @@ modes, each with a guard:
    of string allocations at known sizes and asserts the histogram matches
    exactly. A representation decision is about to rest on these numbers; they
    must be validated, not trusted.
-3. **Instrumentation contaminating the baseline.** A test asserts that a
-   benchmark's median runtime with `MARCH_STRING_STATS` off is within 2% of an
-   uninstrumented build, so "zero overhead when off" is a fact rather than an
-   assumption.
+3. **Instrumentation contaminating the baseline.** `bash
+   bench/run_string_bench.sh --verify-overhead` asserts that the most
+   allocation-dense benchmark's median runtime with `MARCH_STRING_STATS` off is
+   within 2% of baseline (measured: −0.34%). It is a harness mode rather than an
+   alcotest test on purpose: a 2% timing assertion inside `dune runtest` would
+   flake on loaded CI and get muted, which is worse than not having it.
 
 **Failure handling:** if a benchmark fails to compile or crashes, the harness
 reports it and continues, then exits non-zero. It never silently skips — this
 codebase has been bitten before by skip-on-failure producing vacuous green runs,
 and a perf suite that quietly drops its hardest case is that same failure mode.
+
+## Blocker found during phase 1: two compiled-only RC leaks
+
+The harness immediately found two memory leaks in compiled code, both with
+minimal repros, both absent when interpreted:
+
+1. **`x ++ "literal"`** allocates a fresh copy of the literal on every
+   evaluation and never frees it. The same loop with both operands as
+   variables is clean (2,000,004 allocations / 2,000,001 frees, 2.9MB RSS);
+   with a literal operand it is 4,000,003 / 2,000,001 and 64.2MB, growing
+   linearly with iterations.
+2. **A hand-written recursive walk over `List(String)`** never frees the
+   elements. `string_split_large` reports **9,000,126 string allocations and 3
+   frees**, with RSS growing ~9.3MB per iteration (5 iterations = 52MB, 20 =
+   190MB, 60 = 558MB). Consuming the same list with the builtin `List.length`
+   instead drops the leak to 1 per iteration.
+
+**Consequence for this phase: the peak-RSS and peak-live columns are not
+usable evidence until these are fixed.** They measure leaked memory as much as
+working set, and the "views are indicated" criterion partly rests on memory.
+Acting on them as they stand would justify a representation change to fix what
+is actually a reference-counting bug — the exact failure this phase exists to
+prevent, arrived at from the opposite direction. Timing, allocation counts, and
+copy volumes are unaffected and remain usable.
+
+The leaks are tracked separately; fixing them is an RC correction, not string
+work, and phase 2's memory-based criteria should be re-evaluated afterwards.
 
 ## Risks
 
