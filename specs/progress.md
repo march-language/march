@@ -110,6 +110,61 @@ fully checked. 245 refinecheck tests (was 236), exit 0 on a cold VC cache;
 `test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
 An adversarial sweep and a 12-violation-kind file both run with **zero**
 `(error` lines on a tee'd solver channel.
+## Current State (as of 2026-07-27, string performance phase 1: measurement)
+
+The measurement apparatus that decides March's string representation question,
+built so the decision rests on data rather than on asymptotic reasoning. Three
+parts: opt-in runtime counters, a six-program benchmark corpus, and a harness.
+
+**Counters** (`MARCH_STRING_STATS=1`, `runtime/march_runtime.c`): allocation
+count and payload bytes, a size histogram bucketed at 7/15/23/31/63/255 bytes,
+bytes copied, frees, peak live bytes, and non-string (`march_alloc`) object
+counts. Hooked into `march_string_alloc` and **both** `march_decrc` free paths.
+Off by default behind a lazy env check shaped like `gc_trace_on`, relaxed
+atomics throughout; the "zero cost when off" claim is measured at −0.34%, not
+assumed. 23 bytes is the load-bearing bucket boundary — what would fit inline in
+the footprint the 24-byte `march_string` header already occupies. The
+`obj_allocs` counter was added mid-implementation after the split/slice pair
+proved unable to attribute cons-cell cost without it: cons cells are not
+strings, so they never reach `march_string_alloc`, and the two benchmarks
+reported near-identical `allocs` (9,000,126 vs 9,000,006) where the real
+difference is 9,000,120 vs 0.
+
+**Corpus** (`bench/string_{scan,case,split_large,slice_walk,small_churn,parallel_scan}.march`,
+documented in `specs/benchmarks.md`): each isolates one cost. `split_large` and
+`slice_walk` are a matched pair — same buffer, same field shape, differing only
+in whether a list is built — and their difference is what separates cons-cell
+cost from copy cost.
+
+**Harness** (`bench/run_string_bench.sh` → `bench/STRING_RESULTS.md`): median of
+5, peak RSS via `getrusage` with per-platform unit normalization (bytes on
+macOS, kilobytes on Linux), cross-checked against `/usr/bin/time -l` to within
+0.2%. Checksums are asserted, not printed, so a benchmark whose work is
+optimized away fails rather than reporting a fast number; the gate was proved to
+fire by corrupting an expected value.
+
+**Verdicts** (`specs/2026-07-26-string-performance-profile.md`), against
+criteria fixed in the spec before measuring: small-string optimization
+**indicated** (91.7% of allocations ≤23 bytes; doubling allocations doubles wall
+time); array-returning `split` **indicated** (split is 1.82× slower than
+slice-walk while copying only 1.43× the bytes — the difference is 9M cons
+cells); borrowed views **not indicated** (copy volume is 0.55–0.79× of input,
+not the ≥2× the criterion required — every field is copied exactly once);
+SIMD search worth doing at ~0.5 GB/s but not the largest win; phase 3's
+contention gate **triggered** (parallel scan plateaus at 3.97× on 8 workers of a
+10-performance-core machine, unexplained by cores or bandwidth).
+
+**Blocker found — since FIXED on main.** The harness turned up two
+compiled-only RC leaks, both with minimal repros, both absent when interpreted:
+`x ++ "literal"` re-allocated and leaked the literal on every evaluation, and a
+container released without being destructured never freed its contents —
+`split_large` showed 9,000,126 allocations against **3** frees, RSS growing
+~9.3MB per iteration. Both were fixed independently (immortal cell per literal
+site; `fix(codegen): deep drop for containers released without destructuring`).
+The phase 1 peak-RSS and peak-live columns were measured against the leaky
+compiler and must be re-taken before any memory-based criterion is applied;
+timing, allocation counts and copy volumes were unaffected and carry the
+verdicts above.
 
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 

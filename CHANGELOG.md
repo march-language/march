@@ -90,6 +90,19 @@ git log is authoritative for exact commits.
   the new code. The driver now resolves the runtime directory once and
   registers it with the CAS, so the key always digests the sources actually
   compiled; `MARCH_RUNTIME_DIR` overrides the search, mirroring `MARCH_STDLIB`.
+- **`MARCH_STRING_STATS=1`** — an opt-in profiling mode for compiled binaries.
+  Set the environment variable and the program prints string-allocation
+  statistics to stderr at exit: allocation count and bytes, a size histogram,
+  bytes copied, frees, peak live bytes, and non-string heap allocations. Off by
+  default and measured at −0.34% overhead when off. Intended for answering
+  "where is this program's string cost going?" without a profiler.
+
+- **String benchmark suite** — six benchmarks in `bench/` (`string_scan`,
+  `string_case`, `string_split_large`, `string_slice_walk`,
+  `string_small_churn`, `string_parallel_scan`), each isolating one cost, run
+  by `bash bench/run_string_bench.sh` into `bench/STRING_RESULTS.md`. Documented
+  in `specs/benchmarks.md`; findings in
+  `specs/2026-07-26-string-performance-profile.md`.
 
 ### Changed
 
