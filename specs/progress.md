@@ -1,5 +1,57 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, string performance phase 2 tasks 1-3)
+
+Three string optimizations landed against the phase 1 profile, each verified by
+a same-session A/B — absolute timings on this machine are not comparable across
+runs, so every claim below re-measured its baseline alongside the change.
+
+**`String.index_of_from`** (`runtime/march_runtime.c` + the nine builtin sites)
+takes a start offset and returns the index in the haystack's own coordinates.
+Its absence forced an O(n²) shape on any tokenizer — without it the only way to
+find the next separator is to slice off the tail and search again, re-copying
+the remainder every step, which is why two phase 1 benchmarks had to be written
+around it. Counting 150K fields in an 800KB buffer: `String.split` +
+`List.length` at 975ms against an `index_of_from` walk at **267ms**, with
+effectively zero allocation against ~9M strings plus ~9M cons cells.
+
+**memchr-based substring search.** A shared `march_memmem` two-stage helper —
+memchr for candidate first bytes, memcmp to confirm — now backs `index_of`,
+`index_of_from`, `contains`, `split`, `replace` and `replace_all`.
+`last_index_of` stays scalar because it scans backwards. libc's memchr is
+SIMD-optimised everywhere we target, so this gets vector scanning with no
+intrinsics and no per-arch code, the same reasoning behind
+`march_http_parse_simd.c`'s scalar fallback. `bench/string_scan` **809ms →
+20.8ms (39×)**, `string_parallel_scan` 390 → 171ms, `string_split_large` 1108 →
+928ms, and unchanged where no search is involved. Throughput went from ~0.5 GB/s
+to ~40 GB/s. A failed candidate resumes at `hit+1`, not `hit+nlen` — needles
+overlap, and skipping the whole needle loses the match in `("aaaa","aa")` at
+index 1. `replace_all` also stopped copying byte by byte between matches, which
+RAISES its reported `copy_bytes`: the old loop wrote through `buf[out++]` and
+bypassed the counter, so the previous figure undercounted.
+
+**Three-way concat folding** (`lib/desugar/desugar.ml`). A left-deep `++` chain
+allocates k-1 intermediates and re-copies the growing prefix at each link;
+folding in groups of three gives `ceil((k-1)/2)`. A 5-part chain over 100K
+iterations went 400,004 → 200,004 allocations, and `bench/string_small_churn`
+888.9 → 710.5ms with copying down 145.7 → 112.6MB. Fixed arity rather than a
+variadic n-ary concat because March builtin signatures are `Mono (TArrow ...)`;
+the only variable-length alternative is `string_join`, whose cons-list
+materialization measured at 59% of its cost at k=5.
+
+The concat rewrite lives in desugar rather than the parser or TIR, and the
+reason is load-bearing: the parser is where PR #90 broke the formatter's
+`"${...}"` reconstruction and silently disabled `~H` HTML escaping, while TIR is
+ANF — by then a chain is let-bound temporaries with `dec_rc` interleaved, a
+liveness analysis rather than a tree rewrite. **The `~H` bug was reintroduced
+anyway and caught by test**: `ESigil` desugars its content before HTML lowering,
+so the chain reached `html_interp_to_iolist` as one opaque `concat3` and it
+stopped matching `to_string(e)` per part. `decompose_concat` now flattens
+`concat3` as well as `++`. That failure mode fails open — the template still
+renders, just unsafely — which is why the codegen test guarding it earns its
+keep.
+
+
 ## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
 
 Compiled March now reclaims an aggregate that is released WITHOUT being
