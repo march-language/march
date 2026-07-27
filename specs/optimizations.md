@@ -115,7 +115,7 @@ Peephole rewrites based on algebraic identity and strength-reduction rules.
 Inlines small, pure, non-recursive functions at call sites. Alpha-renames inlined bodies to prevent variable capture.
 
 **Eligibility criteria:**
-- Function body ≤ 15 TIR nodes (configurable via `inline_size_threshold`)
+- Function body ≤ 50 TIR nodes (configurable via `inline_size_threshold`)
 - Function body is pure (no effects; checked by `lib/tir/purity.ml`)
 - Function is non-recursive (does not call itself)
 - Does not call another inlining candidate (prevents infinite fixed-point expansion)
@@ -127,6 +127,83 @@ Inlines small, pure, non-recursive functions at call sites. Alpha-renames inline
 **Effort:** Low (done) | **Impact:** High
 **Dependencies:** Pairs with Fold and Simplify for maximum benefit
 **Tests:** `test_inline_*` group in `test/test_march.ml`
+
+---
+
+### 4a. Single-Use Private-Function Inlining  ✅
+
+**Location:** `lib/tir/single_use_inline.ml`
+**Stage:** TIR (Opt coordinator), after ordinary `inline` and before `cprop`
+
+Relocates a small, syntactically impure top-level function into its only
+direct call site. The pass retains `Inline.inline_size_threshold = 50` and
+runs in the fixed-point order `inline → single-use-inline → cprop → fold →
+simplify → fusion → dce`.
+
+Eligibility requires exactly one **total** free top-level reference in the
+current artifact, not merely one caller. That occurrence must be an
+arity-correct direct `EApp`; any occurrence as a value, argument, closure
+field, indirect-call target, `ADefRef`, or other atom position makes the
+function address-taken and excludes it. Syntactically pure functions remain
+the ordinary inliner's responsibility.
+
+The impure-body case is sound because one substitution relocates observable
+operations rather than duplicating them. The pass excludes DCE roots
+(`main`/qualified main, exports, tests, setup, migrations, and the no-seed
+fallback), every recursive direct-call SCC, collision-dispatch targets, and
+hot-code-reload boundary functions. Existing alpha-renaming and
+arity-checked ANF substitution preserve lexical scope and argument binding.
+
+Perceus runs before this optimization, so ownership operations are already
+explicit. Inlining must preserve every `EIncRC`, `EDecRC`, atomic RC, `EFree`,
+and `EReuse` operation and their order; it does not synthesize, combine,
+remove, or reorder RC work. Downstream impurity-aware DCE may remove only
+bindings and now-unreachable named definitions under its existing rules.
+
+**Measured emitted-LLVM result (2026-07-27):** all 93 current non-JS top-level
+native fixtures compiled successfully. Their final output contains 1,869
+matched March definitions and 2,310 residual direct calls to those
+definitions. On the exact 91-fixture set used by the published baseline,
+2,029 definitions became 1,853 (176 removed), while the published 2,468
+residual calls became 2,294 (174 fewer, 7.05%). A same-source no-pass control
+at `91afbe99` measured 2,470 → 2,294 calls and 2,029 → 1,853 definitions,
+attributing 176 removed calls and definitions across the same 51 fixtures;
+the two-call difference from the published baseline predates this pass.
+
+Across all 93 current fixtures, the same no-pass control measured 2,049 →
+1,869 definitions and 2,490 → 2,310 calls: 180 removed call/definition
+occurrences, 156 distinct bodies, across 53 fixtures. Of those occurrences,
+159 contain explicit RC operations. The final-phase dump distributions were:
+
+| Serialized `body_size` | Removed definitions |
+| ---: | ---: |
+| 1–10 | 23 |
+| 11–20 | 71 |
+| 21–25 | 30 |
+| 26–30 | 17 |
+| 31–40 | 21 |
+| 41–50 | 13 |
+| 51+ | 5 |
+
+| Serialized `rc_ops` | Removed definitions |
+| ---: | ---: |
+| 0 | 21 |
+| 1 | 42 |
+| 2 | 39 |
+| 3 | 32 |
+| 4 | 20 |
+| 5–9 | 20 |
+| 10–19 | 6 |
+
+The pass still enforces `Inline.node_count <= 50`. The dump serializer's
+`body_size` is a visualization counter that weights aggregate atom lists
+differently, so five removed definitions serialize as 51–56 even though they
+meet the pass's 50-node predicate. These are compiler-output measurements;
+no runtime speedup was measured.
+
+**Tests:** `single_use_inline`, `inline`, DCE, hot-reload boundary, mutual-TCO,
+reduction-check, TIR property, raw-LLVM elimination, and native RC-order
+regressions
 
 ---
 
