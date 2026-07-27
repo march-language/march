@@ -119,7 +119,9 @@ git log is authoritative for exact commits.
   reconciled with the annotations, so the body was checked against the
   annotation while every call site checked its argument against the unrelated
   variable. `fn (x : String) -> ...` applied to `42` typechecked. For session
-  types this was the last live soundness hole in the `Chan.offer` fixes above:
+  types this was the last soundness hole *found* in the `Chan.offer` fixes
+  above (the enforced routes are enumerated, not proved — see
+  `specs/lang/session-types.md`):
   passing an unrefined continuation to `fn (c : Chan(Role, Proto)) -> ...`
   reached neither the per-operation check nor the unification check, and the
   compiled program read one branch's `String` payload as the other's `Int`.
