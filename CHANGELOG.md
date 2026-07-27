@@ -67,6 +67,15 @@ git log is authoritative for exact commits.
   role-mismatch error. A program that closes a session channel instead of
   driving the post-choice steps is now correctly rejected.
 
+- Session types: `loop do ... end` protocols now genuinely loop. The
+  projection previously substituted the post-loop continuation into the
+  recursion point, so a `loop` was silently one unrolled iteration — a
+  second send/recv round was rejected with `` channel is at `End` ``. `loop`
+  now projects to the standard recursive µ-type, so a channel may run the
+  loop body any number of times. Since such a loop never exits, a protocol
+  step written after a `loop` block is now a compile error instead of
+  unreachable, silently-accepted dead code.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and

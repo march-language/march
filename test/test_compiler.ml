@@ -1527,8 +1527,14 @@ let test_session_mpst_bystander_still_merges () =
     "MSend(A, Int, End)" (pp_sty c_ty)
 
 let test_session_loop_projection () =
-  (* A protocol with a loop: generates SRec/SVar *)
+  (* A protocol with a loop projects to a GENUINE recursive binder: the body
+     must end in a back-reference (SVar) to the binder, not in SEnd.  The old
+     assertion (`SRec (_, SSend _)`) held even after `subst_svar` had replaced
+     the back-reference with the post-loop continuation — i.e. it passed while
+     `loop` was silently a single unrolled iteration. *)
   let (ctx, env) = typecheck_full {|mod Test do
+    type Source = Source
+    type Sink = Sink
     protocol Stream do
       loop do
         Source -> Sink : Int
@@ -1538,12 +1544,54 @@ let test_session_loop_projection () =
   Alcotest.(check bool) "loop protocol: no errors" false (has_errors ctx);
   let pi = March_typecheck.Typecheck.StrMap.find "Stream" env.March_typecheck.Typecheck.protocols in
   let source_ty = List.assoc "Source" pi.March_typecheck.Typecheck.pi_projections in
-  (* Source projection should be Rec(X, Send(Int, X)) for some X *)
   (match source_ty with
-   | March_typecheck.Typecheck.SRec (_, March_typecheck.Typecheck.SSend _) ->
-     Alcotest.(check bool) "source loop projection is SRec(Send(...))" true true
+   | March_typecheck.Typecheck.SRec (x, March_typecheck.Typecheck.SSend
+       (_, March_typecheck.Typecheck.SVar y)) when x = y ->
+     Alcotest.(check bool) "source loop projection is Rec(X, Send(Int, X))" true true
    | other ->
-     Alcotest.fail ("expected SRec(SSend(...)) but got: " ^ pp_sty other))
+     Alcotest.fail ("expected SRec(X, SSend(_, SVar X)) but got: " ^ pp_sty other))
+
+(** A loop protocol must permit MORE THAN ONE iteration.  Pre-fix the second
+    iteration was rejected with "channel is at `End`". *)
+let test_session_loop_two_iterations_ok () =
+  let ctx = typecheck {|mod Test do
+    type Prod = Prod
+    type Cons = Cons
+    protocol Str do
+      loop do
+        Prod -> Cons : Int
+        Cons -> Prod : Bool
+      end
+    end
+    fn main() do
+      let (cc, pp) = Chan.new(Str)
+      let pp2 = Chan.send(pp, 1)
+      let (x, cc2) = Chan.recv(cc)
+      let cc3 = Chan.send(cc2, true)
+      let (ack, pp3) = Chan.recv(pp2)
+      let pp4 = Chan.send(pp3, 2)
+      let (y, cc4) = Chan.recv(cc3)
+      let cc5 = Chan.send(cc4, false)
+      let (ack2, pp5) = Chan.recv(pp4)
+      println(int_to_string(x + y))
+    end
+  end|} in
+  Alcotest.(check bool) "two loop iterations typecheck" false (has_errors ctx)
+
+(** Steps written AFTER a `loop` block are unreachable — the loop never exits —
+    and are now a protocol-declaration error rather than silently reachable. *)
+let test_session_steps_after_loop_error () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    protocol Bad do
+      loop do
+        A -> B : Int
+      end
+      B -> A : Bool
+    end
+  end|} in
+  Alcotest.(check bool) "steps after loop: error" true (has_errors ctx)
 
 let test_session_chan_type_annotation () =
   (* Chan(Client, Ping) in a type annotation should resolve correctly — no errors *)
@@ -2557,7 +2605,12 @@ let test_srec_dual () =
 
 (** SRec multi-turn typecheck: a function using a recursive channel protocol typechecks. *)
 let test_srec_multi_turn_typechecks () =
-  (* A function that uses a recursive protocol exactly once (one send+recv then done) *)
+  (* A function that uses a recursive (looping) protocol for exactly one turn,
+     then drops the channel.  Since the 2026-07-24 loop-recursion fix, a
+     looping channel never reaches `End`, so `Chan.close` on it is correctly
+     rejected ("channel is at `Send(..., Rec(...))` but I expected `End`") —
+     the must-close check fires only at `End`, so dropping mid-loop is legal
+     and this is what a well-typed caller does instead of closing. *)
   let ctx = typecheck {|mod Test do
     protocol Ping do
       loop do
@@ -2566,7 +2619,7 @@ let test_srec_multi_turn_typechecks () =
     end
     fn one_ping(ch : Chan(Client, Ping)) : Unit do
       let ch2 = Chan.send(ch, 42)
-      Chan.close(ch2)
+      ()
     end
   end|} in
   Alcotest.(check bool) "recursive Chan usage typechecks" false (has_errors ctx)
@@ -8586,6 +8639,8 @@ let compiler_suites =
           Alcotest.test_case "session choice tail survives projection" `Quick test_session_choice_tail_survives_projection;
           Alcotest.test_case "session mpst bystander still merges"       `Quick test_session_mpst_bystander_still_merges;
           Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
+          Alcotest.test_case "session loop two iterations ok" `Quick test_session_loop_two_iterations_ok;
+          Alcotest.test_case "session steps after loop error" `Quick test_session_steps_after_loop_error;
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
           Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
           Alcotest.test_case "session Chan unknown role"     `Quick test_session_chan_unknown_role_error;

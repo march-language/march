@@ -7347,18 +7347,19 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
        else
          rest_ty ()   (* This role doesn't participate in this step *)
      | Ast.ProtoLoop inner_steps ->
-       (* Wrap the inner projection in a recursive binder *)
+       (* `loop do S end` is the µ-type `Rec X. S[X]` — the body's continuation
+          IS the binder's back-reference, so the loop repeats indefinitely.
+          (Substituting the post-loop continuation into the back-reference, as
+          this arm used to do, produced a vacuous SRec with no SVar in it: one
+          unrolled iteration.  Steps after a `loop` are unreachable and are
+          rejected at protocol-declaration time.) *)
        let rec_var = proto_name ^ "_loop" in
        let inner = project_steps env ~proto_name ~multiparty inner_steps role (SVar rec_var) in
-       let after_loop = rest_ty () in
        (match inner with
         | SVar _ ->
-          (* Role not involved in the loop at all — skip *)
-          after_loop
-        | _ ->
-          (* Substitute the continuation into the SVar back-reference *)
-          let inner_with_cont = subst_svar rec_var after_loop inner in
-          SRec (rec_var, inner_with_cont))
+          (* Role not involved in the loop at all — skip the binder entirely. *)
+          rest_ty ()
+        | _ -> SRec (rec_var, inner))
      | Ast.ProtoChoice (chooser, branches) ->
        (* Every branch rejoins the protocol tail, so each arm is projected with
           the steps that FOLLOW this choice block as its continuation — not the
@@ -8780,6 +8781,25 @@ let rec check_decl env (d : Ast.decl) : env =
         List.iter (fun (_, steps) -> List.iter validate_step steps) branches
     in
     List.iter validate_step pdef.proto_steps;
+    (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
+       follows one at the same nesting level is unreachable. *)
+    let rec check_unreachable_after_loop steps =
+      match steps with
+      | Ast.ProtoLoop inner :: rest ->
+        check_unreachable_after_loop inner;
+        if rest <> [] then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "Protocol `%s`: the steps after this `loop` can never run — \
+                a `loop` block repeats forever, so it must be the last step."
+               name.txt)
+      | Ast.ProtoChoice (_, branches) :: rest ->
+        List.iter (fun (_, arm) -> check_unreachable_after_loop arm) branches;
+        check_unreachable_after_loop rest
+      | _ :: rest -> check_unreachable_after_loop rest
+      | [] -> ()
+    in
+    check_unreachable_after_loop pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
     let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
     let participants = List.map fst projections in
