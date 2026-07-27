@@ -4737,6 +4737,25 @@ static inline double clo_call_dbl_dbl(void *clo, double x) {
     return march_unbox_float(wire_ret);
 }
 
+/* Two-argument variants for native_{int,float}_arr_map2 (a genuine 2-param
+ * March lambda, e.g. `fn (a, b) -> a + b`, compiles to a 3-param apply fn:
+ * ($clo, a, b) -- confirmed via -emit-llvm, not a tuple-destructured
+ * single param). Same wire-tagged/boxed ABI as the 1-arg helpers above. */
+static inline void *clo_apply_ptr2(void *clo, void *arg1, void *arg2) {
+    void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 16);
+    return fn(clo, arg1, arg2);
+}
+static inline int64_t clo_call_int_int_int(void *clo, int64_t x, int64_t y) {
+    void *wire_x = (void *)(intptr_t)((x << 1) | 1);
+    void *wire_y = (void *)(intptr_t)((y << 1) | 1);
+    void *wire_ret = clo_apply_ptr2(clo, wire_x, wire_y);
+    return (int64_t)(intptr_t)wire_ret >> 1;
+}
+static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
+    void *wire_ret = clo_apply_ptr2(clo, march_alloc_float(x), march_alloc_float(y));
+    return march_unbox_float(wire_ret);
+}
+
 /* Uninitialized allocation for llvm_emit's inline map loop (native_map_inline.ml):
  * every slot is written by the loop before any read, so leaving them
  * uninitialized (unlike native_int_arr_make/native_float_arr_make, which
@@ -4816,6 +4835,42 @@ void *native_int_arr_map(void *arr, void *f) {
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int(f, x);
+    }
+    return new_arr;
+}
+
+/* Elementwise binary op over two same-length int arrays -- the two-array
+ * counterpart to native_int_arr_map, for DataFrame.col_add_col-shaped
+ * column-column arithmetic. Caller (stdlib) checks the length match; a
+ * mismatch here is a genuine caller bug (both callers already validate),
+ * so it's an assert rather than a Result -- matching native_int_arr_min/max's
+ * "caller guarantees" convention above, not a new error-handling contract. */
+void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
+    int64_t len = native_int_arr_length(arr1);
+    if (len != native_int_arr_length(arr2)) {
+        fputs("march: native_int_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr1 + NATIVE_ARR_HDR + i * 8);
+        int64_t y = *(int64_t *)((char *)arr2 + NATIVE_ARR_HDR + i * 8);
+        *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int_int(f, x, y);
+    }
+    return new_arr;
+}
+
+/* Widen an int array to float, elementwise -- used by col_add_col's mixed
+ * Int/Float branches to bring both sides to Float before native_float_arr_map2,
+ * instead of round-tripping through List(Value). Pure conversion, no
+ * closure -- should auto-vectorize (int64->double SIMD convert) same as
+ * native_int_arr_sum already does for the reduction case. */
+void *native_int_arr_to_float_arr(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        double d = (double)x;
+        memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &d, 8);
     }
     return new_arr;
 }
@@ -4930,6 +4985,26 @@ void *native_float_arr_map(void *arr, void *f) {
     for (int64_t i = 0; i < len; i++) {
         double x; memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
         double r = clo_call_dbl_dbl(f, x);
+        memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
+    }
+    return new_arr;
+}
+
+/* Elementwise binary op over two same-length float arrays -- see
+ * native_int_arr_map2's doc comment (same two-array shape, Float instead
+ * of Int). Both sides must already be Float; col_add_col's mixed-type
+ * cases widen the Int side via native_int_arr_to_float_arr first. */
+void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
+    int64_t len = native_float_arr_length(arr1);
+    if (len != native_float_arr_length(arr2)) {
+        fputs("march: native_float_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        double x, y;
+        memcpy(&x, (char *)arr1 + NATIVE_ARR_HDR + i * 8, 8);
+        memcpy(&y, (char *)arr2 + NATIVE_ARR_HDR + i * 8, 8);
+        double r = clo_call_dbl_dbl_dbl(f, x, y);
         memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
     }
     return new_arr;

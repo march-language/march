@@ -51,6 +51,32 @@ stopped matching `to_string(e)` per part. `decompose_concat` now flattens
 renders, just unsafely — which is why the codegen test guarding it earns its
 keep.
 
+## Current State (as of 2026-07-27, NativeArray.map2 primitive + DataFrame.col_add_col rewiring)
+
+New two-array zip-with primitive, `NativeArray.map2_int`/`map2_float` (plus
+`to_float_arr` for widening a `NativeIntArr`), unblocking `DataFrame.col_add_col`
+(column-column arithmetic) from a `List.zip`/`List.map`/`native_*_arr_from_list`
+round-trip — the last piece of the P10 Phase 3 "two-array ops" survey (aggregations
+were already done; `col_add_col`/`fill_null` were the two identified two-array
+shapes, `fill_null` remains out of scope since it zips against a `TypedArray(Bool)`
+mask, not another `NativeArray`).
+
+Full stack, all four layers: runtime C (`native_{int,float}_arr_map2` in
+`runtime/march_runtime.c`, reusing `map`'s wire-tagged/boxed closure-call ABI via
+new 2-arg helpers `clo_call_int_int_int`/`clo_call_dbl_dbl_dbl`), interpreter
+(`lib/eval/eval.ml`), typechecker (`lib/typecheck/typecheck.ml`), and
+compiled-path registration (`lib/tir/llvm_builtins.ml` table + preamble
+`PDeclare`s — matched in `test/test_codegen.ml`'s golden preamble string —
+plus `lib/tir/defun.ml`'s `builtin_names`). `stdlib/dataframe.march`'s
+`col_add_col` rewired for `IntCol+IntCol`, `IntCol+FloatCol`, `FloatCol+FloatCol`,
+`FloatCol+IntCol`. Verified byte-identical output between interpreted and
+compiled modes, including the length-mismatch error path. Regression test:
+`test/native/native_arr_map2.march`.
+
+Scoped to correctness only — `map2` does not (yet) get the Phase-2b/2c/Option-A/B
+closure-inlining/vectorization treatment `map_int`/`map_float` have; each element
+still dispatches through the C runtime's closure-pointer call. That inlining is a
+natural follow-up, not started. See `specs/optimizations.md` §P10 "Phase 3".
 
 ## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
 
@@ -92,6 +118,16 @@ types (a dropped `Option(String)` still leaks its payload), tuples and records
 (`Rc_types.needs_rc` is FALSE for both, so no aggregate-level dec exists to
 rewrite), deep LEFT spines (only the last field's drop is a tail call), and
 `EAtomicDecRC`.
+## Current State (as of 2026-07-27, session types: `stop` lets a `choose` branch inside a `loop` exit it)
+
+A `loop do … end` protocol projects to the µ-type `Rec X. S[X]` and, before this fix, had no way to reach `SEnd`: every step inside the body — including every `choose` branch — took the loop's own back-reference as its continuation, so a looping channel could only be *abandoned* via `Chan.close`, never actually closed. `stop` is a new `protocol_step` (`Ast.ProtoStop of span`), legal only inside a `loop` body directly or nested inside a `choose` branch within one; `project_steps`' new arm projects it to `SEnd` for every role unconditionally — the literature shape `Rec X. choose { more: S;X, done: end }`.
+
+Surface syntax is contextual rather than a reserved word: `protocol_step`'s existing alternatives all start with an upper-case role name, `LOOP`, or `CHOOSE`, so a bare `lower_name` alternative in `parser.mly` is unambiguous — it reduces to `ProtoStop` only when the identifier's text is `"stop"`, and raises a positioned parse error naming `stop` as the only valid step otherwise. Confirmed zero new menhir shift/reduce conflicts.
+
+Two validation rules keep `stop` from meaning something it doesn't: `stop` outside any `loop` is rejected (a no-op there — writing nothing already ends the protocol), and steps written after `stop` in the same list are unreachable, extending the existing `check_unreachable_after_loop` walker rather than duplicating it. Duality needs no special handling — `dual_session_ty` already maps `SEnd` to `SEnd` — verified live with a two-role protocol whose `done` branch dualizes cleanly against the peer's `SEnd`.
+
+4 new unit tests in `test/test_compiler.ml` (`run_compiler` quick suite: 604 total). Corpus: `specs/lang/types/accept/t105_loop_stop_two_iterations_close` (loops twice, exits via `stop`, closes both endpoints — run interpreted AND `--compile`d, byte-identical output `3`) and `reject/t106_stop_outside_loop` / `t107_steps_after_stop_unreachable`; `check_types.sh` 187/187 → **190/190** (94 accept, 96 reject). `specs/lang/golden/verify.sh` 46/46 unchanged (no golden witness needed — compile-time-only feature). `scripts/check-docs.sh` clean. Docs: `specs/lang/session-types.md` (new "Exiting a loop: `stop`" subsection), `specs/lang/core-march-types.md` §2.7.1/§2.7.3, `specs/lang/surface-syntax.md`.
+
 ## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
 
 Compiled string literals are now emitted as one immortal cell per literal
@@ -342,6 +378,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Actors** — share-nothing message passing with private state, isolation guaranteed by linear types
 - **Actor state updates** use record spread: `{ state with field = new_value }`
 - **Binary session types** for v1 — typed two-party protocols verified at compile time (catches deadlocks, protocol violations, missing cases). Multi-party deferred post-v1.
+- **`loop`/`stop` protocol repetition and termination** — `loop do … end` projects to the recursive µ-type `Rec X. S[X]`; a `stop` step inside the loop (directly, or nested in a `choose` branch) exits it by projecting to `SEnd`, so a looping protocol can reach `End` and `Chan.close` cleanly instead of only ever being abandoned.
 - **Capability-secure messaging** — actors can only message actors they hold an unforgeable capability reference to; linear capabilities enable ownership transfer
 - **Content-addressed message schemas** — messages reference their schema by hash for safe distributed communication
 - **Location-transparent `Pid`** (Erlang model) — you don't know or care which node an actor lives on
@@ -6729,3 +6766,41 @@ No changes to code in this pass — audit only. Both findings in `specs/todos.md
 **Scope, deliberately narrow:** only the *argument* box is reused. The *return*-value box (the apply body's own fresh allocation for its result, e.g. `march_alloc_float(double %ar112)` inside the lambda) is NOT reused here — doing that would need the callee's own codegen to cooperate (an out-parameter or FBIP-style hint), a larger change than this loop controls. `Int` has no equivalent box (its wire value is a tagged immediate via `coerce`'s `"i64"`/`"ptr"` arm, no allocation involved) so is unaffected. This does NOT unlock Float vectorization — the return-side allocation still blocks the auto-vectorizer — it only cuts allocation traffic; see `specs/optimizations.md` P10 "Stage 4" for the larger unboxed-apply-function option (Option B) that would be needed for that.
 
 **Regression test:** `test/native/native_arr_map_inline_float_box_reuse.march` — correctness (`.expected` diff) plus an `--emit-llvm` structural check (an `awk` script isolating each `nmap_bodyN:` loop-body block's text and grepping it for `march_alloc_float`, asserting zero — the allocation must live only in the `nmap_preN` preheader that precedes the block). Full test suite green except the pre-existing, reconfirmed-environmental ASAN teardown hang.
+
+## Current State (as of 2026-07-27, P10 float-boxing Stage 4 Option B — unboxed apply-fn clone for map_float, genuine Float vectorization)
+
+**`lib/tir/native_map_inline.ml` now synthesizes an unboxed clone of an all-`Float`-signature `map_float` callback, and it actually vectorizes.** The Option A entry above only cut allocation traffic; this unlocks real SIMD, and turned out far cheaper than the "second calling convention, real defun.ml work" estimate in `specs/optimizations.md`'s earlier Option B sketch.
+
+**The key discovery:** `Tir_names.is_apply_fn` — the single predicate every box/unbox decision in `lib/tir/llvm_toplevel.ml`'s function-emission code keys off — is a pure name check (does the function name contain the literal substring `"$apply$"`), not a structural/TIR-level marker. A lifted lambda's `fn_def` already carries its natural, concrete parameter/return types (e.g. `x : TFloat`); boxing is applied purely because the name matches at *emission time*. So emitting the exact same already-Perceus-processed `fn_def` under a renamed `fn_name` that does not contain `"$apply$"` makes the existing, completely unmodified emission code treat it as an ordinary function: natural `double` params and return, no `march_alloc_float`/`march_unbox_float` anywhere. Zero changes needed to `llvm_toplevel.ml`.
+
+**Implementation (`lib/tir/native_map_inline.ml`):** `try_unboxed_variant` checks whether the apply fn behind a `map_float` callback has an all-`Float` signature (`fn_ret_ty = TFloat` and every non-`$clo` param `= TFloat` — no `TVar`, i.e. genuinely concrete, not still-generic). If so, it clones the `fn_def` under `unboxed_name_of` (splices out the `"$apply$"` marker itself, replacing with `"$mapfast$"` — appending past it wouldn't work, since the original substring would still be present) and pushes it onto a new `extra_fns : Tir.fn_def list ref` threaded through `rewrite_expr`, which `run` appends to `tm_fns` at the end. Both `rewrite_expr` match arms (non-capturing Phase 2b shape and capturing Phase 2c shape) call this and, on success, substitute the map call's target with the clone's name instead of the original boxed apply fn — `subst_call`/`subst_call_capturing` both gained an `~unboxed` parameter for this. Captures are unaffected either way: a captured Float is already stored/loaded at its own concrete type in the closure struct (`TDClosure`'s field types are the free variables' own types, never boxed), independent of which apply-fn variant reads it.
+
+**Codegen (`lib/tir/llvm_emit.ml`):** `emit_native_map_inline_loop` gained an `~unboxed` parameter. When true: no box allocated at all (not even Option A's reused one) — the loop loads a raw `double` from the array, calls the clone directly (`call double @name(ptr %clo, double %x)`), stores the raw `double` result. A new synthetic builtin name, `__native_float_arr_map_inline_unboxed` (both the 2-arg non-capturing and 3-arg capturing forms), selects this path; the existing `__native_float_arr_map_inline` (Option A) stays for anything that doesn't qualify (a still-generic signature — Int never needed either mode, it has no box to begin with).
+
+**Verified via `-S -emit-llvm` + `clang -O2` disassembly** on `fn x -> x *. 2.0 +. 1.0` over a 1,000,000-element array: `march_main`'s fully-inlined loop shows LLVM's own vectorizer block markers (`%vector.ph`, `%vector.body`) and real 8-wide-unrolled NEON (`fadd.2d` — the `*2.0` strength-reduced to a self-add) — genuine Float SIMD, the first time this has actually fired for `map_float` in this codebase. Correctness confirmed against the existing `native_arr_map_inline_capture.march`/`native_arr_map_inline_vectorize.march`/`native_arr_map_inline_reuse.march`/`native_arr_map_inline_float_box_reuse.march` fixtures (all still pass byte-for-byte, including the capturing-and-reused-elsewhere fallback case), plus a dedicated `test/native/native_arr_map_inline_unboxed.march` (non-capturing and capturing all-Float cases) checked for correctness and, via `--emit-llvm`, that exactly 2 `$mapfast$` clones exist with zero boxing calls in either clone's *own body* — a stronger check than Option A's "not inside the loop" (the callee itself must be clean too, since it now takes/returns a raw `double`). Real vector-instruction assertions were deliberately left out of the automated test — clang-version/target-architecture dependent, not portable across CI runners — and verified manually instead, as above.
+
+**Known, accepted cost:** the *original* boxed apply fn is left in the module alongside its unboxed clone — `Native_map_inline.run` executes after Opt's DCE pass, so the now-dead original (nothing calls it once the rewrite redirects the call site) is never swept. Not a correctness issue, just unnecessary compiled/linked dead code; a reachability check to drop it is a plausible follow-up, not attempted here.
+
+**Along the way:** hit the same stale-`_build/default/runtime`-copy issue as before (see `project_build_runtime_stale_copy.md`), this time in this worktree specifically, after merging in unrelated upstream commits. Fixed the same way: `dune build --root . @bin/warm-cache`.
+
+## Current State (as of 2026-07-27, docs site — site-wide ⌘K search via Pagefind)
+
+**march-lang.org gained full-text search across every page, plus stdlib symbol lookup, behind one `⌘K` / `Ctrl+K` / `/` shortcut** (`docs/_includes/search.html`, `scripts/build-search-index.sh`, `scripts/serve-docs.sh`, `.github/workflows/deploy-pages.yml`). The site previously had no search at all outside the generated API reference.
+
+**Why Pagefind, and why a post-build step:** the searchable site is two families of pages that share no source format — ~53 Jekyll pages rendered from `docs/**/*.md`, and 114 pre-generated standalone HTML files under `docs/docs/stdlib/` emitted by the *external* `march_doc` tool (auto-cloned by `scripts/gen-stdlib-docs.sh`, not in this repo). Pagefind crawls the *built* `_site/`, which is the only point at which both are the same kind of artifact. The index ships with the site; there is no search service at runtime and no CDN dependency. 167 pages indexed.
+
+**Opt-in inclusion.** Pages carry `data-pagefind-body`; Pagefind's rule is that once *any* page in a crawl has that attribute, only pages with it are indexed — so the playground, Tetris, perihelion and decision-graph pages stay out with no exclusion rules. The four layouts (`default`, `docs`, `cookbook`, `landing`) set it on their content element with a `data-pagefind-filter="section:…"` tag that drives the Guide/Cookbook/Stdlib/Home result labels. The stdlib pages can't set it — we don't own their generator — so `build-search-index.sh` injects it into `_site/docs/stdlib/*.html` (`<main id="main">`, which holds module content only; the ~1900-line symbol sidebar is a sibling `<nav id="sb">` and correctly stays out). Injecting into the *build output* means a future stdlib regeneration can never undo it.
+
+**Two search tiers in one box.** Pagefind indexes stdlib pages at PAGE granularity — searching `push` lands on `Queue.html` with no anchor. So the modal also loads `docs/docs/stdlib/search-index.json` (the symbol index `march_doc` already emits: 2038 entries, ~57 KB gzipped, fetched lazily on first keystroke in parallel with Pagefind) and renders a capped "Standard library" group above the prose results, linking to the definition anchor directly (`Array.html#fn-push`, using the generator's own `#fn-`/`#type-`/`#iface-` scheme). Symbols match on NAME only, exact or prefix (plus `_`-boundary prefixes, so `string` finds `to_string`); a `Module.member` pair is recognised (`List.map`), and any other multi-word query skips the symbol tier entirely. This is deliberately narrower than the stdlib page's own scorer, which also matches signatures, docstrings and Levenshtein neighbours — that would flood prose queries across 2038 names. Verified: `push`→`Array.push` first; `List.map`→`List.map` first; `to_string`→5 hits; `Array`→module page first; `how do supervisors restart children`→**zero** symbols.
+
+**Non-obvious bug fixed during review:** the full-screen scrim covered only a sliver at the top of the page. Cause is a CSS containing-block rule, not a z-index or sizing mistake — the layouts render the include inside their nav, and both `.d-nav` and `.m-nav` set `backdrop-filter`, which makes an element a containing block for `position: fixed` DESCENDANTS. Measured in-page: the overlay was `846×126` (the nav's box) versus `846×998` (the viewport) once reparented. Fixed by moving the overlay to `<body>` at init, which is robust against any layout later gaining a `transform`/`filter` on an ancestor.
+
+**Idle panel.** A bare `⌘K` shows recent searches (localStorage, capped at 5, written only when a query actually leads somewhere, `try`/`catch`-wrapped for Safari private browsing) above curated starting points. Those links are generated by Liquid from `site.pages` by `nav_order`, not hardcoded, so a renamed permalink can't leave a dead suggestion. Nothing is preselected in the idle state — auto-highlighting would make an unmodified `⌘K`+Enter navigate somewhere the user never chose.
+
+**Guard against silent rot:** `build-search-index.sh` fails the build if the index comes out with fewer than 100 pages. Pagefind exits 0 and still writes a `pagefind/` directory when it indexes nothing, so a dropped `data-pagefind-body` would otherwise ship a search box that finds nothing, with a green CI run.
+
+**Local workflow:** `scripts/serve-docs.sh` (jekyll build → pagefind → serve `_site`). Plain `jekyll serve` cannot be used — it rebuilds `_site` and wipes the index — and the modal says so explicitly, but only on localhost; visitors get a plain "search is unavailable" message. The script also exports a UTF-8 locale, without which Jekyll's SCSS converter dies with `Invalid US-ASCII character "\xE2"`.
+
+**Verified:** built and driven live in a browser across all four layouts in both light and dark themes (the toggling layouts use a `.light` class on `<html>`, the generated stdlib pages use `data-theme='light'`; the modal matches both). Keyboard nav, `Esc`, `/`, recents record/replay/clear, and `↵` on a symbol row landing on a real anchor (`/docs/stdlib/Array.html#fn-push`, confirmed present with signature `push(v, elem)`) all checked. No console errors. `scripts/check-docs.sh` green.
+
+**Not done:** the 114 generated API pages keep their own `⌘K` symbol modal, so the keystroke still means something narrower there. Unifying it requires a change to the separate `march_doc` repo plus regenerating and committing all 114 files — deliberately left as a follow-up.

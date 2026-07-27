@@ -1038,6 +1038,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let branch_roles =
         List.concat_map (fun (_, steps) -> collect_roles [] steps) branches in
       collect_roles (ch.txt :: branch_roles @ acc) rest
+    | Ast.ProtoStop _ :: rest -> collect_roles acc rest
   in
   let rec register_protocols decls =
     List.iter (fun d -> match d with

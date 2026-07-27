@@ -36,6 +36,52 @@ git log is authoritative for exact commits.
 
 
 ### Added
+- **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
+  mismatch) and Int→Float widening helper, for numeric ops over two
+  `NativeArray`s at once. `DataFrame.col_add_col` (column-column arithmetic)
+  now uses these instead of round-tripping through `List.zip`/`List.map`.
+
+- **The docs site gained full-text search on ⌘K / Ctrl-K.** Every page on
+  march-lang.org — the guides, the cookbook, and all 114 standard-library API
+  pages — is now searchable from one box, opened with `⌘K`, `Ctrl+K`, `/`, or
+  the Search button in the nav. Results are grouped by area (Guide, Cookbook,
+  Stdlib) and include in-page heading links, so `↵` jumps straight to the
+  relevant section rather than the top of the page. The index is built by
+  [Pagefind](https://pagefind.app/) as a post-build step over the generated
+  site, ships with it, and needs no search service at runtime.
+
+  The same box also does **standard-library symbol lookup**, which previously
+  worked only from inside the API reference itself. Typing a function or type
+  name (`push`, `to_string`, `List.map`) puts a "Standard library" group above
+  the prose results, each entry showing its kind and signature and linking
+  directly to the definition's anchor — `Array.html#fn-push` rather than the
+  top of the module page. Symbols are matched on name only, exactly or by
+  prefix, so multi-word prose queries return prose results alone. The API
+  reference pages keep their own `⌘K` for now.
+
+- **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
+  do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
+  until now, had no way back out — every step inside the body, including
+  every `choose` branch, looped back to the start, so a looping channel could
+  only be abandoned, never actually `Chan.close`d. Writing `stop` inside a
+  `loop` body (directly, or nested in a `choose` branch within one) exits the
+  loop instead of repeating it, e.g.:
+  ```march
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  ```
+  `stop` is a contextual keyword (a plain identifier everywhere else, not
+  reserved). `stop` written outside any `loop`, or steps written after a
+  `stop`, are both compile errors.
 
 - **`Bool` and `Float` refinement types are now enforced.** Both previously
   parsed and type-checked while checking nothing at all, so
@@ -129,6 +175,15 @@ git log is authoritative for exact commits.
   `specs/2026-07-26-string-performance-profile.md`.
 
 ### Changed
+
+- Compiled `NativeArray.map_float` with a plain, concretely-typed
+  callback (`fn x -> x *. 2.0 +. 1.0`, a captured scalar, or similar — no
+  generic/unresolved types involved) no longer allocates at all for each
+  element crossing the callback boundary, and the resulting loop can
+  actually be vectorized by the backend compiler on suitable inputs. A
+  callback whose type isn't fully known at this point still allocates one
+  reusable cell per call (an earlier improvement over one per element) and
+  is unaffected by this change. No observable behavior change either way.
 
 - Compiled `NativeArray.map_float` now allocates one boxed-float cell per
   call and reuses it across all elements, instead of one per element. Cuts

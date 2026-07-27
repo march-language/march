@@ -589,6 +589,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_int_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map(ptr %arr, ptr %f)" };
+  { march_name = "native_int_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
+  { march_name = "native_int_arr_to_float_arr"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_to_float_arr(ptr %arr)" };
   { march_name = "native_int_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_from_list(ptr %lst)" };
   { march_name = "native_int_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
@@ -613,6 +617,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_float_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map(ptr %arr, ptr %f)" };
+  { march_name = "native_float_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
   { march_name = "native_float_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_from_list(ptr %lst)" };
   { march_name = "native_float_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TFloat]));
@@ -1231,6 +1237,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_int_arr_max";
   PDeclare "native_int_arr_sumsq_dev";
   PDeclare "native_int_arr_map";
+  PDeclare "native_int_arr_map2";
+  PDeclare "native_int_arr_to_float_arr";
   PDeclare "native_int_arr_from_list";
   PDeclare "native_int_arr_to_list";
   PDeclare "native_int_arr_filter_mask";
@@ -1244,6 +1252,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_max";
   PDeclare "native_float_arr_sumsq_dev";
   PDeclare "native_float_arr_map";
+  PDeclare "native_float_arr_map2";
   PDeclare "native_float_arr_from_list";
   PDeclare "native_float_arr_to_list";
   PDeclare "native_float_arr_filter_mask";

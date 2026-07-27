@@ -620,8 +620,16 @@ let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
     the literal ["null"] for a non-capturing closure (Phase 2; the apply
     body never reads $clo), or a real closure-struct pointer register for a
     capturing one (Phase 2c; the apply body loads free vars from it). See
-    [Native_map_inline] for which shape produces which. *)
-let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
+    [Native_map_inline] for which shape produces which.
+
+    [unboxed] (Float only; ignored for Int) selects Stage 4 Option B: call
+    an unboxed clone of the apply fn (see [Native_map_inline.try_unboxed_variant])
+    that takes/returns a raw `double` directly instead of the generic boxed
+    `ptr` ABI — no march_alloc_float/march_unbox_float anywhere, argument
+    or return. This is what actually lets the loop vectorize; the
+    argument-box-reuse path above (still used when [unboxed] is false,
+    e.g. a still-generic signature) only cuts allocation traffic. *)
+let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
     : string * string =
   let elem_ty = if is_float then "double" else "i64" in
   let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
@@ -637,24 +645,23 @@ let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
   emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
   let new_arr = fresh ctx "nmap_out" in
   emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
-  (* Float only: allocate ONE reusable wire-argument box before the loop,
-     instead of a fresh march_alloc_float per element. Safe because every
-     apply function unconditionally unboxes its argument as its very first
-     instruction and never touches the pointer again — the generated
-     prologue is always `call double @march_unbox_float(ptr %x.arg)`
-     before any user code runs (verified via -emit-llvm on a compiled
-     lambda), so nothing can observe or retain this box's identity across
-     calls. Overwriting its .val field between iterations is therefore
-     indistinguishable from fresh-boxing each time, at 1/N the allocation
-     cost. march_float_box layout is [rc:8][tag:4][pad:4][val:8] (24 bytes,
-     runtime/march_runtime.h) — val is at byte offset 16. The return-value
-     box (the apply body's OWN fresh allocation for its result) is not
-     reused here — that would require the callee's own codegen to
-     cooperate (an out-parameter or FBIP-style hint), a larger change than
-     this loop controls; see specs/optimizations.md P10 Stage 4 "Option B".
-     Int has no equivalent box — its wire value is a tagged immediate
-     (coerce's "i64"/"ptr" arm), not an allocation. *)
-  let arg_box = if is_float then begin
+  (* Float, non-unboxed only: allocate ONE reusable wire-argument box before
+     the loop, instead of a fresh march_alloc_float per element. Safe
+     because every (boxed-ABI) apply function unconditionally unboxes its
+     argument as its very first instruction and never touches the pointer
+     again — the generated prologue is always `call double
+     @march_unbox_float(ptr %x.arg)` before any user code runs (verified
+     via -emit-llvm on a compiled lambda), so nothing can observe or retain
+     this box's identity across calls. Overwriting its .val field between
+     iterations is therefore indistinguishable from fresh-boxing each time,
+     at 1/N the allocation cost. march_float_box layout is
+     [rc:8][tag:4][pad:4][val:8] (24 bytes, runtime/march_runtime.h) — val
+     is at byte offset 16. When [unboxed] is true there is no box at all —
+     the callee takes/returns a raw double directly (Stage 4 Option B) —
+     so this allocation is skipped entirely rather than merely reused.
+     Int has no equivalent box either way — its wire value is a tagged
+     immediate (coerce's "i64"/"ptr" arm), not an allocation. *)
+  let arg_box = if is_float && not unboxed then begin
       let b = fresh ctx "nmap_argbox" in
       emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b);
       Some b
@@ -683,17 +690,28 @@ let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
   let x = fresh ctx "nmap_x" in
   emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
-  let wire_arg = match arg_box with
-    | Some b ->
-      let vfield = fresh ctx "nmap_argval" in
-      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
-      emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
-      b
-    | None -> coerce ctx elem_ty x "ptr"
+  let y_native =
+    if unboxed then begin
+      (* No box either side: raw double in, raw double out. This is the
+         shape that actually vectorizes — no allocation call anywhere in
+         the loop for the vectorizer to trip over. *)
+      let y = fresh ctx "nmap_y" in
+      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s)" y apply_name clo_reg x);
+      y
+    end else begin
+      let wire_arg = match arg_box with
+        | Some b ->
+          let vfield = fresh ctx "nmap_argval" in
+          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
+          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
+          b
+        | None -> coerce ctx elem_ty x "ptr"
+      in
+      let y = fresh ctx "nmap_y" in
+      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
+      coerce ctx "ptr" y elem_ty
+    end
   in
-  let y = fresh ctx "nmap_y" in
-  emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
-  let y_native = coerce ctx "ptr" y elem_ty in
   let dptr = fresh ctx "nmap_dptr" in
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
   emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
@@ -2095,13 +2113,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      entirely, leaving a plain scalar loop the vectorizer can pack into SIMD.
      Float keeps the alloc/unbox calls (real heap allocations) in the loop
      body, which blocks vectorization — see specs/optimizations.md P10.
-     $clo is `null`: the apply body never reads it (no free vars to load). *)
+     $clo is `null`: the apply body never reads it (no free vars to load).
+     "..._unboxed" (Float only — Stage 4 Option B) calls an unboxed clone
+     of the apply fn instead, see [Native_map_inline.try_unboxed_variant]
+     and [emit_native_map_inline_loop]'s [~unboxed] doc. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
     when f.Tir.v_name = "__native_int_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline" ->
-    let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
+      || f.Tir.v_name = "__native_float_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
-    emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg:"null"
+    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg:"null"
 
   (* ── Native array map inline loop, capturing closure (P10 Phase 2c) ──
      Same rewrite/codegen as Phase 2 above, but for a closure that DOES
@@ -2119,12 +2142,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      story as Phase 2's non-capturing case. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v; clo_atom])
     when f.Tir.v_name = "__native_int_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline" ->
-    let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
+      || f.Tir.v_name = "__native_float_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
-    emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
+    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
