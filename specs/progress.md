@@ -284,7 +284,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-07-24, session types: post-`choose` protocol steps survive projection AND `loop` is genuinely recursive)
+## Current State (as of 2026-07-24, session types: post-`choose` protocol steps survive projection, `loop` is genuinely recursive, AND `Chan.new` rejects 3+-role protocols)
 
 **Session-types-review Task 1 fixed.** `project_steps`' `ProtoChoice` arm (`lib/typecheck/typecheck.ml`) projected every branch of a `choose ... end` block with the projection call's OUTER continuation (`cont`, which is `SEnd` at the top level of a `protocol` block) instead of `rest_ty ()`, the steps that actually follow the choice block in source order. Both roles lost the protocol's tail from their projection consistently, so binary duality still held and a program that skipped the trailing message typechecked and ran clean; in the MPST (>2-role) case it was worse, since the send/recv-pair consistency check doesn't descend into `SOffer`, so a legal 3-role protocol with a choice followed by another message was *rejected* with a spurious "role A should receive from C" error. Fixed by binding `let after_choice = rest_ty ()` before building `branch_tys` and projecting each arm with `after_choice` in place of `cont`; the chooser/merge/`SOffer` logic is untouched. Compile-time-only — the channel runtime is untyped, so no lowering/codegen/runtime changes were needed.
 
@@ -297,6 +297,12 @@ De-vacuumed `test_session_loop_projection` — its old assertion `SRec (_, SSend
 New conformance witnesses: `specs/lang/types/accept/t92_loop_protocol_two_iterations.march` (a `Prod`/`Cons` loop runs two full iterations, typechecks, and prints `3` identically interpreted and compiled) and `specs/lang/types/reject/t93_steps_after_loop_unreachable.march` (a step after `loop` rejects with "can never run"). `specs/lang/types/INDEX.md`'s accept table grows 90 → 91 and reject table 82 → 83 (174 / 174 total, still 100%).
 
 `run_compiler` 544 → 546 (two new tests, one collateral test updated), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
+**Session-types-review Task 3 fixed.** The `Chan.new` arm of `infer_expr` (`lib/typecheck/typecheck.ml`) matched `pi.pi_projections` on the 3+-roles case with `(* 3+ roles: just return first two as a pair *)` — re-matching the same list to pull the first two roles' projections and hand them back as a `(Chan, Chan)` pair, with no diagnostic at all. `Chan.new` is the BINARY channel constructor (exactly two roles); `MPST.new` already carried the mirror-image "requires at least 3" guard, but nothing stopped `Chan.new` from being called on an MPST protocol, and the two projections it returned are not duals of each other — a real, silent unsoundness. Fixed by replacing the fallback with `Err.error` reporting the protocol name and its actual role count, plus `TError`.
+
+New regression test `test_session_chan_new_multiparty_error` (`test/test_compiler.ml`, registered next to `session Chan.new unknown`) asserts a 3-role protocol (`A -> B : Int`, `B -> C : Int`, `C -> A : Bool`) passed to `Chan.new` produces an error. New reject-conformance witness `specs/lang/types/reject/t94_chan_new_multiparty_protocol.march` pins the observable behavior change with the same 3-role protocol, expecting `` Chan.new: protocol `Tri` has 3 roles ``. `specs/lang/types/INDEX.md`'s reject table grows 83 → 84 (175 / 175 total, still 100%).
+
+`run_compiler` 546 → 547 (one new test), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
 
 ## Current State (as of 2026-07-24, record field preconditions integrated with String + ADT-tag refinements)
 

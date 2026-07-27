@@ -4311,13 +4311,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
                Err.error env.errors ~span:sp
                  (Printf.sprintf "Chan.new: protocol `%s` has no roles." pname);
                TError
-             | _ ->
-               (* 3+ roles: just return first two as a pair *)
-               (match pi.pi_projections with
-                | (_, sty_a) :: (_, sty_b) :: _ ->
-                  TTuple [TLin (Ast.Linear, TChan (ref sty_a));
-                          TLin (Ast.Linear, TChan (ref sty_b))]
-                | _ -> TError))))
+             | projs ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf
+                    "Chan.new: protocol `%s` has %d roles but Chan.new needs \
+                     exactly 2. Use MPST.new for multi-party protocols."
+                    pname (List.length projs));
+               TError)))
 
     (* Chan.send(ch, value) → linear Chan at continuation session state.
        Pre-condition: ch must be at SSend(T, S). Post: ch is consumed; returns Chan at S. *)

@@ -1714,6 +1714,25 @@ let test_session_chan_new_unknown_proto_error () =
   end|} in
   Alcotest.(check bool) "Chan.new unknown protocol: error" true (has_errors ctx)
 
+(** `Chan.new` on a 3+-role protocol used to silently return the first two
+    roles' (non-dual) endpoints.  It must error and point at `MPST.new`. *)
+let test_session_chan_new_multiparty_error () =
+  let ctx = typecheck {|mod Test do
+    type A = A
+    type B = B
+    type C = C
+    protocol Tri do
+      A -> B : Int
+      B -> C : Int
+      C -> A : Bool
+    end
+    fn main() do
+      let (x, y) = Chan.new(Tri)
+      println("unused")
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.new on 3-role protocol: error" true (has_errors ctx)
+
 (* ── Phase 3: Choose/Offer branching ────────────────────────────────────── *)
 
 let test_session_choose_protocol_parses () =
@@ -8651,6 +8670,7 @@ let compiler_suites =
           Alcotest.test_case "session close wrong state"     `Quick test_session_close_at_wrong_state_error;
           Alcotest.test_case "session Chan.new ok"           `Quick test_session_chan_new_ok;
           Alcotest.test_case "session Chan.new unknown"      `Quick test_session_chan_new_unknown_proto_error;
+          Alcotest.test_case "session Chan.new multiparty error" `Quick test_session_chan_new_multiparty_error;
           Alcotest.test_case "session eval send recv"        `Quick test_session_eval_send_recv;
           (* Phase 3: Choose/Offer branching *)
           Alcotest.test_case "session choose protocol parses"    `Quick test_session_choose_protocol_parses;

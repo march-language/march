@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t92 accept, t01–t93 reject)
+# Typing corpus index (t01–t92 accept, t01–t94 reject)
 
 Navigable map of the Core March **static-semantics** conformance corpus: each
 program in this directory (`specs/lang/types/accept/*.march`,
@@ -476,8 +476,9 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t81_spawn_pid_cross_actor` | **(finding 18 FIXED) cross-actor pid list rejected (§2.6.3, 2026-07-18)** — `spawn(A) : Pid[{x: Int}]` and `spawn(B) : Pid[{s: String}]` no longer unify (both used to be `Pid[<fresh var>]`, silently conflating distinct actors' pids). Accept twin `t87` | ``expected `{ x : Int }` but got `{ s : String }`` |
 | `t91_choice_tail_step_required` | **(post-`choose` tail projection, 2026-07-24)** — `project_steps`' `ProtoChoice` arm now projects each branch with the steps that FOLLOW the choice block (`rest_ty ()`) instead of the outer continuation. Pre-fix the trailing `Client -> Server : String` vanished from both roles' projections and closing early was wrongly ACCEPTED | `` Chan.close: channel is at `` |
 | `t93_steps_after_loop_unreachable` | **(session types, `loop` µ-type recursion, 2026-07-24)** — a `loop` block's projection is `Rec X. S[X]`, which never exits, so any step written after a `loop` at the same nesting level can never run. `DProtocol` validation now walks `proto_steps` and rejects a non-empty tail after a top-level (or choice-branch) `loop`. Accept twin `t92` | `can never run` |
+| `t94_chan_new_multiparty_protocol` | **(session types, `Chan.new` role-count guard, 2026-07-24)** — `Chan.new` is the BINARY channel constructor; its `infer_expr` arm had a silent `(* 3+ roles: just return first two as a pair *)` fallback that handed back two projections which are not duals of each other, with no diagnostic. Now errors and points at `MPST.new` for multi-party protocols | ``Chan.new: protocol `Tri` has 3 roles`` |
 
-**Result: 174 / 174 (91 accept, 83 reject).**
+**Result: 175 / 175 (91 accept, 84 reject).**
 
 ## Coverage notes (deliberately absent programs, and why)
 

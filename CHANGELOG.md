@@ -76,6 +76,13 @@ git log is authoritative for exact commits.
   step written after a `loop` block is now a compile error instead of
   unreachable, silently-accepted dead code.
 
+- Session types: `Chan.new` on a protocol with more than two roles is now a
+  compile error instead of silently handing back the first two roles'
+  (non-dual) endpoints as a pair. `Chan.new` is the binary-only channel
+  constructor; `MPST.new` already existed for 3+-role protocols but nothing
+  stopped `Chan.new` from being called on one too. The error names the
+  protocol's actual role count and points at `MPST.new`.
+
 - Refinement verdicts of `unknown` are no longer cached. An `unknown` is the
   absence of an answer, not an answer: the solver runs under a wall-clock
   timeout, so a loaded machine could turn a decidable check into `unknown` and
