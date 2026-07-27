@@ -329,6 +329,7 @@
       <span class="logo-slug">/ cookbook</span>
     </a>
     <div class="d-nav-right">
+      {% include search.html %}
       <a href="{{ site.baseurl }}/docs/getting-started/" class="d-nav-link">Docs</a>
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="d-nav-link">GitHub</a>
       <button class="d-theme-btn" id="d-theme-btn">☀ Light</button>
@@ -369,7 +370,7 @@
   </aside>
 
   <main class="d-main">
-    <div class="d-content">
+    <div class="d-content" data-pagefind-body data-pagefind-filter="section:Cookbook">
       {% if page.scrollmd %}{% include scrollmd-button.html %}{% endif %}
       {{ content }}
     </div>

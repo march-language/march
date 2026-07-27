@@ -13,6 +13,24 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **The docs site gained full-text search on ⌘K / Ctrl-K.** Every page on
+  march-lang.org — the guides, the cookbook, and all 114 standard-library API
+  pages — is now searchable from one box, opened with `⌘K`, `Ctrl+K`, `/`, or
+  the Search button in the nav. Results are grouped by area (Guide, Cookbook,
+  Stdlib) and include in-page heading links, so `↵` jumps straight to the
+  relevant section rather than the top of the page. The index is built by
+  [Pagefind](https://pagefind.app/) as a post-build step over the generated
+  site, ships with it, and needs no search service at runtime.
+
+  The same box also does **standard-library symbol lookup**, which previously
+  worked only from inside the API reference itself. Typing a function or type
+  name (`push`, `to_string`, `List.map`) puts a "Standard library" group above
+  the prose results, each entry showing its kind and signature and linking
+  directly to the definition's anchor — `Array.html#fn-push` rather than the
+  top of the module page. Symbols are matched on name only, exactly or by
+  prefix, so multi-word prose queries return prose results alone. The API
+  reference pages keep their own `⌘K` for now.
+
 - **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
   do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
   until now, had no way back out — every step inside the body, including

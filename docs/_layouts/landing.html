@@ -430,6 +430,7 @@
       <span>March</span>
     </a>
     <div class="m-nav-links">
+      {% include search.html %}
       <a href="{{ site.baseurl }}/docs/getting-started/" class="m-nav-link">Docs</a>
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="m-nav-link">GitHub</a>
       <button class="m-theme-btn" id="theme-btn">☀ Light</button>
@@ -451,7 +452,7 @@
   </div>
 </div>
 
-<main>
+<main data-pagefind-body data-pagefind-filter="section:Home">
 <!-- HERO -->
 <section class="m-hero">
   <div class="m-hero-inner">
