@@ -1,5 +1,41 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
+
+Compiled string literals are now emitted as one immortal cell per literal
+SITE, cached in a per-site LLVM global by `march_string_lit_static`
+(`runtime/march_runtime.c`, plus a single-threaded counterpart in
+`march_runtime_wasm.c`), instead of a fresh `rc=1` allocation on every
+evaluation.
+
+This closes a compiled-only leak. A string literal carries no RC obligation
+in TIR — `perceus.ml`'s `EAtom (ALit _)` arm returns the expression
+untouched, exactly as it does for a global `ADefRef` — so a per-evaluation
+allocation was owned by nobody and no pass ever emitted a matching
+decrement. The leak was invisible in the two neighbouring shapes (a
+let-bound literal gets an ordinary Perceus dec; a literal argument to a
+non-allocating call is hoisted out of the loop) and showed up only when a
+literal was evaluated repeatedly as a direct operand — canonically of `++`.
+`let s = buf ++ "xyz"` over 2M iterations leaked 2M strings, peaking at
+64.2MB RSS where the same loop with two variable operands used 2.9MB; after
+the fix that program matches the variable-operand control exactly. Literal
+sharing is safe because March strings are immutable and the runtime never
+mutates a string cell in place; the immortal refcount
+(`MARCH_RC_IMMORTAL`) also makes the FBIP `rc == 1` uniqueness test always
+false, so a shared cell is never reused in place, and `march_free` skips
+immortal cells so the `EFree` path cannot free static-lifetime memory.
+
+Guarded by `test_string_literal_operand_no_leak_compiled`
+(`string_literal_codegen` group, `test/test_codegen.ml`), which reads the
+runtime's own `march_live_allocs` gauge through an extern and asserts the
+live-object count does not grow with the iteration count. Verified
+non-vacuous: the same program prints `LEAKED 20001` against the previous
+emission.
+
+Interpreted execution was never affected (OCaml GC). Native benchmarks show
+no regression and a measurable improvement where literals are hot —
+`bench/iolist_template.march` peak RSS 52.6MB → 45.4MB.
+
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 
 A relational postcondition on a structurally recursive function —
@@ -6394,3 +6430,15 @@ No changes to code in this pass — audit only. Both findings in `specs/todos.md
 **Investigated but deferred: `col_add_col`/`ColExpr::Add/Sub/Mul/Div` and `fill_null`'s per-column arithmetic.** Both round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped operations, but on inspection both are actually **two-array** operations (column-column arithmetic; a data array zipped elementwise against a null-bitmap array) — `NativeArray.map_int`/`map_float` only take one array, so neither can use the existing Phase 2b/2c inlining without a new `map2`/zip-with NativeArray primitive that doesn't exist yet. Real work, but compiler-side (a new builtin + LLVM codegen support, likely its own inlining treatment mirroring Phase 2b/2c), not a quick stdlib change — scoped as a separate follow-up.
 
 **Found and filed separately, not fixed here: `DataFrame.eval_agg` has ~40ms of fixed per-call overhead in compiled builds**, unrelated to the actual aggregation work — confirmed via isolated benchmark (`NativeArray.sum_float` direct: ~0ms for 5 calls over 500K floats; the same via `DataFrame.eval_agg(Sum)`: ~207ms) and confirmed pre-existing (reproduces identically on `stdlib/dataframe.march` from before this session's `col_native_sum` change, via file-copy swap). Root cause not yet investigated — dwarfs any vectorization win for aggregations run in a loop (e.g. `group_by`).
+
+## Current State (as of 2026-07-27, CAS key now digests the runtime directory that is actually compiled)
+
+**Whole-binary CAS cache-correctness bug fixed (2026-07-27).** Two independent runtime-directory resolutions disagreed. `lib/cas/cas.ml`'s `runtime_identity` — the runtime component of the artifact key, via `compilation_hash` — searched `["runtime"; <exedir>/../runtime; <exedir>/../../runtime]`, i.e. **cwd-first**, while `bin/main.ml`'s `find_runtime_file` (which selects the sources actually handed to clang, and which the 2026-07-26 fix above deliberately made "independent of CWD") searches **exe-relative first**. Run from the repo/worktree root against `_build/default/bin/main.exe`, the key therefore digested the edited `./runtime/*.c` while the compile used `_build/default/runtime/*.c` — and a targeted `dune build test/run_stdlib.exe bin/main.exe` does not restage `_build/default/runtime`, so those two directories genuinely hold different content. Observed: after adding instrumentation to `runtime/march_runtime.c`, `--compile` printed `compiled <out> (cached)` and produced a binary with none of the new code. `Cas.compiler_identity` does **not** cover this (it hashes only the march executable's bytes, unchanged when only runtime C changes); the cas.ml comment claiming otherwise — and the same claim in `runtime_archive.ml` — was wrong and is corrected.
+
+**Fix — one source of truth.** `bin/main.ml` now resolves the runtime directory ONCE (`runtime_dir`, anchored on `march_runtime.c`, exe-relative first, cwd last, `MARCH_RUNTIME_DIR` overriding the search the way `MARCH_STDLIB` does) and registers it with the CAS via the new `Cas.set_runtime_dir` before any `compilation_hash` can be computed; `find_runtime_file` is a thin lookup in that directory (with the old per-name scan retained only as a fallback for files the resolved directory does not hold). `Cas.runtime_identity` became a memo keyed on the resolved directory rather than a `Lazy.t`, so re-registration recomputes instead of answering from the previous directory's snapshot. The unregistered fallback path (unit tests, library embeddings) now mirrors bin/main.ml's order exactly — exe-relative first, cwd last, candidate must contain `march_runtime.c` — so the two lists cannot silently drift apart again.
+
+**Regression coverage.** `test/cas_runtime_dir_check.sh` + `(alias cas-runtime-dir)` in `test/dune` (`dune build @test/cas-runtime-dir`): copies the runtime tree twice, appends an observable startup marker to copy B, and compiles one March program against A, A again, B, then A — through the same warm CAS store. Step 2 asserts the repeat compile IS a cache hit (otherwise the rest of the test would be vacuous, since a miss always recompiles), and steps 3–4 assert each binary carries its own runtime's marker. Confirmed RED with the fix disabled (`set_runtime_dir` stubbed to a no-op → `compiled outB (cached)`, marker absent) and GREEN with it. Two `test_cas.ml` unit cases pin the same invariant directly: the compilation hash follows the registered directory (and a content edit inside it), and the unregistered fallback prefers an exe-relative runtime over a cwd decoy.
+
+**Also corrected:** `CLAUDE.md` documented the artifact directory as `.march/cas/artifacts/`, but artifacts have lived in `artifacts-v2/` since the v1 pointer-store fix — clearing the documented path clears nothing. The CAS note now names `artifacts-v2/` and spells out that the runtime the compiler compiles is the *staged* `_build/default/runtime`, which a targeted `dune build bin/main.exe` does not refresh.
+
+**Verified:** `dune build @test/cas-runtime-dir` green (RED without the fix); `test_cas` 56/56; full `scripts/run-tests.sh` green except the known machine-level ASAN teardown hang (`adversarial-regressions` 39), reconfirmed environmental — a trivial unrelated `clang -fsanitize=address` C program also hangs on this machine.

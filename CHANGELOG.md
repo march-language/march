@@ -23,6 +23,28 @@ git log is authoritative for exact commits.
   60-80x faster at 500K rows in local measurement. `Median` still sorts and
   is unaffected by this fix.
 
+- **Compiled string literals no longer leak once per evaluation.** A literal
+  used as a direct operand — most commonly `acc ++ ", "` or `s ++ "\n"` inside
+  a loop — allocated a fresh string every time it was evaluated, and nothing
+  ever freed it, so ordinary string-building loops grew memory without bound
+  (a 2M-iteration concat peaked at 64MB of RSS against 2.9MB for the same loop
+  with both operands bound to variables). Each literal now allocates one shared
+  string for the whole program, matching how the compiler's ownership analysis
+  has always treated literals: as constants that no binding owns. Only the
+  compiled backend was affected; the interpreter was always correct.
+
+- **The compiled-binary cache no longer serves a stale binary after a
+  `runtime/*.c` edit.** The CAS key digested a runtime directory it resolved
+  itself, searching the current directory *first*, while the compiler picks the
+  sources it hands to clang exe-relative *first* ("independent of CWD"). Run
+  from the repo root against `_build/default/bin/main.exe`, those are two
+  different directories, so the key could be identical (or differ for reasons
+  unrelated to what was built) while the compiled output differed — a runtime
+  edit could print `compiled <out> (cached)` for a binary containing none of
+  the new code. The driver now resolves the runtime directory once and
+  registers it with the CAS, so the key always digests the sources actually
+  compiled; `MARCH_RUNTIME_DIR` overrides the search, mirroring `MARCH_STDLIB`.
+
 ### Changed
 
 - Native and WASM LLVM output now describes `march_alloc` as a fresh,

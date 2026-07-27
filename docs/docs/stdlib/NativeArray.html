@@ -350,6 +350,7 @@
 <a class="sl" href="DataFrame.html#fn-col_len"><span class="sb-kind" style="color:var(--fn)">F</span>col_len</a>
 <a class="sl" href="DataFrame.html#fn-col_mul_float"><span class="sb-kind" style="color:var(--fn)">F</span>col_mul_float</a>
 <a class="sl" href="DataFrame.html#fn-col_name"><span class="sb-kind" style="color:var(--fn)">F</span>col_name</a>
+<a class="sl" href="DataFrame.html#fn-col_native_sum"><span class="sb-kind" style="color:var(--fn)">F</span>col_native_sum</a>
 <a class="sl" href="DataFrame.html#fn-col_normalize"><span class="sb-kind" style="color:var(--fn)">F</span>col_normalize</a>
 <a class="sl" href="DataFrame.html#fn-col_null_count"><span class="sb-kind" style="color:var(--fn)">F</span>col_null_count</a>
 <a class="sl" href="DataFrame.html#fn-col_to_nullable"><span class="sb-kind" style="color:var(--fn)">F</span>col_to_nullable</a>
@@ -1922,7 +1923,27 @@
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>NativeArray</span></nav><h1>NativeArray</h1><div class="mdoc"><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><p>Unlike Array (which uses a 32-way persistent trie), NativeArray is backed by a flat OCaml array that maps directly to sequential memory.  This makes it cache-friendly for sequential scan patterns and enables tight inner loops for sum, map, and fold operations.</p><p>P10 vectorization target: native_float_arr_sum and native_float_arr_map emit tight for-loops that LLVM can auto-vectorize to AVX2 when the program is compiled with --compile and -mavx2.  In the interpreter path these builtins bypass the generic evaluator entirely, giving 5-10x speedup over the PVec Array for numeric-only workloads.</p><p>Two opaque element types are supported: NativeIntArr   — wraps int array NativeFloatArr — wraps float array</p><p>Note: these are interpreter-path builtins.  The --compile (LLVM) path support is tracked in specs/optimizations.md P10.</p><p>Usage: let arr = NativeArray.make_float(1000, 0.0) let arr2 = NativeArray.map_float(arr, fn x -&gt; x *. 2.0) let s    = NativeArray.sum_float(arr2)</p></div><h2>Functions</h2><div class="item" id="fn-fold_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_float</span><span class="sig">fold_float(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_float" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>NativeArray</span></nav><h1>NativeArray</h1><div class="mdoc"><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><p>Unlike Array (which uses a 32-way persistent trie), NativeArray is backed by a flat OCaml array that maps directly to sequential memory.  This makes it cache-friendly for sequential scan patterns and enables tight inner loops for sum, map, and fold operations.</p><p>Compiled (--compile) vectorization, in practice:</p><ul><li>sum_int / sum_float: both auto-vectorize under clang -O2 (NEON on</li></ul><pre><code>  arm64, SSE4.2+ on x86-64) — sum_float needed a scoped
+  `#pragma clang fp reassociate(on)` in the runtime C loop, since
+  strict IEEE 754 float semantics otherwise block the reduction from
+  vectorizing at all.
+- map_int with a non-capturing or single-capture lambda: the compiler
+  inlines the callback directly into the loop instead of dispatching
+  through a closure pointer, which lets clang's own inliner and
+  vectorizer see through it — arithmetic-heavy bodies (`fn x -&gt; x*x+1`,
+  `fn x -&gt; x + captured`) compile to real SIMD instructions. A closure
+  reused elsewhere, or one with more than one captured variable, still
+  works correctly but falls back to the slower closure-dispatch path.
+- map_float: correct and (for capturing/non-capturing alike) gets the
+  same closure-inlining treatment as map_int, but does NOT vectorize —
+  every float crossing a closure-call boundary is heap-boxed
+  (march_alloc_float), which blocks the vectorizer regardless. This is
+  a known, tracked limitation (see specs/optimizations.md P10 and
+  specs/plans/2026-07-13-float-boxing-design.md's deferred Stage 4),
+  not something wrong with your code.
+- fold_int / fold_float have no compiled implementation yet — calling
+  them from a --compile build will fail to link. Use sum/map or a
+  manual index loop until this lands.</code></pre><p>Two opaque element types are supported: NativeIntArr   — wraps int array NativeFloatArr — wraps float array</p><p>Usage: let arr = NativeArray.make_float(1000, 0.0) let arr2 = NativeArray.map_float(arr, fn x -&gt; x *. 2.0) let s    = NativeArray.sum_float(arr2)</p></div><h2>Functions</h2><div class="item" id="fn-fold_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_float</span><span class="sig">fold_float(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_float" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
 <div class="item" id="fn-fold_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_int</span><span class="sig">fold_int(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_int" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
 <div class="item" id="fn-from_list_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_list_float</span><span class="sig">from_list_float(lst)</span><a class="anchor-link" href="#fn-from_list_float" title="Link">#</a></div><div class="ib"><p>Build a NativeFloatArr from a List(Float). O(n).</p></div></div>
 <div class="item" id="fn-from_list_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_list_int</span><span class="sig">from_list_int(lst)</span><a class="anchor-link" href="#fn-from_list_int" title="Link">#</a></div><div class="ib"><p>Build a NativeIntArr from a List(Int). O(n).</p></div></div>

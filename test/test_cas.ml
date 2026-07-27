@@ -333,6 +333,80 @@ let test_cas_runtime_identity_ignores_non_c_files () =
   let h2 = March_cas.Cas.runtime_identity_of_dir dir in
   Alcotest.(check string) "non-.c/.h files do not affect digest" h1 h2
 
+(* The compilation_hash must follow the runtime directory the DRIVER says it
+   compiles (bin/main.ml registers it via set_runtime_dir), not a directory
+   cas.ml guessed for itself.  When those two resolutions disagreed — cas.ml
+   searched cwd-first, bin/main.ml exe-relative-first — the key digested
+   ./runtime/*.c while clang compiled _build/default/runtime/*.c, so a runtime
+   edit produced `compiled <out> (cached)` with none of the new code. *)
+let test_cas_compilation_hash_follows_registered_runtime_dir () =
+  with_tmpdir @@ fun dir ->
+  let mk sub body =
+    let d = Filename.concat dir sub in
+    Unix.mkdir d 0o755;
+    let oc = open_out_bin (Filename.concat d "march_runtime.c") in
+    output_string oc body;
+    close_out oc;
+    d
+  in
+  let a = mk "rtA" "int march_rt(void) { return 0; }" in
+  let b = mk "rtB" "int march_rt(void) { return 1; }" in
+  let hash () =
+    March_cas.Cas.compilation_hash (String.make 64 'e') ~target:"native" ~flags:[]
+  in
+  March_cas.Cas.set_runtime_dir a;
+  let ha = hash () in
+  March_cas.Cas.set_runtime_dir b;
+  let hb = hash () in
+  Alcotest.(check bool) "different runtime dir → different compilation hash"
+    false (String.equal ha hb);
+  March_cas.Cas.set_runtime_dir a;
+  Alcotest.(check string) "same runtime dir → same compilation hash" ha (hash ());
+  (* An edit inside the registered directory must invalidate too — the memo is
+     keyed on the directory, so it must not outlive a content change. *)
+  let oc = open_out_bin (Filename.concat a "march_runtime.c") in
+  output_string oc "int march_rt(void) { return 2; }";
+  close_out oc;
+  March_cas.Cas.set_runtime_dir a;
+  Alcotest.(check bool) "edited runtime source → different compilation hash"
+    false (String.equal ha (hash ()));
+  March_cas.Cas.clear_runtime_dir ()
+
+(* No registration (unit tests, library embeddings): the fallback must still
+   mirror bin/main.ml's order — exe-relative first, cwd LAST — so the two
+   cannot drift apart again. *)
+let test_cas_runtime_dir_fallback_prefers_exe_relative () =
+  with_tmpdir @@ fun dir ->
+  let decoy = Filename.concat dir "runtime" in
+  Unix.mkdir decoy 0o755;
+  let oc = open_out_bin (Filename.concat decoy "march_runtime.c") in
+  output_string oc "int decoy(void) { return 0; }";
+  close_out oc;
+  March_cas.Cas.clear_runtime_dir ();
+  let exe_dir = Filename.dirname Sys.executable_name in
+  let exe_relative_exists =
+    List.exists
+      (fun c -> Sys.file_exists (Filename.concat exe_dir (c ^ "/march_runtime.c")))
+      ["../runtime"; "../../runtime"; "../../../runtime"]
+  in
+  if not exe_relative_exists then
+    (* Installed/standalone layout — nothing to prefer over cwd. *) ()
+  else begin
+    let cwd = Sys.getcwd () in
+    let same_file p q =
+      try Unix.((stat p).st_ino = (stat q).st_ino && (stat p).st_dev = (stat q).st_dev)
+      with _ -> false
+    in
+    Fun.protect ~finally:(fun () -> Sys.chdir cwd) (fun () ->
+      Sys.chdir dir;
+      match March_cas.Cas.resolve_runtime_dir () with
+      | None -> Alcotest.fail "no runtime dir resolved despite an exe-relative one existing"
+      | Some d ->
+        Alcotest.(check bool)
+          (Printf.sprintf "resolved %s, which must not be the cwd decoy" d)
+          false (same_file d decoy))
+  end
+
 let test_cas_copy_artifact_missing_src_fails () =
   with_tmpdir @@ fun dir ->
   let src  = Filename.concat dir "gone.bin" in
@@ -848,6 +922,10 @@ let () =
         test_cas_artifact_survives_source_overwrite;
       Alcotest.test_case "runtime identity tracks sources"    `Quick test_cas_runtime_identity_changes_with_sources;
       Alcotest.test_case "runtime identity ignores non-C"     `Quick test_cas_runtime_identity_ignores_non_c_files;
+      Alcotest.test_case "compilation hash follows registered runtime dir" `Quick
+        test_cas_compilation_hash_follows_registered_runtime_dir;
+      Alcotest.test_case "runtime dir fallback prefers exe-relative over cwd" `Quick
+        test_cas_runtime_dir_fallback_prefers_exe_relative;
       Alcotest.test_case "copy_artifact missing src fails"    `Quick test_cas_copy_artifact_missing_src_fails;
       Alcotest.test_case "copy_artifact copies bytes"         `Quick test_cas_copy_artifact_copies;
       Alcotest.test_case "copy_artifact same file ok"         `Quick test_cas_copy_artifact_same_file_ok;

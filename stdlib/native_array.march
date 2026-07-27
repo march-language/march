@@ -5,18 +5,33 @@
 -- it cache-friendly for sequential scan patterns and enables tight inner loops
 -- for sum, map, and fold operations.
 --
--- P10 vectorization target: native_float_arr_sum and native_float_arr_map
--- emit tight for-loops that LLVM can auto-vectorize to AVX2 when the program
--- is compiled with --compile and -mavx2.  In the interpreter path these
--- builtins bypass the generic evaluator entirely, giving 5-10x speedup over
--- the PVec Array for numeric-only workloads.
+-- Compiled (--compile) vectorization, in practice:
+--   - sum_int / sum_float: both auto-vectorize under clang -O2 (NEON on
+--     arm64, SSE4.2+ on x86-64) — sum_float needed a scoped
+--     `#pragma clang fp reassociate(on)` in the runtime C loop, since
+--     strict IEEE 754 float semantics otherwise block the reduction from
+--     vectorizing at all.
+--   - map_int with a non-capturing or single-capture lambda: the compiler
+--     inlines the callback directly into the loop instead of dispatching
+--     through a closure pointer, which lets clang's own inliner and
+--     vectorizer see through it — arithmetic-heavy bodies (`fn x -> x*x+1`,
+--     `fn x -> x + captured`) compile to real SIMD instructions. A closure
+--     reused elsewhere, or one with more than one captured variable, still
+--     works correctly but falls back to the slower closure-dispatch path.
+--   - map_float: correct and (for capturing/non-capturing alike) gets the
+--     same closure-inlining treatment as map_int, but does NOT vectorize —
+--     every float crossing a closure-call boundary is heap-boxed
+--     (march_alloc_float), which blocks the vectorizer regardless. This is
+--     a known, tracked limitation (see specs/optimizations.md P10 and
+--     specs/plans/2026-07-13-float-boxing-design.md's deferred Stage 4),
+--     not something wrong with your code.
+--   - fold_int / fold_float have no compiled implementation yet — calling
+--     them from a --compile build will fail to link. Use sum/map or a
+--     manual index loop until this lands.
 --
 -- Two opaque element types are supported:
 --   NativeIntArr   — wraps int array
 --   NativeFloatArr — wraps float array
---
--- Note: these are interpreter-path builtins.  The --compile (LLVM) path
--- support is tracked in specs/optimizations.md P10.
 --
 -- Usage:
 --   let arr = NativeArray.make_float(1000, 0.0)
