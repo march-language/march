@@ -239,6 +239,7 @@
       <span class="logo-slug">/ docs</span>
     </a>
     <div class="d-nav-right">
+      {% include search.html %}
       <a href="{{ site.baseurl }}/" class="d-nav-link">Home</a>
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="d-nav-link">GitHub</a>
       <button class="d-theme-btn" id="d-theme-btn">☀ Light</button>
@@ -300,7 +301,7 @@
 
   <!-- MAIN CONTENT -->
   <main class="d-main">
-    <div class="d-content">
+    <div class="d-content" data-pagefind-body data-pagefind-filter="section:Guide">
       {% if page.scrollmd %}{% include scrollmd-button.html %}{% endif %}
       {{ content }}
     </div>

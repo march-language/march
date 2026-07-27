@@ -36,6 +36,9 @@ test/native/rust_ffi/Cargo.lock
 .march/
 .forge/
 docs/_site/
+# Jekyll's destination is ../_site — i.e. the REPO ROOT, not docs/_site — for both CI
+# (deploy-pages.yml) and scripts/serve-docs.sh. Pagefind then writes its index into it.
+/_site/
 .claude/worktrees/
 march-phases/
 docs/superpowers/

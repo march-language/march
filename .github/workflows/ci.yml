@@ -46,6 +46,15 @@ jobs:
       - name: Lint docs for stale source pointers and stdlib counts
         run: scripts/check-docs.sh
 
+      # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
+      # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
+      # can only reach production by being in git. A docs edit without a regenerated
+      # index means the live search silently serves stale results, which nothing else
+      # would catch. Compares a digest of the docs sources, not the index bytes:
+      # Pagefind's output is intentionally not reproducible run-to-run.
+      - name: Check the committed search index is not stale
+        run: scripts/gen-docs-search-index.sh --check
+
   # The long pole. Kept as its own job so nothing else waits behind it.
   test:
     strategy:
