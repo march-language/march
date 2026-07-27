@@ -161,6 +161,34 @@ every verdict above.
 
 ---
 
+## Addendum, 2026-07-27: `index_of_from` measured, and what it does to the split decision
+
+`String.index_of_from` (phase 2 Task 1) landed. Same-session A/B, counting every
+field in an 800KB CSV-shaped buffer over 60 passes, both halves in one process:
+
+| Method | Time (3 runs) | Allocations |
+|---|---|---|
+| `String.split` + `List.length` | 975 / 988 / 987ms | ~9M strings + ~9M cons cells, 39.8MB copied |
+| `index_of_from` walk | **267 / 269 / 268ms** | ~0 (7 strings for a single pass, no copying) |
+
+Identical field counts (9,000,060) both ways, so the work is equivalent.
+**3.7× faster with effectively no allocation.**
+
+The six harness benchmarks are unchanged by this, correctly: `index_of_from` is
+a new entry point, not an optimization of an existing path. Nothing in the
+corpus calls it.
+
+**This strengthens option C in phase 2 Task 5's decision** (the container-returning
+`split`). A large share of what a zero-cons `split` would buy is available today
+without any new container type, provided the caller wants to *scan* rather than
+to *materialize* the fields. The remaining case for a new container is narrower
+than phase 1 implied: it is specifically for callers that genuinely need every
+field as a retained `String`, which the scan pattern does not serve.
+
+Before building a `StringArray`, measure how much of the real workload is
+scan-shaped versus materialize-shaped. If it is mostly the former, Task 5 should
+close as "not needed" rather than ship a container type nobody's hot path uses.
+
 ## Recommendation for phase 2
 
 1. **Fix the two RC leaks first.** They are not string work, they block the
