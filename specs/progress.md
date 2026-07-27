@@ -40,6 +40,16 @@ types (a dropped `Option(String)` still leaks its payload), tuples and records
 (`Rc_types.needs_rc` is FALSE for both, so no aggregate-level dec exists to
 rewrite), deep LEFT spines (only the last field's drop is a tail call), and
 `EAtomicDecRC`.
+## Current State (as of 2026-07-27, session types: `stop` lets a `choose` branch inside a `loop` exit it)
+
+A `loop do … end` protocol projects to the µ-type `Rec X. S[X]` and, before this fix, had no way to reach `SEnd`: every step inside the body — including every `choose` branch — took the loop's own back-reference as its continuation, so a looping channel could only be *abandoned* via `Chan.close`, never actually closed. `stop` is a new `protocol_step` (`Ast.ProtoStop of span`), legal only inside a `loop` body directly or nested inside a `choose` branch within one; `project_steps`' new arm projects it to `SEnd` for every role unconditionally — the literature shape `Rec X. choose { more: S;X, done: end }`.
+
+Surface syntax is contextual rather than a reserved word: `protocol_step`'s existing alternatives all start with an upper-case role name, `LOOP`, or `CHOOSE`, so a bare `lower_name` alternative in `parser.mly` is unambiguous — it reduces to `ProtoStop` only when the identifier's text is `"stop"`, and raises a positioned parse error naming `stop` as the only valid step otherwise. Confirmed zero new menhir shift/reduce conflicts.
+
+Two validation rules keep `stop` from meaning something it doesn't: `stop` outside any `loop` is rejected (a no-op there — writing nothing already ends the protocol), and steps written after `stop` in the same list are unreachable, extending the existing `check_unreachable_after_loop` walker rather than duplicating it. Duality needs no special handling — `dual_session_ty` already maps `SEnd` to `SEnd` — verified live with a two-role protocol whose `done` branch dualizes cleanly against the peer's `SEnd`.
+
+4 new unit tests in `test/test_compiler.ml` (`run_compiler` quick suite: 604 total). Corpus: `specs/lang/types/accept/t105_loop_stop_two_iterations_close` (loops twice, exits via `stop`, closes both endpoints — run interpreted AND `--compile`d, byte-identical output `3`) and `reject/t106_stop_outside_loop` / `t107_steps_after_stop_unreachable`; `check_types.sh` 187/187 → **190/190** (94 accept, 96 reject). `specs/lang/golden/verify.sh` 46/46 unchanged (no golden witness needed — compile-time-only feature). `scripts/check-docs.sh` clean. Docs: `specs/lang/session-types.md` (new "Exiting a loop: `stop`" subsection), `specs/lang/core-march-types.md` §2.7.1/§2.7.3, `specs/lang/surface-syntax.md`.
+
 ## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
 
 Compiled string literals are now emitted as one immortal cell per literal
@@ -235,6 +245,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Actors** — share-nothing message passing with private state, isolation guaranteed by linear types
 - **Actor state updates** use record spread: `{ state with field = new_value }`
 - **Binary session types** for v1 — typed two-party protocols verified at compile time (catches deadlocks, protocol violations, missing cases). Multi-party deferred post-v1.
+- **`loop`/`stop` protocol repetition and termination** — `loop do … end` projects to the recursive µ-type `Rec X. S[X]`; a `stop` step inside the loop (directly, or nested in a `choose` branch) exits it by projecting to `SEnd`, so a looping protocol can reach `End` and `Chan.close` cleanly instead of only ever being abandoned.
 - **Capability-secure messaging** — actors can only message actors they hold an unforgeable capability reference to; linear capabilities enable ownership transfer
 - **Content-addressed message schemas** — messages reference their schema by hash for safe distributed communication
 - **Location-transparent `Pid`** (Erlang model) — you don't know or care which node an actor lives on

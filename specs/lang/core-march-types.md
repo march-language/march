@@ -2497,8 +2497,8 @@ later widening task, not here.
 
 A protocol is a top-level declaration, `DProtocol of name * protocol_def *
 span` (`lib/ast/ast.ml:151`), where `protocol_def = { proto_steps :
-protocol_step list }` (`ast.ml:287–289`). `protocol_step` has **exactly three**
-variants (`ast.ml:291–294`) — there is no separate "receive" step (send/recv
+protocol_step list }` (`ast.ml:287–289`). `protocol_step` has **four**
+variants (`ast.ml:291–295`) — there is no separate "receive" step (send/recv
 are the two ends of one `ProtoMsg`) and no `ProtoEnd`/`ProtoVar` (those are
 synthesized only during projection, §2.7.2):
 
@@ -2507,14 +2507,22 @@ and protocol_step =
   | ProtoMsg    of name * name * ty                         (* Sender -> Receiver : T *)
   | ProtoLoop   of protocol_step list                        (* loop do ... end *)
   | ProtoChoice of name * (name * protocol_step list) list   (* choose by Role: label -> steps *)
+  | ProtoStop   of span                                      (* stop -- exits an enclosing loop *)
 ```
 
-The parser (`lib/parser/parser.mly:606–627`) mirrors this one-for-one:
-`protocol_decl` is `PROTOCOL upper_name DO list(protocol_step) END`;
-`protocol_step` matches `sender ARROW receiver COLON ty` → `ProtoMsg`, `LOOP DO
-... END` → `ProtoLoop`, and `CHOOSE BY chooser COLON ... branches ... END` →
-`ProtoChoice` (branches via `choose_branch: option(PIPE) label ARROW
-list(protocol_step)`, `:627–629`). Example (the parser's own doc comment,
+The parser (`lib/parser/parser.mly`) mirrors this one-for-one: `protocol_decl`
+is `PROTOCOL upper_name DO list(protocol_step) END`; `protocol_step` matches
+`sender ARROW receiver COLON ty` → `ProtoMsg`, `LOOP DO ... END` →
+`ProtoLoop`, `CHOOSE BY chooser COLON ... branches ... END` → `ProtoChoice`
+(branches via `choose_branch: option(PIPE) label ARROW list(protocol_step)`),
+and a bare `lower_name` whose text is `"stop"` → `ProtoStop`; any other
+identifier there is a parse error naming `stop` as the only valid step
+(`` I don't recognize `<name>` here — the only protocol step allowed is
+`stop` (to exit an enclosing `loop`). ``). `stop` (2026-07-27) is
+deliberately a **contextual** keyword, not a reserved word: it is recognized
+only in the `protocol_step` position, via the same `lower_name` production
+ordinary identifiers use, so `stop` remains legal everywhere else (a variable,
+function, or field named `stop` is unaffected). Example (the parser's own doc comment,
 `parser.mly:606–614`; **corrected here** — the doc comment itself writes
 `Ack()`, but `ty`'s grammar has no zero-argument-parens type-application
 production (`Name()` is a parse error, "I got stuck here", confirmed live
@@ -2655,6 +2663,27 @@ what the two recursive arms below actually thread through:
   the `multiparty` guard is exactly what closes F4: a binary protocol's
   non-chooser now always projects to `SOffer{…}`, never merges, because
   there is no bystander role for a 2-role protocol to be one of.
+- **`ProtoStop _`** — **[ADDED 2026-07-27]** projects to `SEnd`, for every
+  role, unconditionally — it ignores both the surrounding `cont` and
+  `rest_ty ()` entirely, rather than threading either through. This is what
+  gives a `loop` a way out: a `choose` branch inside a `loop` that ends in
+  `stop` reaches a genuine terminal state instead of looping back to the
+  binder, so a channel that takes that branch can `Chan.close` on both ends
+  where an unconditionally-looping protocol never could. Because `stop`
+  discards `rest_ty ()`, any steps written after it in the same list (or the
+  tail of an enclosing `choose` a `stop`-ending branch would otherwise
+  reach) are unreachable — `DProtocol`'s validation extends the same
+  `check_unreachable_after_loop` walk that already rejects steps after a
+  `loop` to treat `ProtoStop` identically, and separately rejects a `stop`
+  found outside any enclosing `loop` (that position is a no-op — the
+  protocol already ends where its step list ends — so it is flagged rather
+  than silently accepted). Duality needs no special-casing: `dual_session_ty`
+  already maps `SEnd` to `SEnd`, so a `stop` branch's projection is
+  automatically dual to its peer's `SEnd`. See the session-types reference's
+  "Exiting a loop: `stop`" section; corpus:
+  `accept/t105_loop_stop_two_iterations_close` (two loop iterations, exit via
+  `stop`, close both endpoints), `reject/t106_stop_outside_loop`,
+  `reject/t107_steps_after_stop_unreachable`.
 
 **`project_protocol env ~span ~proto_name pdef`** (`typecheck.ml:5952`) is the
 entry point: it collects every role mentioned anywhere in the protocol

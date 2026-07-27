@@ -13,6 +13,29 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
+  do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
+  until now, had no way back out — every step inside the body, including
+  every `choose` branch, looped back to the start, so a looping channel could
+  only be abandoned, never actually `Chan.close`d. Writing `stop` inside a
+  `loop` body (directly, or nested in a `choose` branch within one) exits the
+  loop instead of repeating it, e.g.:
+  ```march
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  ```
+  `stop` is a contextual keyword (a plain identifier everywhere else, not
+  reserved). `stop` written outside any `loop`, or steps written after a
+  `stop`, are both compile errors.
+
 - **`Bool` and `Float` refinement types are now enforced.** Both previously
   parsed and type-checked while checking nothing at all, so
   `fn needTrue(b : {Bool | _ == true})` accepted `needTrue(false)` and
