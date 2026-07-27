@@ -607,6 +607,67 @@ let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
    re-export bare. *)
 let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
 
+(** P10 Phase 2/2c — shared codegen for the NativeArray map inline loop.
+    Emits: length -> uninitialized alloc -> for-loop (load elem, tag/box to
+    the wire ptr ABI, DIRECT call to [apply_name], untag/unbox, store).
+    [clo_reg] is the LLVM value to pass as the apply fn's $clo argument —
+    the literal ["null"] for a non-capturing closure (Phase 2; the apply
+    body never reads $clo), or a real closure-struct pointer register for a
+    capturing one (Phase 2c; the apply body loads free vars from it). See
+    [Native_map_inline] for which shape produces which. *)
+let emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
+    : string * string =
+  let elem_ty = if is_float then "double" else "i64" in
+  let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
+  let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+  (* Open a dedicated preheader so its label is known for the loop phi,
+     regardless of what block was open before this arm ran. *)
+  let preheader = fresh_block ctx "nmap_pre" in
+  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+  emit_label ctx preheader;
+  let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
+  let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
+  let len = fresh ctx "nmap_len" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
+  let new_arr = fresh ctx "nmap_out" in
+  emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
+  let cond_lbl = fresh_block ctx "nmap_cond" in
+  let body_lbl = fresh_block ctx "nmap_body" in
+  let exit_lbl = fresh_block ctx "nmap_exit" in
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx cond_lbl;
+  let i = fresh ctx "nmap_i" in
+  let i_next = fresh ctx "nmap_inext" in
+  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+  let cmp = fresh ctx "nmap_cmp" in
+  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+  emit_label ctx body_lbl;
+  (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
+     (march_runtime.c), so one offset serves both GEPs. *)
+  let soff = fresh ctx "nmap_soff" in
+  emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+  let byte_off = fresh ctx "nmap_off" in
+  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  let sptr = fresh ctx "nmap_sptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
+  let x = fresh ctx "nmap_x" in
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
+  let wire_arg = coerce ctx elem_ty x "ptr" in
+  let y = fresh ctx "nmap_y" in
+  emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
+  let y_native = coerce ctx "ptr" y elem_ty in
+  let dptr = fresh ctx "nmap_dptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
+  emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx exit_lbl;
+  ("ptr", new_arr)
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -1963,7 +2024,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (ret_ty, r)
        end)
 
-  (* ── Native array map inline loop (P10 Phase 2) ──────────────────────
+  (* ── Native array map inline loop, non-capturing closure (P10 Phase 2) ──
      native_map_inline.ml rewrites EApp(native_int_arr_map/native_float_arr_map,
      [arr; clo]) into this synthetic call whenever the closure is a fresh,
      non-capturing lambda used nowhere else: the 2nd arg becomes a direct
@@ -1980,62 +2041,37 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      and for Int, instcombine can then cancel the tag/untag round-trip
      entirely, leaving a plain scalar loop the vectorizer can pack into SIMD.
      Float keeps the alloc/unbox calls (real heap allocations) in the loop
-     body, which blocks vectorization — see specs/optimizations.md P10. *)
+     body, which blocks vectorization — see specs/optimizations.md P10.
+     $clo is `null`: the apply body never reads it (no free vars to load). *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
     when f.Tir.v_name = "__native_int_arr_map_inline"
       || f.Tir.v_name = "__native_float_arr_map_inline" ->
     let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
-    let elem_ty = if is_float then "double" else "i64" in
-    let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
-    let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
-    (* Open a dedicated preheader so its label is known for the loop phi,
-       regardless of what block was open before this arm ran. *)
-    let preheader = fresh_block ctx "nmap_pre" in
-    emit_term ctx (Printf.sprintf "br label %%%s" preheader);
-    emit_label ctx preheader;
-    let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
-    let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
-    let len = fresh ctx "nmap_len" in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
-    let new_arr = fresh ctx "nmap_out" in
-    emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
-    let cond_lbl = fresh_block ctx "nmap_cond" in
-    let body_lbl = fresh_block ctx "nmap_body" in
-    let exit_lbl = fresh_block ctx "nmap_exit" in
-    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+    emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg:"null"
 
-    emit_label ctx cond_lbl;
-    let i = fresh ctx "nmap_i" in
-    let i_next = fresh ctx "nmap_inext" in
-    emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
-    let cmp = fresh ctx "nmap_cmp" in
-    emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
-    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
-
-    emit_label ctx body_lbl;
-    (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
-       (march_runtime.c), so one offset serves both GEPs. *)
-    let soff = fresh ctx "nmap_soff" in
-    emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
-    let byte_off = fresh ctx "nmap_off" in
-    emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
-    let sptr = fresh ctx "nmap_sptr" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
-    let x = fresh ctx "nmap_x" in
-    emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
-    let wire_arg = coerce ctx elem_ty x "ptr" in
-    let y = fresh ctx "nmap_y" in
-    emit ctx (Printf.sprintf "%s = call ptr @%s(ptr null, ptr %s)" y apply_name wire_arg);
-    let y_native = coerce ctx "ptr" y elem_ty in
-    let dptr = fresh ctx "nmap_dptr" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-    emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
-    emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
-    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-    emit_label ctx exit_lbl;
-    ("ptr", new_arr)
+  (* ── Native array map inline loop, capturing closure (P10 Phase 2c) ──
+     Same rewrite/codegen as Phase 2 above, but for a closure that DOES
+     capture free variables: native_map_inline.ml leaves the closure
+     allocation (and any alias-copy lets / Perceus RC ops around it)
+     completely untouched — the struct is a real, live value now, not
+     something safe to drop — and only rewrites the terminal call site to
+     this 3-arg form, adding the closure pointer as a genuine 3rd argument.
+     The call below passes it as the apply fn's real $clo, instead of the
+     `null` Phase 2 uses: the apply body loads its free variables from it
+     via ordinary EField (GEP+load), and since $clo is loop-invariant, LLVM
+     can hoist that load above the loop once the call is inlined — e.g. a
+     DataFrame `col +. scalar` (`fn x -> x +. f`, capturing `f`) reduces to
+     one hoisted load of `f` plus a per-element fadd, same vectorization
+     story as Phase 2's non-capturing case. *)
+  | Tir.EApp (f, [arr_atom; Tir.AVar apply_v; clo_atom])
+    when f.Tir.v_name = "__native_int_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline" ->
+    let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+    let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
+    emit_native_map_inline_loop ctx ~is_float ~arr_atom ~apply_name ~clo_reg
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

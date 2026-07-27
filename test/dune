@@ -3433,6 +3433,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "test \"$(cat native_arr_map_inline_reuse_llvm_check.out)\" -gt 0 || { echo 'inline path (nmap_pre/nmap_cond) did not fire for the self-recursive array-reuse shape' >&2; exit 1; }")))
 
+; P10 Phase 2c — capturing closures. Native_map_inline.ml's non-capturing
+; case (Phase 2) drops the closure allocation and passes null for $clo, but
+; a capturing closure's apply body reads free vars from $clo, so this case
+; leaves the allocation (and everything around it) untouched and only
+; rewrites the terminal call to a 3-arg form keeping the real closure
+; pointer. Assert both correctness (the .expected diff below) and, via the
+; same nmap_pre/nmap_cond grep as the reuse test above, that exactly 3 of
+; the 4 map calls in the fixture take the inline path — the 4th (a closure
+; that captures AND is reused elsewhere, both as the map callback and
+; called directly) must fall back to the general closure-call path, since
+; it's used more than once.
+(rule
+ (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_capture
+        native/native_arr_map_inline_capture.march)
+   (with-stdout-to native_arr_map_inline_capture.out
+        (system "./native_arr_map_inline_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_capture.expected native_arr_map_inline_capture.out)))
+
+(rule
+ (targets native_arr_map_inline_capture_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march)
+   (with-stdout-to native_arr_map_inline_capture_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c nmap_pre native/native_arr_map_inline_capture.ll) $(grep -c '= call ptr @native_int_arr_map(ptr\\|= call ptr @native_float_arr_map(ptr' native/native_arr_map_inline_capture.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_capture_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r pre gen < native_arr_map_inline_capture_llvm_check.out; \
+    test \"$pre\" -eq 9 -a \"$gen\" -eq 1 || { echo \"expected 3 inlined map calls (nmap_pre x3 = 9) and 1 general-path call (found nmap_pre=$pre general-calls=$gen)\" >&2; exit 1; }")))
+
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})
