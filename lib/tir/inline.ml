@@ -10,6 +10,8 @@
     of this threshold — they are handled by the size check implicitly. *)
 let inline_size_threshold = 50
 
+module SSet = Set.Make (String)
+
 (** Hot Code Reload boundary config, set by [Opt.run] for the duration of a
     run. When [Some], reloadable (boundary) functions are excluded from the
     inline-candidate set so a boundary→boundary call survives to codegen as a
@@ -34,18 +36,85 @@ let rec node_count : Tir.expr -> int = function
     + Option.fold ~none:0 ~some:node_count default
   | Tir.ESeq (e1, e2) -> 1 + node_count e1 + node_count e2
 
-(** Check if a function calls itself (recursion detection). *)
-let rec calls_self name : Tir.expr -> bool = function
-  | Tir.EApp (f, _) when f.Tir.v_name = name -> true
-  | Tir.ELet (_, rhs, body) -> calls_self name rhs || calls_self name body
-  | Tir.ELetRec (fns, body) ->
-    List.exists (fun fd -> calls_self name fd.Tir.fn_body) fns
-    || calls_self name body
-  | Tir.ECase (_, branches, default) ->
-    List.exists (fun b -> calls_self name b.Tir.br_body) branches
-    || Option.fold ~none:false ~some:(calls_self name) default
-  | Tir.ESeq (e1, e2) -> calls_self name e1 || calls_self name e2
-  | _ -> false
+(** Collect direct calls to functions in the current candidate pool. *)
+let direct_candidate_calls candidates expr =
+  let rec collect acc = function
+    | Tir.EApp (fn, _) when Hashtbl.mem candidates fn.Tir.v_name ->
+      SSet.add fn.Tir.v_name acc
+    | Tir.ELet (_, rhs, body) ->
+      collect (collect acc rhs) body
+    | Tir.ELetRec (fns, body) ->
+      let acc =
+        List.fold_left
+          (fun calls fn -> collect calls fn.Tir.fn_body)
+          acc fns
+      in
+      collect acc body
+    | Tir.ECase (_, branches, default) ->
+      let acc =
+        List.fold_left
+          (fun calls branch -> collect calls branch.Tir.br_body)
+          acc branches
+      in
+      Option.fold ~none:acc ~some:(collect acc) default
+    | Tir.ESeq (e1, e2) ->
+      collect (collect acc e1) e2
+    | _ -> acc
+  in
+  collect SSet.empty expr
+
+(** Return candidates that participate in recursive call-graph SCCs. *)
+let recursive_candidate_names (candidates : (string, Tir.fn_def) Hashtbl.t)
+    : SSet.t =
+  let successors : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
+  Hashtbl.iter (fun name fn ->
+    Hashtbl.add successors name (direct_candidate_calls candidates fn.Tir.fn_body)
+  ) candidates;
+  let indices : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let lowlinks : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let index = ref 0 in
+  let stack = ref [] in
+  let on_stack = ref SSet.empty in
+  let recursive = ref SSet.empty in
+  let rec strongconnect name =
+    Hashtbl.add indices name !index;
+    Hashtbl.add lowlinks name !index;
+    incr index;
+    stack := name :: !stack;
+    on_stack := SSet.add name !on_stack;
+    SSet.iter (fun successor ->
+      if not (Hashtbl.mem indices successor) then begin
+        strongconnect successor;
+        let lowlink = min (Hashtbl.find lowlinks name)
+            (Hashtbl.find lowlinks successor) in
+        Hashtbl.replace lowlinks name lowlink
+      end else if SSet.mem successor !on_stack then begin
+        let lowlink = min (Hashtbl.find lowlinks name)
+            (Hashtbl.find indices successor) in
+        Hashtbl.replace lowlinks name lowlink
+      end
+    ) (Hashtbl.find successors name);
+    if Hashtbl.find lowlinks name = Hashtbl.find indices name then begin
+      let rec pop_component component =
+        match !stack with
+        | member :: rest ->
+          stack := rest;
+          on_stack := SSet.remove member !on_stack;
+          let component = SSet.add member component in
+          if String.equal member name then component
+          else pop_component component
+        | [] -> assert false
+      in
+      let component = pop_component SSet.empty in
+      if SSet.cardinal component > 1
+         || SSet.mem name (Hashtbl.find successors name) then
+        recursive := SSet.union !recursive component
+    end
+  in
+  Hashtbl.iter (fun name _ ->
+    if not (Hashtbl.mem indices name) then strongconnect name
+  ) successors;
+  !recursive
 
 (** Alpha-rename: give each parameter and let-bound variable a fresh name. *)
 let gensym =
@@ -163,41 +232,16 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
   List.iter (fun fd ->
     let is_pure     = Purity.is_pure fd.Tir.fn_body in
     let is_small    = node_count fd.Tir.fn_body <= inline_size_threshold in
-    let is_nonrec   = not (calls_self fd.Tir.fn_name fd.Tir.fn_body) in
     (* Hot Code Reload: a reloadable (boundary) function must never be inlined,
        or its call sites would be fixed into callers and could not be swapped. *)
     let is_reloadable = match !boundary_config with
       | Some cfg -> Hot_reload.is_reloadable cfg (Hot_reload.module_of_name fd.Tir.fn_name)
       | None     -> false in
-    if is_pure && is_small && is_nonrec && not is_reloadable then
+    if is_pure && is_small && not is_reloadable then
       Hashtbl.add fn_env fd.Tir.fn_name fd
   ) m.Tir.tm_fns;
-  (* Conservative mutual-recursion filter:
-     Remove any candidate that calls another candidate to prevent infinite
-     fixed-point loops. Chains (f→g→h non-circular) still work correctly:
-     only g/h are inlined in this pass; f gains their bodies and becomes
-     eligible in subsequent fixed-point iterations. *)
-  let candidate_names = Hashtbl.fold (fun k _ acc -> k :: acc) fn_env [] in
-  List.iter (fun name ->
-    match Hashtbl.find_opt fn_env name with
-    | None -> ()  (* already removed *)
-    | Some fd ->
-      let calls_other =
-        let rec check = function
-          | Tir.EApp (f, _) -> List.mem f.Tir.v_name candidate_names && f.Tir.v_name <> name
-          | Tir.ELet (_, rhs, body) -> check rhs || check body
-          | Tir.ELetRec (fns, body) ->
-            List.exists (fun nfd -> check nfd.Tir.fn_body) fns || check body
-          | Tir.ECase (_, branches, default) ->
-            List.exists (fun b -> check b.Tir.br_body) branches
-            || Option.fold ~none:false ~some:check default
-          | Tir.ESeq (e1, e2) -> check e1 || check e2
-          | _ -> false
-        in
-        check fd.Tir.fn_body
-      in
-      if calls_other then Hashtbl.remove fn_env name
-  ) candidate_names;
+  let recursive = recursive_candidate_names fn_env in
+  SSet.iter (Hashtbl.remove fn_env) recursive;
   { m with Tir.tm_fns = List.map (fun fd ->
       { fd with Tir.fn_body = inline_expr ~changed fn_env fd.Tir.fn_body }
     ) m.Tir.tm_fns }

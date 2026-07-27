@@ -759,6 +759,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\n\\n  fn broken() : Int do\\n    double(1, 2, 3)\\n  end\\n\\nend\\n' > cas_stale_dir/cs_helper.march && \
 ! %{exe:../bin/main.exe} --check cas_stale_dir/cs_entry.march 2>/dev/null")))
 
+; ── Regression: CAS key must digest the runtime dir that is actually compiled ──
+; cas.ml resolved its own runtime-directory candidates cwd-FIRST while
+; bin/main.ml resolves the sources it compiles exe-relative-FIRST, so with cwd
+; at the repo root the key digested ./runtime/*.c and clang compiled
+; _build/default/runtime/*.c.  A targeted `dune build bin/main.exe` does not
+; refresh _build/default/runtime, so the two diverge and editing a runtime
+; source printed `compiled <out> (cached)` for a binary with none of the new
+; code (compiler_identity does not cover it — the exe's bytes are unchanged).
+; The script compiles one March program against two divergent runtime trees
+; through the same warm CAS store and requires each binary to come from the
+; runtime it was compiled against.  Native compiles, hence `Slow`-equivalent:
+; own alias, run with `dune build @test/cas-runtime-dir`.
+(rule
+ (alias cas-runtime-dir)
+ (deps (file %{exe:../bin/main.exe})
+       (file cas_runtime_dir_check.sh)
+       (source_tree ../runtime)
+       (source_tree ../stdlib))
+ (action (setenv MARCH_BIN %{exe:../bin/main.exe}
+          (run bash %{dep:cas_runtime_dir_check.sh}))))
+
 ; ── Regression: whole-program assembly must not leak named-type placeholders ──
 ; `forge build` typechecks each lib file individually (`march --check <file>`)
 ; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be
@@ -3432,6 +3453,169 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action
   (run bash -c
    "test \"$(cat native_arr_map_inline_reuse_llvm_check.out)\" -gt 0 || { echo 'inline path (nmap_pre/nmap_cond) did not fire for the self-recursive array-reuse shape' >&2; exit 1; }")))
+
+; P10 Phase 2c — capturing closures. Native_map_inline.ml's non-capturing
+; case (Phase 2) drops the closure allocation and passes null for $clo, but
+; a capturing closure's apply body reads free vars from $clo, so this case
+; leaves the allocation (and everything around it) untouched and only
+; rewrites the terminal call to a 3-arg form keeping the real closure
+; pointer. Assert both correctness (the .expected diff below) and, via the
+; same nmap_pre/nmap_cond grep as the reuse test above, that exactly 3 of
+; the 4 map calls in the fixture take the inline path — the 4th (a closure
+; that captures AND is reused elsewhere, both as the map callback and
+; called directly) must fall back to the general closure-call path, since
+; it's used more than once.
+; Regression: NativeArray.map2_int / map2_float / to_float_arr, and
+; DataFrame.col_add_col's rewiring onto them (P10 map2 primitive) instead
+; of the List.zip/List.map/native_*_arr_from_list round-trip. Correctness
+; only — this fixture does not exercise the map-inline machinery.
+(rule
+ (targets native_arr_map2 native_arr_map2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map2
+        native/native_arr_map2.march)
+   (with-stdout-to native_arr_map2.out
+        (system "./native_arr_map2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2.expected native_arr_map2.out)))
+
+(rule
+ (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_capture
+        native/native_arr_map_inline_capture.march)
+   (with-stdout-to native_arr_map_inline_capture.out
+        (system "./native_arr_map_inline_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_capture.expected native_arr_map_inline_capture.out)))
+
+(rule
+ (targets native_arr_map_inline_capture_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_capture.march)
+   (with-stdout-to native_arr_map_inline_capture_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c nmap_pre native/native_arr_map_inline_capture.ll) $(grep -c '= call ptr @native_int_arr_map(ptr\\|= call ptr @native_float_arr_map(ptr' native/native_arr_map_inline_capture.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_capture_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r pre gen < native_arr_map_inline_capture_llvm_check.out; \
+    test \"$pre\" -eq 9 -a \"$gen\" -eq 1 || { echo \"expected 3 inlined map calls (nmap_pre x3 = 9) and 1 general-path call (found nmap_pre=$pre general-calls=$gen)\" >&2; exit 1; }")))
+
+; P10 Stage 4 "Option A" — the map_float inline loop's wire-argument box
+; (march_alloc_float) must be allocated ONCE before the loop and reused
+; (a GEP+store into its .val field per iteration), not allocated fresh once
+; per element. Assert both correctness (the .expected diff below) and, via
+; -emit-llvm, that no march_alloc_float call appears inside the nmap_bodyN
+; loop-body block (only in the nmap_preN preheader that precedes it).
+(rule
+ (targets native_arr_map_inline_float_box_reuse native_arr_map_inline_float_box_reuse.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_float_box_reuse
+        native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse.out
+        (system "./native_arr_map_inline_float_box_reuse")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_float_box_reuse.expected native_arr_map_inline_float_box_reuse.out)))
+
+(rule
+ (targets native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_float_box_reuse.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_float_box_reuse.march)
+   (with-stdout-to native_arr_map_inline_float_box_reuse_llvm_check.out
+    (run bash -c
+     "awk '/^nmap_body[0-9]+:/{flag=1; next} /^[a-zA-Z_][a-zA-Z0-9_]*:/{flag=0} flag' native/native_arr_map_inline_float_box_reuse.ll | (grep -c march_alloc_float || true)")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_float_box_reuse_llvm_check.out)
+ (action
+  (run bash -c
+   "test \"$(cat native_arr_map_inline_float_box_reuse_llvm_check.out)\" -eq 0 || { echo 'march_alloc_float still called inside the map_float loop body -- the wire-argument box is no longer being reused across iterations' >&2; exit 1; }")))
+
+; P10 float-boxing Stage 4, Option B — unboxed apply-fn variant for an
+; all-Float map_float callback. Native_map_inline.ml clones the apply fn
+; under a name that does not contain "$apply$" (Tir_names.is_apply_fn's
+; marker), so llvm_toplevel.ml's UNMODIFIED function-emission code treats
+; it as an ordinary function: natural double params/return, no
+; march_alloc_float/march_unbox_float anywhere -- argument or return side,
+; loop or callee. Assert correctness (the .expected diff below), that
+; exactly 2 "$mapfast$"-named clones exist (one per qualifying call site in
+; the fixture), and that NEITHER clone's own function body contains a
+; boxing call (a stronger check than the box-reuse test's "not inside the
+; loop" -- this also covers the callee, which now takes/returns a raw
+; double so there is nothing left to box).
+(rule
+ (targets native_arr_map_inline_unboxed native_arr_map_inline_unboxed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_unboxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map_inline_unboxed
+        native/native_arr_map_inline_unboxed.march)
+   (with-stdout-to native_arr_map_inline_unboxed.out
+        (system "./native_arr_map_inline_unboxed")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map_inline_unboxed.expected native_arr_map_inline_unboxed.out)))
+
+(rule
+ (targets native_arr_map_inline_unboxed_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map_inline_unboxed.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map_inline_unboxed.march)
+   (with-stdout-to native_arr_map_inline_unboxed_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_map_inline_unboxed.ll) $(awk '/^define double @.*\\$mapfast\\$/{flag=1} flag{print} /^}/{flag=0}' native/native_arr_map_inline_unboxed.ll | (grep -c 'march_alloc_float\\|march_unbox_float' || true))\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map_inline_unboxed_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nclones boxcalls < native_arr_map_inline_unboxed_llvm_check.out; \
+    test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 || { echo \"expected 2 unboxed \\$mapfast\\$ clones with zero boxing calls in their bodies (found clones=$nclones boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)

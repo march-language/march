@@ -112,14 +112,21 @@
             March
           </a>
         </div>
-        <div class="navbar-end">
+        <div class="navbar-end gap-1">
+          <!-- Mobile trigger. The modal itself is rendered once, in the sidebar below. -->
+          <button data-ms-open type="button" class="btn btn-ghost btn-square btn-sm" aria-label="Search docs">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a8ccd8" stroke-width="2" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+          </button>
           <a href="https://github.com/march-language/march" class="btn btn-ghost btn-sm" style="color:#a8ccd8;" target="_blank" rel="noopener">GitHub</a>
         </div>
       </nav>
 
       <!-- Main content -->
       <main class="flex-1 w-full max-w-4xl mx-auto px-6 py-10 lg:px-12">
-        <article class="prose max-w-none prose-pre:p-0 prose-pre:bg-transparent prose-pre:rounded-none">
+        <article class="prose max-w-none prose-pre:p-0 prose-pre:bg-transparent prose-pre:rounded-none"
+                 data-pagefind-body data-pagefind-filter="section:Guide">
           {{ content }}
         </article>
       </main>
@@ -144,6 +151,9 @@
             <span class="font-bold text-xl" style="color:#D6EEF5;">March</span>
           </a>
         </div>
+
+        <!-- Search (renders the ⌘K trigger + the single shared modal for this page) -->
+        <div class="px-4 pt-4 ms-trigger-block">{% include search.html %}</div>
 
         <!-- Nav -->
         <nav id="march-nav" class="flex-1 overflow-y-auto py-3 px-2">

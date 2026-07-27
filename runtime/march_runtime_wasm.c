@@ -119,6 +119,19 @@ void *march_string_lit(const char *s, int64_t len) {
     return str;
 }
 
+/* Get-or-create the single shared march_string for one literal site — the
+ * form codegen emits for `ALit (LitString _)`.  See march_runtime.h for why
+ * literals must not allocate per evaluation.  No atomics and no immortal rc
+ * are needed here: WASM runs single-threaded and this runtime's allocator is
+ * a bump arena whose RC ops and march_free are already no-ops.  Caching
+ * still matters — without it every evaluation bumped the arena forward by
+ * another header, so a literal in a loop grew the heap without bound. */
+void *march_string_lit_static(const char *s, int64_t len, void **cell) {
+    if (*cell) return *cell;
+    *cell = march_string_lit(s, len);
+    return *cell;
+}
+
 int64_t march_string_eq(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;

@@ -241,6 +241,18 @@ int64_t march_decrc_freed(void *p) {
 }
 
 void march_free(void *p) {
+    /* Immortal cells (compiled-in string literals) belong to the program
+     * image and are shared by every evaluation of their literal site, so the
+     * unconditional free below must not reach them.  Defensive rather than a
+     * fix for a known reproducer: the RC paths can't free an immortal cell
+     * (its count never reaches zero), but march_free bypasses the count
+     * entirely — Perceus emits EFree instead of a decrement for a dead
+     * LINEAR/AFFINE binding (perceus.ml), and the shapes that produce such a
+     * binding are not obviously closed to a value that came from a literal.
+     * One predictable branch on an already-cold path is worth not risking a
+     * free() of static-lifetime memory that every later evaluation of that
+     * literal site still hands out. */
+    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
     if (gc_trace_on() && IS_HEAP_PTR(p))
         gc_emit("free", p, 0, 0, ((march_hdr *)p)->tag);
     free(p);
@@ -377,6 +389,28 @@ void *march_string_lit(const char *utf8, int64_t len) {
     memcpy(s->data, utf8, (size_t)len);
     s->data[len] = '\0';
     return s;
+}
+
+/* Get-or-create the single immortal march_string for one literal site.
+ * See march_runtime.h for why literals must not allocate per evaluation.
+ * Thread-safe: two threads reaching a cold cell both build a string, the
+ * CAS loser frees its copy and adopts the winner's, so every caller
+ * observes the same pointer. */
+void *march_string_lit_static(const char *utf8, int64_t len, void **cell) {
+    _Atomic(void *) *slot = (_Atomic(void *) *)cell;
+    void *cached = atomic_load_explicit(slot, memory_order_acquire);
+    if (cached) return cached;
+    march_string *s = march_string_alloc(len);
+    memcpy(s->data, utf8, (size_t)len);
+    s->data[len] = '\0';
+    s->rc = MARCH_RC_IMMORTAL;
+    void *winner = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            slot, &winner, (void *)s, memory_order_acq_rel, memory_order_acquire))
+        return s;
+    MARCH_FREE_BUMP();
+    free(s);
+    return winner;
 }
 
 void *march_int_to_string(int64_t n) {
@@ -4453,6 +4487,25 @@ static inline double clo_call_dbl_dbl(void *clo, double x) {
     return march_unbox_float(wire_ret);
 }
 
+/* Two-argument variants for native_{int,float}_arr_map2 (a genuine 2-param
+ * March lambda, e.g. `fn (a, b) -> a + b`, compiles to a 3-param apply fn:
+ * ($clo, a, b) -- confirmed via -emit-llvm, not a tuple-destructured
+ * single param). Same wire-tagged/boxed ABI as the 1-arg helpers above. */
+static inline void *clo_apply_ptr2(void *clo, void *arg1, void *arg2) {
+    void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 16);
+    return fn(clo, arg1, arg2);
+}
+static inline int64_t clo_call_int_int_int(void *clo, int64_t x, int64_t y) {
+    void *wire_x = (void *)(intptr_t)((x << 1) | 1);
+    void *wire_y = (void *)(intptr_t)((y << 1) | 1);
+    void *wire_ret = clo_apply_ptr2(clo, wire_x, wire_y);
+    return (int64_t)(intptr_t)wire_ret >> 1;
+}
+static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
+    void *wire_ret = clo_apply_ptr2(clo, march_alloc_float(x), march_alloc_float(y));
+    return march_unbox_float(wire_ret);
+}
+
 /* Uninitialized allocation for llvm_emit's inline map loop (native_map_inline.ml):
  * every slot is written by the loop before any read, so leaving them
  * uninitialized (unlike native_int_arr_make/native_float_arr_make, which
@@ -4490,12 +4543,84 @@ int64_t native_int_arr_sum(void *arr) {
     return s;
 }
 
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+int64_t native_int_arr_min(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+int64_t native_int_arr_max(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    int64_t m = *(int64_t *)((char *)arr + NATIVE_ARR_HDR);
+    for (int64_t i = 1; i < len; i++) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. int elements promote to
+ * double for the deviation. */
+double native_int_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_int_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v = (double)(*(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8));
+        double d = v - mean;
+        s += d * d;
+    }
+    return s;
+}
+
 void *native_int_arr_map(void *arr, void *f) {
     int64_t len = native_int_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     for (int64_t i = 0; i < len; i++) {
         int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
         *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int(f, x);
+    }
+    return new_arr;
+}
+
+/* Elementwise binary op over two same-length int arrays -- the two-array
+ * counterpart to native_int_arr_map, for DataFrame.col_add_col-shaped
+ * column-column arithmetic. Caller (stdlib) checks the length match; a
+ * mismatch here is a genuine caller bug (both callers already validate),
+ * so it's an assert rather than a Result -- matching native_int_arr_min/max's
+ * "caller guarantees" convention above, not a new error-handling contract. */
+void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
+    int64_t len = native_int_arr_length(arr1);
+    if (len != native_int_arr_length(arr2)) {
+        fputs("march: native_int_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr1 + NATIVE_ARR_HDR + i * 8);
+        int64_t y = *(int64_t *)((char *)arr2 + NATIVE_ARR_HDR + i * 8);
+        *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int_int(f, x, y);
+    }
+    return new_arr;
+}
+
+/* Widen an int array to float, elementwise -- used by col_add_col's mixed
+ * Int/Float branches to bring both sides to Float before native_float_arr_map2,
+ * instead of round-tripping through List(Value). Pure conversion, no
+ * closure -- should auto-vectorize (int64->double SIMD convert) same as
+ * native_int_arr_sum already does for the reduction case. */
+void *native_int_arr_to_float_arr(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        double d = (double)x;
+        memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &d, 8);
     }
     return new_arr;
 }
@@ -4569,12 +4694,67 @@ double native_float_arr_sum(void *arr) {
     return s;
 }
 
+/* Caller (DataFrame.col_native_min_max) guarantees len >= 1; empty arrays
+ * never reach this loop. */
+double native_float_arr_min(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v < m) m = v;
+    }
+    return m;
+}
+
+double native_float_arr_max(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double m; memcpy(&m, (char *)arr + NATIVE_ARR_HDR, 8);
+    for (int64_t i = 1; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+/* Sum of squared deviations from a precomputed mean — the stable second pass
+ * of the standard two-pass variance algorithm. */
+double native_float_arr_sumsq_dev(void *arr, double mean) {
+    int64_t len = native_float_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) {
+        double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        double d = v - mean;
+        s += d * d;
+    }
+    return s;
+}
+
 void *native_float_arr_map(void *arr, void *f) {
     int64_t len = native_float_arr_length(arr);
     void *new_arr = native_arr_alloc(len);
     for (int64_t i = 0; i < len; i++) {
         double x; memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
         double r = clo_call_dbl_dbl(f, x);
+        memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
+    }
+    return new_arr;
+}
+
+/* Elementwise binary op over two same-length float arrays -- see
+ * native_int_arr_map2's doc comment (same two-array shape, Float instead
+ * of Int). Both sides must already be Float; col_add_col's mixed-type
+ * cases widen the Int side via native_int_arr_to_float_arr first. */
+void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
+    int64_t len = native_float_arr_length(arr1);
+    if (len != native_float_arr_length(arr2)) {
+        fputs("march: native_float_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        double x, y;
+        memcpy(&x, (char *)arr1 + NATIVE_ARR_HDR + i * 8, 8);
+        memcpy(&y, (char *)arr2 + NATIVE_ARR_HDR + i * 8, 8);
+        double r = clo_call_dbl_dbl_dbl(f, x, y);
         memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
     }
     return new_arr;

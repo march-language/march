@@ -1,0 +1,54 @@
+-- Regression: P10 Phase 2c — inline capturing NativeArray.map closures.
+--
+-- Native_map_inline.ml's non-capturing case (Phase 2) drops the closure
+-- allocation entirely and passes `null` for $clo, since the apply body
+-- never reads it. A capturing closure's apply body DOES read free vars
+-- from $clo, so Phase 2c leaves the allocation (and everything around it)
+-- untouched and only rewrites the terminal call to a 3-arg form that keeps
+-- the real closure pointer instead of null.
+--
+-- Exercises: single capture (Float, matching stdlib/dataframe.march's
+-- `col +. scalar` shape), multiple captures, a capture used inside a
+-- self-recursive loop (the same "array reused after the map call" shape
+-- that needed the Phase 2b ESeq-wrapper fix, now combined with capture),
+-- and — critically — a closure that captures AND is reused elsewhere
+-- (both as the map callback and called directly), which must NOT take the
+-- inline path since it's used more than once.
+mod Main do
+  pfn go(arr, i, acc, scale) do
+    if i >= 3 do
+      acc
+    else
+      let arr2 = NativeArray.map_int(arr, fn x -> x * scale - 1)
+      go(arr, i + 1, acc + NativeArray.sum_int(arr2), scale)
+    end
+  end
+
+  fn main() : () do
+    -- Single capture, Float (dataframe.march's `col +. f` / `col *. f` shape).
+    let f = 3.0
+    let farr = NativeArray.from_list_float(Cons(1.0, Cons(2.0, Cons(3.0, Nil))))
+    let farr2 = NativeArray.map_float(farr, fn x -> x +. f)
+    println(NativeArray.to_list_float(farr2))   -- [4., 5., 6.]
+
+    -- Multiple captures, Int, negative/zero/positive inputs.
+    let a = 10
+    let b = 100
+    let iarr = NativeArray.from_list_int(Cons(-3, Cons(0, Cons(3, Nil))))
+    let iarr2 = NativeArray.map_int(iarr, fn x -> x + a + b)
+    println(NativeArray.to_list_int(iarr2))   -- [107, 110, 113]
+
+    -- Capture reused inside a self-recursive loop (array mapped, then reused
+    -- for the tail call — the Phase 2b shape — now with a captured `scale`).
+    let arr = NativeArray.from_list_int(Cons(-3, Cons(-1, Cons(0, Cons(1, Cons(3, Nil))))))
+    println(go(arr, 0, 0, 4))   -- -5 per iteration * 3 = -15
+
+    -- Captures AND is reused elsewhere: must fall back to the general path.
+    let k = 7
+    let closure = fn x -> x + k
+    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let a2 = NativeArray.map_int(a1, closure)
+    println(NativeArray.to_list_int(a2))   -- [8, 9, 10]
+    println(closure(100))   -- 107
+  end
+end

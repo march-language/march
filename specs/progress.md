@@ -32,6 +32,223 @@ the join shape). `specs/lang/surface-syntax.md`'s operator reference now notes
 that `++` itself is still O(n) per call (so accumulating via `acc = acc ++ x`
 in a loop is still O(n²)) and points at `IOList` for that case —
 `stdlib/string.march`'s `String.concat` doc already carried the same note.
+## Current State (as of 2026-07-27, NativeArray.map2 primitive + DataFrame.col_add_col rewiring)
+
+New two-array zip-with primitive, `NativeArray.map2_int`/`map2_float` (plus
+`to_float_arr` for widening a `NativeIntArr`), unblocking `DataFrame.col_add_col`
+(column-column arithmetic) from a `List.zip`/`List.map`/`native_*_arr_from_list`
+round-trip — the last piece of the P10 Phase 3 "two-array ops" survey (aggregations
+were already done; `col_add_col`/`fill_null` were the two identified two-array
+shapes, `fill_null` remains out of scope since it zips against a `TypedArray(Bool)`
+mask, not another `NativeArray`).
+
+Full stack, all four layers: runtime C (`native_{int,float}_arr_map2` in
+`runtime/march_runtime.c`, reusing `map`'s wire-tagged/boxed closure-call ABI via
+new 2-arg helpers `clo_call_int_int_int`/`clo_call_dbl_dbl_dbl`), interpreter
+(`lib/eval/eval.ml`), typechecker (`lib/typecheck/typecheck.ml`), and
+compiled-path registration (`lib/tir/llvm_builtins.ml` table + preamble
+`PDeclare`s — matched in `test/test_codegen.ml`'s golden preamble string —
+plus `lib/tir/defun.ml`'s `builtin_names`). `stdlib/dataframe.march`'s
+`col_add_col` rewired for `IntCol+IntCol`, `IntCol+FloatCol`, `FloatCol+FloatCol`,
+`FloatCol+IntCol`. Verified byte-identical output between interpreted and
+compiled modes, including the length-mismatch error path. Regression test:
+`test/native/native_arr_map2.march`.
+
+Scoped to correctness only — `map2` does not (yet) get the Phase-2b/2c/Option-A/B
+closure-inlining/vectorization treatment `map_int`/`map_float` have; each element
+still dispatches through the C runtime's closure-pointer call. That inlining is a
+natural follow-up, not started. See `specs/optimizations.md` §P10 "Phase 3".
+
+## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
+
+Compiled March now reclaims an aggregate that is released WITHOUT being
+pattern-matched. Previously only destructuring reclaimed one: `llvm_case.ml`'s
+owned-scrutinee path frees the box via `march_decrc_freed` and lets the
+extracted fields inherit its child references, while a bare `EDecRC` lowered to
+`march_decrc_local` — a shallow `free(p)` that never decremented the children.
+Perceus emits that bare drop whenever the consumer BORROWS the container, which
+is the ordinary shape of `let parts = String.split(…)` followed by a call, so
+bulk text processing leaked proportionally to its input (60-iteration loop:
+9,000,126 string allocations / 3 frees, 585 MB peak, linear in iterations).
+
+The new post-Perceus pass `lib/tir/drop.ml` synthesizes one
+`__drop$T(x) = case x of C(f…) -> if march_decrc_freed(x) then drop f…` per
+heap-owning variant type and rewrites bare aggregate `EDecRC`s into calls to
+it. Synthesizing in TIR (rather than emitting LLVM by hand) means the RC
+protocol and Boxed/Niche/Newtype representation handling come from the existing
+case lowering, and the recursive field's drop — left in tail position — becomes
+a `llvm_tco` loop, so a 150K-element spine does not recurse in C. The
+shared-box early exit is load-bearing twice over: descending into a cell whose
+refcount did not reach zero would free children still owned by the surviving
+reference, and would make every drop quadratic.
+
+`Llvm_tco.dup_bound_vars` additionally narrows the self-TCO back-edge's
+skip-RC-ops-on-forwarded-arguments rule (commit `eafbd71a`) to arguments with
+no compensating IncRC — a `Cons(_, t)` walk's forwarded tail is dup-bound, and
+skipping its release stranded a `+1` on every cons cell, which would have
+pinned the whole list even with deep drop in place.
+
+Repro 585 MB → 16 MB and flat across iteration counts; tree build-and-discard
+shows 0 net live objects under `MARCH_TRACE_GC`; `bench/binary_trees.march`
+157 MB → 6 MB peak with unchanged output. Oracle 0 divergences over 96
+comparable programs; compiler/eval/snapshots/codegen/stdlib_march green,
+stdlib green but for a pre-existing machine-wide ASAN hang. Interpreted mode is
+untouched (the pass runs only in the compile pipeline, and is skipped for the
+GC'd JS target). Known gaps, all pre-existing and unchanged: Newtype/Niche-repr
+types (a dropped `Option(String)` still leaks its payload), tuples and records
+(`Rc_types.needs_rc` is FALSE for both, so no aggregate-level dec exists to
+rewrite), deep LEFT spines (only the last field's drop is a tail call), and
+`EAtomicDecRC`.
+## Current State (as of 2026-07-27, session types: `stop` lets a `choose` branch inside a `loop` exit it)
+
+A `loop do … end` protocol projects to the µ-type `Rec X. S[X]` and, before this fix, had no way to reach `SEnd`: every step inside the body — including every `choose` branch — took the loop's own back-reference as its continuation, so a looping channel could only be *abandoned* via `Chan.close`, never actually closed. `stop` is a new `protocol_step` (`Ast.ProtoStop of span`), legal only inside a `loop` body directly or nested inside a `choose` branch within one; `project_steps`' new arm projects it to `SEnd` for every role unconditionally — the literature shape `Rec X. choose { more: S;X, done: end }`.
+
+Surface syntax is contextual rather than a reserved word: `protocol_step`'s existing alternatives all start with an upper-case role name, `LOOP`, or `CHOOSE`, so a bare `lower_name` alternative in `parser.mly` is unambiguous — it reduces to `ProtoStop` only when the identifier's text is `"stop"`, and raises a positioned parse error naming `stop` as the only valid step otherwise. Confirmed zero new menhir shift/reduce conflicts.
+
+Two validation rules keep `stop` from meaning something it doesn't: `stop` outside any `loop` is rejected (a no-op there — writing nothing already ends the protocol), and steps written after `stop` in the same list are unreachable, extending the existing `check_unreachable_after_loop` walker rather than duplicating it. Duality needs no special handling — `dual_session_ty` already maps `SEnd` to `SEnd` — verified live with a two-role protocol whose `done` branch dualizes cleanly against the peer's `SEnd`.
+
+4 new unit tests in `test/test_compiler.ml` (`run_compiler` quick suite: 604 total). Corpus: `specs/lang/types/accept/t105_loop_stop_two_iterations_close` (loops twice, exits via `stop`, closes both endpoints — run interpreted AND `--compile`d, byte-identical output `3`) and `reject/t106_stop_outside_loop` / `t107_steps_after_stop_unreachable`; `check_types.sh` 187/187 → **190/190** (94 accept, 96 reject). `specs/lang/golden/verify.sh` 46/46 unchanged (no golden witness needed — compile-time-only feature). `scripts/check-docs.sh` clean. Docs: `specs/lang/session-types.md` (new "Exiting a loop: `stop`" subsection), `specs/lang/core-march-types.md` §2.7.1/§2.7.3, `specs/lang/surface-syntax.md`.
+
+## Current State (as of 2026-07-27, verified compiled string-literal RC leak fix)
+
+Compiled string literals are now emitted as one immortal cell per literal
+SITE, cached in a per-site LLVM global by `march_string_lit_static`
+(`runtime/march_runtime.c`, plus a single-threaded counterpart in
+`march_runtime_wasm.c`), instead of a fresh `rc=1` allocation on every
+evaluation.
+
+This closes a compiled-only leak. A string literal carries no RC obligation
+in TIR — `perceus.ml`'s `EAtom (ALit _)` arm returns the expression
+untouched, exactly as it does for a global `ADefRef` — so a per-evaluation
+allocation was owned by nobody and no pass ever emitted a matching
+decrement. The leak was invisible in the two neighbouring shapes (a
+let-bound literal gets an ordinary Perceus dec; a literal argument to a
+non-allocating call is hoisted out of the loop) and showed up only when a
+literal was evaluated repeatedly as a direct operand — canonically of `++`.
+`let s = buf ++ "xyz"` over 2M iterations leaked 2M strings, peaking at
+64.2MB RSS where the same loop with two variable operands used 2.9MB; after
+the fix that program matches the variable-operand control exactly. Literal
+sharing is safe because March strings are immutable and the runtime never
+mutates a string cell in place; the immortal refcount
+(`MARCH_RC_IMMORTAL`) also makes the FBIP `rc == 1` uniqueness test always
+false, so a shared cell is never reused in place, and `march_free` skips
+immortal cells so the `EFree` path cannot free static-lifetime memory.
+
+Guarded by `test_string_literal_operand_no_leak_compiled`
+(`string_literal_codegen` group, `test/test_codegen.ml`), which reads the
+runtime's own `march_live_allocs` gauge through an extern and asserts the
+live-object count does not grow with the iteration count. Verified
+non-vacuous: the same program prints `LEAKED 20001` against the previous
+emission.
+
+Interpreted execution was never affected (OCaml GC). Native benchmarks show
+no regression and a measurable improvement where literals are hot —
+`bench/iolist_template.march` peak RSS 52.6MB → 45.4MB.
+## Current State (as of 2026-07-27, verified Bool and Float refinements)
+
+`{Bool | _ == true}` and `{Float | _ >= 0.0}` used to parse, type-check and
+check **nothing** — no error, no warning, confirmed against the built compiler
+before any change. Both are now enforced at preconditions, postconditions and
+through path-sensitive guards. Bool needed only the missing `is_bool_base`
+dispatch and reflection at `Smt.SBool`; Float is a new sort in
+`lib/refine/smt.ml`.
+
+**Float uses Z3's bit-precise IEEE-754 FloatingPoint theory (`Float64`,
+`fp.geq`/`fp.gt`/`fp.leq`/`fp.lt`, `fp.eq`, `((_ to_fp 11 53) RNE …)`), never
+reals** — a correctness requirement, not a preference. `¬(x >= 0.0) ∧ ¬(x <=
+0.0)` is **sat** over floats (witness `NaN`) and **unsat** over reals
+(trichotomy); since the checker reports exactly when it proves a predicate can
+never hold, a reals encoding would flag that ordinary contract on every
+argument. Verified end-to-end: a predicate whose only witness is NaN is skipped,
+not reported. Equality is `fp.eq` rather than bitwise `=`, so `{Float | _ !=
+0.0}` rejects `-0.0` as well as `+0.0`.
+
+March spells float comparison with the ordinary operators, so `smt_of` builds
+`Smt.Ge` for Int and Float alike; a new `fp_rewrite` pass converts only
+comparisons whose *both* operands are float-sorted, once the declarations are
+final. Three containment guards keep a malformed VC off the shared `z3 -in`
+channel: `sort_conflict` (one symbol at two sorts), `float_wellsorted` (a float
+left in an Int position), and `formula_wellsorted` (a non-formula in Boolean
+position) — the last of which fixed a **pre-existing** malformed query, a bare
+Bool guard `if j do … end` asserted as an integer.
+
+Out of scope and deliberately silent: symbolic float arithmetic in a predicate
+(`_ +. 1.0 > 0.0`), `Float` record fields and ADT payloads, and special-value
+predicates. Literal-only float arithmetic (`0.0 -. 1.0`) is constant-folded and
+fully checked. 245 refinecheck tests (was 236), exit 0 on a cold VC cache;
+`test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
+An adversarial sweep and a 12-violation-kind file both run with **zero**
+`(error` lines on a tee'd solver channel.
+
+## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
+
+A relational postcondition on a structurally recursive function —
+`fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1}` — is now
+PROVEN at its definition and therefore propagates to call sites, where it was
+previously skipped. Z3 does no induction; `check_post_induction`
+(`lib/refinecheck/refine_check.ml`) supplies the **induction hypothesis** at
+each self-recursive call whose argument at the matched parameter's position is
+certified by `structural_subvars`, asserts the arm's pattern equation, and
+discharges each `match` arm against the `@[measure]` recursion equations. The
+path occupies the previously-inert variant-ADT-return case
+(`return_refine_ext` returned `None` for it), and is verdict-only: it never
+emits a diagnostic, so its sole observable effect is enabling propagation
+through `gate_unverified_posts`. `fn_sig` gained `ret_sort` so an ADT-sorted
+postcondition is carried only by `reflect_dt`, never by the `Int` consumers
+that would declare one symbol at two sorts. `Int`/record postconditions are
+untouched. `--no-measure-axioms` disables the path (it empties the sort
+declarations the VCs require). 200 refinecheck tests (was 184), exit 0 on a
+cold VC cache;
+`test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
+The stdlib HAMT remains out of reach behind three stacked obstacles, the first
+of which is the built-in `List`'s opaque element sort — see the Limitations
+section of `specs/lang/refinement-types.md`.
+
+## 2026-07-27 — `DataFrame.eval_agg` native-reduction fix for Min/Max/Std/Variance
+
+`eval_agg`'s `Min`/`Max`/`Std`/`Variance` branches materialized a boxed
+`List(Float)` from the column's `NativeArray` (`float_list`) before folding
+with `Stats.*`, an O(n) allocation on top of the O(n) reduction — reported as
+"~40ms fixed per-call overhead" on `Sum` but actually O(n), confirmed scaling
+linearly from ~8ms/call at 100K rows to ~43ms/call at 500K. `Sum`/`Mean` were
+already fixed via `native_float_arr_sum`/`native_int_arr_sum`
+(`f4301ac0`, same session); this extends the fix. A March-level recursive
+index loop over `native_float_arr_get` looked allocation-free but wasn't —
+`get`'s return value is boxed at the call site under the generic calling
+convention, so it paid the same O(n) boxing cost. The real fix stays inside a
+single C-level reduction loop like `native_float_arr_sum`: six new builtins,
+`native_{float,int}_arr_{min,max}` and `native_{float,int}_arr_sumsq_dev(arr,
+mean)` (the stable second pass of the standard two-pass variance algorithm),
+each touching all five sites a native-array builtin needs
+(`runtime/march_runtime.c`, `lib/tir/llvm_builtins.ml`, `lib/tir/defun.ml`,
+`lib/eval/eval.ml`, `lib/typecheck/typecheck.ml`). `Median` is untouched — it
+needs a full sort, a separate and larger problem. Min/Std at 500K rows went
+from ~33-42ms/call to ~0.5-0.6ms/call (60-80x), verified numerically
+matching `Stats.variance_safe`/`std_dev_safe` bit-for-bit on a test vector.
+New regression benchmark `bench/dataframe_bench.march`'s `bench_agg_overhead`
+compares direct `NativeArray.sum_float` against `DataFrame.eval_agg(Sum)` and
+panics if the ratio exceeds 20x while eval_agg takes ≥5ms — verified it fires
+by temporarily reintroducing the old `float_list`-based `Sum` branch.
+Full suite: 817 stdlib tests, 1 pre-existing failure (the same machine-wide
+ASAN altstack livelock documented elsewhere in this file — reproduced with a
+trivial unrelated `clang -fsanitize=address` hello-world hanging identically
+under the same load), unrelated to this change.
+
+## 2026-07-26 — SCC-aware inliner candidate selection
+
+The inliner formerly applied a conservative second candidate filter that
+discarded every small, pure candidate that directly called another candidate;
+that avoided recursive expansion but also excluded acyclic callers.  It now
+builds the same purity/size/hot-reload candidate pool, computes direct-call
+SCCs, and excludes only recursive components (including singleton self-edges).
+The emitted-LLVM regression uses a live body-growth fixture: a 9-node
+`inner_growth` inside a 46-node `outer_growth` (an 11-binding addition chain,
+55 nodes after inner expansion).  After optimization, LLVM has neither the
+named `call i64 @outer_growth(...)` nor its `define i64 @outer_growth(...)`:
+the fixture's direct-call count is 4 → 2 and its LLVM size is 22,633 → 22,215
+bytes.  Five warm runs of the focused Dune/Alcotest command took 215–324 ms
+(median 232 ms), including process and test-runner startup.  These are
+regression-suite wall-time measurements, not a runtime-speedup claim.
 
 ## Current State (as of 2026-07-25, verified LLVM allocation and closure-trampoline attributes)
 
@@ -87,6 +304,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Actors** — share-nothing message passing with private state, isolation guaranteed by linear types
 - **Actor state updates** use record spread: `{ state with field = new_value }`
 - **Binary session types** for v1 — typed two-party protocols verified at compile time (catches deadlocks, protocol violations, missing cases). Multi-party deferred post-v1.
+- **`loop`/`stop` protocol repetition and termination** — `loop do … end` projects to the recursive µ-type `Rec X. S[X]`; a `stop` step inside the loop (directly, or nested in a `choose` branch) exits it by projecting to `SEnd`, so a looping protocol can reach `End` and `Chan.close` cleanly instead of only ever being abandoned.
 - **Capability-secure messaging** — actors can only message actors they hold an unforgeable capability reference to; linear capabilities enable ownership transfer
 - **Content-addressed message schemas** — messages reference their schema by hash for safe distributed communication
 - **Location-transparent `Pid`** (Erlang model) — you don't know or care which node an actor lives on
@@ -479,6 +697,101 @@ Found by writing worked examples for the documentation rather than by a test —
 Feature list addition:
 
 - Redundant (unreachable) match-arm warnings on both the inference and checking typecheck paths
+## Current State (as of 2026-07-24, session types: post-`choose` protocol steps survive projection, `loop` is genuinely recursive, AND `Chan.new` rejects 3+-role protocols)
+
+**Session-types-review Task 1 fixed.** `project_steps`' `ProtoChoice` arm (`lib/typecheck/typecheck.ml`) projected every branch of a `choose ... end` block with the projection call's OUTER continuation (`cont`, which is `SEnd` at the top level of a `protocol` block) instead of `rest_ty ()`, the steps that actually follow the choice block in source order. Both roles lost the protocol's tail from their projection consistently, so binary duality still held and a program that skipped the trailing message typechecked and ran clean; in the MPST (>2-role) case it was worse, since the send/recv-pair consistency check doesn't descend into `SOffer`, so a legal 3-role protocol with a choice followed by another message was *rejected* with a spurious "role A should receive from C" error. Fixed by binding `let after_choice = rest_ty ()` before building `branch_tys` and projecting each arm with `after_choice` in place of `cont`; the chooser/merge/`SOffer` logic is untouched. Compile-time-only — the channel runtime is untyped, so no lowering/codegen/runtime changes were needed.
+
+New regression test `test_session_choice_tail_survives_projection` (`test/test_compiler.ml`, registered next to `session binary choice identical branches`) asserts a binary protocol with a step after `choose ... end` projects every branch of the Client's `SOffer` as `Recv(Bool, Send(String, End))`, not `Recv(Bool, End)`. New reject-conformance witness `specs/lang/types/reject/t91_choice_tail_step_required.march` pins the observable behavior change: pre-fix, a program that closes its channel instead of driving the post-choice `Client -> Server : String` step was wrongly ACCEPTED (both projections silently agreed on the truncated protocol); post-fix it correctly rejects with `` Chan.close: channel is at `Send(String, End)` but I expected `End`. ``. `specs/lang/types/INDEX.md`'s reject table grows 81 → 82 (172 / 172 total, still 100%).
+
+**Session-types-review Task 2 fixed.** `project_steps`' `ProtoLoop` arm built the recursive body with an `SVar` back-reference to the binder, then called `subst_svar rec_var after_loop inner` — REPLACING that back-reference with the post-loop continuation, so the resulting `SRec` binder contained no `SVar` anywhere: `loop` projected to one unrolled iteration, and a second send/recv round was rejected with `` channel is at `End` ``. Fixed with the standard µ-type encoding `Rec X. S[X]`: the body's own continuation IS the binder's back-reference (`SVar rec_var`), so `unfold_srec` (`typecheck.ml:~4128`, unchanged) re-wraps the binder on every unfold and channel state cycles indefinitely. A loop that never exits makes any protocol step written after it unreachable; new `check_unreachable_after_loop` (in the `Ast.DProtocol` validation block) walks `pdef.proto_steps`, recursing into `ProtoChoice` branches, and rejects a non-empty tail after a `loop` at protocol-declaration time. `subst_svar` is no longer called from this arm but stays in the file (still used elsewhere in the `and`-chain).
+
+De-vacuumed `test_session_loop_projection` — its old assertion `SRec (_, SSend _)` held even after `subst_svar` had destroyed the back-reference, so it passed throughout the bug's lifetime — to assert the actual shape `Rec(X, Send(Int, SVar X))`. Two new tests: `test_session_loop_two_iterations_ok` (a two-role `Prod`/`Cons` loop typechecks a full second send/recv round) and `test_session_steps_after_loop_error` (a step after a top-level `loop` now errors). One pre-existing test, `test_srec_multi_turn_typechecks`, broke as a direct consequence of the fix: it called `Chan.close` on a channel still inside a loop, which the old bug's one-unrolled-iteration behavior wrongly allowed to reach `End`. A looping channel never reaches `End` (dropping it mid-protocol is legal — the must-close check fires only at `End`), so `Chan.close` on it is now correctly rejected (`` channel is at `Send(Int, Rec(...))` but I expected `End` ``); the test now drops the channel instead of closing it.
+
+New conformance witnesses: `specs/lang/types/accept/t92_loop_protocol_two_iterations.march` (a `Prod`/`Cons` loop runs two full iterations, typechecks, and prints `3` identically interpreted and compiled) and `specs/lang/types/reject/t93_steps_after_loop_unreachable.march` (a step after `loop` rejects with "can never run"). `specs/lang/types/INDEX.md`'s accept table grows 90 → 91 and reject table 82 → 83 (174 / 174 total, still 100%).
+
+`run_compiler` 544 → 546 (two new tests, one collateral test updated), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
+**Session-types-review Task 3 fixed.** The `Chan.new` arm of `infer_expr` (`lib/typecheck/typecheck.ml`) matched `pi.pi_projections` on the 3+-roles case with `(* 3+ roles: just return first two as a pair *)` — re-matching the same list to pull the first two roles' projections and hand them back as a `(Chan, Chan)` pair, with no diagnostic at all. `Chan.new` is the BINARY channel constructor (exactly two roles); `MPST.new` already carried the mirror-image "requires at least 3" guard, but nothing stopped `Chan.new` from being called on an MPST protocol, and the two projections it returned are not duals of each other — a real, silent unsoundness. Fixed by replacing the fallback with `Err.error` reporting the protocol name and its actual role count, plus `TError`.
+
+New regression test `test_session_chan_new_multiparty_error` (`test/test_compiler.ml`, registered next to `session Chan.new unknown`) asserts a 3-role protocol (`A -> B : Int`, `B -> C : Int`, `C -> A : Bool`) passed to `Chan.new` produces an error. New reject-conformance witness `specs/lang/types/reject/t94_chan_new_multiparty_protocol.march` pins the observable behavior change with the same 3-role protocol, expecting `` Chan.new: protocol `Tri` has 3 roles ``. `specs/lang/types/INDEX.md`'s reject table grows 83 → 84 (175 / 175 total, still 100%).
+
+`run_compiler` 546 → 547 (one new test), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
+**Session-types-review Task 4 fixed — the most consequential of the seven: an unrefined `Chan.offer` continuation was a live soundness hole.** The 2026-07-15 F5 fix made a `match` on the label returned by `Chan.offer` refine the shared session ref per arm, but only when such a `match` exists — driving the offer's channel WITHOUT matching still fell back to the FIRST branch's continuation as an unsound guess. Live pre-fix repro: a two-branch protocol (`ok -> Int` / `err -> String`); the peer chooses `:err` and sends a `String`; the offerer skips the `match` and calls `Chan.recv`, which the checker types `Int` off the guess. Interpreted, this dies dynamically. **Compiled, it is silent type confusion** — the String's heap pointer is read as an `Int` and printed as `4328203745`.
+
+Fixed with a new registry, `env.offer_unrefined : session_ty ref list ref` (`lib/typecheck/typecheck.ml`). `Chan.offer`'s `SOffer` arm now compares every branch's continuation against the first with `session_ty_exact_equal`; if any differ, the returned session ref is pushed onto `offer_unrefined`. Every `Chan.*` operation arm (`send`/`recv`/`close`/`choose`/`offer`) gained a guard, `offer_unrefined_error`, that rejects a channel still listed there before inspecting its session state, with a message pointing at `match lbl do ...`. `with_offer_refinement` (the existing per-arm refinement helper) now also transiently removes the ref from `offer_unrefined` for the duration of a matched arm — via `Fun.protect`'s `~finally`, restoring both the ref's session state AND its unrefined-membership afterward — so the channel is legal to drive INSIDE a `match` arm and illegal OUTSIDE one. Branches that continue IDENTICALLY register nothing, so that merge-safe case is completely unchanged (new witness: `test_session_offer_identical_branches_no_match_ok`).
+
+Two pre-existing witnesses relied on the unsound guess and needed migration — both drove a two-branch `Int`/`String` offer without a `match`: `specs/lang/types/accept/t43_choose_offer_roundtrip.march` and `specs/lang/golden/g39_chan_choose_offer.march`. Both now `match` on the returned label and drive the channel (plus the trailing `println`s) inside each arm. `g39`'s printed output was confirmed **byte-identical** pre- and post-migration (`:ok` then `43`) by rebuilding the pre-fix compiler from git history and diffing its output against the migrated program's, and `specs/lang/golden/verify.sh` independently confirms interp/compiled parity holds (`g39` still `MATCH`). `specs/lang/types/accept/t79_offer_branch_dependent_continuation` (the F5 per-arm-refinement witness) still typechecks unchanged; `reject/t74_offer_wrong_branch_drive` (driving a matched arm with the WRONG branch's payload type) still rejects for its original reason (`expected Int but got String`), not newly caught by this rule — confirming the new guard does not fire inside a correctly-refined arm.
+
+New regression tests `test_session_offer_unrefined_continuation_error` and `test_session_offer_identical_branches_no_match_ok` (`test/test_compiler.ml`, registered next to `session offer wrong state`). New reject-conformance witness `specs/lang/types/reject/t95_offer_unrefined_continuation.march` codifies the live repro above (`` came from `Chan.offer` ``). `specs/lang/types/INDEX.md`'s reject table grows 84 → 85 (176 / 176 total, still 100%); the `t43` accept-table entry and `specs/lang/golden/INDEX.md`'s `g39` entry are both updated to describe the migrated, match-refined shape.
+
+`run_compiler` 547 → 549 (two new tests), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
+**Review fix (2026-07-27): the F5-residual fix above was itself bypassable by shadowing the offer's label name.** `with_offer_refinement` keys its lookup on `env.offer_labels` by the bare string name of the `match` scrutinee (`typecheck.ml`'s `Ast.EVar name -> List.assoc_opt name.txt env.offer_labels`); that linkage is only ever ADDED (at the `let (lbl, ch) = Chan.offer(...)` destructure) and was never RETIRED when `lbl` was later rebound to something else. Live pre-fix repro: `let (lbl, cc2) = Chan.offer(cc)` followed by `let lbl = :ok` (the peer actually chose `:err` and sent a `String`) then `match lbl do :ok -> Chan.recv(cc2) ...` — the stale `offer_labels["lbl"]` entry still pointed at `cc2`'s session ref, so the shadowed match refined (and un-marked) it as if the peer had returned `:ok`, letting `Chan.recv` drive it typed `Int` regardless. `--check` exited 0; interpreted this dies with `int_to_string: expected int`, compiled it is the identical pointer-as-Int confusion `t95` was meant to close — just reached through a shadowed name instead of a missing `match`.
+
+Fixed at the two chokepoints every binding construct already funnels through, `bind_var` and `bind_linear` (`lib/typecheck/typecheck.ml`, ~line 1334): both now filter any `offer_labels` entry whose key matches the name being (re)bound, mirroring the pre-existing `fn_arities`-shadowing removal those same two functions already perform for the identical reason (a param/let/pattern binding must shadow a stale registration, not merely add to it). Since `bind_var`/`bind_linear` are the common floor under plain `let`, lambda/`fn` params, and `match` pattern bindings alike, one fix retires the stale entry for all three constructs — matching this repo's established refinement-checker shadowing discipline (`scope`/`path` retirement in `lib/refinecheck/`) applied to a different subsystem's name-keyed side table.
+
+New regression tests `test_session_offer_label_shadow_bypass_error` (the repro above, expects an error) and `test_session_offer_label_shadow_no_false_positive` (an UNRELATED name rebound after a legitimately match-refined offer must not itself break the refinement — asserts silence), both registered next to the Task 4 offer tests. New reject-conformance witness `specs/lang/types/reject/t97_offer_label_shadow_bypass.march` codifies the live repro (`` came from `Chan.offer` ``). `specs/lang/types/INDEX.md`'s reject table grows 85 → 86 (177 / 177 total, still 100%; the header's stale `175 / 175` result line — left over from before Task 4's own `t95` addition — is also corrected here). `run_compiler` 549 → 551 (two new tests), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0 (golden untouched — the bug and fix are both compile-time-only).
+
+**Session-types-review Task 5 fixed — offer-label `match` exhaustiveness was backwards.** Matching the `Atom` label returned by `Chan.offer` went through the ordinary Atom exhaustiveness path, and `Atom` is an OPEN universe — so a `match` that handled EVERY protocol branch still warned `` Non-exhaustive pattern match — missing case: _ ``, while a `match` that genuinely omitted a branch produced the exact same warning and never an error. The one signal meant to catch "you forgot a protocol branch" was indistinguishable noise either way.
+
+Fixed with a new helper, `check_offer_label_exhaustiveness` (`lib/typecheck/typecheck.ml`, next to `offer_arm_label`): when the `match` scrutinee is an `EVar` linked in `env.offer_labels`, it checks the arms against the protocol's CLOSED label set instead of falling through to the generic `Atom` checker. Covering every label — with or without a catch-all — is exhaustive and silent; a missing label with no catch-all (guarded arms don't count, since the guard can fail) is a new `Err.error` naming the specific missing branch(es) and listing the protocol's full branch set. Both `check_exhaustiveness` call sites (`check_expr`'s `EMatch` arm and `infer_match`) now try the offer-label check first and only fall back to the generic Atom path when it doesn't apply (non-offer scrutinee). Because the check reads `env.offer_labels`, it automatically inherits Task 4's shadowing discipline: a `let lbl = ...` rebinding retires the label entry, so a shadowed label var simply isn't an offer label any more and correctly falls through to the generic path.
+
+Two pre-existing witnesses had catch-alls added during Task 4's migration specifically to silence the old bogus warning: `specs/lang/types/accept/t43_choose_offer_roundtrip.march` and `specs/lang/golden/g39_chan_choose_offer.march`. Both catch-alls are now unnecessary (every label is already handled) but were left in place as harmless — re-verified `t43` still `--check`s clean and `g39` still `MATCH`es in `specs/lang/golden/verify.sh`, with no new redundant-arm warning. `reject/t74_offer_wrong_branch_drive.march` (which has a `_ -> println("other")` catch-all) still rejects for its ORIGINAL reason — a wrong-branch payload type error (`expected Int but got String`) — confirming the new check stays silent there and doesn't mask or replace the pre-existing diagnostic.
+
+New regression tests `test_session_offer_all_labels_no_warning` (all protocol labels handled: no error, no exhaustiveness warning) and `test_session_offer_missing_label_error` (a protocol label omitted with no catch-all: a hard error), both registered next to the Task 4 offer tests. New reject-conformance witness `specs/lang/types/reject/t96_offer_missing_branch_arm.march` codifies the missing-branch repro (`` doesn't handle every branch ``). `specs/lang/types/INDEX.md`'s reject table grows 86 → 87 (178 / 178 total, still 100%).
+
+`run_compiler` 551 → 553 (two new tests), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0 (golden untouched — the bug and fix are both compile-time-only).
+
+**Session-types-review Task 6 fixed — F8: dropped the bogus protocol-participant HINT; named the unsupported `MPST.*` ops.** Two message-quality fixes, no semantic change. (1) `DProtocol`'s handling in `typecheck.ml` hinted, for every protocol role that is not ALSO a known actor or declared type, `` Protocol `%s`: participant `%s` is not a known actor or type. Did you forget to declare `actor %s ...`? ``. Roles are their own namespace, so the hint was wrong by construction — it fired on the reference chapter's own `Echo` example, and the conformance corpus worked around it by declaring `type Client = Client` in every witness. The `List.iter` hint block is deleted and replaced with an explanatory comment; the corpus's now-unnecessary role-as-type declarations are left in place (removing them is diff churn with no behavior change). (2) `MPST.choose`/`MPST.offer` (multiparty branching) don't exist, so a call to them fell through the generic qualified-name path and produced `` Unknown module `MPST`. Did you mean `List`? `` — sending the reader hunting for a missing import. Fixed with a new catch-all `EApp (EVar "MPST.*"|"Chan.*", ...)` arm in `infer_expr`, placed immediately after the `MPST.close` arm (the last named `Chan.*`/`MPST.*` arm) and before the generic `EApp` fallthrough, naming the real problem and returning `TError`.
+
+Two new tests in `test/test_compiler.ml`: `test_session_no_participant_hint` (an `Echo`-shaped protocol with undeclared roles asserts `has_hint_with ctx "is not a known actor or type"` is false) and `test_session_mpst_choose_unsupported_message` (an `MPST.choose` call asserts `has_errors` true). The hint's severity is `Hint`, not `Warning` (`lib/errors/errors.ml`'s `severity` type), so the pre-existing `has_hint_with` helper — not `has_warning_with` — is the correct assertion; using `has_warning_with` would have been vacuously true (the hint is never a `Warning`, so "no warning containing X" trivially holds whether or not the hint fires). Verified no `stdlib/` module is bare-named `Chan` or `MPST` (the stdlib channel modules are `Channel`/`ChannelSocket`/`ChannelServer`), so the new prefix-match catch-all cannot misfire on a legitimately-named module in this codebase. The pre-existing `test_protocol_unknown_participant_hint` only ever asserted "no hard errors" (never the hint's presence), so it needed no change. This task adds no corpus files — `specs/lang/types/INDEX.md`'s 178/178 (91 accept / 87 reject) is unchanged.
+
+`run_compiler` 553 → 555 (two new tests), all green; `specs/lang/types/check_types.sh` and `specs/lang/golden/verify.sh` both exit 0.
+
+**Session-types-review Task 7 (docs-only, 2026-07-24) — reconciled `specs/lang/session-types.md`, `core-march-types.md`, and `core-march.md` with Tasks 1–6 above, and re-verified F3.** No compiler code changed. `specs/lang/session-types.md:18` claimed every `MPST.*` program segfaults compiled (exit 139, finding F3) — re-run live against this branch's compiler, a 3-role and a 4-role protocol (`Int`/`Bool`/`String` payloads, send/recv/close) both compile, run, and print output identical to the interpreter, exit 0 (full transcript in `specs/todos.md`'s Done entry). Updated: the backend-parity paragraph and `Chan` API table (role-sorted endpoint order, `Chan.new`'s binary-only rejection) in `session-types.md`; the `choose`/`offer` section (closed-label-set `match` exhaustiveness is now an error, not a warning; an offer whose branches differ must be matched before use); the guarantees section (moved "every offered case is handled" into the guarantees list, kept F6/F7 as the two remaining caveats); a new "Repetition: `loop`" section documenting the µ-type projection and the "loop must be a protocol's last step" rule as a deliberate design decision. In `core-march-types.md`: §2.7.3's `ProtoLoop`/`ProtoChoice` projection prose (the µ-type back-reference and the post-choice-tail continuation, replacing the stale `subst_svar`/outer-`cont` descriptions), §2.7.8's per-op line citations (all six `Chan.*`/`MPST.*` arms moved since Task 1–6 landed), §2.7.9 rewritten from "F5 OPEN" to "F5 CLOSED" with the actual `with_offer_refinement`/`offer_unrefined_error` mechanism, and §4.1 findings 21 (F5 → FIXED) plus three new findings 22–24 (non-recursive `loop`, post-`choose` tail drop, `Chan.new` multiparty fallback), each marked FIXED with its task and witness ids. In `core-march.md`: §4.11.5 replaced the F3 segfault claim with the re-verification (MPST still has no golden witness, multiparty `choose`/`offer` remain unimplemented with a real compile error), and the §5 roadmap list's F3/F8 mentions were corrected to match. `scripts/check-docs.sh`, `specs/lang/types/check_types.sh`, and `specs/lang/golden/verify.sh` all exit 0 (docs-only change; conformance corpus untouched).
+
+**Session-types final whole-branch review fix wave (2026-07-27) — the unrefined-offer mark was LAUNDERED BY UNIFICATION (critical), plus four minors.** The whole-branch review of the seven session-type tasks above found that Task 4/5's headline claim was still falsifiable, and the CHANGELOG/reference overclaimed it.
+
+**Finding 1 (critical) — `env.offer_unrefined` was defeated by any construct that mints a fresh `TChan` ref.** The `Chan.*` operation guards (`offer_unrefined_error`) test membership by PHYSICAL identity, but `unify`'s `TChan` arm never aliased refs — it only compared states with `session_ty_equal`. So any construct producing a second, unmarked ref carrying the SAME session state laundered the mark away. Four live shapes reproduced at branch HEAD, all `--check` exit 0: (a) a type annotation, `let ch : Chan(C, E) = cc2` where `E` is exactly the offer's guessed FIRST branch (compiled: printed `40852523489`, the `String` payload's heap pointer read as an `Int`); (b) an `if`-join with an ordinary channel at the same state, `let ch = if false do ec else cc2 end`, needing NO annotation and therefore the shape reachable by accident (compiled: `4315028705`); (c) passing the channel to a function with an annotated parameter, `drain(cc2)`; (d) a record field whose declared type is a fixed `Chan(R, P)`. Verified NOT holes (the same ref flows through, so the physical-identity guard still fires): plain `let` rebinding, tuple store-then-project.
+
+Fixed in `unify`'s `TChan` arm (`lib/typecheck/typecheck.ml`): if either ref is in `env.offer_unrefined` (and they are not the same ref), the unification ITSELF is the error — an unrefined offer continuation may not be unified with any other channel type at all, only refined by a `match` on its paired label. **Fix-direction choice:** the review offered a contained fix (propagate the mark to the other ref) and a durable one (a new `SOfferPending` session STATE that survives unification by construction). Neither was taken verbatim. Propagation was rejected because it cannot close shape (c): a callee's annotated parameter mints its own ref and the callee body is checked against THAT ref, so a mark propagated at the call site arrives after the body is already checked and diagnoses nothing — an obvious hole. Reporting at the unify chokepoint closes all four shapes at the point the laundering happens, with one diagnostic each and no double-reporting, at a fraction of the durable option's blast radius (`pp_session_ty`, `session_ty_equal`, `session_ty_exact_equal`, `dual_session_ty`, `unfold_srec`, and every `match` over `session_ty`, many of which have `_` fallbacks and so would NOT be flagged by the compiler). The durable form is filed in `specs/todos.md` as the follow-up.
+
+**What the fix does NOT cover, stated plainly.** Enforcement now rests on two chokepoints — every `Chan.*` operation, and every `TChan`/`TChan` unification — not on the session type itself. Those are the only ways a `TChan` can be consumed or copied today (`instantiate`/`subst` return `TChan` unchanged, so generalization preserves the ref; the only fresh-ref mints are `Chan.new`, the `Chan.*`/`MPST.*` continuations, and `surface_ty`'s `Chan(R, P)` annotation), so there is no known remaining route. But it is a checked invariant, not a structural impossibility: a future construct that mints a fresh `TChan` type without unifying it would reopen the hole. `specs/lang/session-types.md`'s guarantees section now says exactly this instead of the absolute "there is no way to accidentally treat one branch's continuation as another's" it previously asserted (Finding 2).
+
+> **Superseded 2026-07-27 (same day, later).** The "there is no known remaining route" sentence in the paragraph above was FALSE when written: a fifth shape — an annotated *lambda* or nested-`fn` parameter — reached neither chokepoint, because the argument never took part in a `TChan`/`TChan` unification at all. See the "Finding 1 residual" entry below for the live reproduction and the fix. Read that entry, not this paragraph, for current truth.
+
+**Finding 3 — two chapters still described the deleted F8 participant HINT in the present tense.** `core-march-types.md` §2.7.1 (the "emits a non-fatal HINT" paragraph) is rewritten to state current truth, with a dated `> **Changed 2026-07-24.**` block recording what the hint was and why it went; §2.7.6's cross-reference is annotated rather than rewritten. `core-march.md` §4.11.6's F8 write-up — which carried a stale source pointer (`typecheck.ml:~7057–7066`) and contradicted the same file's own §5 roadmap line — is reframed as `**F8 REMOVED 2026-07-24**`, matching the F3 `RE-VERIFIED` pattern already used a few paragraphs above it. `g39_chan_choose_offer.march`'s header comment got the same treatment.
+
+**Finding 4 — a blind spot from the Task 1 + Task 2 interaction.** Task 1 projects the post-`choose` tail (`rest_ty ()`) into EVERY branch; Task 2's `check_unreachable_after_loop` walked each branch's own step list, where `rest = []`, so a branch ENDING in a `loop` never tripped the rule even though the just-projected tail is provably dead in it. `check_unreachable_after_loop` now takes a `~tail` argument threading the enclosing level's remaining steps into the branch recursion, with its own message (the existing same-level message would have been misleading, since the offending steps are not written after the `loop`). Not unsound — both roles agree on the same dead tail — but exactly the defect class Task 2 exists to reject. Witness `reject/t101_loop_branch_hides_post_choose_tail`, plus a SILENCE companion test asserting the same protocol without a trailing step stays clean.
+
+**Finding 5 — a corpus witness was vacuous.** `accept/t43_choose_offer_roundtrip.march` carried a `_ -> println("other")` catch-all added during Task 4 to silence a warning Task 5 then removed. `INDEX.md` credits `t43` as the accept twin of `t96` ("all labels handled, silent"), but the catch-all makes `has_catch_all` true, so the closed-label check passed TRIVIALLY and `t43` did not witness the property it was credited with. (Task 5's own progress note above, which left both catch-alls in place "as harmless," is corrected by this entry: harmless to the exit code, but not harmless to what the witness proves.) Arm removed from `t43`; also removed from `golden/g39_chan_choose_offer.march` after confirming the printed output is byte-identical (`:ok` then `43` — the arm was unreachable) and that the `.ll` sibling is a gitignored byproduct, not a pinned artifact.
+
+**Finding 6 — a typo'd arm label was silently accepted.** `check_offer_label_exhaustiveness` returns `true` unconditionally once the scrutinee is a linked offer label, so an arm naming a label the protocol does not offer (`:okk` alongside `:ok`/`:err`) was neither reported nor ever taken. Now a WARNING naming the unknown label and listing the valid set — deliberately not an error, since a redundant arm is dead code, not a soundness problem, and an error would break builds over a harmless mistake. No `reject/` witness for that reason (the program still exits 0); unit-tested instead.
+
+**Finding 7 — misleading text on the unrefined-offer error.** A 2-branch offer matched as `:ok -> … / _ -> …` got "Match on the label first" INSIDE the `_` arm, where the user demonstrably had matched. `with_offer_refinement`'s no-refinement path now detects "scrutinee IS an offer label but this arm names no branch" and bumps a depth counter for the duration of the arm body; the shared message builder appends the real explanation (a catch-all does not identify which branch the peer chose, so every label needs its own arm) only when that counter is non-zero. A dynamic-nesting counter rather than an `env` field because `env` is copied by every binding construct.
+
+Also added, per the review's explicit request: the one-sentence comment on `with_offer_refinement`'s whole-snapshot restore explaining why it is safe (`Chan.offer` only ever PREPENDS to `offer_unrefined`, so anything registered while the arm body is checked is a strictly newer ref whose scope ended with the body — restoring the snapshot can neither resurrect a stale mark nor drop a live one).
+
+**Finding 1 RESIDUAL (2026-07-27) — an annotated LAMBDA or nested-`fn` channel parameter still laundered the mark, and the reason is that lambda parameter annotations were never enforced at all.** The fix-wave entry above asserts "there is no known remaining route." That was false when written. Live at `dcddc620`, `--check` exit 0 and the compiled binary printed `4326055105` (lambda form) / `4354153665` (nested-`fn` form) — a `String` payload's heap pointer read as an `Int`:
+
+```march
+let (lbl, cc2) = Chan.offer(cc)
+let f = fn (c : Chan(C, E)) -> Chan.recv(c)   -- or: fn f(c : Chan(C, E)) do Chan.recv(c) end
+let (v, cx) = f(cc2)
+```
+
+**Root cause, confirmed live, and NOT session-specific.** `bind_lam_params` (`lib/typecheck/typecheck.ml`) minted `fresh_var env.level` per parameter, built the lambda's arrow type out of those variables, and then called `bind_lam_param … (Some t)`; when the parameter carried an annotation, that function bound it at `surface_ty ann` and **never unified it with `t`**. So the body was checked against the annotation's own fresh `TChan` ref while the call site unified the marked argument against a bare, unconstrained type variable — reaching neither the `Chan.*` physical-identity arms nor `unify`'s `TChan`/`TChan` guard. The corroborating non-session symptom: `fn (c : Chan(C, F)) -> Chan.send(c, 1)` applied to an `E` endpoint (wrong DIRECTION) also `--check`ed clean, as did `fn (x : String) -> …` applied to `42`. Every lambda parameter annotation in the language was checked against nothing. A named `fn` declared inside a function body routes through the same `bind_lam_params`, hence the second shape; the top-level `check_fn` `FPNamed` loop binds at the annotation AND builds the declared arrow from it, which is why `reject/t100` was already caught.
+
+**PRE-EXISTING**, reproduced at the branch base — not a regression this branch introduced. Closed here anyway because it falsifies the branch's headline guarantee.
+
+**Fix direction: the general one, deliberately.** `bind_lam_param` now unifies an annotated parameter with the expected type whenever one is supplied — which covers both of its callers, `bind_lam_params` (inference) and `check_expr`'s lambda-peel (checking against an expected arrow). The narrow alternative (route only the annotated-`TChan` case through the mark check) was rejected: it would have left the general annotation gap open, and the general gap is itself a bug — a wrongly-annotated lambda parameter should not typecheck. The cost is blast radius: this is a whole-typechecker change, so the full binary set was the gate, not just the session tests. All four exit 0 (`run_compiler` 569 → 573, `run_eval` 240, `run_codegen`, `run_stdlib` 780), as do `check_types.sh`, `golden/verify.sh` and `scripts/check-docs.sh`.
+
+**Scope, stated without overclaiming.** Enforcement still rests on the same two chokepoints (every `Chan.*` operation; every `TChan`/`TChan` unification) plus, now, the fact that an annotated binder actually participates in a unification. Every laundering shape tried to date is covered — but this residual is direct evidence that "the only ways a `TChan` can be consumed or copied" is a claim about routes that have been *enumerated*, not proved: the lambda route evaded the chokepoints by never being a channel-to-channel unification in the first place. `specs/lang/session-types.md`'s scope note now says that in those terms. The durable fix — a pending-refinement session STATE (`SOfferPending`) that survives by construction — remains the open follow-up in `specs/todos.md`.
+
+New witnesses `reject/t102_offer_unrefined_laundered_lambda_param`, `reject/t103_offer_unrefined_laundered_inner_fn_param`, and `accept/t104_lambda_param_annotation_enforced` (the false-positive direction: ordinary annotated lambda params, an annotated lambda as a higher-order argument, an annotated nested `fn`, and a `match`-refined offer continuation through an annotated lambda parameter). Corpus 182/182 → 185/185 (92 accept, 93 reject). Four new unit tests in `test/test_compiler.ml`, two asserting rejection, one asserting SILENCE across all of the above, and one asserting the non-channel half (`fn (x : String)` applied to `42` is now an error).
+
+Nine new tests in `test/test_compiler.ml` (four laundering shapes, a SILENCE companion asserting an ordinary channel-to-channel unification and a properly match-refined continuation both stay clean, the unknown-label warning, the catch-all message, and the Finding 4 error plus its silence companion). Four new reject witnesses: `t98_offer_unrefined_laundered_annotation`, `t99_offer_unrefined_laundered_if_join`, `t100_offer_unrefined_laundered_fn_param`, `t101_loop_branch_hides_post_choose_tail`. Corpus 178 → **182** (91 accept, 87 → **91** reject); `check_types.sh` 182/182 exit 0, `golden/verify.sh` 46/46 exit 0 (g39 still `MATCH`), `scripts/check-docs.sh` exit 0, `run_compiler -e -q` 569 tests green.
 
 ## Current State (as of 2026-07-24, record field preconditions integrated with String + ADT-tag refinements)
 
@@ -6335,3 +6648,91 @@ No changes to code in this pass — audit only. Both findings in `specs/todos.md
 ## Current State (as of 2026-07-26, `typed_array_map`/`typed_array_fold` compiled SIGSEGV fixed + regression coverage added)
 
 **`typed_array_map`/`typed_array_fold` compiled SIGSEGV fixed + regression coverage added (2026-07-26).** `call_closure_1`/`call_closure_1_int`/`call_closure_2` (`runtime/march_runtime.c`) read a closure's fn pointer at byte offset +8 of the closure object — the `march_hdr.tag` field, not the fn pointer (field 0, offset +16; matches `clo_apply_ptr`'s existing correct offset). Crashed every compiled `typed_array_map`/`typed_array_fold` call, including `stdlib/dataframe.march`'s boolean-column negation/is-not-null checks. The offset itself was already corrected as an uncredited side-effect of the `4aa74c4c` SIMD/perf commit; this pass adds the missing regression: `test/native/typed_array_map_closure_abi.march`, registered in `test_oracle.ml`'s curated allowlist. Full 143-program oracle sweep: 0 divergences. `run_compiler`/`run_eval`/`run_codegen` all green; `run_stdlib` 815/816 (the one failure is a machine-level ASAN teardown hang, confirmed unrelated — even a trivial `-fsanitize=address` `int main(){return 0;}` hung on the same machine).
+
+## Current State (as of 2026-07-27, P10 Phase 2c — capturing closures in NativeArray.map)
+
+**P10 Phase 2c — inline CAPTURING NativeArray.map closures (2026-07-27).** Extends Phase 2b (which only handled non-capturing lambdas) to the common `stdlib/dataframe.march` shape — `fn x -> x +. f` / `fn x -> x *. f`, capturing a scalar (DataFrame's `col +. scalar` / `col *. scalar`), a real, already-shipping workload that got no benefit from Phase 2b since its lambdas always capture the scalar operand.
+
+`lib/tir/native_map_inline.ml`: new `rewrite_expr` arm matching an `EAlloc` whose arg list has one-or-more captured free vars (as opposed to Phase 2b's exactly-one-arg, no-captures pattern). Unlike Phase 2b, nothing upstream is stripped — the closure struct is a real value the apply body genuinely reads free vars from (`EField($clo, ...)`), so the allocation, any alias-copy `let`s, and any Perceus RC ops around them are left completely untouched; only the terminal call site is rewritten in place to a 3-argument form (`[arr; apply_fn; clo]`) that keeps the real closure pointer instead of dropping it. New helper `find_target_call_var`/`subst_call_capturing` (mirroring the existing `find_target_call`/`subst_call`, extended to carry/emit the closure var).
+
+`lib/tir/llvm_emit.ml`: the loop codegen (length, alloc, GEP, tag/box, call, untag/unbox, store) was factored out of the existing 2-arg match arm into a shared `emit_native_map_inline_loop` helper parameterized on the `$clo` register string — the 2-arg (Phase 2b) call site passes the literal `"null"`; a new 3-arg match arm (Phase 2c) emits/coerces the real closure atom and passes that register instead. No duplicated loop logic between the two paths.
+
+**Why this should still vectorize:** once the direct call is inlined, a captured free-variable load becomes a plain GEP+load on a *loop-invariant* pointer (`$clo` doesn't change across iterations), which LLVM's LICM typically hoists above the loop entirely — so `fn x -> x +. f` reduces to one hoisted load of `f` plus a per-element `fadd`, the same vectorization shape Phase 2b already gets for non-capturing Int bodies.
+
+**Bug found and fixed during implementation:** the eligibility check (`count_uses effective_name ...`) was initially run on the *unstripped* tree, which still contains the closure's own `let f_iN = $t... in ...` alias-copy binding. `count_uses`'s `ELet` case treats a rebinding of the tracked name as "this is now a distinct shadowed variable — stop counting", which is correct for genuine shadowing but exactly wrong here: the "rebinding" in question *is* the tracked variable's own binding site, so it zeroed out the real use further downstream (`native_float_arr_map(arr, f_iN)`) before ever reaching it — the pass silently never fired. Caught immediately via `--emit-llvm` grep showing 0 `nmap_pre` occurrences on a hand-written capturing-closure test program. Fixed by checking uses against the alias-*stripped* tree (`strip_alias_chain`'s third return value, already computed for the alias-name resolution) instead of the raw `rest'`, while still reconstructing the *unstripped* tree in the final output (the capturing case never drops anything).
+
+**Verification:** new regression test `test/native/native_arr_map_inline_capture.march` — single capture (Float, the exact DataFrame shape), multiple captures (Int, negative/zero/positive inputs), a capture combined with the Phase 2b array-reuse-in-a-self-recursive-loop shape (both fixes composing correctly), and — critically — a closure that both captures a variable AND is reused elsewhere (used as the map callback and called directly), which must fall back to the general path since it's used more than once. Checked for correctness (`.expected` diff) and, via `--emit-llvm` grepped for `nmap_pre` occurrences vs. actual `native_int_arr_map`/`native_float_arr_map` calls, that exactly 3 of the fixture's 4 map calls take the inline path (the reused one correctly does not). Full test suite green. See `specs/optimizations.md` §P10 "Phase 2c".
+
+## Current State (as of 2026-07-27, DataFrame `Sum`/`Mean` aggregations use native_int_arr_sum/native_float_arr_sum)
+
+**`DataFrame.eval_agg`'s `Sum`/`Mean` now call `native_int_arr_sum`/`native_float_arr_sum` directly** (`stdlib/dataframe.march`, new `col_native_sum` helper) instead of materializing the whole column to a `List(Float)` via `float_list` and folding with `Stats.sum`/`Stats.mean_safe`. The column representation was already `NativeArray`-backed (an earlier "P10 Phase 3" migration), but every aggregation still round-tripped through a List, never touching the already-vectorized sum primitives (the `sum_float` fix earlier this session). `col_native_sum` returns `(sum, element_count)` so `Mean` can divide without a second pass; empty-column semantics preserved exactly (`Sum([]) = 0.0` matching `Stats.sum`'s fold-over-Nil; `Mean([]) = NullVal` matching the old `mean_safe` Err→NullVal path). `Min`/`Max`/`Std`/`Variance`/`Median` are unchanged — no vectorized reduction primitive exists for those yet (would need new runtime builtins), and `Median` needs the full sorted list regardless. Verified compiled: hand-written test comparing Sum/Mean on Int and Float columns (including an empty column) against expected values; full DataFrame test suite green.
+
+**Investigated but deferred: `col_add_col`/`ColExpr::Add/Sub/Mul/Div` and `fill_null`'s per-column arithmetic.** Both round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped operations, but on inspection both are actually **two-array** operations (column-column arithmetic; a data array zipped elementwise against a null-bitmap array) — `NativeArray.map_int`/`map_float` only take one array, so neither can use the existing Phase 2b/2c inlining without a new `map2`/zip-with NativeArray primitive that doesn't exist yet. Real work, but compiler-side (a new builtin + LLVM codegen support, likely its own inlining treatment mirroring Phase 2b/2c), not a quick stdlib change — scoped as a separate follow-up.
+
+**Found and filed separately, not fixed here: `DataFrame.eval_agg` has ~40ms of fixed per-call overhead in compiled builds**, unrelated to the actual aggregation work — confirmed via isolated benchmark (`NativeArray.sum_float` direct: ~0ms for 5 calls over 500K floats; the same via `DataFrame.eval_agg(Sum)`: ~207ms) and confirmed pre-existing (reproduces identically on `stdlib/dataframe.march` from before this session's `col_native_sum` change, via file-copy swap). Root cause not yet investigated — dwarfs any vectorization win for aggregations run in a loop (e.g. `group_by`).
+
+## Current State (as of 2026-07-27, CAS key now digests the runtime directory that is actually compiled)
+
+**Whole-binary CAS cache-correctness bug fixed (2026-07-27).** Two independent runtime-directory resolutions disagreed. `lib/cas/cas.ml`'s `runtime_identity` — the runtime component of the artifact key, via `compilation_hash` — searched `["runtime"; <exedir>/../runtime; <exedir>/../../runtime]`, i.e. **cwd-first**, while `bin/main.ml`'s `find_runtime_file` (which selects the sources actually handed to clang, and which the 2026-07-26 fix above deliberately made "independent of CWD") searches **exe-relative first**. Run from the repo/worktree root against `_build/default/bin/main.exe`, the key therefore digested the edited `./runtime/*.c` while the compile used `_build/default/runtime/*.c` — and a targeted `dune build test/run_stdlib.exe bin/main.exe` does not restage `_build/default/runtime`, so those two directories genuinely hold different content. Observed: after adding instrumentation to `runtime/march_runtime.c`, `--compile` printed `compiled <out> (cached)` and produced a binary with none of the new code. `Cas.compiler_identity` does **not** cover this (it hashes only the march executable's bytes, unchanged when only runtime C changes); the cas.ml comment claiming otherwise — and the same claim in `runtime_archive.ml` — was wrong and is corrected.
+
+**Fix — one source of truth.** `bin/main.ml` now resolves the runtime directory ONCE (`runtime_dir`, anchored on `march_runtime.c`, exe-relative first, cwd last, `MARCH_RUNTIME_DIR` overriding the search the way `MARCH_STDLIB` does) and registers it with the CAS via the new `Cas.set_runtime_dir` before any `compilation_hash` can be computed; `find_runtime_file` is a thin lookup in that directory (with the old per-name scan retained only as a fallback for files the resolved directory does not hold). `Cas.runtime_identity` became a memo keyed on the resolved directory rather than a `Lazy.t`, so re-registration recomputes instead of answering from the previous directory's snapshot. The unregistered fallback path (unit tests, library embeddings) now mirrors bin/main.ml's order exactly — exe-relative first, cwd last, candidate must contain `march_runtime.c` — so the two lists cannot silently drift apart again.
+
+**Regression coverage.** `test/cas_runtime_dir_check.sh` + `(alias cas-runtime-dir)` in `test/dune` (`dune build @test/cas-runtime-dir`): copies the runtime tree twice, appends an observable startup marker to copy B, and compiles one March program against A, A again, B, then A — through the same warm CAS store. Step 2 asserts the repeat compile IS a cache hit (otherwise the rest of the test would be vacuous, since a miss always recompiles), and steps 3–4 assert each binary carries its own runtime's marker. Confirmed RED with the fix disabled (`set_runtime_dir` stubbed to a no-op → `compiled outB (cached)`, marker absent) and GREEN with it. Two `test_cas.ml` unit cases pin the same invariant directly: the compilation hash follows the registered directory (and a content edit inside it), and the unregistered fallback prefers an exe-relative runtime over a cwd decoy.
+
+**Also corrected:** `CLAUDE.md` documented the artifact directory as `.march/cas/artifacts/`, but artifacts have lived in `artifacts-v2/` since the v1 pointer-store fix — clearing the documented path clears nothing. The CAS note now names `artifacts-v2/` and spells out that the runtime the compiler compiles is the *staged* `_build/default/runtime`, which a targeted `dune build bin/main.exe` does not refresh.
+
+**Verified:** `dune build @test/cas-runtime-dir` green (RED without the fix); `test_cas` 56/56; full `scripts/run-tests.sh` green except the known machine-level ASAN teardown hang (`adversarial-regressions` 39), reconfirmed environmental — a trivial unrelated `clang -fsanitize=address` C program also hangs on this machine.
+
+## Current State (as of 2026-07-27, P10 float-boxing Stage 4 "Option A" — reuse the map_float wire-argument box)
+
+**`emit_native_map_inline_loop` (`lib/tir/llvm_emit.ml`) now allocates ONE `march_alloc_float` box before the loop for `map_float`'s wire-argument, instead of a fresh one per element.** Every apply function unconditionally unboxes its argument as its very first instruction and never touches the pointer again (confirmed via `-emit-llvm` on a compiled lambda: the generated prologue is always `call double @march_unbox_float(ptr %x.arg)` before any user code runs), so nothing can observe or retain a specific box's identity across calls — overwriting the same box's `.val` field each iteration (a GEP to byte offset 16, per `march_float_box`'s `[rc:8][tag:4][pad:4][val:8]` layout in `runtime/march_runtime.h`) is indistinguishable from fresh-boxing every time, at 1/N the allocation cost.
+
+**Motivation:** confirmed via a 3000-iteration, 200K-element `map_float` stress test that the loop was generating enough garbage to visibly pressure the runtime's tracing GC (RSS oscillating 1.3-3.2GB, not growing unboundedly — not a leak, but real avoidable pressure). The fix isn't cosmetic: the same stress test dropped from 18.96s to 10.18s wall-clock (~1.9x), 14.95s to 7.93s user-CPU, via file-copy-swap A/B on an otherwise-identical binary.
+
+**Scope, deliberately narrow:** only the *argument* box is reused. The *return*-value box (the apply body's own fresh allocation for its result, e.g. `march_alloc_float(double %ar112)` inside the lambda) is NOT reused here — doing that would need the callee's own codegen to cooperate (an out-parameter or FBIP-style hint), a larger change than this loop controls. `Int` has no equivalent box (its wire value is a tagged immediate via `coerce`'s `"i64"`/`"ptr"` arm, no allocation involved) so is unaffected. This does NOT unlock Float vectorization — the return-side allocation still blocks the auto-vectorizer — it only cuts allocation traffic; see `specs/optimizations.md` P10 "Stage 4" for the larger unboxed-apply-function option (Option B) that would be needed for that.
+
+**Regression test:** `test/native/native_arr_map_inline_float_box_reuse.march` — correctness (`.expected` diff) plus an `--emit-llvm` structural check (an `awk` script isolating each `nmap_bodyN:` loop-body block's text and grepping it for `march_alloc_float`, asserting zero — the allocation must live only in the `nmap_preN` preheader that precedes the block). Full test suite green except the pre-existing, reconfirmed-environmental ASAN teardown hang.
+
+## Current State (as of 2026-07-27, P10 float-boxing Stage 4 Option B — unboxed apply-fn clone for map_float, genuine Float vectorization)
+
+**`lib/tir/native_map_inline.ml` now synthesizes an unboxed clone of an all-`Float`-signature `map_float` callback, and it actually vectorizes.** The Option A entry above only cut allocation traffic; this unlocks real SIMD, and turned out far cheaper than the "second calling convention, real defun.ml work" estimate in `specs/optimizations.md`'s earlier Option B sketch.
+
+**The key discovery:** `Tir_names.is_apply_fn` — the single predicate every box/unbox decision in `lib/tir/llvm_toplevel.ml`'s function-emission code keys off — is a pure name check (does the function name contain the literal substring `"$apply$"`), not a structural/TIR-level marker. A lifted lambda's `fn_def` already carries its natural, concrete parameter/return types (e.g. `x : TFloat`); boxing is applied purely because the name matches at *emission time*. So emitting the exact same already-Perceus-processed `fn_def` under a renamed `fn_name` that does not contain `"$apply$"` makes the existing, completely unmodified emission code treat it as an ordinary function: natural `double` params and return, no `march_alloc_float`/`march_unbox_float` anywhere. Zero changes needed to `llvm_toplevel.ml`.
+
+**Implementation (`lib/tir/native_map_inline.ml`):** `try_unboxed_variant` checks whether the apply fn behind a `map_float` callback has an all-`Float` signature (`fn_ret_ty = TFloat` and every non-`$clo` param `= TFloat` — no `TVar`, i.e. genuinely concrete, not still-generic). If so, it clones the `fn_def` under `unboxed_name_of` (splices out the `"$apply$"` marker itself, replacing with `"$mapfast$"` — appending past it wouldn't work, since the original substring would still be present) and pushes it onto a new `extra_fns : Tir.fn_def list ref` threaded through `rewrite_expr`, which `run` appends to `tm_fns` at the end. Both `rewrite_expr` match arms (non-capturing Phase 2b shape and capturing Phase 2c shape) call this and, on success, substitute the map call's target with the clone's name instead of the original boxed apply fn — `subst_call`/`subst_call_capturing` both gained an `~unboxed` parameter for this. Captures are unaffected either way: a captured Float is already stored/loaded at its own concrete type in the closure struct (`TDClosure`'s field types are the free variables' own types, never boxed), independent of which apply-fn variant reads it.
+
+**Codegen (`lib/tir/llvm_emit.ml`):** `emit_native_map_inline_loop` gained an `~unboxed` parameter. When true: no box allocated at all (not even Option A's reused one) — the loop loads a raw `double` from the array, calls the clone directly (`call double @name(ptr %clo, double %x)`), stores the raw `double` result. A new synthetic builtin name, `__native_float_arr_map_inline_unboxed` (both the 2-arg non-capturing and 3-arg capturing forms), selects this path; the existing `__native_float_arr_map_inline` (Option A) stays for anything that doesn't qualify (a still-generic signature — Int never needed either mode, it has no box to begin with).
+
+**Verified via `-S -emit-llvm` + `clang -O2` disassembly** on `fn x -> x *. 2.0 +. 1.0` over a 1,000,000-element array: `march_main`'s fully-inlined loop shows LLVM's own vectorizer block markers (`%vector.ph`, `%vector.body`) and real 8-wide-unrolled NEON (`fadd.2d` — the `*2.0` strength-reduced to a self-add) — genuine Float SIMD, the first time this has actually fired for `map_float` in this codebase. Correctness confirmed against the existing `native_arr_map_inline_capture.march`/`native_arr_map_inline_vectorize.march`/`native_arr_map_inline_reuse.march`/`native_arr_map_inline_float_box_reuse.march` fixtures (all still pass byte-for-byte, including the capturing-and-reused-elsewhere fallback case), plus a dedicated `test/native/native_arr_map_inline_unboxed.march` (non-capturing and capturing all-Float cases) checked for correctness and, via `--emit-llvm`, that exactly 2 `$mapfast$` clones exist with zero boxing calls in either clone's *own body* — a stronger check than Option A's "not inside the loop" (the callee itself must be clean too, since it now takes/returns a raw `double`). Real vector-instruction assertions were deliberately left out of the automated test — clang-version/target-architecture dependent, not portable across CI runners — and verified manually instead, as above.
+
+**Known, accepted cost:** the *original* boxed apply fn is left in the module alongside its unboxed clone — `Native_map_inline.run` executes after Opt's DCE pass, so the now-dead original (nothing calls it once the rewrite redirects the call site) is never swept. Not a correctness issue, just unnecessary compiled/linked dead code; a reachability check to drop it is a plausible follow-up, not attempted here.
+
+**Along the way:** hit the same stale-`_build/default/runtime`-copy issue as before (see `project_build_runtime_stale_copy.md`), this time in this worktree specifically, after merging in unrelated upstream commits. Fixed the same way: `dune build --root . @bin/warm-cache`.
+
+## Current State (as of 2026-07-27, docs site — site-wide ⌘K search via Pagefind)
+
+**march-lang.org gained full-text search across every page, plus stdlib symbol lookup, behind one `⌘K` / `Ctrl+K` / `/` shortcut** (`docs/_includes/search.html`, `scripts/build-search-index.sh`, `scripts/serve-docs.sh`, `.github/workflows/deploy-pages.yml`). The site previously had no search at all outside the generated API reference.
+
+**Why Pagefind, and why a post-build step:** the searchable site is two families of pages that share no source format — ~53 Jekyll pages rendered from `docs/**/*.md`, and 114 pre-generated standalone HTML files under `docs/docs/stdlib/` emitted by the *external* `march_doc` tool (auto-cloned by `scripts/gen-stdlib-docs.sh`, not in this repo). Pagefind crawls the *built* `_site/`, which is the only point at which both are the same kind of artifact. The index ships with the site; there is no search service at runtime and no CDN dependency. 167 pages indexed.
+
+**Opt-in inclusion.** Pages carry `data-pagefind-body`; Pagefind's rule is that once *any* page in a crawl has that attribute, only pages with it are indexed — so the playground, Tetris, perihelion and decision-graph pages stay out with no exclusion rules. The four layouts (`default`, `docs`, `cookbook`, `landing`) set it on their content element with a `data-pagefind-filter="section:…"` tag that drives the Guide/Cookbook/Stdlib/Home result labels. The stdlib pages can't set it — we don't own their generator — so `build-search-index.sh` injects it into `_site/docs/stdlib/*.html` (`<main id="main">`, which holds module content only; the ~1900-line symbol sidebar is a sibling `<nav id="sb">` and correctly stays out). Injecting into the *build output* means a future stdlib regeneration can never undo it.
+
+**Two search tiers in one box.** Pagefind indexes stdlib pages at PAGE granularity — searching `push` lands on `Queue.html` with no anchor. So the modal also loads `docs/docs/stdlib/search-index.json` (the symbol index `march_doc` already emits: 2038 entries, ~57 KB gzipped, fetched lazily on first keystroke in parallel with Pagefind) and renders a capped "Standard library" group above the prose results, linking to the definition anchor directly (`Array.html#fn-push`, using the generator's own `#fn-`/`#type-`/`#iface-` scheme). Symbols match on NAME only, exact or prefix (plus `_`-boundary prefixes, so `string` finds `to_string`); a `Module.member` pair is recognised (`List.map`), and any other multi-word query skips the symbol tier entirely. This is deliberately narrower than the stdlib page's own scorer, which also matches signatures, docstrings and Levenshtein neighbours — that would flood prose queries across 2038 names. Verified: `push`→`Array.push` first; `List.map`→`List.map` first; `to_string`→5 hits; `Array`→module page first; `how do supervisors restart children`→**zero** symbols.
+
+**Non-obvious bug fixed during review:** the full-screen scrim covered only a sliver at the top of the page. Cause is a CSS containing-block rule, not a z-index or sizing mistake — the layouts render the include inside their nav, and both `.d-nav` and `.m-nav` set `backdrop-filter`, which makes an element a containing block for `position: fixed` DESCENDANTS. Measured in-page: the overlay was `846×126` (the nav's box) versus `846×998` (the viewport) once reparented. Fixed by moving the overlay to `<body>` at init, which is robust against any layout later gaining a `transform`/`filter` on an ancestor.
+
+**Idle panel.** A bare `⌘K` shows recent searches (localStorage, capped at 5, written only when a query actually leads somewhere, `try`/`catch`-wrapped for Safari private browsing) above curated starting points. Those links are generated by Liquid from `site.pages` by `nav_order`, not hardcoded, so a renamed permalink can't leave a dead suggestion. Nothing is preselected in the idle state — auto-highlighting would make an unmodified `⌘K`+Enter navigate somewhere the user never chose.
+
+**Guard against silent rot:** `build-search-index.sh` fails the build if the index comes out with fewer than 100 pages. Pagefind exits 0 and still writes a `pagefind/` directory when it indexes nothing, so a dropped `data-pagefind-body` would otherwise ship a search box that finds nothing, with a green CI run.
+
+**Local workflow:** `scripts/serve-docs.sh` (jekyll build → pagefind → serve `_site`). Plain `jekyll serve` cannot be used — it rebuilds `_site` and wipes the index — and the modal says so explicitly, but only on localhost; visitors get a plain "search is unavailable" message. The script also exports a UTF-8 locale, without which Jekyll's SCSS converter dies with `Invalid US-ASCII character "\xE2"`.
+
+**Verified:** built and driven live in a browser across all four layouts in both light and dark themes (the toggling layouts use a `.light` class on `<html>`, the generated stdlib pages use `data-theme='light'`; the modal matches both). Keyboard nav, `Esc`, `/`, recents record/replay/clear, and `↵` on a symbol row landing on a real anchor (`/docs/stdlib/Array.html#fn-push`, confirmed present with signature `push(v, elem)`) all checked. No console errors. `scripts/check-docs.sh` green.
+
+**Not done:** the 114 generated API pages keep their own `⌘K` symbol modal, so the keystroke still means something narrower there. Unifying it requires a change to the separate `march_doc` repo plus regenerating and committing all 114 files — deliberately left as a follow-up.
+
+**Correction, same day — the index had to be committed, because `deploy-pages.yml` does not serve production.** The entry above described the index as shipping via the CI post-build step. That step works, but it publishes to the `march-language.github.io` repo, and **march-lang.org is a different Pages site**: `march-language/march` itself, configured `cname march-lang.org, source {branch: main, path: /docs}` — GitHub's own legacy Jekyll over `docs/`, which admits no post-build hook. Confirmed via the Pages API on both repos plus a live A/B (`/pagefind/pagefind.js` → 200 on `march-language.github.io`, 404 on `march-lang.org`, while `/docs/tour/` served the new markup on both). The misreading came from `scripts/gen-stdlib-docs.sh`'s header comment, which asserted `deploy-pages.yml` serves march-lang.org; that comment is now corrected in place.
+
+**Resolution:** `scripts/gen-docs-search-index.sh` regenerates the index into `docs/pagefind/` (194 files, 1.7 MB) and it is committed — the same model the 114 generated stdlib API pages already use, and the only way anything reaches march-lang.org. Verified that GitHub's Jekyll copies all 193 served files verbatim, `.pf_fragment` / `.pf_index` / `wasm.*.pagefind` extensions included, and that full-text search works end-to-end against a pure `jekyll build` output with no post-build step (the exact production shape). `deploy-pages.yml`'s Pagefind step is retained so the secondary site stays correct, and `build-search-index.sh` now `rm -rf`s its output directory first, since the committed copy now lands in `_site` during the Jekyll build and Pagefind's filenames are content-hashed (a merge would accumulate orphaned shards).
+
+**Staleness guard, and why it is not a byte diff.** Pagefind's output is deliberately not reproducible — two consecutive runs over byte-identical input produce different content-hashed filenames (`en_5a30fea.pf_filter` vs `en_ca11dc6.pf_filter`) and a different entry hash — so `git diff --exit-code docs/pagefind/` would fail on every run and train everyone to ignore it. Instead `gen-docs-search-index.sh --check` compares a SHA-256 over all `docs/**/*.{md,html}` (paths included, so renames count; `docs/pagefind/` itself excluded) against `docs/pagefind/.source-digest`, and runs in CI's `doc-lint` job. Verified non-vacuous: appending one comment line to `docs/tour.md` makes it exit 1 with both digests printed, and reverting restores exit 0.

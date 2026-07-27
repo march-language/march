@@ -680,6 +680,17 @@ type env = {
       typing ([infer_match] / the [check_expr] EMatch arm): when the scrutinee
       is such a [lbl] and an arm matches label `:L`, the shared ref is
       transiently set to [branches[L]] while that arm body is checked. *)
+  offer_unrefined : session_ty ref list ref;
+  (** Offer continuations awaiting per-arm refinement (F5 residual, 2026-07-24).
+      [Chan.offer] registers the session ref it hands back here IFF the offer's
+      branch continuations are not all identical — in that case the returned
+      channel's real state depends on which label the peer chose at runtime, so
+      operating on it before a `match` on the paired label refines it would type
+      the channel at the FIRST branch (silent type confusion: compiled, a
+      String payload gets read as an Int).  [with_offer_refinement] transiently
+      removes the ref while checking a refined arm; the [Chan.*] operation arms
+      reject any channel still listed here.  A shared mutable ref for the same
+      reason [offer_conts] is one. *)
 }
 
 let make_env errors type_map = {
@@ -713,10 +724,44 @@ let make_env errors type_map = {
   local_mods = StrMap.empty;
   offer_conts = ref [];
   offer_labels = [];
+  offer_unrefined = ref [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
+
+(** Is [r] an [offer] continuation still awaiting per-arm refinement?
+    Physical identity on purpose: [env.offer_unrefined] tracks the exact ref
+    [Chan.offer] minted, and the ref cell IS the channel's identity for the
+    duration of the session (every [Chan.*] op mints a FRESH ref for its
+    continuation, so a marked ref can never be confused with a later state of
+    the same channel). *)
+let offer_ref_unrefined env (r : session_ty ref) =
+  List.exists (fun r' -> r' == r) !(env.offer_unrefined)
+
+(** Depth of enclosing `match` arms that are a CATCH-ALL over an offer label
+    (`_ ->` / a variable pattern, where [with_offer_refinement] cannot refine
+    because the arm names no label).  Non-zero means the user did write a
+    `match`, so the bare "match the label first" advice would read as wrong —
+    the diagnostic appends the real explanation instead (a catch-all does not
+    identify WHICH branch the peer chose).  A global counter rather than an
+    [env] field because [env] is copied by every binding construct while this
+    must track dynamic nesting of the checking recursion. *)
+let offer_catchall_depth = ref 0
+
+(** The shared body of the "unrefined `Chan.offer` continuation" diagnostic.
+    [lead] names what is being attempted ("Chan.recv", "This channel"). *)
+let offer_unrefined_message lead =
+  Printf.sprintf
+    "%s came from `Chan.offer`, and the protocol's branches \
+     continue differently, so I don't know which one the peer chose.\n\
+     Match on the label first — `match lbl do :ok -> ... :err -> ... end` — \
+     and use the channel inside each arm.%s"
+    lead
+    (if !offer_catchall_depth > 0 then
+       "\nA `_` catch-all arm is not enough: it does not identify which branch \
+        the peer chose, so every label needs its own arm."
+     else "")
 
 (** Value restriction for capability-producer applications.  Lower every
     [Unbound] TVar reachable in [ty] to level 0 IN PLACE, so [generalize]
@@ -1319,9 +1364,23 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
    (module prebinds, check_decl's DFn rebind, check_fn's self-bind).
    Regression note: this fix (commit c6599af9) was lost in the PR #27/#38
    merge-conflict resolution and restored here. *)
+(* [offer_labels] shadowing discipline (F5 residual, 2026-07-24 review fix):
+   [offer_labels] links a NAME (e.g. `lbl` in `let (lbl, ch) = Chan.offer(...)`)
+   to a session ref, keyed on the string alone — the same name-keying hazard
+   [fn_arities] above is already guarded against.  `bind_var`/`bind_linear` are
+   the two chokepoints EVERY binding construct funnels through (plain `let`,
+   lambda/`fn` params, `match` pattern bindings all eventually call one of
+   these) so rebinding a name here retires any stale [offer_labels] entry for
+   it — otherwise `let lbl = :ok` after `let (lbl, ch) = Chan.offer(...)`
+   would leave the OLD entry reachable by `List.assoc_opt "lbl"`, and
+   `with_offer_refinement` would refine (and un-mark) an unrelated channel
+   based on a label the peer never actually returned: the exact `Chan.offer`
+   soundness hole this file's [offer_unrefined] field exists to close, just
+   reached through a shadowed name instead of a bare missing `match`. *)
 let bind_var name sch env =
   { env with vars = StrMap.add name sch env.vars;
-             fn_arities = StrMap.remove name env.fn_arities }
+             fn_arities = StrMap.remove name env.fn_arities;
+             offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
@@ -1332,7 +1391,8 @@ let bind_linear name lin ty env =
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
-    lin  = le :: env.lin }
+    lin  = le :: env.lin;
+    offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 (* =================================================================
    §8  Generalization and instantiation
@@ -2275,9 +2335,21 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeIntArr", []))))));
     ("native_int_arr_sum",
        Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_min",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_max",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_sumsq_dev",
+       Mono (TArrow (TCon ("NativeIntArr", []), TArrow (t_float, t_float))));
     ("native_int_arr_map",
        Mono (TArrow (TCon ("NativeIntArr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeIntArr", [])))));
+    ("native_int_arr_map2",
+       Mono (TArrow (TCon ("NativeIntArr", []),
+             TArrow (TCon ("NativeIntArr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeIntArr", []))))));
+    ("native_int_arr_to_float_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeFloatArr", []))));
     ("native_int_arr_fold",
        poly1 (fun a ->
          TArrow (a, TArrow (TCon ("NativeIntArr", []),
@@ -2298,9 +2370,19 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
     ("native_float_arr_sum",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_min",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_max",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_sumsq_dev",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TArrow (t_float, t_float))));
     ("native_float_arr_map",
        Mono (TArrow (TCon ("NativeFloatArr", []),
              TArrow (TArrow (t_float, t_float), TCon ("NativeFloatArr", [])))));
+    ("native_float_arr_map2",
+       Mono (TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeFloatArr", []))))));
     ("native_float_arr_fold",
        poly1 (fun a ->
          TArrow (a, TArrow (TCon ("NativeFloatArr", []),
@@ -2861,7 +2943,24 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   (* Session-typed channels unify by checking their current session states match. *)
   | TChan r1, TChan r2 ->
-    if not (session_ty_equal !r1 !r2) then
+    (* LAUNDERING GUARD (F5 residual, 2026-07-27).  The [Chan.*] operation arms
+       reject an unrefined `offer` continuation by PHYSICAL identity against
+       [env.offer_unrefined] — but unification does not alias refs, it only
+       compares states.  So any construct that mints a fresh [TChan] ref and
+       unifies it with the marked one (a `Chan(R, P)` type annotation, an
+       `if`/`match` join with another channel, a record field, an annotated
+       function parameter at a CALL SITE) would hand back a different, unmarked
+       ref carrying the same state — and the physical-identity guard would never
+       fire again.  Every such route goes through THIS arm, so reject here: an
+       unrefined offer continuation may not be unified with any other channel
+       type at all, only refined by a `match` on its paired label.  (Reporting
+       rather than propagating the mark is deliberate — propagation cannot help
+       across a function boundary, where the callee's body was already checked
+       against its own ref.) *)
+    if (not (r1 == r2))
+       && (offer_ref_unrefined env r1 || offer_ref_unrefined env r2) then
+      Err.error env.errors ~span (offer_unrefined_message "This channel")
+    else if not (session_ty_equal !r1 !r2) then
       Err.error env.errors ~span
         (Printf.sprintf
            "Session type mismatch: expected channel at `%s` but found `%s`."
@@ -4519,6 +4618,16 @@ let rec unfold_srec s =
     unfold_srec (subst_inner body)
   | _ -> s
 
+(** Reject a [Chan.*] operation on a channel whose session ref came from an
+    [offer] with differing branch continuations and has not been refined by a
+    `match` on the paired label (F5 residual). *)
+let offer_unrefined_error env span (r : session_ty ref) op =
+  if offer_ref_unrefined env r then begin
+    Err.error env.errors ~span
+      (offer_unrefined_message (Printf.sprintf "%s: this channel" op));
+    true
+  end else false
+
 (** Type constructor names that cannot appear in actor message payloads.
     These types carry mutable state that must remain owned by a single actor. *)
 let non_sendable_types = ["RingBuf"]
@@ -4687,13 +4796,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
                Err.error env.errors ~span:sp
                  (Printf.sprintf "Chan.new: protocol `%s` has no roles." pname);
                TError
-             | _ ->
-               (* 3+ roles: just return first two as a pair *)
-               (match pi.pi_projections with
-                | (_, sty_a) :: (_, sty_b) :: _ ->
-                  TTuple [TLin (Ast.Linear, TChan (ref sty_a));
-                          TLin (Ast.Linear, TChan (ref sty_b))]
-                | _ -> TError))))
+             | projs ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf
+                    "Chan.new: protocol `%s` has %d roles but Chan.new needs \
+                     exactly 2. Use MPST.new for multi-party protocols."
+                    pname (List.length projs));
+               TError)))
 
     (* Chan.send(ch, value) → linear Chan at continuation session state.
        Pre-condition: ch must be at SSend(T, S). Post: ch is consumed; returns Chan at S. *)
@@ -4704,6 +4813,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.send" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SSend (payload_ty, cont) ->
@@ -4734,6 +4844,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.recv" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SRecv (payload_ty, cont) ->
@@ -4762,6 +4873,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.close" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SEnd -> t_unit
@@ -4794,6 +4906,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | _ -> None
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.choose" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SChoose branches ->
@@ -4839,6 +4952,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | t -> t
       in
       (match inner_chan_ty with
+       | TChan r when offer_unrefined_error env sp r "Chan.offer" -> TError
        | TChan r ->
          (match unfold_srec !r with
           | SOffer branches ->
@@ -4853,6 +4967,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   taken (F5 path-dependent refinement). *)
                let cont_ref = ref sty in
                env.offer_conts := (cont_ref, branches) :: !(env.offer_conts);
+               (* If the branches continue differently, the first-branch type is
+                  a GUESS — mark the ref as needing a `match`-driven refinement
+                  before any operation may use it. *)
+               (match branches with
+                | (_, first) :: rest
+                  when not (List.for_all (fun (_, s) -> session_ty_exact_equal s first) rest) ->
+                  env.offer_unrefined := cont_ref :: !(env.offer_unrefined)
+                | _ -> ());
                TTuple [t_atom; TLin (Ast.Linear, TChan cont_ref)]
              | [] ->
                TTuple [t_atom; TError])
@@ -5038,6 +5160,60 @@ let rec infer_expr env (e : Ast.expr) : ty =
               "MPST.close: expected a multi-party channel endpoint but got `%s`."
               (pp_ty ch_ty));
          TError)
+
+    (* Any other `MPST.*` / `Chan.*` spelling reaching this point either (a) is
+       one of the six real `Chan.*` ops called with the wrong shape (the
+       arity-specific arms above only match the CORRECT arg count, so falling
+       through to here with one of these six exact names, still bound to the
+       compiler's OWN untouched placeholder, means the call is malformed) or
+       (b) does not resolve as an ordinary bound name at all (a misspelling,
+       an unimplemented `MPST.choose`/`MPST.offer`, etc). Both are treated as
+       a session-op diagnostic rather than a library-lookup failure — falling
+       through to the generic qualified-name path would otherwise produce a
+       misleading "Unknown module `MPST`".
+
+       The distinction between "still the compiler's placeholder" and "a user
+       module shadowed this name" is made STRUCTURALLY, not by a hand-kept
+       name list: `builtin_bindings` (the table a few hundred lines above
+       that seeds `Chan.new`/`send`/`recv`/`close`/`choose`/`offer` into
+       `base_env` as generic curried placeholders — see the comment there,
+       "these entries just put the names in scope; the real typing is done in
+       the Chan.* EApp branches") is evaluated exactly once at program
+       startup, so each entry's `scheme` is a single fixed heap object. A
+       fresh top-level `env` starts with that EXACT object bound under each
+       name (`bind_vars` calls `StrMap.add`, which stores the value, not a
+       copy). If a user later writes `mod Chan do fn recv(a, b) do ... end
+       end`, module-export folding REBINDS "Chan.recv" in `env.vars` to a
+       brand-new scheme built while typechecking that function — a different
+       heap object. So `sch == placeholder_sch` (physical equality) is true
+       iff the name was never shadowed: exactly the "still a bare, unshadowed
+       compiler builtin, and we already fell through its arity-specific arm"
+       case this branch needs to catch, with no risk of a false positive on a
+       real user binding and no separate list to keep in sync with the table.
+       MPST has no placeholder table entries at all, so `MPST.*` names always
+       take the `None`-from-`lookup_var` branch below (mirroring the two
+       resolution steps the ordinary `EVar` fallthrough, above, tries first)
+       — a genuinely-defined `MPST.helper` (a user module actually named
+       `MPST`) is left alone and reaches that path unharmed; only names that
+       would ALSO fail there get the session-op message. *)
+    | Ast.EApp (Ast.EVar ({ txt = op; _ } as n), _, sp)
+      when ((String.length op > 5 && String.sub op 0 5 = "MPST.")
+         || (String.length op > 5 && String.sub op 0 5 = "Chan."))
+        && (match lookup_var op env with
+            | None -> (match resolve_qualified_var op env with (_, Some _) -> false | (_, None) -> true)
+            | Some sch ->
+              (match List.assoc_opt op builtin_bindings with
+               | Some placeholder_sch -> sch == placeholder_sch
+               | None -> false)) ->
+      Err.error env.errors ~span:sp
+        (Printf.sprintf
+           "`%s` is not a session-channel operation I know, or it was called \
+            with the wrong number of arguments.\n\
+            Binary channels: Chan.new/send/recv/close/choose/offer. \
+            Multi-party: MPST.new/send/recv/close — multi-party `choose`/`offer` \
+            are not implemented yet."
+           n.txt);
+      TError
 
     (* Restrict cap_narrow (Part 1): its result must never be a nominal proof
        cap. cap_narrow is the ONLY polymorphic cap producer, so closing this
@@ -5715,7 +5891,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         with_offer_refinement env scrut br (fun () ->
           check_expr env' br.branch_body expected ~reason)
       );
-    check_exhaustiveness env msp scrut_ty branches;
+    if not (check_offer_label_exhaustiveness env msp scrut branches) then
+      check_exhaustiveness env msp scrut_ty branches;
     check_redundant_arms env scrut_ty branches
 
   (* Constructor in check mode: when the bare constructor name is ambiguous
@@ -5824,6 +6001,54 @@ and offer_arm_label (br : Ast.branch) =
   | Ast.PatLit (Ast.LitAtom l, _)   -> Some l
   | _                               -> None
 
+(** Exhaustiveness for a `match` whose scrutinee is an OFFER LABEL variable.
+    The label's universe is the protocol's branch set — closed — not the open
+    `Atom` universe the generic checker assumes.  Returns [true] when this
+    specialised check ran (so the caller skips the generic one). *)
+and check_offer_label_exhaustiveness env span scrut (branches : Ast.branch list) =
+  match scrut with
+  | Ast.EVar name ->
+    (match List.assoc_opt name.txt env.offer_labels with
+     | None -> false
+     | Some (_r, proto_branches) ->
+       let has_catch_all =
+         List.exists (fun (br : Ast.branch) ->
+             match br.branch_pat with
+             | Ast.PatWild _ | Ast.PatVar _ -> br.branch_guard = None
+             | _ -> false) branches
+       in
+       let handled =
+         List.filter_map (fun (br : Ast.branch) ->
+             if br.branch_guard = None then offer_arm_label br else None) branches
+       in
+       let missing =
+         List.filter (fun (lbl, _) -> not (List.mem lbl handled)) proto_branches
+       in
+       (* An arm naming a label the protocol does not offer can never be taken —
+          almost always a typo (`:okk` for `:ok`).  A warning, not an error: a
+          redundant arm is dead code, not a soundness problem. *)
+       List.iter (fun (br : Ast.branch) ->
+           match offer_arm_label br with
+           | Some lbl when not (List.mem_assoc lbl proto_branches) ->
+             Err.warning env.errors ~span
+               (Printf.sprintf
+                  "This `match` has an arm for `:%s`, which is not one of the \
+                   protocol's `offer` branches — it can never be taken.\n\
+                   The branches are: %s."
+                  lbl
+                  (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) proto_branches)))
+           | _ -> ()) branches;
+       (if not has_catch_all && missing <> [] then
+          Err.error env.errors ~span
+            (Printf.sprintf
+               "This `match` doesn't handle every branch the peer can choose — \
+                missing: %s.\n\
+                The protocol's `offer` branches are: %s."
+               (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) missing))
+               (String.concat ", " (List.map (fun (l, _) -> ":" ^ l) proto_branches))));
+       true)
+  | _ -> false
+
 (** Run [f] with the offer channel's session ref transiently refined to the
     branch [br] selects (F5).  When [scrut] is an offer label variable (linked
     in [env.offer_labels]) and [br]'s pattern names a known branch label, point
@@ -5843,8 +6068,35 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     | _ -> None
   in
   match applied with
-  | Some (r, saved) -> Fun.protect ~finally:(fun () -> r := saved) f
-  | None            -> f ()
+  | Some (r, saved) ->
+    (* Snapshot-and-restore the WHOLE list rather than re-adding [r] on the way
+       out: safe because [Chan.offer] only ever PREPENDS, so anything registered
+       while [f] runs is a strictly newer, unrelated ref whose own scope ended
+       with [f] — restoring the snapshot cannot resurrect a stale mark or drop a
+       live one for a ref still reachable after this arm. *)
+    let saved_unrefined = !(env.offer_unrefined) in
+    env.offer_unrefined := List.filter (fun r' -> not (r' == r)) saved_unrefined;
+    Fun.protect
+      ~finally:(fun () -> r := saved; env.offer_unrefined := saved_unrefined)
+      f
+  | None ->
+    (* No refinement applied.  If the scrutinee IS an offer label but this arm
+       names no branch (a `_`/variable catch-all), the user demonstrably DID
+       write a `match` — record that so any unrefined-channel diagnostic raised
+       inside the arm explains why the catch-all does not count (F7). *)
+    let is_offer_catchall =
+      match scrut with
+      | Ast.EVar name ->
+        List.mem_assoc name.txt env.offer_labels
+        && (match br.branch_pat with
+            | Ast.PatWild _ | Ast.PatVar _ -> true
+            | _ -> false)
+      | _ -> false
+    in
+    if is_offer_catchall then begin
+      incr offer_catchall_depth;
+      Fun.protect ~finally:(fun () -> decr offer_catchall_depth) f
+    end else f ()
 
 (** Check each match arm as a mutually-exclusive path with respect to
     linear-value use.  Because at most one arm runs on any execution path, a
@@ -5886,7 +6138,8 @@ and infer_match env span scrut scrut_ty branches =
         check_expr env' br.branch_body result_ty
           ~reason:(Some (RMatchArm span)))
     );
-  check_exhaustiveness env span scrut_ty branches;
+  if not (check_offer_label_exhaustiveness env span scrut branches) then
+    check_exhaustiveness env span scrut_ty branches;
   check_redundant_arms env scrut_ty branches;
   result_ty
 
@@ -6156,9 +6409,30 @@ and bind_lam_params env params =
 
 and bind_lam_param env _sp (p : Ast.param) ann_ty =
   let t = match p.param_ty, ann_ty with
-    | Some ann, _ ->
+    | Some ann, expected ->
       let tvars = ref [] in
-      surface_ty env ~tvars ann
+      let ann_t = surface_ty env ~tvars ann in
+      (* RECONCILE the annotation with the type the caller expects this
+         parameter to have (F5 residual, 2026-07-27).  [bind_lam_params] mints a
+         fresh var per parameter, builds the lambda's ARROW type from those vars
+         and passes each one here; [check_expr]'s lambda-peel passes the arrow
+         component of the expected type.  Before this unify, an ANNOTATED
+         parameter simply ignored that type: the body was checked against the
+         annotation while the arrow — and therefore every call site — kept the
+         unrelated variable.  So a lambda (or a named `fn` nested in a function
+         body, which routes here too) had its parameter annotations checked
+         against NOTHING, and an argument flowing into an annotated parameter
+         reached neither the [Chan.*] operation arms nor [unify]'s `TChan`
+         laundering guard — letting an unrefined `Chan.offer` continuation be
+         washed clean by `fn (c : Chan(R, P)) -> ...`.  The top-level [check_fn]
+         `FPNamed` loop never had this gap, which is why only the inner forms
+         leaked. *)
+      (match expected with
+       | Some t0 ->
+         unify env ~span:p.param_name.Ast.span
+           ~reason:(Some (RAnnotation p.param_name.Ast.span)) t0 ann_t
+       | None -> ());
+      ann_t
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
@@ -7734,21 +8008,27 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
        else
          rest_ty ()   (* This role doesn't participate in this step *)
      | Ast.ProtoLoop inner_steps ->
-       (* Wrap the inner projection in a recursive binder *)
+       (* `loop do S end` is the µ-type `Rec X. S[X]` — the body's continuation
+          IS the binder's back-reference, so the loop repeats indefinitely.
+          (Substituting the post-loop continuation into the back-reference, as
+          this arm used to do, produced a vacuous SRec with no SVar in it: one
+          unrolled iteration.  Steps after a `loop` are unreachable and are
+          rejected at protocol-declaration time.) *)
        let rec_var = proto_name ^ "_loop" in
        let inner = project_steps env ~proto_name ~multiparty inner_steps role (SVar rec_var) in
-       let after_loop = rest_ty () in
        (match inner with
         | SVar _ ->
-          (* Role not involved in the loop at all — skip *)
-          after_loop
-        | _ ->
-          (* Substitute the continuation into the SVar back-reference *)
-          let inner_with_cont = subst_svar rec_var after_loop inner in
-          SRec (rec_var, inner_with_cont))
+          (* Role not involved in the loop at all — skip the binder entirely. *)
+          rest_ty ()
+        | _ -> SRec (rec_var, inner))
      | Ast.ProtoChoice (chooser, branches) ->
+       (* Every branch rejoins the protocol tail, so each arm is projected with
+          the steps that FOLLOW this choice block as its continuation — not the
+          outer [cont], which at top level is just SEnd and silently truncates
+          the protocol. *)
+       let after_choice = rest_ty () in
        let branch_tys = List.map (fun (lbl, arm_steps) ->
-           let arm_ty = project_steps env ~proto_name ~multiparty arm_steps role cont in
+           let arm_ty = project_steps env ~proto_name ~multiparty arm_steps role after_choice in
            (lbl.Ast.txt, arm_ty)
          ) branches in
        if chooser.Ast.txt = role then
@@ -7770,7 +8050,13 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
              first_ty   (* role not involved — merged/transparent *)
            else
              SOffer branch_tys
-       end)
+       end
+     | Ast.ProtoStop _ ->
+       (* `stop` exits the enclosing `loop` for every role: it projects to
+          `SEnd` unconditionally, discarding both the surrounding [cont] and
+          any steps that follow it (those are rejected as unreachable at
+          protocol-declaration time — see [check_unreachable_after_loop]). *)
+       SEnd)
 
 (** Substitute occurrences of [SVar x] with [replacement] inside [s]. *)
 and subst_svar x replacement s =
@@ -7816,6 +8102,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
       chooser.Ast.txt ::
       List.concat_map (fun (_, steps) -> roles_of_steps steps) branches @
       roles_of_steps rest
+    | Ast.ProtoStop _ :: rest -> roles_of_steps rest
   in
   let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
   let multiparty = List.length roles > 2 in
@@ -7856,6 +8143,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
          let branch_msgs = List.concat_map (fun (_, steps) ->
              gather_msgs [] steps) branches in
          gather_msgs (branch_msgs @ acc) rest
+       | Ast.ProtoStop _ :: rest -> gather_msgs acc rest
      in
      let msgs = gather_msgs [] pdef.proto_steps in
      List.iter (fun (sender, receiver, msg_ty) ->
@@ -9138,8 +9426,10 @@ let rec check_decl env (d : Ast.decl) : env =
       Err.warning env.errors ~span:sp
         (Printf.sprintf "Protocol `%s` has no steps — it describes no communication."
            name.txt);
-    (* Validate each step for structural correctness. *)
-    let rec validate_step = function
+    (* Validate each step for structural correctness. [in_loop] tracks
+       whether we're nested (directly, or via a `choose` branch) inside a
+       `loop` block — `stop` is only meaningful there. *)
+    let rec validate_step ~in_loop = function
       | Ast.ProtoMsg (sender, receiver, msg_ty) ->
         if sender.txt = receiver.txt then
           Err.error env.errors ~span:sender.span
@@ -9153,16 +9443,76 @@ let rec check_decl env (d : Ast.decl) : env =
           Err.error env.errors ~span:sp
             (Printf.sprintf "Protocol `%s`: a `loop` block must contain at least one step."
                name.txt);
-        List.iter validate_step steps
+        List.iter (validate_step ~in_loop:true) steps
       | Ast.ProtoChoice (participant, branches) ->
         if List.length branches < 2 then
           Err.error env.errors ~span:participant.span
             (Printf.sprintf
                "Protocol `%s`: `choice` by `%s` must have at least 2 branches."
                name.txt participant.txt);
-        List.iter (fun (_, steps) -> List.iter validate_step steps) branches
+        List.iter (fun (_, steps) -> List.iter (validate_step ~in_loop) steps) branches
+      | Ast.ProtoStop stop_sp ->
+        if not in_loop then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
+                protocol already ends here if you just write nothing."
+               name.txt)
     in
-    List.iter validate_step pdef.proto_steps;
+    List.iter (validate_step ~in_loop:false) pdef.proto_steps;
+    (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
+       follows one at the same nesting level is unreachable. *)
+    (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's
+       real continuation is its own steps FOLLOWED BY the post-`choose` tail
+       (`project_steps`' `ProtoChoice` arm projects `rest_ty ()` into every
+       branch), so a branch ending in a `loop` makes that projected tail
+       unreachable just as surely as a written-out step would — walking each
+       branch with `rest = []` and no tail missed exactly that case. *)
+    let rec check_unreachable_after_loop ~tail steps =
+      match steps with
+      | Ast.ProtoLoop inner :: rest ->
+        check_unreachable_after_loop ~tail:[] inner;
+        if rest <> [] then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "Protocol `%s`: the steps after this `loop` can never run — \
+                a `loop` block repeats forever, so it must be the last step."
+               name.txt)
+        else if tail <> [] then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "Protocol `%s`: this `choose` branch ends in a `loop`, but the \
+                protocol continues after the `choose` — those following steps \
+                are projected into EVERY branch, so they can never run in this \
+                one. Move them inside the branches that can reach them."
+               name.txt)
+      | Ast.ProtoStop stop_sp :: rest ->
+        (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
+           discarding both [rest] here and the enclosing [tail] — same
+           unreachability shape as `loop`, just via early exit instead of
+           looping forever. *)
+        if rest <> [] then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: the steps after `stop` can never run — `stop` \
+                exits the loop immediately, so it must be the last step."
+               name.txt)
+        else if tail <> [] then
+          Err.error env.errors ~span:stop_sp
+            (Printf.sprintf
+               "Protocol `%s`: this `choose` branch ends in `stop`, but the \
+                protocol continues after the `choose` — those following steps \
+                are projected into EVERY branch, so they can never run in this \
+                one. Move them inside the branches that can reach them."
+               name.txt)
+      | Ast.ProtoChoice (_, branches) :: rest ->
+        List.iter (fun (_, arm) ->
+            check_unreachable_after_loop ~tail:(rest @ tail) arm) branches;
+        check_unreachable_after_loop ~tail rest
+      | _ :: rest -> check_unreachable_after_loop ~tail rest
+      | [] -> ()
+    in
+    check_unreachable_after_loop ~tail:[] pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
     let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
     let participants = List.map fst projections in
@@ -9172,17 +9522,10 @@ let rec check_decl env (d : Ast.decl) : env =
            "Protocol `%s` only names one participant (`%s`). \
             A protocol usually involves at least two parties."
            name.txt (List.hd participants));
-    (* Hint if participant names are not known actor/type names. *)
-    List.iter (fun p ->
-        let is_actor = StrMap.exists (fun _ cis -> List.exists (fun ci -> ci.ci_type = p) cis) env.ctors in
-        let is_type  = StrMap.mem p env.types in
-        if not (is_actor || is_type) then
-          Err.hint env.errors ~span:sp
-            (Printf.sprintf
-               "Protocol `%s`: participant `%s` is not a known actor or type. \
-                Did you forget to declare `actor %s ...`?"
-               name.txt p p)
-      ) participants;
+    (* Protocol roles are their own namespace — they are NOT type or actor
+       names, so no "unknown participant" hint is emitted (F8, removed
+       2026-07-24: it fired on every ordinary protocol, including the
+       reference chapter's own Echo example). *)
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
     let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
     let new_env = { env with protocols = StrMap.add name.txt pi env.protocols } in

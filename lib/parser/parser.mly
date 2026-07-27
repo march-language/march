@@ -654,6 +654,20 @@ actor_handler:
         Client -> Server : More(String)
         Server -> Client : Ack()
       end
+    end
+
+    A `loop` body (or a `choose` branch nested inside one) may end in `stop`
+    to exit the loop instead of repeating it — `stop` is a CONTEXTUAL
+    keyword (plain `lower_name`, not reserved elsewhere):
+    protocol Stream do
+      loop do
+        Prod -> Cons : Int
+        choose by Cons:
+          more -> Cons -> Prod : Bool
+          done -> Cons -> Prod : Bool
+                  stop
+        end
+      end
     end *)
 protocol_decl:
   | PROTOCOL; name = upper_name; DO; steps = list(protocol_step); END
@@ -666,6 +680,15 @@ protocol_step:
     { ProtoLoop steps }
   | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END
     { ProtoChoice (chooser, branches) }
+  | id = lower_name
+    { if id.txt = "stop" then ProtoStop (mk_span $loc)
+      else
+        error_raise
+          (Printf.sprintf
+             "I don't recognize `%s` here — the only protocol step allowed \
+              is `stop` (to exit an enclosing `loop`)."
+             id.txt)
+          None $startpos(id) }
 
 choose_branch:
   | option(PIPE); label = lower_name; ARROW; steps = list(protocol_step)

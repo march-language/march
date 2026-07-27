@@ -7360,6 +7360,27 @@ let base_env : env =
           for i = 0 to Array.length a - 1 do s := !s + a.(i) done;
           VInt !s
         | _ -> eval_error "native_int_arr_sum: expected NativeIntArr"))
+  ; ("native_int_arr_min", VBuiltin ("native_int_arr_min", function
+        | [VNativeIntArr a] ->
+          let m = ref a.(0) in
+          for i = 1 to Array.length a - 1 do if a.(i) < !m then m := a.(i) done;
+          VInt !m
+        | _ -> eval_error "native_int_arr_min: expected NativeIntArr"))
+  ; ("native_int_arr_max", VBuiltin ("native_int_arr_max", function
+        | [VNativeIntArr a] ->
+          let m = ref a.(0) in
+          for i = 1 to Array.length a - 1 do if a.(i) > !m then m := a.(i) done;
+          VInt !m
+        | _ -> eval_error "native_int_arr_max: expected NativeIntArr"))
+  ; ("native_int_arr_sumsq_dev", VBuiltin ("native_int_arr_sumsq_dev", function
+        | [VNativeIntArr a; VFloat mean] ->
+          let s = ref 0.0 in
+          for i = 0 to Array.length a - 1 do
+            let d = float_of_int a.(i) -. mean in
+            s := !s +. d *. d
+          done;
+          VFloat !s
+        | _ -> eval_error "native_int_arr_sumsq_dev: expected (NativeIntArr, Float)"))
   ; ("native_int_arr_map", VBuiltin ("native_int_arr_map", function
         | [VNativeIntArr a; f] ->
           let n = Array.length a in
@@ -7372,6 +7393,23 @@ let base_env : env =
           done;
           VNativeIntArr b
         | _ -> eval_error "native_int_arr_map: expected (NativeIntArr, fn)"))
+  ; ("native_int_arr_map2", VBuiltin ("native_int_arr_map2", function
+        | [VNativeIntArr a; VNativeIntArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_int_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i); VInt b.(i)] with
+             | VInt v -> out.(i) <- v
+             | v -> eval_error "native_int_arr_map2: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeIntArr out
+        | _ -> eval_error "native_int_arr_map2: expected (NativeIntArr, NativeIntArr, fn)"))
+  ; ("native_int_arr_to_float_arr", VBuiltin ("native_int_arr_to_float_arr", function
+        | [VNativeIntArr a] -> VNativeFloatArr (Array.map float_of_int a)
+        | _ -> eval_error "native_int_arr_to_float_arr: expected NativeIntArr"))
   ; ("native_int_arr_fold", VBuiltin ("native_int_arr_fold", function
         | [acc0; VNativeIntArr a; f] ->
           let acc = ref acc0 in
@@ -7426,6 +7464,27 @@ let base_env : env =
           for i = 0 to Array.length a - 1 do s := !s +. a.(i) done;
           VFloat !s
         | _ -> eval_error "native_float_arr_sum: expected NativeFloatArr"))
+  ; ("native_float_arr_min", VBuiltin ("native_float_arr_min", function
+        | [VNativeFloatArr a] ->
+          let m = ref a.(0) in
+          for i = 1 to Array.length a - 1 do if a.(i) < !m then m := a.(i) done;
+          VFloat !m
+        | _ -> eval_error "native_float_arr_min: expected NativeFloatArr"))
+  ; ("native_float_arr_max", VBuiltin ("native_float_arr_max", function
+        | [VNativeFloatArr a] ->
+          let m = ref a.(0) in
+          for i = 1 to Array.length a - 1 do if a.(i) > !m then m := a.(i) done;
+          VFloat !m
+        | _ -> eval_error "native_float_arr_max: expected NativeFloatArr"))
+  ; ("native_float_arr_sumsq_dev", VBuiltin ("native_float_arr_sumsq_dev", function
+        | [VNativeFloatArr a; VFloat mean] ->
+          let s = ref 0.0 in
+          for i = 0 to Array.length a - 1 do
+            let d = a.(i) -. mean in
+            s := !s +. d *. d
+          done;
+          VFloat !s
+        | _ -> eval_error "native_float_arr_sumsq_dev: expected (NativeFloatArr, Float)"))
   ; ("native_float_arr_map", VBuiltin ("native_float_arr_map", function
         | [VNativeFloatArr a; f] ->
           let n = Array.length a in
@@ -7438,6 +7497,20 @@ let base_env : env =
           done;
           VNativeFloatArr b
         | _ -> eval_error "native_float_arr_map: expected (NativeFloatArr, fn)"))
+  ; ("native_float_arr_map2", VBuiltin ("native_float_arr_map2", function
+        | [VNativeFloatArr a; VNativeFloatArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_float_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i); VFloat b.(i)] with
+             | VFloat v -> out.(i) <- v
+             | v -> eval_error "native_float_arr_map2: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeFloatArr out
+        | _ -> eval_error "native_float_arr_map2: expected (NativeFloatArr, NativeFloatArr, fn)"))
   ; ("native_float_arr_fold", VBuiltin ("native_float_arr_fold", function
         | [acc0; VNativeFloatArr a; f] ->
           let acc = ref acc0 in
@@ -9447,6 +9520,7 @@ let rec eval_decl (env : env) (d : decl) : env =
         let branch_roles = List.concat_map (fun (_, steps) ->
             collect_roles [] steps) branches in
         collect_roles (ch.txt :: branch_roles @ acc) rest
+      | ProtoStop _ :: rest -> collect_roles acc rest
     in
     let roles = List.sort_uniq String.compare
         (collect_roles [] pdef.proto_steps) in

@@ -158,6 +158,7 @@ type ctx = Llvm_ctx.ctx = {
   mutable tco_param_info : (string * string * string) list;
   mutable tco_stack_save : string;
   mutable tco_in_tail   : bool;
+  mutable tco_dup_bound : string list;
   mutable mutual_tco_group      : string list;
   mutable mutual_tco_tag_slot   : string;
   mutable mutual_tco_loop_label : string;
@@ -332,10 +333,15 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     Hashtbl.replace ctx.atom_names h name;
     ("i64", Int64.to_string h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
-    let gname = intern_string ctx s in
+    (* One immortal string per literal SITE, not one per evaluation: a
+       literal is RC-free in TIR (see [intern_string_site]), so a fresh
+       rc=1 cell here would be owned by nobody and leak every time the
+       site is evaluated. *)
+    let (gname, cell) = Llvm_ctx.intern_string_site ctx s in
     let tmp = fresh ctx "sl" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
-                tmp gname (String.length s));
+    emit ctx (Printf.sprintf
+                "%s = call ptr @march_string_lit_static(ptr %s, i64 %d, ptr %s)"
+                tmp gname (String.length s) cell);
     ("ptr", tmp)
   | Tir.ADefRef did ->
     (* Reference to a top-level def by content hash — emit as a function pointer *)
@@ -607,6 +613,114 @@ let is_trivial_dec_chain = Llvm_tco.is_trivial_dec_chain
    re-export bare. *)
 let fail_if_unresolved_iface_method = Llvm_calls.fail_if_unresolved_iface_method
 
+(** P10 Phase 2/2c — shared codegen for the NativeArray map inline loop.
+    Emits: length -> uninitialized alloc -> for-loop (load elem, tag/box to
+    the wire ptr ABI, DIRECT call to [apply_name], untag/unbox, store).
+    [clo_reg] is the LLVM value to pass as the apply fn's $clo argument —
+    the literal ["null"] for a non-capturing closure (Phase 2; the apply
+    body never reads $clo), or a real closure-struct pointer register for a
+    capturing one (Phase 2c; the apply body loads free vars from it). See
+    [Native_map_inline] for which shape produces which.
+
+    [unboxed] (Float only; ignored for Int) selects Stage 4 Option B: call
+    an unboxed clone of the apply fn (see [Native_map_inline.try_unboxed_variant])
+    that takes/returns a raw `double` directly instead of the generic boxed
+    `ptr` ABI — no march_alloc_float/march_unbox_float anywhere, argument
+    or return. This is what actually lets the loop vectorize; the
+    argument-box-reuse path above (still used when [unboxed] is false,
+    e.g. a still-generic signature) only cuts allocation traffic. *)
+let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
+    : string * string =
+  let elem_ty = if is_float then "double" else "i64" in
+  let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
+  let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+  (* Open a dedicated preheader so its label is known for the loop phi,
+     regardless of what block was open before this arm ran. *)
+  let preheader = fresh_block ctx "nmap_pre" in
+  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+  emit_label ctx preheader;
+  let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
+  let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
+  let len = fresh ctx "nmap_len" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
+  let new_arr = fresh ctx "nmap_out" in
+  emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
+  (* Float, non-unboxed only: allocate ONE reusable wire-argument box before
+     the loop, instead of a fresh march_alloc_float per element. Safe
+     because every (boxed-ABI) apply function unconditionally unboxes its
+     argument as its very first instruction and never touches the pointer
+     again — the generated prologue is always `call double
+     @march_unbox_float(ptr %x.arg)` before any user code runs (verified
+     via -emit-llvm on a compiled lambda), so nothing can observe or retain
+     this box's identity across calls. Overwriting its .val field between
+     iterations is therefore indistinguishable from fresh-boxing each time,
+     at 1/N the allocation cost. march_float_box layout is
+     [rc:8][tag:4][pad:4][val:8] (24 bytes, runtime/march_runtime.h) — val
+     is at byte offset 16. When [unboxed] is true there is no box at all —
+     the callee takes/returns a raw double directly (Stage 4 Option B) —
+     so this allocation is skipped entirely rather than merely reused.
+     Int has no equivalent box either way — its wire value is a tagged
+     immediate (coerce's "i64"/"ptr" arm), not an allocation. *)
+  let arg_box = if is_float && not unboxed then begin
+      let b = fresh ctx "nmap_argbox" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b);
+      Some b
+    end else None in
+  let cond_lbl = fresh_block ctx "nmap_cond" in
+  let body_lbl = fresh_block ctx "nmap_body" in
+  let exit_lbl = fresh_block ctx "nmap_exit" in
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx cond_lbl;
+  let i = fresh ctx "nmap_i" in
+  let i_next = fresh ctx "nmap_inext" in
+  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+  let cmp = fresh ctx "nmap_cmp" in
+  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+  emit_label ctx body_lbl;
+  (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
+     (march_runtime.c), so one offset serves both GEPs. *)
+  let soff = fresh ctx "nmap_soff" in
+  emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+  let byte_off = fresh ctx "nmap_off" in
+  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  let sptr = fresh ctx "nmap_sptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
+  let x = fresh ctx "nmap_x" in
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
+  let y_native =
+    if unboxed then begin
+      (* No box either side: raw double in, raw double out. This is the
+         shape that actually vectorizes — no allocation call anywhere in
+         the loop for the vectorizer to trip over. *)
+      let y = fresh ctx "nmap_y" in
+      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s)" y apply_name clo_reg x);
+      y
+    end else begin
+      let wire_arg = match arg_box with
+        | Some b ->
+          let vfield = fresh ctx "nmap_argval" in
+          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield b);
+          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield);
+          b
+        | None -> coerce ctx elem_ty x "ptr"
+      in
+      let y = fresh ctx "nmap_y" in
+      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s)" y apply_name clo_reg wire_arg);
+      coerce ctx "ptr" y elem_ty
+    end
+  in
+  let dptr = fresh ctx "nmap_dptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
+  emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx exit_lbl;
+  ("ptr", new_arr)
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -692,19 +806,29 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           drop a freshly-owned, uncompensated value (no matching prior IncRC) to
           refcount 0 immediately before it is reused as the next iteration's
           value — a use-after-free. Skip RC ops on these variables; ownership is
-          transferred into the new slot instead. *)
+          transferred into the new slot instead.
+          EXCEPTION TO THE EXCEPTION: a forwarded argument that is DUP-BOUND
+          (its binding RHS is `inc_rc x; x` — see Llvm_tco.dup_bound_vars) does
+          have a matching prior IncRC, so its DecRC is the closing half of a
+          balanced pair rather than an early release. Skipping it strands the
+          +1 and leaks one cell per iteration (a `Cons(_, t)` list walk leaks
+          the entire list). Emit those. *)
     let arg_var_names =
-      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+      List.filter_map (fun a -> match a with
+        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
+          Some v.Tir.v_name
+        | _ -> None) args
     in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
+    let skip op =
+      match Llvm_tco.cleanup_target op with
+      | Some n -> List.mem n arg_var_names
+      | None -> false
+    in
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
-        when List.mem v.Tir.v_name arg_var_names ->
-        emit_dec_chain rest
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
-        ignore (emit_expr ctx op);
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op);
         emit_dec_chain rest
       | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
     in
@@ -756,28 +880,31 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           variables so a freshly-owned, uncompensated argument (e.g. the
           result of a fresh allocation with no prior IncRC, as opposed to a
           borrowed field promoted via IncRC) isn't dropped to refcount 0 and
-          freed immediately before being reused as the next iteration's value. *)
+          freed immediately before being reused as the next iteration's value.
+          The "as opposed to" half of that sentence is the DUP-BOUND case, and
+          it must NOT be skipped: there the DecRC balances the IncRC that
+          materialised the local, so dropping it leaks one cell per iteration
+          (see Llvm_tco.dup_bound_vars — this is the `Cons(_, t)` walk that
+          leaked its whole list). *)
     let arg_var_names =
-      List.filter_map (fun a -> match a with Tir.AVar v -> Some v.Tir.v_name | _ -> None) args
+      List.filter_map (fun a -> match a with
+        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
+          Some v.Tir.v_name
+        | _ -> None) args
     in
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
+    let skip op =
+      match Llvm_tco.cleanup_target op with
+      | Some n -> List.mem n arg_var_names
+      | None -> false
+    in
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-                  | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v)), rest)
-        when List.mem v.Tir.v_name arg_var_names ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op);
         emit_dec_chain rest
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | (Tir.EDecRC (Tir.AVar v) | Tir.EAtomicDecRC (Tir.AVar v)
-        | Tir.EIncRC (Tir.AVar v) | Tir.EAtomicIncRC (Tir.AVar v))
-        when List.mem v.Tir.v_name arg_var_names ->
-        ()
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
+      | op when Llvm_tco.is_cleanup_op op ->
+        if not (skip op) then ignore (emit_expr ctx op)
       | _ -> ()
     in
     emit_dec_chain dec_chain;
@@ -834,7 +961,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ as op), rest) ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
       | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
@@ -887,13 +1014,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let saved_tail = ctx.tco_in_tail in
     ctx.tco_in_tail <- false;
     let rec emit_dec_chain = function
-      | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-                  | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op, rest) ->
+      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
         ignore (emit_expr ctx op);
         emit_dec_chain rest
-      | (Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _
-        | Tir.EIncRC _ | Tir.EAtomicIncRC _) as op ->
-        ignore (emit_expr ctx op)
+      | op when Llvm_tco.is_cleanup_op op -> ignore (emit_expr ctx op)
       | _ -> ()
     in
     emit_dec_chain dec_chain;
@@ -949,7 +1073,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ctx.tco_in_tail <- saved_tail;
     (match e2 with
      | Tir.EDecRC _ | Tir.EIncRC _
-     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _ ->
+     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _
+     (* A synthesized deep-drop call stands in for exactly the EDecRC above
+        (Drop.run rewrites one into the other), returns Unit, and is likewise
+        evaluated only for effect — so it must propagate e1's value too. See
+        Tir_names.is_drop_fn. *)
+     | Tir.EApp ({ Tir.v_name = _; _ }, _)
+       when (match e2 with
+             | Tir.EApp (f, _) -> Tir_names.is_drop_fn f.Tir.v_name
+             | _ -> false) ->
        (* e2 is a pure side-effect (no meaningful value). Return e1's value so
           that ELet(v, ESeq(call, dec_rc), body) binds the call result, not 0.
           Perceus emits this pattern for borrowed-arg post-call decrements. *)
@@ -1963,7 +2095,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (ret_ty, r)
        end)
 
-  (* ── Native array map inline loop (P10 Phase 2) ──────────────────────
+  (* ── Native array map inline loop, non-capturing closure (P10 Phase 2) ──
      native_map_inline.ml rewrites EApp(native_int_arr_map/native_float_arr_map,
      [arr; clo]) into this synthetic call whenever the closure is a fresh,
      non-capturing lambda used nowhere else: the 2nd arg becomes a direct
@@ -1980,62 +2112,44 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      and for Int, instcombine can then cancel the tag/untag round-trip
      entirely, leaving a plain scalar loop the vectorizer can pack into SIMD.
      Float keeps the alloc/unbox calls (real heap allocations) in the loop
-     body, which blocks vectorization — see specs/optimizations.md P10. *)
+     body, which blocks vectorization — see specs/optimizations.md P10.
+     $clo is `null`: the apply body never reads it (no free vars to load).
+     "..._unboxed" (Float only — Stage 4 Option B) calls an unboxed clone
+     of the apply fn instead, see [Native_map_inline.try_unboxed_variant]
+     and [emit_native_map_inline_loop]'s [~unboxed] doc. *)
   | Tir.EApp (f, [arr_atom; Tir.AVar apply_v])
     when f.Tir.v_name = "__native_int_arr_map_inline"
-      || f.Tir.v_name = "__native_float_arr_map_inline" ->
-    let is_float = f.Tir.v_name = "__native_float_arr_map_inline" in
-    let elem_ty = if is_float then "double" else "i64" in
-    let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
-    let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+      || f.Tir.v_name = "__native_float_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
     let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
-    (* Open a dedicated preheader so its label is known for the loop phi,
-       regardless of what block was open before this arm ran. *)
-    let preheader = fresh_block ctx "nmap_pre" in
-    emit_term ctx (Printf.sprintf "br label %%%s" preheader);
-    emit_label ctx preheader;
-    let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
-    let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
-    let len = fresh ctx "nmap_len" in
-    emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len len_fn arr_v);
-    let new_arr = fresh ctx "nmap_out" in
-    emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len);
-    let cond_lbl = fresh_block ctx "nmap_cond" in
-    let body_lbl = fresh_block ctx "nmap_body" in
-    let exit_lbl = fresh_block ctx "nmap_exit" in
-    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg:"null"
 
-    emit_label ctx cond_lbl;
-    let i = fresh ctx "nmap_i" in
-    let i_next = fresh ctx "nmap_inext" in
-    emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
-    let cmp = fresh ctx "nmap_cmp" in
-    emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
-    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
-
-    emit_label ctx body_lbl;
-    (* Both source and dest arrays share the same NATIVE_ARR_HDR=24 layout
-       (march_runtime.c), so one offset serves both GEPs. *)
-    let soff = fresh ctx "nmap_soff" in
-    emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
-    let byte_off = fresh ctx "nmap_off" in
-    emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
-    let sptr = fresh ctx "nmap_sptr" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
-    let x = fresh ctx "nmap_x" in
-    emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
-    let wire_arg = coerce ctx elem_ty x "ptr" in
-    let y = fresh ctx "nmap_y" in
-    emit ctx (Printf.sprintf "%s = call ptr @%s(ptr null, ptr %s)" y apply_name wire_arg);
-    let y_native = coerce ctx "ptr" y elem_ty in
-    let dptr = fresh ctx "nmap_dptr" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
-    emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty y_native dptr);
-    emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
-    emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
-
-    emit_label ctx exit_lbl;
-    ("ptr", new_arr)
+  (* ── Native array map inline loop, capturing closure (P10 Phase 2c) ──
+     Same rewrite/codegen as Phase 2 above, but for a closure that DOES
+     capture free variables: native_map_inline.ml leaves the closure
+     allocation (and any alias-copy lets / Perceus RC ops around it)
+     completely untouched — the struct is a real, live value now, not
+     something safe to drop — and only rewrites the terminal call site to
+     this 3-arg form, adding the closure pointer as a genuine 3rd argument.
+     The call below passes it as the apply fn's real $clo, instead of the
+     `null` Phase 2 uses: the apply body loads its free variables from it
+     via ordinary EField (GEP+load), and since $clo is loop-invariant, LLVM
+     can hoist that load above the loop once the call is inlined — e.g. a
+     DataFrame `col +. scalar` (`fn x -> x +. f`, capturing `f`) reduces to
+     one hoisted load of `f` plus a per-element fadd, same vectorization
+     story as Phase 2's non-capturing case. *)
+  | Tir.EApp (f, [arr_atom; Tir.AVar apply_v; clo_atom])
+    when f.Tir.v_name = "__native_int_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline"
+      || f.Tir.v_name = "__native_float_arr_map_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map_inline_unboxed" in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+    let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
+    emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

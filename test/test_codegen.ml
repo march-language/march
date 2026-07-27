@@ -890,6 +890,124 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
     true (List.length live_decrefs > 0)
 
+(** Regression: a hand-written tail-recursive list walk leaked every cons cell.
+
+    [eafbd71a] fixed a use-after-free where the self-TCO back-edge eagerly ran
+    a post-call DecRC on a FRESHLY-ALLOCATED forwarded argument (no matching
+    prior IncRC), freeing it one instruction before the next iteration reused
+    it.  The fix skipped every Dec/IncRC in the dec-chain whose target is one
+    of the forwarded arguments — too broad.  A [Cons(_, t) -> walk(t, ...)]
+    walk lowers to
+        let t = (inc_rc $f; $f) in walk(t, acc'); dec_rc t
+    where the DecRC is the *matching half* of the IncRC that materialised [t]
+    from the borrowed tail field.  Skipping it leaves the IncRC uncompensated,
+    so every cons cell (and its payload) ends the loop at refcount >= 1 and is
+    never reclaimed when the owner drops the list — a leak proportional to the
+    input, the ordinary way to consume a [String.split] result.
+
+    [walk]'s whole body is the TCO loop, so its RC ops must balance over one
+    iteration: assert the emitted [@walk] definition issues as many DecRCs as
+    IncRCs.  Before the fix it dups the tail field once and never releases it
+    (1 IncRC / 0 DecRC).  (eafbd71a's own case stays covered by
+    test/native/tco_fresh_arg_decrc.march — there the forwarded argument has
+    no IncRC to balance, so it must keep emitting neither op.) *)
+let test_tco_self_dup_arg_decref_on_live_path () =
+  let ir = emit_tco_opt_ir {|mod Test do
+    @[no_warn_recursion]
+    fn walk(xs : List(String), acc : Int) : Int do
+      match xs do
+      Nil -> acc
+      Cons(_, t) -> walk(t, acc + 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(walk(["a", "b"], 0))) end
+  end|} in
+  Alcotest.(check bool) "self-tco dup-arg: tco_loop emitted" true
+    (ir_contains ir "tco_loop");
+  let walk_ir =
+    let start = Str.search_forward (Str.regexp "define [^\n]*@walk(") ir 0 in
+    let stop = Str.search_forward (Str.regexp "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  Alcotest.(check bool) "self-tco dup-arg: walk's body is the TCO loop" true
+    (ir_contains walk_ir "br label %tco_loop");
+  let count pat =
+    let re = Str.regexp_string pat in
+    let rec go start acc =
+      match Str.search_forward re walk_ir start with
+      | exception Not_found -> acc
+      | _ -> go (Str.match_end ()) (acc + 1)
+    in
+    go 0 0
+  in
+  let incs = count "@march_incrc" in
+  (* The release is either a direct decrc or — once Drop.run has rewritten it
+     — a call to the generated deep drop, which performs that same decrc on
+     the box.  Either discharges the dup; neither being present does not. *)
+  let decs = count "@march_decrc" + count "@__drop$" in
+  Alcotest.(check bool) "self-tco dup-arg: the tail field is dup'd" true (incs > 0);
+  Alcotest.(check int)
+    "self-tco dup-arg: every IncRC of the forwarded tail has a matching release (else every cons cell leaks)"
+    incs decs
+
+(** Regression: dropping a container that was never destructured leaked
+    everything below its top cell.
+
+    March reclaims an aggregate by DESTRUCTURING it — [llvm_case.ml]'s
+    owned-scrutinee path frees the box with [march_decrc_freed] and lets the
+    extracted fields inherit its child references.  A bare [EDecRC], which is
+    what Perceus emits for the OWNER when the consumer only borrows, instead
+    lowered to [march_decrc_local]: a shallow [free(p)] that never decrements
+    the children.  So
+
+    {v
+      let parts = String.split(buf, ",")
+      consume(parts)        -- borrows
+      -- drop parts         -- freed ONE cons cell; 150K strings orphaned
+    v}
+
+    leaked proportionally to the input (585 MB peak on a 60-iteration loop,
+    growing linearly).  It was never about the traversal: a [consume] that
+    ignores its argument entirely leaked identically.
+
+    [Drop.run] now routes such a drop through a synthesized [__drop$T].
+    Assert the call reaches the emitted IR and that the drop function itself
+    is present, releases the head field, and early-exits on a shared box —
+    that last part is not an optimization: descending into a cell whose
+    refcount did not reach zero is both wrong (the children still belong to
+    the surviving reference) and quadratic. *)
+let test_deep_drop_of_borrowed_container () =
+  let ir = emit_tco_opt_ir {|mod Test do
+    @[no_warn_recursion]
+    fn consume(xs : List(String)) : Int do 0 end
+    fn go(buf : String, i : Int, n : Int, acc : Int) : Int do
+      if i >= n do acc
+      else
+        let parts = String.split(buf, ",")
+        go(buf, i + 1, n, acc + consume(parts))
+      end
+    end
+    fn main() : Unit do println(int_to_string(go("a,b,c", 0, 2, 0))) end
+  end|} in
+  Alcotest.(check bool)
+    "deep drop: the owner's drop of the split result calls a generated deep drop, not a bare decrc"
+    true (ir_contains ir "call void @__drop$List_String");
+  let drop_ir =
+    let start = Str.search_forward
+        (Str.regexp "define [^\n]*@__drop\\$List_String(") ir 0 in
+    let stop = Str.search_forward (Str.regexp "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  Alcotest.(check bool)
+    "deep drop: releases the box via march_decrc_freed so it can tell unique from shared"
+    true (ir_contains drop_ir "@march_decrc_freed");
+  Alcotest.(check bool)
+    "deep drop: releases the head field when it owned the box"
+    true (ir_contains drop_ir "@march_decrc");
+  Alcotest.(check bool)
+    "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
+    true (ir_contains drop_ir "br label %tco_loop")
+
 (** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
     arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
     at ANY position without checking [in_tail], so a Perceus-wrapped group
@@ -3360,6 +3478,12 @@ let test_simplify_not_false () =
 
 (* ── Function inlining ───────────────────────────────────────────── *)
 
+let direct_call_to name =
+  March_tir.Tir.EApp
+    (mk_var name
+       (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+     [ilit 1])
+
 let test_inline_pure_small () =
   (* fn double(x) = x + x; fn main() = double(5) → call gets inlined *)
   let changed = ref false in
@@ -3433,6 +3557,141 @@ let test_inline_mutual_recursion_not_inlined () =
   let m = mk_module [f_fn; g_fn; main_fn] in
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
+
+let test_inline_acyclic_candidate_chain () =
+  let changed = ref false in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let leaf =
+    { March_tir.Tir.fn_name = "leaf";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let wrapper =
+    { March_tir.Tir.fn_name = "wrapper";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.EApp
+          (mk_var "leaf"
+             (March_tir.Tir.TFn
+                ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+           [March_tir.Tir.AVar x]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = direct_call_to "wrapper";
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let result =
+    March_tir.Inline.run ~changed (mk_module [leaf; wrapper; main])
+  in
+  let main_body =
+    result.March_tir.Tir.tm_fns
+    |> List.find (fun fn -> String.equal fn.March_tir.Tir.fn_name "main")
+    |> fun fn -> fn.March_tir.Tir.fn_body
+  in
+  match main_body with
+  | March_tir.Tir.EApp (fn, _)
+    when String.equal fn.March_tir.Tir.v_name "wrapper" ->
+    Alcotest.fail "acyclic wrapper remained excluded from candidates"
+  | _ -> ()
+
+let live_add_chain param count tail =
+  let rec build index current =
+    if index = count then tail current
+    else
+      let next =
+        mk_var (Printf.sprintf "grow_%d" index) March_tir.Tir.TInt
+      in
+      March_tir.Tir.ELet
+        (next,
+         app "+" [March_tir.Tir.AVar current; March_tir.Tir.AVar param],
+         build (index + 1) next)
+  in
+  build 0 param
+
+let test_inline_acyclic_growth_removes_outer_from_llvm () =
+  let int_fn_ty =
+    March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)
+  in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let inner_first = mk_var "inner_first" March_tir.Tir.TInt in
+  let inner_second = mk_var "inner_second" March_tir.Tir.TInt in
+  let inner_growth =
+    { March_tir.Tir.fn_name = "inner_growth";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.ELet
+          (inner_first,
+           app "+" [March_tir.Tir.AVar x; March_tir.Tir.AVar x],
+           March_tir.Tir.ELet
+             (inner_second,
+              app "+" [March_tir.Tir.AVar inner_first; March_tir.Tir.AVar x],
+              March_tir.Tir.EAtom (March_tir.Tir.AVar inner_second)));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let outer_x = mk_var "outer_x" March_tir.Tir.TInt in
+  let outer_growth =
+    { March_tir.Tir.fn_name = "outer_growth";
+      fn_params = [outer_x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        live_add_chain outer_x 11 (fun current ->
+          March_tir.Tir.EApp
+            (mk_var "inner_growth" int_fn_ty, [March_tir.Tir.AVar current]));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = March_tir.Tir.EApp (mk_var "outer_growth" int_fn_ty, [ilit 1]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  Alcotest.(check int) "inner_growth fixture node count" 9
+    (March_tir.Inline.node_count inner_growth.March_tir.Tir.fn_body);
+  Alcotest.(check int) "outer_growth fixture node count" 46
+    (March_tir.Inline.node_count outer_growth.March_tir.Tir.fn_body);
+  let module_ = mk_module [inner_growth; outer_growth; main] in
+  let contains haystack needle =
+    let needle_len = String.length needle in
+    let rec search index =
+      index + needle_len <= String.length haystack
+      && (String.sub haystack index needle_len = needle || search (index + 1))
+    in
+    search 0
+  in
+  let count_substring haystack needle =
+    let needle_len = String.length needle in
+    let rec count index total =
+      if index + needle_len > String.length haystack then total
+      else if String.sub haystack index needle_len = needle then
+        count (index + needle_len) (total + 1)
+      else count (index + 1) total
+    in
+    count 0 0
+  in
+  let ir_before = March_tir.Llvm_emit.emit_module module_ in
+  let optimized = March_tir.Opt.run module_ in
+  let ir = March_tir.Llvm_emit.emit_module optimized in
+  let metrics =
+    Printf.sprintf " (calls before=%d after=%d; ir bytes before=%d after=%d)"
+      (count_substring ir_before " call ")
+      (count_substring ir " call ")
+      (String.length ir_before) (String.length ir)
+  in
+  Alcotest.(check bool)
+    ("no residual call to outer_growth" ^ metrics) false
+    (contains ir "call i64 @outer_growth(");
+  Alcotest.(check bool)
+    ("DCE removes outer_growth definition" ^ metrics) false
+    (contains ir "define i64 @outer_growth(")
 
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
@@ -7606,6 +7865,80 @@ let test_float_lit_no_wildcard_panics_compiled () =
       ((ir_contains run_out "non-exhaustive" || ir_contains run_out "panic")
        && ir_contains run_out "EXIT:1")
 
+(* ── String literals are constants, not per-evaluation allocations ──────
+   A string literal carries NO refcount obligation in TIR: perceus.ml's
+   [EAtom (ALit _)] arm returns the expression untouched, exactly as it does
+   for a global [ADefRef].  Codegen used to break that contract for
+   [LitString] by calling @march_string_lit — a fresh rc=1 malloc — on every
+   evaluation of the site.  Nothing owned that cell, so no pass ever emitted
+   a matching dec: each evaluation leaked one string.  `buf ++ "xyz"` in a
+   2M-iteration loop leaked 2M strings (peak RSS 64MB vs 2.9MB for the same
+   loop with both operands as variables).  This matters well beyond the
+   synthetic case — `acc ++ ", "` and `s ++ "\n"` are how ordinary string
+   building is written.  Fix: one immortal string per literal SITE, cached in
+   a per-site global by @march_string_lit_static.
+
+   Choosing the shape of this test is the whole trick, because two adjacent
+   shapes are VACUOUS:
+     * a let-bound literal (`let s = "xyz"` used later) gets an ordinary
+       Perceus dec on its binding, so it never leaked; and
+     * a literal passed straight to a non-allocating call (e.g.
+       `String.byte_size("xyz")` in a loop) is hoisted out of the loop by the
+       optimizer and evaluated twice in total.
+   Only a literal evaluated repeatedly as a direct OPERAND — canonically of
+   `++` — exercises the bug.  Verified non-vacuous by reverting just the
+   codegen arm: this program prints "LEAKED 20001" against the old emission
+   and "BOUNDED" against the fixed one.
+
+   The assertion reads the runtime's own live-object gauge
+   (march_live_allocs, alloc + / free-on-rc=0 -) through an extern rather
+   than sampling RSS, so it measures the leak directly and cannot flake on
+   allocator or platform behaviour.  It compares the SAME literal site across
+   two loop lengths: the growth is what must stay bounded, not the absolute
+   count (one immortal cell per site is the intended, and permanent, cost). *)
+let test_string_literal_operand_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_strlitleak"
+    "mod StrLitLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      let s = buf ++ \"xyz\"\n\
+    \      concat_loop(buf, i + 1, n, acc + String.byte_size(s))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the literal site first, so its one permanent cell is already\n\
+     -- allocated when the baseline is sampled and only per-iteration growth\n\
+     -- can move the gauge.\n\
+    \    let warm = concat_loop(\"abc\", 0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = concat_loop(\"abc\", 0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "strlitleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a string literal used as a `++` operand in a loop allocates once for \
+       the whole site, not once per iteration (live-object count must not \
+       grow with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -9042,6 +9375,7 @@ declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
+declare ptr  @march_string_lit_static(ptr %s, i64 %len, ptr %cell)
 declare ptr  @march_html_auto_escape(ptr %v)
 declare i32  @march_record_shape_intern(ptr %desc)
 declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)
@@ -9339,7 +9673,12 @@ declare i64    @native_int_arr_length(ptr %arr)
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare i64    @native_int_arr_sum(ptr %arr)
+declare i64    @native_int_arr_min(ptr %arr)
+declare i64    @native_int_arr_max(ptr %arr)
+declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_int_arr_map2(ptr %arr1, ptr %arr2, ptr %f)
+declare ptr    @native_int_arr_to_float_arr(ptr %arr)
 declare ptr    @native_int_arr_from_list(ptr %lst)
 declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
@@ -9349,7 +9688,11 @@ declare i64    @native_float_arr_length(ptr %arr)
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
+declare double @native_float_arr_min(ptr %arr)
+declare double @native_float_arr_max(ptr %arr)
+declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_float_arr_map2(ptr %arr1, ptr %arr2, ptr %f)
 declare ptr    @native_float_arr_from_list(ptr %lst)
 declare ptr    @native_float_arr_to_list(ptr %arr)
 declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
@@ -9752,6 +10095,10 @@ let codegen_suites =
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
           Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
             `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "self TCO: dup'd forwarded arg is decref'd on live path"
+            `Quick test_tco_self_dup_arg_decref_on_live_path;
+          Alcotest.test_case "deep drop: never-destructured container releases its children"
+            `Quick test_deep_drop_of_borrowed_container;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
             `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"
@@ -9907,6 +10254,9 @@ let codegen_suites =
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
+        Alcotest.test_case "acyclic_candidate_chain" `Quick test_inline_acyclic_candidate_chain;
+        Alcotest.test_case "acyclic_growth_removes_outer_from_llvm" `Quick
+          test_inline_acyclic_growth_removes_outer_from_llvm;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;
@@ -10234,6 +10584,10 @@ let codegen_suites =
           Alcotest.test_case "compiled float non-exhaustive match panics (B4)" `Quick
             test_float_lit_no_wildcard_panics_compiled;
         ] );
+      ( "string_literal_codegen", [
+          Alcotest.test_case "compiled string literal as `++` operand does not leak per evaluation" `Quick
+            test_string_literal_operand_no_leak_compiled;
+        ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
             test_erased_option_niche_fbip_no_underflow_compiled;
@@ -10380,4 +10734,3 @@ let codegen_suites =
   @ Test_ir_verify.suites (* W2.1: LLVM IR validity gate over test/native/*.march *)
   @ Test_collision_set.suites (* Task 0: same-short-name type collision-set computation *)
   @ Test_ctor_tags.suites (* Task 1: globally-unique ctor tags for colliding types *)
-

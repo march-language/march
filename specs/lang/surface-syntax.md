@@ -307,22 +307,41 @@ type Arr(n) = Array(n * 2)
 ## Refinement Types
 
 A base type plus a predicate, checked by an SMT solver (Z3) at compile time.
-`_` is the value being refined; the predicate is `Int`/`Bool` linear arithmetic.
+`_` is the value being refined; a named binder (`v : T`) is required to reach
+fields or pass the value to a measure.
 
 ```march
 {Int | _ >= 0}                     -- a non-negative Int
 {Int | _ != 0}                     -- a non-zero Int
 {v : Int | v >= 0 && v < 100}      -- named binder form
+{String | len(_) > 0}              -- a non-empty String
+{String | _ != ""}                 -- literal equality
+{Bool | _ == true}                 -- a Bool (operator form; `not _` won't parse)
+{Float | _ >= 0.0}                 -- a Float, via Z3's IEEE-754 theory
+{Float | _ != 0.0}                 -- a safe divisor (`-0.0` is rejected too)
+{Option(Int) | is_Some(_)}         -- an ADT constructor tag
+{v : Cfg | v.port >= 1}            -- a record field
+{v : Cfg | v.port > v.retries}     -- one field against another
+{v : Tree | size(v) < 100}         -- a @[measure] over a structure
 ```
 
-Used as parameter (precondition) or return (postcondition) types:
+The predicate fragment is `+ - *` (literal coefficients), the comparisons
+`== != < <= > >=`, the connectives `&& || not`, literals, field projection,
+`len`, `is_<Ctor>` testers, and `@[measure]` functions. A predicate may also
+mention **another parameter**, which makes it *relational*:
 
 ```march
-fn at(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs)}) : Int do ... end
-fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
+fn slice(lo : Int, hi : {Int | _ > lo}) : Int do hi end
+fn get(t : Tree, i : {Int | _ >= 0 && _ < size(t)}) : Int do i end
+fn insert(t : Tree, x : Int) : {Tree | size(_) == size(t) + 1} do ... end
 ```
 
-A `@[measure]` function (total, terminating, pure) may be used in predicates:
+Used as parameter (precondition) or return (postcondition) types. A return
+refinement the checker can **prove** propagates to call sites, so
+`takepos(neg())` is rejected when `neg` promises `{Int | _ < 0}`.
+
+A `@[measure]` function (total, terminating, pure, structurally recursive) may
+be used in predicates:
 
 ```march
 @[measure]
@@ -334,10 +353,23 @@ fn size(t : Tree(a)) : Int do
 end
 ```
 
-Checking is definite-failure (flags only what can *never* hold — no false
-positives) and runs only when `z3` is on `PATH`. See the
-[Refinement Types guide](refinement-types.md) for the full story and
-limitations (`Int`/`Bool` only, no `Float` value-refinements, direct calls only).
+Checking is definite-failure — it flags only what can *never* hold, so there
+are no false positives, and silence means "not disproved", never "verified".
+It runs only when `z3` is on `PATH`. A predicate calling a name the checker
+does not know produces a **warning** rather than silently enforcing nothing.
+
+`Float` predicates are **comparisons only** — float *arithmetic* in a predicate
+(`_ +. 1.0 > 0.0`) is out of scope and makes the obligation skipped rather than
+guessed at. They are discharged through Z3's bit-precise IEEE-754 theory, never
+by modelling floats as reals: over reals `not (x >= 0.0) && not (x <= 0.0)` is
+unsatisfiable and correct code would be flagged, while over floats it is
+satisfiable (witness: `NaN`) and correctly stays silent.
+
+See the [Refinement Types guide](refinement-types.md) for the full story and
+the exact limitations (float arithmetic, float record fields and special-value
+predicates are out of scope; strings support only `len` and literal equality;
+higher-order checking covers refined callback types and local aliases but not
+unrefined callbacks or `interface` dispatch).
 
 ---
 
@@ -925,6 +957,19 @@ protocol Negotiation do
   choose by Client:
     | accept -> Client -> Server : Bool
     | reject -> Client -> Server : Bool
+  end
+end
+
+-- `stop` exits an enclosing `loop` instead of repeating it; legal only
+-- inside a `loop` body, directly or inside a `choose` branch nested in one.
+protocol Stream do
+  loop do
+    Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
   end
 end
 ```

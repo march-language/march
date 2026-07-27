@@ -90,6 +90,8 @@ fn count(xs : List(a)) : {Int | _ >= 0} do List.length(xs) end
 The supported predicate fragment is **`Int`/`Bool` linear arithmetic**:
 `+ - *` (multiplication by a literal), the comparisons `== != < <= > >=`, the
 connectives `&& || not`, integer/bool literals, and **measures** (below).
+`Bool` and `Float` values are refinable too — see
+[Bool and Float Refinements](#bool-and-float-refinements).
 
 ---
 
@@ -235,30 +237,105 @@ reasoning.
 
 ---
 
+## Bool and Float Refinements
+
+A `Bool` parameter or return carries a predicate over the ordinary boolean
+operators — `==`, `!=`, `&&`, `||`, `not` — against `true` and `false`:
+
+```march
+fn commit(confirmed : {Bool | _ == true}) : Int do ... end
+
+commit(false)   -- rejected: `_ == true` can never hold at `false`
+commit(true)    -- fine
+```
+
+Write the **operator form**: `{Bool | not _}` does not parse, so use
+`{Bool | _ == false}`. An unknown `Bool` is skipped, and a guard works as you'd
+expect — `if k do commit(k) else 0 end` passes.
+
+A `Float` parameter or return carries a **comparison** — `>=`, `>`, `<=`, `<`,
+`==`, `!=` — against float literals or another float value:
+
+```march
+fn sqrtish(x : {Float | _ >= 0.0}) : Float do ... end
+fn ratio(n : Float, d : {Float | _ != 0.0}) : Float do n /. d end
+
+sqrtish(0.0 -. 1.0)   -- rejected
+sqrtish(4.0)          -- fine
+ratio(1.0, 0.0)       -- rejected: a zero divisor
+```
+
+### Why floats are not modelled as reals
+
+Float predicates go to Z3's **bit-precise IEEE-754 FloatingPoint** theory:
+`Float64`, `fp.geq` / `fp.gt` / `fp.leq` / `fp.lt`, and `fp.eq` for equality.
+Modelling floats as mathematical **reals** would break the no-false-positives
+promise. Consider `not (x >= 0.0) && not (x <= 0.0)`. Over reals, trichotomy
+makes that **impossible** — and since the checker objects exactly when a
+predicate can *never* hold, it would flag this contract on every argument. Over
+floats it is perfectly possible, witnessed by `NaN`, which compares false
+against everything; so the checker correctly stays silent.
+
+Equality is `fp.eq` (IEEE equality), not bitwise identity. Under bitwise
+identity `-0.0` would differ from `0.0` and `{Float | _ != 0.0}` would accept a
+negative zero — just as bad a divisor as a positive one. Under `fp.eq`,
+`-0.0 == 0.0` holds (so a negative zero **is** rejected) and `NaN` equals
+nothing, not even itself.
+
+Float **arithmetic inside a predicate** — `{Float | _ +. 1.0 > 0.0}` — is out of
+scope: modelling it needs rounding-mode reasoning, so the whole predicate is
+skipped rather than approximated. Arithmetic over float *literals* is different:
+`0.0 -. 1.0` is folded to a constant first and is fully checked, which is how a
+negative literal (which March has no direct spelling for) still works.
+
+---
+
 ## Limitations
 
 No refinement system is complete — this one is intentionally a *pragmatic slice* of
 dependent typing. Know the edges:
 
-- **`Int` and `Bool` only.** There are **no `Float` value-refinements** —
-  encoding floats as mathematical reals is unsound for IEEE-754 arithmetic, so
-  it's deliberately omitted. Predicates over other types aren't supported.
+- **`Int`, `Bool`, `Float`, `String` (narrowly), records and ADT tags.**
+  Predicates over other types aren't supported. `Float` predicates are
+  **comparisons only**; float arithmetic inside one is skipped rather than
+  guessed at, and a `Float` sitting inside a record or a constructor is opaque.
+  See [Bool and Float Refinements](#bool-and-float-refinements).
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
   "unknown" and are skipped. This never produces a false positive, but it does
   mean some real guarantees go unchecked.
-- **Direct calls only — no higher-order or interface dispatch.** A precondition
-  on a function passed as a value, called through a variable, or dispatched
-  through an `interface`/`impl` is **not** checked. (True higher-order checking
-  needs refinement subtyping in unification, which isn't implemented.)
+- **Higher-order: two shapes are checked, the rest are not.** A call made
+  through a parameter whose declared type carries a refinement —
+  `f : ({Int | _ >= 0}) -> Int` — is checked, and so is a call through a local
+  alias of a named refined function (`let g = takepos` then `g(-3)`). NOT
+  checked: a callback parameter whose own type is unrefined (so
+  `apply(take_n, -3)` with `apply(f : Int -> Int, x : Int)` still passes),
+  inferring a higher-order function's requirement from its body, dispatch
+  through an `interface`/`impl`, and multi-argument callback types. To
+  constrain a caller today, refine the higher-order function's *own* parameter.
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
-- **No relational postconditions yet.** Properties that *relate* a measure
-  across an operation — `size(insert(t, x)) == size(t) + 1` — are not yet
-  provable automatically (they often need induction the solver can't do by
-  itself). Use an `assert` lemma where you need them.
+- **Relational postconditions work, within structural recursion.** A predicate
+  that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
+  — is proven by supplying the induction hypothesis at each recursive call whose
+  argument is a proper component of the matched parameter, then discharging each
+  `match` arm against the measure's recursion equations. Only a postcondition
+  actually *proved* propagates, so an unprovable one stays legal but tells
+  callers nothing. Still silent: mutual recursion, a recursive call inside a
+  lambda or behind a nested `match`, and any non-structural recursion.
+- **A measure over a built-in `List` with a non-scalar element does not
+  axiomatise.** `List(Int)` is fine; `List(SomeAdt)` collapses the element to an
+  opaque sort and the measure is never usable. A user-defined list type with the
+  same shape works. This is the first obstacle between this machinery and the
+  stdlib's HAMT-based `Map`.
+- **`Bool` predicates need an operator form.** `{Bool | _ == true}` is checked;
+  the bare-binder spelling `{Bool | not _}` is a parse error — write
+  `{Bool | _ == false}`.
+- **No float special values.** There is no `is_nan` / `is_finite` vocabulary, so
+  a predicate cannot mention them (NaN is still modelled correctly *inside* the
+  solver, which is what keeps correct code from being flagged).
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is

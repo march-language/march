@@ -125,17 +125,58 @@ let find_stdlib_dir () =
     main.exe` layout dune produces — resolvable only via the CWD-relative
     fallback, so a `march --compile` invoked from any other directory failed
     with "cannot find runtime/march_runtime.c" even though the sources were
-    right there, three levels up from the exe. *)
+    right there, three levels up from the exe.
+
+    [runtime_dir] resolves the directory ONCE (anchored on march_runtime.c) and
+    hands it to the CAS via [Cas.set_runtime_dir], so the cache key digests the
+    very sources this process compiles.  Before that, cas.ml resolved its own
+    candidate list cwd-FIRST: with cwd at the repo root and the exe under
+    _build/default/bin/, the key digested ./runtime/*.c while clang compiled
+    _build/default/runtime/*.c, and editing a runtime source could print
+    `compiled <out> (cached)` for a binary containing none of the new code.
+    MARCH_RUNTIME_DIR overrides the search, mirroring MARCH_STDLIB. *)
+let runtime_dir : string option Lazy.t = lazy (
+  let candidates =
+    match Sys.getenv_opt "MARCH_RUNTIME_DIR" with
+    | Some d when d <> "" -> [d]
+    | _ ->
+      let exe_dir = Filename.dirname (resolve_exe_path Sys.executable_name) in
+      [ Filename.concat exe_dir "../runtime";
+        Filename.concat exe_dir "../../runtime";
+        Filename.concat exe_dir "../../../runtime";
+        "runtime" ]
+  in
+  let dir =
+    List.find_opt
+      (fun d -> Sys.file_exists (Filename.concat d "march_runtime.c"))
+      candidates
+  in
+  (match dir with
+   | Some d -> March_cas.Cas.set_runtime_dir d
+   | None -> ());
+  dir)
+
 let find_runtime_file name =
-  let exe_path = resolve_exe_path Sys.executable_name in
-  let exe_dir = Filename.dirname exe_path in
-  let candidates = [
-    Filename.concat exe_dir (Filename.concat "../runtime" name);
-    Filename.concat exe_dir (Filename.concat "../../runtime" name);
-    Filename.concat exe_dir (Filename.concat "../../../runtime" name);
-    Filename.concat "runtime" name;
-  ] in
-  List.find_opt Sys.file_exists candidates
+  let in_runtime_dir =
+    match Lazy.force runtime_dir with
+    | Some d ->
+      let p = Filename.concat d name in
+      if Sys.file_exists p then Some p else None
+    | None -> None
+  in
+  match in_runtime_dir with
+  | Some _ as found -> found
+  | None ->
+    (* The resolved directory does not hold this particular file (e.g. a JS
+       runtime .mjs shipped in a different layout) — fall back to the original
+       per-name scan rather than failing. *)
+    let exe_dir = Filename.dirname (resolve_exe_path Sys.executable_name) in
+    List.find_opt Sys.file_exists [
+      Filename.concat exe_dir (Filename.concat "../runtime" name);
+      Filename.concat exe_dir (Filename.concat "../../runtime" name);
+      Filename.concat exe_dir (Filename.concat "../../../runtime" name);
+      Filename.concat "runtime" name;
+    ]
 
 (** Parse a stdlib source file and return its top-level declarations.
     Each stdlib file is a single [mod Name do ... end] wrapper.
@@ -2190,6 +2231,17 @@ let compile filename =
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
     stamp "perceus";
+    (* Deep-drop synthesis: route Perceus's bare EDecRC on a heap-owning
+       aggregate through a generated destructuring drop, so releasing a
+       container that was never pattern-matched also releases its children
+       (see lib/tir/drop.ml).  Skipped for the JS target, whose runtime is
+       GC'd and ignores RC ops entirely — there the generated drop would be a
+       pure-overhead walk of every dropped structure. *)
+    let tir =
+      if parse_target !target_str = March_tir.Llvm_emit.Js then tir
+      else March_tir.Drop.run tir in
+    snap_tir "tir-drop" tir;
+    stamp "drop";
     let tir = March_tir.Escape.escape_analysis tir in
     snap_tir "tir-escape" tir;
     stamp "escape";
@@ -3483,6 +3535,12 @@ let () =
       && Sys.getenv_opt "TERM" <> Some "dumb"
       && Unix.isatty Unix.stderr
   )
+
+let () =
+  (* Register the runtime directory with the CAS before anything can compute a
+     compilation_hash, so the cache key always digests the sources this process
+     will actually compile (see [runtime_dir]). *)
+  ignore (Lazy.force runtime_dir)
 
 let () =
   (* Handle subcommands before Arg.parse *)

@@ -350,6 +350,9 @@
 <a class="sl" href="DataFrame.html#fn-col_len"><span class="sb-kind" style="color:var(--fn)">F</span>col_len</a>
 <a class="sl" href="DataFrame.html#fn-col_mul_float"><span class="sb-kind" style="color:var(--fn)">F</span>col_mul_float</a>
 <a class="sl" href="DataFrame.html#fn-col_name"><span class="sb-kind" style="color:var(--fn)">F</span>col_name</a>
+<a class="sl" href="DataFrame.html#fn-col_native_min_max"><span class="sb-kind" style="color:var(--fn)">F</span>col_native_min_max</a>
+<a class="sl" href="DataFrame.html#fn-col_native_moments"><span class="sb-kind" style="color:var(--fn)">F</span>col_native_moments</a>
+<a class="sl" href="DataFrame.html#fn-col_native_sum"><span class="sb-kind" style="color:var(--fn)">F</span>col_native_sum</a>
 <a class="sl" href="DataFrame.html#fn-col_normalize"><span class="sb-kind" style="color:var(--fn)">F</span>col_normalize</a>
 <a class="sl" href="DataFrame.html#fn-col_null_count"><span class="sb-kind" style="color:var(--fn)">F</span>col_null_count</a>
 <a class="sl" href="DataFrame.html#fn-col_to_nullable"><span class="sb-kind" style="color:var(--fn)">F</span>col_to_nullable</a>
@@ -1223,12 +1226,15 @@
 <a class="sl" href="NativeArray.html#fn-length_int"><span class="sb-kind" style="color:var(--fn)">F</span>length_int</a>
 <a class="sl" href="NativeArray.html#fn-make_float"><span class="sb-kind" style="color:var(--fn)">F</span>make_float</a>
 <a class="sl" href="NativeArray.html#fn-make_int"><span class="sb-kind" style="color:var(--fn)">F</span>make_int</a>
+<a class="sl" href="NativeArray.html#fn-map2_float"><span class="sb-kind" style="color:var(--fn)">F</span>map2_float</a>
+<a class="sl" href="NativeArray.html#fn-map2_int"><span class="sb-kind" style="color:var(--fn)">F</span>map2_int</a>
 <a class="sl" href="NativeArray.html#fn-map_float"><span class="sb-kind" style="color:var(--fn)">F</span>map_float</a>
 <a class="sl" href="NativeArray.html#fn-map_int"><span class="sb-kind" style="color:var(--fn)">F</span>map_int</a>
 <a class="sl" href="NativeArray.html#fn-set_float"><span class="sb-kind" style="color:var(--fn)">F</span>set_float</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_int"><span class="sb-kind" style="color:var(--fn)">F</span>sum_int</a>
+<a class="sl" href="NativeArray.html#fn-to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-to_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_float</a>
 <a class="sl" href="NativeArray.html#fn-to_list_int"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_int</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
@@ -1945,7 +1951,7 @@
 <a href="ConsistentHash.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ConsistentHash</h3><p>ConsistentHash: consistent hashing ring for distributed load balancing.</p><div class="st"><span>8 functions</span><span>1 types</span></div></div></a>
 <a href="Crypto.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Crypto</h3><p>Crypto module: general-purpose cryptographic primitives.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="Csv.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Csv</h3><p>Csv module: streaming CSV parser.</p><div class="st"><span>5 functions</span><span>2 types</span></div></div></a>
-<a href="DataFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>DataFrame</h3><p>DataFrame module: columnar, lazy-evaluated tabular data.</p><div class="st"><span>129 functions</span><span>16 types</span></div></div></a>
+<a href="DataFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>DataFrame</h3><p>DataFrame module: columnar, lazy-evaluated tabular data.</p><div class="st"><span>132 functions</span><span>16 types</span></div></div></a>
 <a href="DateTime.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>DateTime</h3><p>DateTime module: date/time types and arithmetic.</p><div class="st"><span>31 functions</span><span>5 types</span></div></div></a>
 <a href="Decimal.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Decimal</h3><p>Decimal module: fixed-point decimal arithmetic for financial math.</p><div class="st"><span>18 functions</span><span>1 types</span></div></div></a>
 <a href="Deque.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Deque</h3><p>Deque: functional double-ended queue with O(1) size tracking.</p><div class="st"><span>19 functions</span><span>1 types</span></div></div></a>
@@ -1984,7 +1990,7 @@
 <a href="Membership.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Membership</h3><p>Membership: SWIM-style cluster membership with a CRDT member view (P1 L3).</p><div class="st"><span>10 functions</span><span>3 types</span></div></div></a>
 <a href="Merkle.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Merkle</h3><p>Merkle: content-addressed hash tree.</p><div class="st"><span>9 functions</span><span>1 types</span></div></div></a>
 <a href="Msgpack.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Msgpack</h3><p>Msgpack module: MessagePack binary serialization.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
-<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>18 functions</span><span>0 types</span></div></div></a>
+<a href="NativeArray.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NativeArray</h3><p>NativeArray — flat numeric arrays for high-performance numeric loops.</p><div class="st"><span>21 functions</span><span>0 types</span></div></div></a>
 <a href="NetFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetFrame</h3><p>NetFrame: length-prefixed framing for the distributed net-kernel transport.</p><div class="st"><span>2 functions</span><span>0 types</span></div></div></a>
 <a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>16 functions</span><span>0 types</span></div></div></a>
 <a href="NodeCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCall</h3><p>NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>

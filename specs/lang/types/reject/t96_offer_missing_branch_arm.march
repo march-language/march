@@ -1,0 +1,35 @@
+-- EXPECT-ERROR: doesn't handle every branch
+mod Main do
+  -- Session-types Task 5 (2026-07-27) -- offer-label `match` exhaustiveness
+  -- was backwards: an offer label's `match` went through the ordinary Atom
+  -- exhaustiveness path, which is an OPEN universe, so a `match` handling
+  -- EVERY protocol branch still warned "missing case: _" while a `match`
+  -- that genuinely omits a branch produced the exact same warning -- never
+  -- an error. This program omits the `:err` arm entirely, with no catch-all,
+  -- so it must now be a hard error naming the missing branch instead of the
+  -- generic Atom warning. Accept twin: t43 (all labels handled, matches
+  -- against the protocol's closed label set silently).
+  needs IO.Console
+  type C = C
+  type S = S
+
+  protocol D4 do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(D4)
+    let sc2 = Chan.choose(sc, :ok)
+    let sc3 = Chan.send(sc2, 7)
+    Chan.close(sc3)
+    let (lbl, cc2) = Chan.offer(cc)
+    match lbl do
+      :ok ->
+        let (n, cc3) = Chan.recv(cc2)
+        Chan.close(cc3)
+    end
+  end
+end

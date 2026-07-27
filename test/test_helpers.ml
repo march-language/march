@@ -484,6 +484,24 @@ let ir_count ir pat =
     untag + trunc + br i1, not a second ctor-tag switch on the field. *)
 let emit_tco_ir src = emit_actor_ir src
 
+(** Like [emit_tco_ir], but runs the post-Perceus stages the real compiler
+    runs (see bin/main.ml: Perceus → Drop → Escape → Opt).  Needed for TCO and
+    deep-drop tests whose subject only appears in the TIR shape those stages
+    produce — the plain pipeline can leave a self-tail-call in a shape the
+    back-edge emitter never intercepts, hiding emission bugs behind an
+    ordinary call, and emits no [__drop$T] functions at all. *)
+let emit_tco_opt_ir src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Drop.run tir in
+  let tir = March_tir.Escape.escape_analysis tir in
+  let tir = March_tir.Opt.run tir in
+  March_tir.Llvm_emit.emit_module tir
+
 (** Tail-recursive accumulator factorial: should produce a tco_loop block and
     a back-edge branch replacing the self-tail-call. *)
 let emit_mutual_tco_ir = emit_tco_ir
@@ -1678,6 +1696,21 @@ let has_warning_with ctx sub =
   let sub_lo = String.lowercase_ascii sub in
   List.exists (fun d ->
     d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let sub_len = String.length sub_lo in
+    let m_len   = String.length m in
+    let found   = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub_lo then found := true
+    done;
+    !found
+  ) ctx.March_errors.Errors.diagnostics
+
+(** Returns true if ANY error diagnostic's message contains [sub] (case-insensitive). *)
+let has_error_with ctx sub =
+  let sub_lo = String.lowercase_ascii sub in
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error &&
     let m = String.lowercase_ascii d.March_errors.Errors.message in
     let sub_len = String.length sub_lo in
     let m_len   = String.length m in

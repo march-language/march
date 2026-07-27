@@ -1,0 +1,46 @@
+-- EXPECT-ERROR: came from `Chan.offer`
+mod Main do
+  -- Session-types final review, Finding 1 RESIDUAL (2026-07-27) -- the
+  -- NESTED-`fn` shape of the annotated-parameter laundering, and the reason
+  -- `t100` (top-level `fn`) did NOT already cover it.
+  --
+  -- A named `fn` declared INSIDE a function body is not checked by `check_fn`;
+  -- it is desugared to a local binding whose parameters are bound by
+  -- `bind_lam_params`, exactly like a lambda's. So it inherited the same gap
+  -- `t102` documents: the arrow type was built from fresh variables that were
+  -- never unified with the parameter annotations, and an unrefined
+  -- `Chan.offer` continuation flowed into `f` without touching either
+  -- chokepoint. Pre-fix: `--check` exit 0, compiled printed `4354153665` --
+  -- the `String` payload's heap pointer read as an `Int`.
+  --
+  -- Same one-line fix as `t102` (`bind_lam_param` now unifies an annotated
+  -- parameter with the expected type). Lambda sibling: `t102`. Top-level
+  -- twin: `t100`. Base witness: `t95`.
+  needs IO.Console
+  type C = C
+  type S = S
+
+  protocol D2 do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  protocol E do
+    S -> C : Int
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(D2)
+    let sc2 = Chan.choose(sc, :err)
+    let sc3 = Chan.send(sc2, "boom")
+    Chan.close(sc3)
+    let (lbl, cc2) = Chan.offer(cc)
+    -- The laundering: a NESTED named `fn` with an annotated parameter.
+    fn f(c : Chan(C, E)) do Chan.recv(c) end
+    let (v, cx) = f(cc2)
+    Chan.close(cx)
+    println(int_to_string(v + 1))
+  end
+end
