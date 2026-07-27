@@ -58,7 +58,36 @@ git log is authoritative for exact commits.
   `Float` record fields and special-value predicates (`is_nan`) stay out of
   scope and are silently skipped rather than approximated.
 
+- **Non-empty-collection preconditions, on 13 stdlib functions that panic on an
+  empty argument.** `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the
+  `prelude` `head`/`tail`, `Stats.mean`/`min_val`/`max_val`, `Gen.element`/
+  `one_of` and `Random.choice` now declare `{List(a) | len(_) > 0}`, so passing
+  a literal empty list is a compile error instead of a runtime abort:
+  ```march
+  List.head([])       -- refinement violation: `len(_) > 0` cannot hold
+  List.head([1, 2])   -- fine
+  ```
+  Each contract is derived from that function's own panic message, so none is
+  stronger than the check the code already performed, and every `panic` remains
+  as the runtime backstop for arguments the checker skips. A list whose contents
+  the checker cannot see stays **unknown** and is skipped, never guessed. Note
+  that an ordinary `List.length(xs) > 0` guard does not yet discharge the
+  obligation — the runtime function and the `len` measure are not connected, so
+  a guarded call is skipped rather than proved.
+
 ### Fixed
+
+- **A measure over the refined value only worked under one of its three
+  spellings.** In `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` the
+  refined value reflected to a fresh unconstrained constant rather than to the
+  call's actual argument, so the predicate was satisfiable at every call site,
+  never a definite failure, and the contract silently checked nothing — while
+  the third spelling, naming the parameter (`len(xs) > 0`), worked. Two
+  consequences, both silent: the `_` form the documentation teaches gave no
+  enforcement at all, and renaming a parameter unenforced a working contract
+  with no diagnostic beyond an incidental unused-variable warning. All three
+  spellings now resolve against the same actual, as the string and
+  axiom-measure paths already did.
 
 - **Discarding a container no longer leaks its contents.** March reclaimed an
   aggregate only by *destructuring* it; releasing one that was never pattern-

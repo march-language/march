@@ -1,5 +1,48 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, non-empty-collection contracts + measure-over-self binder spellings)
+
+**Non-empty-collection preconditions are now enforceable, and 13 stdlib
+functions carry one.** `{List(a) | len(_) > 0}` on `List.head`/`tail`/`last`/
+`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`, `Stats.mean`/`min_val`/
+`max_val`, `Gen.element`/`one_of` and `Random.choice` turns `List.head([])` from
+a runtime abort into a compile error. Each contract is derived from that
+function's own panic message, so none is stronger than the check the code
+already performed, and every `panic` stays as the runtime backstop for the
+arguments the checker skips.
+
+The enabling fix, in `lib/refinecheck/refine_check.ml`: a measure applied to the
+REFINED VALUE ITSELF now resolves against the call's actual argument under all
+three spellings of that value — the anonymous `_`, a named binder `v`, and the
+parameter's own name. The non-axiom-measure branch (list `len`, user measures
+without axioms) previously resolved the first two to a fresh non-negative
+constant, which is satisfiable at every call site and therefore never a definite
+failure: the contract parsed, typechecked, and checked nothing, while the third
+spelling worked. Two silent consequences — the `_` form the documentation
+teaches gave no enforcement at all, and renaming a parameter unenforced a
+working contract with no diagnostic beyond an incidental unused-variable
+warning. The string and axiom-measure paths on either side of it already
+resolved against the actual; this branch was the odd one out.
+
+The gap survived a green suite because the corpus only ever exercised `len` in
+its RELATIONAL form (`{Int | _ < len(xs)}`, the measure naming a *different*
+parameter — always correct). Nothing exercised a measure over the refined value
+for a list. `accept/t115`–`t117` and `reject/t114`–`t116` now bracket each
+spelling from BOTH sides, because an accept-only witness cannot tell a working
+contract from one that checks nothing; `reject/t116` additionally pins that a
+contract written in a stdlib signature reaches a user call site at all.
+
+Unknown lengths stay skipped, never guessed: a `List` the checker cannot see
+into is silent. Verified false-positive-free across the whole stdlib (0
+refinement violations over 111 modules) and the full typing corpus (216/216 —
+107 accept, 109 reject). Suites: refinecheck 245, refine 22, run_compiler 605,
+run_eval 253, run_stdlib 817.
+
+**Known limitation.** A runtime `List.length(xs) > 0` guard does NOT discharge a
+`len(_) > 0` obligation — the `List.length` function and the `len` measure are
+unconnected — so a guarded call over a non-literal list is skipped rather than
+proved. A missed proof, not a false report.
+
 ## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
 
 Compiled March now reclaims an aggregate that is released WITHOUT being

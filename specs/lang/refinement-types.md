@@ -277,6 +277,47 @@ Measures may call **other measures** and be **mutually recursive** (e.g. a
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons structurally just like `size`.
 
+### Refining a collection over its own length
+
+The measure may also range over the refined value **itself**, which is how a
+non-empty-collection precondition is written:
+
+```march
+fn head(xs : {List(a) | len(_) > 0}) : a do ... end
+```
+
+All three spellings of the refined value mean the same thing here and are
+checked identically — the anonymous `_`, a named binder, and the parameter's own
+name:
+
+```march
+fn head(xs : {List(a)     | len(_)  > 0}) : a do ... end
+fn head(xs : {v : List(a) | len(v)  > 0}) : a do ... end
+fn head(xs : {List(a)     | len(xs) > 0}) : a do ... end
+```
+
+A call with a literal empty list is a definite failure and is reported;
+`head([1, 2])` is silent; and a `List` whose contents the checker cannot see
+stays **unknown**, so it is skipped rather than guessed:
+
+```march
+head([])            -- reported: `len(_) > 0` cannot hold
+head([1, 2])        -- silent
+fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
+```
+
+Thirteen stdlib functions that panic on an empty argument carry this contract —
+`List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`,
+`Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`, and `Random.choice`. Each
+is derived from that function's own panic message, so the contract is never
+stronger than the check the code already performs, and the `panic` remains as the
+runtime backstop for the arguments the checker skips.
+
+> An ordinary `List.length(ys) > 0` guard does **not** currently discharge this
+> obligation: the runtime `List.length` function and the `len` measure are not
+> connected, so a guarded call is skipped rather than proved. That is a missed
+> proof, not a false report.
+
 ### Refining a record over its fields
 
 A refinement may also range over a **record** type, with the predicate reading
