@@ -215,6 +215,51 @@ out-of-bounds index into a literal tree is caught, and `size(t) >= 0` is known f
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons the same way as `size`.
 
+### Requiring a non-empty collection
+
+In the examples above the measure describes a *different* parameter — `len(xs)`
+bounds the index `i`. A measure can just as well describe the refined value
+**itself**, which is how you say "this list must not be empty":
+
+```march
+fn head(xs : {List(a) | len(_) > 0}) : a do ... end
+```
+
+Inside the predicate you can name the refined value three ways, and they all mean
+the same thing and are checked identically — the anonymous `_`, your own binder,
+or the parameter's name:
+
+```march
+fn head(xs : {List(a)     | len(_)  > 0}) : a do ... end
+fn head(xs : {v : List(a) | len(v)  > 0}) : a do ... end
+fn head(xs : {List(a)     | len(xs) > 0}) : a do ... end
+```
+
+Pass a list the compiler can see is empty and you get an error; pass one it can
+see is non-empty and it says nothing; pass one it can't see into and it stays
+quiet rather than guessing:
+
+```march
+head([])            -- error: `len(_) > 0` can never hold here
+head([1, 2])        -- fine
+fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
+```
+
+Thirteen standard-library functions that panic on an empty argument now carry
+this contract — `List.head`, `tail`, `last`, `minimum_int`, `maximum_int`, the
+prelude's `head`/`tail`, `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`,
+and `Random.choice` — so `List.head([])` is a compile error rather than a crash.
+Each contract is taken from that function's own panic message, so it never
+demands more than the code already checked, and every `panic` stays in place to
+catch the cases the compiler skips.
+
+One caveat worth knowing before you rely on this: an ordinary
+`List.length(xs) > 0` guard does **not** currently satisfy the requirement. The
+runtime `List.length` function and the `len` measure aren't connected to each
+other, so a guarded call is skipped rather than proved. That's a missed proof
+rather than a false alarm — but it does mean the contracts mostly bite on
+literal lists today, not on lists you've just checked at runtime.
+
 ### The measure soundness gate
 
 The solver trusts a `@[measure]` completely — it treats the function's body as a fact
@@ -317,6 +362,12 @@ dependent typing. Know the edges:
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
+- **A runtime length check does not discharge a `len` obligation.** The
+  `List.length` function and the `len` measure are unconnected, so guarding with
+  `if List.length(xs) > 0` leaves a call to `{List(a) | len(_) > 0}` *skipped*
+  rather than proved. Non-empty contracts therefore catch literal empty lists
+  reliably, but say nothing about a list you validated at runtime. See
+  [Requiring a non-empty collection](#requiring-a-non-empty-collection).
 - **Relational postconditions work, within structural recursion.** A predicate
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
   — is proven by supplying the induction hypothesis at each recursive call whose
