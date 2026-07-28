@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-07-27 (`Json.parse` signed exponents; see below.)
+**Last updated:** 2026-07-27 (`Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; interpolating a String no longer costs a refcount pair; see below and Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -11,16 +11,18 @@ This file tracks everything that still needs to get done. Organized by priority 
 **Symptom.** `Json.parse("1e-5")` returned `Err("invalid number: 1e")`. Same for
 `2.5E+10` and `1e-308` — every JSON number with a signed exponent.
 
-**Cause.** `json_is_num_char` in `stdlib/json.march` accepted only digits, `.`,
-`e`, `E` — never `+`/`-`. `parse_number` stripped one leading `-` before the
+**Cause.** `is_num_byte` in `stdlib/json.march` accepted only digits, `.`, `e`,
+`E` — never `+`/`-`. `parse_number` stepped past one leading `-` before the
 scan, so a sign was only handled in the mantissa position. The scan stopped at
 the `-` in `1e-5` and `string_to_float("1e")` returned `None`. Long-standing;
-the character set predates the byte-index scanner work.
+the character set predates the byte-index scanner rewrite (`556cf7e9`), which
+preserved it verbatim and flagged it in a comment to stay a pure perf change.
 
-**Fix.** Replaced the predicate + `json_collect_num` with an RFC 8259 grammar
-scanner (`json_scan_digits`/`_int`/`_frac`/`_exp`) that validates
-`["-"] int [frac] [exp]` during the scan. `+`/`-` accepted only straight after
-`e`/`E`, so `1-2` still scans as `1` then errors on the trailing `-`.
+**Fix.** Replaced `is_num_byte`/`scan_number_end` with an RFC 8259 grammar
+scanner in the same byte-index style (`is_digit_byte`, `scan_digits`,
+`scan_int`, `scan_frac`, `scan_exp`) validating `["-"] int [frac] [exp]` during
+the scan. `+`/`-` accepted only straight after `e`/`E`, so `1-2` still scans as
+`1` then errors on the trailing `-`.
 Validating shape here rather than deferring to `string_to_float` (strtod /
 `float_of_string`) also closes forms JSON does not allow: `1.` and `01` parsed
 before and are now rejected, as are `+1`, `Infinity`, `0x10`, `.5`.
@@ -246,6 +248,43 @@ not a line count.
   output. A snapshot regenerated without reading the diff against the
   fixture's stated intent is worse than no snapshot: it converts a regression
   into a guarantee. Regenerating snapshots is a review step, not a chore.
+
+## Large-operand interpolation is quadratic again — needs `string_concat_n` (OPEN, 2026-07-27)
+
+`fceea07b` removed the `string_join` cons-list path, so every interpolation now
+desugars to a `++` chain folded into three-way `string_concat3` calls. That is
+the right call for the common case — measured here with SHORT (8-byte)
+operands, the concat3 chain beats `string_join` at *every* size tested, with no
+crossover up to 20 operands:
+
+| operands | chain | join |
+|---|---|---|
+| 2  | 30ms  | 59ms  |
+| 5  | 77ms  | 108ms |
+| 8  | 121ms | 157ms |
+| 20 | 302ms | 350ms |
+
+But `string_concat3` still re-copies the accumulated prefix at every step, so
+with LARGE operands the single remaining shape is quadratic, and the join path
+that used to cover that band is gone:
+
+| operands | chain (4KB operands) | join (4KB operands) |
+|---|---|---|
+| 4  | 16ms   | 13ms |
+| 8  | 87ms   | 23ms |
+| 16 | 356ms  | 49ms |
+| 32 | 1236ms | 97ms |
+
+Restoring a count-based threshold would not fix this: the parser knows operand
+COUNT but not operand SIZE, and these two tables disagree about the right
+choice at the same count. The fix that removes the tradeoff entirely is a
+length-summing **`string_concat_n`** — sum all parts once, allocate once, copy
+once — which would dominate both shapes at every size with no cons cells.
+Blocked on the constraint that forced the fixed-arity `string_concat3` fold in
+the first place: March builtin signatures are `Mono (TArrow ...)` and cannot be
+variadic, so this needs either a variadic builtin mechanism or a
+spread-into-array calling shape.
+
 
 ## Performance regressions vs the 2026-03-24 benchmark table (OPEN, 2026-07-24)
 
@@ -1482,6 +1521,12 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **`Json.parse` allocated ~2 heap strings per INPUT BYTE; rewritten as a byte-index scanner, plus a new `string_byte_at` builtin (2026-07-27, `stdlib/json.march`, `runtime/march_runtime.{c,h,mjs}`, `lib/typecheck/typecheck.ml`, `lib/eval/eval.ml`, `lib/tir/{defun,borrow,llvm_builtins,js_emit}.ml`).** `parse` opened with `string_split(src, "")` — one heap string per input byte — then rebuilt every token by consing those single-byte strings and `string_join`-ing them, so cost scaled with the SIZE of the document rather than with the number of strings in it; `to_string`/`escape_str` did the same on the output side. On a 239-byte document containing ~20 distinct strings, compiled `--opt 2` over 20,000 iterations: **261 → 21 allocations per parse** (21 is the number of strings the document actually holds, the floor for a parser returning owned `String`s), 486 → 58 for a parse + serialize round trip, `hist_le7` share 90% → 31%, wall clock 0.67 → 0.14s parse-only and 1.10 → 0.24s round-trip (same-session interleaved A/B, 4 rounds, identical to 0.01s). **The enabling primitive was missing:** before `string_byte_at(s, i)` (byte value `0..255`, `-1` out of range, allocates nothing) March had NO way to inspect one character of a string without allocating — both `string_split(s, "")` and `string_slice(s, i, 1)` allocate a heap string per character — so "just don't split up front" does not work on its own, because the scanner still must inspect essentially every byte to find token boundaries. **Dead end worth recording:** the first rewrite walked `string_to_codepoints` (a `List(Int)`) alongside a byte offset, passed the full 825-test stdlib suite, and then failed to LINK when compiled — `string_to_codepoints` and `string_from_codepoint` are interpreter-only, with no entry in `llvm_builtins.ml`/`defun.ml`/`js_emit.ml`/the C runtime, and nothing rejects them at typecheck time. **A green stdlib suite does not establish that stdlib code compiles** (those tests run interpreted). The final version scans BYTES, which is safe because every JSON structural character is ASCII and every byte of a UTF-8 multibyte sequence is `>= 0x80` — and which avoids the codepoint version's real hazard, that `string_to_codepoints` emits a raw byte and advances ONE byte on a truncated multibyte sequence, silently desyncing a width-derived offset and slicing at the wrong boundary. Behaviour verified identical over a 48-case corpus (all escape forms, 2/3/4-byte UTF-8 in keys and values, nesting, whitespace, 16 error cases), old-vs-new and interpreted-vs-native, error text included; two deliberate improvements: a non-ASCII character in an error message prints as itself instead of mojibake, and a keyword mismatch names the keyword (`expected 'null'`) not the byte (`expected 'l'`). **Found and fixed in passing:** `march_string_slice` in `runtime/march_runtime.mjs` was `s.slice(start, len)`, treating arg 3 as an END index rather than a LENGTH, so every JS-backend slice with a non-zero start was wrong (`String.slice("abcdefgh", 5, 3)` → `""` on JS vs `"fgh"` elsewhere) — load-bearing here because the new parser slices at non-zero offsets constantly where the old one never called `string_slice` at all; the three checked-in `march_runtime.mjs` copies that were byte-identical to canonical were re-synced. **Three pre-existing bugs found and deliberately NOT fixed**, to keep this a pure performance change: a qualified constructor PATTERN whose bare name is shared by another stdlib ADT silently takes the wrong branch when COMPILED (`Ok(Json.Array(_))` and `Ok(Json.Null)` fall through to `_` compiled but match interpreted — `Array` is declared in both `json.march` and `msgpack.march`, `Null` in `dataframe`/`json`/`msgpack`, so the qualification is dropped and the pattern is compiled against another ADT's tag; it fails OPEN, with no error or warning, and reproduces identically pre-rewrite); `Json.to_string` crashes on any Object on the JS backend (`TypeError: f._0 is not a function` from the match-lambda passed to `map_list`; reproduces identically pre-change, and the JS *parse* path is verified correct), and the number scanner rejects a signed exponent like `1e-5` (preserved verbatim from the old `json_is_num_char`, flagged in a comment at `is_num_byte`).
+
+- ⏳ **`toml.march`, `yaml.march`, `xml.march` have the same per-byte allocation profile** — all three still open with `string_split(s, "")`. `string_byte_at` is the primitive they need and it now exists; the `json.march` rewrite is the template.
+- ✅ **Interpolating a String no longer costs an atomic refcount pair per operand (`lib/tir/lower.ml`, 2026-07-27).** `"a${s}b"` desugars to `to_string(s)`, which Show-dispatches to `Show$String.show` — a synthesized IDENTITY (`fn x -> x`, emitted by `emit_builtin_impls`, because a string already is its own representation). That call was *emitted* and then inlined away in the post-Perceus opt loop; since Perceus runs FIRST, it saw a live owned-argument call and bracketed it with `inc_rc`/`dec_rc`, and the later inlining removed the call and stranded the pair around a bare alias. `string_concat3` borrows all three arguments (`lib/tir/borrow.ml`), so the extra reference bought nothing, and it was charged to every interpolated String operand in every March program. **Two fixes, both at the source rather than downstream:** lowering elides the `Show$String.show` call outright (so Perceus never sees a call), and `lower_to_atom_k` no longer binds a fresh temp when the lowered RHS is already a *variable* atom — `let v = EAtom (AVar x) in k (AVar v)` ≡ `k (AVar x)` in ANF, but the alias reads to Perceus as a second owned reference, so eliding only the call just moved the pair onto the alias. **The `AVar` restriction is load-bearing and was found by test, not by inspection:** the first attempt passed *any* `Tir.EAtom` through, which drops the binder's `ty_of_expr` ascription — a literal atom carries no type of its own, so `println(:hello)`/`show(:world)` fell back to the untyped path and printed `()` instead of `:hello` (caught by `iface_impl_mono_codegen` cases 17-18, compiled Show$Atom parity). Measured on arm64, `"w${a}x"` vs hand-written `"w" ++ a ++ "x"`, 3M iterations: **181/173ms → 137/133ms**, with the two now lowering to byte-identical TIR; `MARCH_STRING_STATS=1` histograms unchanged, confirming refcount traffic and not allocation. `bench/tree_transform` and `bench/list_ops` unchanged. Pinned by the `interp_string_operand_rc` TIR golden snapshot, **verified to FAIL on the unfixed compiler** at both the lower and perceus stages. **Two traps worth recording.** (1) *Benchmarks of this shape have a ~25% first-position warmup penalty*: in an A/B where both halves compile to identical IR, whichever ran first measured 173ms against the second's 137ms — so the original report's "interp 358ms vs chain 285ms" was itself partly warmup, and any before/after claim here must hold the benchmark slot fixed. (2) *Two previously-attempted fixes were reported as "did not work" on a mistaken premise* — that `to_string` was already gone before pre-Perceus simplify. `MARCH_DUMP_TXT` (added in this pass) shows `Show$String.show(a)` alive and well at the `tir-simplify-pre` checkpoint; the call survives all the way into Perceus. `--dump-tir` is post-Opt and therefore cannot distinguish a pass that CREATED a construct from one that merely preserved it.
+- ✅ **`MARCH_DUMP_TXT=<stage>` prints pretty-printed TIR at any pipeline checkpoint (`bin/main.ml`, 2026-07-27).** `--dump-phases` serialized every `snap_tir` stage to JSON but there was no readable text view of the intermediate stages, so diagnosing "which pass introduced this?" meant reading `--dump-tir`, which only shows the post-Opt end of the pipeline. `MARCH_DUMP_TXT` prints `Pp.string_of_fn_def` for every function at each checkpoint whose label contains the given substring (`all` matches every stage) — e.g. `MARCH_DUMP_TXT=tir-simplify-pre`. This is what localized the interpolation refcount bug above.
 
 - ✅ **Many-part string interpolation desugars to a single `string_join` call instead of a `++` chain (`lib/parser/parser.mly`, 2026-07-26).** `desugar_interp` folded interpolation parts (`"${a}${b}"`) into a left-deep chain of `++` (`prefix ++ to_string(e1) ++ s1 ++ ...`); each `++` (`march_string_concat`) allocates and copies the whole growing prefix again, so a k-part interpolation copied O(k²) total bytes. Past `interp_join_threshold` (3) segments it now builds a `Cons`/`Nil` list of the parts and emits one `string_join(parts, "")` call — `march_string_join` already does a proper two-pass O(n) join (sum lengths once, allocate once, copy once), so no runtime change was needed, and `string_join` is registered as a bare global builtin identically to `++` (typecheck/eval/codegen all key it by name with no module qualification). Short interpolations keep the `++` chain: materializing the list costs more than the extra copy at that size, measured on arm64 over 2M iterations with short segments at 231ms (`++`) vs 303ms (`string_join`) for 2 segments, 307 vs 356 for 3, and 589 vs 564 for 5 — crossover just under 5. Because both shapes now reach downstream passes, the two consumers that pattern-match the desugared interpolation had to learn the join shape: `try_collect_interp` (`lib/format/format.ml`), which reconstructs `"${...}"` source — without it the formatter emitted a literal `string_join([...], "")` call and the stdlib formatter-idempotency tests failed — and `decompose_concat` (`lib/desugar/desugar.ml`), which splits a `~H` sigil into per-part IOList segments. The `~H` path was the dangerous one: `html_interp_to_iolist` matches `to_string(e)` *per part* to decide what to wrap in `html_auto_escape`, so an unrecognized shape collapses the template into one opaque part and silently stops HTML-escaping interpolations — reproduced with `~H"<p>${evil}</p>"` emitting raw `<script>` tags, escaping restored by the `decompose_concat` fix. `test/test_eval.ml` now asserts both desugarings (`parse interp`, `parse interp many`). `specs/lang/surface-syntax.md`'s operator table gained a note that `++` itself is still O(n) per call — so `acc = acc ++ x` in a loop is still O(n²) — pointing at `IOList` (`stdlib/iolist.march`) for that case, matching the note `String.concat`'s doc already carried. **Not done in this pass** (deferred): a memchr-based prefiltering pass for `march_string_contains`/`index_of`/`split`/`split_first`/`replace`/`replace_all` (`runtime/march_runtime.c:2550-2760`), which currently do a naive byte-by-byte `memcmp` scan.
 - ✅ **String performance phase 2, tasks 1-3 (2026-07-27).** Three landed against the phase 1 profile, each verified by same-session A/B (absolute timings on this machine are not comparable across runs). (1) **`String.index_of_from`** — offset-aware search, removing the O(n²) trap in tokenizing: without a start offset, finding the next separator means slicing off the tail and searching again, re-copying the remaining bytes every step. Two phase 1 benchmarks had to be written around its absence. Counting 150K fields in an 800KB buffer: `String.split` + `List.length` 975ms vs an `index_of_from` walk at 267ms — **3.7× with effectively zero allocation**. (2) **memchr-based substring search** — a shared two-stage helper (memchr finds candidate first bytes, memcmp confirms) routed through `index_of`, `index_of_from`, `contains`, `split`, `replace`, `replace_all`; `last_index_of` stays scalar as it scans backwards. `bench/string_scan` **809ms → 20.8ms (39×)**, `string_parallel_scan` 390 → 171ms, `string_split_large` 1108 → 928ms; unchanged where no search is involved. Absolute throughput went from ~0.5 GB/s to ~40 GB/s. `replace_all` additionally jumps between matches and bulk-copies each span rather than testing and copying byte by byte — which RAISES its reported `copy_bytes` because the old byte-at-a-time loop bypassed the copy counter entirely. (3) **Three-way concat folding** — desugar collapses `++` chains of 3+ in groups of three, `ceil((k-1)/2)` allocations instead of `k-1`: a 5-part chain went 400,004 → 200,004 allocations over 100K iterations, and `bench/string_small_churn` 888.9 → 710.5ms with copying down 145.7 → 112.6MB. Fixed arity rather than the variadic n-ary concat originally planned, because March builtin signatures are `Mono (TArrow ...)` and the only variable-length alternative is `string_join`, whose cons-list materialization measured at 59% of its cost. **The `~H` escaping bug from PR #90 was reintroduced and caught by test**: `ESigil` desugars its content before HTML lowering, so the chain arrived as one opaque `concat3` and `html_interp_to_iolist` stopped matching `to_string(e)` per part — silently disabling escaping, a failure that fails OPEN. `decompose_concat` now flattens `concat3` as well as `++`.

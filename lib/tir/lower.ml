@@ -142,8 +142,26 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
       Tir.ELet (v, Tir.ETuple atoms, k (Tir.AVar v)))
   | _ ->
     let rhs = lower_expr env e in
-    let v = fresh_var (ty_of_expr env e) in
-    Tir.ELet (v, rhs, k (Tir.AVar v))
+    (match rhs with
+     (* Already a VARIABLE atom — pass it straight through instead of binding
+        it to a fresh temp.  `let v = EAtom (AVar x) in k (AVar v)` and
+        `k (AVar x)` are equivalent in ANF, but they are NOT equivalent to
+        Perceus: the let-bound alias looks like a second owned reference to the
+        same value, so RC insertion brackets it with an inc_rc/dec_rc pair that
+        buys nothing.  This arm is reached when a lowering rule collapses an
+        expression to one of its operands — e.g. the `Show$String.show`
+        identity elision above, which every `"${s}"` interpolation of a String
+        goes through.
+
+        Restricted to [AVar] on purpose.  A LITERAL atom carries no type of its
+        own, so the fresh binder's [ty_of_expr] ascription is load-bearing for
+        it: passing a bare `ALit (LitAtom …)` through drops that type and
+        `println(:x)` / `show(:x)` fall back to the untyped path and print `()`
+        instead of `:x`. *)
+     | Tir.EAtom (Tir.AVar _ as a) -> k a
+     | _ ->
+       let v = fresh_var (ty_of_expr env e) in
+       Tir.ELet (v, rhs, k (Tir.AVar v)))
 
 (** Lower a list of expressions to atoms using CPS. *)
 and lower_atoms_k (env : env) (es : Ast.expr list) (k : Tir.atom list -> Tir.expr) : Tir.expr =
@@ -562,6 +580,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
             | _ -> f_expr))
       | _ -> f_expr
     in
+    (* `Show$String.show` is the synthesized IDENTITY on String (emitted by
+       [emit_builtin_impls] below: `fn x -> x`, because a string already IS
+       its own representation).  Emitting the call and letting a later pass
+       remove it is NOT free: Perceus runs first, sees a real owned-argument
+       call, and brackets it with an inc_rc/dec_rc pair; the opt loop that
+       inlines the identity away runs afterwards and leaves the pair behind.
+       Every string interpolation lowers `"${s}"` to `to_string(s)`, which
+       dispatches here, so that leftover atomic pair was charged to every
+       interpolated String operand in every March program.  Elide the call at
+       the source instead — then Perceus never sees a call to bracket. *)
+    begin match resolved_f, args with
+    | Ast.EVar { txt = "Show$String.show"; _ }, [ arg ] -> lower_expr env arg
+    | _ ->
     lower_to_atom_k env resolved_f (fun f_atom ->
       lower_atoms_k env args (fun arg_atoms ->
         let f_var = match f_atom with
@@ -620,6 +651,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
               Tir.EApp (reg_var, [pid_atom; name_atom; Tir.AVar clo_var]))
         else
           Tir.EApp (f_var, arg_atoms)))
+    end
 
   (* --- Constructor application (CPS for args) --- *)
   (* Embed the parent type name in the TCon key so that different ADTs with
