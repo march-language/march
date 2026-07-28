@@ -1,4 +1,4 @@
 (library
  (name march_refinecheck)
  (libraries march_ast march_errors march_refine march_caps)
- (modules refine_check division_safety no_alloc return_infer cap_infer))
+ (modules refine_check division_safety no_alloc return_infer cap_infer obligation))
