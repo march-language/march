@@ -1,7 +1,7 @@
 ---
 layout: docs
 title: SIMD Benchmarks
-nav_order: 9.65
+nav_order: 11.6
 permalink: /docs/simd-benchmarks/
 ---
 
@@ -88,8 +88,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 ### `sum(arr)` — Float array reduction
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | **March** | **1.1 ms** | 1.0 ms | 1.4 ms |
@@ -98,8 +96,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 | Elixir | 83.9 ms | 81.2 ms | 91.7 ms |
 | Python | 296.9 ms | 283.0 ms | 319.3 ms |
 | NumPy | 1.0 ms | 1.0 ms | 1.0 ms |
-
-</div>
 
 `native_float_arr_sum` auto-vectorizes under `clang -O2` — see
 [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/#what-vectorizes) for the
@@ -114,8 +110,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 ### `map(x -> x * 2.0 + 1.0)` — elementwise Float map
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | March | 5.1 ms | 4.8 ms | 5.5 ms |
@@ -124,8 +118,6 @@ Run 10 times per language per benchmark; median, min, max reported.
 | Elixir | 244.8 ms | 236.9 ms | 281.8 ms |
 | Python | 194.1 ms | 192.9 ms | 199.5 ms |
 | NumPy | 2.1 ms | 2.1 ms | 2.9 ms |
-
-</div>
 
 This one needs a compiler-side trick, not just clang: March's closure-call
 ABI heap-boxes every `Float` crossing a call boundary, which blocks
@@ -144,8 +136,6 @@ is competitive with hand-written OCaml/Rust and within 3x of NumPy.
 
 ### `map2(a, b, (x, y) -> x + y)` — elementwise two-array zip
 
-<div style="overflow-x:auto">
-
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
 | March | 6.4 ms | 6.3 ms | 8.8 ms |
@@ -154,8 +144,6 @@ is competitive with hand-written OCaml/Rust and within 3x of NumPy.
 | Elixir | 101.6 ms | 99.4 ms | 132.0 ms |
 | Python | 197.1 ms | 189.3 ms | 207.5 ms |
 | NumPy | 1.6 ms | 1.5 ms | 1.6 ms |
-
-</div>
 
 `NativeArray.map2_int`/`map2_float` — added to unblock
 `DataFrame.col_add_col` (column-column arithmetic) — now gets the same

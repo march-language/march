@@ -11,6 +11,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **String interpolation is ~1.45× faster** and allocates no intermediate list.
+  `"a${x}b${y}c"` now desugars to a plain `++` chain at every length, which the
+  compiler folds into three-way concats — where it previously switched to a
+  `string_join` over a cons list past a size threshold. Measured at seven
+  segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
+  interpolation dropping to zero.
+
+
 ### Added
 
 - **`String.index_of_from(s, sub, start)`** — substring search from a byte
@@ -118,6 +128,15 @@ git log is authoritative for exact commits.
   See `docs/simd-benchmarks.md`.
 
 ### Fixed
+
+- **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
+  three tables under "Results" on
+  [/docs/simd-benchmarks/](https://march-lang.org/docs/simd-benchmarks/) were
+  wrapped in `<div style="overflow-x:auto">`. Kramdown does not parse markdown
+  inside a raw HTML block unless the element carries `markdown="1"`, so each
+  table was emitted verbatim as text. The wrapper was also redundant — the docs
+  layout already sets `display:block; overflow-x:auto` on content tables, which
+  is why the same page's other two tables were fine — so it is simply removed.
 
 - **Discarding a container no longer leaks its contents.** March reclaimed an
   aggregate only by *destructuring* it; releasing one that was never pattern-
