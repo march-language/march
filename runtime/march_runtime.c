@@ -775,6 +775,25 @@ int64_t march_string_byte_length(void *s) {
     return s ? ((march_string *)s)->len : 0;
 }
 
+/* Random access to a single byte, as 0..255.
+ *
+ * Exists so that a scanner (JSON, TOML, YAML, XML ...) can inspect the input
+ * one byte at a time WITHOUT allocating.  The alternative available in March
+ * before this — string_split(s, "") or string_slice(s, i, 1) — allocates a
+ * heap string per byte inspected, which is what made Json.parse allocate
+ * ~2 strings per input byte regardless of how many strings the document
+ * actually contained.
+ *
+ * Out-of-range (negative, or >= len) returns -1 rather than trapping: a
+ * scanner's natural loop condition is "read until something that isn't part of
+ * this token", and -1 is not a valid byte, so end-of-input falls out of the
+ * same comparison as any other terminator with no separate length check. */
+int64_t march_string_byte_at(void *s, int64_t i) {
+    march_string *ss = (march_string *)s;
+    if (!ss || i < 0 || i >= ss->len) return -1;
+    return (int64_t)(unsigned char)ss->data[i];
+}
+
 int64_t march_string_is_empty(void *s) {
     return (!s || ((march_string *)s)->len == 0) ? 1 : 0;
 }

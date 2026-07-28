@@ -104,8 +104,31 @@ export function march_string_contains(s, sub) { return s.includes(sub); }
 export function march_string_starts_with(s, pre) { return s.startsWith(pre); }
 export function march_string_ends_with(s, suf) { return s.endsWith(suf); }
 
-export function march_string_slice(s, start, end_) {
-  return s.slice(start, end_);
+/* Mirrors march_string_slice in runtime/march_runtime.c.
+ *
+ * The third argument is a LENGTH, not an end index — this used to call
+ * s.slice(start, len) directly, so every slice with a non-zero start returned
+ * the wrong text (string_slice("abcdefgh", 5, 3) gave "" here and "fgh"
+ * natively).  Clamping is spelled out rather than left to s.slice because JS
+ * treats a negative index as an offset from the end, where C clamps to 0. */
+export function march_string_slice(s, start, len) {
+  const slen = s.length;
+  if (start < 0) start = 0;
+  if (start > slen) start = slen;
+  if (len < 0) len = 0;
+  if (start + len > slen) len = slen - start;
+  return s.slice(start, start + len);
+}
+
+/* Mirrors march_string_byte_at: byte value 0..255, or -1 out of range.
+ *
+ * CAVEAT: JS strings are UTF-16 code units, not bytes, so this indexes code
+ * units and agrees with the C version only for ASCII.  That is the same
+ * pre-existing representational split that march_string_byte_length and
+ * march_string_slice already have on this backend, not a new one. */
+export function march_string_byte_at(s, i) {
+  if (i < 0 || i >= s.length) return -1;
+  return s.charCodeAt(i);
 }
 
 export function march_string_split(s, sep) {

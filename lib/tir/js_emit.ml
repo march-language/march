@@ -568,6 +568,7 @@ and emit_val_impl ctx expr =
           | "string_split" | "string_split_first" | "string_replace"
           | "string_replace_all" | "string_repeat" | "string_pad_left"
           | "string_pad_right" | "string_index_of" | "string_index_of_from"
+          | "string_byte_at"
           | "string_last_index_of"
           | "char_from_int" | "byte_to_char" | "char_to_int"
           | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace"

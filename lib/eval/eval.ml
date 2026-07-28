@@ -4711,6 +4711,14 @@ let base_env : env =
           if ls >= width then VString s
           else VString (s ^ String.make (width - ls) fill.[0])
         | _ -> eval_error "string_pad_right: expected string, int, char-string"))
+  (* Byte-indexed random access.  Clamping must mirror march_string_byte_at in
+     runtime/march_runtime.c exactly — out of range (negative or >= len) is -1,
+     never a trap — or interpreted and compiled runs disagree. *)
+  ; ("string_byte_at", VBuiltin ("string_byte_at", function
+        | [VString s; VInt i] ->
+          if i < 0 || i >= String.length s then VInt (-1)
+          else VInt (Char.code s.[i])
+        | _ -> eval_error "string_byte_at: expected (String, Int)"))
   ; ("string_byte_length", VBuiltin ("string_byte_length", function
         | [VString s] -> VInt (String.length s)
         | _ -> eval_error "string_byte_length: expected string"))

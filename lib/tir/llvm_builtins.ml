@@ -159,6 +159,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
   { march_name = "string_byte_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
+  { march_name = "string_byte_at"; c_name = Some "march_string_byte_at"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_at(ptr %s, i64 %i)" };
   { march_name = "string_is_empty"; c_name = Some "march_string_is_empty"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_is_empty(ptr %s)" };
   { march_name = "string_to_int"; c_name = Some "march_string_to_int"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
@@ -971,6 +973,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_hash_string";
   PDeclare "march_hash_bool";
   PDeclare "march_string_byte_length";
+  PDeclare "march_string_byte_at";
   PDeclare "march_string_is_empty";
   PDeclare "march_string_to_int";
   PDeclare "march_string_concat3";

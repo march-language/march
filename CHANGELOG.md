@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`string_byte_at(s, i)`** — reads the byte at a byte offset as `0..255`, or
+  `-1` when out of range, allocating nothing. Before this, the only ways to
+  look at one character of a string from March were `string_split(s, "")` and
+  `string_slice(s, i, 1)`, both of which allocate a heap string per character
+  inspected — so every hand-written scanner in the stdlib paid an allocation
+  per input byte just to decide what the byte was.
+
 - **`String.index_of_from(s, sub, start)`** — substring search from a byte
   offset, returning the index in `s`'s own coordinates so it can be fed
   straight back in when tokenizing. Without it, scanning for successive
@@ -20,6 +27,21 @@ git log is authoritative for exact commits.
   remaining bytes at every step and makes a full tokenize O(n²).
 
 ### Changed
+
+- **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
+  parser used to begin with `string_split(src, "")`, exploding the document
+  into one heap string per byte, so its cost scaled with the size of the input
+  rather than with the number of strings in it — a 239-byte document holding
+  ~20 strings cost 261 allocations per parse, 90% of them 7 bytes or smaller.
+  It is now a byte-index scanner that inspects bytes with `string_byte_at` and
+  takes one `string_slice` per token: **261 → 21 allocations per parse**, which
+  is the number of strings the document actually contains. `Json.to_string`
+  got the same treatment (a string needing no escaping is now returned as-is,
+  allocating nothing), taking a combined parse + serialize round trip from 486
+  to 58 allocations per iteration and 1.10s to 0.24s over 20,000 iterations.
+  Parsing is unchanged semantically; the only visible difference is that a
+  non-ASCII character in an error message now prints correctly instead of as a
+  single mangled byte.
 
 - **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
   `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
@@ -112,6 +134,14 @@ git log is authoritative for exact commits.
   scope and are silently skipped rather than approximated.
 
 ### Fixed
+
+- **`String.slice` returned the wrong text on the JS backend.** The JS runtime
+  implemented `march_string_slice(s, start, len)` as `s.slice(start, len)`,
+  treating the third argument as an END index rather than a LENGTH, so every
+  slice with a non-zero start was wrong — `String.slice("abcdefgh", 5, 3)` gave
+  `""` on JS against `"fgh"` interpreted and compiled. Negative arguments now
+  clamp the way the C runtime clamps, instead of being read as offsets from the
+  end of the string.
 
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on
