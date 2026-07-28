@@ -5409,6 +5409,34 @@ end
     "unrelated-named sibling dotted module still resolves (regression control)"
     false errored
 
+(* A user module whose dotted name's LEADING SEGMENT collides with a stdlib
+   module ("Depot" is in [stdlib_module_names], as is "Env", "Ast", …) must
+   still resolve from the search path.  Before dotted candidates existed
+   [import_refs] yielded only the first segment, so `use Depot.Query` was
+   skipped as stdlib and step 2's auto-discovery picked the user file up;
+   once candidates were filtered against the stdlib list, the bare "Depot"
+   was dropped and the surviving "Depot.Query" — a real user module, but not
+   at `depot/query.march` — became a hard "Module not found".  That broke
+   depot itself, whose own Depot.Query / Depot.Url / Depot.Transaction /
+   Depot.Migration live at lib/api/depot_*.march. *)
+let test_stdlib_prefixed_user_module_resolves () =
+  let sibling_src = {|mod Depot.Query do
+  fn answer() : Int do 42 end
+end
+|} in
+  let entry_src = {|mod App do
+  import Depot.Query
+
+  fn main() : Int do
+    Depot.Query.answer()
+  end
+end
+|} in
+  let errored = check_entry_with_lib_dir [("depot_query.march", sibling_src)] entry_src in
+  Alcotest.(check bool)
+    "user module under a stdlib-named prefix resolves from the search path"
+    false errored
+
 let test_self_prefix_nested_submodule_still_strips () =
   (* Control for the [strip_entry_self_qual] fix itself: a GENUINE nested
      submodule (declared directly inside the entry, not a separate sibling
@@ -9894,6 +9922,9 @@ let compiler_suites =
           Alcotest.test_case
             "genuine nested submodule self-qualification still strips"
             `Quick test_self_prefix_nested_submodule_still_strips;
+          Alcotest.test_case
+            "user module under a stdlib-named dotted prefix resolves"
+            `Quick test_stdlib_prefixed_user_module_resolves;
         ] );
       ( "diagnostic dedup",
         [

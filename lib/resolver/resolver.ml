@@ -34,7 +34,15 @@ let module_name_to_filename name =
 (** Stdlib module names — used only to SUPPRESS "module not found" errors
     for imports that resolve from the bundled stdlib.  A user file with the
     same conventional filename always wins (it is found first), so listing
-    a name here never shadows user code. *)
+    a name here never shadows user code.
+
+    Every entry must name a module that [stdlib/] actually declares.  Nine
+    Depot* names (Depot, Depot.Gate, DepotForm, DepotGate, DepotSchema,
+    DepotRepo, DepotQuery, DepotMigration, DepotTest) were listed but ship
+    in the third-party `depot` package, not here, so they only suppressed
+    genuine diagnostics for depot's own modules.  "URI" was likewise never
+    a module — [stdlib/uri.march] declares `mod Uri`, and the mismatched
+    casing meant a plain `import Uri` reported "not found". *)
 let stdlib_module_names =
   [ "List"; "Map"; "Set"; "Array"; "Queue"; "String"; "Option"; "Result"
   ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Duration"; "Bytes"; "Json"
@@ -42,12 +50,9 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Test"
-  ; "Vault"; "URI"
-  ; "Depot"; "Depot.Gate"
+  ; "Vault"; "Uri"
   ; "Config"; "Crypto"; "Env"; "Channel"; "PubSub"
   ; "ChannelServer"; "ChannelSocket"; "Presence"; "Tls"; "Uuid"
-  ; "DepotForm"; "DepotGate"; "DepotSchema"; "DepotRepo"
-  ; "DepotQuery"; "DepotMigration"; "DepotTest"
   ; "Tuple"; "Char"; "OrderedMap"; "SortedSet"; "Range" ]
 
 (** All non-empty dotted prefixes of [names], LONGEST first, down to the
@@ -283,12 +288,56 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
   Hashtbl.add loaded_paths canonical_source ();
   note_user_file source_file canonical_source;
 
+  (* Does [path] declare `mod [mod_name]` at the start of a line?  A cheap
+     textual check — enough to locate the file, which is then parsed
+     properly by [load]. *)
+  let file_declares path mod_name =
+    match (try Some (read_file path) with Sys_error _ -> None) with
+    | None -> false
+    | Some src ->
+      let needle = "mod " ^ mod_name in
+      let nlen = String.length needle in
+      let slen = String.length src in
+      let rec scan i =
+        if i + nlen > slen then false
+        else if (i = 0 || src.[i - 1] = '\n')
+                && String.sub src i nlen = needle
+                && (i + nlen = slen
+                    || (match src.[i + nlen] with
+                        | ' ' | '\t' | '\n' | '\r' -> true
+                        | _ -> false))
+        then true
+        else scan (i + 1)
+      in
+      scan 0
+  in
+
+  (* The conventional dotted->path mapping first ("MyApp.Router" ->
+     "my_app/router.march"), then a scan for the file that actually DECLARES
+     the module.  The scan matters because a module's file need not follow
+     the convention: step 2's auto-discovery keys off the `mod` declaration,
+     not the path, so such a module was always reachable — just not by
+     explicit `import`.  depot declares `mod Depot.Query` in
+     lib/api/depot_query.march, and until [import_refs] began yielding
+     dotted candidates that import resolved only because "Depot" sat
+     (wrongly) in [stdlib_module_names] and suppressed the lookup entirely.
+     Scanning only on a miss keeps the common path a single [Sys.file_exists]
+     and preserves the precise "looked for <path>" diagnostic for a module
+     that genuinely is not there. *)
   let find_file mod_name =
     let fname = module_name_to_filename mod_name in
-    List.find_map (fun dir ->
-        let p = Filename.concat dir fname in
-        if Sys.file_exists p then Some p else None
-      ) search_path
+    match
+      List.find_map (fun dir ->
+          let p = Filename.concat dir fname in
+          if Sys.file_exists p then Some p else None
+        ) search_path
+    with
+    | Some p -> Some p
+    | None ->
+      List.find_map (fun dir ->
+          List.find_opt (fun p -> file_declares p mod_name)
+            (collect_lib_files dir)
+        ) search_path
   in
 
   let rec load mod_name ~from_span =
