@@ -546,6 +546,18 @@ type env = {
       number of arguments panics at runtime (and the compiler miscompiles
       under-application into a body call with a garbage argument).  Used to
       reject wrong-arity calls of these functions at the call site. *)
+  plain_let_names : StringSet.t;
+  (** Names most recently bound by a simple, unrestricted `let name = expr`
+      (single-variable pattern — see the [Ast.ELet] case of [infer_block]).
+      Used ONLY by the [Ast.EApp] handler's zero-arg "calling a non-function
+      local value" check (`zf()` where `let zf = answer` — see the
+      [noncallable_error] comment there) as a POSITIVE, narrowly-scoped
+      signal, deliberately not reusing [fn_arities]'s absence: unlike
+      [fn_arities] (name-keyed and cleared by [bind_var] on every rebind,
+      including a bulk `import Mod`'s re-binding of an imported function
+      under its short name — see [bind_var]'s comment), this field is only
+      ever ADDED to at one site, so it can't be accidentally emptied by an
+      unrelated rebinding elsewhere in the same threaded env. *)
   proof_caps : (string * string) list;
   (** Proof cap registry: full cap path → declaring module name.
       Populated by [DProofCap] during check_decl; checked by check_module_needs. *)
@@ -705,6 +717,7 @@ let make_env errors type_map = {
   import_idx = make_import_index ();
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
+  plain_let_names = StringSet.empty;
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
@@ -1380,6 +1393,7 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
 let bind_var name sch env =
   { env with vars = StrMap.add name sch env.vars;
              fn_arities = StrMap.remove name env.fn_arities;
+             plain_let_names = StringSet.remove name env.plain_let_names;
              offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
 let bind_vars bindings env =
@@ -1391,6 +1405,7 @@ let bind_linear name lin ty env =
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     fn_arities = StrMap.remove name env.fn_arities;
+    plain_let_names = StringSet.remove name env.plain_let_names;
     lin  = le :: env.lin;
     offer_labels = List.filter (fun (n, _) -> n <> name) env.offer_labels }
 
@@ -5312,18 +5327,42 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | None -> None)
         | _ -> None
       in
-      (* Reject a zero-arg call of a builtin that is a plain ambient VALUE,
-         not a function (e.g. `root_cap()`).  infer_app's `| [], t -> t` base
+      (* Reject a zero-arg call of a plain, non-function VALUE — e.g.
+         `root_cap()`, or `let x = 5; x()`, or `let zf = answer; zf()`
+         aliasing a genuine zero-arg fn.  infer_app's `| [], t -> t` base
          case exists so a zero-param user `fn` (whose type collapses to its
          bare return type — see the [pmap_threshold] comment) can still be
          invoked as `f()`; without this check it also silently accepts
          calling any non-function value with `()`, since a plain value and a
          "disguised" zero-arg function are indistinguishable by type alone
-         once no arguments remain to unify against. *)
+         once no arguments remain to unify against.
+
+         Two cases:
+          - a hardcoded denylist of builtin ambient values ([root_cap]);
+          - the general case: a name in [env.plain_let_names] — i.e. one
+            most recently bound by a simple `let name = expr` (see the
+            [Ast.ELet] case of [infer_block]) — whose resolved type is a
+            *concrete* non-arrow (excluding [TVar], which means "not yet
+            known" — e.g. mid-inference of a self-recursive call — and
+            [TError], already reported elsewhere).  Deliberately does NOT
+            use "not in [env.fn_arities]" as the discriminator: that field
+            is cleared by [bind_var] on ANY rebinding of the same name
+            (correct for its own arity-check purpose — see its comment —
+            but a bulk `import Mod` rebinds every imported name via
+            [bind_var] too), so at multi-file program scale one importing
+            module's `import Shared` would wipe [fn_arities]'s "helper" entry
+            for every OTHER module checked afterward in the same threaded
+            env, and a plain, unaliased `helper()` call would be misflagged.
+            [plain_let_names] avoids that: it is only ever ADDED to at one
+            site, so it can't be emptied by an unrelated binding elsewhere. *)
       let noncallable_error =
         match f, args with
         | Ast.EVar name, [] when StringSet.mem name.txt noncallable_builtin_values ->
           Some name
+        | Ast.EVar name, [] when StringSet.mem name.txt env.plain_let_names ->
+          (match repr f_ty with
+           | TArrow _ | TVar _ | TError -> None
+           | _ -> Some name)
         | _ -> None
       in
       (match arity_error, noncallable_error with
@@ -6293,6 +6332,43 @@ and infer_block env exprs =
             bind_linear bname lin t acc_env
           ) env bindings'
     in
+    (* Mark a simple, unrestricted `let name = expr` binding as a genuine
+       plain VALUE (see [plain_let_names]) — this is the ONLY site that adds
+       to it, so it's a precise, narrow, positively-identified signal (as
+       opposed to [fn_arities]'s broader "not a known function" absence,
+       which the [Ast.EApp] handler's zero-arg noncallable check used to
+       lean on for this and proved unsafe: a bulk `import Mod` re-binds
+       every imported name via [bind_var] too, which — by design (see the
+       comment above [bind_var]) — clears any [fn_arities] entry for that
+       name as part of ordinary shadow discipline, so a large multi-file
+       program whose modules cross-import a same-module zero-arg fn made
+       EVERY later reference to it look "not a known function").  Only a
+       true `let x = e` (single-variable pattern, non-linear) is marked —
+       destructuring patterns, lambda/fn params, and match arms are left
+       alone (narrower scope, no false positives there either way).
+
+       Critically, ALSO exclude an RHS that is itself a lambda literal
+       (`Ast.ELam`, i.e. `let g = fn ... -> body`).  A ZERO-param lambda
+       checked under plain inference (no expected-type context — see the
+       [Ast.ELam] arm of [infer_expr]) collapses to its body's result type
+       exactly like a top-level zero-arg `fn`, via the identical
+       [List.fold_right ... [] body_ty = body_ty] convention — it only
+       gets a real `Unit -> T` [TArrow] when CHECKED against one (the
+       [Ast.ELam] arm of [check_expr]).  So `let g = fn -> println("b")`
+       then `g()` (test/native/unit_callback_zero_arg.march) is completely
+       legitimate, ordinary code whose RHS produces the very same
+       "collapsed non-arrow type" shape as the bug this check targets —
+       type alone truly cannot tell them apart here, but the AST shape of
+       the RHS can: a fresh lambda LITERAL is never a "disguised alias of
+       something else", it always means exactly what it says. *)
+    let env' =
+      match b.bind_pat, auto_lin, b.bind_expr with
+      | Ast.PatVar _, Ast.Unrestricted, Ast.ELam _ ->
+        env'
+      | Ast.PatVar name, Ast.Unrestricted, _ ->
+        { env' with plain_let_names = StringSet.add name.txt env'.plain_let_names }
+      | _ -> env'
+    in
     (* F5 path-dependent OFFER refinement: if this let destructures a
        `Chan.offer` result — a 2-tuple whose 2nd component is a channel whose
        session ref was registered in [offer_conts] — link the label variable
@@ -6396,6 +6472,22 @@ and infer_block env exprs =
       unify env ~span:sp ~reason:None fn_ty arrow_ty;
     let gen_ty = generalize (env.level - 1) arrow_ty in
     let env' = bind_var name.txt gen_ty env in
+    (* Register this local fn's arity in [fn_arities] (mirrors the top-level
+       `DFn` registration — see the [env_rec] comment above [check_fn]) so
+       the [arity_error] wrong-arg-count check in [Ast.EApp]'s handler also
+       covers direct calls of a local `fn ... end` binding, not just a
+       top-level `fn` decl — e.g. `fn helper(a, b) do ... end; helper(1)`
+       inside a block now reports the same "expects 2 arguments" diagnostic
+       a top-level `helper` would.  (This is NOT needed for the zero-arg
+       "calling a non-function value" check just above — that one uses
+       [plain_let_names], which a local `fn ... end` binding never enters,
+       so `helper()`/a sibling local fn calling `helper()` already
+       typechecks regardless of this registration.)  [bind_var] just above
+       already cleared any stale entry under this name (shadow semantics),
+       so this is a plain (re-)add, not a merge. *)
+    let env' =
+      { env' with fn_arities =
+          StrMap.add name.txt (List.length params, name.span) env'.fn_arities } in
     infer_block env' rest
   | e :: rest ->
     ignore (infer_expr env e);
