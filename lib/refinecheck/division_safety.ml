@@ -285,7 +285,23 @@ let check_var_divisor ~root errctx span var_name params path let_values =
     else
       (* Try Z3, adding any path-derived assumptions *)
       match smt_of ~b:bdr ~var:var_name pred with
-      | None -> () (* predicate not in supported fragment — skip conservatively *)
+      (* An unreflectable predicate is NOT a proof.  Treating it as one made a
+         meaningless refinement more permissive than no refinement at all —
+         `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
+         errored.  `cap no_panic` promises the division cannot panic, so an
+         obligation we cannot discharge must fail closed, exactly as the
+         `Refine.Unverified` branch below already does.  A path condition that
+         syntactically proves `var ≠ 0` still discharges it, matching the
+         unrefined-parameter branch above. *)
+      | None ->
+        if path_proves_nonzero var_name path then ()
+        else
+          Err.error errctx ~span
+            (Printf.sprintf
+               "division by `%s` in `cap no_panic` module: the refinement on \
+                `%s` is outside the checkable fragment, so it cannot prove \
+                `%s != 0`.%s"
+               var_name var_name var_name division_suggestion)
       | Some assumption ->
         let path_assumes =
           List.filter_map

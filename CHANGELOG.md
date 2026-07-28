@@ -63,6 +63,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`cap no_panic`: an unreflectable divisor refinement is no longer accepted as
+  a proof.** The division-safety check treated "this predicate is outside the
+  checkable fragment" as a discharged obligation, which made a *meaningless*
+  refinement more permissive than no refinement at all: `d : Int` correctly
+  errored, while `d : {Int | is_prime(_)}` — a predicate the checker cannot
+  reflect — passed having proved nothing. Such a divisor is now reported,
+  failing closed exactly as the "solver unavailable or undecided" case already
+  did. A path condition that genuinely proves the divisor non-zero (a `when
+  d != 0` guard) still discharges the obligation. Only `cap no_panic` modules
+  are affected; a refinement the checker *can* reflect is unchanged.
+
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process
   locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
   a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites

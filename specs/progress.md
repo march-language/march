@@ -7505,3 +7505,32 @@ performance change:
 **Not done:** `toml.march`, `yaml.march` and `xml.march` still open with
 `string_split(s, "")` and have the same allocation profile. `string_byte_at`
 is what they need, and it now exists.
+
+## Current State (as of 2026-07-28, `cap no_panic` division safety fails closed on unreflectable refinements)
+
+- **Tests:** 279 refinecheck (was 274), 606 run_compiler — both green.
+- **The hole:** `lib/refinecheck/division_safety.ml`, in `check_var_divisor`'s
+  `Some (_, bdr, pred)` branch, had `| None -> ()` for `smt_of` — commented
+  "predicate not in supported fragment — skip conservatively". At the *solver*
+  boundary the pass already fails closed (`Refine.Refuted` and
+  `Refine.Unverified` both error); at the *reflection* boundary it failed open.
+  Consequence: in a `cap no_panic` module, `fn f(n : Int, d : Int)` correctly
+  errored on `n / d`, but `fn f(n : Int, d : {Int | is_prime(_)})` passed —
+  a meaningless refinement was strictly more permissive than none at all, so
+  the capability's guarantee was never established. Verified by probe before
+  and after (`--check` exit 0 → 1).
+- **Fix:** the `None` arm now reports "division by `d` in `cap no_panic`
+  module: the refinement on `d` is outside the checkable fragment, so it cannot
+  prove `d != 0`", plus the shared `division_suggestion`. A path condition that
+  syntactically proves the divisor non-zero (a `when d != 0` guard) still
+  discharges the obligation, mirroring the unrefined-parameter branch — an
+  unreflectable predicate on a guarded divisor is not a false positive.
+- **Blast radius:** no stdlib module declares `cap no_panic`. All 216
+  `specs/lang/types` corpus files keep their accept/reject verdicts, including
+  the division-safety pair `accept/t78` / `reject/t73`, and the 32-test
+  `cap no_panic` group in `run_compiler` is unchanged.
+- **Note for future test authors:** `test_refinecheck.ml`'s `has_refine_error`
+  runs `Refine_check`, which does **not** run the `cap no_panic` division
+  checker — that is a separate pass wired only in `bin/main.ml`. Division-safety
+  tests must call `Division_safety.check_module` on the **desugared** module
+  (helper `has_divsafety_error`), or they pass vacuously.

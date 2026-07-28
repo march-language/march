@@ -3582,6 +3582,82 @@ let cap_verified_suite =
         Alcotest.(check bool) "names the reason" true (has "unreflectable-predicate"))
   ]
 
+(* ── Division-safety reflection hole (Task 8) ──────────────────────────────
+   NOTE: [has_refine_error] runs [Refine_check], which does NOT run the
+   `cap no_panic` division checker — that is a separate pass wired in
+   bin/main.ml.  These tests must call [Division_safety] directly, on the
+   DESUGARED module, exactly as the driver does. *)
+let divsafety_error_texts src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Division_safety.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+let has_divsafety_error src = divsafety_error_texts src <> []
+
+let divsafety_hole_suite =
+  [ gated "cap no_panic: an unreflectable divisor refinement is an ERROR"
+      (fun () ->
+        (* Before the fix this PASSED: `is_prime` does not reflect, so [smt_of]
+           returned None and division_safety treated that as proof.  Writing a
+           meaningless refinement was more permissive than writing none. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D1 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end\n\
+              end\n"))
+  ; gated "cap no_panic: a genuine proof still passes" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D2 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | _ > 0}) : Int do n / d end\n\
+              end\n"))
+  ; gated "cap no_panic: a bare Int divisor still errors" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D3 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : Int) : Int do n / d end\n\
+              end\n"))
+  ; gated "cap no_panic: unreflectable-refinement error explains itself"
+      (fun () ->
+        let errs =
+          divsafety_error_texts
+            "mod D4 do\n\
+            \  cap no_panic\n\
+            \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end\n\
+             end\n"
+        in
+        Alcotest.(check int) "one error" 1 (List.length errs);
+        let msg = List.hd errs in
+        let has sub =
+          let n = String.length sub and m = String.length msg in
+          let rec go i = i + n <= m && (String.sub msg i n = sub || go (i + 1)) in
+          go 0
+        in
+        Alcotest.(check bool) "names the divisor" true (has "`d`");
+        Alcotest.(check bool) "names the cap" true (has "cap no_panic");
+        Alcotest.(check bool) "names the reason" true
+          (has "outside the checkable fragment"))
+  ; gated "cap no_panic: a guard still discharges an unreflectable refinement"
+      (fun () ->
+        (* The path condition genuinely proves d != 0, so the unreflectable
+           predicate is irrelevant — this must NOT become a false positive. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D5 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int when d != 0 do n / d end\n\
+              end\n"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3616,4 +3692,5 @@ let () =
       ("length-alias", length_alias_suite);
       ("string-alias", string_alias_suite);
       ("obligations", obligation_suite);
-      ("cap-verified", cap_verified_suite) ]
+      ("cap-verified", cap_verified_suite);
+      ("divsafety-hole", divsafety_hole_suite) ]
