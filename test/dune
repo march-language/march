@@ -1889,6 +1889,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_static_lambda_no_leak.out native/static_lambda_no_leak.expected)
  (action (diff native/static_lambda_no_leak.expected native_static_lambda_no_leak.out)))
 
+; ── A closure/local-fn PARAMETER must shadow an imported fn of the same     ──
+; ── name.  `import Logger` aliases Logger.i to the bare `i`; lowering used  ──
+; ── to rewrite a binder named `i` to that global (the binder was never      ──
+; ── registered as a local), so Bytes.get(b, i) got a function address as    ──
+; ── its index.  depot's read_cstring has exactly this shape, so every       ──
+; ── compiled Postgres connect panicked.  Covers all three binder forms.     ──
+(rule
+ (targets native_closure_param_shadows_import native_closure_param_shadows_import.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/closure_param_shadows_import.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_closure_param_shadows_import
+         native/closure_param_shadows_import.march)
+    (with-stdout-to native_closure_param_shadows_import.out
+         (system "./native_closure_param_shadows_import"))))))
+
+(rule
+ (alias runtest)
+ (deps native_closure_param_shadows_import.out native/closure_param_shadows_import.expected)
+ (action (diff native/closure_param_shadows_import.expected native_closure_param_shadows_import.out)))
+
 ; ── Tuple projection forwarding, RC-relevant case: heap-typed (String)     ──
 ; ── tuple elements, including the same heap value duplicated into both    ──
 ; ── slots (let t = (s, s)), destructured and used independently. This is  ──
