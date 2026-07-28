@@ -198,7 +198,7 @@ learns the condition; the else-branch learns its negation:
 ```march
 fn get(xs : List(Int), i : Int) : Int do
   if i >= 0 && i < List.length(xs) do
-    at(xs, i)          -- ok: the guard proves the precondition here
+    at(xs, i)          -- silent: see the caveat below
   else
     0
   end
@@ -208,6 +208,21 @@ end
 (`len` is a measure name usable only inside a `{...}` refinement predicate,
 not a callable in ordinary code — verified live, 2026-07-22; use
 `List.length` in a plain guard expression like the one above.)
+
+> **The `List.length` half of that guard does not actually discharge anything.**
+> The runtime function `List.length` and the `len` measure are unconnected
+> symbols, so `i < List.length(xs)` contributes no fact about `len(xs)`. In the
+> example above the `i >= 0` conjunct genuinely discharges the `_ >= 0` half of
+> `at`'s precondition; the `_ < len(xs)` half is *skipped*, not proved, and the
+> call is silent for that reason rather than because it was verified.
+>
+> Verified 2026-07-27 with a control pair: writing the contradictory guard
+> `if i >= List.length(xs) do at(xs, i)` against a precondition of only
+> `{Int | _ < len(xs)}` stays **silent**, while the same precondition with a
+> concrete list (`at([1, 2], 7)`) is reported — so the machinery works and it is
+> specifically the `List.length`→`len` link that is missing. The same gap is why
+> a `List.length(xs) > 0` guard does not discharge a `{List(a) | len(_) > 0}`
+> precondition. This is a missed proof, never a false report.
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -850,13 +865,21 @@ edges:
   cannot write a predicate that says "not NaN"; see
   [Float Refinements](#float-refinements) for why NaN nevertheless never causes
   a false report.
-- **A measure applied to the refined value itself is reasoned about by axiom,
-  not evaluated on a literal.** `{v : Tree | size(v) < 0}` is caught for any
-  argument (it contradicts the non-negativity axiom), but
+- **An AXIOMATISED measure applied to the refined value itself is reasoned
+  about by axiom, not evaluated on a literal.** `{v : Tree | size(v) < 0}` is
+  caught for any argument (it contradicts the non-negativity axiom), but
   `{v : Tree | size(v) > 2}` applied to `Leaf` is NOT — the checker does not
   concretely evaluate `size(Leaf) = 0` in that position. A measure applied to a
   *different* parameter IS evaluated concretely, which is why the
   `get(Node(Leaf, 5, Leaf), 3)` example above works.
+
+  This limit is specific to `@[measure]`-axiomatised measures over an ADT.
+  The built-in list `len` applied to the refined value **is** folded on a
+  literal, which is what makes `head([])` against `{List(a) | len(_) > 0}` a
+  reported violation — see [Refining a collection over its own
+  length](#refining-a-collection-over-its-own-length). Both re-verified
+  2026-07-27: `big(Leaf)` against `{v : Tree | size(v) > 2}` stays silent,
+  `head([])` against `{List(Int) | len(_) > 0}` is reported.
 - **Performance: measures can be slow on a cold cache.** Quantified + datatype
   reasoning is far more expensive per query than plain arithmetic. Verdicts are
   content-addressed and cached (warm rebuilds are fast), and the cost is
@@ -938,6 +961,26 @@ fact of the corpus: its `apply`'s callback parameter is declared `Int -> Int`
 (unrefined), so it still demonstrates the boundary that *is* still out of
 reach — a caller's own contract is only enforced when it is actually
 declared refined, never inferred from what the callback happens to point to.
+
+The typing corpus now stands at **216 programs (107 accept, 109 reject)**, with
+each refinement feature bracketed from BOTH sides. That pairing is deliberate
+and load-bearing: an accept-only witness cannot distinguish a working contract
+from one that silently checks nothing, which is exactly how the `_` and
+named-binder spellings of a measure over the refined value shipped unenforced
+until 2026-07-27 (`accept/t115`–`t117`, `reject/t114`–`t116`; `reject/t116`
+additionally pins that a contract declared in a *stdlib* signature reaches a
+user call site at all). Two witnesses pin soundness rather than a feature:
+`accept/t110` (an unproven postcondition must not propagate) and `accept/t113`
+(a NaN-only `Float` predicate must stay satisfiable — it fails the moment
+anyone re-encodes floats as reals).
+
+On the operational side, golden `g46_refinement_erasure` is the only refinement
+program in the 46-program golden corpus, and it exercises `{Int | _ >= 0}`
+only. Erasure was separately re-verified 2026-07-27 for every later form — ADT
+tags, `Bool`, `Float`, `String` `len`, non-empty `List`, and the stdlib
+`List.head`/`Option.unwrap` contracts — by diffing interpreted against compiled
+output on one program using all of them: byte-identical, exit 0 both. The
+golden corpus itself remains 46/46 MATCH.
 
 ## Next Steps
 
