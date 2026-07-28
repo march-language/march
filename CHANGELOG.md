@@ -129,6 +129,23 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A module-qualified constructor pattern could silently never match when
+  compiled.** `match Json.parse(s) do Ok(Json.Array(_)) -> ... end` matched
+  correctly interpreted but fell through to the catch-all arm in a compiled
+  binary — no error, no warning, no crash, just the wrong branch. It affected
+  any qualified pattern whose bare constructor name is declared by more than one
+  module: in the standard library that is `Array` and `Null` (both
+  `Json.JsonValue` and `Msgpack.Value` declare them), so `Json.Array(_)` and
+  `Json.Null` were the visible casualties, while `Json.Object(_)` — a name
+  unique to `JsonValue` — worked. Codegen identifies constructors by their
+  *type* (`JsonValue.Array`), but the documented qualified-pattern syntax writes
+  a *module* (`Json.Array`); when the two names differ the qualifier resolved to
+  nothing and the pattern fell back to matching on the bare name, which then
+  picked whichever module's constructor the compiler happened to enumerate
+  first. The qualifier is now translated to its declaring type during lowering,
+  so an explicitly qualified pattern resolves to exactly the constructor it
+  names.
+
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on
   [/docs/simd-benchmarks/](https://march-lang.org/docs/simd-benchmarks/) were

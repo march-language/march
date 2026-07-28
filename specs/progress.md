@@ -1,5 +1,94 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, module-qualified ctor pattern silently failed to match compiled)
+
+Fixed a silent-wrong-answer codegen bug: a MODULE-qualified constructor
+pattern whose bare ctor name is declared by more than one module compiled
+into a `switch` case that could never fire, so the arm **failed open** to
+the catch-all — no error, no warning, no crash. The interpreter was always
+correct, making this a pure compiled/interpreted parity divergence.
+
+Repro (`Json.Array`/`Json.Null` fall through compiled, match interpreted):
+
+```march
+match Json.parse("[1]") do
+Ok(Json.Array(_)) -> println("array")
+Ok(_)             -> println("fell through")   -- compiled took THIS arm
+Err(_)            -> println("err")
+end
+```
+
+`Json.Object(_)` matched correctly throughout, which is what made the bug
+survive so long — see "why the obvious fixture misses it" below.
+
+**Root cause.** Codegen keys `Llvm_ctx.ctor_info` by TYPE
+(`"JsonValue.Array"`), and `Llvm_case.qualified_br_key` resolves a written
+qualifier by comparing it only against a key's *type* segment. But the
+documented qualified-pattern syntax (`specs/lang/pattern-matching.md`,
+"Qualified Constructor Patterns") writes a *module* — and `Json` declares
+the type `JsonValue`, `Msgpack` declares `Value`. The two names differ, so
+neither the `ktype = qual` nor the `last_seg ktype = qtail` comparison could
+ever fire, no key matched, and the tag DEGRADED to the bare ctor `"Array"`.
+`Llvm_data.ctor_entry` then resolved that bare name by its ambiguous
+`".<ctor>"` suffix scan over every type in the program, tie-broken by
+hashtable order — and landed on `Msgpack.Value.Array`. Because `Value` is a
+same-short-name colliding type (Msgpack + DataFrame), its ctors carry
+globally-unique tags from the disjoint `0x0200_0000` range (Task 1 of the
+ctor-module-identity plan), so the emitted case constant was `33554472`
+against a value built with `JsonValue.Array`'s tag `4`. Confirmed directly in
+`--emit-llvm`: the switch compared `i32 33554472` while every `store i32` in
+the whole module was in the range 0–5.
+
+**Why it could not be fixed in codegen.** The obvious repair — fall back to
+the scrutinee's own type when the qualifier resolves nothing — is dead code
+here. Instrumenting `qualified_br_key` showed `scrut_ty = TVar _` for all
+three patterns: the scrutinee is a destructured sub-pattern variable (the
+`Ok(...)` payload), and `lower_match` mints those with `unknown_ty`, so by
+codegen the type names nothing at all. The qualifier has to be translated
+while module structure is still in hand.
+
+**Fix** (`lib/tir/lower_state.ml`, `lib/tir/lower_match.ml`). The existing
+`compute_shared_ctor_collisions` walk over all decls already collects, per
+declared variant type, its module prefix and ctor names; it now also indexes
+that same data two other ways — `module_ctor_type_tbl` ((module prefix, ctor)
+→ declaring type's short name, or `None` when that module declares the ctor
+on two different types) and `type_ctor_tbl` ((short type name, ctor)).
+`pat_tag_and_subs`'s qualified branch consults them after the existing narrow
+collision path declines: a qualifier that is really a TYPE (`List.Cons`, or
+the 3-segment `Mod.Type.Ctor` form the collision path emits) is left
+untouched since it already exact-matches a `ctor_info` key, and an ambiguous
+module passes through unchanged rather than guessing. Otherwise the tag is
+rewritten to `"JsonValue.Array"`, which `qualified_br_key` then satisfies on
+its FIRST check (`Hashtbl.mem ctor_info br_tag`) — no codegen change at all.
+
+Note this also makes the previously-passing `Msgpack.Array` direction
+*deterministic* rather than accidentally correct: it too was degrading to the
+bare name and merely winning the hashtable coin-flip.
+
+**Why the obvious fixture misses it** (worth remembering when writing the
+regression). The failure is name-dependent, not construct-dependent: only
+`Array` and `Null` are declared by two stdlib modules, so only those two
+misresolve. `Object` is unique to `JsonValue`, so its ambiguous suffix scan
+had exactly one candidate and silently landed right; `Str` is declared by
+both but at the *same* tag position (3) in each, so the wrong lookup returned
+the right number. A fixture checking only `Object`, or only `Str`, passes
+pre-fix and proves nothing. The new test asserts `Array`, `Null`, `Object`,
+`Str` and a non-matching fallthrough together, and was confirmed RED before
+the fix (`array`/`null` → `other`).
+
+**JS backend was never affected** — `js_emit` discriminates on the ctor-name
+string (`{ $: "Array" }`), not a numeric tag, so no tag identity is involved.
+
+**Tests.** New `test_module_qualified_colliding_ctor_pattern_compiled` in
+`test/test_codegen.ml`, registered under the existing
+`cross_module_ctor_resolution` group alongside its sibling
+`test_msgpack_cross_module_ctor_resolution_compiled` (the same bug family
+approached from the stdlib-internal side). Also verified by hand on a
+user-module reproduction: two nested modules `A`/`B` declaring types `T`/`U`
+that share the ctor names `Node`/`Leaf`, matched via `A.Node`/`B.Node`, plus
+`List.Cons`/`List.Nil` type-qualified patterns to confirm the untouched path
+— compiled output matches interpreted on every arm.
+
 ## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
 
 Extended `lib/tir/native_map_inline.ml` (the compiler pass behind

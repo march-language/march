@@ -1,8 +1,38 @@
 # March — TODO List
 
-**Last updated:** 2026-07-27 (deep drop for containers released without destructuring; see Done.)
+**Last updated:** 2026-07-27 (module-qualified ctor pattern silently failed to match compiled; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## Module-qualified ctor pattern silently failed to match compiled (FIXED 2026-07-27)
+
+**Symptom.** `Ok(Json.Array(_))` matched interpreted but fell through to the
+catch-all arm in a compiled binary — no error, no warning, no crash. Hit any
+qualified pattern whose bare ctor name is declared by two modules; in the
+stdlib that is `Array` and `Null` (`Json.JsonValue` + `Msgpack.Value`).
+`Json.Object(_)` worked, masking it.
+
+**Cause.** `ctor_info` is keyed by TYPE (`"JsonValue.Array"`) and
+`Llvm_case.qualified_br_key` matches a written qualifier only against a key's
+type segment — but the documented syntax writes a MODULE (`Json`), whose name
+differs from the type it declares (`JsonValue`). Nothing matched, the tag
+degraded to the bare `"Array"`, and `Llvm_data.ctor_entry`'s ambiguous
+`".<ctor>"` suffix scan resolved it by hashtable order onto
+`Msgpack.Value.Array` — a colliding type, so its tag comes from the disjoint
+`0x0200_0000` range and the case constant (`33554472`) could not match tag `4`
+under any input. Could not be repaired in codegen: the scrutinee is a
+destructured sub-pattern var typed `TVar "_"` by then.
+
+**Fix.** `Lower_state.compute_shared_ctor_collisions`'s existing decl walk now
+also builds `module_ctor_type_tbl` / `type_ctor_tbl`; `Lower_match`'s
+qualified branch uses them to rewrite a module qualifier to its declaring
+type, leaving type qualifiers (`List.Cons`) and ambiguous modules alone.
+Regression test `test_module_qualified_colliding_ctor_pattern_compiled`
+(`test/test_codegen.ml`, `cross_module_ctor_resolution` group) — asserts
+`Array`/`Null`/`Object`/`Str` together, since a fixture checking only `Object`
+or only `Str` passes pre-fix. Full write-up in `specs/progress.md`.
 
 ---
 
