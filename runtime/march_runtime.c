@@ -317,25 +317,6 @@ void *march_alloc(int64_t sz) {
  * _Atomic int64_t has the same size and alignment as int64_t on all targets.
  */
 
-/* Polymorphic containers store scalars via tagged integers: the low bit of the
- * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
- * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
- * so their low bit is always 0.  This uniform tagging scheme lets the runtime
- * discriminate between heap pointers and immediates without dereferencing.
- *
- * Tag scheme:
- *   immediate integer n  → stored as ptr = (n << 1) | 1  (low bit = 1)
- *   heap pointer p       → stored as ptr = p             (low bit = 0)
- *
- * Guards (in order, short-circuit):
- *   1. low bit == 0: any value with bit 0 set is an immediate — reject fast.
- *   2. addresses below one page (4096) are never valid heap allocations —
- *      defense-in-depth for uninitialised fields and NULL.
- *   3. values with the sign bit set (intptr_t < 0) are never valid heap
- *      pointers on any supported 64-bit ABI: user-space mallocs live in the
- *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64). */
-#define IS_HEAP_PTR(p) \
-    (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
 
 void march_incrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
