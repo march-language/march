@@ -140,6 +140,7 @@ type ctx = Llvm_ctx.ctx = {
   var_slot  : (string, string) Hashtbl.t;
   local_names : (string, int) Hashtbl.t;
   emitted_wraps : (string, unit) Hashtbl.t;
+  static_clos : (string, string) Hashtbl.t;
   extra_fns : Buffer.t;
   emitted_eq_fns : (string, unit) Hashtbl.t;
   emitted_dispatch_fns : (string, unit) Hashtbl.t;
@@ -313,6 +314,22 @@ let alloca_name = Llvm_ctx.alloca_name
 
 (* ── Atom emission ───────────────────────────────────────────────────── *)
 
+(* A static closure bakes in one compiled version of the function and one
+   pointer identity for the whole module, which is correct for a whole-module
+   compile but not for:
+     - the REPL/JIT, whose fragments are separate modules with their own ctx
+       (a per-fragment global would give the same fn different pointers across
+       fragments, and can collide in the ORC backend's shared JITDylib);
+     - hot-reload boundary functions, which must keep a per-materialization
+       object rather than a module-lifetime one.
+   Both fall back to the original fresh-march_alloc path. *)
+let static_closure_ok ctx (march_name : string) : bool =
+  (not ctx.repl)
+  && (match ctx.hr_config with
+      | None     -> true
+      | Some cfg ->
+        not (Hot_reload.is_reloadable cfg (Hot_reload.module_of_name march_name)))
+
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
 let emit_atom ctx (atom : Tir.atom) : string * string =
   match atom with
@@ -399,15 +416,19 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         (clo_wrap_define wrap_name param_tys target_ret fn_name)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
-    let hp = fresh ctx "cwrap" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
-    let tgp = fresh ctx "cwt" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
-    emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
-    let fp = fresh ctx "cwf" in
-    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
-    emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
-    ("ptr", hp)
+    if static_closure_ok ctx v.Tir.v_name then
+      ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+    else begin
+      let hp = fresh ctx "cwrap" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
+      let tgp = fresh ctx "cwt" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
+      emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
+      let fp = fresh ctx "cwf" in
+      emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
+      emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+      ("ptr", hp)
+    end
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
                  && not (Hashtbl.mem ctx.zero_arg_fns v.Tir.v_name)
                  && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
@@ -513,15 +534,19 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          Buffer.add_string ctx.extra_fns
            (clo_wrap_define wrap_name param_tys target_ret fn_name)
        end;
-       let hp  = fresh ctx "cwrap" in
-       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
-       let tgp = fresh ctx "cwt" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
-       emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
-       let fp  = fresh ctx "cwf" in
-       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
-       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
-       ("ptr", hp)
+       if static_closure_ok ctx resolved then
+         ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
+       else begin
+         let hp  = fresh ctx "cwrap" in
+         emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
+         let tgp = fresh ctx "cwt" in
+         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
+         emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
+         let fp  = fresh ctx "cwf" in
+         emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
+         emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+         ("ptr", hp)
+       end
      | _ ->
        (* 0-arg function (module-level constant) or unknown type:
           call with no arguments to obtain the value. *)

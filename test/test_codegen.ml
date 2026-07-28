@@ -11163,6 +11163,70 @@ let test_preamble_wrapper_delegates () =
   Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
     (Buffer.contents buf_new) (Buffer.contents buf_old)
 
+(** A top-level fn used as a first-class value must NOT emit a fresh
+    march_alloc(24) per materialization; it must reference one immortal
+    static global instead. *)
+let test_static_closure_global_replaces_alloc () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* main returns `target` AS A VALUE (not calling it) — forces materialization. *)
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [];
+      fn_ret_ty = fn_ty;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [target; main]) in
+  Alcotest.(check bool) "emits an immortal static closure global"
+    true (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "static closure carries the MARCH_RC_IMMORTAL refcount"
+    true (Test_helpers.contains "1099511627776" ir);
+  Alcotest.(check bool) "static closure is a writable global, not a constant"
+    true (Test_helpers.contains "internal global" ir);
+  Alcotest.(check bool) "no per-materialization march_alloc(i64 24) remains"
+    false (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** REPL fragments are separate modules; a per-fragment static global would
+    hand out different pointers for the same fn across fragments, and can
+    collide under the ORC backend's shared JITDylib. The REPL must keep the
+    fresh-alloc path.
+
+    Exercised through the actual REPL emission entry point
+    ([Llvm_emit.emit_repl_expr], which builds its ctx with [~repl:true] —
+    see [lib/tir/llvm_repl.ml]) rather than by calling
+    [Llvm_ctx.intern_static_closure] directly: the eligibility gate lives in
+    [llvm_emit.ml]'s [static_closure_ok], not in the memoizing helper itself,
+    so the helper alone can't demonstrate the REPL is declined — only the
+    full materialization path can. *)
+let test_static_closure_not_emitted_in_repl_mode () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* REPL fragment: "target" evaluated as a bare expression, materializing the
+     top-level fn as a first-class value — the same trigger as the native
+     test above, run through the REPL fragment emitter instead of
+     emit_module. *)
+  let body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty)) in
+  let ir =
+    March_tir.Llvm_emit.emit_repl_expr
+      ~n:0 ~ret_ty:fn_ty ~prev_slots:[] ~fns:[target] ~types:[] body
+  in
+  Alcotest.(check bool) "REPL mode still materializes via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir);
+  Alcotest.(check bool) "REPL mode emits no static closure global"
+    false (Test_helpers.contains "$static_clo" ir)
+
 (* ── Robustness: an unreadable sibling directory must not crash the compiler ──
    The compiler auto-discovers sibling `.march` modules in the entry file's own
    source directory (`resolve_imports` plus the early-CAS sibling hash both walk
@@ -12109,6 +12173,10 @@ let codegen_suites =
             test_clo_wrap_is_alwaysinline;
           Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
             test_preamble_wrapper_delegates;
+          Alcotest.test_case "static closure global replaces per-materialization march_alloc" `Quick
+            test_static_closure_global_replaces_alloc;
+          Alcotest.test_case "static closure global is not emitted in REPL mode" `Quick
+            test_static_closure_not_emitted_in_repl_mode;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
