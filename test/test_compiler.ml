@@ -7157,6 +7157,15 @@ let test_cap_no_alloc_lexes () =
   Alcotest.(check bool) "cap no_alloc lexes as CAP_NO_ALLOC token" true
     (match tok with March_parser.Parser.CAP_NO_ALLOC -> true | _ -> false)
 
+let test_cap_verified_parses () =
+  let src = "mod V do\n  cap verified\n  fn f(n : Int) : Int do n end\nend\n" in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  Alcotest.(check bool) "DOpts verified present" true
+    (List.exists
+       (function March_ast.Ast.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
+       m.March_ast.Ast.mod_decls)
+
 let test_cap_no_alloc_tuple_error () =
   let ctx = check_no_alloc {|mod M do
     cap no_alloc
@@ -10415,6 +10424,7 @@ let compiler_suites =
         ] );
       ( "cap_no_alloc", [
           Alcotest.test_case "cap no_alloc lexes as CAP_NO_ALLOC token"   `Quick test_cap_no_alloc_lexes;
+          Alcotest.test_case "cap verified parses as DOpts [verified]"    `Quick test_cap_verified_parses;
           Alcotest.test_case "cap no_alloc + tuple: error"                 `Quick test_cap_no_alloc_tuple_error;
           Alcotest.test_case "cap no_alloc + record: error"                `Quick test_cap_no_alloc_record_error;
           Alcotest.test_case "cap no_alloc + Some(x): error"              `Quick test_cap_no_alloc_some_error;
