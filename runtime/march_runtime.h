@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <setjmp.h>
+#include <stdio.h>   /* march_sso_selftest formats its failure message */
 
 /* Object header layout (16 bytes):
  *   offset  0: int64_t  rc   (reference count)
@@ -120,6 +121,170 @@ void   *march_alloc_float(double v);
 /* Read the double out of a boxed Float. Undefined if [p] is not a float box. */
 double  march_unbox_float(void *p);
 typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[]; } march_string;
+
+/* Polymorphic containers store scalars via tagged integers: the low bit of the
+ * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
+ * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
+ * so their low bit is always 0.  This uniform tagging scheme lets the runtime
+ * discriminate between heap pointers and immediates without dereferencing.
+ *
+ * Tag scheme:
+ *   immediate integer n  → stored as ptr = (n << 1) | 1  (low bit = 1)
+ *   heap pointer p       → stored as ptr = p             (low bit = 0)
+ *
+ * Guards (in order, short-circuit):
+ *   1. low bit == 0: any value with bit 0 set is an immediate — reject fast.
+ *   2. addresses below one page (4096) are never valid heap allocations —
+ *      defense-in-depth for uninitialised fields and NULL.
+ *   3. values with the sign bit set (intptr_t < 0) are never valid heap
+ *      pointers on any supported 64-bit ABI: user-space mallocs live in the
+ *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64). */
+#define IS_HEAP_PTR(p) \
+    (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
+
+/* Moved here from march_runtime.c: the inline-string encoding below is safe
+ * only BECAUSE of this predicate's exact definition — an inline string sets the
+ * sign bit and so fails guard 3 — and march_sso_selftest asserts exactly that.
+ * Keeping the two in one file means they cannot drift apart silently. */
+
+/* ── Small-string optimization: inline strings of <= 7 bytes ──────────────
+ *
+ * A string of at most MARCH_SSO_MAX bytes is stored IN THE VALUE, with no
+ * allocation and no refcount:
+ *
+ *   [63] = 1  |  [62:59] = length 0..7  |  [58:3] = payload  |  [2:0] = 0
+ *
+ * WHY THIS ENCODING IS SAFE — the correctness argument for the whole scheme.
+ * March already carries two tagged forms, and this is unreachable by both:
+ *
+ *   heap pointer    bit63 = 0, low bit = 0, value >= 4096
+ *   immediate int   (n << 1) | 1  — low bit ALWAYS 1, for any n incl. negative
+ *   inline string   bit63 = 1, low bit = 0                      <- distinct
+ *
+ * An inline string sets bit63, so it fails IS_HEAP_PTR's `(intptr_t)p > 0`
+ * test and can never be mistaken for a pointer.  It clears the low bit, so it
+ * can never be mistaken for an immediate integer, whose encoding forces that
+ * bit set regardless of sign.
+ *
+ * The consequence that makes this cheap: march_incrc and march_decrc both open
+ * with `if (!IS_HEAP_PTR(p)) return;`, so inline strings are refcount-free with
+ * NO change to the RC hot path.  They are never freed, never counted, never
+ * shared — copying one is copying a register.
+ *
+ * Bytes are little-endian within the payload; the empty string is length 0.
+ * See specs/plans/2026-07-27-string-sso.md. */
+#define MARCH_SSO_MAX 7
+#define MARCH_SSO_BIT (1ULL << 63)
+
+static inline int march_str_is_inline(const void *p) {
+    return ((uintptr_t)p & MARCH_SSO_BIT) != 0 && ((uintptr_t)p & 1u) == 0;
+}
+
+static inline int64_t march_str_len(const void *p) {
+    if (march_str_is_inline(p)) return (int64_t)(((uintptr_t)p >> 59) & 0xF);
+    return ((const march_string *)p)->len;
+}
+
+/* Returns a pointer to the string's bytes, NUL-terminated.
+ *
+ * For an inline string the bytes are unpacked into [scratch], which the CALLER
+ * owns and which MUST be at least MARCH_SSO_MAX + 1 bytes — the returned
+ * pointer is valid only as long as [scratch] is.  A heap string returns its own
+ * data and ignores [scratch].  Callers that keep the pointer beyond the
+ * scratch buffer's lifetime are wrong; that is the one hazard this accessor
+ * introduces and the reason it takes the buffer explicitly rather than using a
+ * static. */
+static inline const char *march_str_data(const void *p, char *scratch) {
+    if (march_str_is_inline(p)) {
+        uint64_t bits = (uint64_t)(uintptr_t)p >> 3;
+        int64_t n = march_str_len(p);
+        for (int64_t i = 0; i < n; i++)
+            scratch[i] = (char)((bits >> (i * 8)) & 0xFF);
+        scratch[n] = '\0';
+        return scratch;
+    }
+    return ((const march_string *)p)->data;
+}
+
+/* Pack [n] <= MARCH_SSO_MAX bytes into an inline string value. */
+static inline void *march_str_make_inline(const char *s, int64_t n) {
+    uint64_t bits = 0;
+    for (int64_t i = 0; i < n; i++)
+        bits |= (uint64_t)(unsigned char)s[i] << (i * 8);
+    return (void *)(uintptr_t)(MARCH_SSO_BIT | ((uint64_t)n << 59) | (bits << 3));
+}
+
+/* Self-test for the inline-string encoding (see march_runtime.h).
+ *
+ * Checks the three properties the representation depends on:
+ *   1. round-trip: every length 0..MARCH_SSO_MAX recovers its exact bytes,
+ *      including embedded NULs and high bytes (march_string is length-counted,
+ *      so 0x00 and 0xFF are ordinary data);
+ *   2. non-collision with immediate integers, whose encoding (n << 1) | 1
+ *      forces the low bit set for every n including negatives;
+ *   3. non-collision with heap pointers, i.e. IS_HEAP_PTR rejects every inline
+ *      value — which is what makes the RC path need no changes.
+ *
+ * Returns "ok" or the first failure. */
+static inline const char *march_sso_selftest(void) {
+    static char msg[128];
+    char scratch[MARCH_SSO_MAX + 1];
+
+    /* 1. Round-trip every length, with a byte pattern that includes 0x00 and
+     *    0xFF so a NUL-terminator assumption or a sign-extension bug shows up. */
+    for (int64_t n = 0; n <= MARCH_SSO_MAX; n++) {
+        char src[MARCH_SSO_MAX];
+        for (int64_t i = 0; i < n; i++)
+            src[i] = (char)(i == 0 ? 0x00 : (i == 1 ? 0xFF : 'a' + i));
+        void *v = march_str_make_inline(src, n);
+        if (!march_str_is_inline(v)) {
+            snprintf(msg, sizeof msg, "len %lld: not recognised as inline", (long long)n);
+            return msg;
+        }
+        if (march_str_len(v) != n) {
+            snprintf(msg, sizeof msg, "len %lld: read back %lld",
+                     (long long)n, (long long)march_str_len(v));
+            return msg;
+        }
+        const char *d = march_str_data(v, scratch);
+        for (int64_t i = 0; i < n; i++) {
+            if (d[i] != src[i]) {
+                snprintf(msg, sizeof msg, "len %lld: byte %lld is 0x%02x, expected 0x%02x",
+                         (long long)n, (long long)i,
+                         (unsigned char)d[i], (unsigned char)src[i]);
+                return msg;
+            }
+        }
+        if (d[n] != '\0') {
+            snprintf(msg, sizeof msg, "len %lld: not NUL-terminated", (long long)n);
+            return msg;
+        }
+        /* 3. An inline value must never look like a heap pointer. */
+        if (IS_HEAP_PTR(v)) {
+            snprintf(msg, sizeof msg, "len %lld: IS_HEAP_PTR accepted an inline value", (long long)n);
+            return msg;
+        }
+    }
+
+    /* 2. No immediate integer can be mistaken for an inline string. */
+    {
+        int64_t probes[] = { 0, 1, -1, -2, 42, -42,
+                             (int64_t)1 << 40, -((int64_t)1 << 40),
+                             INT64_MAX / 2, INT64_MIN / 2 };
+        for (size_t i = 0; i < sizeof probes / sizeof probes[0]; i++) {
+            void *imm = (void *)(uintptr_t)(((uint64_t)probes[i] << 1) | 1u);
+            if (march_str_is_inline(imm)) {
+                snprintf(msg, sizeof msg,
+                         "immediate int %lld misread as an inline string",
+                         (long long)probes[i]);
+                return msg;
+            }
+        }
+    }
+
+    return "ok";
+}
+
 /* Allocate an uninitialised-data march_string of byte length [len], with the
  * header (rc=1, tag=MARCH_STRING_TAG, pad=0, len) filled in.  Callers fill
  * data[0..len] and the NUL terminator.  Centralises header init so no string

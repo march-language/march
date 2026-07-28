@@ -11,6 +11,27 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`String.to_uppercase` / `to_lowercase` no longer depend on the process
+  locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
+  a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites
+  `0xC3`, the lead byte of every 2-byte UTF-8 sequence, silently corrupting the
+  encoding. March never calls `setlocale`, but any linked library or embedding
+  application can. Behaviour is now fixed regardless of locale, and the same
+  change made them **~30× faster** (0.60s → 0.02s on `bench/string_case`).
+  Scope is unchanged — ASCII only, non-ASCII bytes pass through untouched.
+
+### Documentation
+
+- `stdlib/string.march` no longer claims the runtime has small-string
+  optimisation. It had stated since 2026-03-19 that "strings of 15 bytes or
+  fewer are stored inline without a heap allocation"; that was never true — every
+  March string is a refcounted heap allocation with a 24-byte header. The header
+  now also states plainly that `grapheme_count` counts *codepoints* despite its
+  name, with the cases where the two differ.
+
+
 ### Changed
 
 - The TIR optimizer folds a tuple element access to its source value when
@@ -144,6 +165,23 @@ git log is authoritative for exact commits.
   `Float` record fields and special-value predicates (`is_nan`) stay out of
   scope and are silently skipped rather than approximated.
 
+- **Non-empty-collection preconditions, on 13 stdlib functions that panic on an
+  empty argument.** `List.head`/`tail`/`last`/`minimum_int`/`maximum_int`, the
+  `prelude` `head`/`tail`, `Stats.mean`/`min_val`/`max_val`, `Gen.element`/
+  `one_of` and `Random.choice` now declare `{List(a) | len(_) > 0}`, so passing
+  a literal empty list is a compile error instead of a runtime abort:
+  ```march
+  List.head([])       -- refinement violation: `len(_) > 0` cannot hold
+  List.head([1, 2])   -- fine
+  ```
+  Each contract is derived from that function's own panic message, so none is
+  stronger than the check the code already performed, and every `panic` remains
+  as the runtime backstop for arguments the checker skips. A list whose contents
+  the checker cannot see stays **unknown** and is skipped, never guessed. Note
+  that an ordinary `List.length(xs) > 0` guard does not yet discharge the
+  obligation — the runtime function and the `len` measure are not connected, so
+  a guarded call is skipped rather than proved.
+
 ### Changed
 
 - **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
@@ -168,6 +206,33 @@ git log is authoritative for exact commits.
   See `docs/simd-benchmarks.md`.
 
 ### Fixed
+
+- **A measure over the refined value only worked under one of its three
+  spellings.** In `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` the
+  refined value reflected to a fresh unconstrained constant rather than to the
+  call's actual argument, so the predicate was satisfiable at every call site,
+  never a definite failure, and the contract silently checked nothing — while
+  the third spelling, naming the parameter (`len(xs) > 0`), worked. Two
+  consequences, both silent: the `_` form the documentation teaches gave no
+  enforcement at all, and renaming a parameter unenforced a working contract
+  with no diagnostic beyond an incidental unused-variable warning. All three
+  spellings now resolve against the same actual, as the string and
+  axiom-measure paths already did.
+
+- **`Json.parse` rejected JSON numbers with a signed exponent.** `1e-5`,
+  `2.5E+10` and `1e-308` all failed with `invalid number: 1e` — the number
+  scanner accepted `+`/`-` only in the mantissa position, so it stopped at the
+  sign after the exponent marker and handed a truncated `"1e"` to
+  `string_to_float`. The scanner now follows RFC 8259's grammar
+  (`["-"] int [frac] [exp]`), accepting a sign immediately after `e`/`E`.
+  `1-2` still parses as `1` followed by a trailing-character error, as before.
+
+- **`Json.parse` accepted number forms JSON does not allow.** Shape is now
+  validated during the scan instead of being left to `string_to_float`
+  (`strtod` / `float_of_string`), which is more permissive than JSON: `1.` and
+  `01` previously parsed and are now rejected, joining `+1`, `Infinity`,
+  `0x10` and `.5`. This is a behavior change for input that was never valid
+  JSON — anything conforming to RFC 8259 parses as it did before.
 
 - **A module-qualified constructor pattern could silently never match when
   compiled.** `match Json.parse(s) do Ok(Json.Array(_)) -> ... end` matched

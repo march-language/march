@@ -1,5 +1,135 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, `Json.bad_number` monomorphisation reverted — the typecheck blowup it claimed to fix does not reproduce)
+
+`d21c846b` changed `Json.bad_number` to return a bare message `String`, with
+the three callers wrapping it in `Err` themselves, on the stated grounds that
+returning `Err(msg)` directly gave the helper the type `Result(a, String)` —
+polymorphic in an `Ok` payload it never produces — and that instantiating that
+scheme at each call site made typechecking any caller of `Json.parse` explode
+("six call sites went from ~1.5s to non-terminating"). **That measurement does
+not reproduce, and the workaround is reverted here.** `bad_number` returns
+`Err(...)` again, exactly as before `d21c846b`.
+
+A/B over the two helper shapes the commit names (a `println`-with-`++`-concat
+helper, and a `JsonValue`-returning helper), at 6/12/16/22 call sites, three
+interleaved reps each, same compiler binary, only the staged
+`_build/default/stdlib/json.march` differing, `--check` so only typechecking
+is timed: **polymorphic and monomorphic are indistinguishable at every point** —
+~1.03–1.10s on a cold stdlib and ~57ms warm, for both variants, with no growth
+in call-site count. Scaling the concat shape to 80 call sites is likewise flat
+(1110ms → 1203ms from 10 to 80 sites). The 22-case number corpus produces
+byte-identical output before and after the revert.
+
+Two measurement hazards explain how the original numbers could have been
+reached, and are worth knowing for any future typecheck benchmark:
+
+- **`~/.cache/march/stdlib_tcenv_cli_<hash>.bin`** (`bin/main.ml`
+  `get_stdlib_tc_env`) caches the whole typechecked stdlib env, keyed on a
+  digest of the stdlib AST and living under `$HOME` — so it is shared across
+  every worktree and session on the machine. A cold run pays ~1.0s; a warm one
+  ~57ms. Comparing a cold run of one variant against a warm run of the other
+  manufactures an 18× difference out of nothing. Any stdlib-typecheck timing
+  must state which side of that cache it is on.
+- **A stale `_build/default/stdlib/`** — the compiler resolves stdlib
+  exe-relative, and `dune build bin/main.exe` does not restage it. The copy
+  found in this worktree was a whole generation old (the pre-`556cf7e9`
+  char-list parser), so `1e-5` reported `ERR invalid number: 1e` from a
+  compiler built at HEAD. `dune build @install` refreshes it. The original
+  "reproduces identically with `json.march` reverted to 61f92b95" control was
+  performed by swapping that same staged file, so it was not necessarily
+  measuring the stdlib it appeared to be.
+
+The separate claim in `d21c846b`'s message — that a helper concatenating its
+input around `Json.to_string` drives the typechecker to ~16GB RSS at 22 call
+sites — also does not reproduce: the exact program runs in 1157ms at HEAD,
+including under the originating worktree's own compiler binary with the
+pre-fix stdlib staged. Whatever produced that run is not present in any
+compiler build on this machine, and no commit after `ad8e81f1` touches `lib/`.
+
+## Current State (as of 2026-07-27, non-empty-collection contracts + measure-over-self binder spellings)
+
+**Non-empty-collection preconditions are now enforceable, and 13 stdlib
+functions carry one.** `{List(a) | len(_) > 0}` on `List.head`/`tail`/`last`/
+`minimum_int`/`maximum_int`, the `prelude` `head`/`tail`, `Stats.mean`/`min_val`/
+`max_val`, `Gen.element`/`one_of` and `Random.choice` turns `List.head([])` from
+a runtime abort into a compile error. Each contract is derived from that
+function's own panic message, so none is stronger than the check the code
+already performed, and every `panic` stays as the runtime backstop for the
+arguments the checker skips.
+
+The enabling fix, in `lib/refinecheck/refine_check.ml`: a measure applied to the
+REFINED VALUE ITSELF now resolves against the call's actual argument under all
+three spellings of that value — the anonymous `_`, a named binder `v`, and the
+parameter's own name. The non-axiom-measure branch (list `len`, user measures
+without axioms) previously resolved the first two to a fresh non-negative
+constant, which is satisfiable at every call site and therefore never a definite
+failure: the contract parsed, typechecked, and checked nothing, while the third
+spelling worked. Two silent consequences — the `_` form the documentation
+teaches gave no enforcement at all, and renaming a parameter unenforced a
+working contract with no diagnostic beyond an incidental unused-variable
+warning. The string and axiom-measure paths on either side of it already
+resolved against the actual; this branch was the odd one out.
+
+The gap survived a green suite because the corpus only ever exercised `len` in
+its RELATIONAL form (`{Int | _ < len(xs)}`, the measure naming a *different*
+parameter — always correct). Nothing exercised a measure over the refined value
+for a list. `accept/t115`–`t117` and `reject/t114`–`t116` now bracket each
+spelling from BOTH sides, because an accept-only witness cannot tell a working
+contract from one that checks nothing; `reject/t116` additionally pins that a
+contract written in a stdlib signature reaches a user call site at all.
+
+Unknown lengths stay skipped, never guessed: a `List` the checker cannot see
+into is silent. Verified false-positive-free across the whole stdlib (0
+refinement violations over 111 modules) and the full typing corpus (216/216 —
+107 accept, 109 reject). Suites: refinecheck 245, refine 22, run_compiler 605,
+run_eval 253, run_stdlib 817.
+
+**Known limitation.** A runtime `List.length(xs) > 0` guard does NOT discharge a
+`len(_) > 0` obligation — the `List.length` function and the `len` measure are
+unconnected — so a guarded call over a non-literal list is skipped rather than
+proved. A missed proof, not a false report.
+
+## Current State (as of 2026-07-27, Json.parse RFC 8259 number scanner)
+
+`Json.parse` rejected every JSON number with a signed exponent — `1e-5`,
+`2.5E+10`, `1e-308` all failed with `invalid number: 1e`. The number-body
+predicate (`is_num_byte` in `stdlib/json.march`) accepted only digits, `.`,
+`e`, `E`; `parse_number` stepped past a single leading `-` before the scan, so
+a sign was only ever handled in the mantissa position, never after an exponent
+marker. The scan stopped at the `-`, sliced `"1e"`, and `string_to_float("1e")`
+returned `None`. Long-standing — the character set predates the byte-index
+scanner rewrite (`556cf7e9`) and was preserved verbatim through it, with a
+comment at `is_num_byte` flagging it as a deliberate deferral so that rewrite
+stayed a pure performance change.
+
+Replaced `is_num_byte`/`scan_number_end` with a scanner that validates RFC
+8259's grammar (`["-"] int [frac] [exp]`) as it goes, in the same byte-index
+style: `is_digit_byte` / `scan_digits` / `scan_int` / `scan_frac` / `scan_exp`,
+each returning the index it stopped at. `+`/`-` are accepted *only* immediately
+after `e`/`E` — treating them as ordinary number bytes would make `1-2` scan as
+the single token `"1-2"` and change the error for malformed input.
+`string_byte_at` returns `-1` past the end of the string, so every scan
+terminates at EOF without a bounds check. Errors quote the offending slice via
+`bad_number(s, start, e)`, so `1e-` still reports `invalid number: 1e-`.
+
+Validating shape during the scan also stops `Json.parse` inheriting whatever
+`string_to_float` happens to admit. That builtin is `strtod` (native) /
+`float_of_string` (interpreter) backed, so deferring to it let non-JSON forms
+through: `1.` and `01` both parsed before this change. Now rejected, along with
+`+1`, `Infinity`, `0x10`, `.5`, `1e`, `1e-` (several of those were already
+rejected upstream in `parse_value`, and still are). Verified identical
+interpreted and compiled (`--opt 2`) over a 22-case corpus.
+
+`test/stdlib/test_json.march` had rotted out of the build entirely: it was
+referenced by no runner, and no longer typechecked against the current stdlib
+(bare `Null`/`Bool`/`Str`/`Array` became ambiguous once `Msgpack` and `IOList`
+landed the same constructor names). Constructors qualified as `Json.*`, and the
+file wired into `test/test_stdlib_march.ml` — `json.march` is loaded before
+`iolist.march`/`msgpack.march` so their same-named constructors keep winning
+bare lookups exactly as before. 48 tests, previously running nowhere, now run
+in CI; 26 of them are new, covering the exponent forms and the RFC shape rules.
+
 ## Current State (as of 2026-07-27, module-qualified ctor pattern silently failed to match compiled)
 
 Fixed a silent-wrong-answer codegen bug: a MODULE-qualified constructor
@@ -121,7 +251,6 @@ closure rule cannot be applied to one and missed by the others again. Pinned by
 `test/native/js_closure_reuse_apply_slot.{march,expected}` (a dune-rule JS
 pipeline test — needs `dune build @runtest`, not the alcotest binaries), which
 covers both the general shape and `Json.to_string` over an array and an object.
-
 ## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
 
 Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per

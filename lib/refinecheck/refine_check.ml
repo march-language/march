@@ -2707,17 +2707,33 @@ let check_call ~root errctx ~span
             decls := (name, Smt.SData adt) :: !decls;
             Some (Smt.App (m, [ Smt.Const name ]))
           | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
-      else if is_self name then
-        (* A measure with no axioms (a user measure, or list `len`) over the
-           refined value: one fresh non-negative constant, again shared by both
-           spellings so `len(_)` and `len(v)` cannot diverge. *)
-        measure_of_var m self_dt_sym
       else
-        match actual_of_name name with
+        (* A measure with no axioms (a user measure, or list `len`).  All three
+           spellings of the refined value — the anonymous `_`, the named binder
+           `v`, and the parameter's own name `xs` — denote the SAME value, so all
+           three must resolve against the SAME actual argument.  Routing `_`/`v`
+           to a fresh constant instead (as this did until 2026-07-27) made
+           `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` reflect to
+           an unconstrained non-negative integer: satisfiable, hence never a
+           definite failure, hence SILENT.  The contract parsed, typechecked and
+           checked nothing, while the third spelling worked — so a stdlib author
+           following the documented `_` idiom got no enforcement at all, and
+           renaming a parameter silently unenforced a working contract. *)
+        let actual = if is_self name then Some self_actual else actual_of_name name in
+        match actual with
         | Some a -> (
             match (if m = "len" then list_len a else None) with
             | Some n -> Some (Smt.IntLit n)
-            | None -> (match a with A.EVar { A.txt = x; _ } -> measure_of_var m x | _ -> None))
+            | None -> (
+                match a with
+                | A.EVar { A.txt = x; _ } -> measure_of_var m x
+                (* A non-variable, non-literal actual (a call, a field…): no
+                   symbol to share with the caller's facts.  For the binder
+                   spellings keep the fresh non-negative constant — it is what
+                   the two spellings resolved to before, and it stays SAT, so
+                   the outcome is silence either way. *)
+                | _ when is_self name -> measure_of_var m self_dt_sym
+                | _ -> None))
         | None -> measure_of_var m name (* a caller-scope variable *)
     in
     (* [resolve_field] turns the predicate's `v.port` into the record's SMT
