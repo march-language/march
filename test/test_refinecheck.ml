@@ -3396,6 +3396,43 @@ mod RSL do
     if string_byte_length(t) == 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
+end|}));
+
+    (* ── Declaration forms that BIND without being descended into ──────────
+       A module-level `let` is never visited by [visit_decls] — yet it binds the
+       name for every sibling `fn` body, which is exactly where obligations are
+       raised.  Reasoning from "the checker never descends into a DLet" is what
+       hid this; the gate's invariant is now "can this construct put the name in
+       scope for a checked body", not "is this construct visited". *)
+    gated "a module-level let string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod DL do
+  let string_byte_length = fn s -> 99
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* An `extern` block declares its functions under their bare names — the
+       same class of hole, reached through a different decl form. *)
+    gated "an extern fn named string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod DX do
+  needs LibC
+  extern "libc": Cap(LibC) do
+    fn string_byte_length(s: String): Int
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
 end|}))
   ]
 

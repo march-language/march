@@ -4371,52 +4371,101 @@ let expr_binds_name (name : string) (e : A.expr) : bool =
    `except:` list that does not exclude the name) can import an arbitrary
    `string_byte_length`, so both count as taking it.
 
-   WHAT IT SCANS, and why that is enough.  Declaration forms alone are NOT:
-   a `let string_byte_length = fn s -> 99` (or a parameter of that name) also
-   shadows the builtin, and missing it under-suppressed — a demonstrated false
-   positive on correct code, since the shadowed body makes the `== 0` branch
-   dead.  So this also walks expression binders, via [expr_binds_name], over
-   every `DFn` clause: its parameters, its guard, and its body.
+   ── THE INVARIANT ──────────────────────────────────────────────────────────
+   Scan every construct that can BIND [name] into a scope some `DFn` body can
+   see.  That is strictly LARGER than the set the checker descends into, and
+   conflating the two is how this gate has been wrong twice:
 
-   That set is exactly [visit_decls]'s: the checker reaches a call site only
-   through `DFn` bodies nested in `DMod`s, and never enters a `DTest`,
-   `DImpl`, `DActor`, `DApp` or `DLet` body at all.  So a binding the scan
-   cannot see also sits somewhere no obligation is ever raised, and cannot
-   produce the false positive this gate exists to prevent.  If [visit_decls]
-   ever grows a decl form, this must grow the same one. *)
+     - round 1 scanned declaration forms only, missing a `let`/parameter
+       binding INSIDE a `DFn` body;
+     - round 2 argued the scanned set "is exactly [visit_decls]'s", which is
+       the wrong invariant even though the sentence was true.  [visit_decls]
+       recurses into `DFn`/`DMod` alone — but a module-level `DLet` is never
+       DESCENDED INTO and still BINDS the name for every sibling `DFn`, which
+       is precisely where obligations are raised.  Both misses were the same
+       failure: a real shadowing left the alias active, so a dead `== 0`
+       branch was treated as reachable and a correct program was reported.
+
+   So do not reason about where bodies are visited.  Ask only: can this
+   construct put the name in scope for a checked body?  Two consequences —
+   this walks expression binders via [expr_binds_name] (round 1), and the
+   match below is EXHAUSTIVE over [A.decl] with no wildcard, so a new
+   declaration form is a compile error here rather than a silent hole (round
+   2).  The arms that do nothing say so by name, and each is a claim that that
+   form cannot bind a bare value name; check it rather than trusting it. *)
 let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
   let taken = ref false in
+  let take b = if b then taken := true in
   let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
+  let fn_def_takes (fd : A.fn_def) =
+    take (fd.A.fn_name.A.txt = name);
+    List.iter
+      (fun (c : A.fn_clause) ->
+        take (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
+        (* A default-value expression is a binder site too (it can carry a
+           lambda), and [fc_params] holds it outside the body. *)
+        List.iter
+          (function
+            | A.FPDefault (_, d) -> take (expr_binds_name name d)
+            | A.FPNamed _ | A.FPPat _ -> ())
+          c.A.fc_params;
+        (match c.A.fc_guard with Some g -> take (expr_binds_name name g) | None -> ());
+        take (expr_binds_name name c.A.fc_body))
+      fd.A.fn_clauses
+  in
   let rec go ds =
     List.iter
       (function
-        | A.DFn (fd, _) ->
-          if fd.A.fn_name.A.txt = name then taken := true;
+        (* ── Binds a bare value name ─────────────────────────────────────── *)
+        | A.DFn (fd, _) -> fn_def_takes fd
+        (* A module-level `let` is never descended into by [visit_decls], yet it
+           binds the name for every sibling `DFn` body — the round-2 hole. *)
+        | A.DLet (_, b, _) ->
+          take (List.mem name (pat_binders b.A.bind_pat));
+          take (expr_binds_name name b.A.bind_expr)
+        (* An `extern` block declares its functions under their bare names. *)
+        | A.DExtern (ed, _) ->
+          take (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
+        (* Interface METHODS are called by bare name and dispatched on the
+           argument's type, so a method of this name takes the spelling; a
+           default body is a binder site as well. *)
+        | A.DInterface (idf, _) ->
           List.iter
-            (fun (c : A.fn_clause) ->
-              if List.exists (fun b -> b = name) (List.concat_map fnparam_binders c.A.fc_params)
-              then taken := true;
-              (* A default-value expression is a binder site too (it can carry a
-                 lambda), and [fc_params] holds it outside the body. *)
-              List.iter
-                (function
-                  | A.FPDefault (_, d) -> if expr_binds_name name d then taken := true
-                  | A.FPNamed _ | A.FPPat _ -> ())
-                c.A.fc_params;
-              (match c.A.fc_guard with
-               | Some g -> if expr_binds_name name g then taken := true
-               | None -> ());
-              if expr_binds_name name c.A.fc_body then taken := true)
-            fd.A.fn_clauses
-        | A.DMod (_, _, ds, _) -> go ds
-        | A.DAlias (a, _) when a.A.alias_name.A.txt = name -> taken := true
+            (fun (m : A.method_decl) ->
+              take (m.A.md_name.A.txt = name);
+              match m.A.md_default with
+              | Some d -> take (expr_binds_name name d)
+              | None -> ())
+            idf.A.iface_methods
+        | A.DImpl (idf, _) ->
+          List.iter
+            (fun ((mn : A.name), (fd : A.fn_def)) ->
+              take (mn.A.txt = name);
+              fn_def_takes fd)
+            idf.A.impl_methods
+        | A.DAlias (a, _) -> take (a.A.alias_name.A.txt = name)
         | A.DUse (u, _) ->
           (match u.A.use_sel with
            | A.UseAll -> taken := true
-           | A.UseExcept xs -> if not (named xs) then taken := true
-           | A.UseNames xs -> if named xs then taken := true
+           | A.UseExcept xs -> take (not (named xs))
+           | A.UseNames xs -> take (named xs)
            | A.UseSingle -> ())
-        | _ -> ())
+        (* ── Contains declarations; recurse ──────────────────────────────── *)
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
+        (* ── Cannot bind a bare value name ───────────────────────────────── *)
+        (* Types and their constructors: March constructors are capitalised, so
+           they cannot collide with a lowercase builtin, and they are `ECon`
+           rather than `EVar` at the call anyway. *)
+        | A.DType _ | A.DAlwaysLinearType _ | A.DTransitions _
+        (* Named, capitalised entities with their own namespace. *)
+        | A.DActor _ | A.DProtocol _ | A.DSig _ | A.DApp _
+        (* Desugared into `DImpl` before this pass runs; handled above. *)
+        | A.DDeriving _ | A.DSatisfy _
+        (* Capability/compiler directives — no value bindings at all. *)
+        | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+        (* Test bodies bind only within themselves, and no obligation raised in
+           a sibling `DFn` can see those bindings. *)
+        | A.DTest _ | A.DSetup _ | A.DSetupAll _ -> ())
       ds
   in
   go decls;
