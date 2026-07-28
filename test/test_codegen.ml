@@ -5279,6 +5279,126 @@ let test_cprop_field_fold_update () =
    | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
    | e -> Alcotest.failf "expected r2.x=3 (from r), got: %s" (March_tir.Tir.show_expr e))
 
+(* P13 (extended) — EField of known tuple ──────────────────────────── *)
+
+let test_cprop_field_fold_tuple () =
+  (* let t = (3, 4) in t.$fv0
+     CProp: t in fenv (tuple) -> EField(t, fv_field 0) folds to ALit 3 *)
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t = mk_var "t" ty_t in
+  let body = March_tir.Tir.ELet (t,
+    March_tir.Tir.ETuple [ilit 3; ilit 4],
+    March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 0)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3))) -> ()
+   | e -> Alcotest.failf "expected t.$fv0=3, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_tuple_second_element () =
+  (* let t = (3, 4) in t.$fv1  -- the SECOND element, not just the first *)
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t = mk_var "t" ty_t in
+  let body = March_tir.Tir.ELet (t,
+    March_tir.Tir.ETuple [ilit 3; ilit 4],
+    March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 1)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 4))) -> ()
+   | e -> Alcotest.failf "expected t.$fv1=4, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_tuple_alias () =
+  (* let t  = (3, 4)
+     let t2 = t             -- alias: should copy t's fenv entry to t2
+     t2.$fv0                -- folds to 3 via alias propagation *)
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t  = mk_var "t"  ty_t in
+  let t2 = mk_var "t2" ty_t in
+  let body =
+    March_tir.Tir.ELet (t, March_tir.Tir.ETuple [ilit 3; ilit 4],
+      March_tir.Tir.ELet (t2, March_tir.Tir.EAtom (March_tir.Tir.AVar t),
+        March_tir.Tir.EField (March_tir.Tir.AVar t2, March_tir.Tir_names.fv_field 0))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 3)))) -> ()
+   | e -> Alcotest.failf "expected t2.$fv0=3 via alias, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_field_fold_tuple_non_literal_element () =
+  (* let t = (x, y) in t.$fv0   -- non-literal elements still forward
+     (this is the whole point: it's not just constant-folding, it's
+     forwarding to whatever atom built the tuple, literal or not). *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t = mk_var "t" ty_t in
+  let body = March_tir.Tir.ELet (t,
+    March_tir.Tir.ETuple [March_tir.Tir.AVar x; ilit 4],
+    March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 0)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.AVar v))
+     when v.March_tir.Tir.v_name = "x" -> ()
+   | e -> Alcotest.failf "expected t.$fv0 -> x, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_no_tuple_field_collision_with_closure_capture () =
+  (* A closure-capture struct also has a field literally named "$fv1"
+     (defun.ml's 1-based capture-field convention), built via EAlloc, never
+     ETuple. It must NEVER be folded as if it were a tuple: field_env is
+     populated only from a name's OWN binding shape, never from the field
+     name string, so a variable bound via EAlloc can never appear in
+     field_env at all. This test pins that boundary explicitly. *)
+  let captured = mk_var "captured" March_tir.Tir.TInt in
+  let clo_ty = March_tir.Tir.TCon ("$Clo_foo", []) in
+  let clo = mk_var "clo" clo_ty in
+  let body = March_tir.Tir.ELet (clo,
+    March_tir.Tir.EAlloc (clo_ty, [March_tir.Tir.AVar captured; ilit 99]),
+    March_tir.Tir.EField (March_tir.Tir.AVar clo, March_tir.Tir_names.fv_field 1)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "no fold: EAlloc never enters field_env" false !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EField (March_tir.Tir.AVar v, k))
+     when v.March_tir.Tir.v_name = "clo" && k = March_tir.Tir_names.fv_field 1 -> ()
+   | e -> Alcotest.failf "expected clo.$fv1 left untouched, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_tuple_field_result_escape_unchanged () =
+  (* Pins CURRENT (unchanged) behavior for a tuple field returned bare in
+     result position: fn f(t) = t.$fv0. This does NOT get the record-only
+     dup_field_results escape-safety normalization (lib/tir/perceus.ml:1378
+     matches only Tir.TRecord) -- a pre-existing, unrelated gap. This test
+     exists so a future change to that gap (or to this cprop extension)
+     that alters this shape gets caught, and so THIS plan is not blamed for
+     a behavior it neither introduces nor fixes. cprop itself still folds
+     the projection when the tuple's shape is locally known (as it does for
+     every other position) -- there is nothing perceus-specific to pin
+     inside cprop.ml itself, so this is a same-shape restatement of
+     test_cprop_field_fold_tuple kept under its own name/intent for
+     discoverability if perceus.ml's dup_field_results is ever extended to
+     TTuple later. *)
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t = mk_var "t" ty_t in
+  let body = March_tir.Tir.ELet (t,
+    March_tir.Tir.ETuple [ilit 7; ilit 8],
+    March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 0)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 7))) -> ()
+   | e -> Alcotest.failf "expected t.$fv0=7, got: %s" (March_tir.Tir.show_expr e))
+
 (* ── P12: variable copy propagation ─────────────────────────────────────── *)
 
 (** P12 basic: let x = y in x + 1  →  y + 1
@@ -11450,6 +11570,16 @@ let codegen_suites =
         Alcotest.test_case "field_fold_record"       `Quick test_cprop_field_fold_record;
         Alcotest.test_case "field_fold_alias"        `Quick test_cprop_field_fold_alias;
         Alcotest.test_case "field_fold_update"       `Quick test_cprop_field_fold_update;
+        Alcotest.test_case "field_fold_tuple"        `Quick test_cprop_field_fold_tuple;
+        Alcotest.test_case "field_fold_tuple_second_element" `Quick
+          test_cprop_field_fold_tuple_second_element;
+        Alcotest.test_case "field_fold_tuple_alias"  `Quick test_cprop_field_fold_tuple_alias;
+        Alcotest.test_case "field_fold_tuple_non_literal_element" `Quick
+          test_cprop_field_fold_tuple_non_literal_element;
+        Alcotest.test_case "no_tuple_field_collision_with_closure_capture" `Quick
+          test_cprop_no_tuple_field_collision_with_closure_capture;
+        Alcotest.test_case "tuple_field_result_escape_unchanged" `Quick
+          test_cprop_tuple_field_result_escape_unchanged;
         Alcotest.test_case "var_alias"               `Quick test_cprop_var_alias;
         Alcotest.test_case "var_chain"               `Quick test_cprop_var_chain;
         Alcotest.test_case "no_alias_closure"        `Quick test_cprop_var_no_alias_closure;

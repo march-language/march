@@ -32,16 +32,27 @@
     enables Fold to make progress in cascaded inline→fold chains.
     Closure aliases excluded (see above).
 
-    P13 — EField of known record:
+    P13 — EField of known record or tuple:
         let r = { x = a, y = b } in r.x  →  a
-    The [r] binding is retained. For heap-typed fields, Perceus inserts an
+        let t = (a, b) in t.$fv0         →  a
+    The [r]/[t] binding is retained. For heap-typed fields, Perceus inserts an
     EIncRC dup via [dup_field_results] — the dup fires through the [v_name]
-    alias and RC semantics are preserved. Note: for [TRecord]-typed variables,
-    [needs_rc(TRecord) = false] so Perceus places no EDecRC/EFree for [r]
-    itself; only the individual heap-typed *fields* are RC-managed.
-    [EUpdate] is also tracked: merged fields from the base record are inherited
-    so that [let r2 = { r with x = c } in r2.y] folds to [b].
-    Record aliases ([let r2 = r]) also propagate the field list.
+    alias and RC semantics are preserved. Note: for [TRecord]/[TTuple]-typed
+    variables, [needs_rc(TRecord|TTuple) = false] so Perceus places no
+    EDecRC/EFree for [r]/[t] itself; only the individual heap-typed *fields*
+    are RC-managed. [EUpdate] is also tracked (record-only — tuples have no
+    update syntax): merged fields from the base record are inherited so that
+    [let r2 = { r with x = c } in r2.y] folds to [b]. Record and tuple
+    aliases ([let r2 = r], [let t2 = t]) also propagate the known field list.
+    A tuple's field list is keyed by [Tir_names.fv_field i] (0-based),
+    matching [lib/tir/lower.ml]'s tuple-destructure lowering convention
+    exactly, so no change was needed to the [EField] fold arm itself — only
+    to how [field_env] gets populated. This name format is ALSO used by
+    closure-capture struct fields ([lib/tir/defun.ml], 1-based) — safe to
+    share because [field_env] is populated purely from a name's own binding
+    shape ([ETuple]/[ERecord]/[EUpdate]/known alias), never from the field
+    name string, and a closure-capture struct is built via [EAlloc], never
+    [ETuple], so it can never enter [field_env].
 
     Sets [~changed] on any substitution. *)
 
@@ -173,19 +184,29 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
         avar_add name y avar0
       | _ -> avar0
     in
-    (* Extend field env for ERecord, EUpdate, and EAtom(AVar) record aliases. *)
+    (* Extend field env for ERecord, ETuple, EUpdate, and EAtom(AVar)
+       record/tuple aliases. *)
     let fenv' = match rhs' with
       | Tir.ERecord fields ->
         (* [rhs'] is already fully substituted by the ERecord arm below, so
            [fields] here is post-substitution — store directly. *)
         fenv_add name fields fenv0
+      | Tir.ETuple atoms ->
+        (* [rhs'] is already fully substituted by the ETuple arm below, so
+           [atoms] here is post-substitution — store directly, keyed
+           positionally by Tir_names.fv_field to match lower.ml's
+           tuple-destructure field-naming convention (0-based). *)
+        let fields = List.mapi (fun i a -> (Tir_names.fv_field i, a)) atoms in
+        fenv_add name fields fenv0
       | Tir.EAtom (Tir.AVar base) ->
-        (* Record alias: let r2 = r. If r has a known field list, copy it. *)
+        (* Record/tuple alias: let r2 = r (or let t2 = t). If the base has
+           a known field list, copy it. *)
         (match fenv_find base.Tir.v_name fenv with
          | Some fields -> fenv_add name fields fenv0
          | None        -> fenv0)
       | Tir.EUpdate (Tir.AVar base, new_fields) ->
-        (* Merge: new_fields override the base record's known fields. *)
+        (* Merge: new_fields override the base record's known fields.
+           (EUpdate is record-only; a tuple base never reaches this arm.) *)
         (match fenv_find base.Tir.v_name fenv with
          | Some base_fields ->
            let new_keys = List.map fst new_fields in
