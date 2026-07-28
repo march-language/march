@@ -19,6 +19,17 @@ if [ ! -x "$bin" ]; then
   exit 2
 fi
 
+# `--compile` drops a `.march/` CAS directory in the process's CWD, so running
+# this script from the golden directory (the natural thing to do) left one
+# behind next to the corpus.  It is gitignored, so `git status` stays clean —
+# but `scripts/check-docs.sh` counts the corpus with `find -name '*.march'`, and
+# the glob's `*` matches the empty string, so the directory was counted as a
+# 47th golden program and the doc lint failed with a corpus-count mismatch that
+# looked like someone had added a file.  Run from $work instead: the CAS lands
+# in the temp dir the EXIT trap already removes.  $here, $work and $bin are all
+# absolute, so nothing below depends on the original CWD.
+cd "$work" || exit 2
+
 pass=0; fail=0
 for f in "$here"/*.march; do
   b="$(basename "$f" .march)"
