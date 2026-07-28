@@ -10,9 +10,9 @@ permalink: /docs/simd-benchmarks/
 Cross-language numbers for the Float-array operations described in
 [SIMD & Native Arrays]({{ site.baseurl }}/docs/simd/). March vs. hand-written
 OCaml and Rust, idiomatic Elixir, naive interpreted Python, and NumPy (a
-hand-tuned, BLAS-backed reference implementation) — three operations, one
-that vectorizes cleanly, one that vectorizes with a compiler-side trick, and
-one that (honestly) doesn't vectorize at all yet.
+hand-tuned, BLAS-backed reference implementation) — three operations, all
+three now competitive. `map2` wasn't always one of them; see
+[Fix history: map2](#fix-history-map2) below for the before/after.
 
 ---
 
@@ -20,7 +20,7 @@ one that (honestly) doesn't vectorize at all yet.
 
 **This is a shared development machine, not a dedicated benchmark box.**
 The run below shared the machine with several other active sessions — load
-average was **8.5** (1-minute) at the time, on a 14-core machine. That mostly
+average was **7.9–11.1** at the time, on a 14-core machine. That mostly
 washes out for the SIMD numbers specifically (each program self-times only
 its own operation over up to a few milliseconds — see Methodology), but
 treat everything here as directional, not authoritative. Run it yourself on
@@ -29,9 +29,8 @@ command is at the bottom of this page.
 
 **No cherry-picking.** These are the median/min/max of 10 runs, taken
 directly from a single invocation of `bench/run_benchmarks.sh`, unedited.
-Where March loses or is only mid-pack, that's shown too (`simd-map2` is not
-just mid-pack — it's the slowest language here by a wide margin, including
-slower than naive interpreted Python; see below for why).
+Where March loses or is only mid-pack, that's shown too (`map` loses to Rust
+here; `map2` did too, along with everything else, before the fix below).
 
 ## Machine profile
 
@@ -41,7 +40,7 @@ slower than naive interpreted Python; see below for why).
 | Cores | 14 (10 performance + 4 efficiency) |
 | Memory | 36 GB |
 | OS | macOS 26.5.2 (Darwin 25.5.0, arm64) |
-| Load average at run time | 8.49, 10.05, 8.50 (1m/5m/15m) — **not idle** |
+| Load average at run time | 7.89, 11.10, 10.28 (1m/5m/15m) — **not idle** |
 | Date | 2026-07-27 |
 
 ## Versions
@@ -93,12 +92,12 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
-| **March** | **1.3 ms** | 0.9 ms | 3.2 ms |
-| OCaml | 4.8 ms | 4.7 ms | 5.0 ms |
-| Rust | 5.4 ms | 5.2 ms | 5.5 ms |
-| Elixir | 84.2 ms | 83.1 ms | 97.2 ms |
-| Python | 308.8 ms | 288.1 ms | 391.3 ms |
-| NumPy | 1.0 ms | 0.9 ms | 1.5 ms |
+| **March** | **1.1 ms** | 1.0 ms | 1.4 ms |
+| OCaml | 4.7 ms | 4.7 ms | 4.8 ms |
+| Rust | 5.4 ms | 5.3 ms | 6.5 ms |
+| Elixir | 83.9 ms | 81.2 ms | 91.7 ms |
+| Python | 296.9 ms | 283.0 ms | 319.3 ms |
+| NumPy | 1.0 ms | 1.0 ms | 1.0 ms |
 
 </div>
 
@@ -119,12 +118,12 @@ Run 10 times per language per benchmark; median, min, max reported.
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
-| March | 6.4 ms | 5.3 ms | 7.6 ms |
+| March | 5.1 ms | 4.8 ms | 5.5 ms |
 | OCaml | 5.5 ms | 5.4 ms | 5.6 ms |
-| **Rust** | **4.3 ms** | 3.9 ms | 5.1 ms |
-| Elixir | 252.8 ms | 242.2 ms | 323.6 ms |
-| Python | 193.5 ms | 191.3 ms | 202.2 ms |
-| NumPy | 2.4 ms | 2.1 ms | 3.7 ms |
+| **Rust** | **3.9 ms** | 3.7 ms | 4.3 ms |
+| Elixir | 244.8 ms | 236.9 ms | 281.8 ms |
+| Python | 194.1 ms | 192.9 ms | 199.5 ms |
+| NumPy | 2.1 ms | 2.1 ms | 2.9 ms |
 
 </div>
 
@@ -133,8 +132,8 @@ ABI heap-boxes every `Float` crossing a call boundary, which blocks
 vectorization outright. For a concrete-`Float`, single-use callback like this
 one, a dedicated pass clones the inlined callback under natural `double`
 params with zero boxing (`Float`-boxing Stage 4, Option B) — without it, this
-number would look like `map2`'s below, not like this. March is competitive
-with hand-written OCaml/Rust and within 3x of NumPy.
+number would look like `map2`'s pre-fix numbers below, not like this. March
+is competitive with hand-written OCaml/Rust and within 3x of NumPy.
 
 **Source:** [`bench/simd_map.march`](https://github.com/march-language/march/blob/main/bench/simd_map.march) ·
 [`bench/ocaml/simd_map.ml`](https://github.com/march-language/march/blob/main/bench/ocaml/simd_map.ml) ·
@@ -149,25 +148,50 @@ with hand-written OCaml/Rust and within 3x of NumPy.
 
 | Language | Median | Min | Max |
 |----------|-------:|----:|----:|
-| March | 299.2 ms | 296.8 ms | 315.6 ms |
-| OCaml | 7.0 ms | 7.0 ms | 7.7 ms |
-| **Rust** | **6.3 ms** | 5.7 ms | 7.8 ms |
-| Elixir | 105.9 ms | 101.7 ms | 140.6 ms |
-| Python | 201.8 ms | 196.0 ms | 206.4 ms |
-| NumPy | 1.7 ms | 1.6 ms | 1.9 ms |
+| March | 6.4 ms | 6.3 ms | 8.8 ms |
+| OCaml | 7.0 ms | 6.9 ms | 7.1 ms |
+| **Rust** | **4.5 ms** | 4.3 ms | 4.8 ms |
+| Elixir | 101.6 ms | 99.4 ms | 132.0 ms |
+| Python | 197.1 ms | 189.3 ms | 207.5 ms |
+| NumPy | 1.6 ms | 1.5 ms | 1.6 ms |
 
 </div>
 
-**The honest gap.** `NativeArray.map2_int`/`map2_float` — added to unblock
-`DataFrame.col_add_col` (column-column arithmetic) — has none of the
-inlining/boxing-elimination treatment `map` gets: every element dispatches
-through the general closure-call path (heap-box, indirect call through the
-closure's function pointer, unbox the result). At 299ms it is **~47x slower
-than March's own `map`** for essentially the same arithmetic, and **slower
-than naive interpreted Python** for the same operation. This isn't a
-regression to be fixed reactively — it's a scoping decision (`map2` shipped
-correctness-first) now visible as a concrete number instead of a caveat. See
-[Known limitations]({{ site.baseurl }}/docs/simd/#known-limitations).
+`NativeArray.map2_int`/`map2_float` — added to unblock
+`DataFrame.col_add_col` (column-column arithmetic) — now gets the same
+inlining/boxing-elimination treatment `map` does: the same compiler pass
+(`Native_map_inline.ml`) that recognizes a single-array `map` call with a
+fresh, single-use callback was extended to recognize the two-array `map2`
+shape too, cloning a boxing-free variant for a concrete-`Float` callback
+exactly as it does for `map`. Beats OCaml, within 3x of NumPy.
+
+### Fix history: map2
+
+This wasn't always true. `map2` originally shipped **correctness-first** —
+the primitive itself (runtime, interpreter, typechecker, compiled-path
+registration) landed without the inlining pass most other `NativeArray`
+operations get, a known, explicitly-documented scoping decision. The numbers
+made the cost of that gap concrete rather than a caveat:
+
+| | March (before) | March (after) | Speedup |
+|---|---:|---:|---:|
+| `map2` | 299.2 ms | 6.4 ms | **~47x** |
+
+Before the fix, every element dispatched through the general closure-call
+path (heap-box each argument, indirect call through the closure's function
+pointer, unbox the result) — 299ms, **slower than naive interpreted
+Python**, and ~47x slower than March's own `map` doing essentially the same
+arithmetic. `Native_map_inline.ml` was extended the same day these numbers
+were first published: same eligibility bar as `map` (fresh, single-use,
+non-capturing-or-single-capture callback), same synthetic-call-name
+mechanism, same `Float`-boxing Stage 4 Option B unboxed clone for a
+concrete-`Float` signature — just matching a 3-argument call shape (two
+arrays + closure) instead of `map`'s 2-argument one. The inlined loop
+bypasses `native_int_arr_map2`/`native_float_arr_map2` entirely, so it also
+needed its own length-mismatch check (`native_arr_map2_check_len`,
+`runtime/march_runtime.c`) to keep panicking on a length mismatch exactly
+like the non-inlined path does — verified with a dedicated regression test,
+not just the happy path.
 
 **Source:** [`bench/simd_map2.march`](https://github.com/march-language/march/blob/main/bench/simd_map2.march) ·
 [`bench/ocaml/simd_map2.ml`](https://github.com/march-language/march/blob/main/bench/ocaml/simd_map2.ml) ·

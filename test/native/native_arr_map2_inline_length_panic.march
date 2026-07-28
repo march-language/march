@@ -1,0 +1,16 @@
+-- Regression: the map2 INLINE loop (see native_arr_map2_inline.march)
+-- bypasses native_int_arr_map2/native_float_arr_map2 entirely -- calls the
+-- lifted apply fn directly instead -- so it needs its own length-mismatch
+-- check (native_arr_map2_check_len, runtime/march_runtime.c) to preserve
+-- NativeArray.map2_int's documented "panics on length mismatch" contract.
+-- This callback (fn (x, y) -> x + y) is a fresh, single-use, non-capturing
+-- lambda -- exactly the shape that takes the inline path -- so this
+-- exercises that check specifically, not the non-inlined runtime
+-- function's own (separate) length check.
+mod Main do
+  fn main() : () do
+    let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let short = NativeArray.from_list_int(Cons(1, Cons(2, Nil)))
+    println(NativeArray.to_list_int(NativeArray.map2_int(a, short, fn (x, y) -> x + y)))
+  end
+end

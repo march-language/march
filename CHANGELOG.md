@@ -19,23 +19,6 @@ git log is authoritative for exact commits.
   separators means slicing off the tail and searching again, which copies the
   remaining bytes at every step and makes a full tokenize O(n²).
 
-### Changed
-
-- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
-  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
-  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
-  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
-  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
-  rather than one byte at a time.
-
-- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
-  longer chains are folded into three-way concats, so k parts cost
-  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
-  prefix at every link. Measured 20% faster on a short-string building
-  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
-
-
-### Added
 - **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
   zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
   mismatch) and Int→Float widening helper, for numeric ops over two
@@ -110,6 +93,29 @@ git log is authoritative for exact commits.
   well as `+0.0`. Symbolic float arithmetic in a predicate (`_ +. 1.0 > 0.0`),
   `Float` record fields and special-value predicates (`is_nan`) stay out of
   scope and are silently skipped rather than approximated.
+
+### Changed
+
+- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
+  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
+  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
+  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
+  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
+  rather than one byte at a time.
+
+- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
+  longer chains are folded into three-way concats, so k parts cost
+  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
+  prefix at every link. Measured 20% faster on a short-string building
+  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
+
+- **`NativeArray.map2_int`/`map2_float` vectorize.** Extended the same
+  compiler pass that lets `map_int`/`map_float` compile to real SIMD to also
+  recognize `map2`'s two-array call shape — same eligibility bar, same
+  boxing-free clone for a concrete-`Float` callback. Measured **~47x** on a
+  5M-element benchmark (299 ms → 6.4 ms); previously slower than naive
+  interpreted Python for the same operation, now beating hand-written OCaml.
+  See `docs/simd-benchmarks.md`.
 
 ### Fixed
 

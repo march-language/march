@@ -3617,6 +3617,81 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nclones boxcalls < native_arr_map_inline_unboxed_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 || { echo \"expected 2 unboxed \\$mapfast\\$ clones with zero boxing calls in their bodies (found clones=$nclones boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+; map2 (two-array) counterpart of the map inlining/vectorization machinery
+; above (P10, added 2026-07-27 alongside the map2 primitive itself). Same
+; eligibility bar, same $mapfast$ unboxed-clone trick for a concrete
+; all-Float callback; the fixture also exercises Int (boxed inline path)
+; and the reused-elsewhere fallback. Assert correctness (the .expected diff
+; below), that exactly 2 $mapfast$ clones exist (the two all-Float cases)
+; with zero boxing calls in either body, that exactly 1 general
+; (non-inlined) native_int_arr_map2 call remains (the reused-closure
+; fallback correctly NOT taking the inline path), and that the inline
+; loop's own length-mismatch check is present.
+(rule
+ (targets native_arr_map2_inline native_arr_map2_inline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map2_inline
+        native/native_arr_map2_inline.march)
+   (with-stdout-to native_arr_map2_inline.out
+        (system "./native_arr_map2_inline")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2_inline.expected native_arr_map2_inline.out)))
+
+(rule
+ (targets native_arr_map2_inline_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map2_inline.march)
+   (with-stdout-to native_arr_map2_inline_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_map2_inline.ll) $(awk '/^define double @.*\\$mapfast\\$/{flag=1} flag{print} /^}/{flag=0}' native/native_arr_map2_inline.ll | (grep -c 'march_alloc_float\\|march_unbox_float' || true)) $(grep -c '= call ptr @native_int_arr_map2(ptr' native/native_arr_map2_inline.ll) $(grep -c 'call void @native_arr_map2_check_len' native/native_arr_map2_inline.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map2_inline_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nclones boxcalls ngeneral nchecks < native_arr_map2_inline_llvm_check.out; \
+    test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
+
+; Separate fixture: the map2 inline loop's own length-mismatch check
+; (native_arr_map2_check_len) must panic identically to the non-inlined
+; native_int_arr_map2/native_float_arr_map2 functions' check, since the
+; inline path bypasses those entirely. Kept out of the correctness fixture
+; above because a panic necessarily exits nonzero.
+(rule
+ (targets native_arr_map2_inline_length_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline_length_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o native_arr_map2_inline_length_panic
+       native/native_arr_map2_inline_length_panic.march)))
+
+(rule
+ (targets native_arr_map2_inline_length_panic.err)
+ (deps native_arr_map2_inline_length_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to native_arr_map2_inline_length_panic.err
+    (run ./native_arr_map2_inline_length_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2_inline_length_panic.expected native_arr_map2_inline_length_panic.err)))
+
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)
  (deps (file %{exe:../bin/main.exe})

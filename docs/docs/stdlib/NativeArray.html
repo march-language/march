@@ -1676,6 +1676,7 @@
 <a class="sl" href="String.html#fn-from_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_int</a>
 <a class="sl" href="String.html#fn-grapheme_count"><span class="sb-kind" style="color:var(--fn)">F</span>grapheme_count</a>
 <a class="sl" href="String.html#fn-index_of"><span class="sb-kind" style="color:var(--fn)">F</span>index_of</a>
+<a class="sl" href="String.html#fn-index_of_from"><span class="sb-kind" style="color:var(--fn)">F</span>index_of_from</a>
 <a class="sl" href="String.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="String.html#fn-join"><span class="sb-kind" style="color:var(--fn)">F</span>join</a>
 <a class="sl" href="String.html#fn-last_index_of"><span class="sb-kind" style="color:var(--fn)">F</span>last_index_of</a>
@@ -1954,11 +1955,11 @@
   them from a --compile build will fail to link. Use sum/map or a
   manual index loop until this lands.
 - map2_int / map2_float (two-array zip-with, e.g. for column-column
-  arithmetic) are correct in both interpreted and compiled builds, but
-  do not yet get the map_int/map_float closure-inlining treatment above
-  — each element still dispatches through the C runtime's closure-pointer
-  call. A future compiler pass could extend the inlining/vectorization
-  machinery to this shape; not done yet.</code></pre><p>Two opaque element types are supported: NativeIntArr   — wraps int array NativeFloatArr — wraps float array</p><p>Usage: let arr = NativeArray.make_float(1000, 0.0) let arr2 = NativeArray.map_float(arr, fn x -&gt; x *. 2.0) let s    = NativeArray.sum_float(arr2)</p></div><h2>Functions</h2><div class="item" id="fn-fold_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_float</span><span class="sig">fold_float(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_float" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
+  arithmetic) get the identical closure-inlining/vectorization treatment
+  map_int/map_float do above — same eligibility bar, same unboxed clone
+  for a concrete-Float callback. Verified ~47x faster than the pre-fix
+  boxed closure-call path on a 5M-element benchmark; see
+  docs/simd-benchmarks.md's &quot;Fix history: map2&quot;.</code></pre><p>Two opaque element types are supported: NativeIntArr   — wraps int array NativeFloatArr — wraps float array</p><p>Usage: let arr = NativeArray.make_float(1000, 0.0) let arr2 = NativeArray.map_float(arr, fn x -&gt; x *. 2.0) let s    = NativeArray.sum_float(arr2)</p></div><h2>Functions</h2><div class="item" id="fn-fold_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_float</span><span class="sig">fold_float(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_float" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
 <div class="item" id="fn-fold_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">fold_int</span><span class="sig">fold_int(arr, acc, f)</span><a class="anchor-link" href="#fn-fold_int" title="Link">#</a></div><div class="ib"><p>Left fold over all elements.  Argument order: collection first, init second, callback last (uncurried-collection convention).  Callback <code>f(acc, elem) = new_acc</code>.  O(n).</p></div></div>
 <div class="item" id="fn-from_list_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_list_float</span><span class="sig">from_list_float(lst)</span><a class="anchor-link" href="#fn-from_list_float" title="Link">#</a></div><div class="ib"><p>Build a NativeFloatArr from a List(Float). O(n).</p></div></div>
 <div class="item" id="fn-from_list_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">from_list_int</span><span class="sig">from_list_int(lst)</span><a class="anchor-link" href="#fn-from_list_int" title="Link">#</a></div><div class="ib"><p>Build a NativeIntArr from a List(Int). O(n).</p></div></div>

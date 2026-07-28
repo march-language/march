@@ -33,11 +33,11 @@
 --     them from a --compile build will fail to link. Use sum/map or a
 --     manual index loop until this lands.
 --   - map2_int / map2_float (two-array zip-with, e.g. for column-column
---     arithmetic) are correct in both interpreted and compiled builds, but
---     do not yet get the map_int/map_float closure-inlining treatment above
---     — each element still dispatches through the C runtime's closure-pointer
---     call. A future compiler pass could extend the inlining/vectorization
---     machinery to this shape; not done yet.
+--     arithmetic) get the identical closure-inlining/vectorization treatment
+--     map_int/map_float do above — same eligibility bar, same unboxed clone
+--     for a concrete-Float callback. Verified ~47x faster than the pre-fix
+--     boxed closure-call path on a 5M-element benchmark; see
+--     docs/simd-benchmarks.md's "Fix history: map2".
 --
 -- Two opaque element types are supported:
 --   NativeIntArr   — wraps int array
