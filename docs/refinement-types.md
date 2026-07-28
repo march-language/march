@@ -335,6 +335,89 @@ negative literal (which March has no direct spelling for) still works.
 
 ---
 
+## Constructor Tags — Refining over ADT Variants
+
+Refinements aren't limited to numbers and sizes. You can also require that a
+value is a *particular variant* of a union type. Every constructor — in your own
+types, and in the built-in `Option`, `Result` and `List` — implicitly comes with
+an `is_<Ctor>` **tester** you can use inside a predicate. You don't declare
+these; writing `type Shape = Circle(Int) | Square(Int)` gives you `is_Circle`
+and `is_Square` for free.
+
+That lets a function say "I need the populated case" in its own signature:
+
+```march
+fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do ... end
+
+unwrap(Some(1))   -- fine
+unwrap(None)      -- error: `None` can never satisfy `is_Some(_)`
+```
+
+This is what backs the standard library's `Option.unwrap`/`expect` and
+`Result.unwrap`/`unwrap_err`/`expect`, so `Option.unwrap(None)` and
+`Result.unwrap(Err("boom"))` are now compile errors rather than runtime panics.
+
+The tester name is **exact-case**. `is_Some` is the tester for the constructor
+`Some`; `is_some` is *not* a tester — it's the lowercase stdlib helper
+`Option.is_some`. Get the case wrong and you don't silently get a different
+meaning, you get a warning that the refinement isn't being checked:
+
+> `is_some` is not a measure or known predicate, so this refinement is not
+> checked. Annotate the function `@[measure]`, or use a supported predicate.
+
+### Facts from a `match`
+
+A constructor literal at the call site is the easy case. The more useful one is
+a `match`: entering an arm tells the checker what the scrutinee's tag is for
+everything inside that arm.
+
+```march
+fn f(x : Option(Int)) : Int do
+  match x do
+    None    -> unwrap(x)   -- error: inside this arm, `x` is definitely `None`
+    Some(v) -> unwrap(x)   -- fine: inside this arm, `x` is definitely `Some`
+  end
+end
+```
+
+This narrowing is deliberately conservative. Where it stops, the checker goes
+quiet rather than guessing — so these are all *silence*, never false alarms:
+
+- **The scrutinee has to be a plain variable.** `match mk() do …` matches an
+  expression, and there's no stable name to attach a fact to, so nothing inside
+  the arms is narrowed. Bind it with a `let` first if you want the fact.
+- **A pattern that rebinds the name ends it.** Matching `y` with `Some(x) ->`
+  tells you nothing about `x` — that `x` is a fresh name for the payload, not
+  for the scrutinee.
+- **An `as` pattern isn't narrowed.** `None as z ->` binds the whole scrutinee
+  under a second name, but the arm's head is an `as` pattern rather than a bare
+  constructor pattern, so no tag fact is recorded — not for `z`, and not for the
+  scrutinee. Write `None ->` if you want the narrowing.
+- **An ambiguous constructor name is skipped.** If two types in scope both
+  declare a constructor `Row`, then `is_Row` doesn't identify a particular type
+  and isn't checked.
+- **Rebinding the name discards the fact.** A narrowing is recorded against a
+  *name*, so anything that rebinds that name inside the arm — a `let`, a `let?`,
+  a lambda parameter, an inner `match` binder — drops it:
+
+  ```march
+  match x do
+    None ->
+      let x = Some(1)
+      unwrap(x)     -- fine: this `x` is a different value
+    Some(v) -> v
+  end
+  ```
+
+  This is the same rule that governs facts established by an `if` guard, and
+  it's what keeps a fact about an outer value from being wrongly attributed to
+  an inner one.
+
+As everywhere else, the definite-failure stance applies: an `Option` whose tag
+the checker can't determine is not an error.
+
+---
+
 ## Limitations
 
 No refinement system is complete — this one is intentionally a *pragmatic slice* of
@@ -344,7 +427,13 @@ dependent typing. Know the edges:
   Predicates over other types aren't supported. `Float` predicates are
   **comparisons only**; float arithmetic inside one is skipped rather than
   guessed at, and a `Float` sitting inside a record or a constructor is opaque.
-  See [Bool and Float Refinements](#bool-and-float-refinements).
+  See [Bool and Float Refinements](#bool-and-float-refinements) and
+  [Constructor Tags](#constructor-tags--refining-over-adt-variants).
+- **Tag narrowing stops at several ordinary shapes.** A `match` on an
+  expression rather than a variable, an `as` pattern, a pattern that rebinds the
+  name, an ambiguous constructor name, and any rebinding of the name inside the
+  arm all leave the call *unchecked* rather than reported. See
+  [Facts from a `match`](#facts-from-a-match).
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
