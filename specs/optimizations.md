@@ -751,7 +751,9 @@ One bug found and fixed during implementation: the eligibility check for the cap
 
 **Float-boxing Stage 4, Option A — reuse the `map_float` wire-argument box (done, 2026-07-27):** every float crossing the closure-call ABI boundary is heap-boxed (`march_alloc_float`) — this is what blocks `map_float` from vectorizing (see Phase 2c above) and is a known, deliberate tradeoff from an earlier design decision (`specs/plans/2026-07-13-float-boxing-design.md`), not a bug: boxing fixed real correctness issues (RC-on-raw-float-bits SIGSEGV, negative floats sorting wrong under a raw-bits integer compare) that a plain register-guard fix provably couldn't. That design doc named its own deferred "Stage 4 — perf pass" for the cost, with two options: `EReuse` on the float box, or unbox-on-entry at monomorphized boundaries. `emit_native_map_inline_loop` (`lib/tir/llvm_emit.ml`) now does the first, scoped to the *argument* side: it allocates ONE `march_alloc_float` box before the loop and overwrites its `.val` field (a GEP to byte offset 16, per `march_float_box`'s `[rc:8][tag:4][pad:4][val:8]` layout) each iteration, instead of a fresh box per element. Safe because every apply function unconditionally unboxes its argument as its very first instruction and never retains the pointer (confirmed via `-emit-llvm`: the generated prologue is always `call double @march_unbox_float(ptr %x.arg)` before any user code runs) — nothing can observe a specific box's identity across calls, so reuse is indistinguishable from fresh-boxing at 1/N the allocation cost. Confirmed via a 3000-iteration, 200K-element stress test that this wasn't cosmetic: the loop was visibly pressuring the runtime's tracing GC (RSS oscillating 1.3-3.2GB rather than growing unboundedly — not a leak, but real avoidable churn), and wall-clock dropped ~1.9x (18.96s → 10.18s) via file-copy-swap A/B on an otherwise-identical binary. Scoped narrowly on purpose: only the argument box is reused; the *return*-value box (the apply body's own fresh allocation for its result) is untouched — reusing that would need the callee's own codegen to cooperate (an out-parameter or FBIP-style hint), a larger change than this loop controls, and is effectively "Stage 4, Option B" (see below) territory. `Int` has no equivalent box (its wire value is a tagged immediate, no allocation) so is unaffected. This does **not** unlock Float vectorization — the return-side box still blocks the auto-vectorizer — it only cuts allocation traffic. Regression test: `test/native/native_arr_map_inline_float_box_reuse.march` (correctness + an `--emit-llvm` structural check that no `march_alloc_float` call appears inside the loop-body block).
 
-**Float-boxing Stage 4, Option B — unbox-on-entry at monomorphized boundaries (not started):** the deeper fix, and the only path to genuine Float vectorization. Since the map-inline loop already knows the element type is concretely `Float`, in principle it could call an *unboxed* variant of the apply function's logic directly, skipping the box round-trip (both argument and return) entirely, rather than merely reusing a box. This needs the apply function to expose (or the inliner to synthesize) a specialized unboxed calling convention — real work in `defun.ml`'s lambda-lifting, since every lifted apply function today unconditionally uses the generic `ptr`-in/`ptr`-out ABI (`is_apply_fn`, `lib/tir/llvm_calls.ml`). Bigger and riskier than Option A: it means a *second* compiled entry point per lambda, a decision at each call site about which one it can use, and confidence that nothing else in the compiler assumes one calling convention per apply function. Not started.
+**Float-boxing Stage 4, Option B — unboxed apply-fn clone for `map_float` (done, 2026-07-27):** the deeper fix, and the only path to genuine Float vectorization — Option A only cut allocation traffic. Turned out much lower-risk than the "second calling convention, real work in `defun.ml`" estimate above: `Tir_names.is_apply_fn` (the single predicate every box/unbox decision in `lib/tir/llvm_toplevel.ml`'s function-emission code keys off) is a pure name check — does the function's name contain the literal substring `"$apply$"` — not a structural/TIR-level marker. A lifted lambda's `fn_def` already carries its natural, concrete parameter/return types; boxing is applied purely because the name matches at emission time. So `Native_map_inline.ml`, on finding a `map_float` callback whose signature is concretely all-`Float` (no `TVar` — captures are fine, since a captured Float is already stored/loaded at its own concrete type in the closure struct, never boxed, regardless of which apply-fn variant reads it), clones the *exact same* already-Perceus-processed `fn_def` under a renamed `fn_name` that does **not** contain `"$apply$"` (`"$mapfast$"` instead) and adds it to the module. The existing, completely unmodified emission code in `llvm_toplevel.ml` then treats the clone as an ordinary function: natural `double` params and return, no `march_alloc_float`/`march_unbox_float` anywhere — argument or return side, loop or callee. `llvm_emit.ml`'s `emit_native_map_inline_loop` gained an `~unboxed` parameter selecting a plain-`double` load/call/store path with no box allocation at all (vs. Option A's box-once-and-reuse path, still used for anything that doesn't qualify — Int, or a still-generic signature). New synthetic builtin name `__native_float_arr_map_inline_unboxed` (both 2-arg non-capturing and 3-arg capturing forms) dispatches to it.
+
+Verified via `-S -emit-llvm` + `clang -O2` disassembly on `fn x -> x *. 2.0 +. 1.0` over a 1M-element array: `march_main`'s inlined loop shows LLVM's own vectorizer block markers (`%vector.ph`/`%vector.body`) and real 8-wide-unrolled NEON (`fadd.2d` — `*2.0` strength-reduced to self-add) — genuine Float SIMD, the first time this has actually fired for `map_float`. Known, accepted cost: the *original* boxed apply fn is left in the module alongside its unboxed clone (Native_map_inline runs after Opt's DCE, so the now-dead original isn't swept) — dead code, not a correctness issue, just unnecessary compile/link work; a reachability check to drop it is a possible follow-up, not done here. Regression test: `test/native/native_arr_map_inline_unboxed.march` — non-capturing and capturing all-Float cases, checked for correctness and (via `--emit-llvm`) that exactly 2 `$mapfast$` clones exist with zero boxing calls in either clone's own body (a stronger check than Option A's "not inside the loop" — the callee itself must be clean too, since it now takes/returns a raw `double`). Actual vector-instruction assertions were deliberately left out of the automated test (clang-version/target-architecture dependent, not portable across CI runners) — verified manually instead, as described above.
 
 **Deferred (Phase 3):** GEP-based vectorizable loop emission with `!llvm.loop.vectorize.enable` metadata and `align 32` allocation (requires `posix_memalign`) for `sum`/`fold`, and extending Phase 2b/2c's direct-call inlining to `fold` (same closure-inlining pattern, same win). The current Phase 2 calls the C runtime's tight loops for `sum`/`fold`; LLVM auto-vectorizes the runtime `sum` loop at `-O2`/`-O3` (see correction above) without needing this, so remaining value here is mostly `fold` and any future ops that don't already have a hand-rolled emitter.
 
@@ -787,14 +789,53 @@ What's left is making the *operations* on those columns actually use the fast
   (P10 Phase 2 correction, above) for free. `Min`/`Max`/`Std`/`Variance`/`Median`
   unchanged: no vectorized reduction primitive exists for those (would need new
   runtime builtins), and `Median` needs the full sorted list regardless.
-- **Investigated, deferred:** `col_add_col`/`ColExpr::Add/Sub/Mul/Div` (column-column
-  arithmetic) and `fill_null` (data array zipped against a null-bitmap array) both
-  round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped
-  ops, but are actually **two-array** operations — `NativeArray.map_int`/`map_float`
-  only take one array, so neither can use the Phase 2b/2c inlining without a new
-  `map2`/zip-with `NativeArray` primitive (new runtime builtin + LLVM codegen support,
-  likely needing its own Phase-2b/2c-style closure-inlining treatment). Real,
-  scoped, compiler-side work — not started.
+- **Done (2026-07-27):** `NativeArray.map2_int`/`map2_float` — a genuine two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length mismatch),
+  plus `NativeArray.to_float_arr` (widen a `NativeIntArr` to `NativeFloatArr`) for
+  mixed-type column arithmetic. Full stack: runtime C (`native_{int,float}_arr_map2`
+  in `runtime/march_runtime.c`, using the same wire-tagged/boxed closure-call ABI as
+  `map`'s `clo_call_*` helpers, plus 2-arg variants `clo_call_int_int_int`/
+  `clo_call_dbl_dbl_dbl`), interpreter (`lib/eval/eval.ml`), typechecker
+  (`lib/typecheck/typecheck.ml`), and compiled-path registration (`llvm_builtins.ml`
+  table + preamble `PDeclare`s, `defun.ml`'s `builtin_names`). `DataFrame.col_add_col`
+  now uses these instead of `List.zip`/`List.map`/`native_*_arr_from_list` for all
+  four `IntCol`/`FloatCol` combinations. Regression test: `test/native/native_arr_map2.march`.
+  Shipped correctness-first — `map2` did not initially get its own
+  Phase-2b/2c/Option-A/B-style closure-inlining or vectorization treatment (still
+  dispatched through the C runtime's opaque closure-pointer call per element).
+- **Done (2026-07-27, same day):** `map2` closure-inlining/vectorization. Extended
+  `lib/tir/native_map_inline.ml` (the Phase 2b/2c/Stage-4 pass behind `map`'s
+  numbers above) to also recognize the two-array `map2` call shape — same
+  eligibility bar (fresh, single-use, non-capturing-or-single-capture callback),
+  same synthetic-inline-name mechanism, same `Float`-boxing Stage 4 Option B
+  unboxed clone for a concrete-`Float` signature — via four new mirror functions
+  (`find_target_call2`/`subst_call2`/`find_target_call_var2`/`subst_call_capturing2`)
+  matching a 3-arg call (2 leading `NativeArray` args + closure) instead of `map`'s
+  2-arg one, plus `apply_fn_table`'s arity filter widened to accept a 2-param
+  ($clo+a+b) apply fn alongside the existing 1-param one. `lib/tir/llvm_emit.ml`
+  gained `emit_native_map2_inline_loop`, mirroring `emit_native_map_inline_loop`
+  with two source-array reads and a 2-argument direct call. One thing with no
+  single-array equivalent: the inlined loop bypasses
+  `native_int_arr_map2`/`native_float_arr_map2` (and their own length checks)
+  entirely, so it needed its own length-mismatch panic
+  (`native_arr_map2_check_len`, `runtime/march_runtime.c`, emitted once in the
+  loop's preheader — no per-iteration cost) to preserve
+  `NativeArray.map2_*`'s documented contract; verified with a dedicated
+  regression fixture expecting exit 1
+  (`test/native/native_arr_map2_inline_length_panic.march`), not just the happy
+  path. Measured **~47x** on the `bench/simd_map2.march` cross-language
+  benchmark: 299.2 ms → 6.4 ms (5M elements), now beating hand-written OCaml and
+  within 3x of NumPy — see `docs/simd-benchmarks.md`'s "Fix history: map2".
+  Regression test: `test/native/native_arr_map2_inline.march` (correctness — Int
+  and Float, non-capturing and capturing, plus a reused-closure fallback case)
+  plus an `--emit-llvm` structural check
+  (exactly 2 unboxed `$mapfast$` clones, zero boxing calls in either, exactly 1
+  remaining general non-inlined `native_int_arr_map2` call for the
+  reused-elsewhere case).
+- **Still out of scope:** `ColExpr::Add/Sub/Mul/Div` (the lazy-expression path, as
+  opposed to `col_add_col`'s eager one) and `fill_null` (data array zipped against a
+  `TypedArray(Bool)` null-bitmap, not another `NativeArray` — a different shape than
+  `map2` covers) have not been rewired.
 - **Found, filed separately, not fixed:** `DataFrame.eval_agg` has ~40ms of fixed
   per-call overhead in compiled builds, unrelated to the actual aggregation —
   confirmed via isolated benchmark and confirmed pre-existing (not caused by the
@@ -807,16 +848,17 @@ What's left is making the *operations* on those columns actually use the fast
   others are pointer/hash-heavy, not data-parallel.
 
 Combined with P9 (columnar layout), the column representation and the now-vectorized
-aggregations move March DataFrame queries closer to Polars-competitive — the
-two-array-arithmetic gap above is the main remaining piece.
+aggregations AND two-array arithmetic move March DataFrame queries closer to
+Polars-competitive — `ColExpr`'s lazy-expression path and `fill_null` are the main
+remaining pieces.
 
 ---
 
-**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, not started
-**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, done
+**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2; ~47× for map2 specifically (299ms → 6.4ms, 5M elements)
 **Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
-**Benchmark:** `bench/array_numeric.march`
-**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops not started
+**Benchmark:** `bench/array_numeric.march`, `bench/simd_sum.march`/`simd_map.march`/`simd_map2.march` (cross-language, see `docs/simd-benchmarks.md`)
+**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops done (primitive, `col_add_col` rewiring, AND inlining/vectorization all done)
 
 ---
 

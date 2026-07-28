@@ -30,13 +30,32 @@
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
-  (* Desugar a string interpolation into concatenation + to_string calls.
-     desugar_interp prefix [(e1, s1); (e2, s2); ...] sp  produces:
+  (* Desugar a string interpolation into a `++` chain + to_string calls:
        prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
-     where to_string is the polymorphic builtin. *)
+     where to_string is the polymorphic builtin.
+
+     A left-deep `++` chain re-copies the growing prefix at every link, which
+     would be O(k^2) for k parts — but desugar collapses chains of 3+ into
+     three-way concats (lib/desugar/desugar.ml, fold_concat3), so the emitted
+     chain costs ceil((k-1)/2) allocations and no intermediate list.
+
+     This deliberately emits ONE shape.  An earlier version emitted
+     `string_join` over a cons list past a part-count threshold, which was a
+     win against a raw `++` chain but is a LOSS against concat3 folding: the
+     list costs a cons cell per part.  Measured on current main, 7 segments at
+     2M iterations — `string_join` 519ms (1 string + 8 cons cells per
+     iteration) against concat3 folding at 287ms (3 strings, no cons cells).
+     Interpolation was 1.8x slower than writing the identical thing with `++`.
+
+     Emitting one shape also removes a standing hazard: the formatter
+     reconstructs `"${...}"` source from this AST (lib/format/format.ml,
+     try_collect_interp) and the ~H sigil lowering decomposes it part-wise
+     (lib/desugar/desugar.ml, decompose_concat).  Every extra shape has to be
+     taught to both, and twice now a missing case there silently disabled HTML
+     auto-escaping — a failure that fails OPEN. *)
   let desugar_interp prefix parts sp =
+    let to_s e = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
     let cat a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
-    let to_s e  = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
     List.fold_left (fun acc (e, seg) ->
         let with_e = cat acc (to_s e) in
         if seg = "" then with_e
@@ -613,6 +632,20 @@ actor_handler:
         Client -> Server : More(String)
         Server -> Client : Ack()
       end
+    end
+
+    A `loop` body (or a `choose` branch nested inside one) may end in `stop`
+    to exit the loop instead of repeating it — `stop` is a CONTEXTUAL
+    keyword (plain `lower_name`, not reserved elsewhere):
+    protocol Stream do
+      loop do
+        Prod -> Cons : Int
+        choose by Cons:
+          more -> Cons -> Prod : Bool
+          done -> Cons -> Prod : Bool
+                  stop
+        end
+      end
     end *)
 protocol_decl:
   | PROTOCOL; name = upper_name; DO; steps = list(protocol_step); END
@@ -625,6 +658,15 @@ protocol_step:
     { ProtoLoop steps }
   | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END
     { ProtoChoice (chooser, branches) }
+  | id = lower_name
+    { if id.txt = "stop" then ProtoStop (mk_span $loc)
+      else
+        error_raise
+          (Printf.sprintf
+             "I don't recognize `%s` here — the only protocol step allowed \
+              is `stop` (to exit an enclosing `loop`)."
+             id.txt)
+          None $startpos(id) }
 
 choose_branch:
   | option(PIPE); label = lower_name; ARROW; steps = list(protocol_step)

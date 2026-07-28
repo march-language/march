@@ -306,6 +306,29 @@ mod String do
   fn index_of(s, substring) do string_index_of(s, substring) end
 
   doc """
+  Find the first occurrence of `substring` at or after byte offset `start`.
+
+  The result is an index into `s` itself, not relative to `start`, so it can be
+  fed straight back in as the next `start` when tokenizing.
+
+  Prefer this over slicing off the tail and searching again: the tail form
+  re-copies the remaining bytes on every step, making a full tokenize O(n²)
+  in bytes copied.
+
+      String.index_of_from("a,b,c", ",", 0)   -- Some(1)
+      String.index_of_from("a,b,c", ",", 2)   -- Some(3)
+      String.index_of_from("a,b,c", ",", 4)   -- None
+
+  A negative `start` is treated as 0; a `start` past the end returns `None`;
+  an empty `substring` matches at `start`.
+
+  Cost: O((n - start) * m) worst case.
+  """
+  fn index_of_from(s, substring, start) do
+    string_index_of_from(s, substring, start)
+  end
+
+  doc """
   Parse `s` as a decimal integer.
   Returns `Ok(n)` on success, `Err(msg)` if the string is not a valid integer.
 

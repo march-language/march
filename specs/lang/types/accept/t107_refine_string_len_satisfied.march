@@ -1,0 +1,12 @@
+-- Refinement types: `String` refinements over the builtin `len` measure
+-- (§2.14). `len` is compiler-recognized vocabulary usable in predicates
+-- without a user `@[measure]` declaration. For a DIRECT call with a string
+-- LITERAL argument, refinecheck evaluates `len("abc")` symbolically (BLAKE3-
+-- cached Z3 String theory) and discharges `len(_) > 0` without ambiguity.
+-- Reject companion: reject/t85 (`nonempty("")`).
+mod M do
+  fn nonempty(s : {String | len(_) > 0}) : Int do 1 end
+  fn main() do
+    println(int_to_string(nonempty("abc")))
+  end
+end

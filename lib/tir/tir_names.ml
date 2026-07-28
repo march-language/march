@@ -519,3 +519,29 @@ let has_runtime_prefix (name : string) : bool =
   let sfx = runtime_prefix in
   String.length name >= String.length sfx
   && String.sub name 0 (String.length sfx) = sfx
+
+(* ── Synthesized deep-drop functions (lib/tir/drop.ml) ──────────────────── *)
+
+(** Name prefix of the deep-drop functions synthesized by [Drop.run] —
+    [__drop$<mangled type>].  A [$] guarantees no collision with a surface
+    identifier (the lexer's [ident] rule admits no [$]). *)
+let drop_fn_prefix = "__drop$"
+
+(** True if [name] is a synthesized deep-drop function.
+
+    These calls REPLACE a bare [EDecRC] and are, like it, evaluated purely for
+    effect and return [Unit].  Two consumers must therefore treat a call to one
+    exactly as they treat the RC op it stands in for, or the substitution
+    changes program meaning rather than just its RC bookkeeping:
+
+    - [llvm_emit.ml]'s [ESeq] value rule ("e2 is an RC op → the seq's value is
+      e1's").  Without this, [ESeq (walk(...), __drop$T(t))] takes the drop
+      call's unit as its value and the function silently returns 0.
+    - [llvm_tco.ml]'s [is_trivial_dec_chain]/[is_trivial_dec_chain_returning].
+      Without this, a tail call followed by a drop is no longer a recognisable
+      "call + cleanup chain", so the back-edge interception is lost and a
+      self-tail-recursive traversal degrades to real stack recursion. *)
+let is_drop_fn (name : string) : bool =
+  let p = drop_fn_prefix in
+  String.length name >= String.length p
+  && String.sub name 0 (String.length p) = p

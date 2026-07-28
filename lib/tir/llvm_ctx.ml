@@ -166,6 +166,17 @@ type ctx = {
      surrounding construction is not discarded.  Cleared by emit_expr around
      non-tail sub-expressions and restored afterwards. *)
   mutable tco_in_tail   : bool;
+  (* Names of locals in the function being emitted whose binding RHS is a
+     "dup" — [ESeq (EIncRC x, EAtom x)], the shape Perceus uses to
+     materialise an owned local from a borrowed field (e.g. the `t` of a
+     `Cons(_, t)` pattern).  Such a local carries a +1 that its post-call
+     DecRC is the matching half of, which is what distinguishes it from a
+     freshly-allocated, uncompensated value.  The TCO back-edge emitters
+     consult this to decide whether a dec-chain op on a FORWARDED argument
+     must still execute (dup-bound: yes, or the +1 leaks every iteration)
+     or be skipped (uncompensated: skipping avoids a use-after-free — see
+     commit eafbd71a).  Populated by [emit_fn] per function. *)
+  mutable tco_dup_bound : string list;
   (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
      mutual_tco_group: names of all functions in the current mutual group (empty = not active).
      mutual_tco_tag_slot: alloca slot name for the dispatch tag.
@@ -257,6 +268,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   tco_param_info = [];
   tco_in_tail    = true;
   tco_stack_save = "";
+  tco_dup_bound  = [];
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
   mutual_tco_loop_label = "";

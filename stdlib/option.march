@@ -44,7 +44,7 @@ mod Option do
   The panic message is prefixed with the module name and `on None` so
   it is clearly attributable when it shows up in a stack trace.
   """
-  fn expect(opt : Option(a), msg : String) : a do
+  fn expect(opt : {Option(a) | is_Some(_)}, msg : String) : a do
     match opt do
     Some(x) -> x
     None    -> panic("Option.expect on None: " ++ msg)
@@ -60,7 +60,7 @@ mod Option do
       march> Option.unwrap(None)
       ** panic: Option.unwrap called on None
   """
-  fn unwrap(opt : Option(a)) : a do
+  fn unwrap(opt : {Option(a) | is_Some(_)}) : a do
     match opt do
     Some(x) -> x
     None    -> panic("Option.unwrap called on None")

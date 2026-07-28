@@ -1,0 +1,20 @@
+-- EXPECT-ERROR: Chan.new: protocol `Tri` has 3 roles
+mod Main do
+  -- Session types: `Chan.new` is the BINARY constructor.  Pre-fix (2026-07-24)
+  -- a 3+-role protocol fell through a silent "just return first two as a pair"
+  -- fallback, handing back two endpoints that are not duals of each other.
+  type A = A
+  type B = B
+  type C = C
+
+  protocol Tri do
+    A -> B : Int
+    B -> C : Int
+    C -> A : Bool
+  end
+
+  fn main() do
+    let (x, y) = Chan.new(Tri)
+    println("unused")
+  end
+end

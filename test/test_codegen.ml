@@ -890,6 +890,124 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
     "mutual-tco borrowed-arg: DecRC executes in the back-edge's own block (live path), not only in the dead mutco_cont block after it"
     true (List.length live_decrefs > 0)
 
+(** Regression: a hand-written tail-recursive list walk leaked every cons cell.
+
+    [eafbd71a] fixed a use-after-free where the self-TCO back-edge eagerly ran
+    a post-call DecRC on a FRESHLY-ALLOCATED forwarded argument (no matching
+    prior IncRC), freeing it one instruction before the next iteration reused
+    it.  The fix skipped every Dec/IncRC in the dec-chain whose target is one
+    of the forwarded arguments — too broad.  A [Cons(_, t) -> walk(t, ...)]
+    walk lowers to
+        let t = (inc_rc $f; $f) in walk(t, acc'); dec_rc t
+    where the DecRC is the *matching half* of the IncRC that materialised [t]
+    from the borrowed tail field.  Skipping it leaves the IncRC uncompensated,
+    so every cons cell (and its payload) ends the loop at refcount >= 1 and is
+    never reclaimed when the owner drops the list — a leak proportional to the
+    input, the ordinary way to consume a [String.split] result.
+
+    [walk]'s whole body is the TCO loop, so its RC ops must balance over one
+    iteration: assert the emitted [@walk] definition issues as many DecRCs as
+    IncRCs.  Before the fix it dups the tail field once and never releases it
+    (1 IncRC / 0 DecRC).  (eafbd71a's own case stays covered by
+    test/native/tco_fresh_arg_decrc.march — there the forwarded argument has
+    no IncRC to balance, so it must keep emitting neither op.) *)
+let test_tco_self_dup_arg_decref_on_live_path () =
+  let ir = emit_tco_opt_ir {|mod Test do
+    @[no_warn_recursion]
+    fn walk(xs : List(String), acc : Int) : Int do
+      match xs do
+      Nil -> acc
+      Cons(_, t) -> walk(t, acc + 1)
+      end
+    end
+    fn main() : Unit do println(int_to_string(walk(["a", "b"], 0))) end
+  end|} in
+  Alcotest.(check bool) "self-tco dup-arg: tco_loop emitted" true
+    (ir_contains ir "tco_loop");
+  let walk_ir =
+    let start = Str.search_forward (Str.regexp "define [^\n]*@walk(") ir 0 in
+    let stop = Str.search_forward (Str.regexp "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  Alcotest.(check bool) "self-tco dup-arg: walk's body is the TCO loop" true
+    (ir_contains walk_ir "br label %tco_loop");
+  let count pat =
+    let re = Str.regexp_string pat in
+    let rec go start acc =
+      match Str.search_forward re walk_ir start with
+      | exception Not_found -> acc
+      | _ -> go (Str.match_end ()) (acc + 1)
+    in
+    go 0 0
+  in
+  let incs = count "@march_incrc" in
+  (* The release is either a direct decrc or — once Drop.run has rewritten it
+     — a call to the generated deep drop, which performs that same decrc on
+     the box.  Either discharges the dup; neither being present does not. *)
+  let decs = count "@march_decrc" + count "@__drop$" in
+  Alcotest.(check bool) "self-tco dup-arg: the tail field is dup'd" true (incs > 0);
+  Alcotest.(check int)
+    "self-tco dup-arg: every IncRC of the forwarded tail has a matching release (else every cons cell leaks)"
+    incs decs
+
+(** Regression: dropping a container that was never destructured leaked
+    everything below its top cell.
+
+    March reclaims an aggregate by DESTRUCTURING it — [llvm_case.ml]'s
+    owned-scrutinee path frees the box with [march_decrc_freed] and lets the
+    extracted fields inherit its child references.  A bare [EDecRC], which is
+    what Perceus emits for the OWNER when the consumer only borrows, instead
+    lowered to [march_decrc_local]: a shallow [free(p)] that never decrements
+    the children.  So
+
+    {v
+      let parts = String.split(buf, ",")
+      consume(parts)        -- borrows
+      -- drop parts         -- freed ONE cons cell; 150K strings orphaned
+    v}
+
+    leaked proportionally to the input (585 MB peak on a 60-iteration loop,
+    growing linearly).  It was never about the traversal: a [consume] that
+    ignores its argument entirely leaked identically.
+
+    [Drop.run] now routes such a drop through a synthesized [__drop$T].
+    Assert the call reaches the emitted IR and that the drop function itself
+    is present, releases the head field, and early-exits on a shared box —
+    that last part is not an optimization: descending into a cell whose
+    refcount did not reach zero is both wrong (the children still belong to
+    the surviving reference) and quadratic. *)
+let test_deep_drop_of_borrowed_container () =
+  let ir = emit_tco_opt_ir {|mod Test do
+    @[no_warn_recursion]
+    fn consume(xs : List(String)) : Int do 0 end
+    fn go(buf : String, i : Int, n : Int, acc : Int) : Int do
+      if i >= n do acc
+      else
+        let parts = String.split(buf, ",")
+        go(buf, i + 1, n, acc + consume(parts))
+      end
+    end
+    fn main() : Unit do println(int_to_string(go("a,b,c", 0, 2, 0))) end
+  end|} in
+  Alcotest.(check bool)
+    "deep drop: the owner's drop of the split result calls a generated deep drop, not a bare decrc"
+    true (ir_contains ir "call void @__drop$List_String");
+  let drop_ir =
+    let start = Str.search_forward
+        (Str.regexp "define [^\n]*@__drop\\$List_String(") ir 0 in
+    let stop = Str.search_forward (Str.regexp "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  Alcotest.(check bool)
+    "deep drop: releases the box via march_decrc_freed so it can tell unique from shared"
+    true (ir_contains drop_ir "@march_decrc_freed");
+  Alcotest.(check bool)
+    "deep drop: releases the head field when it owned the box"
+    true (ir_contains drop_ir "@march_decrc");
+  Alcotest.(check bool)
+    "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
+    true (ir_contains drop_ir "br label %tco_loop")
+
 (** Final-review regression: [has_non_tail_group_call]'s dec-chain-wrapper
     arm used to recognise [ELet (tmp, EApp (f, _), dec-chain-returning-tmp)]
     at ANY position without checking [in_tail], so a Perceus-wrapped group
@@ -10328,6 +10446,7 @@ declare i64    @march_hash_bool(i64 %x)
 declare i64  @march_string_byte_length(ptr %s)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
+declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)
 declare ptr  @march_string_join(ptr %list, ptr %sep)
 ; Float builtins
 declare double @march_float_abs(double %f)
@@ -10385,6 +10504,7 @@ declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
 declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
 declare i64  @march_string_grapheme_count(ptr %s)
 declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_index_of_from(ptr %s, ptr %sub, i64 %start)
 declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
 declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
@@ -10588,6 +10708,8 @@ declare i64    @native_int_arr_min(ptr %arr)
 declare i64    @native_int_arr_max(ptr %arr)
 declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_int_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_int_arr_map2(ptr %arr1, ptr %arr2, ptr %f)
+declare ptr    @native_int_arr_to_float_arr(ptr %arr)
 declare ptr    @native_int_arr_from_list(ptr %lst)
 declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
@@ -10601,11 +10723,13 @@ declare double @native_float_arr_min(ptr %arr)
 declare double @native_float_arr_max(ptr %arr)
 declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)
 declare ptr    @native_float_arr_map(ptr %arr, ptr %f)
+declare ptr    @native_float_arr_map2(ptr %arr1, ptr %arr2, ptr %f)
 declare ptr    @native_float_arr_from_list(ptr %lst)
 declare ptr    @native_float_arr_to_list(ptr %arr)
 declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
 declare ptr    @native_int_arr_alloc_raw(i64 %len)
 declare ptr    @native_float_arr_alloc_raw(i64 %len)
+declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Time builtins
 declare double @march_unix_time()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
@@ -11003,6 +11127,10 @@ let codegen_suites =
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
           Alcotest.test_case "B7: borrowed-arg decref on live path (not dead mutco_cont)"
             `Quick test_mutual_tco_borrowed_arg_decref_on_live_path;
+          Alcotest.test_case "self TCO: dup'd forwarded arg is decref'd on live path"
+            `Quick test_tco_self_dup_arg_decref_on_live_path;
+          Alcotest.test_case "deep drop: never-destructured container releases its children"
+            `Quick test_deep_drop_of_borrowed_container;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
             `Quick test_mutual_tco_non_tail_dec_chain_wrapped_no_loop;
           Alcotest.test_case "B8: reduction check present in mutual loop"

@@ -1,0 +1,14 @@
+-- Refinement types: ADT constructor-tag predicates (§2.14 widening). A
+-- refinement predicate may test a value's constructor tag via the
+-- compiler-recognized `is_<Ctor>` vocabulary (`is_Some`, `is_None`, and one
+-- synthesized per user ADT constructor, e.g. `is_Circle`). For a DIRECT call
+-- with a constructor-literal argument, lib/refinecheck reads the literal's
+-- head constructor and discharges `is_Some(_)` without needing Z3 at all --
+-- the tag is known syntactically. `unwrap(Some(1))` satisfies `is_Some(_)`
+-- trivially. Reject companion: reject/t83 (`unwrap(None)`).
+mod M do
+  fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do 0 end
+  fn main() do
+    println(int_to_string(unwrap(Some(1))))
+  end
+end

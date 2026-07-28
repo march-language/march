@@ -239,6 +239,7 @@
       <span class="logo-slug">/ docs</span>
     </a>
     <div class="d-nav-right">
+      {% include search.html %}
       <a href="{{ site.baseurl }}/" class="d-nav-link">Home</a>
       <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="d-nav-link">GitHub</a>
       <button class="d-theme-btn" id="d-theme-btn">☀ Light</button>
@@ -282,6 +283,13 @@
         {% endif %}
       {% endfor %}
 
+      <p class="d-sidebar-section">SIMD</p>
+      {% for p in nav_pages %}
+        {% if p.nav_order > 11 and p.nav_order < 12 %}
+      <a href="{{ p.url | prepend: site.baseurl }}" class="d-sidebar-link{% if p.url == page.url %} active{% endif %}">{{ p.title }}</a>
+        {% endif %}
+      {% endfor %}
+
       <p class="d-sidebar-section">Reference</p>
       <a href="{{ site.baseurl }}/docs/stdlib/" class="d-sidebar-link">Standard Library</a>
       {% for p in nav_pages %}
@@ -300,7 +308,7 @@
 
   <!-- MAIN CONTENT -->
   <main class="d-main">
-    <div class="d-content">
+    <div class="d-content" data-pagefind-body data-pagefind-filter="section:Guide">
       {% if page.scrollmd %}{% include scrollmd-button.html %}{% endif %}
       {{ content }}
     </div>

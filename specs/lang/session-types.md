@@ -11,11 +11,11 @@ permalink: /docs/session-types/
 
 A protocol is an agreement about *who sends what, and in what order*. Two programs that disagree — one sends before the other is ready, or a channel is used after it's closed — deadlock or corrupt data at runtime, usually under load, usually in production.
 
-March's **session types** turn those agreements into types the compiler checks. You declare a `protocol`, the compiler derives each side's obligations, and any program that breaks the protocol **fails to compile**. Sending in the wrong order and using a channel after it's closed are both type errors, not surprises. (Forgetting to close a channel, and not handling every branch a peer might choose, are related but *weaker* guarantees — see [The guarantees, in one place](#the-guarantees-in-one-place) for the precise, verified story.)
+March's **session types** turn those agreements into types the compiler checks. You declare a `protocol`, the compiler derives each side's obligations, and any program that breaks the protocol **fails to compile**. Sending in the wrong order, using a channel after it's closed, forgetting to close a finished channel, and leaving a branch a peer might choose unhandled are all type errors, not surprises — see [The guarantees, in one place](#the-guarantees-in-one-place) for the precise, verified story, including the two narrower gaps that remain.
 
 These are *binary* session types: a protocol describes exactly two roles talking over one channel. (For data-parallel fan-out across a whole collection, see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/); for actor mailboxes, see [Actors]({{ site.baseurl }}/docs/actors/) — and the [section below](#session-types-and-actors) on how the two relate.)
 
-**What is byte-identical interpreted vs compiled, and what is NOT.** The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends — mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.5). **Multi-party session types (`MPST.*`) are typing-only**: every `MPST.*` program segfaults compiled (exit 139) even though the interpreter runs it correctly — a filed open finding (`specs/todos.md`, F3). This document's examples all use binary (two-role) protocols, which are the safe, byte-identical, production-ready surface; MPST is documented as a typing concept in the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7.4 but should not be relied on compiled today.
+**What is byte-identical interpreted vs compiled, and what is NOT.** The **binary channel plane** (`Chan.*`, not `MPST.*`) with `Int`/`Bool`/`String` payloads, correctly interleaved, produces identical observable output on both backends — mechanically pinned by the golden conformance corpus (`specs/lang/golden/g38`–`g39`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.5). **`MPST.*` send/recv/close round-trips run correctly on both backends, re-verified 2026-07-24** (transcript in `specs/todos.md`): a 3-role and a 4-role protocol, each with `Int`/`Bool`/`String` payloads, both compile and run, printing output identical to the interpreter, exit 0 — the segfault this section used to describe (finding F3) no longer reproduces. What genuinely remains unimplemented is **multiparty `choose`/`offer`** (`MPST.choose`/`MPST.offer` do not exist as typed operations yet — calling them is a compile error, not a crash) — and MPST still has no *golden* conformance witness (`specs/lang/golden/`), only the ad hoc transcript cited above, so a send/recv/close-only MPST program is verified-correct but not yet mechanically pinned the way the binary plane is. See the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7.4 for the projection/consistency machinery MPST protocols go through.
 
 For the typing side (protocol declaration, projection, duality, per-operation channel-state typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.7; for the runtime model (the crossed-queue representation, why `recv` never suspends, and the no-scheduler deadlock boundary) see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.
 
@@ -30,9 +30,9 @@ Two classes of bug become compile errors:
 - **Wrong-order / wrong-direction communication.** `Chan.send` on a channel whose protocol says "receive next" doesn't type-check.
 - **Use-after-close.** The channel is *linear* — you cannot keep using an endpoint after `Chan.close`, or use the same continuation twice.
 
-A third class sounds like it would be a compile error but, as verified against the current implementation, is not always caught — see [The guarantees, in one place](#the-guarantees-in-one-place) below for the precise (narrower) story on unhandled `offer` branches.
+A third class is also caught: **an unhandled `offer` branch.** `match`ing the label an `offer` returns is checked against the protocol's own closed branch set, not the open-ended `Atom` universe an ordinary `match` assumes — see [The guarantees, in one place](#the-guarantees-in-one-place) below for the precise shape of what's checked.
 
-The result is a static guarantee: if your program compiles, the two sides agree on the conversation and the channel is never used after close. A related property — every offered case is handled — is only *usually* true in practice, not mechanically enforced; see [The guarantees, in one place](#the-guarantees-in-one-place). (A channel reaching the end of its protocol and then being dropped without `Chan.close` **is** mechanically caught, as of a fix that landed after this guarantee was first surveyed — see the same section for the precise, narrower shape of what's checked.)
+The result is a static guarantee: if your program compiles, the two sides agree on the conversation, the channel is never used after close, and every branch a peer might pick on an `offer` is handled somewhere. (A channel reaching the end of its protocol and then being dropped without `Chan.close` **is** also mechanically caught — see [The guarantees, in one place](#the-guarantees-in-one-place) for the precise, narrower shape of what's checked, the exact scope of the offered-branch guarantee, and the two caveats that remain out of scope.)
 
 ---
 
@@ -70,6 +70,8 @@ A channel endpoint's type is written `Chan(Role, Protocol)` — for example `Cha
 | `Chan.choose(ch, :label)` | `choose {…}` ⟶ the chosen branch | the advanced `Chan` |
 | `Chan.offer(ch)` | `offer {…}` ⟶ the picked branch | `(label, advanced Chan)` |
 | `Chan.close(ch)` | requires the protocol be **complete** (`end`) | `()` |
+
+`Chan.new(Proto)` returns its pair in **alphabetically sorted role name** order, not declaration order — for `Echo`'s `Alice -> Bob : String`, that's `(Alice's endpoint, Bob's endpoint)` because `"Alice" < "Bob"`, which happens to match declaration order in every example in this document. Don't rely on that coincidence: name your destructuring variables after the roles (`let (alice, bob) = Chan.new(Echo)`), not their position, and for a protocol whose roles don't happen to sort alphabetically the same as they're declared, check the sorted order before assuming which tuple slot is which. `Chan.new` is also **binary-only**: a protocol declaring more than two roles is rejected (`` Chan.new: protocol `Proto` has N roles but Chan.new needs exactly 2. Use MPST.new for multi-party protocols. ``) rather than silently handing back the first two roles' endpoints as a (non-dual!) pair — use `MPST.new(Proto)` for a 3+-role protocol, which returns an N-tuple, one endpoint per role, in the same alphabetically-sorted order.
 
 A few rules the type checker enforces, so they never reach runtime:
 
@@ -168,7 +170,82 @@ fn client_side(ch : Chan(Client, Decision)) : Unit do
 end
 ```
 
-`Chan.choose(ch, :label)` advances the channel into the chosen branch; `Chan.offer(ch)` returns `(picked_label, advanced_channel)`. An invalid label passed to `choose` (one the protocol didn't declare) is rejected at typecheck time. Handling the picked label is an ordinary `match` on the returned `Atom`, so ordinary `match` rules apply — including that a missing arm is only a warning (see [The guarantees, in one place](#the-guarantees-in-one-place)), not the hard error you might expect from "the compiler enforces the protocol."
+`Chan.choose(ch, :label)` advances the channel into the chosen branch; `Chan.offer(ch)` returns `(picked_label, advanced_channel)`. An invalid label passed to `choose` (one the protocol didn't declare) is rejected at typecheck time.
+
+Handling the picked label is a `match` on the returned `Atom` — but it is checked against the protocol's own **closed** branch set, not the open-ended `Atom` universe an ordinary `match` assumes. Covering every branch the protocol declares is silent, exactly like an ordinary exhaustive `match`. Omitting one, with no catch-all arm, is a **hard error** naming the missing label(s):
+
+```
+This `match` doesn't handle every branch the peer can choose — missing: :err.
+The protocol's `offer` branches are: :ok, :err.
+```
+
+A `when`-guarded arm does not count as "handling" its label for this check (a guard can be false at runtime, so the label isn't unconditionally covered), and a guarded catch-all (`_ when ... -> ...`) does not count as a catch-all either.
+
+There is a second rule, independent of `match` exhaustiveness: **if the `offer`'s branches continue the protocol differently** (e.g. `:ok` continues with `Server -> Client : Bool` but `:err` continues with `Server -> Client : Int` — different payload types after the branch), the channel `Chan.offer` returns cannot be driven with `Chan.send`/`Chan.recv`/`Chan.close` until it has been refined by matching on the paired label:
+
+```march
+let (lbl, ch) = Chan.offer(ch)
+Chan.recv(ch)          -- REJECTED: differing branches, label not yet matched
+```
+
+```
+Chan.recv: this channel came from `Chan.offer`, and the protocol's branches
+continue differently, so I don't know which one the peer chose.
+Match on the label first — `match lbl do :ok -> ... :err -> ... end` —
+and use the channel inside each arm.
+```
+
+Matching on `lbl` first, and driving the channel from *inside* each arm, resolves it: each arm sees the channel typed at that specific branch's own continuation, not a guessed-at approximation. (When every branch continues *identically*, this restriction never fires — there's only one continuation to guess, so there's nothing to disambiguate.) Rebinding the label variable's name (`let lbl = :ok` after destructuring it from `Chan.offer`) does not bypass this — the compiler retires the stale linkage the moment the name is rebound, so the channel stays correctly flagged as needing a match on the *current* value in scope.
+
+---
+
+## Repetition: `loop`
+
+A protocol can repeat a sequence of steps indefinitely with `loop do … end`:
+
+```march
+protocol Stream do
+  loop do
+    Producer -> Consumer : Int
+    Consumer -> Producer : Bool
+  end
+end
+```
+
+`loop` projects to the genuine recursive type `Rec X. S[X]` — a **µ-type**, the standard session-type encoding of "repeat this shape forever." Concretely: the loop body is projected with a fresh back-reference as its own continuation, so the LAST step inside the body loops back to the FIRST, not forward to whatever follows the `loop` block. This is why a channel governed by a `loop` can run the body any number of times (zero included, since `Chan.recv`/`Chan.send` just keep advancing around the same cycle) — each iteration textually re-derives the same local type, so the code that drives one iteration can be repeated (by ordinary recursion or a loop construct in the surrounding March code) to drive as many as the two sides agree on at runtime.
+
+Two consequences follow directly from "the body loops back to itself, never forward":
+
+- **A `loop` must be the protocol's last step.** Because the loop's own continuation IS its own back-reference, there is no way for control to "fall out" of a `loop` block into subsequent steps — a step written after a `loop` at the same nesting level can never run, and the compiler rejects the protocol at its declaration site: `` Protocol `<name>`: the steps after this `loop` can never run — a `loop` block repeats forever, so it must be the last step. `` This is a deliberate rule, not a limitation to work around: if a protocol needs a bounded, then-something-else shape, model the "then something else" as its own step *inside* an exit condition the two sides negotiate with `choose`/`offer` (loop vs. finish), rather than as trailing steps outside the `loop`.
+- **A looping channel never reaches `end`, so it is never closed.** `Chan.close` requires the protocol be complete; a `Rec X. S[X]` type has no terminal state to reach. A channel whose protocol is entirely a `loop` (or ends in one) is, by construction, never closed by `Chan.close` — that's expected, not an oversight, and is the same "abandoning a channel mid-protocol" shape as the F7 residual gap noted below, not a new hole this feature introduces.
+
+### Exiting a loop: `stop`
+
+The two consequences above mean a `loop` with no way out can only ever be *abandoned*, never *closed* — every `send`/`recv` inside it type-checks, but there is no sequence of operations that reaches `end`. `stop` (2026-07-27) is the way out: written as a step inside a `loop` body — directly, or nested inside a `choose` branch that is itself inside the loop — it exits the loop instead of repeating it:
+
+```march
+protocol Stream do
+  loop do
+    Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
+  end
+end
+```
+
+`stop` projects to `SEnd` for **every** role, unconditionally — it discards both the loop's own back-reference (the continuation `stop` would otherwise inherit) and any steps written after it in the same list, the same way `loop` itself discards whatever follows it. Concretely, `Stream` above projects `Cons`'s side to `Rec X. Recv(Int, Choose{more: Send(Bool, X), done: Send(Bool, End)})`: the `more` branch loops back to the binder, the `done` branch reaches `End`. Because `stop` reaches a genuine terminal state, a channel that takes the `done` branch can be `Chan.close`d on both ends — something no `loop`-only protocol can ever do. This is exactly the literature shape `Rec X. choose { more: S;X, done: end }`.
+
+Two rules keep `stop` from silently meaning something it doesn't:
+
+- **`stop` outside any `loop` is an error.** Nothing needs it there — the protocol already ends wherever its step list ends, so a `stop` at top level (or inside a `choose` that is not itself nested in a `loop`) would be a no-op, and the compiler rejects it rather than accept a step that does nothing: `` Protocol `<name>`: `stop` outside of a `loop` has no effect — the protocol already ends here if you just write nothing. ``
+- **Steps written after `stop` in the same list are unreachable**, for the same reason steps after a `loop` are: `` Protocol `<name>`: the steps after `stop` can never run — `stop` exits the loop immediately, so it must be the last step. ``
+
+A `loop` with no `stop` anywhere in it is not an error — it is a legitimate "repeat forever, abandon when done" protocol, same as before this feature — but it is worth knowing the tradeoff: without `stop`, that channel can never be closed, only dropped.
+
+Duality needs no special handling for `stop`: `dual_session_ty` already maps `SEnd` to `SEnd`, so a `stop` branch on one role's projection is automatically dual to the matching `SEnd` on the other's.
 
 ---
 
@@ -179,14 +256,17 @@ If a program using session-typed channels compiles, then:
 - **No protocol violations.** Every `send`/`recv` matches the protocol's next step, on both sides, by construction (duality is checked when the protocol is declared).
 - **No use-after-close.** The channel is linear; an endpoint cannot be used after `Chan.close`, and `close` only type-checks once the protocol is complete.
 - **A `let`-bound endpoint that reaches the end of the protocol must be closed.** Dropping it unclosed at that point is rejected, and re-using a channel *parameter* (not just a `let`-bound continuation) is also caught. (This closed two formerly-open gaps, historically labeled F7 — see below for the one shape that's still deliberately out of scope.)
+- **Every offered case is handled.** A `match` on an `offer`'s label is checked against the protocol's own closed branch set: an omitted branch with no catch-all is a compile error, not a warning (see [Choice](#choice-choose-and-offer) above). An arm naming a label the protocol does *not* offer (a typo like `:okk`) is reported too, as a warning — the arm is dead code, not a soundness problem.
+- **An `offer` whose branches diverge cannot be driven unrefined.** When an `offer`'s branch continuations are not all identical, the channel it returns cannot be used at all until a `match` on the paired label refines it: every `Chan.*` operation on it is rejected, *and* — since 2026-07-27 — so is unifying it with any other channel type. That second half matters: the mark identifying the pending channel is a compiler-side table keyed on the channel's identity, so before that fix a `Chan(Role, Proto)` type annotation, an `if`/`match` join with another channel, a record field, or an annotated function parameter at a call site would each mint a *fresh, unmarked* channel at the same state and launder the check away (compiled, that read one branch's `String` payload as the other's `Int`). All four routes are now rejected at the unification itself. An annotated *lambda* or nested-`fn` parameter was a fifth route that evaded even that, by never reaching a channel-to-channel unification at all; it was closed on 2026-07-27 by making lambda parameter annotations enforced (see the scope note below).
+
+  **The precise scope of that guarantee.** Exactly two things are mechanically enforced, and they are both compiler-side checks rather than properties of the session type: (1) every `Chan.*` operation applied to the pending channel is rejected, by comparing the channel's *identity* against a table the compiler marks at the `offer`; (2) every unification of that marked channel with another channel type is rejected. Everything the language currently does with a channel — annotating it, joining it in an `if`/`match`, storing it in a record field, passing it to a function or lambda — routes through one of those two, so every laundering shape known today is covered. That is a statement about routes that have been *tried*, not a proof: the enforcement is a checked invariant, not a structural impossibility, and it has been falsified in practice more than once. Most recently (2026-07-27) an annotated *lambda* or nested-`fn` parameter reached neither check, because lambda parameter annotations were never reconciled with the lambda's arrow type — so the argument unified with a bare type variable and no `TChan`/`TChan` unification ever happened. That is now fixed at its source (an annotated parameter is unified with the expected type, like every other annotation), but the shape of the failure is the point: a future construct that binds a channel without either operating on it or unifying it would reopen the hole silently. Making "awaiting refinement" a session *state*, so it survives by construction, is the durable form of this fix and is filed in `specs/todos.md`. Witnesses: `specs/lang/types/reject/t95` (no `match` at all), `t97` (shadowed label), `t98`/`t99`/`t100` (annotation, `if`-join, top-level function parameter), `t102`/`t103` (lambda and nested-`fn` parameter); accept twins `t43` and `t104`.
 
 These properties are the same ones you'd otherwise chase with runtime assertions and integration tests — promoted to compile-time checks that hold for *all* executions, not just the ones your tests happened to hit.
 
-**One thing that sounds like a guarantee but is not, verified live and filed as an open finding** (`specs/todos.md`; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.6 for the full write-up):
+**Two gaps remain, both deliberately out of scope of the fixes above** (filed in `specs/todos.md`; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.6 for the full write-up):
 
-- **An `offer` that doesn't handle every label is a warning, not an error.** `match`'s exhaustiveness check (the same one that governs every other `match` in March) only warns on a missing case — `--check` still exits 0. If your build treats warnings as informational only, an unhandled label compiles.
-
-**One narrower gap remains, deliberately out of scope of the fix above:** the must-close check only fires once an endpoint has reached the *end* of its protocol. Abandoning a channel *mid*-protocol — creating it and never touching one side again, before either endpoint reaches `end` — still typechecks and runs cleanly. That's the same territory as the no-scheduler `recv`-before-`send` deadlock boundary discussed below, not the "forgot to close a finished conversation" case.
+- **F7 residual — mid-protocol channel abandonment.** The must-close check only fires once an endpoint has reached the *end* of its protocol. Abandoning a channel *mid*-protocol — creating it and never touching one side again, before either endpoint reaches `end` — still typechecks and runs cleanly.
+- **F6 — no scheduler.** `Chan.recv` never suspends; a program whose two sides are driven in the "wrong" order relative to each other deadlocks at runtime (not statically), on both backends. That's the same territory as the mid-protocol-abandonment gap above, not something a `match`/closedness check can catch — see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.6 and the Runtime note above.
 
 ---
 

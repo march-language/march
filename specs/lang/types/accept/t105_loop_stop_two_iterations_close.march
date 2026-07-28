@@ -1,0 +1,65 @@
+mod Main do
+  -- Session types: `stop` (2026-07-27) exits an enclosing `loop` by
+  -- projecting to `SEnd` for every role, unconditionally, discarding both
+  -- the surrounding continuation and any (unreachable) steps that follow it.
+  -- Without `stop` a `loop` protocol can never reach `End` -- see the design
+  -- discussion in `specs/lang/session-types.md`'s `loop` section. Here the
+  -- `Cons` side runs the loop body twice, choosing `more` on the first
+  -- iteration and `done` (which `stop`s) on the second, and BOTH endpoints
+  -- reach `End` and close cleanly.
+  --
+  -- The two branches carry the SAME payload type (`Bool`) but different
+  -- continuations (`more` loops, `done` ends via `stop`) -- since this is a
+  -- BINARY protocol the non-chooser (`Prod`) never merges them (F4,
+  -- core-march-types.md finding 20 only merges for multiparty protocols), so
+  -- `Prod` must `Chan.offer` and `match` on the label at each iteration,
+  -- same pattern as `t43_choose_offer_roundtrip`.
+  needs IO.Console
+  type Prod = Prod
+  type Cons = Cons
+
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  fn main() do
+    let (cc, pp) = Chan.new(Stream)
+
+    -- Iteration 1: Prod sends, Cons chooses `more`.
+    let pp1 = Chan.send(pp, 1)
+    let (x1, cc1) = Chan.recv(cc)
+    let cc2 = Chan.choose(cc1, :more)
+    let (lbl1, pp1a) = Chan.offer(pp1)
+    match lbl1 do
+      :more ->
+        let cc3 = Chan.send(cc2, true)
+        let (ack1, pp2) = Chan.recv(pp1a)
+
+        -- Iteration 2: Prod sends, Cons chooses `done` and stops.
+        let pp3 = Chan.send(pp2, 2)
+        let (x2, cc4) = Chan.recv(cc3)
+        let cc5 = Chan.choose(cc4, :done)
+        let (lbl2, pp3a) = Chan.offer(pp3)
+        match lbl2 do
+          :done ->
+            let cc6 = Chan.send(cc5, false)
+            let (ack2, pp4) = Chan.recv(pp3a)
+            -- Both endpoints reached `End` via `stop` -- close cleanly.
+            Chan.close(cc6)
+            Chan.close(pp4)
+            println(int_to_string(x1 + x2))
+          :more ->
+            println("unreachable: Cons chose done")
+        end
+      :done ->
+        println("unreachable: Cons chose more")
+    end
+  end
+end

@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: the steps after `stop` can never run
+mod Main do
+  -- Session types: `stop` (2026-07-27) projects to `SEnd` unconditionally --
+  -- it discards both the enclosing continuation and any steps written after
+  -- it in the same step list, so those steps can never run and are rejected
+  -- at protocol-declaration time, the same unreachability treatment `loop`
+  -- itself gets (reject/t93).
+  type A = A
+  type B = B
+
+  protocol Bad do
+    loop do
+      A -> B : Int
+      stop
+      B -> A : Bool
+    end
+  end
+
+  fn main() do
+    println("unused")
+  end
+end

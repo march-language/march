@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Cross-language benchmark runner: March vs Elixir, OCaml, Rust
+# Cross-language benchmark runner: March vs Elixir, OCaml, Rust, Python (+ NumPy)
 #
-# Benchmarks: fib(40), binary-trees(15), tree-transform(depth=20 x100), list-ops(1M)
+# Benchmarks: fib(40), binary-trees(15), tree-transform(depth=20 x100), list-ops(1M),
+# simd-sum/simd-map/simd-map2 (N=5M Float array ops — see docs/simd-vectorization.md).
 # Each benchmark is run 10 times; median, min, and max times are reported.
 #
 # Usage: bash bench/run_benchmarks.sh
 #   Optional: RUNS=20 bash bench/run_benchmarks.sh   (override iteration count)
+#
+# The simd-* benchmarks' NumPy row needs a local venv with numpy installed
+# (not committed — python3 -m venv bench/.venv && bench/.venv/bin/pip install numpy);
+# every other row and benchmark runs without it.
 
 set -euo pipefail
 
@@ -19,9 +24,13 @@ RUNS="${RUNS:-10}"
 # Paths
 DUNE=/Users/80197052/.opam/march/bin/dune
 OCAMLOPT=/Users/80197052/.opam/march/bin/ocamlopt
+OCAMLFIND=/Users/80197052/.opam/march/bin/ocamlfind
 MARCH=/Users/80197052/.opam/march/bin/march
 ELIXIR=$(command -v elixir 2>/dev/null || true)
 RUSTC=$(command -v rustc 2>/dev/null || true)
+PYTHON3=$(command -v python3 2>/dev/null || true)
+NUMPY_PY=""
+[ -x "$BENCH_DIR/.venv/bin/python" ] && NUMPY_PY="$BENCH_DIR/.venv/bin/python"
 
 # ── formatting helpers ────────────────────────────────────────────────────────
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -70,6 +79,51 @@ show_interp() {
   fi
 }
 
+# ── self-timed: run a program $RUNS times, parse its own "TIME_MS <float>"
+# line instead of measuring subprocess wall-clock. The simd-* benchmarks
+# self-time only the operation (excluding data generation and, for
+# interpreters, process startup) — see bench/simd_sum.march for why; using
+# subprocess wall-clock here would mostly measure interpreter startup and
+# data-generation cost, not the operation under test.
+self_timed_stats() {
+  python3 - "$RUNS" "$@" <<'PYEOF'
+import sys, subprocess
+runs = int(sys.argv[1])
+cmd  = sys.argv[2:]
+times = []
+for _ in range(runs):
+    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, text=True).stdout
+    for line in out.splitlines():
+        if line.startswith("TIME_MS "):
+            times.append(float(line.split(None, 1)[1]))
+            break
+times.sort()
+mid = len(times) // 2
+median = (times[mid - 1] + times[mid]) / 2 if len(times) % 2 == 0 else times[mid]
+print(f"{median:.3f} {times[0]:.3f} {times[-1]:.3f}")
+PYEOF
+}
+
+show_self_timed() {
+  local label="$1"; shift
+  if "$@" >/dev/null 2>&1; then
+    read -r median min max < <(self_timed_stats "$@")
+    row "$label" "$median" "$min" "$max"
+  else
+    skip "$label"
+  fi
+}
+
+show_interp_self_timed() {
+  local label="$1" interp="$2"; shift 2
+  if command -v "$interp" >/dev/null 2>&1; then
+    read -r median min max < <(self_timed_stats "$interp" "$@")
+    row "$label" "$median" "$min" "$max"
+  else
+    skip "$label"
+  fi
+}
+
 # ── compile step ──────────────────────────────────────────────────────────────
 bold "Compiling..."
 
@@ -79,6 +133,9 @@ printf '  March... '
 (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"   2>/dev/null) && printf 'bt '  || printf '(bt FAILED) '
 (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"   2>/dev/null) && printf 'tt '  || printf '(tt FAILED) '
 (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"   2>/dev/null) && printf 'lo '  || printf '(lo FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_sum.march       -o "$TMP/march_ss"   2>/dev/null) && printf 'ss '  || printf '(ss FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_map.march       -o "$TMP/march_sm"   2>/dev/null) && printf 'sm '  || printf '(sm FAILED) '
+(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_map2.march      -o "$TMP/march_sm2"  2>/dev/null) && printf 'sm2 ' || printf '(sm2 FAILED) '
 printf '\n'
 
 # OCaml (ocamlopt native compiler)
@@ -92,6 +149,16 @@ if [ -x "$OCAMLOPT" ]; then
 else
   printf '(ocamlopt not found)\n'
 fi
+# simd-* OCaml benchmarks self-time via Unix.gettimeofday, so link the unix package.
+if [ -x "$OCAMLFIND" ]; then
+  printf '  OCaml (simd)... '
+  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_sum.ml"  -o "$TMP/ocaml_ss"  2>/dev/null && printf 'ss '  || printf '(ss FAILED) '
+  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_map.ml"  -o "$TMP/ocaml_sm"  2>/dev/null && printf 'sm '  || printf '(sm FAILED) '
+  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_map2.ml" -o "$TMP/ocaml_sm2" 2>/dev/null && printf 'sm2 ' || printf '(sm2 FAILED) '
+  printf '\n'
+else
+  printf '  OCaml (simd)... (ocamlfind not found)\n'
+fi
 
 # Rust (rustc with optimisations)
 printf '  Rust... '
@@ -100,6 +167,9 @@ if [ -n "$RUSTC" ]; then
   "$RUSTC" -O "$BENCH_DIR/rust/binary_trees.rs"   -o "$TMP/rust_bt"   2>/dev/null && printf 'bt '  || printf '(bt FAILED) '
   "$RUSTC" -O "$BENCH_DIR/rust/tree_transform.rs" -o "$TMP/rust_tt"   2>/dev/null && printf 'tt '  || printf '(tt FAILED) '
   "$RUSTC" -O "$BENCH_DIR/rust/list_ops.rs"       -o "$TMP/rust_lo"   2>/dev/null && printf 'lo '  || printf '(lo FAILED) '
+  "$RUSTC" -O "$BENCH_DIR/rust/simd_sum.rs"       -o "$TMP/rust_ss"   2>/dev/null && printf 'ss '  || printf '(ss FAILED) '
+  "$RUSTC" -O "$BENCH_DIR/rust/simd_map.rs"       -o "$TMP/rust_sm"   2>/dev/null && printf 'sm '  || printf '(sm FAILED) '
+  "$RUSTC" -O "$BENCH_DIR/rust/simd_map2.rs"      -o "$TMP/rust_sm2"  2>/dev/null && printf 'sm2 ' || printf '(sm2 FAILED) '
   printf '\n'
 else
   printf '(rustc not found)\n'
@@ -110,6 +180,18 @@ if [ -n "$ELIXIR" ]; then
   printf '  Elixir... (script mode, BEAM JIT)\n'
 else
   printf '  Elixir... (not found)\n'
+fi
+
+# Python / NumPy: interpreted — no ahead-of-time compilation step needed
+if [ -n "$PYTHON3" ]; then
+  printf '  Python... (interpreted)\n'
+else
+  printf '  Python... (not found)\n'
+fi
+if [ -n "$NUMPY_PY" ]; then
+  printf '  NumPy...  (bench/.venv)\n'
+else
+  printf '  NumPy...  (not set up — python3 -m venv bench/.venv && bench/.venv/bin/pip install numpy)\n'
 fi
 
 # ── run benchmarks ────────────────────────────────────────────────────────────
@@ -151,7 +233,41 @@ printf '  March, OCaml, Elixir allocate intermediate lists.\n'
 [ -x "$TMP/rust_lo"    ] && show "Rust"   "$TMP/rust_lo"                || skip "Rust"
 [ -n "$ELIXIR"         ] && show_interp "Elixir" elixir "$BENCH_DIR/elixir/list_ops.exs" || skip "Elixir"
 
+# ── simd-sum(5M) — Float array reduction ─────────────────────────────────────
+header "simd-sum(5M) — Float array reduction"
+printf '  sum(arr). March native_float_arr_sum auto-vectorizes at -O2 (see docs/simd-vectorization.md).\n'
+printf '  Self-timed: each program times only the operation itself (excludes data\n'
+printf '  generation / interpreter startup) and reports it via a TIME_MS line.\n'
+[ -x "$TMP/march_ss"   ] && show_self_timed "March"  "$TMP/march_ss"               || skip "March"
+[ -x "$TMP/ocaml_ss"   ] && show_self_timed "OCaml"  "$TMP/ocaml_ss"               || skip "OCaml"
+[ -x "$TMP/rust_ss"    ] && show_self_timed "Rust"   "$TMP/rust_ss"                || skip "Rust"
+[ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_sum.exs" || skip "Elixir"
+[ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_sum.py" || skip "Python"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_sum_numpy.py" || skip "NumPy"
+
+# ── simd-map(5M) — elementwise Float map ─────────────────────────────────────
+header "simd-map(5M) — elementwise (x * 2.0 + 1.0)"
+printf '  March map_float, with a concrete-Float single-use callback, gets the boxing-free\n'
+printf '  inlined clone (Stage 4 Option B) and genuinely vectorizes. Self-timed (see above).\n'
+[ -x "$TMP/march_sm"   ] && show_self_timed "March"  "$TMP/march_sm"               || skip "March"
+[ -x "$TMP/ocaml_sm"   ] && show_self_timed "OCaml"  "$TMP/ocaml_sm"               || skip "OCaml"
+[ -x "$TMP/rust_sm"    ] && show_self_timed "Rust"   "$TMP/rust_sm"                || skip "Rust"
+[ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_map.exs" || skip "Elixir"
+[ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_map.py" || skip "Python"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_map_numpy.py" || skip "NumPy"
+
+# ── simd-map2(5M) — elementwise two-array zip ────────────────────────────────
+header "simd-map2(5M) — elementwise (a[i] + b[i])"
+printf '  March map2_float is correct but NOT YET vectorized/inlined (see docs/simd-vectorization.md\n'
+printf '  "Known limitations") — included deliberately so the numbers stay honest. Self-timed.\n'
+[ -x "$TMP/march_sm2"  ] && show_self_timed "March"  "$TMP/march_sm2"              || skip "March"
+[ -x "$TMP/ocaml_sm2"  ] && show_self_timed "OCaml"  "$TMP/ocaml_sm2"              || skip "OCaml"
+[ -x "$TMP/rust_sm2"   ] && show_self_timed "Rust"   "$TMP/rust_sm2"               || skip "Rust"
+[ -n "$ELIXIR"         ] && show_interp_self_timed "Elixir" elixir "$BENCH_DIR/elixir/simd_map2.exs" || skip "Elixir"
+[ -n "$PYTHON3"        ] && show_interp_self_timed "Python" "$PYTHON3" "$BENCH_DIR/python/simd_map2.py" || skip "Python"
+[ -n "$NUMPY_PY"       ] && show_interp_self_timed "NumPy"  "$NUMPY_PY" "$BENCH_DIR/python/simd_map2_numpy.py" || skip "NumPy"
+
 printf '\n'
 bold "Done."
-printf '  Source files: bench/elixir/  bench/ocaml/  bench/rust/\n'
+printf '  Source files: bench/elixir/  bench/ocaml/  bench/rust/  bench/python/\n'
 printf '  March sources: bench/*.march  (compiled with --opt 2)\n'

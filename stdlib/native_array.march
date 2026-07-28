@@ -19,15 +19,25 @@
 --     reused elsewhere, or one with more than one captured variable, still
 --     works correctly but falls back to the slower closure-dispatch path.
 --   - map_float: correct and (for capturing/non-capturing alike) gets the
---     same closure-inlining treatment as map_int, but does NOT vectorize —
---     every float crossing a closure-call boundary is heap-boxed
---     (march_alloc_float), which blocks the vectorizer regardless. This is
---     a known, tracked limitation (see specs/optimizations.md P10 and
---     specs/plans/2026-07-13-float-boxing-design.md's deferred Stage 4),
---     not something wrong with your code.
+--     same closure-inlining treatment as map_int. Float crossing a
+--     closure-call boundary is normally heap-boxed (march_alloc_float),
+--     which blocks vectorization — but when the callback's signature is
+--     concretely all-Float (no generic type variable), the compiler clones
+--     the inlined callback under natural double params/return with zero
+--     boxing, and the loop DOES vectorize (real NEON/SSE, confirmed via
+--     -emit-llvm). A callback whose signature is still generic at this
+--     point falls back to the boxed (correct, non-vectorized) path. See
+--     specs/optimizations.md P10 "Float-boxing Stage 4, Option B" and
+--     specs/plans/2026-07-13-float-boxing-design.md.
 --   - fold_int / fold_float have no compiled implementation yet — calling
 --     them from a --compile build will fail to link. Use sum/map or a
 --     manual index loop until this lands.
+--   - map2_int / map2_float (two-array zip-with, e.g. for column-column
+--     arithmetic) get the identical closure-inlining/vectorization treatment
+--     map_int/map_float do above — same eligibility bar, same unboxed clone
+--     for a concrete-Float callback. Verified ~47x faster than the pre-fix
+--     boxed closure-call path on a 5M-element benchmark; see
+--     docs/simd-benchmarks.md's "Fix history: map2".
 --
 -- Two opaque element types are supported:
 --   NativeIntArr   — wraps int array
@@ -70,6 +80,20 @@ mod NativeArray do
   doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
   fn map_int(arr, f) do
     native_int_arr_map(arr, f)
+  end
+
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeIntArr. `f(a_elem, b_elem) = out_elem`. Panics if the arrays
+  differ in length. O(n).
+  """
+  fn map2_int(arr1, arr2, f) do
+    native_int_arr_map2(arr1, arr2, f)
+  end
+
+  doc "Widen every element to Float, returning a new NativeFloatArr. O(n)."
+  fn to_float_arr(arr) do
+    native_int_arr_to_float_arr(arr)
   end
 
   doc """
@@ -121,6 +145,15 @@ mod NativeArray do
   doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
   fn map_float(arr, f) do
     native_float_arr_map(arr, f)
+  end
+
+  doc """
+  Apply [f] elementwise to two same-length arrays, returning a new
+  NativeFloatArr. `f(a_elem, b_elem) = out_elem`. Panics if the arrays
+  differ in length. O(n).
+  """
+  fn map2_float(arr1, arr2, f) do
+    native_float_arr_map2(arr1, arr2, f)
   end
 
   doc """

@@ -1,0 +1,747 @@
+<!--
+  search.html — site-wide ⌘K full-text search, powered by Pagefind.
+
+  The index is NOT built by Jekyll. Pagefind is a post-build step that crawls the
+  generated `_site/` and emits `_site/pagefind/` (see .github/workflows/deploy-pages.yml
+  and scripts/serve-docs.sh). That is deliberate: roughly two thirds of the searchable
+  site — the 114 stdlib API pages under /docs/stdlib/ — are pre-generated static HTML
+  from the external `march_doc` tool, not Jekyll markdown. Indexing the *output* is the
+  only way one search covers both families.
+
+  Consequence: in a plain `jekyll serve` there is no /pagefind/ directory, so the modal
+  opens and reports that the index is missing rather than throwing. Use
+  scripts/serve-docs.sh to exercise search locally.
+
+  Pages opt IN to the index by carrying `data-pagefind-body`. Pagefind's rule is that
+  once *any* page has that attribute, only pages with it are indexed — which is why the
+  playground / Tetris / perihelion / graph pages need no exclusion rules to stay out.
+-->
+
+<!--
+  The modal binds every `[data-ms-open]` element, not just this one, so a layout can
+  place additional triggers (e.g. one in a desktop sidebar and one in a mobile topbar)
+  without duplicating the modal markup or its element ids.
+-->
+<button id="ms-trigger" data-ms-open type="button" aria-label="Search docs (Command K)">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+  </svg>
+  <span class="ms-trigger-label">Search</span>
+  <kbd id="ms-trigger-kbd">⌘K</kbd>
+</button>
+
+<div id="ms-overlay" role="dialog" aria-modal="true" aria-label="Search docs" hidden>
+  <div id="ms-modal">
+    <div id="ms-inputrow">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <input id="ms-input" type="text" placeholder="Search the docs…" autocomplete="off"
+             spellcheck="false" role="combobox" aria-expanded="false"
+             aria-controls="ms-results" aria-autocomplete="list"/>
+      <kbd class="ms-esc">Esc</kbd>
+    </div>
+    <div id="ms-results" role="listbox" aria-label="Search results"></div>
+    <div id="ms-footer">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>↵</kbd> open</span>
+      <span><kbd>Esc</kbd> close</span>
+      <span class="ms-credit">Search by <a href="https://pagefind.app/" target="_blank" rel="noopener">Pagefind</a></span>
+    </div>
+  </div>
+</div>
+
+<style>
+  /*
+    Colours are declared as custom properties on #ms-overlay so the one component can
+    live in every theming regime on the site: `default.html` hardcodes a dark palette,
+    while `docs.html` / `cookbook.html` / `landing.html` toggle a `.light` CLASS on
+    <html>. The generated stdlib pages instead use `data-theme='light'` — they don't
+    embed this modal today, but matching both spellings costs nothing and means the
+    component still themes correctly if it is ever dropped in there.
+
+    The dark values are the base; light overrides sit under the two light selectors.
+  */
+  #ms-overlay {
+    --ms-bg:      #0F2A36;
+    --ms-bg-deep: #0B1F2A;
+    --ms-card:    #133847;
+    --ms-bdr:     #1C5D6F;
+    --ms-text:    #D6EEF5;
+    --ms-bright:  #E6FCF9;
+    --ms-dim:     #7aacbe;
+    --ms-acc:     #6FE3D6;
+    --ms-scrim:   rgba(4, 12, 18, .68);
+  }
+  html.light #ms-overlay, html[data-theme='light'] #ms-overlay {
+    --ms-bg:      #ffffff;
+    --ms-bg-deep: #f0f6fc;
+    --ms-card:    #e3eef8;
+    --ms-bdr:     #b5cce0;
+    --ms-text:    #14313f;
+    --ms-bright:  #071828;
+    --ms-dim:     #4a7898;
+    --ms-acc:     #0d6b78;
+    --ms-scrim:   rgba(12, 32, 44, .38);
+  }
+
+  /* ── Trigger button ─────────────────────────────────────────────────────── */
+  #ms-trigger {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid #1C5D6F; border-radius: 7px;
+    color: #a8ccd8; cursor: pointer;
+    padding: 5px 10px; font: inherit; font-size: 13px; line-height: 1.2;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  html.light #ms-trigger, html[data-theme='light'] #ms-trigger { background: rgba(0, 0, 0, .03); border-color: #b5cce0; color: #2e5c7c; }
+  #ms-trigger:hover { border-color: #6FE3D6; color: #D6EEF5; }
+  html.light #ms-trigger:hover, html[data-theme='light'] #ms-trigger:hover { border-color: #0d6b78; color: #071828; }
+  #ms-trigger kbd {
+    font: inherit; font-size: 10px; padding: 1px 5px; border-radius: 4px;
+    background: rgba(0, 0, 0, .25); border: 1px solid #1C5D6F; color: inherit;
+  }
+  html.light #ms-trigger kbd, html[data-theme='light'] #ms-trigger kbd { background: rgba(0, 0, 0, .05); border-color: #b5cce0; }
+  /* Opt-in wrapper for sidebar placement, where the trigger should fill the column. */
+  .ms-trigger-block #ms-trigger { width: 100%; }
+  .ms-trigger-block #ms-trigger kbd { margin-left: auto; }
+
+  /* On narrow screens the trigger collapses to a bare magnifier. */
+  @media (max-width: 720px) {
+    .ms-trigger-label, #ms-trigger kbd { display: none; }
+    #ms-trigger { padding: 6px; }
+  }
+
+  /* ── Overlay + modal shell ──────────────────────────────────────────────── */
+  #ms-overlay[hidden] { display: none; }
+  #ms-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    background: var(--ms-scrim);
+    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: min(14vh, 110px) 16px 16px;
+  }
+  #ms-modal {
+    width: 640px; max-width: 100%; max-height: min(70vh, 620px);
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--ms-bg); color: var(--ms-text);
+    border: 1px solid var(--ms-bdr); border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .45);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+  }
+
+  #ms-inputrow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid var(--ms-bdr);
+    color: var(--ms-dim); flex-shrink: 0;
+  }
+  #ms-input {
+    flex: 1; min-width: 0; background: transparent; border: none; outline: none;
+    color: var(--ms-text); font: inherit; font-size: 15px;
+  }
+  #ms-input::placeholder { color: var(--ms-dim); }
+  .ms-esc {
+    font: inherit; font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    background: var(--ms-bg-deep); border: 1px solid var(--ms-bdr); color: var(--ms-dim);
+  }
+
+  /* ── Results ────────────────────────────────────────────────────────────── */
+  #ms-results { overflow-y: auto; padding: 8px; flex: 1; }
+  #ms-results::-webkit-scrollbar { width: 8px; }
+  #ms-results::-webkit-scrollbar-thumb { background: var(--ms-bdr); border-radius: 4px; }
+
+  .ms-empty { padding: 26px 16px; text-align: center; color: var(--ms-dim); font-size: 13px; }
+  .ms-empty a { color: var(--ms-acc); text-decoration: underline; }
+  .ms-empty code {
+    background: var(--ms-bg-deep); border: 1px solid var(--ms-bdr);
+    border-radius: 4px; padding: 1px 5px; font-size: 12px;
+  }
+
+  /* ── Group headers ──────────────────────────────────────────────────────── */
+  .ms-group {
+    font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ms-dim); padding: 10px 12px 5px;
+  }
+  #ms-results > .ms-group:first-child { padding-top: 4px; }
+
+  .ms-group { display: flex; align-items: center; }
+  .ms-clear {
+    margin-left: auto; background: none; border: none; cursor: pointer;
+    font: inherit; font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ms-dim); padding: 0 2px; text-decoration: underline;
+  }
+  .ms-clear:hover { color: var(--ms-acc); }
+
+  /* ── Idle-panel suggestions (recent queries + starting points) ───────────── */
+  .ms-suggest {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 8px 12px; border-radius: 8px; border: 1px solid transparent;
+    background: none; text-align: left; cursor: pointer;
+    font: inherit; font-size: 13.5px; color: var(--ms-text); text-decoration: none;
+  }
+  .ms-suggest:hover { text-decoration: none; }
+  .ms-suggest svg { color: var(--ms-dim); flex-shrink: 0; }
+  .ms-suggest.ms-sel {
+    background: var(--ms-card);
+    border-color: color-mix(in srgb, var(--ms-acc) 45%, transparent);
+  }
+  .ms-suggest.ms-sel svg { color: var(--ms-acc); }
+  .ms-suggest-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ms-hint { text-align: left; padding: 14px 12px 6px; font-size: 12px; line-height: 1.6; }
+
+  /* ── Stdlib symbol rows ─────────────────────────────────────────────────── */
+  .ms-sym {
+    display: flex; align-items: baseline; gap: 9px;
+    padding: 7px 12px; border-radius: 8px; border: 1px solid transparent;
+    text-decoration: none; color: inherit; font-size: 13px;
+  }
+  .ms-sym:hover { text-decoration: none; }
+  .ms-sym.ms-sel {
+    background: var(--ms-card);
+    border-color: color-mix(in srgb, var(--ms-acc) 45%, transparent);
+  }
+  .ms-sym-name {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ms-bright); font-weight: 600; flex-shrink: 0;
+  }
+  .ms-sym-sig {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ms-dim); font-size: 11.5px; flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ms-sym-mod { color: var(--ms-dim); font-size: 11px; flex-shrink: 0; }
+  /* Kind badge colours mirror the stdlib API pages so the two stay recognisably
+     the same vocabulary (fn / type / interface / private). */
+  .ms-kind {
+    flex-shrink: 0; min-width: 34px; text-align: center;
+    font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px;
+  }
+  .ms-k-fn        { background: color-mix(in oklab, #2fbf95 15%, transparent); color: #2fbf95; }
+  .ms-k-type      { background: color-mix(in oklab, #d59b3f 15%, transparent); color: #d59b3f; }
+  .ms-k-interface { background: color-mix(in oklab, #5aa9e6 15%, transparent); color: #5aa9e6; }
+  .ms-k-module    { background: color-mix(in oklab, var(--ms-acc) 15%, transparent); color: var(--ms-acc); }
+  .ms-k-pfn,
+  .ms-k-ptype     { background: color-mix(in oklab, #7d8fa0 18%, transparent); color: #7d8fa0; }
+
+  .ms-hit {
+    display: block; text-decoration: none; color: inherit;
+    padding: 9px 12px; border-radius: 8px; border: 1px solid transparent;
+  }
+  .ms-hit:hover { text-decoration: none; }
+  .ms-hit.ms-sel {
+    background: var(--ms-card);
+    border-color: color-mix(in srgb, var(--ms-acc) 45%, transparent);
+  }
+  .ms-hit-top { display: flex; align-items: baseline; gap: 9px; }
+  .ms-hit-title {
+    color: var(--ms-bright); font-weight: 600; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ms-tag {
+    flex-shrink: 0; margin-left: auto;
+    font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 100px;
+    background: color-mix(in srgb, var(--ms-acc) 13%, transparent);
+    color: var(--ms-acc);
+    border: 1px solid color-mix(in srgb, var(--ms-acc) 26%, transparent);
+  }
+  .ms-hit-excerpt {
+    color: var(--ms-dim); font-size: 12.5px; line-height: 1.55; margin-top: 3px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .ms-hit-excerpt mark {
+    background: color-mix(in srgb, var(--ms-acc) 22%, transparent);
+    color: var(--ms-bright); border-radius: 3px; padding: 0 2px;
+  }
+  /* Sub-results are heading-level anchors within a page — "related topics" links. */
+  .ms-sub {
+    display: flex; align-items: baseline; gap: 8px;
+    text-decoration: none; color: var(--ms-dim); font-size: 12.5px;
+    padding: 5px 12px 5px 26px; border-radius: 7px; border: 1px solid transparent;
+    position: relative;
+  }
+  .ms-sub::before {
+    content: '↳'; position: absolute; left: 11px; color: var(--ms-bdr); font-size: 11px;
+  }
+  .ms-sub:hover { text-decoration: none; }
+  .ms-sub.ms-sel {
+    background: var(--ms-card);
+    border-color: color-mix(in srgb, var(--ms-acc) 45%, transparent);
+    color: var(--ms-text);
+  }
+  .ms-sub-title { color: var(--ms-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; max-width: 45%; }
+  .ms-sub-excerpt { color: var(--ms-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ms-sub-excerpt mark { background: none; color: var(--ms-acc); }
+
+  #ms-footer {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 14px; border-top: 1px solid var(--ms-bdr);
+    color: var(--ms-dim); font-size: 11px; flex-shrink: 0;
+  }
+  #ms-footer kbd {
+    font: inherit; font-size: 10px; padding: 1px 5px; margin-right: 3px; border-radius: 4px;
+    background: var(--ms-bg-deep); border: 1px solid var(--ms-bdr);
+  }
+  #ms-footer .ms-credit { margin-left: auto; }
+  #ms-footer a { color: var(--ms-dim); text-decoration: underline; }
+  @media (max-width: 560px) { #ms-footer .ms-credit { display: none; } }
+</style>
+
+<script>
+(function () {
+  var overlay  = document.getElementById('ms-overlay');
+  var modal    = document.getElementById('ms-modal');
+  var input    = document.getElementById('ms-input');
+  var resultsE = document.getElementById('ms-results');
+  if (!overlay || !input) return;
+
+  // Reparent the overlay to <body>.
+  //
+  // Layouts place this include inside their nav bar, and every nav here sets
+  // `backdrop-filter` (.d-nav, .m-nav) — which makes the nav a CONTAINING BLOCK for
+  // `position: fixed` descendants. Left in place, the full-screen scrim would be sized
+  // and clipped to the 60px-tall nav instead of the viewport. Moving it to <body>
+  // restores the viewport as the containing block regardless of where a layout put the
+  // include, so this can't silently regress when a nav gains a transform/filter later.
+  if (overlay.parentNode !== document.body) document.body.appendChild(overlay);
+
+  // Absolute so they resolve identically from /, /docs/tour/, and /docs/stdlib/Array.html.
+  var PAGEFIND_URL = '{{ site.baseurl }}/pagefind/pagefind.js';
+
+  // The stdlib symbol index, emitted by the external `march_doc` generator alongside the
+  // API pages. 2038 entries / ~57 KB gzipped, so it is cheap to pull in whole on the
+  // first keystroke.
+  //
+  // Why both indexes rather than just Pagefind: Pagefind indexes stdlib pages at PAGE
+  // granularity, so searching `push` lands you on Queue.html with no anchor and you then
+  // hunt for the function. This index resolves to Queue.html#fn-push directly, with the
+  // symbol's kind and signature. The two answer different questions — "where is this
+  // explained" vs "where is this defined" — so the modal serves both.
+  var SYMBOLS_URL = '{{ site.baseurl }}/docs/stdlib/search-index.json';
+  var STDLIB_BASE = '{{ site.baseurl }}/docs/stdlib/';
+
+  var MAX_SYMBOLS = 5;   // a hard cap: prose queries must never be buried under symbols
+  var MAX_PAGES   = 8;
+  var MAX_RECENT  = 5;
+  var RECENT_KEY  = 'march-docs-recent-searches';
+
+  // Shown on the empty modal. URLs come from the pages themselves via Liquid rather
+  // than being hardcoded here, so renaming a permalink can't leave a dead suggestion
+  // behind. Selected by nav_order: 3 Getting Started, 4 Language Tour,
+  // 5.2 Pattern Matching, 9 Actors.
+  var SUGGESTIONS = [
+{%- assign suggested_pages = site.pages | sort: 'nav_order' -%}
+{%- for p in suggested_pages -%}
+  {%- if p.nav_order == 3 or p.nav_order == 4 or p.nav_order == 5.2 or p.nav_order == 9 %}
+    { title: {{ p.title | jsonify }}, url: {{ p.url | prepend: site.baseurl | jsonify }} },
+  {%- endif -%}
+{%- endfor %}
+    { title: 'Cookbook',         url: '{{ site.baseurl }}/docs/cookbook/' },
+    { title: 'Standard Library', url: '{{ site.baseurl }}/docs/stdlib/' }
+  ];
+
+  var pagefind   = null;   // resolved module, or the string 'unavailable'
+  var loading    = null;   // in-flight import promise, so concurrent opens share one load
+  var symbols    = null;   // array of stdlib symbol entries, or [] if unavailable
+  var symLoading = null;
+  var rows       = [];     // flat list of selectable anchors, in visual order
+  var selected   = -1;
+  var debounce   = null;
+  var queryToken = 0;      // guards against an older query resolving after a newer one
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-ms-open]'), function (el) {
+    el.addEventListener('click', open);
+  });
+
+  // Show the platform-correct hint rather than always claiming ⌘.
+  var isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  if (!isMac) {
+    Array.prototype.forEach.call(document.querySelectorAll('#ms-trigger-kbd'), function (el) {
+      el.textContent = 'Ctrl K';
+    });
+  }
+
+  function isLocalhost() {
+    var h = location.hostname;
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '';
+  }
+
+  function isTypingTarget(el) {
+    if (!el) return false;
+    var tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
+  document.addEventListener('keydown', function (e) {
+    var open_ = !overlay.hidden;
+    if ((e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      open_ ? close() : open();
+      return;
+    }
+    // Bare "/" is a convenience opener, but must not hijack typing — including
+    // typing into the playground/REPL editors that live on some pages.
+    if (e.key === '/' && !open_ && !e.metaKey && !e.ctrlKey && !e.altKey && !isTypingTarget(e.target)) {
+      e.preventDefault();
+      open();
+      return;
+    }
+    if (!open_) return;
+    if (e.key === 'Escape')    { e.preventDefault(); close(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+    else if (e.key === 'ArrowUp')   { e.preventDefault(); move(-1); }
+    else if (e.key === 'Enter')     {
+      if (selected >= 0 && rows[selected]) { e.preventDefault(); activate(rows[selected]); }
+    }
+  });
+
+  overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+  if (modal) modal.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+
+  function open() {
+    overlay.hidden = false;
+    document.documentElement.style.overflow = 'hidden';
+    input.focus();
+    input.select();
+    load();                                   // lazy: nothing was fetched until now
+    if (!input.value) showIdle();
+  }
+
+  function close() {
+    overlay.hidden = true;
+    document.documentElement.style.overflow = '';
+    input.setAttribute('aria-expanded', 'false');
+  }
+
+  // Loads pagefind.js on first open. Resolves to 'unavailable' rather than rejecting so
+  // every caller can render a message instead of leaving a dead modal.
+  function load() {
+    if (pagefind) return Promise.resolve(pagefind);
+    if (loading)  return loading;
+    loading = import(PAGEFIND_URL).then(function (mod) {
+      return Promise.resolve(mod.options ? mod.options({ excerptLength: 24 }) : null)
+        .then(function () { pagefind = mod; return mod; });
+    }).catch(function () {
+      pagefind = 'unavailable';
+      return pagefind;
+    });
+    return loading;
+  }
+
+  // Resolves to [] rather than rejecting, so a missing/damaged index degrades to
+  // "full-text only" instead of breaking search entirely.
+  function loadSymbols() {
+    if (symbols) return Promise.resolve(symbols);
+    if (symLoading) return symLoading;
+    symLoading = fetch(SYMBOLS_URL)
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (j) { symbols = Array.isArray(j) ? j : []; return symbols; })
+      .catch(function () { symbols = []; return symbols; });
+    return symLoading;
+  }
+
+  // Entry shape (from march_doc): { m: module, k: kind, n: name, s: signature, d: doc }.
+  // Anchor scheme mirrors the generator's own: fn/pfn -> #fn-, type/ptype -> #type-,
+  // interface -> #iface-, module -> the page itself.
+  function symbolHref(e) {
+    var href = STDLIB_BASE + encodeURIComponent(e.m) + '.html';
+    if (e.k === 'fn' || e.k === 'pfn')          return href + '#fn-'    + encodeURIComponent(e.n);
+    if (e.k === 'type' || e.k === 'ptype')      return href + '#type-'  + encodeURIComponent(e.n);
+    if (e.k === 'interface')                    return href + '#iface-' + encodeURIComponent(e.n);
+    return href;
+  }
+
+  // Deliberately narrower than the stdlib page's own scorer, which also matches
+  // signatures, docstrings and fuzzy/Levenshtein neighbours. Here a symbol must match by
+  // NAME, exactly or by prefix. Descriptions are what the full-text half is for, and
+  // fuzzy matching on 2038 names would flood prose queries with near-misses.
+  function scoreName(q, name) {
+    if (!name) return 0;
+    var n = name.toLowerCase();
+    if (n === q) return 10000;
+    if (n.indexOf(q) === 0) return 5000 - n.length;
+    // Word-boundary prefix, so `string` finds `to_string` and `decode` finds
+    // `json_decode`, without `s` matching every name containing an s.
+    var parts = n.split('_');
+    for (var i = 1; i < parts.length; i++) {
+      if (parts[i].indexOf(q) === 0) return 2000 - i * 100 - n.length;
+    }
+    return 0;
+  }
+
+  function searchSymbols(raw) {
+    if (!symbols || !symbols.length) return [];
+    var q = raw.toLowerCase().trim();
+    var scored = [];
+    var i, e, s;
+
+    // A dotted or spaced pair is read as Module + member ("List.map", "list map").
+    var pair = q.split(/[.\s]+/).filter(Boolean);
+    if (pair.length === 2) {
+      for (i = 0; i < symbols.length; i++) {
+        e = symbols[i];
+        var ms = scoreName(pair[0], e.m), ns = scoreName(pair[1], e.n);
+        if (ms > 0 && ns > 0) scored.push({ e: e, score: ms + ns });
+      }
+      return rank(scored);
+    }
+
+    // Any other multi-word query is prose; leave it entirely to the full-text half.
+    if (pair.length !== 1) return [];
+
+    for (i = 0; i < symbols.length; i++) {
+      e = symbols[i];
+      s = scoreName(q, e.n);
+      // A bare module name should surface the module page, but rank below members.
+      if (e.k === 'module') s = Math.max(s, scoreName(q, e.m) - 500);
+      if (s > 0) scored.push({ e: e, score: s });
+    }
+    return rank(scored);
+  }
+
+  function rank(scored) {
+    scored.sort(function (a, b) {
+      if (b.score !== a.score) return b.score - a.score;
+      // Stable, meaningful tiebreak: public before private, then alphabetical, so the
+      // same query always yields the same order across loads.
+      var ap = (a.e.k === 'pfn' || a.e.k === 'ptype') ? 1 : 0;
+      var bp = (b.e.k === 'pfn' || b.e.k === 'ptype') ? 1 : 0;
+      if (ap !== bp) return ap - bp;
+      return (a.e.m + a.e.n).localeCompare(b.e.m + b.e.n);
+    });
+    return scored.slice(0, MAX_SYMBOLS);
+  }
+
+  input.addEventListener('input', function () {
+    clearTimeout(debounce);
+    debounce = setTimeout(run, 120);
+  });
+
+  // ── Recent searches ────────────────────────────────────────────────────────
+  //
+  // Stored locally and only ever written when a query actually leads somewhere (a
+  // result is opened), so half-typed queries don't accumulate as noise. Wrapped
+  // because Safari private browsing throws on localStorage access.
+  function readRecent() {
+    try {
+      var v = JSON.parse(window.localStorage.getItem(RECENT_KEY) || '[]');
+      return Array.isArray(v) ? v.filter(function (x) { return typeof x === 'string'; }) : [];
+    } catch (e) { return []; }
+  }
+
+  function rememberRecent(q) {
+    q = (q || '').trim();
+    if (!q) return;
+    try {
+      var list = readRecent().filter(function (x) { return x.toLowerCase() !== q.toLowerCase(); });
+      list.unshift(q);
+      window.localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, MAX_RECENT)));
+    } catch (e) { /* storage unavailable — recents are a nicety, not a requirement */ }
+  }
+
+  function clearRecent() {
+    try { window.localStorage.removeItem(RECENT_KEY); } catch (e) {}
+    showIdle();
+    input.focus();
+  }
+
+  function showIdle() {
+    var html = '';
+    var recent = readRecent();
+
+    if (recent.length) {
+      html += '<div class="ms-group">Recent' +
+              '<button type="button" class="ms-clear" data-ms-clear>Clear</button></div>';
+      recent.forEach(function (q) {
+        html +=
+          '<button type="button" class="ms-suggest" role="option" data-query="' + escapeAttr(q) + '">' +
+            '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+                 'stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/>' +
+                 '<path d="M12 7v5l3 2"/></svg>' +
+            '<span class="ms-suggest-label">' + escapeHtml(q) + '</span>' +
+          '</button>';
+      });
+    }
+
+    html += '<div class="ms-group">' + (recent.length ? 'Jump to' : 'Start here') + '</div>';
+    SUGGESTIONS.forEach(function (s) {
+      html +=
+        '<a class="ms-suggest" role="option" href="' + escapeAttr(s.url) + '">' +
+          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+               'stroke-width="2" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/>' +
+               '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>' +
+          '<span class="ms-suggest-label">' + escapeHtml(s.title) + '</span>' +
+        '</a>';
+    });
+
+    html += '<div class="ms-empty ms-hint">Or type a function or type name — ' +
+            '<code>push</code>, <code>to_string</code>, <code>List.map</code> — ' +
+            'to jump straight to its API entry.</div>';
+
+    paintResults(html, false);
+  }
+
+  function run() {
+    var q = input.value.trim();
+    var token = ++queryToken;
+    if (!q) { showIdle(); return; }
+
+    // Both halves are fetched together; neither blocks the other, and a failure in
+    // either still renders whatever the other found.
+    Promise.all([load(), loadSymbols()]).then(function (both) {
+      if (token !== queryToken) return;        // a newer keystroke already superseded this
+      var pf   = both[0];
+      var syms = searchSymbols(q);
+
+      if (pf === 'unavailable') {
+        // Symbol lookup still works without Pagefind — show it, and only explain the
+        // missing half. Visitors get a plain apology; a local dev gets the actual cause,
+        // which is almost always "you ran `jekyll serve`, which builds no index".
+        var note = isLocalhost()
+          ? '<div class="ms-empty">No full-text index at <code>/pagefind/</code>.<br>' +
+            'Build one with <code>scripts/serve-docs.sh</code> — <code>jekyll serve</code> does not.</div>'
+          : '<div class="ms-empty">Full-text search is unavailable right now.<br>' +
+            'Try the navigation, or <a href="https://github.com/march-language/march">browse the docs on GitHub</a>.</div>';
+        paintResults(renderSymbols(syms) + note);
+        return;
+      }
+
+      return pf.search(q).then(function (search) {
+        if (token !== queryToken) return;
+        // Loading every result's data would be one fetch per hit; the top slice is
+        // all the modal can show anyway.
+        return Promise.all(search.results.slice(0, MAX_PAGES).map(function (r) { return r.data(); }))
+          .then(function (data) {
+            if (token === queryToken) render(syms, data, search.results.length);
+          });
+      });
+    });
+  }
+
+  function tagFor(d) {
+    var f = d.filters && d.filters.section;
+    if (f && f.length) return f[0];
+    return 'Docs';
+  }
+
+  function renderSymbols(syms) {
+    if (!syms.length) return '';
+    var html = '<div class="ms-group">Standard library</div>';
+    syms.forEach(function (r) {
+      var e = r.e;
+      html +=
+        '<a class="ms-sym" role="option" href="' + escapeAttr(symbolHref(e)) + '">' +
+          '<span class="ms-kind ms-k-' + escapeAttr(e.k) + '">' + escapeHtml(e.k) + '</span>' +
+          '<span class="ms-sym-name">' + escapeHtml(e.n) + '</span>' +
+          '<span class="ms-sym-sig">' + escapeHtml(e.s || e.d || '') + '</span>' +
+          // For a module entry the name IS the module, so the trailing module label
+          // would just repeat it ("Array  Array").
+          (e.k === 'module' ? '' : '<span class="ms-sym-mod">' + escapeHtml(e.m) + '</span>') +
+        '</a>';
+    });
+    return html;
+  }
+
+  // Single place that commits HTML to the DOM and rebuilds the keyboard row list, so
+  // symbol rows and page rows are always navigable as one sequence.
+  // `autoselect` is false for the idle panel: pre-highlighting a suggestion would make a
+  // bare ⌘K-then-Enter navigate somewhere the user never chose. With real results, the
+  // top hit is what Enter should mean.
+  function paintResults(html, autoselect) {
+    resultsE.innerHTML = html;
+    rows = Array.prototype.slice.call(
+      resultsE.querySelectorAll('.ms-sym, .ms-hit, .ms-sub, .ms-suggest'));
+    input.setAttribute('aria-expanded', rows.length ? 'true' : 'false');
+    selected = -1;
+    if (rows.length && autoselect !== false) move(1);
+    rows.forEach(function (row, i) {
+      row.addEventListener('mouseenter', function () { selected = i; paint(); });
+    });
+  }
+
+  // A row either re-runs a stored query (recent searches) or navigates (everything
+  // else). Both paths funnel through here so the mouse and the keyboard can't diverge.
+  function activate(row) {
+    if (!row) return;
+    var q = row.getAttribute('data-query');
+    if (q !== null) {
+      input.value = q;
+      input.focus();
+      clearTimeout(debounce);
+      run();
+      return;
+    }
+    rememberRecent(input.value);
+    window.location.href = row.href;
+  }
+
+  resultsE.addEventListener('click', function (e) {
+    if (e.target.closest('[data-ms-clear]')) { e.preventDefault(); clearRecent(); return; }
+    var row = e.target.closest('.ms-sym, .ms-hit, .ms-sub, .ms-suggest');
+    if (!row) return;
+    // Links navigate on their own; intercept only so the query is recorded first, and
+    // to drive the query-refill rows, which are buttons with no default action.
+    e.preventDefault();
+    activate(row);
+  });
+
+  function render(syms, data, total) {
+    if (!data.length && !syms.length) {
+      paintResults('<div class="ms-empty">No results for “' + escapeHtml(input.value.trim()) + '”.</div>');
+      return;
+    }
+
+    // Symbols first: when a query matches a symbol name exactly it is nearly always the
+    // thing being looked for, and the group is capped at MAX_SYMBOLS so it can never
+    // push the prose results off-screen.
+    var html = renderSymbols(syms);
+    if (data.length && syms.length) html += '<div class="ms-group">Documentation</div>';
+    data.forEach(function (d) {
+      html +=
+        '<a class="ms-hit" role="option" href="' + escapeAttr(d.url) + '">' +
+          '<div class="ms-hit-top">' +
+            '<span class="ms-hit-title">' + escapeHtml(d.meta && d.meta.title ? d.meta.title : d.url) + '</span>' +
+            '<span class="ms-tag">' + escapeHtml(tagFor(d)) + '</span>' +
+          '</div>' +
+          '<div class="ms-hit-excerpt">' + d.excerpt + '</div>' +   // Pagefind-generated, contains <mark>
+        '</a>';
+
+      // Sub-results are the in-page headings that matched — the "jump to the related
+      // section" affordance. The first one repeats the page itself, so drop it.
+      (d.sub_results || []).slice(1, 3).forEach(function (s) {
+        html +=
+          '<a class="ms-sub" role="option" href="' + escapeAttr(s.url) + '">' +
+            '<span class="ms-sub-title">' + escapeHtml(s.title || '') + '</span>' +
+            '<span class="ms-sub-excerpt">' + s.excerpt + '</span>' +
+          '</a>';
+      });
+    });
+
+    if (total > data.length) {
+      html += '<div class="ms-empty">' + (total - data.length) + ' more result' +
+              (total - data.length === 1 ? '' : 's') + ' — keep typing to narrow.</div>';
+    }
+
+    paintResults(html);
+  }
+
+  function move(delta) {
+    if (!rows.length) return;
+    selected = (selected + delta + rows.length) % rows.length;
+    paint();
+    rows[selected].scrollIntoView({ block: 'nearest' });
+  }
+
+  function paint() {
+    rows.forEach(function (row, i) { row.classList.toggle('ms-sel', i === selected); });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+})();
+</script>

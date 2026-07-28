@@ -939,6 +939,10 @@ and protocol_step_to_json (ps : protocol_step) : string =
       ("kind", Dump.json_string "ProtoLoop");
       ("steps", Dump.json_list (List.map protocol_step_to_json steps));
     ]
+  | ProtoStop _ ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ProtoStop");
+    ]
   | ProtoChoice (role, branches) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ProtoChoice");

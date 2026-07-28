@@ -1,0 +1,19 @@
+-- EXPECT-ERROR: can never run
+mod Main do
+  -- Session types: a `loop` block repeats forever (`Rec X. S[X]`), so steps
+  -- written after it at the same level are unreachable and rejected at
+  -- protocol-declaration time (2026-07-24).
+  type A = A
+  type B = B
+
+  protocol Bad do
+    loop do
+      A -> B : Int
+    end
+    B -> A : Bool
+  end
+
+  fn main() do
+    println("unused")
+  end
+end

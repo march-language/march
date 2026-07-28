@@ -56,7 +56,7 @@ mod Prelude do
   -- ---- Option helpers ----
 
   doc "Extracts the value from Some(x), panicking if None."
-  fn unwrap(opt : Option(a)) : a do
+  fn unwrap(opt : {Option(a) | is_Some(_)}) : a do
     match opt do
     Some(x) -> x
     None    -> panic("unwrap called on None")

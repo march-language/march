@@ -1226,12 +1226,15 @@
 <a class="sl" href="NativeArray.html#fn-length_int"><span class="sb-kind" style="color:var(--fn)">F</span>length_int</a>
 <a class="sl" href="NativeArray.html#fn-make_float"><span class="sb-kind" style="color:var(--fn)">F</span>make_float</a>
 <a class="sl" href="NativeArray.html#fn-make_int"><span class="sb-kind" style="color:var(--fn)">F</span>make_int</a>
+<a class="sl" href="NativeArray.html#fn-map2_float"><span class="sb-kind" style="color:var(--fn)">F</span>map2_float</a>
+<a class="sl" href="NativeArray.html#fn-map2_int"><span class="sb-kind" style="color:var(--fn)">F</span>map2_int</a>
 <a class="sl" href="NativeArray.html#fn-map_float"><span class="sb-kind" style="color:var(--fn)">F</span>map_float</a>
 <a class="sl" href="NativeArray.html#fn-map_int"><span class="sb-kind" style="color:var(--fn)">F</span>map_int</a>
 <a class="sl" href="NativeArray.html#fn-set_float"><span class="sb-kind" style="color:var(--fn)">F</span>set_float</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_int"><span class="sb-kind" style="color:var(--fn)">F</span>sum_int</a>
+<a class="sl" href="NativeArray.html#fn-to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-to_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_float</a>
 <a class="sl" href="NativeArray.html#fn-to_list_int"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_int</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
@@ -1673,6 +1676,7 @@
 <a class="sl" href="String.html#fn-from_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_int</a>
 <a class="sl" href="String.html#fn-grapheme_count"><span class="sb-kind" style="color:var(--fn)">F</span>grapheme_count</a>
 <a class="sl" href="String.html#fn-index_of"><span class="sb-kind" style="color:var(--fn)">F</span>index_of</a>
+<a class="sl" href="String.html#fn-index_of_from"><span class="sb-kind" style="color:var(--fn)">F</span>index_of_from</a>
 <a class="sl" href="String.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="String.html#fn-join"><span class="sb-kind" style="color:var(--fn)">F</span>join</a>
 <a class="sl" href="String.html#fn-last_index_of"><span class="sb-kind" style="color:var(--fn)">F</span>last_index_of</a>
@@ -1925,7 +1929,7 @@
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Option</span></nav><h1>Option</h1><div class="mdoc"><p>Option module: operations on Option(a) = Some(a) None</p><p>All functions are pure. The type Option(a) is a builtin with constructors Some and None.</p></div><h2>Functions</h2><div class="item" id="fn-expect"><div class="ih"><span class="badge bfn">fn</span><span class="name">expect</span><span class="sig">expect(opt : Option(a), msg : String) : a</span><a class="anchor-link" href="#fn-expect" title="Link">#</a></div><div class="ib"><p>Extracts the value from Some(x), panicking with the given message if None. Use when you are certain the option is Some.</p><pre><code>The panic message is prefixed with the module name and `on None` so
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Option</span></nav><h1>Option</h1><div class="mdoc"><p>Option module: operations on Option(a) = Some(a) None</p><p>All functions are pure. The type Option(a) is a builtin with constructors Some and None.</p></div><h2>Functions</h2><div class="item" id="fn-expect"><div class="ih"><span class="badge bfn">fn</span><span class="name">expect</span><span class="sig">expect(opt : {Option(a) | is_Some(_)}, msg : String) : a</span><a class="anchor-link" href="#fn-expect" title="Link">#</a></div><div class="ib"><p>Extracts the value from Some(x), panicking with the given message if None. Use when you are certain the option is Some.</p><pre><code>The panic message is prefixed with the module name and `on None` so
 it is clearly attributable when it shows up in a stack trace.</code></pre></div></div>
 <div class="item" id="fn-filter"><div class="ih"><span class="badge bfn">fn</span><span class="name">filter</span><span class="sig">filter(opt : Option(a), pred : a -&gt; Bool) : Option(a)</span><a class="anchor-link" href="#fn-filter" title="Link">#</a></div><div class="ib"><p>Returns None if the value does not satisfy <code>pred</code>.</p></div></div>
 <div class="item" id="fn-flat_map"><div class="ih"><span class="badge bfn">fn</span><span class="name">flat_map</span><span class="sig">flat_map(opt : Option(a), f : a -&gt; Option(b)) : Option(b)</span><a class="anchor-link" href="#fn-flat_map" title="Link">#</a></div><div class="ib"><p>Applies <code>f</code> (which itself returns an Option) and flattens the result.</p></div></div>
@@ -1943,7 +1947,7 @@ it is clearly attributable when it shows up in a stack trace.</code></pre></div>
 <div class="item" id="fn-or_else"><div class="ih"><span class="badge bfn">fn</span><span class="name">or_else</span><span class="sig">or_else(opt : Option(a), f : () -&gt; Option(a)) : Option(a)</span><a class="anchor-link" href="#fn-or_else" title="Link">#</a></div><div class="ib"><p>Returns <code>f()</code> if None, or the original Some value.</p></div></div>
 <div class="item" id="fn-to_list"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_list</span><span class="sig">to_list(opt : Option(a)) : List(a)</span><a class="anchor-link" href="#fn-to_list" title="Link">#</a></div><div class="ib"><p>Converts Option(a) to a List: Some(x) becomes [x], None becomes [].</p></div></div>
 <div class="item" id="fn-to_result"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_result</span><span class="sig">to_result(opt : Option(a), err : e) : Result(a, e)</span><a class="anchor-link" href="#fn-to_result" title="Link">#</a></div><div class="ib"><p>Converts Option(a) to Result(a, e) using the provided error value.</p></div></div>
-<div class="item" id="fn-unwrap"><div class="ih"><span class="badge bfn">fn</span><span class="name">unwrap</span><span class="sig">unwrap(opt : Option(a)) : a</span><a class="anchor-link" href="#fn-unwrap" title="Link">#</a></div><div class="ib"><p>Extracts the value from Some(x), panicking if None.</p><pre><code>    march&gt; Option.unwrap(Some(42))
+<div class="item" id="fn-unwrap"><div class="ih"><span class="badge bfn">fn</span><span class="name">unwrap</span><span class="sig">unwrap(opt : {Option(a) | is_Some(_)}) : a</span><a class="anchor-link" href="#fn-unwrap" title="Link">#</a></div><div class="ib"><p>Extracts the value from Some(x), panicking if None.</p><pre><code>    march&gt; Option.unwrap(Some(42))
     42
 
     march&gt; Option.unwrap(None)

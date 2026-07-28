@@ -1,0 +1,46 @@
+-- EXPECT-ERROR: came from `Chan.offer`
+mod Main do
+  -- Session-types final review, Finding 1 (2026-07-27) -- the FUNCTION-BOUNDARY
+  -- shape of the unification laundering, and the reason the fix REPORTS in
+  -- `unify` instead of merely propagating the `offer_unrefined` mark.
+  --
+  -- `drain`'s parameter annotation `Chan(C, E)` mints its own session ref, and
+  -- `drain`'s body is checked against THAT ref, not the caller's. Passing the
+  -- unrefined `cc2` unifies the two at the CALL SITE -- so propagating the mark
+  -- to the callee's ref would arrive after the callee body was already checked
+  -- and produce no diagnostic at all. Rejecting the unification itself catches
+  -- it at the call site, where the mistake actually is.
+  --
+  -- Pre-fix: `--check` exit 0. Sibling shapes: `t98` (annotation), `t99`
+  -- (`if`-join). Base witness: `t95`.
+  needs IO.Console
+  type C = C
+  type S = S
+
+  protocol D2 do
+    choose by S:
+      ok  -> S -> C : Int
+      err -> S -> C : String
+    end
+  end
+
+  protocol E do
+    S -> C : Int
+  end
+
+  fn drain(ch : Chan(C, E)) : Int do
+    let (v, ch2) = Chan.recv(ch)
+    Chan.close(ch2)
+    v
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(D2)
+    let sc2 = Chan.choose(sc, :err)
+    let sc3 = Chan.send(sc2, "boom")
+    Chan.close(sc3)
+    let (lbl, cc2) = Chan.offer(cc)
+    -- The laundering: `drain`'s parameter ref is fresh and unmarked.
+    println(int_to_string(drain(cc2) + 1))
+  end
+end

@@ -1,0 +1,75 @@
+-- Slice-walk benchmark: slice fields out of a large buffer, building NO list.
+--
+-- Isolates COPYING OFF A LARGE OWNER with zero cons cells.  Every slice
+-- allocates a fresh string and memcpy's the bytes out of the owner, because
+-- March strings have no borrowed-view representation -- this is precisely the
+-- work such a representation would make free.
+--
+-- PAIRED WITH bench/string_split_large.march.  Same buffer, same field shape,
+-- same field count: split allocates a string AND a cons cell per field, this
+-- allocates only the string.  Under MARCH_STRING_STATS=1 the pair separates
+-- the two costs:
+--   obj_allocs      -- cons cells.  split ~1 per field, this ~0.  Note that
+--                      `allocs` (strings) is nearly IDENTICAL for the two
+--                      (measured 9_000_126 vs 9_000_006), because cons cells
+--                      go through march_alloc, not march_string_alloc; the
+--                      obj_* counters exist precisely so this comparison is
+--                      possible at all.
+--   copy_bytes      -- both copy each field once, so this scales with field
+--                      bytes and is comparable between the two.
+--   peak_live_bytes -- split holds EVERY field simultaneously (measured
+--                      39.8MB vs 800KB here, a ~50x difference); this holds
+--                      one at a time.  The starkest number in the pair, and
+--                      the one that matters most for bulk processing.
+-- That attribution is what decides between an array-returning split and a
+-- view representation, so the two files MUST stay in sync.
+--
+-- Deliberately does NOT tokenize by searching.  The obvious formulation --
+-- index_of the next comma, then slice off the remainder and recurse -- is
+-- O(n^2) in bytes copied, because String.index_of has no start-offset variant
+-- and so the tail must be re-sliced at every step (~80GB for this buffer).
+-- Walking by arithmetic keeps the copy volume O(n) and comparable to split's,
+-- which is the whole point of the pair.  The cost of the *search* is measured
+-- separately and honestly by bench/string_scan.march.
+--
+-- Expected output: checksum=27000000
+-- (60 iterations x 150,000 fields x 3 bytes)
+-- Usage: march --compile --opt 2 bench/string_slice_walk.march -o /tmp/string_slice_walk
+
+mod StringSliceWalk do
+
+-- Keep identical to string_split_large.
+pfn rows() : Int do 50000 end
+pfn iterations() : Int do 60 end
+
+-- The row layout "aaa,bbb,ccc,ddd\n" is 16 bytes with 3-byte fields at
+-- offsets 0, 4, 8 -- the same fields String.split(buf, ",") produces.
+pfn fields_per_row() : Int do 3 end
+pfn row_stride() : Int do 16 end
+pfn field_len() : Int do 3 end
+
+-- One slice per field, summing lengths so the slices stay live.  No list is
+-- built, so the only heap traffic is the per-field string allocation + copy.
+pfn walk(buf : String, f : Int, total_fields : Int, acc : Int) : Int do
+  if f >= total_fields do acc
+  else
+    let row   = f / fields_per_row()
+    let col   = f % fields_per_row()
+    let start = row * row_stride() + col * 4
+    let field = String.slice(buf, start, field_len())
+    walk(buf, f + 1, total_fields, acc + String.byte_size(field))
+  end
+end
+
+pfn go(buf : String, i : Int, n : Int, total_fields : Int, acc : Int) : Int do
+  if i >= n do acc
+  else go(buf, i + 1, n, total_fields, acc + walk(buf, 0, total_fields, 0)) end
+end
+
+fn main() do
+  let buf = String.repeat("aaa,bbb,ccc,ddd\n", rows())
+  let total_fields = rows() * fields_per_row()
+  println("checksum=" ++ to_string(go(buf, 0, iterations(), total_fields, 0)))
+end
+
+end

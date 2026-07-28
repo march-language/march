@@ -1226,12 +1226,15 @@
 <a class="sl" href="NativeArray.html#fn-length_int"><span class="sb-kind" style="color:var(--fn)">F</span>length_int</a>
 <a class="sl" href="NativeArray.html#fn-make_float"><span class="sb-kind" style="color:var(--fn)">F</span>make_float</a>
 <a class="sl" href="NativeArray.html#fn-make_int"><span class="sb-kind" style="color:var(--fn)">F</span>make_int</a>
+<a class="sl" href="NativeArray.html#fn-map2_float"><span class="sb-kind" style="color:var(--fn)">F</span>map2_float</a>
+<a class="sl" href="NativeArray.html#fn-map2_int"><span class="sb-kind" style="color:var(--fn)">F</span>map2_int</a>
 <a class="sl" href="NativeArray.html#fn-map_float"><span class="sb-kind" style="color:var(--fn)">F</span>map_float</a>
 <a class="sl" href="NativeArray.html#fn-map_int"><span class="sb-kind" style="color:var(--fn)">F</span>map_int</a>
 <a class="sl" href="NativeArray.html#fn-set_float"><span class="sb-kind" style="color:var(--fn)">F</span>set_float</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_int"><span class="sb-kind" style="color:var(--fn)">F</span>sum_int</a>
+<a class="sl" href="NativeArray.html#fn-to_float_arr"><span class="sb-kind" style="color:var(--fn)">F</span>to_float_arr</a>
 <a class="sl" href="NativeArray.html#fn-to_list_float"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_float</a>
 <a class="sl" href="NativeArray.html#fn-to_list_int"><span class="sb-kind" style="color:var(--fn)">F</span>to_list_int</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div><div class="sb-sub"><a class="sl" href="NetFrame.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
@@ -1673,6 +1676,7 @@
 <a class="sl" href="String.html#fn-from_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_int</a>
 <a class="sl" href="String.html#fn-grapheme_count"><span class="sb-kind" style="color:var(--fn)">F</span>grapheme_count</a>
 <a class="sl" href="String.html#fn-index_of"><span class="sb-kind" style="color:var(--fn)">F</span>index_of</a>
+<a class="sl" href="String.html#fn-index_of_from"><span class="sb-kind" style="color:var(--fn)">F</span>index_of_from</a>
 <a class="sl" href="String.html#fn-is_empty"><span class="sb-kind" style="color:var(--fn)">F</span>is_empty</a>
 <a class="sl" href="String.html#fn-join"><span class="sb-kind" style="color:var(--fn)">F</span>join</a>
 <a class="sl" href="String.html#fn-last_index_of"><span class="sb-kind" style="color:var(--fn)">F</span>last_index_of</a>
@@ -1981,6 +1985,21 @@ Cost: O(digits).</code></pre></div></div>
     String.index_of(&quot;hello&quot;, &quot;&quot;)     -- Some(0)
 
 Cost: O(n * m) worst case.</code></pre></div></div>
+<div class="item" id="fn-index_of_from"><div class="ih"><span class="badge bfn">fn</span><span class="name">index_of_from</span><span class="sig">index_of_from(s, substring, start)</span><a class="anchor-link" href="#fn-index_of_from" title="Link">#</a></div><div class="ib"><p>Find the first occurrence of <code>substring</code> at or after byte offset <code>start</code>.</p><pre><code>The result is an index into `s` itself, not relative to `start`, so it can be
+fed straight back in as the next `start` when tokenizing.
+
+Prefer this over slicing off the tail and searching again: the tail form
+re-copies the remaining bytes on every step, making a full tokenize O(n²)
+in bytes copied.
+
+    String.index_of_from(&quot;a,b,c&quot;, &quot;,&quot;, 0)   -- Some(1)
+    String.index_of_from(&quot;a,b,c&quot;, &quot;,&quot;, 2)   -- Some(3)
+    String.index_of_from(&quot;a,b,c&quot;, &quot;,&quot;, 4)   -- None
+
+A negative `start` is treated as 0; a `start` past the end returns `None`;
+an empty `substring` matches at `start`.
+
+Cost: O((n - start) * m) worst case.</code></pre></div></div>
 <div class="item" id="fn-is_empty"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_empty</span><span class="sig">is_empty(s) do string_is_empty(s) end</span><a class="anchor-link" href="#fn-is_empty" title="Link">#</a></div><div class="ib"><p>Return <code>true</code> if <code>s</code> contains no bytes.</p><pre><code>    String.is_empty(&quot;&quot;)      -- true
     String.is_empty(&quot;x&quot;)    -- false
     String.is_empty(&quot;  &quot;)   -- false

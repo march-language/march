@@ -284,10 +284,12 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_param_info <- param_slots;
     ctx.Llvm_ctx.tco_in_tail    <- true;
     ctx.Llvm_ctx.tco_stack_save <- stack_save;
+    ctx.Llvm_ctx.tco_dup_bound  <- Llvm_tco.dup_bound_vars fn.Tir.fn_body;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     (* Clear TCO state before emitting any other function. *)
     ctx.Llvm_ctx.tco_fn_name <- None;
     ctx.Llvm_ctx.tco_stack_save <- "";
+    ctx.Llvm_ctx.tco_dup_bound <- [];
     if ret_ty = "void" then
       Llvm_ctx.emit_term ctx "ret void"
     else begin

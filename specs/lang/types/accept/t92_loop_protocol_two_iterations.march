@@ -1,0 +1,32 @@
+mod Main do
+  -- Session types: `loop do ... end` projects to the µ-type `Rec X. S[X]`
+  -- (2026-07-24 fix), so a channel may run the body any number of times.
+  -- Pre-fix the projection substituted the post-loop continuation into the
+  -- recursion variable, giving ONE unrolled iteration: the second `send`
+  -- below was rejected with "channel is at `End`".  A looping channel never
+  -- reaches `End`, so it is never closed — dropping mid-protocol is legal
+  -- (the must-close check fires only at `End`).
+  needs IO.Console
+  type Prod = Prod
+  type Cons = Cons
+
+  protocol Str do
+    loop do
+      Prod -> Cons : Int
+      Cons -> Prod : Bool
+    end
+  end
+
+  fn main() do
+    let (cc, pp) = Chan.new(Str)
+    let pp2 = Chan.send(pp, 1)
+    let (x, cc2) = Chan.recv(cc)
+    let cc3 = Chan.send(cc2, true)
+    let (ack, pp3) = Chan.recv(pp2)
+    let pp4 = Chan.send(pp3, 2)
+    let (y, cc4) = Chan.recv(cc3)
+    let cc5 = Chan.send(cc4, false)
+    let (ack2, pp5) = Chan.recv(pp4)
+    println(int_to_string(x + y))
+  end
+end
