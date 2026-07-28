@@ -47,10 +47,16 @@ below is correct either way; this section is about the compiled fast path.
   natural `double` parameters/return with **zero heap boxing**, and the loop
   vectorizes for real (confirmed via `-emit-llvm`: NEON `fadd.2d`/similar
   vector instructions, not just scalar unrolling).
+- **`map2_int` / `map2_float`** (element-wise over two arrays, e.g.
+  `col_add_col`'s column-column arithmetic) get the identical treatment —
+  same eligibility bar, same boxing-free clone for a concrete-`Float`
+  callback. Landed after the rest of this page (see the benchmark history
+  below); previously these fell straight through to the general
+  closure-dispatch path.
 
-A closure that's **reused elsewhere** (passed to `map` and also called
-directly, or stored and called later), or that captures more than one
-variable, still runs correctly — it just falls back to the general
+A closure that's **reused elsewhere** (passed to `map`/`map2` and also
+called directly, or stored and called later), or that captures more than
+one variable, still runs correctly — it just falls back to the general
 closure-dispatch path, which does not vectorize.
 
 ## How to trigger it
@@ -61,9 +67,9 @@ closure-dispatch path, which does not vectorize.
 2. **Compile with `--compile --opt 2`.** `-O2` is what enables clang's
    auto-vectorizer; an interpreted or unoptimized build never vectorizes.
 3. **Keep the callback simple and single-use.** A short arithmetic lambda
-   passed to `map_int`/`map_float` and used nowhere else gets inlined. If you
-   need the same closure for multiple purposes, expect the general
-   (non-vectorized, still correct) path.
+   passed to `map_int`/`map_float`/`map2_int`/`map2_float` and used nowhere
+   else gets inlined. If you need the same closure for multiple purposes,
+   expect the general (non-vectorized, still correct) path.
 4. **For `Float`, avoid leaving the callback's type generic** if you want the
    zero-boxing path — a concrete `Float -> Float` signature is what lets the
    compiler drop the boxing entirely.
@@ -80,16 +86,19 @@ operations over 5M elements:
 
 | Benchmark (N=5M)                       | March    | OCaml   | Rust    | NumPy   |
 |-----------------------------------------|----------|---------|---------|---------|
-| `sum(arr)`                              | **1.3 ms** | 4.8 ms | 5.4 ms | 1.0 ms |
-| `map(x -> x * 2.0 + 1.0)`                | 6.4 ms   | 5.5 ms  | 4.3 ms  | 2.4 ms |
-| `map2(a, b, (x, y) -> x + y)`            | 299.2 ms | 7.0 ms  | 6.3 ms  | 1.7 ms |
+| `sum(arr)`                              | **1.1 ms** | 4.7 ms | 5.4 ms | 1.0 ms |
+| `map(x -> x * 2.0 + 1.0)`                | 5.1 ms   | 5.5 ms  | 3.9 ms  | 2.1 ms |
+| `map2(a, b, (x, y) -> x + y)`            | 6.4 ms   | 7.0 ms  | 4.5 ms  | 1.6 ms |
 
-`sum` and `map` are genuine wins — March ties a hand-tuned, BLAS-backed
-reference implementation (NumPy) and is competitive with hand-written
-OCaml/Rust, via general-purpose LLVM auto-vectorization rather than a
-hand-rolled numeric kernel. `map2` is the honest counterpoint: it has none of
-the inlining/vectorization treatment described above yet, and the number
-shows it — slower even than naive interpreted Python for the same operation.
+All three hold up — March ties a hand-tuned, BLAS-backed reference
+implementation (NumPy) on `sum`, and is competitive with hand-written
+OCaml/Rust on all three, via general-purpose LLVM auto-vectorization rather
+than a hand-rolled numeric kernel. `map2` used to be the odd one out here —
+**299 ms**, no inlining treatment, slower than naive interpreted Python —
+until it got the same closure-inlining/boxing-elimination machinery `map`
+already had; see the benchmark history in
+[SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/) for the
+before/after.
 
 Full write-up (machine profile, methodology, per-language source links) at
 [SIMD Benchmarks]({{ site.baseurl }}/docs/simd-benchmarks/). Reproduce
@@ -100,15 +109,11 @@ locally with `bash bench/run_benchmarks.sh` from a checkout.
 - **`fold_int` / `fold_float` have no compiled implementation yet** — calling
   either from a `--compile` build fails to link. Use `sum`/`map` or a manual
   index loop until this lands.
-- **`map2_int` / `map2_float`** (element-wise over two arrays, e.g. for
-  column-column arithmetic) are correct in both interpreted and compiled
-  builds, but do not yet get the `map_int`/`map_float` inlining/vectorization
-  treatment — each element still dispatches through a closure-pointer call.
 - **`DataFrame`**: `Sum`/`Mean` aggregation and `col_add_col` (column-column
-  arithmetic) use the vectorized `NativeArray` primitives above under the
-  hood. `Min`/`Max`/`Std`/`Variance`/`Median` aggregation, `ColExpr`-based
-  lazy-frame arithmetic, and `fill_null` do not yet — they're correct, just
-  not on the fast path.
+  arithmetic, via `map2_int`/`map2_float`) use the vectorized `NativeArray`
+  primitives above under the hood. `Min`/`Max`/`Std`/`Variance`/`Median`
+  aggregation, `ColExpr`-based lazy-frame arithmetic, and `fill_null` do not
+  yet — they're correct, just not on the fast path.
 - Vectorization is an **LLVM/clang optimizer decision**, not a March
   language guarantee — it can depend on the target architecture and clang
   version. Nothing above changes program *behavior*; a callback that doesn't

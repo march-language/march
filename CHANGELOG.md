@@ -11,6 +11,25 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **String interpolation is ~1.45× faster** and allocates no intermediate list.
+  `"a${x}b${y}c"` now desugars to a plain `++` chain at every length, which the
+  compiler folds into three-way concats — where it previously switched to a
+  `string_join` over a cons list past a size threshold. Measured at seven
+  segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
+  interpolation dropping to zero.
+
+- **…and interpolating a `String` no longer costs a refcount pair per operand**,
+  which closes the rest of that gap. `"a${s}b"` goes through `to_string(s)`,
+  which for a String resolves to an identity — but the identity call was only
+  removed *after* reference counting had already bracketed it with an atomic
+  increment/decrement, leaving the pair stranded around nothing. The call is now
+  elided during lowering, so no pair is ever created, and interpolation compiles
+  to exactly the same code as the equivalent hand-written `++` chain.
+  Allocation counts are unchanged — this was refcount traffic, not allocation.
+
+
 ### Added
 
 - **`String.index_of_from(s, sub, start)`** — substring search from a byte
@@ -19,42 +38,6 @@ git log is authoritative for exact commits.
   separators means slicing off the tail and searching again, which copies the
   remaining bytes at every step and makes a full tokenize O(n²).
 
-### Changed
-
-- **String interpolation of a String is faster.** Interpolating a String-typed
-  operand (`"a${s}b"`) emitted an atomic refcount increment/decrement pair per
-  operand that bought nothing — the `Show$String.show` identity call it goes
-  through was removed only *after* reference counting had already bracketed it.
-  The call is now elided during lowering, so no pair is ever created. Measured
-  ~25% faster on an interpolation-heavy loop, with interpolation now compiling
-  to exactly the same code as the equivalent hand-written `++` chain.
-  Allocation counts are unchanged.
-
-### Fixed
-
-- **`--dump-phases` stages are now readable as text.** `MARCH_DUMP_TXT=<stage>`
-  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
-  the given substring (`all` for every stage). Previously only the very end of
-  the pipeline was inspectable via `--dump-tir`, which is too late to tell
-  whether a pass created a construct or merely preserved one.
-
-### Changed
-
-- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
-  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
-  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
-  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
-  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
-  rather than one byte at a time.
-
-- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
-  longer chains are folded into three-way concats, so k parts cost
-  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
-  prefix at every link. Measured 20% faster on a short-string building
-  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
-
-
-### Added
 - **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
   zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
   mismatch) and Int→Float widening helper, for numeric ops over two
@@ -130,7 +113,36 @@ git log is authoritative for exact commits.
   `Float` record fields and special-value predicates (`is_nan`) stay out of
   scope and are silently skipped rather than approximated.
 
+### Changed
+
+- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
+  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
+  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
+  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
+  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
+  rather than one byte at a time.
+
+- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
+  longer chains are folded into three-way concats, so k parts cost
+  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
+  prefix at every link. Measured 20% faster on a short-string building
+  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
+
+- **`NativeArray.map2_int`/`map2_float` vectorize.** Extended the same
+  compiler pass that lets `map_int`/`map_float` compile to real SIMD to also
+  recognize `map2`'s two-array call shape — same eligibility bar, same
+  boxing-free clone for a concrete-`Float` callback. Measured **~47x** on a
+  5M-element benchmark (299 ms → 6.4 ms); previously slower than naive
+  interpreted Python for the same operation, now beating hand-written OCaml.
+  See `docs/simd-benchmarks.md`.
+
 ### Fixed
+
+- **TIR pipeline stages are now inspectable as text.** `MARCH_DUMP_TXT=<stage>`
+  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
+  the given substring (`all` for every stage). Previously only the very end of
+  the pipeline was readable, via `--dump-tir`, which is too late to tell whether
+  a pass created a construct or merely preserved one.
 
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on

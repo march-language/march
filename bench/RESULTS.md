@@ -1,9 +1,10 @@
 # Cross-Language Benchmark Results
 
 **Date:** 2026-07-24 (after restoring Perceus FBIP reuse + removing the per-call TLS preemption check);
-simd-sum/simd-map/simd-map2 added and last refreshed 2026-07-27.
+simd-sum/simd-map added 2026-07-27; simd-map2 refreshed 2026-07-27 after extending the map-inlining
+compiler pass to the two-array shape (see the fix history under simd-map2 below).
 **Machine:** Apple M3 Max, 14 cores (10P+4E), 36 GB, macOS 26.5.2 (Darwin 25.5.0, arm64). This is a
-shared development machine, not a dedicated benchmark box — load average was 8.5 (1-minute) at the
+shared development machine, not a dedicated benchmark box — load average was 7.9-11.1 at the
 time of the simd-* refresh. See [docs/simd-benchmarks.md](../docs/simd-benchmarks.md) for the fuller
 write-up and per-source-file links.
 **Methodology:** `RUNS=10 bash bench/run_benchmarks.sh`; median, min, max reported. fib/binary-trees/
@@ -34,9 +35,9 @@ section below for why).
 
 | SIMD benchmark (N=5M, self-timed) | March    | OCaml   | Rust    | Elixir   | Python   | NumPy   |
 |------------------------------------|----------|---------|---------|----------|----------|---------|
-| simd-sum                           | **1.3 ms** | 4.8 ms | 5.4 ms | 84.2 ms  | 308.8 ms | 1.0 ms  |
-| simd-map                           | 6.4 ms   | 5.5 ms  | **4.3 ms** | 252.8 ms | 193.5 ms | 2.4 ms  |
-| simd-map2                          | 299.2 ms | 7.0 ms  | **6.3 ms** | 105.9 ms | 201.8 ms | 1.7 ms  |
+| simd-sum                           | **1.1 ms** | 4.7 ms | 5.4 ms | 83.9 ms  | 296.9 ms | 1.0 ms  |
+| simd-map                           | 5.1 ms   | 5.5 ms  | **3.9 ms** | 244.8 ms | 194.1 ms | 2.1 ms  |
+| simd-map2                          | 6.4 ms   | 7.0 ms  | **4.5 ms** | 101.6 ms | 197.1 ms | 1.6 ms  |
 
 Bold = fastest for that benchmark.
 
@@ -157,62 +158,71 @@ at parity (zero-cost abstraction, as advertised).
 
 | simd-sum(5M) | Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| **March**    | **1.3 ms** | 0.9 ms | 3.2 ms |
-| OCaml        | 4.8 ms   | 4.7 ms  | 5.0 ms  |
-| Rust         | 5.4 ms   | 5.2 ms  | 5.5 ms  |
-| Elixir       | 84.2 ms  | 83.1 ms | 97.2 ms |
-| Python       | 308.8 ms | 288.1 ms| 391.3 ms|
-| NumPy        | 1.0 ms   | 0.9 ms  | 1.5 ms  |
+| **March**    | **1.1 ms** | 1.0 ms | 1.4 ms |
+| OCaml        | 4.7 ms   | 4.7 ms  | 4.8 ms  |
+| Rust         | 5.4 ms   | 5.3 ms  | 6.5 ms  |
+| Elixir       | 83.9 ms  | 81.2 ms | 91.7 ms |
+| Python       | 296.9 ms | 283.0 ms| 319.3 ms|
+| NumPy        | 1.0 ms   | 1.0 ms  | 1.0 ms  |
 
 | simd-map(5M) | Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| March        | 6.4 ms   | 5.3 ms  | 7.6 ms  |
+| March        | 5.1 ms   | 4.8 ms  | 5.5 ms  |
 | OCaml        | 5.5 ms   | 5.4 ms  | 5.6 ms  |
-| **Rust**     | **4.3 ms** | 3.9 ms | 5.1 ms |
-| Elixir       | 252.8 ms | 242.2 ms| 323.6 ms|
-| Python       | 193.5 ms | 191.3 ms| 202.2 ms|
-| NumPy        | 2.4 ms   | 2.1 ms  | 3.7 ms  |
+| **Rust**     | **3.9 ms** | 3.7 ms | 4.3 ms |
+| Elixir       | 244.8 ms | 236.9 ms| 281.8 ms|
+| Python       | 194.1 ms | 192.9 ms| 199.5 ms|
+| NumPy        | 2.1 ms   | 2.1 ms  | 2.9 ms  |
 
 | simd-map2(5M)| Median   | Min     | Max     |
 |--------------|----------|---------|---------|
-| March        | 299.2 ms | 296.8 ms| 315.6 ms|
-| OCaml        | 7.0 ms   | 7.0 ms  | 7.7 ms  |
-| **Rust**     | **6.3 ms** | 5.7 ms | 7.8 ms |
-| Elixir       | 105.9 ms | 101.7 ms| 140.6 ms|
-| Python       | 201.8 ms | 196.0 ms| 206.4 ms|
-| NumPy        | 1.7 ms   | 1.6 ms  | 1.9 ms  |
+| March        | 6.4 ms   | 6.3 ms  | 8.8 ms  |
+| OCaml        | 7.0 ms   | 6.9 ms  | 7.1 ms  |
+| **Rust**     | **4.5 ms** | 4.3 ms | 4.8 ms |
+| Elixir       | 101.6 ms | 99.4 ms | 132.0 ms|
+| Python       | 197.1 ms | 189.3 ms| 207.5 ms|
+| NumPy        | 1.6 ms   | 1.5 ms  | 1.6 ms  |
 
-**simd-sum and simd-map: the SIMD claim holds up.** March ties NumPy (a
-hand-tuned, BLAS-backed reference implementation) for the reduction, and is
-competitive with hand-written OCaml/Rust for both — genuine wins for a
-compiler doing this via general-purpose auto-vectorization (LLVM's, at `-O2`)
-rather than a hand-rolled numeric kernel.
+**All three: the SIMD claim holds up.** March ties NumPy (a hand-tuned,
+BLAS-backed reference implementation) for the reduction, and is competitive
+with hand-written OCaml/Rust across all three — genuine wins for a compiler
+doing this via general-purpose auto-vectorization (LLVM's, at `-O2`) rather
+than a hand-rolled numeric kernel.
 
-**simd-map2 is the honest gap.** `NativeArray.map2_int`/`map2_float` (added
-2026-07-27 to unblock `DataFrame.col_add_col`) has no inlining/vectorization
-treatment yet — every element dispatches through the boxed closure-call path
-(`march_alloc_float` per element, indirect call through the closure
-pointer). At 299.2 ms it is **slower than naive interpreted Python** (201.8
-ms) for the same operation, and 47x slower than March's own `simd-map`. This
-is not a regression to fix reactively — it's a known, already-documented
-limitation (`docs/simd-vectorization.md` "Known limitations", added the same
-day as `map2` itself) surfaced here with a concrete number instead of a
-qualitative "not yet vectorized." Extending the Phase 2b/2c/Stage-4-style
-inlining machinery that already exists for `map_int`/`map_float` to the
-two-array `map2` shape is the natural next step if this gap is worth closing.
+**simd-map2 fix history.** This table wasn't always three wins. When first
+published, `NativeArray.map2_int`/`map2_float` (added 2026-07-27 to unblock
+`DataFrame.col_add_col`) had no inlining/vectorization treatment — every
+element dispatched through the boxed closure-call path (`march_alloc_float`
+per element, indirect call through the closure pointer). That measured
+**299.2 ms** — slower than naive interpreted Python (201.8 ms) for the same
+operation, and 47x slower than March's own `simd-map`. Rather than leave that
+as a documented-but-unaddressed limitation, `Native_map_inline.ml` (the pass
+behind `simd-map`'s numbers above) was extended the same day to recognize
+map2's two-array call shape: same eligibility bar (fresh, single-use
+callback), same `Float`-boxing Stage 4 Option B unboxed clone for a
+concrete-`Float` signature, just matching 2 leading array args instead of 1
+before the trailing closure. The inlined loop bypasses
+`native_int_arr_map2`/`native_float_arr_map2` entirely, so it also needed its
+own length-mismatch check (`native_arr_map2_check_len`,
+`runtime/march_runtime.c`) to preserve the "panics on length mismatch"
+contract — verified with a dedicated regression test
+(`test/native/native_arr_map2_inline_length_panic.march`), not just the
+happy path. Result: **299.2 ms → 6.4 ms, ~47x**, now beating OCaml and within
+3x of NumPy. See `docs/simd-benchmarks.md`'s "Fix history: map2" section for
+the full before/after writeup.
 
 ---
 
 ## Where March wins and trails
 
 **Wins:** FBIP-shaped workloads (tree-transform) — in-place reuse under
-Perceus RC beats every allocating implementation by a wide margin. Single-
-array vectorizable Float ops (simd-sum, simd-map) — ties or beats NumPy.
+Perceus RC beats every allocating implementation by a wide margin. Vectorizable
+Float array ops (simd-sum, simd-map, simd-map2 — one- and two-array alike) —
+ties or beats NumPy, competitive with hand-written OCaml/Rust.
 
 **Trails:** allocation-heavy churn with short-lived objects (binary-trees),
 where a generational GC is structurally better than RC; tight iterator
-pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched; and
-two-array Float ops (simd-map2), which have no vectorization treatment yet.
+pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched.
 
 **Preemption overhead:** compiled green threads stay preemptible via a
 per-function-entry check. It is now a single load of a plain global plus a

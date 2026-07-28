@@ -38,20 +38,91 @@ half that runs first measured ~25% slower (173ms vs 137ms). Any before/after
 claim about interpolation must hold the benchmark slot fixed, or it will
 attribute warmup to the change.
 
-**Still open — the `interp_join_threshold` tradeoff.** The threshold of 3
-segments (`desugar_interp`, `lib/parser/parser.mly`) is unrelated to the above
-but dominates any interpolation with more than one operand, which is why the
-original report's repro (`"w${a}x${b}y${a}z"`, 7 segments) showed no
-improvement: it takes the `string_join` path, not `string_concat3`. Measured
-crossover, arm64, 300k iterations: with SHORT (8-byte) operands the `++`/
-concat3 chain beats `string_join` at every size tested — 2 operands 30ms vs
-59ms, 8 operands 121ms vs 157ms, 20 operands 302ms vs 350ms — so no crossover
-exists in that regime. With LARGE (4KB) operands the chain is genuinely
-quadratic and join is essential: 4 operands 16ms vs 13ms, 8 operands 87ms vs
-23ms, 16 operands 356ms vs 49ms, 32 operands 1236ms vs 97ms. The parser cannot
-know operand SIZE, only count, so raising the threshold trades a ~2x win on
-short interpolations against exposing large-string interpolations to
-quadratic copying. Left at 3 deliberately pending a decision.
+**Interaction with the `string_join` path removal (`fceea07b`, same day).**
+This work was done against a tree where `desugar_interp` still switched to a
+`string_join` cons-list past `interp_join_threshold` (3 segments), which is why
+a 7-segment repro showed no improvement from the RC fix alone — it took the
+join path, not `string_concat3`. `fceea07b` removed that second shape
+entirely, and its commit message closes by noting the residual gap it could not
+explain: "`to_string(x)` where x is statically a String looks like an identity
+that is not being elided; worth a look separately." That is exactly this
+change, so the two compose — join removal made every interpolation take the
+concat3 path, and this makes that path free of the identity's refcount pair.
+
+Measurements taken here before the merge, now of historical interest only:
+`++`/concat3 beat `string_join` at *every* size tested with short (8-byte)
+operands (2 operands 30ms vs 59ms, 8 operands 121ms vs 157ms, 20 operands
+302ms vs 350ms — no crossover in that regime, contradicting the 2026-07-26
+"crossover just under 5" figure, which had not controlled for the warmup
+penalty above). With large (4KB) operands the chain *is* quadratic (4 operands
+16ms vs 13ms, 8 operands 87ms vs 23ms, 32 operands 1236ms vs 97ms) — so the
+concat3-only shape does re-expose large-operand interpolation to quadratic
+copying. Not a regression introduced here, but the reason a length-summing
+`string_concat_n` remains the real fix for that band; tracked in
+`specs/todos.md`.
+
+## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
+
+Extended `lib/tir/native_map_inline.ml` (the compiler pass behind
+`map_int`/`map_float`'s auto-vectorization — see the 2026-07-27 entry below
+for the primitive this closes the loop on) to also recognize
+`NativeArray.map2_int`/`map2_float`'s two-array call shape. Same
+eligibility bar as `map` (a fresh, single-use, non-capturing-or-single-capture
+closure), same `Float`-boxing Stage 4 Option B unboxed clone for a
+concrete-`Float` signature — four new mirror functions
+(`find_target_call2`/`subst_call2`/`find_target_call_var2`/
+`subst_call_capturing2`) match a 3-arg call (2 leading `NativeArray` args +
+closure) instead of `map`'s 2-arg one, and `apply_fn_table`'s arity filter
+now accepts a 2-param ($clo+a+b) apply fn alongside the existing 1-param one.
+`lib/tir/llvm_emit.ml` gained `emit_native_map2_inline_loop`, mirroring the
+single-array loop with two source-array reads and a 2-argument direct call.
+
+One wrinkle with no single-array equivalent: the inlined loop bypasses
+`native_int_arr_map2`/`native_float_arr_map2` (and their own
+length-mismatch checks) entirely — calls the lifted apply fn directly
+instead — so it needed its own length-mismatch panic
+(`native_arr_map2_check_len`, `runtime/march_runtime.c`) to preserve
+`NativeArray.map2_*`'s documented "panics on length mismatch" contract.
+Emitted once in the loop's preheader (not per-iteration), so it costs
+nothing in the hot path. Verified with a dedicated regression fixture
+expecting exit 1 (`test/native/native_arr_map2_inline_length_panic.march`),
+not just the happy-path fixture
+(`test/native/native_arr_map2_inline.march`: Int + Float, non-capturing +
+capturing, plus a closure that's reused elsewhere — confirmed via
+`--emit-llvm` that it correctly falls back to the general path, not
+inlined).
+
+Measured on the cross-language SIMD benchmark added the same day
+(`bench/simd_map2.march`, 5M elements): **299.2 ms → 6.4 ms, ~47x** —
+previously slower than naive interpreted Python, now beating hand-written
+OCaml and within 3x of NumPy. Full before/after write-up in
+`docs/simd-benchmarks.md` ("Fix history: map2"). See
+`specs/optimizations.md` §P10 "Phase 3".
+
+## Current State (as of 2026-07-27, cross-language SIMD benchmarks — March vs OCaml/Rust/Elixir/Python/NumPy)
+
+New benchmark set (`bench/simd_{sum,map,map2}.march` + OCaml/Rust/Elixir/
+Python/NumPy equivalents, wired into `bench/run_benchmarks.sh`) grounding the
+SIMD vectorization work in real cross-language numbers instead of only
+internal `-emit-llvm` structural checks. One correction along the way: the
+first version measured whole-process wall-clock like the project's other
+benchmarks, which turned out to mostly measure March building a 5M-element
+boxed `List` (~200ms) rather than the actual vectorized operation (~1ms) — a
+genuinely misleading number. Fixed by having every language self-time only
+the operation and report it via a `TIME_MS` line, and by using manual loops
+for OCaml (its `Array.fold_left`/`Array.map` box every float through a
+polymorphic closure, ~5x slower — not representative of real OCaml numeric
+code; Rust's iterator-based versions were checked against a manual-loop
+control and found already at parity, so kept as-is).
+
+Results at first publish: `sum`/`map` genuine wins (March ties NumPy, is
+competitive with hand-written OCaml/Rust); `map2` was the honest
+counterpoint — 299ms, no vectorization treatment, slower than naive
+interpreted Python. Published as `docs/simd-vectorization.md`'s "Benchmarks"
+section and a dedicated `docs/simd-benchmarks.md` page (machine profile,
+methodology, per-source-file GitHub links, explicit "shared dev machine, not
+idle" caveat with the load average at run time). `map2`'s gap was closed the
+same day — see the entry above.
 
 ## Current State (as of 2026-07-26, many-part string interpolation desugars to one string_join call)
 

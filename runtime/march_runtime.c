@@ -4859,6 +4859,18 @@ void *native_int_arr_map2(void *arr1, void *arr2, void *f) {
     return new_arr;
 }
 
+/* Length-mismatch panic shared by the compiled map2 INLINE loop
+ * (lib/tir/native_map_inline.ml / llvm_emit.ml's emit_native_map2_inline_loop).
+ * That loop bypasses native_int_arr_map2/native_float_arr_map2 entirely
+ * (calls the lifted apply fn directly instead of going through this file),
+ * so it needs its own length check to preserve the "panics on length
+ * mismatch" contract documented on NativeArray.map2_int/map2_float. */
+void native_arr_map2_check_len(int64_t len1, int64_t len2) {
+    if (len1 != len2) {
+        fputs("march: native_arr_map2: array length mismatch\n", stderr); exit(1);
+    }
+}
+
 /* Widen an int array to float, elementwise -- used by col_add_col's mixed
  * Int/Float branches to bring both sides to Float before native_float_arr_map2,
  * instead of round-tripping through List(Value). Pure conversion, no

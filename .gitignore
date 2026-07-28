@@ -74,6 +74,8 @@ __pycache__/
 !/bench/elixir/
 !/bench/rust/
 !/bench/python/
+!/bench/c/
+!/bench/cpp/
 !/bench/tfb/
 
 # Runtime trace dumps
