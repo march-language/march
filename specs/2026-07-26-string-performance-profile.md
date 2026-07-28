@@ -277,6 +277,36 @@ unaffected (strings are JS strings there).
 Notably it is **not** a type-system change: `String` stays one type, and nothing
 in typecheck, mono, or defun needs to know.
 
+### Measured: real workloads are MORE <=7-skewed than the synthetic benchmark
+
+The analysis above worried that 7 bytes is too small, since HTTP header names
+(`content-type` at 12, `user-agent` at 10) exceed it. Measured against real
+workloads, that worry was wrong in the opposite direction:
+
+| workload | allocations | <=7 bytes | <=15 |
+|---|---|---|---|
+| `bench/iolist_template` (web templating) | 100,007 | **53%** | 100% |
+| JSON parse + re-serialize | 9,720,054 | 90% | 96% |
+| `bench/string_split_large` (CSV-shaped) | 9,000,126 | 99.99% | ~100% |
+| `bench/string_small_churn` (synthetic) | 10,000,009 | 42% | 61% |
+
+**Trust the templating number (53%), not the other two.** The CSV split is my
+own synthetic with 3-byte fields. And the JSON figure is an ARTIFACT: that
+parser allocates 2.03 strings per input BYTE for a 239-byte document containing
+about 20 distinct strings — 486 allocations per parse. Those are one-character
+strings from per-character token building, not real content. Tracked separately;
+it is a parser bug worth more than the SSO it would flatter.
+
+That artifact is itself the sharpest argument for care here: **an SSO would make
+an allocation-heavy implementation look fast without fixing it.** The JSON
+parser would go from 486 tiny allocations per parse to 486 free inline strings,
+and nobody would notice it is allocating 24x more strings than the document
+contains.
+
+Revised estimate: 7-byte inline storage eliminates roughly **half** of
+allocations in real templating work — better than the 42% the synthetic
+benchmark suggested, and it needs no ABI change and no RC-path change.
+
 ### Honest assessment
 
 7-byte inline strings are the only variant that fits March's existing
@@ -289,12 +319,12 @@ names — `content-type` at 12 bytes, `user-agent` at 10 — mostly miss it. The
 42% figure comes from one synthetic benchmark whose string sizes were chosen to
 straddle the 23-byte boundary, not from a real corpus.
 
-**Before building anything, measure the size distribution of a real workload**
-(a `bench/tfb` run, or a CSV/JSON parse) rather than `string_small_churn`. If
-real short strings cluster at 8-20 bytes, 7-byte inline storage misses most of
-them and the whole approach is worth less than this analysis suggests. That
-measurement is cheap — the `MARCH_STRING_STATS` histogram already exists — and it
-decides whether the ceiling is 42% or much lower.
+That measurement has now been done (see above) and it came back favourable:
+real templating work is 53% <=7 bytes, better than the synthetic 42%. The
+remaining question is not whether the sizes fit but whether ~half of allocations
+going free is worth a runtime-and-codegen change across ~30 functions — and
+whether some of the workloads that would benefit should instead stop allocating
+so much, as the JSON parser should.
 
 ## Recommendation for phase 2
 
