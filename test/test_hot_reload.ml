@@ -284,6 +284,89 @@ let test_inliner_inlines_without_boundary () =
   check "A no longer calls B (inlined) when flag off" false
     (a_still_calls_b (a_body_after_inline None))
 
+(* ── single-use inliner no-inline guard for reloadable callees ───────────── *)
+
+let one_use_impure_module callee : Tir.tir_module =
+  let x = { Tir.v_name = "x"; v_ty = Tir.TString; v_lin = Tir.Unr } in
+  let b : Tir.fn_def =
+    { fn_name = callee; fn_params = [x]; fn_ret_ty = Tir.TString;
+      fn_body =
+        Tir.ESeq
+          (Tir.EIncRC (Tir.AVar x),
+           Tir.ESeq
+             (Tir.EDecRC (Tir.AVar x), Tir.EAtom (Tir.AVar x)));
+      fn_kind = Tir.FnNormal } in
+  let a : Tir.fn_def =
+    { fn_name = "MyApp.A"; fn_params = []; fn_ret_ty = Tir.TString;
+      fn_body = Tir.EApp ({ Tir.v_name = callee;
+                            v_ty = Tir.TFn ([Tir.TString], Tir.TString);
+                            v_lin = Tir.Unr },
+                          [Tir.ALit (March_ast.Ast.LitString "input")]);
+      fn_kind = Tir.FnNormal } in
+  let main : Tir.fn_def =
+    { fn_name = "main"; fn_params = []; fn_ret_ty = Tir.TString;
+      fn_body = Tir.EApp ({ Tir.v_name = "MyApp.A";
+                            v_ty = Tir.TFn ([], Tir.TString); v_lin = Tir.Unr }, []);
+      fn_kind = Tir.FnNormal } in
+  { Tir.tm_name = "MyApp"; tm_fns = [main; a; b]; tm_types = []; tm_externs = [];
+    tm_exports = []; tm_tests = []; tm_io_fns = [] }
+
+let run_single_use_with_config config module_ =
+  March_tir.Inline.boundary_config := config;
+  Fun.protect
+    ~finally:(fun () -> March_tir.Inline.boundary_config := None)
+    (fun () ->
+      March_tir.Single_use_inline.run ~changed:(ref false) module_)
+
+let a_still_calls (callee : string) (module_ : Tir.tir_module) : bool =
+  let a = List.find (fun fn -> fn.Tir.fn_name = "MyApp.A") module_.Tir.tm_fns in
+  match a.Tir.fn_body with
+  | Tir.EApp (fn, _) -> String.equal fn.Tir.v_name callee
+  | _ -> false
+
+let test_single_use_skips_reloadable_callee () =
+  let result =
+    run_single_use_with_config (Some (HR.default_config "MyApp"))
+      (one_use_impure_module "MyApp.B.run")
+  in
+  check "reloadable MyApp.B.run call is preserved" true
+    (a_still_calls "MyApp.B.run" result)
+
+let test_opt_keeps_reloadable_callee_for_single_use_inline () =
+  let result =
+    March_tir.Opt.run ~hot_reload:(Some (HR.default_config "MyApp"))
+      (one_use_impure_module "MyApp.B.run")
+  in
+  check "optimizer preserves reloadable MyApp.B.run call" true
+    (a_still_calls "MyApp.B.run" result)
+
+let test_single_use_inlines_without_boundary () =
+  let result =
+    run_single_use_with_config None (one_use_impure_module "MyApp.B.run")
+  in
+  check "MyApp.B.run call is removed without a boundary" false
+    (a_still_calls "MyApp.B.run" result)
+
+let test_single_use_inlines_excluded_callee () =
+  let config =
+    Some { (HR.default_config "MyApp") with HR.excludes = ["MyApp.B"] }
+  in
+  let result =
+    run_single_use_with_config config (one_use_impure_module "MyApp.B.run")
+  in
+  check "excluded MyApp.B.run is eligible" false
+    (a_still_calls "MyApp.B.run" result)
+
+let test_single_use_skips_force_included_external_callee () =
+  let config =
+    Some { (HR.default_config "MyApp") with HR.includes = ["External"] }
+  in
+  let result =
+    run_single_use_with_config config (one_use_impure_module "External.B.run")
+  in
+  check "force-included External.B.run call is preserved" true
+    (a_still_calls "External.B.run" result)
+
 let () =
   Alcotest.run "hot_reload" [
     ("boundary", [
@@ -318,6 +401,18 @@ let () =
     ("inline_guard", [
       Alcotest.test_case "boundary callee not inlined"       `Quick test_inliner_skips_boundary_callee;
       Alcotest.test_case "inlined when flag off"             `Quick test_inliner_inlines_without_boundary;
+    ]);
+    ("single_use_inline_guard", [
+      Alcotest.test_case "reloadable callee not inlined" `Quick
+        test_single_use_skips_reloadable_callee;
+      Alcotest.test_case "optimizer keeps reloadable callee" `Quick
+        test_opt_keeps_reloadable_callee_for_single_use_inline;
+      Alcotest.test_case "inlined when flag off" `Quick
+        test_single_use_inlines_without_boundary;
+      Alcotest.test_case "excluded callee is eligible" `Quick
+        test_single_use_inlines_excluded_callee;
+      Alcotest.test_case "force-included external callee not inlined" `Quick
+        test_single_use_skips_force_included_external_callee;
     ]);
     ("name_table", [
       Alcotest.test_case "ids assigned in sorted order"  `Quick test_ids_assigned_in_sorted_order;

@@ -499,6 +499,76 @@ compiler and must be re-taken before any memory-based criterion is applied;
 timing, allocation counts and copy volumes were unaffected and carry the
 verdicts above.
 
+## 2026-07-27 — Single-use private-function inlining measured and verified
+
+The TIR optimizer now runs a separately named `single-use-inline` pass after
+ordinary pure-function inlining and before constant propagation. It relocates
+a syntactically impure body only when the function has exactly one total
+reference and that reference is an arity-correct direct call. The 50-node
+limit, DCE-root boundary, recursive-SCC exclusion, address-taking and
+collision-dispatch guards, and hot-code-reload boundary remain conservative.
+Because Perceus has already made ownership explicit, substitution preserves
+the existing RC operations and their order.
+
+**Corpus measurement:** all 93 current non-JS top-level native fixtures
+compiled with `--dump-phases --emit-llvm` (0 failures; 488.67 s command wall
+time). Final raw LLVM contains 1,869 matched March definitions and 2,310
+residual direct calls. On the exact 91-fixture published-baseline set,
+definitions fell 2,029 → 1,853 (176 removed) and published residual calls
+fell 2,468 → 2,294 (174 fewer, 7.05%). A same-source no-pass control at
+`91afbe99` measured 2,470 → 2,294 calls, attributing 176 removed calls and
+definitions across the same 51 affected fixtures; the two-call difference
+from the published baseline predates this pass. Across all 93 current
+fixtures, the control measured 180 removed calls/definitions, 156 distinct
+bodies, across 53 fixtures; 159/180 removed occurrences contain explicit RC
+operations. `specs/optimizations.md` records the body-size and RC
+distributions and the dump-metric distinction.
+
+**Verification:** focused codegen groups passed (`single_use_inline` 24/24,
+combined `inline` 30/30, DCE 6/6, mutual TCO 8/8, reduction checks 4/4);
+hot reload passed 35/35; TIR eval selection passed 62/62; TIR
+pipeline/pass/invariant properties passed 16/16. Full codegen passed 478/478
+in 256.141 s command wall time, including the 93-fixture native LLVM verifier
+(one unrelated cross-sysroot case was tool-skipped because its external
+sysroot is absent). `dune build @install` and `scripts/check-docs.sh` passed.
+
+The standalone golden sanitizer gate did **not** pass on this host:
+`./specs/lang/golden/sanitize.sh` exited 1 with `0 clean, 46 failed`. Every
+golden compiled, then every sanitized binary hit the script's 25-second
+watchdog with rc 142; none emitted an AddressSanitizer, UBSan, or
+LeakSanitizer diagnostic. This broad host ASAN failure includes trivial
+literal/arithmetic goldens and matches the independently reproduced
+host-sensitive watchdog recorded by the preceding task. No claim is made
+that full `dune runtest` or the sanitizer gate is green, and the fixed-port
+node aliases remain quarantined.
+
+All measurements above are compiler output or regression-command wall time.
+No runtime speedup was measured.
+
+**Corpus-count correction (2026-07-27, post-review fix wave):** the 93-fixture
+count above was accurate for the commit it was measured at
+(`d3315b3624bdbcf11ce8cf001f355fc0fe28cf57`). A later rebase onto `main`
+brought in one unrelated fixture, `test/native/native_arr_map_inline_float_box_reuse.march`
+(float-boxing Stage 4 Option A), bringing the current non-JS top-level native
+corpus to 94. Rather than re-run the full ~488s/~465s two-pass corpus
+measurement for one added fixture, that fixture was independently checked:
+its `--dump-phases` trace shows an identical TIR node count immediately
+before and after both `tir-opt-{1,2}-single-use-inline` phases (13,062 →
+13,062 in the first fixed-point iteration, 5,610 → 5,610 in the second) — the
+pass is a no-op on it, since the fixture defines only `main` plus
+Defun-lifted map-loop closures, none of which is an eligible single-caller
+private top-level function. The 93-fixture aggregate figures above (180
+removed occurrences, 156 distinct bodies, 53 affected fixtures) therefore
+still hold unchanged for the current 94-fixture corpus; this note exists so
+the fixture count itself does not go stale. The fix wave also addressed the
+final review's three Critical findings (caller-binding capture rejection in
+`single_use_inline.ml`; a persistent lexically-scoped alpha-renaming
+environment replacing the prior single mutable table in `inline.ml`; and
+bare/qualified-alias canonicalization in reference and SCC accounting) and
+the non-hermetic native-LLVM Dune gate (Important #5: sequenced compile/emit
+copies onto distinct basenames, and the `grep` exit-status handling now
+distinguishes "no match" from a real error).
+
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 
 A relational postcondition on a structurally recursive function —
