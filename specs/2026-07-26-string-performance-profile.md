@@ -189,6 +189,47 @@ Before building a `StringArray`, measure how much of the real workload is
 scan-shaped versus materialize-shaped. If it is mostly the former, Task 5 should
 close as "not needed" rather than ship a container type nobody's hot path uses.
 
+## Addendum, 2026-07-27: Task 4's gate, settled by cross-language measurement
+
+`bench/run_string_xlang.sh` runs `string_small_churn` (2M short-string
+build/concat/compare cycles) against four baselines chosen to separate two
+explanations a single number cannot distinguish. All five print the same
+checksum, so the work is equivalent; all five ran back-to-back in one session,
+so the ratios are sound even though the machine was loaded and the absolute
+milliseconds are not comparable across runs.
+
+| | ms | vs March |
+|---|---|---|
+| C++ (`std::string`, **has SSO**) | 246 | **3.0× faster** |
+| C (raw `malloc`, no header, no RC) | 411 | 1.8× faster |
+| Rust (`String`, **no SSO** — same representation as March) | 566 | 1.3× faster |
+| **March** | **741** | — |
+| Python (`pymalloc` size classes) | 1305 | 1.8× slower |
+
+**Verdict: the phase 1 recommendation was wrong, and so was its phase 2
+refinement.** Phase 1 said "SSO indicated"; the phase 2 plan then argued for a
+size-class freelist instead, on the grounds that true SSO is far more invasive.
+The data does not support that ordering:
+
+- **Rust has March's exact representation** — heap allocation per string, no
+  inline storage — and is only ~1.3× faster. That gap is allocator and refcount
+  overhead, and it bounds what a freelist can win. It is the smallest gap in the
+  table and therefore the least precise; treat it as "roughly a third", not 31%.
+- **C++ with SSO is 3× faster, and faster than C with raw `malloc`** (246 vs
+  411ms). A hand-rolled allocator cannot beat not allocating at all. This is the
+  decisive comparison, and it is why C++ was worth adding as a one-off despite
+  not being in the project's usual baseline set.
+
+So the ordering is inverted: **a freelist buys roughly a third; the 3× needs
+inline storage.** A freelist is still the cheaper change and still a real win,
+but it should be chosen knowing it forecloses most of the available gain, not
+in the belief that it captures it.
+
+Nothing here says to build SSO now — it is a String ABI change touching
+`IS_HEAP_PTR`, the erased-i64 tagging convention, codegen, and the C FFI. It
+says the decision is between "a third, cheaply" and "3×, expensively", which is
+a different question from the one the phase 2 plan posed.
+
 ## Recommendation for phase 2
 
 1. **Fix the two RC leaks first.** They are not string work, they block the

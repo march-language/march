@@ -713,10 +713,38 @@ What's left is making the *operations* on those columns actually use the fast
   table + preamble `PDeclare`s, `defun.ml`'s `builtin_names`). `DataFrame.col_add_col`
   now uses these instead of `List.zip`/`List.map`/`native_*_arr_from_list` for all
   four `IntCol`/`FloatCol` combinations. Regression test: `test/native/native_arr_map2.march`.
-  Deliberately scoped to *correctness* only — `map2` does not (yet) get its own
-  Phase-2b/2c/Option-A/B-style closure-inlining or vectorization treatment; it still
-  dispatches through the C runtime's opaque closure-pointer call per element. That
-  inlining is a natural follow-up, not started.
+  Shipped correctness-first — `map2` did not initially get its own
+  Phase-2b/2c/Option-A/B-style closure-inlining or vectorization treatment (still
+  dispatched through the C runtime's opaque closure-pointer call per element).
+- **Done (2026-07-27, same day):** `map2` closure-inlining/vectorization. Extended
+  `lib/tir/native_map_inline.ml` (the Phase 2b/2c/Stage-4 pass behind `map`'s
+  numbers above) to also recognize the two-array `map2` call shape — same
+  eligibility bar (fresh, single-use, non-capturing-or-single-capture callback),
+  same synthetic-inline-name mechanism, same `Float`-boxing Stage 4 Option B
+  unboxed clone for a concrete-`Float` signature — via four new mirror functions
+  (`find_target_call2`/`subst_call2`/`find_target_call_var2`/`subst_call_capturing2`)
+  matching a 3-arg call (2 leading `NativeArray` args + closure) instead of `map`'s
+  2-arg one, plus `apply_fn_table`'s arity filter widened to accept a 2-param
+  ($clo+a+b) apply fn alongside the existing 1-param one. `lib/tir/llvm_emit.ml`
+  gained `emit_native_map2_inline_loop`, mirroring `emit_native_map_inline_loop`
+  with two source-array reads and a 2-argument direct call. One thing with no
+  single-array equivalent: the inlined loop bypasses
+  `native_int_arr_map2`/`native_float_arr_map2` (and their own length checks)
+  entirely, so it needed its own length-mismatch panic
+  (`native_arr_map2_check_len`, `runtime/march_runtime.c`, emitted once in the
+  loop's preheader — no per-iteration cost) to preserve
+  `NativeArray.map2_*`'s documented contract; verified with a dedicated
+  regression fixture expecting exit 1
+  (`test/native/native_arr_map2_inline_length_panic.march`), not just the happy
+  path. Measured **~47x** on the `bench/simd_map2.march` cross-language
+  benchmark: 299.2 ms → 6.4 ms (5M elements), now beating hand-written OCaml and
+  within 3x of NumPy — see `docs/simd-benchmarks.md`'s "Fix history: map2".
+  Regression test: `test/native/native_arr_map2_inline.march` (correctness — Int
+  and Float, non-capturing and capturing, plus a reused-closure fallback case)
+  plus an `--emit-llvm` structural check
+  (exactly 2 unboxed `$mapfast$` clones, zero boxing calls in either, exactly 1
+  remaining general non-inlined `native_int_arr_map2` call for the
+  reused-elsewhere case).
 - **Still out of scope:** `ColExpr::Add/Sub/Mul/Div` (the lazy-expression path, as
   opposed to `col_add_col`'s eager one) and `fill_null` (data array zipped against a
   `TypedArray(Bool)` null-bitmap, not another `NativeArray` — a different shape than
@@ -733,16 +761,17 @@ What's left is making the *operations* on those columns actually use the fast
   others are pointer/hash-heavy, not data-parallel.
 
 Combined with P9 (columnar layout), the column representation and the now-vectorized
-aggregations move March DataFrame queries closer to Polars-competitive — the
-two-array-arithmetic gap above is the main remaining piece.
+aggregations AND two-array arithmetic move March DataFrame queries closer to
+Polars-competitive — `ColExpr`'s lazy-expression path and `fill_null` are the main
+remaining pieces.
 
 ---
 
-**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, `map2` primitive done, inlining not started
-**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, done
+**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2; ~47× for map2 specifically (299ms → 6.4ms, 5M elements)
 **Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
-**Benchmark:** `bench/array_numeric.march`
-**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops: `map2` primitive + `col_add_col` rewiring done, inlining/vectorization not started
+**Benchmark:** `bench/array_numeric.march`, `bench/simd_sum.march`/`simd_map.march`/`simd_map2.march` (cross-language, see `docs/simd-benchmarks.md`)
+**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops done (primitive, `col_add_col` rewiring, AND inlining/vectorization all done)
 
 ---
 

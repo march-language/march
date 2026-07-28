@@ -721,6 +721,109 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
   emit_label ctx exit_lbl;
   ("ptr", new_arr)
 
+(** [Native_map_inline]'s two-array counterpart to [emit_native_map_inline_loop]
+    above (map2 added 2026-07-27 to unblock [DataFrame.col_add_col]). Same
+    trick, same wire ABI, same [~unboxed] Stage 4 Option B path — just two
+    source arrays read per iteration and a 2-argument call to [apply_name]
+    instead of one. One addition with no equivalent in the single-array
+    case: [native_int_arr_map2]/[native_float_arr_map2]'s own length-mismatch
+    panic (`NativeArray.map2_*`'s documented contract) has to be reproduced
+    here explicitly, since this loop calls the lifted apply fn directly and
+    never goes through those functions at all — see
+    [native_arr_map2_check_len] (runtime/march_runtime.c). It's emitted once
+    in the preheader (not per-iteration), so it costs nothing in the hot
+    loop and doesn't touch anything the vectorizer looks at. *)
+let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+    : string * string =
+  let elem_ty = if is_float then "double" else "i64" in
+  let len_fn = if is_float then "native_float_arr_length" else "native_int_arr_length" in
+  let alloc_fn = if is_float then "native_float_arr_alloc_raw" else "native_int_arr_alloc_raw" in
+  let preheader = fresh_block ctx "nmap2_pre" in
+  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+  emit_label ctx preheader;
+  let (arr1_ty0, arr1_v0) = emit_atom ctx arr1_atom in
+  let arr1_v = coerce ctx arr1_ty0 arr1_v0 "ptr" in
+  let (arr2_ty0, arr2_v0) = emit_atom ctx arr2_atom in
+  let arr2_v = coerce ctx arr2_ty0 arr2_v0 "ptr" in
+  let len1 = fresh ctx "nmap2_len1" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len1 len_fn arr1_v);
+  let len2 = fresh ctx "nmap2_len2" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len2 len_fn arr2_v);
+  emit ctx (Printf.sprintf "call void @native_arr_map2_check_len(i64 %s, i64 %s)" len1 len2);
+  let new_arr = fresh ctx "nmap2_out" in
+  emit ctx (Printf.sprintf "%s = call ptr @%s(i64 %s)" new_arr alloc_fn len1);
+  (* Float, non-unboxed only: reuse two wire-argument boxes (one per source
+     array) across iterations instead of a fresh march_alloc_float per
+     element per array — same reasoning as [emit_native_map_inline_loop]'s
+     single [arg_box]. Skipped entirely when [unboxed] (no box at all, Stage
+     4 Option B) or for Int (tagged immediate, no allocation either way). *)
+  let arg_boxes = if is_float && not unboxed then begin
+      let b1 = fresh ctx "nmap2_argbox1" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b1);
+      let b2 = fresh ctx "nmap2_argbox2" in
+      emit ctx (Printf.sprintf "%s = call ptr @march_alloc_float(double 0.000000e+00)" b2);
+      Some (b1, b2)
+    end else None in
+  let cond_lbl = fresh_block ctx "nmap2_cond" in
+  let body_lbl = fresh_block ctx "nmap2_body" in
+  let exit_lbl = fresh_block ctx "nmap2_exit" in
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx cond_lbl;
+  let i = fresh ctx "nmap2_i" in
+  let i_next = fresh ctx "nmap2_inext" in
+  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+  let cmp = fresh ctx "nmap2_cmp" in
+  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len1);
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+  emit_label ctx body_lbl;
+  (* Both source arrays and the dest array share the same
+     NATIVE_ARR_HDR=24 layout (march_runtime.c), so one offset serves all
+     three GEPs. *)
+  let soff = fresh ctx "nmap2_soff" in
+  emit ctx (Printf.sprintf "%s = mul i64 %s, 8" soff i);
+  let byte_off = fresh ctx "nmap2_off" in
+  emit ctx (Printf.sprintf "%s = add i64 %s, 24" byte_off soff);
+  let sptr1 = fresh ctx "nmap2_sptr1" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr1 arr1_v byte_off);
+  let x = fresh ctx "nmap2_x" in
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr1);
+  let sptr2 = fresh ctx "nmap2_sptr2" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr2 arr2_v byte_off);
+  let y = fresh ctx "nmap2_y" in
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" y elem_ty sptr2);
+  let z_native =
+    if unboxed then begin
+      let z = fresh ctx "nmap2_z" in
+      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s, double %s)" z apply_name clo_reg x y);
+      z
+    end else begin
+      let (wire_x, wire_y) = match arg_boxes with
+        | Some (b1, b2) ->
+          let vfield1 = fresh ctx "nmap2_argval1" in
+          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield1 b1);
+          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" x vfield1);
+          let vfield2 = fresh ctx "nmap2_argval2" in
+          emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" vfield2 b2);
+          emit ctx (Printf.sprintf "store double %s, ptr %s, align 8" y vfield2);
+          (b1, b2)
+        | None -> (coerce ctx elem_ty x "ptr", coerce ctx elem_ty y "ptr")
+      in
+      let z = fresh ctx "nmap2_z" in
+      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s, ptr %s)" z apply_name clo_reg wire_x wire_y);
+      coerce ctx "ptr" z elem_ty
+    end
+  in
+  let dptr = fresh ctx "nmap2_dptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" dptr new_arr byte_off);
+  emit ctx (Printf.sprintf "store %s %s, ptr %s, align 8" elem_ty z_native dptr);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx exit_lbl;
+  ("ptr", new_arr)
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -2150,6 +2253,32 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
     emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~clo_reg
+
+  (* ── Native array map2 inline loop, non-capturing closure ────────────
+     [Native_map_inline]'s two-array counterpart of the non-capturing arm
+     above — same rewrite, same reasoning, just [__native_*_map2_inline]
+     names and two leading array atoms instead of one. See
+     [emit_native_map2_inline_loop]. *)
+  | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v])
+    when f.Tir.v_name = "__native_int_arr_map2_inline"
+      || f.Tir.v_name = "__native_float_arr_map2_inline"
+      || f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map2_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg:"null"
+
+  (* ── Native array map2 inline loop, capturing closure ──────────────── *)
+  | Tir.EApp (f, [arr1_atom; arr2_atom; Tir.AVar apply_v; clo_atom])
+    when f.Tir.v_name = "__native_int_arr_map2_inline"
+      || f.Tir.v_name = "__native_float_arr_map2_inline"
+      || f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" ->
+    let is_float = f.Tir.v_name <> "__native_int_arr_map2_inline" in
+    let unboxed = f.Tir.v_name = "__native_float_arr_map2_inline_unboxed" in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+    let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
+    emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

@@ -9701,6 +9701,7 @@ declare ptr    @native_float_arr_to_list(ptr %arr)
 declare ptr    @native_float_arr_filter_mask(ptr %arr, ptr %mask)
 declare ptr    @native_int_arr_alloc_raw(i64 %len)
 declare ptr    @native_float_arr_alloc_raw(i64 %len)
+declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Time builtins
 declare double @march_unix_time()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
