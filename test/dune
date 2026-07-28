@@ -1811,9 +1811,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_tuple_destructure_dce.out native/tuple_destructure_dce.expected)
  (action (diff native/tuple_destructure_dce.expected native_tuple_destructure_dce.out)))
 
-; ── Static capture-free closures: a top-level named fn materialized as a  ──
-; ── first-class value inside a loop must not allocate per materialization ──
-; ── (one immortal static closure per fn, not one fresh alloc per use).    ──
+; ── Static capture-free closures: compiled/interpreted output parity for a ──
+; ── top-level named fn materialized as a first-class value inside a loop.  ──
+; ── This fixture diffs stdout ONLY — it does not measure allocations and   ──
+; ── would pass unchanged if the per-materialization leak came back.  The   ──
+; ── actual allocation-growth assertion lives in test/test_codegen.ml       ──
+; ── (`static closure does not scale with materializations`, which reads    ──
+; ── march_live_allocs and is pinned non-vacuous).                          ──
 (rule
  (targets native_static_closure_no_leak native_static_closure_no_leak.out)
  (deps (file %{exe:../bin/main.exe})
