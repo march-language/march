@@ -21,7 +21,10 @@ Measured baseline on `stdlib/list.march` (2026-07-28): user-only `0 proved,
 `Refinement obligation coverage ratchet` step in the `conformance` job — it needs
 a built compiler and z3, which the `doc-lint` job has neither of). The ratchet is
 a ceiling on SKIPS, so it may only ever be revised downward; it also trips if z3
-goes missing from PATH, which drives the count to 36.
+goes missing from PATH, which drives the count to 36. A ceiling alone is not a
+ratchet — a pass that raised no obligations at all would report `0 skipped` and
+sail through it — so the step also asserts a FLOOR on the proved count (8, may
+only be revised upward).
 
 **Runtime length guards now discharge `len` obligations.** The checker aliases
 the qualified `List.length`, `String.byte_size`, and the `string_byte_length`
@@ -33,9 +36,17 @@ thing keeping them useful only on literal lists. The alias is narrow by design:
 qualified spellings only, only while they denote the standard library's own
 function (identified by the sources the compiler actually loaded, so it survives
 `MARCH_STDLIB` and an installed `share/march`), and withdrawn module-wide the
-moment the name could denote something else — a user definition, a vendored
-`List` via `MARCH_LIB_PATH`, an `alias`/`use` rebinding of `List`/`String`, or
-any binder of the bare `string_byte_length`. A withdrawn alias returns the
+moment the name could denote something else — a user definition in ANY
+declaration form (`fn`, a module-level `let`, an `extern` block, an interface or
+impl method, including one at the entry module's own top level when that module
+is itself named `List`/`String`), a vendored `List` via `MARCH_LIB_PATH`, an
+`alias`/`use`/`import` rebinding of `List`/`String` under any selector form
+(single, `.{…}`, glob, `except:`), or any binder of the bare
+`string_byte_length`. The qualified gate `stdlib_member_defs_ok` originally
+matched `A.DFn` alone behind a `| _ -> ()` wildcard, so a competing `let`- or
+`extern`-defined member was invisible and correct code was REPORTED; it is now
+an exhaustive `A.decl` match with no wildcard, the same discipline
+`bare_builtin_undefined` already had. A withdrawn alias returns the
 obligation to being skipped, which is the pre-alias behaviour: never a false
 report. `string_length` is deliberately NOT aliased — it is a byte length today
 (it lowers to `march_string_byte_length`; `string_length("é")` is 2), but the

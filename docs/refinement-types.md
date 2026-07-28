@@ -168,8 +168,10 @@ before it says anything.
 The connection is deliberately narrow, since attaching `len`'s meaning to the wrong
 function is how you'd get a false alarm on correct code. Only the **qualified**
 `List.length` counts (a bare `length` is left alone), and only while it's still the
-standard library's own. If your program defines its own `List.length`, ships a forked
-`List` via `MARCH_LIB_PATH`, or rebinds `List` with `alias`/`use`, the connection is
+standard library's own. If your program defines its own `List.length` — however it
+spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface
+or impl method — ships a forked
+`List` via `MARCH_LIB_PATH`, or rebinds `List` with `alias`/`use`/`import`, the connection is
 dropped for that whole module and you're back to the older behaviour: the obligation
 is skipped, quietly, rather than proved.
 

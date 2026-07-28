@@ -3138,6 +3138,103 @@ mod Q do
   fn main() : Int do go([1]) end
 end|}));
 
+    (* ── The same competing definition in every OTHER declaration form ─────
+       The gate above once matched `A.DFn` alone and ended its walk in a
+       wildcard, so the three shapes below were invisible: the alias stayed on,
+       the dead `== 0` branch was treated as reachable, and correct code was
+       reported.  That is a false positive, the one error this pass must never
+       make.  Each of these is the `mod Q` case reworded — silence is required,
+       and it is the CONTRADICTORY-guard case above (which must still fire)
+       that proves the fix suppressed a wrong fact rather than the feature. *)
+    gated "a user-defined List.length as a module-level `let` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QLet do
+  mod List do
+    let length = fn xs -> 99
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "an extern-declared List.length is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QExt do
+  mod List do
+    needs Ffi
+    extern "c" : Cap(Ffi) do
+      fn length(xs: List(Int)) : Int = "march_qext_length"
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* The ENTRY module's own declarations are top-level, not a `DMod` — and
+       bin/main.ml strips the stdlib's `DMod List` whenever the entry module
+       shadows it — so `mod List do fn length` defines `List.length` with
+       nothing nested for the walk to see.  The gate now starts its walk with
+       `in_mod = true` when the enclosing module's own name matches.
+
+       HONESTY NOTE: unlike its four neighbours, this case passes against the
+       PRE-fix gate too, so it does not by itself discriminate the hole — a
+       string-parsed fixture has no stdlib prepended, and the discriminating
+       shape needs bin/main.ml's prepend-and-strip.  It is kept because the
+       property it asserts (silence) is the one that must hold, not because it
+       is a witness. *)
+    gated "an entry module named List defining `length` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod List do
+  fn length(xs : List(Int)) : Int do 99 end
+  mod Inner do
+    fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+    fn go(ys : List(Int)) : Int do
+      if List.length(ys) == 0 do head(ys) else 0 end
+    end
+  end
+  fn main() : Int do Inner.go([1]) end
+end|}));
+
+    (* Rebinding the bare segment `List` withdraws the alias too, whichever
+       selector form does it — `use X.List` was handled, the three below were
+       not. *)
+    gated "`import X.{List}` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QIN do
+  import Shim.{List}
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a glob `import X` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGlob do
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
     (* ── The ENABLING branch ───────────────────────────────────────────────
        Every case above reaches its verdict WITHOUT a `List.length` definition
        in scope at all, i.e. via the gate's "no defs -> allow" path.  None of
@@ -3282,6 +3379,71 @@ mod QS do
   mod String do
     fn byte_size(s : String) : Int do 99 end
   end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The same competing definition in the other declaration forms — the
+       `A.DFn`-only hole, string side.  See the list-side comment. *)
+    gated "a user-defined String.byte_size as a module-level `let` is NOT aliased"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSLet do
+  mod String do
+    let byte_size = fn s -> 99
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "an extern-declared String.byte_size is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSExt do
+  mod String do
+    needs Ffi
+    extern "c" : Cap(Ffi) do
+      fn byte_size(s: String) : Int = "march_qsext_byte_size"
+    end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Same shape, same honesty note, as the list-side entry-module case. *)
+    gated "an entry module named String defining `byte_size` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod String do
+  fn byte_size(s : String) : Int do 99 end
+  mod Inner do
+    fn slug(s : {String | len(_) > 0}) : Int do 1 end
+    fn go(t : String) : Int do
+      if String.byte_size(t) == 0 do slug(t) else 0 end
+    end
+  end
+  fn main() : Int do Inner.go("a") end
+end|}));
+
+    gated "`import X.{String}` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSIN do
+  import Shim.{String}
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) == 0 do slug(t) else 0 end

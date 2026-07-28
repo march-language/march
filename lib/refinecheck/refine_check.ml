@@ -4369,34 +4369,114 @@ let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
 
 (* Is the qualified spelling `<md>.<fn>` still the standard library's own?
    Parameterised over the pair so the `List.length` and `String.byte_size`
-   aliases share one gate rather than two that can drift apart. *)
-let stdlib_member_defs_ok ~(md : string) ~(fn : string) (decls : A.decl list) : bool =
+   aliases share one gate rather than two that can drift apart.
+
+   ── THE INVARIANT (shared with [bare_builtin_undefined]) ───────────────────
+   Ask only: can this declaration make the spelling `<md>.<fn>` denote a
+   function that is not the stdlib's?  Two ways — DEFINE a member named [fn]
+   inside a module named [md], or REBIND the bare segment [md] to some other
+   module.  Everything that can do either must be named here.
+
+   An earlier revision asked instead "is this an `A.DFn` inside a `DMod`?" and
+   ended its walk in a `| _ -> ()` wildcard.  A competing member defined as a
+   module-level `let`, or declared in an `extern` block, was therefore
+   invisible: the alias stayed on, `List.length` was equated with `len`, the
+   dead branch under a contradictory guard was treated as reachable, and
+   CORRECT code was reported — a false positive, the one error this pass must
+   never make.  That is the identical hole [bare_builtin_undefined] had closed
+   for the bare spelling and this gate never inherited; hence the match below
+   is EXHAUSTIVE over [A.decl] with no wildcard, so a new declaration form is a
+   compile error here rather than a silent hole.  The arms that do nothing say
+   so by name, and each is a claim that that form can neither define a member
+   nor rebind a module name; check it rather than trusting it.
+
+   [mod_name] is the ENCLOSING module's own name.  The entry module's
+   declarations are top-level rather than a `DMod` — and bin/main.ml strips the
+   stdlib's `DMod List` whenever the entry module shadows it — so a file
+   `mod List do fn length …` defines `List.length` with nothing nested to see.
+   Starting the walk with `in_mod = true` when the names match closes that.
+
+   Direction of doubt is always to SUPPRESS: a missed proof is silence, the
+   status quo ante; a wrong fact in the assumption set is a false positive. *)
+let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
+    (decls : A.decl list) : bool =
   let foreign = ref false in
   let rebound = ref false in
+  (* A member definition only competes if it did NOT come from the standard
+     library's own sources — see [is_stdlib_source_file]. *)
+  let defines in_mod (sp : A.span) b =
+    if in_mod && b && not (is_stdlib_source_file sp.A.file) then foreign := true
+  in
+  let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
   let rec go in_mod ds =
     List.iter
       (function
-        | A.DFn (fd, sp) when in_mod && fd.A.fn_name.A.txt = fn ->
-          if not (is_stdlib_source_file sp.A.file) then foreign := true
-        | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
-        | A.DAlias (a, _) when a.A.alias_name.A.txt = md -> rebound := true
+        (* ── Can define `<md>.<fn>` ──────────────────────────────────────── *)
+        | A.DFn (fd, sp) -> defines in_mod sp (fd.A.fn_name.A.txt = fn)
+        (* `let length = fn xs -> …` is a member exactly like `fn length`. *)
+        | A.DLet (_, b, sp) -> defines in_mod sp (List.mem fn (pat_binders b.A.bind_pat))
+        (* An `extern` block declares its functions as members of the module
+           that encloses it. *)
+        | A.DExtern (ed, sp) ->
+          defines in_mod sp
+            (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns)
+        (* Interface/impl methods are reachable under the declaring module's
+           qualified spelling too. *)
+        | A.DInterface (idf, sp) ->
+          defines in_mod sp
+            (List.exists
+               (fun (m : A.method_decl) -> m.A.md_name.A.txt = fn)
+               idf.A.iface_methods)
+        | A.DImpl (idf, sp) ->
+          defines in_mod sp
+            (List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods)
+        (* ── Rebinds the bare segment `<md>` ─────────────────────────────── *)
+        | A.DAlias (a, _) -> if a.A.alias_name.A.txt = md then rebound := true
         | A.DUse (u, _) ->
-          (* `use X.<md>` (importing the module itself) rebinds the bare
-             segment `<md>` to whatever module that path names. *)
-          (match u.A.use_sel, List.rev u.A.use_path with
-           | A.UseSingle, last :: _ :: _ when last.A.txt = md -> rebound := true
-           | _ -> ())
-        | _ -> ())
+          (* Four selector forms, all of which can put some other module under
+             the bare name `<md>`:
+               `use X.<md>`            — UseSingle, the path's last segment
+               `import X.{<md>, …}`    — UseNames (its list admits upper names)
+               `import X`              — UseAll, a glob that can carry a
+                                         nested module named `<md>`
+               `import X, except: [_]` — UseExcept, ditto unless `<md>` is
+                                         excluded. *)
+          (match u.A.use_sel with
+           | A.UseSingle ->
+             (match List.rev u.A.use_path with
+              | last :: _ :: _ when last.A.txt = md -> rebound := true
+              | _ -> ())
+           | A.UseNames xs -> if mentions_md xs then rebound := true
+           | A.UseExcept xs -> if not (mentions_md xs) then rebound := true
+           | A.UseAll -> rebound := true)
+        (* ── Contains declarations; recurse ──────────────────────────────── *)
+        | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
+        (* A `describe` block does not open a module scope of its own, so its
+           declarations sit at the enclosing module's level. *)
+        | A.DDescribe (_, ds, _) -> go in_mod ds
+        (* ── Can neither define `<md>.<fn>` nor rebind `<md>` ────────────── *)
+        (* Types and their constructors: constructors are capitalised, so they
+           cannot collide with the lowercase `length`/`byte_size`. *)
+        | A.DType _ | A.DAlwaysLinearType _ | A.DTransitions _
+        (* Capitalised entities in their own namespaces; none of them is a
+           module that the bare segment `<md>` could resolve to. *)
+        | A.DActor _ | A.DProtocol _ | A.DSig _ | A.DApp _
+        (* Desugared into `DImpl` before this pass runs; handled above. *)
+        | A.DDeriving _ | A.DSatisfy _
+        (* Capability/compiler directives — no bindings at all. *)
+        | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+        (* Test bodies bind only within themselves. *)
+        | A.DTest _ | A.DSetup _ | A.DSetupAll _ -> ())
       ds
   in
-  go false decls;
+  go (mod_name = md) decls;
   (not !foreign) && not !rebound
 
-let list_length_defs_ok (decls : A.decl list) : bool =
-  stdlib_member_defs_ok ~md:"List" ~fn:"length" decls
+let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"List" ~fn:"length" ~mod_name decls
 
-let string_byte_size_defs_ok (decls : A.decl list) : bool =
-  stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" decls
+let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" ~mod_name decls
 
 (* Does any binding construct inside [e] bind [name]?  BINDER positions only —
    an ordinary `string_byte_length(t)` CALL mentions the name without binding
@@ -4579,8 +4659,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      never be able to leave it on. *)
   strict_verified := false;
   stdlib_source_files := stdlib_files;
-  list_length_is_stdlib := list_length_defs_ok m.A.mod_decls;
-  string_byte_size_is_stdlib := string_byte_size_defs_ok m.A.mod_decls;
+  let mod_name = m.A.mod_name.A.txt in
+  list_length_is_stdlib := list_length_defs_ok ~mod_name m.A.mod_decls;
+  string_byte_size_is_stdlib := string_byte_size_defs_ok ~mod_name m.A.mod_decls;
   string_byte_length_is_builtin := bare_builtin_undefined "string_byte_length" m.A.mod_decls;
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;

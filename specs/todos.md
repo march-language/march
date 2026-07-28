@@ -79,6 +79,25 @@ enforcing nothing while the suite stayed green.
 - **Postconditions are not in the ledger.** `check_post` neither records nor
   escalates, so `--refine-report` undercounts and `cap verified` silently permits
   an undischarged return refinement.
+- **A qualified spelling INSIDE a predicate enforces nothing, silently.**
+  `{List(Int) | List.length(_) > 0}` parses and typechecks, and enforces
+  nothing at all: refinement predicates are not run through desugar, so
+  `List.length` stays an `EField` chain rather than the dotted `EVar` the alias
+  keys on, and the obligation is skipped. Pre-existing, not introduced here —
+  but it is the one case this branch leaves invisible, which is exactly the
+  failure mode `--refine-report` exists to surface. At minimum the pass should
+  WARN on an unreflectable qualified call in a predicate; the fuller fix is to
+  desugar predicate expressions the way bodies are. (The supported spelling is
+  the bare measure, `len(_) > 0`.)
+- **A refined parameter's own predicate is not an assumption inside its body.**
+  Inside `fn head_of(xs : {List(Int) | len(_) > 0}) …`, a call to
+  `List.head(xs)` — whose own precondition is the same `len(_) > 0` — is still
+  solver-undecided, because the caller-supplied predicate never enters the
+  assumption set for the body it guards. So non-empty contracts do not COMPOSE:
+  a function that requires non-emptiness cannot pass its argument on to another
+  function that requires the same thing without re-guarding it. This is the
+  practical ceiling on how far the non-empty contracts added in this branch can
+  be threaded through the stdlib.
 
 ---
 

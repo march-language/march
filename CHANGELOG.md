@@ -45,9 +45,11 @@ git log is authoritative for exact commits.
   a violation only when a predicate can *never* hold, which makes silence
   ambiguous between "proved" and "not checkable" — an ambiguity that let
   `{List(a) | len(_) > 0}` ship enforcing nothing while the suite stayed green.
-  CI now ratchets on the whole-program skip count, so a change that quietly
-  stops checking things fails the build. Counts cover precondition obligations
-  raised at call sites; postconditions are not in the ledger.
+  CI now ratchets on the whole-program counts — a ceiling on skips *and* a floor
+  on proofs, since a ceiling alone is satisfied by a checker that raises no
+  obligations at all — so a change that quietly stops checking things fails the
+  build. Counts cover precondition obligations raised at call sites;
+  postconditions are not in the ledger.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -61,8 +63,10 @@ git log is authoritative for exact commits.
   checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing anywhere).
   The alias is withdrawn for the whole module if anything could make that
   spelling denote a different function: a program defining its own
-  `List.length`, a vendored or forked `List` supplied through `MARCH_LIB_PATH`,
-  or rebinding the name `List` via `alias`/`use`. In those cases the obligation
+  `List.length` in any declaration form (a `fn`, a module-level `let`, an
+  `extern` block, an interface or impl method), a vendored or forked `List`
+  supplied through `MARCH_LIB_PATH`, or rebinding the name `List` via
+  `alias`/`use`/`import`. In those cases the obligation
   goes back to being unprovable and silently skipped, which is the pre-existing
   behaviour; the alias never attaches `len`'s meaning to a function that is not
   the list's length.

@@ -143,6 +143,11 @@ jobs:
           # (unreflectable-predicate 1, solver-undecided 27). Lower is better —
           # this is a CEILING on skips, so it may only ever be revised DOWN.
           baseline=28
+          # A ceiling alone is not a ratchet: if the pass stopped raising
+          # obligations at all, `skipped` would be 0 and the ceiling would be
+          # satisfied by a checker that checks nothing. So pin a FLOOR on the
+          # proved count too. Higher is better — it may only ever be revised UP.
+          proved_floor=8
           dune build bin/main.exe
           # A `--check` whose sources hash to an artifact already in the CAS
           # exits BEFORE parsing (bin/main.ml, the `do_check` lookup), so the
@@ -163,7 +168,10 @@ jobs:
           skipped=$(sed -n \
             's/^refinement obligations (user + stdlib):.*, \([0-9][0-9]*\) skipped$/\1/p' \
             /tmp/refine.txt)
-          if [ -z "$skipped" ]; then
+          proved=$(sed -n \
+            's/^refinement obligations (user + stdlib): \([0-9][0-9]*\) proved,.*/\1/p' \
+            /tmp/refine.txt)
+          if [ -z "$skipped" ] || [ -z "$proved" ]; then
             echo "FAIL: could not find the 'user + stdlib' line in --refine-report output."
             echo "Three things produce that, in order of likelihood:"
             echo "  a. the run hit the --check CAS and short-circuited before the"
@@ -174,7 +182,22 @@ jobs:
             echo "This step must never pass vacuously."
             exit 1
           fi
-          echo "skipped=$skipped (ceiling: $baseline)"
+          echo "proved=$proved (floor: $proved_floor)  skipped=$skipped (ceiling: $baseline)"
+          if [ "$proved" -lt "$proved_floor" ]; then
+            echo ""
+            echo "FAIL: refinement obligations PROVED fell from $proved_floor to $proved."
+            echo "The ceiling on skips cannot catch this: a pass that raises no"
+            echo "obligations at all reports 0 skipped and would sail through it."
+            echo "Fewer proofs means contracts that were enforced no longer are."
+            echo ""
+            echo "The most common cause is a measure alias being withdrawn too"
+            echo "eagerly — the gates in lib/refinecheck/refine_check.ml"
+            echo "(stdlib_member_defs_ok / bare_builtin_undefined) suppress on"
+            echo "doubt, so widening one can switch the feature off wholesale."
+            echo "Check the per-reason breakdown printed above: proofs turning"
+            echo "into 'solver-undecided' skips is that signature."
+            exit 1
+          fi
           if [ "$skipped" -gt "$baseline" ]; then
             echo ""
             echo "FAIL: refinement obligation skips rose from $baseline to $skipped."
@@ -197,9 +220,11 @@ jobs:
             echo "     in 'solver-undecided' usually means a measure alias was withdrawn"
             echo "     or a guard stopped reflecting; 'unreflectable-predicate' means a"
             echo "     contract was rewritten outside the supported fragment."
-            echo "  3. A skips-to-ZERO result (or 'proved' dropping to 0) usually means"
-            echo "     z3 is missing from PATH and refinement checking is disabled"
-            echo "     entirely — check the toolchain step before blaming the code."
+            echo "  3. A missing z3 does NOT show up as skips falling — it shows up as"
+            echo "     skips RISING. Without a solver every obligation is Unverified,"
+            echo "     so the measured signature is 0 proved / 36 skipped (every one of"
+            echo "     the 8 proofs becomes a skip). If you see that pair, check the"
+            echo "     toolchain step before blaming the code."
             echo "  4. Fix the regression. Only raise the ceiling if the rise is"
             echo "     intentional and explained in the commit message; this number is"
             echo "     meant to travel downward."

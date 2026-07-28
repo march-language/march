@@ -535,8 +535,10 @@ Only byte-valued spellings are aliased, because `len` is a byte count:
   in a guard.
 
 The same withdrawal rules as the list alias apply: a program that defines its own
-`String.byte_size` (unless it *is* the standard library's), rebinds `String` via
-`alias`/`use`, or binds the name `string_byte_length` itself — as a declaration,
+`String.byte_size` (unless it *is* the standard library's) — in any declaration
+form: a `fn`, a module-level `let`, an `extern` block, an interface or impl
+method — rebinds `String` via `alias`/`use`/`import`, or binds the name
+`string_byte_length` itself — as a declaration,
 an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
 alias for the whole module, and the obligation returns to being skipped.
 
