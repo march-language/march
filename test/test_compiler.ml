@@ -673,19 +673,17 @@ let test_tc_zero_arg_user_fn_still_callable () =
   end|} in
   Alcotest.(check bool) "zero-arg user fn call: no errors" false (has_errors ctx)
 
-(* KNOWN, SEPARATE GAP (not fixed here): calling an ordinary non-function
-   local value with zero args — e.g. `let x = 5; x()` — is STILL silently
-   accepted by --check today, for the same underlying reason root_cap() was:
-   infer_app's `| [], t -> t` base case can't distinguish "callee is a
-   disguised zero-arg fn" from "callee is a plain value" once no args remain,
-   and a plain `let`-bound value can't safely be told apart from a legitimate
-   bare-imported or qualified cross-module zero-arg function call (neither is
-   tracked in env.fn_arities, which only covers same-module `fn` decls) without
-   deeper env changes tracking local-vs-global binding provenance.  This test
-   pins CURRENT behavior so it doesn't silently regress further, not because
-   it's correct — closing this gap for real is a follow-up, not part of the
-   root_cap fix. *)
-let test_tc_nonfunction_local_value_call_known_gap () =
+(* FIXED (was a known gap): calling an ordinary non-function local value
+   with zero args — e.g. `let x = 5; x()` — used to be silently accepted by
+   --check, for the same underlying reason root_cap() was: infer_app's
+   `| [], t -> t` base case can't distinguish "callee is a disguised
+   zero-arg fn" from "callee is a plain value" once no args remain.  The fix
+   generalizes the root_cap denylist: a bare (unqualified) `EVar` call with
+   zero args, whose name is NOT a known function (checked via
+   [env.fn_arities], which now also covers local `fn ... end` (ELetFn)
+   bindings, not just top-level `fn` decls) and whose resolved type is a
+   concrete non-arrow (i.e. definitely not a function), is rejected. *)
+let test_tc_nonfunction_local_value_call_fixed () =
   let ctx = typecheck {|mod Test do
     fn f() : Int do
       let x = 5
@@ -693,9 +691,126 @@ let test_tc_nonfunction_local_value_call_known_gap () =
     end
   end|} in
   Alcotest.(check bool)
-    "KNOWN GAP: plain non-function local value called with 0 args is not \
-     yet rejected at --check (crashes at runtime instead) — separate from \
-     the root_cap fix"
+    "plain non-function local value called with 0 args is now a --check error"
+    true (has_errors ctx);
+  let has_clear_message = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+    d.severity = March_errors.Errors.Error &&
+    contains "x" d.message &&
+    contains "not a function" d.message
+  ) ctx.diagnostics in
+  Alcotest.(check bool) "error names `x` and explains it's not a function"
+    true has_clear_message
+
+(* The exact filed bug: a top-level zero-arg fn assigned to a local `let`
+   loses its "this is a function" provenance (its TYPE collapses to Int,
+   identical to a plain value's), so calling it must now be rejected too —
+   compiled, this used to SIGSEGV (the runtime called `answer()` to bind
+   `zf`, then tried to jump through the raw `42` as a closure pointer). *)
+let test_tc_zero_arg_fn_value_call_rejected () =
+  let ctx = typecheck {|mod Test do
+    fn answer() : Int do 42 end
+    fn f() : Int do
+      let zf = answer
+      zf()
+    end
+  end|} in
+  Alcotest.(check bool) "zf() where zf aliases a zero-arg fn: is a --check error"
+    true (has_errors ctx);
+  let has_clear_message = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+    d.severity = March_errors.Errors.Error &&
+    contains "zf" d.message &&
+    contains "not a function" d.message
+  ) ctx.diagnostics in
+  Alcotest.(check bool) "error names `zf` and explains it's not a function"
+    true has_clear_message
+
+(* A LOCAL zero-arg fn (`fn ... end`, ELetFn) called directly must still
+   typecheck — same collapsed-type shape as a top-level zero-arg fn, and
+   must not be confused with a plain local value. *)
+let test_tc_zero_arg_local_fn_still_callable () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      fn helper() do 7 end
+      helper()
+    end
+  end|} in
+  Alcotest.(check bool) "local zero-arg `fn ... end` call: no errors"
+    false (has_errors ctx)
+
+(* A local zero-arg fn called from ANOTHER local fn defined afterward in the
+   same block must also still typecheck — this is the case that requires
+   local `fn ... end` bindings to be registered in [env.fn_arities] (not
+   just top-level `fn` decls), or the generalized check would false-positive
+   on `helper()` inside `caller`'s body. *)
+let test_tc_zero_arg_local_fn_called_from_sibling_local_fn () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      fn helper() do 7 end
+      fn caller() do helper() end
+      caller()
+    end
+  end|} in
+  Alcotest.(check bool) "sibling local fn calling local zero-arg fn: no errors"
+    false (has_errors ctx)
+
+(* Assigning a LOCAL zero-arg fn (not just a top-level one) to a plain let
+   and calling the alias must be rejected too — same disguised-value hazard,
+   just via a local `fn ... end` instead of a top-level `fn`. *)
+let test_tc_zero_arg_local_fn_value_call_rejected () =
+  let ctx = typecheck {|mod Test do
+    fn f() : Int do
+      fn helper() do 7 end
+      let g = helper
+      g()
+    end
+  end|} in
+  Alcotest.(check bool) "g() where g aliases a local zero-arg fn: is a --check error"
+    true (has_errors ctx)
+
+(* Qualified cross-module zero-arg calls (`Mod.member()`) must be unaffected
+   — they don't flow through [env.fn_arities] (that only tracks bare names
+   populated while checking a module's own decls), so the generalized check
+   deliberately exempts any dotted name rather than risk a false positive
+   here. *)
+let test_tc_zero_arg_qualified_call_still_callable () =
+  let ctx = typecheck {|
+mod Top do
+  mod Dep do
+    fn bar() : Int do 99 end
+  end
+  mod Test do
+    fn f() : Int do
+      Dep.bar()
+    end
+  end
+end
+|} in
+  Alcotest.(check bool) "qualified zero-arg call `Dep.bar()`: no errors"
+    false (has_errors ctx)
+
+(* A local zero-arg LAMBDA LITERAL (`let g = fn -> body`) called with `g()`
+   must still typecheck.  Under plain inference (no expected-type context) a
+   zero-param lambda collapses to its body's result type just like a
+   top-level zero-arg `fn` — the SAME shape the generalized noncallable
+   check targets — so `let g = fn -> println("b"); g()` is real, existing,
+   tested behavior (test/native/unit_callback_zero_arg.march) that a naive
+   "any plain let-bound non-arrow value is uncallable" rule would wrongly
+   reject.  [plain_let_names] is therefore never populated for an RHS that
+   is itself a lambda literal — see the [Ast.ELam] exclusion in the
+   [Ast.ELet] case of [infer_block]. *)
+let test_tc_zero_arg_lambda_let_still_callable () =
+  let ctx = typecheck {|mod Test do
+    fn run_twice(cb : Unit -> Unit) : Unit do
+      cb()
+      cb()
+    end
+    fn f() : Unit do
+      run_twice(fn -> ())
+      let g = fn -> ()
+      g()
+    end
+  end|} in
+  Alcotest.(check bool) "let-bound zero-arg lambda literal call: no errors"
     false (has_errors ctx)
 
 (* ── Fix 1: Interface constraint discharge ──────────────────────────────── *)
@@ -2739,7 +2854,16 @@ let test_session_loop_branch_no_tail_ok () =
 let test_srec_pingpong_loop_typechecks () =
   (* Ping-pong loop: Client sends Int, Server replies Bool, repeats.
      A function that does one iteration and returns the updated channel
-     should typecheck — the channel type after one loop is the same as before. *)
+     should typecheck — the channel type after one loop is the same as
+     before.  [server_step] discards the post-send channel directly from
+     the call expression (`let _ = Chan.send(...)`) rather than through an
+     intermediate `let ch2 = ...; let _ = ch2` — a bare local var
+     immediately followed on the next line by a `()`-led expression is the
+     documented `let x = V` / `(`-led-tail parser glomming ambiguity (see
+     specs/lang parser notes): it was parsing as `ch2()`, silently accepted
+     before the zero-arg call-of-a-non-function fix (this file,
+     [noncallable_error]) started rejecting exactly that shape as
+     "not a function". *)
   let ctx = typecheck {|mod Test do
     protocol PingLoop do
       loop do
@@ -2755,8 +2879,7 @@ let test_srec_pingpong_loop_typechecks () =
     end
     fn server_step(ch : Chan(Server, PingLoop)) : Unit do
       let (n, ch1) = Chan.recv(ch)
-      let ch2 = Chan.send(ch1, n > 0)
-      let _ = ch2
+      let _ = Chan.send(ch1, n > 0)
       ()
     end
   end|} in
@@ -10038,7 +10161,13 @@ let compiler_suites =
           Alcotest.test_case "bare root_cap is ok"                 `Quick test_tc_root_cap_bare_ok;
           Alcotest.test_case "legit zero-arg builtins still callable" `Quick test_tc_zero_arg_builtins_still_callable;
           Alcotest.test_case "zero-arg user fn still callable"     `Quick test_tc_zero_arg_user_fn_still_callable;
-          Alcotest.test_case "KNOWN GAP: non-fn local value call"  `Quick test_tc_nonfunction_local_value_call_known_gap;
+          Alcotest.test_case "non-fn local value call is rejected" `Quick test_tc_nonfunction_local_value_call_fixed;
+          Alcotest.test_case "zero-arg fn value call is rejected"  `Quick test_tc_zero_arg_fn_value_call_rejected;
+          Alcotest.test_case "zero-arg local fn still callable"    `Quick test_tc_zero_arg_local_fn_still_callable;
+          Alcotest.test_case "zero-arg local fn called from sibling local fn" `Quick test_tc_zero_arg_local_fn_called_from_sibling_local_fn;
+          Alcotest.test_case "zero-arg local fn value call is rejected" `Quick test_tc_zero_arg_local_fn_value_call_rejected;
+          Alcotest.test_case "zero-arg qualified call still callable" `Quick test_tc_zero_arg_qualified_call_still_callable;
+          Alcotest.test_case "zero-arg lambda-let call still callable" `Quick test_tc_zero_arg_lambda_let_still_callable;
           Alcotest.test_case "actor handler extra field"   `Quick test_actor_handler_extra_field;
           Alcotest.test_case "actor handler missing field" `Quick test_actor_handler_missing_field;
           Alcotest.test_case "actor handler correct"       `Quick test_actor_handler_correct;

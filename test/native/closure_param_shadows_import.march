@@ -1,0 +1,56 @@
+-- A lambda / local-fn PARAMETER shadows an imported module's function of the
+-- same name.  `import Logger` registers stdlib's Logger.i (Int -> LogValue)
+-- as the unqualified alias `i`; a binder named `i` must still win inside the
+-- closure body.  Before the fix the lowering pass rewrote the parameter to
+-- @Logger.i, so `Bytes.get(b, i)` received a function address as its index and
+-- panicked "index out of bounds" — the shape depot's Postgres wire decoder
+-- (read_cstring) uses, which broke every DB connect in a compiled program.
+mod Main do
+  needs IO.Console
+  import Logger
+
+-- Local named fn as a block statement (the depot shape).
+fn scan_block(b, pos) do
+  fn go(i, acc) do
+    let byte = Bytes.get(b, i)
+    if byte == 0 do (acc, i)
+    else go(i + 1, acc + byte)
+    end
+  end
+  go(pos, 0)
+end
+
+-- Same, but the local fn IS the block's final expression — a returned
+-- closure, which lowers through a different arm than the statement form.
+fn make_scanner(b) do
+  fn go(i, acc) do
+    let byte = Bytes.get(b, i)
+    if byte == 0 do acc else go(i + 1, acc + byte) end
+  end
+end
+
+-- Anonymous lambda with an unannotated param of the same name.
+fn scan_lam(b) do
+  let step = fn i -> Bytes.get(b, i)
+  step(0) + step(1)
+end
+
+fn main() do
+  let b = Bytes.from_list([1, 2, 3, 0])
+  match scan_block(b, 0) do
+  (sum, stop) -> do
+    println(int_to_string(sum))
+    println(int_to_string(stop))
+  end
+  end
+  let scanner = make_scanner(b)
+  println(int_to_string(scanner(0, 0)))
+  println(int_to_string(scan_lam(b)))
+  -- The import itself still resolves where nothing shadows it.
+  match Logger.i(42) do
+  LInt(n) -> println(int_to_string(n))
+  _       -> println("wrong LogValue")
+  end
+end
+
+end

@@ -9197,6 +9197,66 @@ let test_string_literal_operand_no_leak_compiled () =
        grow with the iteration count)"
       "BOUNDED" run_out
 
+(* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
+   named fn used as a first-class value now references ONE immortal
+   `internal global` closure object per fn (@<fn>$static_clo, refcount
+   MARCH_RC_IMMORTAL) instead of calling march_alloc(24) at every
+   materialization site evaluation. The old per-materialization allocation
+   was never freed — a genuine leak.
+
+   Same shape as test_string_literal_operand_no_leak_compiled immediately
+   above: read the runtime's own live-object gauge (march_live_allocs)
+   through an extern, warm the materialization site once so its one
+   permanent cell is already live when the baseline is sampled, then re-run
+   the same site at a much larger loop count and assert the growth stays
+   bounded rather than scaling with the iteration count. One static closure
+   per function is the intended permanent cost — the assertion is on
+   GROWTH, not an absolute count. *)
+let test_static_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_staticcloleak"
+    "mod StaticCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  fn double(x : Int) : Int do x * 2 end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      materialize_loop(i + 1, n, acc + apply_it(double, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the materialization site first, so its one permanent static\n\
+     -- closure is already allocated when the baseline is sampled and only\n\
+     -- per-iteration growth can move the gauge.\n\
+    \    let warm = materialize_loop(0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "staticcloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a top-level named fn materialized as a first-class value in a loop \
+       references one immortal static closure per site, not one fresh \
+       allocation per materialization (live-object count must not grow \
+       with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -11163,6 +11223,113 @@ let test_preamble_wrapper_delegates () =
   Alcotest.(check string) "Llvm_emit.emit_preamble wrapper matches Llvm_builtins.emit_preamble"
     (Buffer.contents buf_new) (Buffer.contents buf_old)
 
+(** A top-level fn used as a first-class value must NOT emit a fresh
+    march_alloc(24) per materialization; it must reference one immortal
+    static global instead. *)
+let test_static_closure_global_replaces_alloc () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* main returns `target` AS A VALUE (not calling it) — forces materialization. *)
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [];
+      fn_ret_ty = fn_ty;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [target; main]) in
+  Alcotest.(check bool) "emits an immortal static closure global"
+    true (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "static closure carries the MARCH_RC_IMMORTAL refcount"
+    true (Test_helpers.contains "1099511627776" ir);
+  Alcotest.(check bool) "static closure is a writable global, not a constant"
+    true (Test_helpers.contains "internal global" ir);
+  Alcotest.(check bool) "no per-materialization march_alloc(i64 24) remains"
+    false (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** REPL fragments are separate modules; a per-fragment static global would
+    hand out different pointers for the same fn across fragments, and can
+    collide under the ORC backend's shared JITDylib. The REPL must keep the
+    fresh-alloc path.
+
+    Exercised through the actual REPL emission entry point
+    ([Llvm_emit.emit_repl_expr], which builds its ctx with [~repl:true] —
+    see [lib/tir/llvm_repl.ml]) rather than by calling
+    [Llvm_ctx.intern_static_closure] directly: the eligibility gate lives in
+    [llvm_emit.ml]'s [static_closure_ok], not in the memoizing helper itself,
+    so the helper alone can't demonstrate the REPL is declined — only the
+    full materialization path can. *)
+let test_static_closure_not_emitted_in_repl_mode () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* REPL fragment: "target" evaluated as a bare expression, materializing the
+     top-level fn as a first-class value — the same trigger as the native
+     test above, run through the REPL fragment emitter instead of
+     emit_module. *)
+  let body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty)) in
+  let ir =
+    March_tir.Llvm_emit.emit_repl_expr
+      ~n:0 ~ret_ty:fn_ty ~prev_slots:[] ~fns:[target] ~types:[] body
+  in
+  Alcotest.(check bool) "REPL mode still materializes via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir);
+  Alcotest.(check bool) "REPL mode emits no static closure global"
+    false (Test_helpers.contains "$static_clo" ir)
+
+(** Regression for the finding that the JIT's stdlib-prelude fragment call
+    ([precompile_stdlib] in [lib/jit/repl_jit.ml]) went through
+    [Llvm_emit.emit_fns_fragment] WITHOUT [~repl:true], so a top-level fn
+    materialized as a first-class value inside that fragment silently got a
+    static closure global — exactly the thing [static_closure_ok] is meant to
+    forbid in REPL/JIT mode (a per-fragment global would hand out different
+    pointers for the same fn across fragments, and the ORC backend loads each
+    fragment as its own module). The existing REPL-mode coverage above only
+    drives [emit_repl_expr]; it can't catch a second REPL-mode entry point
+    (`emit_fns_fragment`) forgetting to pass `~repl:true`, because that call
+    site is separate code entirely. This test drives `emit_fns_fragment`
+    itself — the exact function precompile_stdlib calls — with `~repl:true`
+    and asserts no `$static_clo` global is emitted for a fn materialized as a
+    value inside the fragment. Prior to the fix (missing `~repl:true` at
+    repl_jit.ml:823) this scenario is precisely what let 13 `$static_clo`
+    symbols leak into `~/.cache/march/stdlib_prelude_*.so`. *)
+let test_static_closure_not_emitted_in_fns_fragment_repl_mode () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* A second fn that materializes `target` as a first-class value — mirrors
+     how a stdlib fn like `Cluster.parse_addr` passes a named fn as a value
+     (e.g. into a HOF) inside the precompiled prelude fragment. *)
+  let holder =
+    { March_tir.Tir.fn_name = "holder"; fn_params = [];
+      fn_ret_ty = fn_ty;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir =
+    March_tir.Llvm_emit.emit_fns_fragment
+      ~types:[] ~fns:[target; holder] ~repl:true ()
+  in
+  Alcotest.(check bool) "fns_fragment in repl mode emits no static closure global"
+    false (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "fns_fragment in repl mode still materializes via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
 (* ── Robustness: an unreadable sibling directory must not crash the compiler ──
    The compiler auto-discovers sibling `.march` modules in the entry file's own
    source directory (`resolve_imports` plus the early-CAS sibling hash both walk
@@ -11983,6 +12150,8 @@ let codegen_suites =
       ( "string_literal_codegen", [
           Alcotest.test_case "compiled string literal as `++` operand does not leak per evaluation" `Quick
             test_string_literal_operand_no_leak_compiled;
+          Alcotest.test_case "compiled static closure materialization does not leak per use" `Quick
+            test_static_closure_materialization_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
@@ -12109,6 +12278,12 @@ let codegen_suites =
             test_clo_wrap_is_alwaysinline;
           Alcotest.test_case "Llvm_emit.emit_preamble wrapper delegates (W3C2.4)" `Quick
             test_preamble_wrapper_delegates;
+          Alcotest.test_case "static closure global replaces per-materialization march_alloc" `Quick
+            test_static_closure_global_replaces_alloc;
+          Alcotest.test_case "static closure global is not emitted in REPL mode" `Quick
+            test_static_closure_not_emitted_in_repl_mode;
+          Alcotest.test_case "static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
+            test_static_closure_not_emitted_in_fns_fragment_repl_mode;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick

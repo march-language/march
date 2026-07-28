@@ -510,8 +510,43 @@ let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
   _current_module_fns := tbl;
   Fun.protect ~finally:(fun () -> _current_module_fns := saved) f
 
+(** Names bound by an enclosing LAMBDA or local named fn ([Ast.ELam] /
+    [Ast.ELetFn]) while its body is being lowered.  A binder shadows any
+    import alias, exactly as it shadows one in the interpreter.
+
+    Separate from [_fn_param_types] because that table carries a TYPE, and the
+    two lambda paths cannot always supply one: [ELam] deliberately REMOVES an
+    unknown-typed ([TVar "_"]) param so the body falls back to [ty_of_span]
+    instead of inheriting a stale outer type, and [ELetFn] never registered its
+    params at all.  Either way the name stopped counting as a local, so
+    [resolve_use_alias] rewrote it to whatever qualified fn some module's bulk
+    import had registered under that short name.  Concretely: depot's
+
+      fn read_cstring(b, pos) do
+        fn go(i, acc) do let byte = Bytes.get(b, i) ... end
+        go(pos, Nil)
+      end
+
+    compiled `i` to stdlib's [Logger.i] (registered by `import Logger`), so
+    [Bytes.get] got a function address as its index and every Postgres connect
+    died with "Bytes.get: index out of bounds".  Native only — the interpreter
+    resolves against the runtime env and was always correct.
+
+    Used as a scoped multiset: [Hashtbl.add] on entry, [Hashtbl.remove] on
+    exit, so nesting the same name restores the outer binding. *)
+let _scope_locals : (string, unit) Hashtbl.t = Hashtbl.create 32
+
+(** Lower [f] with [names] shadowing any import alias.  Exception-safe so a
+    lowering failure cannot leak binders into a sibling's scope. *)
+let with_scope_locals (names : string list) (f : unit -> 'a) : 'a =
+  List.iter (fun n -> Hashtbl.add _scope_locals n ()) names;
+  Fun.protect
+    ~finally:(fun () -> List.iter (fun n -> Hashtbl.remove _scope_locals n) names)
+    f
+
 let resolve_use_alias (env : env) (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
+  else if Hashtbl.mem _scope_locals name then name
   else if Hashtbl.mem !_current_module_fns name then name
   (* A bulk `import Mod` registers every public fn of Mod as an unqualified
      alias (see [register_aliases] / the DUse cases).  When one of those short

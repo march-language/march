@@ -360,7 +360,7 @@ let emit_fns_fragment
     ~(types : Tir.type_def list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
-    ?(repl : bool = false)
+    ~(repl : bool)
     () : string =
   let ctx = Llvm_ctx.make_ctx ~repl ~type_defs:types () in
   let pseudo_mod : Tir.tir_module =

@@ -74,6 +74,219 @@ fails closed, exactly as the solver-unavailable case already did.
 Corpus: 218/218 (108 accept, 110 reject) — `accept/t118` and `reject/t117` added,
 bracketing the length-guard discharge from both sides, because an accept-only
 witness exits 0 whether the guard is read or the obligation is merely skipped.
+## Current State (as of 2026-07-28, zero-arg function-value SIGSEGV fixed)
+
+**A zero-arg top-level function materialized as a first-class value, then
+invoked through that value, now rejects at `--check` instead of crashing
+compiled `--opt 2` (exit 139).** Filed the same day as an open item during
+the static-closure work below (`specs/todos.md`):
+
+```march
+mod Main do
+  fn answer() : Int do 42 end
+  fn main() : () do
+    let zf = answer
+    println(int_to_string(zf()))
+  end
+end
+```
+
+**Root cause:** typechecker gap, not codegen — codegen faithfully compiles
+what the typechecker says. March's zero-param T-Abs convention collapses a
+`fn`'s type to its bare return type (no `TArrow`), so `answer` referenced
+bare is genuinely typed `Int`; `zf()` — calling a plain non-arrow value —
+was silently accepted by `infer_app`'s `| [], t -> t` base case (needed so a
+genuine zero-arg `fn()` call still typechecks). This is the exact hole the
+`root_cap()` fix (2026-07-22, below) identified but deliberately left open
+for the general local-value case, pending a way to distinguish "a disguised
+zero-arg fn alias" from "a genuine plain value" without false-positiving on
+legitimate code.
+
+**Fix (`lib/typecheck/typecheck.ml`):** rather than a negative "not a known
+function" signal (tried first — `env.fn_arities`'s absence — and found
+unsafe: a bulk `import Mod` clears `fn_arities` entries via `bind_var`'s
+existing shadow discipline, so at multi-file scale one module's `import`
+wiped a shared fn's registration for every module checked afterward, see the
+`specs/todos.md` entry for the reproduction), the fix adds a new POSITIVE,
+narrowly-scoped `env.plain_let_names : StringSet.t`, populated at exactly one
+site — a simple, non-linear `let name = expr` binding (`Ast.PatVar`, in the
+`Ast.ELet` case of `infer_block`) — excluding an RHS that is itself a lambda
+literal (`let g = fn -> body`, which collapses to its body type under plain
+inference the same way a zero-arg `fn` does, and is real, tested, legitimate
+behavior — `test/native/unit_callback_zero_arg.march`). `Ast.EApp`'s handler
+rejects a zero-arg call `f()` when `f`'s name is in `plain_let_names` and its
+resolved type is concretely non-arrow. Local `fn ... end` (`Ast.ELetFn`)
+bindings are now also registered in `fn_arities` (previously top-level-only),
+so aliasing one through a plain `let` is caught too, while calling it
+directly (including from a sibling local fn defined afterward) still
+typechecks. Qualified (`Mod.member()`) and bare builtin (`pmap_threshold()`)
+calls are unaffected since they never flow through `Ast.ELet`.
+
+Fixing this also exposed (not introduced) a pre-existing, unrelated parser
+glomming ambiguity in one test fixture: a bare local var immediately followed
+on the next line by a `()`-led expression parses as a call on that var
+(documented in `specs/lang` parser notes) — `test_srec_pingpong_loop_typechecks`
+had been silently relying on this glomming interpretation "succeeding" (returning
+a value that was simply discarded) rather than actually running two separate
+statements; adjusted to avoid the ambiguous shape.
+
+7 new/updated tests in `test/test_compiler.ml`'s `typecheck` group (the
+pre-existing `let x = 5; x()` "known gap" pin test is now inverted to assert
+the error). Full suite green: compiler 611/611, eval 256/256, codegen
+502/502 (LLVM IR validity gate clean), stdlib (quick) 780/780;
+`scripts/check-docs.sh` clean.
+
+## Current State (as of 2026-07-28, static capture-free closures)
+
+Materializing a top-level function as a first-class value — `let f = some_fn`,
+passing it as a callback, storing it in a list/tuple — allocated a fresh
+24-byte closure object (`march_alloc(i64 24)`) at **every** materialization,
+every time it executed, when the closure captured nothing. That object was
+never released via normal RC (it never escapes to anything that would free
+it), so repeatedly materializing the same function value leaked one
+allocation per materialization — unbounded growth in a loop.
+
+Fixed in codegen (`lib/tir/llvm_ctx.ml`'s new `intern_static_closure` +
+`static_clos` memo, consumed at both closure-materialization sites in
+`lib/tir/llvm_emit.ml`): a capture-free closure's contents are entirely
+compile-time constants (fixed code pointer, no per-instance captured
+environment), so it can be emitted once as an immortal `internal global`
+(`@<fn>$static_clo`, LLVM type `{i64,i32,i32,ptr}`, refcount pre-set to
+`MARCH_RC_IMMORTAL` = 1099511627776) instead of allocated per materialization.
+Ordinary RC inc/dec still execute against the global at call sites (e.g.
+`march_incrc_local` against `@<fn>$static_clo`) — they are *never-freeing*,
+not no-ops, since the refcount starts and stays at the immortal sentinel.
+Memoized by function name, so repeated materializations of the same function
+share one global and distinct functions get distinct globals (no collision).
+
+**Measured** (4,000,000 materializations of a named function value, compiled
+`--opt 2`):
+
+| | obj_allocs | peak RSS | wall |
+|---|---:|---:|---:|
+| Before | 4,000,000 | 125.4 MB | 0.09s |
+| After | 0 | 2.9 MB | 0.01s |
+| Control (direct call, no fn value) | 0 | 2.9 MB | 0.01s |
+
+Materializing a function value is now as cheap as calling it directly, and
+the leak is gone. **Gated off** for the REPL/JIT (`ctx.repl` — each REPL
+evaluation compiles and links a fresh module, so a global baked into one
+JIT'd module can't be safely shared or safely discarded across the REPL's
+incremental-compilation lifecycle) and hot-reload boundary functions
+(`ctx.hr_config` + `Hot_reload.is_reloadable`). This exclusion is defensive
+rather than a fix for a demonstrated staleness bug: the fresh-alloc fallback
+bakes the identical `@<fn>$clo_wrap` pointer into the closure it allocates,
+and `clo_wrap_define` (`lib/tir/llvm_calls.ml:180-190`) already emits a
+hardcoded direct `call @<fn>` that bypasses the versioned HCR dispatch table
+regardless of which path materializes the value — a pre-existing,
+already-documented HCR gap this change does not touch. The exclusion exists
+to keep this change strictly non-regressive for HCR, not to claim it fixes
+that gap.
+
+**Does not cover capturing closures** — a closure that captures a free
+variable differs per instance and cannot be a module-lifetime static
+object, so it still leaks one allocation per materialization (confirmed via
+the same `MARCH_STRING_STATS=1` methodology: 4,000,000 iterations reports
+`obj_allocs 4000000`, peak RSS 131.6 MB, against 2.9 MB / 0 allocs for the
+capture-free control). Filed as a new open item in `specs/todos.md` — it
+needs a genuine ownership fix in `lib/tir/perceus.ml`/`lib/tir/borrow.ml`,
+not a codegen change, and is deliberately out of scope here.
+
+**Benchmark controls:** `bench/list_ops.march` (the HOF/closure-heavy
+benchmark) and `bench/binary_trees.march` were run before/after (built from
+this commit and from its parent `fbea848b`), both orders, to control for
+this machine's documented ~25% first-position warmup penalty. Neither
+benchmark materializes a named top-level function as a first-class value
+(both use inline lambdas passed directly as arguments), so neither exercises
+this optimization's fast path, and neither showed a measurable difference:
+`list_ops` ran ~0.27s cold / ~0.08s warm regardless of before/after or
+ordering; `binary_trees` ran ~0.34-0.55s with RSS flat at ~6.3MB regardless
+of before/after or ordering. No runtime speedup is claimed from this change
+beyond the allocation/RSS elimination measured directly above — the honest
+headline is the leak fix, not a general speedup.
+
+Also found and verified during this work, independent of the static-closure
+change and predating it (bisected to `fbea848b`, the parent commit):
+materializing a **zero-arity** named top-level function as a first-class
+value and then invoking it through that value SIGSEGVs when compiled
+(`--opt 2`, exit 139) while printing the correct value interpreted. Reproduced
+directly on 2026-07-28. Filed as a new open item in `specs/todos.md`; full
+bisection detail in
+`.superpowers/sdd/2026-07-28-static-capture-free-closures/task-3-report.md`.
+
+**Test counts:** `run_compiler` 605, `run_eval` 256, `run_codegen` 501 (all
+`-e`, all exit 0). `run_stdlib -q` 780 (exit 0). `run_stdlib -e` (full,
+including Slow) 825 tests, 1 pre-existing failure —
+`adversarial-regressions` #39 (`MARCH_SANITIZE` sanitized-binary timeout),
+confirmed host-level and unrelated to this change: a trivial
+`clang -fsanitize=address` C program (`int main(void){return 0;}`) also
+hung on this machine when checked directly, matching the machine-wide ASAN
+hazard already on record in this file (2026-07-18 entry) rather than a
+March regression. No `.ml` files changed in this pass (docs only); these
+counts confirm the suite is unaffected by the doc updates and match the
+counts already verified in Task 3.
+
+---
+
+## Current State (as of 2026-07-28, Yaml/Xml/Regex/Uri rewritten as byte-index scanners; Csv measured, left as-is)
+
+Continuation of the `Toml.parse` rewrite below: the same byte-index-scanner
+treatment applied to the remaining pure-March data-format parsers named in
+`specs/2026-07-26-string-performance-profile.md`.
+
+**`Yaml.parse`**: 5.56 allocs/byte before → **1.02 after** (5.4x), on a
+361-byte document, 2,000 iterations. Same char-list-and-append pattern as
+Json/Toml. Byte-value dispatch used `match` rather than `if`/`else-if`
+chains where practical, avoiding the chained-`if` end-counting pitfall
+that consumed most of the Toml rewrite's iteration count (see that section
+below). Verified against the existing `test_yaml.march` suite plus a 20-case
+round-trip corpus (block/flow structures, escapes, comments, document
+separators, multibyte UTF-8, malformed input).
+
+**`Xml.parse`**: 2.92 allocs/byte before → **0.10 after** (~29x), on a
+616-byte document, 2,000 iterations — the largest reduction of the batch.
+Entity-bearing text/attribute scanning uses `Json.scan_string`'s run-slicing
+scheme; comment/CDATA/PI bodies (no entities) collapse to one delimiter scan
+plus one slice. The output-side entity-escaping serializers had the same
+per-character bug and were fixed too. Verified against `test_xml.march` plus
+a 10-case round-trip corpus.
+
+**`Regex`**: a different shape from the others — a compiler (parser-shaped,
+same fix) plus a backtracking matcher (which re-sliced the haystack via
+`string_slice(s, pos, 1)` on every position probed, including every
+backtrack). Compile phase: 5.82 → **~0 allocs/pattern-byte**. Match phase
+(`find_all`+`replace_all`, 265-byte input): 1.215 → **0.064 allocs/input-byte**
+(~19x). Fix: `RALit`/`RAClass` now carry `Int` byte codes instead of 1-char
+`String`s. Verified against the existing 18-case `test_regex.march` suite
+plus a 62-case round-trip corpus (literals, classes, escapes, anchors,
+quantifiers, edge cases), interpreted and compiled.
+
+**`Uri.encode`/`decode`/`decode_query`**: 2.96 → **0.73 allocs/byte** (4.0x),
+on a 157-byte URL exercised through every public function, 5,000 iterations.
+Narrower in scope than the others — `Uri.parse`/`to_string`/`merge` already
+used segment-based splitting and needed no change; the cost was isolated to
+percent-encode/decode, including `decode_query`'s separate `string_replace_all`
+pre-pass for `+`-means-space, now folded into the same scan. Found (and left
+alone, pre-existing and out of scope) a real bug: `Uri.parse` mis-parses a
+scheme-less relative reference with no leading `/` as having an authority,
+which breaks `Uri.merge`'s dot-segment resolution over such references.
+
+**`Csv`**: measured, not touched. `read_all`/`each_row` are thin March
+wrappers around C-runtime builtins that already scan byte-at-a-time with a
+fixed stack buffer and one allocation per emitted field — 0.106 allocs/byte
+on a 284-byte document, already below where the other parsers land *after*
+their rewrites.
+
+All five changes verified together: combined `stdlib/{yaml,xml,regex,uri}.march`
+build cleanly against the already-landed `stdlib/toml.march` rewrite, and the
+full `dune build --root . @runtest` suite passes with only the pre-existing
+environmental `MARCH_SANITIZE` ASAN-timeout failure (confirmed unrelated by
+hanging an unrelated trivial `clang -fsanitize=address` binary identically).
+
+This closes the pure-March parser sweep from
+`specs/2026-07-26-string-performance-profile.md`: every format parser named
+there (`Json`, `Toml`, `Yaml`, `Xml`, `Regex`, `Uri`) is now either rewritten
+or confirmed already efficient (`Csv`).
 
 ## Current State (as of 2026-07-28, Toml.parse rewritten as a byte-index scanner)
 

@@ -1811,6 +1811,80 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_tuple_destructure_dce.out native/tuple_destructure_dce.expected)
  (action (diff native/tuple_destructure_dce.expected native_tuple_destructure_dce.out)))
 
+; ── Static capture-free closures: compiled/interpreted output parity for a ──
+; ── top-level named fn materialized as a first-class value inside a loop.  ──
+; ── This fixture diffs stdout ONLY — it does not measure allocations and   ──
+; ── would pass unchanged if the per-materialization leak came back.  The   ──
+; ── actual allocation-growth assertion lives in test/test_codegen.ml       ──
+; ── (`static closure does not scale with materializations`, which reads    ──
+; ── march_live_allocs and is pinned non-vacuous).                          ──
+(rule
+ (targets native_static_closure_no_leak native_static_closure_no_leak.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/static_closure_no_leak.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_static_closure_no_leak
+         native/static_closure_no_leak.march)
+    (with-stdout-to native_static_closure_no_leak.out
+         (system "./native_static_closure_no_leak"))))))
+
+(rule
+ (alias runtest)
+ (deps native_static_closure_no_leak.out native/static_closure_no_leak.expected)
+ (action (diff native/static_closure_no_leak.expected native_static_closure_no_leak.out)))
+
+; ── Static capture-free closures, function-value semantics: repeated        ──
+; ── materialization of one fn, two distinct fns (must not collide on one   ──
+; ── static global), nested HOF threading, a multi-arg fn value, and fn     ──
+; ── values stored in a list/tuple, all compared against interpreted output.──
+(rule
+ (targets native_static_closure_semantics native_static_closure_semantics.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/static_closure_semantics.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_static_closure_semantics
+         native/static_closure_semantics.march)
+    (with-stdout-to native_static_closure_semantics.out
+         (system "./native_static_closure_semantics"))))))
+
+(rule
+ (alias runtest)
+ (deps native_static_closure_semantics.out native/static_closure_semantics.expected)
+ (action (diff native/static_closure_semantics.expected native_static_closure_semantics.out)))
+
+; ── A closure/local-fn PARAMETER must shadow an imported fn of the same     ──
+; ── name.  `import Logger` aliases Logger.i to the bare `i`; lowering used  ──
+; ── to rewrite a binder named `i` to that global (the binder was never      ──
+; ── registered as a local), so Bytes.get(b, i) got a function address as    ──
+; ── its index.  depot's read_cstring has exactly this shape, so every       ──
+; ── compiled Postgres connect panicked.  Covers all three binder forms.     ──
+(rule
+ (targets native_closure_param_shadows_import native_closure_param_shadows_import.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/closure_param_shadows_import.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_closure_param_shadows_import
+         native/closure_param_shadows_import.march)
+    (with-stdout-to native_closure_param_shadows_import.out
+         (system "./native_closure_param_shadows_import"))))))
+
+(rule
+ (alias runtest)
+ (deps native_closure_param_shadows_import.out native/closure_param_shadows_import.expected)
+ (action (diff native/closure_param_shadows_import.expected native_closure_param_shadows_import.out)))
+
 ; ── Tuple projection forwarding, RC-relevant case: heap-typed (String)     ──
 ; ── tuple elements, including the same heap value duplicated into both    ──
 ; ── slots (let t = (s, s)), destructured and used independently. This is  ──

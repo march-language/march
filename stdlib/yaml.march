@@ -31,96 +31,188 @@ mod Yaml do
 
   type YamlError = YamlError(String, Int, Int)
 
-  -- ── Parser state: (chars, line, col) ─────────────────────────────────────
+  -- ── Scanning discipline ───────────────────────────────────────────────────
+  --
+  -- Byte-index cursor over the source string, following the pattern from the
+  -- Json (commit 556cf7e9) and Toml (commit 4b7c12e0) parser rewrites: a scan
+  -- step inspects bytes with `string_byte_at` (no allocation) and each token
+  -- is materialised with a single `string_slice` (or, for tokens split by
+  -- escapes, a handful of slices joined once via `string_join`). The previous
+  -- parser did `string_split(src, "")` up front and built every token via
+  -- `acc ++ c` -- one fresh heap string per character, and O(n^2) copying for
+  -- an n-byte token.
+  --
+  -- Structural YAML characters are all ASCII, and every byte of a multibyte
+  -- UTF-8 sequence is >= 0x80, so scanning raw bytes never mistakes a
+  -- multibyte character for a delimiter; multibyte text just passes through
+  -- inside a token slice untouched.
+  --
+  -- State is (src, byte_index, line, col). `line`/`col` are maintained for
+  -- error reporting; `col` counts BYTES rather than decoded characters (a
+  -- minor, deliberate divergence from the previous char-list parser, matching
+  -- the Json/Toml rewrites' precedent).
+  --
+  -- Byte dispatch below prefers `match byte do N -> ... _ -> ... end` (one
+  -- `end` no matter how many arms) over `if/else if` chains wherever the
+  -- branches are keyed off exact byte values, specifically to avoid
+  -- miscounting the `end`s an `if/else if` chain needs.
 
-  pfn make_state(src) do (string_split(src, ""), 1, 0) end
-  pfn state_line(st) do match st do (_, l, _) -> l end end
-  pfn state_col(st)  do match st do (_, _, c) -> c end end
-  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
+  -- ── Parser state ──────────────────────────────────────────────────────────
+
+  pfn make_state(src) do (src, 0, 1, 0) end
+
+  pfn st_line(st) do match st do (_, _, l, _) -> l end end
+  pfn st_col(st)  do match st do (_, _, _, c) -> c end end
+
+  pfn cur_byte(st) do
+    match st do (s, i, _, _) -> string_byte_at(s, i) end
+  end
 
   pfn advance(st) do
     match st do
-    (cs, line, col) ->
-      match cs do
-      Nil -> st
-      Cons(c, rest) ->
-        if c == "\n" do (rest, line + 1, 0)
-        else (rest, line, col + 1)
+    (s, i, line, col) ->
+      let b = string_byte_at(s, i)
+      if b < 0 do st
+      else
+        match b do
+        10 -> (s, i + 1, line + 1, 0)
+        _  -> (s, i + 1, line, col + 1)
         end
       end
     end
   end
 
-  pfn peek(st) do
-    match state_chars(st) do
-    Nil -> None
-    Cons(c, _) -> Some(c)
+  pfn at_end(st) do cur_byte(st) < 0 end
+
+  -- Recompute (line, col) after jumping the cursor to byte index `j`,
+  -- counting any newlines crossed. Used after a raw byte-index scan (which
+  -- never touches the state tuple) to rebuild a consistent state once.
+  pfn reposition_go(s, j, k, line, col) do
+    if k >= j do (s, j, line, col)
+    else
+      match string_byte_at(s, k) do
+      10 -> reposition_go(s, j, k + 1, line + 1, 0)
+      _  -> reposition_go(s, j, k + 1, line, col + 1)
+      end
     end
   end
 
-  pfn at_end(st) do
-    match state_chars(st) do
-    Nil -> true
-    _ -> false
+  pfn reposition(st, j) do
+    match st do (s, i0, line0, col0) -> reposition_go(s, j, i0, line0, col0) end
+  end
+
+  pfn err(st, msg) do
+    Err(YamlError(msg, st_line(st), st_col(st)))
+  end
+
+  pfn err_at(st, fail_i, msg) do
+    err(reposition(st, fail_i), msg)
+  end
+
+  -- Byte width of the UTF-8 character starting with lead byte `b`. Used only
+  -- to slice a whole character back out for an error message or for a
+  -- literal character following a backslash escape.
+  pfn utf8_width(b) do
+    if b < 128 do 1
+    else if b < 224 do 2
+    else if b < 240 do 3
+    else 4 end end end
+  end
+
+  pfn char1(s, i) do string_slice(s, i, utf8_width(string_byte_at(s, i))) end
+
+  pfn char1_at(st) do
+    match st do (s, i, _, _) -> char1(s, i) end
+  end
+
+  -- Match a literal `lit` at byte `i`. Returns the index just past it, or -1
+  -- on mismatch. `lit` itself is indexed with string_byte_at, so no list of
+  -- expected chars is ever built.
+  pfn match_lit_go(s, i, lit, j) do
+    let e = string_byte_at(lit, j)
+    if e < 0 do i
+    else
+      let c = string_byte_at(s, i)
+      if c == e do match_lit_go(s, i + 1, lit, j + 1)
+      else -1
+      end
     end
   end
 
-  -- ── Char helpers ──────────────────────────────────────────────────────────
+  pfn starts_with_lit(st, lit) do
+    match st do (s, i, _, _) -> match_lit_go(s, i, lit, 0) >= 0 end
+  end
 
-  pfn is_ws_nonnl(c) do c == " " || c == "\t" end
-  pfn is_ws(c) do c == " " || c == "\t" || c == "\n" || c == "\r" end
+  -- ── Segment-slicing helpers (shared by string scanners) ──────────────────
+
+  -- Push the run [start, i) onto `acc` (newest first) if it's non-empty.
+  pfn push_seg(s, start, i, acc) do
+    if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+  end
+
+  -- Materialise `acc` plus the trailing run [start, i): a single slice in the
+  -- common no-escapes case, one string_join if the token was split by escapes.
+  pfn finish_join(s, start, i, acc) do
+    match acc do
+    Nil -> string_slice(s, start, i - start)
+    _   -> string_join(List.reverse(push_seg(s, start, i, acc)), "")
+    end
+  end
 
   -- ── Whitespace skipping ───────────────────────────────────────────────────
 
   pfn skip_ws(st) do
-    match peek(st) do
-    Some(c) ->
-      if is_ws(c) do skip_ws(advance(st))
-      else st
-      end
-    _ -> st
+    match cur_byte(st) do
+    32 -> skip_ws(advance(st))
+    9  -> skip_ws(advance(st))
+    10 -> skip_ws(advance(st))
+    13 -> skip_ws(advance(st))
+    _  -> st
     end
   end
 
   pfn skip_inline_ws(st) do
-    match peek(st) do
-    Some(c) ->
-      if is_ws_nonnl(c) do skip_inline_ws(advance(st))
-      else st
-      end
-    _ -> st
+    match cur_byte(st) do
+    32 -> skip_inline_ws(advance(st))
+    9  -> skip_inline_ws(advance(st))
+    _  -> st
     end
   end
 
   pfn skip_to_eol(st) do
-    match peek(st) do
-    None -> st
-    Some("\n") -> advance(st)
-    _ -> skip_to_eol(advance(st))
+    let b = cur_byte(st)
+    if b < 0 do st
+    else
+      match b do
+      10 -> advance(st)
+      _  -> skip_to_eol(advance(st))
+      end
     end
   end
 
   pfn skip_blank_lines(st) do
     let st1 = skip_inline_ws(st)
-    match peek(st1) do
-    None -> st1
-    Some("\n") -> skip_blank_lines(advance(st1))
-    Some("#") -> skip_blank_lines(skip_to_eol(st1))
-    _ -> st1
+    let b = cur_byte(st1)
+    if b < 0 do st1
+    else
+      match b do
+      10 -> skip_blank_lines(advance(st1))
+      35 -> skip_blank_lines(skip_to_eol(st1))
+      _  -> st1
+      end
     end
   end
 
   pfn skip_comment_if_any(st) do
     let st1 = skip_inline_ws(st)
-    match peek(st1) do
-    Some("#") -> skip_to_eol(st1)
-    Some("\n") -> advance(st1)
-    None -> st1
-    _ -> st1
+    match cur_byte(st1) do
+    35 -> skip_to_eol(st1)
+    10 -> advance(st1)
+    _  -> st1
     end
   end
 
-  -- ── Advance past N chars ──────────────────────────────────────────────────
+  -- ── Advance past N bytes ──────────────────────────────────────────────────
 
   pfn advance_n(st, n) do
     if n <= 0 do st
@@ -128,67 +220,114 @@ mod Yaml do
     end
   end
 
-  pfn starts_with_chars(st, target) do
-    check_prefix(state_chars(st), string_split(target, ""))
+  -- ── Collect to end of line ────────────────────────────────────────────────
+
+  -- Scan forward to the first '\n', '#', or end of input. Returns (index,
+  -- stop_code): 0 = end of input, 1 = newline (not yet consumed), 2 = '#'
+  -- (not yet consumed).
+  pfn eol_scan_go(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do (i, 0)
+    else
+      match c do
+      10 -> (i, 1)
+      35 -> (i, 2)
+      _  -> eol_scan_go(s, i + 1)
+      end
+    end
   end
 
-  pfn check_prefix(cs, target) do
-    match target do
-    Nil -> true
-    Cons(t, rest) ->
-      match cs do
-      Nil -> false
-      Cons(c, crest) ->
-        if c == t do check_prefix(crest, rest)
-        else false
+  pfn collect_to_eol(st) do
+    match st do
+    (s, i, _, _) ->
+      match eol_scan_go(s, i) do
+      (j, code) ->
+        let tok = string_trim(string_slice(s, i, j - i))
+        let st_j = reposition(st, j)
+        match code do
+        0 -> (tok, st_j)
+        1 -> (tok, advance(st_j))
+        _ -> (tok, skip_to_eol(st_j))
         end
       end
     end
   end
 
-  -- ── Collect to end of line ────────────────────────────────────────────────
-
-  pfn collect_to_eol(st, acc) do
-    match peek(st) do
-    None -> (string_trim(acc), st)
-    Some("\n") -> (string_trim(acc), advance(st))
-    Some("#") -> (string_trim(acc), skip_to_eol(st))
-    Some(c) -> collect_to_eol(advance(st), acc ++ c)
-    end
-  end
-
   -- ── Quoted string parsers ─────────────────────────────────────────────────
 
-  pfn parse_dq_body(st, acc) do
-    match peek(st) do
-    None -> Err(YamlError("unterminated double-quoted string", state_line(st), state_col(st)))
-    Some("\"") -> Ok((acc, advance(st)))
-    Some("\\") ->
-      let st2 = advance(st)
-      match peek(st2) do
-      None -> Err(YamlError("unterminated escape", state_line(st2), state_col(st2)))
-      Some("n")  -> parse_dq_body(advance(st2), acc ++ "\n")
-      Some("t")  -> parse_dq_body(advance(st2), acc ++ "\t")
-      Some("r")  -> parse_dq_body(advance(st2), acc ++ "\r")
-      Some("\\") -> parse_dq_body(advance(st2), acc ++ "\\")
-      Some("\"") -> parse_dq_body(advance(st2), acc ++ "\"")
-      Some("'")  -> parse_dq_body(advance(st2), acc ++ "'")
-      Some(c)    -> parse_dq_body(advance(st2), acc ++ c)
-      end
-    Some(c) -> parse_dq_body(advance(st), acc ++ c)
+  -- Decode one escape sequence body (the byte(s) after the backslash), given
+  -- as its byte code `e` at position `epos`. Any code not recognised is kept
+  -- literally (matching the previous parser, which never rejected an unknown
+  -- escape in a YAML double-quoted string).
+  pfn unescape_dq(s, epos, e) do
+    match e do
+    110 -> "\n"
+    116 -> "\t"
+    114 -> "\r"
+    92  -> "\\"
+    34  -> "\""
+    39  -> "'"
+    _   -> char1(s, epos)
     end
   end
 
-  pfn parse_sq_body(st, acc) do
-    match peek(st) do
-    None -> Err(YamlError("unterminated single-quoted string", state_line(st), state_col(st)))
-    Some("'") ->
-      let st2 = advance(st)
-      match peek(st2) do
-      Some("'") -> parse_sq_body(advance(st2), acc ++ "'")
-      _ -> Ok((acc, st2))
+  -- Double-quoted scalar body. `i` is the first content byte (right after
+  -- the opening quote). Raw newlines are permitted, matching the previous
+  -- parser. Returns Ok((value, index past closing quote)) or
+  -- Err((message, failure_index)).
+  pfn scan_dq_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated double-quoted string", i))
+    else
+      match c do
+      34 -> Ok((finish_join(s, start, i, acc), i + 1))
+      92 ->
+        let e = string_byte_at(s, i + 1)
+        if e < 0 do Err(("unterminated escape", i + 1))
+        else
+          let esc = unescape_dq(s, i + 1, e)
+          let w = utf8_width(e)
+          scan_dq_go(s, i + 1 + w, i + 1 + w, Cons(esc, push_seg(s, start, i, acc)))
+        end
+      _ -> scan_dq_go(s, i + 1, start, acc)
       end
-    Some(c) -> parse_sq_body(advance(st), acc ++ c)
+    end
+  end
+
+  pfn scan_dq_body(st) do
+    match st do
+    (s, i, _, _) ->
+      match scan_dq_go(s, i, i, Nil) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
+      end
+    end
+  end
+
+  -- Single-quoted scalar body: `''` is an escaped literal `'`, anything else
+  -- passes through untouched (including raw newlines).
+  pfn scan_sq_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated single-quoted string", i))
+    else
+      match c do
+      39 ->
+        if string_byte_at(s, i + 1) == 39 do
+          scan_sq_go(s, i + 2, i + 2, Cons("'", push_seg(s, start, i, acc)))
+        else Ok((finish_join(s, start, i, acc), i + 1))
+        end
+      _ -> scan_sq_go(s, i + 1, start, acc)
+      end
+    end
+  end
+
+  pfn scan_sq_body(st) do
+    match st do
+    (s, i, _, _) ->
+      match scan_sq_go(s, i, i, Nil) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
+      end
     end
   end
 
@@ -227,86 +366,94 @@ mod Yaml do
 
   -- ── Flow parsers ──────────────────────────────────────────────────────────
 
-  pfn collect_flow_plain(st, acc) do
-    match peek(st) do
-    None -> (string_trim(acc), st)
-    Some(",") -> (string_trim(acc), st)
-    Some("}") -> (string_trim(acc), st)
-    Some("]") -> (string_trim(acc), st)
-    Some(":") -> (string_trim(acc), st)
-    Some(c) -> collect_flow_plain(advance(st), acc ++ c)
+  pfn flow_plain_scan_go(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do i
+    else
+      match c do
+      44  -> i
+      125 -> i
+      93  -> i
+      58  -> i
+      _   -> flow_plain_scan_go(s, i + 1)
+      end
+    end
+  end
+
+  pfn collect_flow_plain(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = flow_plain_scan_go(s, i)
+      (string_trim(string_slice(s, i, j - i)), reposition(st, j))
     end
   end
 
   pfn parse_flow_key(st) do
-    match peek(st) do
-    None -> Err(YamlError("expected flow key", state_line(st), state_col(st)))
-    Some("\"") ->
-      match parse_dq_body(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
-      end
-    Some("'") ->
-      match parse_sq_body(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
-      end
-    _ ->
-      match collect_flow_plain(st, "") do
-      (s, st2) -> Ok((s, st2))
+    let b = cur_byte(st)
+    if b < 0 do err(st, "expected flow key")
+    else
+      match b do
+      34 -> scan_dq_body(advance(st))
+      39 -> scan_sq_body(advance(st))
+      _  -> Ok(collect_flow_plain(st))
       end
     end
   end
 
   pfn parse_flow_value(st) do
-    match peek(st) do
-    None -> Err(YamlError("expected flow value", state_line(st), state_col(st)))
-    Some("[") ->
-      match parse_flow_seq(advance(st), []) do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (xs, st2) -> Ok((YSeq(xs), st2)) end
-      end
-    Some("{") ->
-      match parse_flow_map(advance(st), []) do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (pairs, st2) -> Ok((YMap(pairs), st2)) end
-      end
-    Some("\"") ->
-      match parse_dq_body(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((YStr(s), st2)) end
-      end
-    Some("'") ->
-      match parse_sq_body(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((YStr(s), st2)) end
-      end
-    _ ->
-      match collect_flow_plain(st, "") do
-      (s, st2) -> Ok((coerce_scalar(s), st2))
+    let b = cur_byte(st)
+    if b < 0 do err(st, "expected flow value")
+    else
+      match b do
+      91 ->
+        match parse_flow_seq(advance(st), []) do
+        Err(e) -> Err(e)
+        Ok((xs, st2)) -> Ok((YSeq(xs), st2))
+        end
+      123 ->
+        match parse_flow_map(advance(st), []) do
+        Err(e) -> Err(e)
+        Ok((pairs, st2)) -> Ok((YMap(pairs), st2))
+        end
+      34 ->
+        match scan_dq_body(advance(st)) do
+        Err(e) -> Err(e)
+        Ok((s, st2)) -> Ok((YStr(s), st2))
+        end
+      39 ->
+        match scan_sq_body(advance(st)) do
+        Err(e) -> Err(e)
+        Ok((s, st2)) -> Ok((YStr(s), st2))
+        end
+      _ ->
+        match collect_flow_plain(st) do
+        (s, st2) -> Ok((coerce_scalar(s), st2))
+        end
       end
     end
   end
 
   pfn parse_flow_seq(st, acc) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None -> Err(YamlError("unterminated flow sequence", state_line(st1), state_col(st1)))
-    Some("]") -> Ok((List.reverse(acc), advance(st1)))
-    Some(",") -> parse_flow_seq(advance(st1), acc)
-    _ ->
-      match parse_flow_value(st1) do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (v, st2) ->
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unterminated flow sequence")
+    else
+      match b do
+      93 -> Ok((List.reverse(acc), advance(st1)))
+      44 -> parse_flow_seq(advance(st1), acc)
+      _ ->
+        match parse_flow_value(st1) do
+        Err(e) -> Err(e)
+        Ok((v, st2)) ->
           let st3 = skip_inline_ws(st2)
-          match peek(st3) do
-          Some(",") -> parse_flow_seq(advance(st3), Cons(v, acc))
-          Some("]") -> Ok((List.reverse(Cons(v, acc)), advance(st3)))
-          Some(c) ->
-            Err(YamlError("expected ',' or ']', got '" ++ c ++ "'", state_line(st3), state_col(st3)))
-          None -> Err(YamlError("unterminated flow sequence", state_line(st3), state_col(st3)))
+          let b2 = cur_byte(st3)
+          if b2 < 0 do err(st3, "unterminated flow sequence")
+          else
+            match b2 do
+            44 -> parse_flow_seq(advance(st3), Cons(v, acc))
+            93 -> Ok((List.reverse(Cons(v, acc)), advance(st3)))
+            _  -> err(st3, "expected ',' or ']', got '" ++ char1_at(st3) ++ "'")
+            end
           end
         end
       end
@@ -315,38 +462,39 @@ mod Yaml do
 
   pfn parse_flow_map(st, acc) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None -> Err(YamlError("unterminated flow mapping", state_line(st1), state_col(st1)))
-    Some("}") -> Ok((List.reverse(acc), advance(st1)))
-    Some(",") -> parse_flow_map(advance(st1), acc)
-    _ ->
-      match parse_flow_key(st1) do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (key, st2) ->
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unterminated flow mapping")
+    else
+      match b do
+      125 -> Ok((List.reverse(acc), advance(st1)))
+      44 -> parse_flow_map(advance(st1), acc)
+      _ ->
+        match parse_flow_key(st1) do
+        Err(e) -> Err(e)
+        Ok((key, st2)) ->
           let st3 = skip_inline_ws(st2)
-          match peek(st3) do
-          Some(":") ->
-            let st4 = skip_inline_ws(advance(st3))
-            match parse_flow_value(st4) do
-            Err(e) -> Err(e)
-            Ok(p2) ->
-              match p2 do
-              (v, st5) ->
+          let b3 = cur_byte(st3)
+          if b3 < 0 do err(st3, "expected ':' after key")
+          else
+            match b3 do
+            58 ->
+              let st4 = skip_inline_ws(advance(st3))
+              match parse_flow_value(st4) do
+              Err(e) -> Err(e)
+              Ok((v, st5)) ->
                 let st6 = skip_inline_ws(st5)
-                match peek(st6) do
-                Some(",") -> parse_flow_map(advance(st6), Cons((key, v), acc))
-                Some("}") -> Ok((List.reverse(Cons((key, v), acc)), advance(st6)))
-                Some(c) ->
-                  Err(YamlError("expected ',' or '}', got '" ++ c ++ "'", state_line(st6), state_col(st6)))
-                None -> Err(YamlError("unterminated flow mapping", state_line(st6), state_col(st6)))
+                let b6 = cur_byte(st6)
+                if b6 < 0 do err(st6, "unterminated flow mapping")
+                else
+                  match b6 do
+                  44  -> parse_flow_map(advance(st6), Cons((key, v), acc))
+                  125 -> Ok((List.reverse(Cons((key, v), acc)), advance(st6)))
+                  _   -> err(st6, "expected ',' or '}', got '" ++ char1_at(st6) ++ "'")
+                  end
                 end
               end
+            _ -> err(st3, "expected ':' after key, got '" ++ char1_at(st3) ++ "'")
             end
-          Some(c) ->
-            Err(YamlError("expected ':' after key, got '" ++ c ++ "'", state_line(st3), state_col(st3)))
-          None -> Err(YamlError("expected ':' after key", state_line(st3), state_col(st3)))
           end
         end
       end
@@ -357,96 +505,87 @@ mod Yaml do
 
   pfn parse_inline_value(st) do
     let st1 = skip_inline_ws(st)
-    match peek(st1) do
-    None -> Ok((YNull, st1))
-    Some("\n") -> Ok((YNull, advance(st1)))
-    Some("[") ->
-      match parse_flow_seq(advance(st1), []) do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (xs, st2) ->
-          let st3 = skip_comment_if_any(st2)
-          Ok((YSeq(xs), st3))
+    let b = cur_byte(st1)
+    if b < 0 do Ok((YNull, st1))
+    else
+      match b do
+      10 -> Ok((YNull, advance(st1)))
+      91 ->
+        match parse_flow_seq(advance(st1), []) do
+        Err(e) -> Err(e)
+        Ok((xs, st2)) -> Ok((YSeq(xs), skip_comment_if_any(st2)))
         end
-      end
-    Some("{") ->
-      match parse_flow_map(advance(st1), []) do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (pairs, st2) ->
-          let st3 = skip_comment_if_any(st2)
-          Ok((YMap(pairs), st3))
+      123 ->
+        match parse_flow_map(advance(st1), []) do
+        Err(e) -> Err(e)
+        Ok((pairs, st2)) -> Ok((YMap(pairs), skip_comment_if_any(st2)))
         end
-      end
-    Some("\"") ->
-      match parse_dq_body(advance(st1), "") do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (s, st2) ->
-          let st3 = skip_comment_if_any(st2)
-          Ok((YStr(s), st3))
+      34 ->
+        match scan_dq_body(advance(st1)) do
+        Err(e) -> Err(e)
+        Ok((s, st2)) -> Ok((YStr(s), skip_comment_if_any(st2)))
         end
-      end
-    Some("'") ->
-      match parse_sq_body(advance(st1), "") do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (s, st2) ->
-          let st3 = skip_comment_if_any(st2)
-          Ok((YStr(s), st3))
+      39 ->
+        match scan_sq_body(advance(st1)) do
+        Err(e) -> Err(e)
+        Ok((s, st2)) -> Ok((YStr(s), skip_comment_if_any(st2)))
         end
-      end
-    _ ->
-      match collect_to_eol(st1, "") do
-      (s, st2) -> Ok((coerce_scalar(s), st2))
+      _ ->
+        match collect_to_eol(st1) do
+        (s, st2) -> Ok((coerce_scalar(s), st2))
+        end
       end
     end
   end
 
   -- ── Block key collection ──────────────────────────────────────────────────
 
-  pfn collect_key(st, acc) do
-    match peek(st) do
-    None -> (string_trim(acc), st)
-    Some(":") ->
-      match state_chars(st) do
-      Cons(_, Cons(next, _)) ->
-        if next == " " || next == "\t" || next == "\n" || next == "\r" do
-          (string_trim(acc), st)
-        else collect_key(advance(st), acc ++ ":")
+  -- Scan a bare block-mapping key: stops at a ':' that is followed by
+  -- whitespace/newline/end-of-input (a bare ':' not so followed is just part
+  -- of the key text), or at a raw '\n' or '#'.
+  pfn collect_key_go(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do i
+    else
+      match c do
+      58 ->
+        let n = string_byte_at(s, i + 1)
+        if n == 32 || n == 9 || n == 10 || n == 13 || n < 0 do i
+        else collect_key_go(s, i + 1)
         end
-      Cons(_, Nil) -> (string_trim(acc), st)
-      _ -> (string_trim(acc), st)
+      10 -> i
+      35 -> i
+      _  -> collect_key_go(s, i + 1)
       end
-    Some("\n") -> (string_trim(acc), st)
-    Some("#") -> (string_trim(acc), st)
-    Some(c) -> collect_key(advance(st), acc ++ c)
+    end
+  end
+
+  pfn collect_key(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = collect_key_go(s, i)
+      (string_trim(string_slice(s, i, j - i)), reposition(st, j))
     end
   end
 
   -- ── Peek ahead for "key: " pattern ───────────────────────────────────────
 
-  pfn peek_key_colon(chars) do
-    match chars do
-    Nil -> false
-    Cons(c, rest) ->
+  pfn peek_key_colon_go(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do false
+    else
       match c do
-      "\n" -> false
-      ":" ->
-        match rest do
-        Cons(" ", _) -> true
-        Cons("\t", _) -> true
-        Cons("\n", _) -> true
-        Nil -> true
-        _ -> false
-        end
-      _ -> peek_key_colon(rest)
+      10 -> false
+      58 ->
+        let n = string_byte_at(s, i + 1)
+        n == 32 || n == 9 || n == 10 || n < 0
+      _ -> peek_key_colon_go(s, i + 1)
       end
     end
+  end
+
+  pfn peek_key_colon(st) do
+    match st do (s, i, _, _) -> peek_key_colon_go(s, i) end
   end
 
   -- ── Block map: parse "key: value" pairs at a given indent column ──────────
@@ -454,50 +593,50 @@ mod Yaml do
 
   pfn parse_block_map(st, map_col, acc) do
     let st1 = skip_blank_lines(st)
-    let col1 = state_col(st1)
+    let col1 = st_col(st1)
     if at_end(st1) || col1 != map_col do
       Ok((YMap(List.reverse(acc)), st1))
     else
-      match peek(st1) do
-      None -> Ok((YMap(List.reverse(acc)), st1))
-      Some("#") ->
-        parse_block_map(skip_to_eol(st1), map_col, acc)
-      Some("-") ->
-        -- Sequence item at same indent: end of mapping
-        Ok((YMap(List.reverse(acc)), st1))
-      _ ->
-        match collect_key(st1, "") do
-        (key, st2) ->
-          if key == "" do
-            parse_block_map(skip_to_eol(st2), map_col, acc)
-          else
-            -- Consume ':'
-            let st3 = advance(st2)
-            let st4 = skip_inline_ws(st3)
-            match peek(st4) do
-            Some("\n") ->
-              -- Value on next line(s)
-              let st5 = skip_blank_lines(advance(st4))
-              let col5 = state_col(st5)
-              if col5 > map_col && not(at_end(st5)) do
-                match parse_block(st5, col5) do
-                Err(e) -> Err(e)
-                Ok(p) ->
-                  match p do
-                  (v, st6) -> parse_block_map(st6, map_col, Cons((key, v), acc))
-                  end
-                end
+      let b = cur_byte(st1)
+      if b < 0 do Ok((YMap(List.reverse(acc)), st1))
+      else
+        match b do
+        35 ->
+          parse_block_map(skip_to_eol(st1), map_col, acc)
+        45 ->
+          -- Sequence item at same indent: end of mapping
+          Ok((YMap(List.reverse(acc)), st1))
+        _ ->
+          match collect_key(st1) do
+          (key, st2) ->
+            if key == "" do
+              parse_block_map(skip_to_eol(st2), map_col, acc)
+            else
+              -- Consume ':'
+              let st3 = advance(st2)
+              let st4 = skip_inline_ws(st3)
+              let b4 = cur_byte(st4)
+              if b4 < 0 do
+                parse_block_map(st4, map_col, Cons((key, YNull), acc))
               else
-                parse_block_map(st5, map_col, Cons((key, YNull), acc))
-              end
-            None ->
-              parse_block_map(st4, map_col, Cons((key, YNull), acc))
-            _ ->
-              match parse_inline_value(st4) do
-              Err(e) -> Err(e)
-              Ok(p) ->
-                match p do
-                (v, st5) -> parse_block_map(st5, map_col, Cons((key, v), acc))
+                match b4 do
+                10 ->
+                  -- Value on next line(s)
+                  let st5 = skip_blank_lines(advance(st4))
+                  let col5 = st_col(st5)
+                  if col5 > map_col && not(at_end(st5)) do
+                    match parse_block(st5, col5) do
+                    Err(e) -> Err(e)
+                    Ok((v, st6)) -> parse_block_map(st6, map_col, Cons((key, v), acc))
+                    end
+                  else
+                    parse_block_map(st5, map_col, Cons((key, YNull), acc))
+                  end
+                _ ->
+                  match parse_inline_value(st4) do
+                  Err(e) -> Err(e)
+                  Ok((v, st5)) -> parse_block_map(st5, map_col, Cons((key, v), acc))
+                  end
                 end
               end
             end
@@ -511,66 +650,62 @@ mod Yaml do
 
   pfn parse_block_seq(st, seq_col, acc) do
     let st1 = skip_blank_lines(st)
-    let col1 = state_col(st1)
+    let col1 = st_col(st1)
     if at_end(st1) || col1 != seq_col do
       Ok((YSeq(List.reverse(acc)), st1))
     else
-      match peek(st1) do
-      None -> Ok((YSeq(List.reverse(acc)), st1))
-      Some("#") -> parse_block_seq(skip_to_eol(st1), seq_col, acc)
-      Some("-") ->
-        match state_chars(st1) do
-        Cons(_, Cons(next, _)) ->
-          if next == " " || next == "\t" || next == "\n" do
-            let st2 = skip_inline_ws(advance(st1))
-            match peek(st2) do
-            Some("\n") ->
-              let st3 = skip_blank_lines(advance(st2))
-              let col3 = state_col(st3)
-              if col3 > seq_col && not(at_end(st3)) do
-                match parse_block(st3, col3) do
-                Err(e) -> Err(e)
-                Ok(p) ->
-                  match p do
-                  (v, st4) -> parse_block_seq(st4, seq_col, Cons(v, acc))
-                  end
-                end
+      let b = cur_byte(st1)
+      if b < 0 do Ok((YSeq(List.reverse(acc)), st1))
+      else
+        match b do
+        35 -> parse_block_seq(skip_to_eol(st1), seq_col, acc)
+        45 ->
+          match st1 do
+          (s1, i1, _, _) ->
+            let next = string_byte_at(s1, i1 + 1)
+            if next == 32 || next == 9 || next == 10 do
+              let st2 = skip_inline_ws(advance(st1))
+              let b2 = cur_byte(st2)
+              if b2 < 0 do
+                parse_block_seq(st2, seq_col, Cons(YNull, acc))
               else
-                parse_block_seq(st3, seq_col, Cons(YNull, acc))
-              end
-            None ->
-              parse_block_seq(st2, seq_col, Cons(YNull, acc))
-            _ ->
-              -- Inline item: might be a mapping
-              let item_col = state_col(st2)
-              if peek_key_colon(state_chars(st2)) do
-                match parse_block_map(st2, item_col, []) do
-                Err(e) -> Err(e)
-                Ok(p) ->
-                  match p do
-                  (v, st3) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                match b2 do
+                10 ->
+                  let st3 = skip_blank_lines(advance(st2))
+                  let col3 = st_col(st3)
+                  if col3 > seq_col && not(at_end(st3)) do
+                    match parse_block(st3, col3) do
+                    Err(e) -> Err(e)
+                    Ok((v, st4)) -> parse_block_seq(st4, seq_col, Cons(v, acc))
+                    end
+                  else
+                    parse_block_seq(st3, seq_col, Cons(YNull, acc))
                   end
-                end
-              else
-                match parse_inline_value(st2) do
-                Err(e) -> Err(e)
-                Ok(p) ->
-                  match p do
-                  (v, st3) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                _ ->
+                  -- Inline item: might be a mapping
+                  let item_col = st_col(st2)
+                  if peek_key_colon(st2) do
+                    match parse_block_map(st2, item_col, []) do
+                    Err(e) -> Err(e)
+                    Ok((v, st3)) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                    end
+                  else
+                    match parse_inline_value(st2) do
+                    Err(e) -> Err(e)
+                    Ok((v, st3)) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                    end
                   end
                 end
               end
+            else
+              -- not "- ": end of sequence
+              Ok((YSeq(List.reverse(acc)), st1))
             end
-          else
-            -- not "- ": end of sequence
-            Ok((YSeq(List.reverse(acc)), st1))
           end
         _ ->
+          -- Not a sequence entry: end of sequence
           Ok((YSeq(List.reverse(acc)), st1))
         end
-      _ ->
-        -- Not a sequence entry: end of sequence
-        Ok((YSeq(List.reverse(acc)), st1))
       end
     end
   end
@@ -579,64 +714,49 @@ mod Yaml do
 
   pfn parse_block(st, min_col) do
     let st1 = skip_blank_lines(st)
-    match peek(st1) do
-    None -> Err(YamlError("unexpected end of input", state_line(st1), state_col(st1)))
-    Some(c) ->
-      match c do
-      "[" ->
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unexpected end of input")
+    else
+      match b do
+      91 ->
         match parse_flow_seq(advance(st1), []) do
         Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (xs, st2) -> Ok((YSeq(xs), skip_comment_if_any(st2)))
-          end
+        Ok((xs, st2)) -> Ok((YSeq(xs), skip_comment_if_any(st2)))
         end
-      "{" ->
+      123 ->
         match parse_flow_map(advance(st1), []) do
         Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (pairs, st2) -> Ok((YMap(pairs), skip_comment_if_any(st2)))
-          end
+        Ok((pairs, st2)) -> Ok((YMap(pairs), skip_comment_if_any(st2)))
         end
-      "\"" ->
-        match parse_dq_body(advance(st1), "") do
+      34 ->
+        match scan_dq_body(advance(st1)) do
         Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (s, st2) -> Ok((YStr(s), skip_comment_if_any(st2)))
-          end
+        Ok((s, st2)) -> Ok((YStr(s), skip_comment_if_any(st2)))
         end
-      "'" ->
-        match parse_sq_body(advance(st1), "") do
+      39 ->
+        match scan_sq_body(advance(st1)) do
         Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (s, st2) -> Ok((YStr(s), skip_comment_if_any(st2)))
-          end
+        Ok((s, st2)) -> Ok((YStr(s), skip_comment_if_any(st2)))
         end
-      "-" ->
+      45 ->
         -- Could be block sequence "- " or negative number
-        match state_chars(st1) do
-        Cons(_, Cons(next, _)) ->
-          if next == " " || next == "\t" || next == "\n" do
-            parse_block_seq(st1, state_col(st1), [])
+        match st1 do
+        (s1, i1, _, _) ->
+          let next = string_byte_at(s1, i1 + 1)
+          if next == 32 || next == 9 || next == 10 do
+            parse_block_seq(st1, st_col(st1), [])
           else
-            match collect_to_eol(st1, "") do
+            match collect_to_eol(st1) do
             (s, st2) -> Ok((coerce_scalar(s), st2))
             end
-          end
-        _ ->
-          match collect_to_eol(st1, "") do
-          (s, st2) -> Ok((coerce_scalar(s), st2))
           end
         end
       _ ->
         -- Plain scalar or block mapping
-        if peek_key_colon(state_chars(st1)) do
-          parse_block_map(st1, state_col(st1), [])
+        if peek_key_colon(st1) do
+          parse_block_map(st1, st_col(st1), [])
         else
-          match collect_to_eol(st1, "") do
+          match collect_to_eol(st1) do
           (s, st2) -> Ok((coerce_scalar(s), st2))
           end
         end
@@ -657,20 +777,16 @@ mod Yaml do
     let st1 = skip_ws(st)
     -- Skip optional document separator ---
     let st2 =
-      if starts_with_chars(st1, "---") do
+      if starts_with_lit(st1, "---") do
         skip_blank_lines(advance_n(st1, 3))
       else st1
       end
     let st3 = skip_blank_lines(st2)
-    match peek(st3) do
-    None -> Err(YamlError("empty document", 1, 0))
-    _ ->
-      match parse_block(st3, state_col(st3)) do
+    if at_end(st3) do Err(YamlError("empty document", 1, 0))
+    else
+      match parse_block(st3, st_col(st3)) do
       Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (v, _) -> Ok(v)
-        end
+      Ok((v, _)) -> Ok(v)
       end
     end
   end

@@ -104,6 +104,47 @@ git log is authoritative for exact commits.
   did. A path condition that genuinely proves the divisor non-zero (a `when
   d != 0` guard) still discharges the obligation. Only `cap no_panic` modules
   are affected; a refinement the checker *can* reflect is unchanged.
+- **Calling a variable that holds a zero-argument function value (`let zf =
+  answer; zf()`) is now a clear `--check` error instead of a runtime crash.**
+  Assigning a top-level (or local) zero-arg function to a plain variable and
+  then calling that variable used to typecheck silently and then crash with
+  a segfault when compiled. It now reports `` `zf` is not a function — it
+  has type `Int`. Remove the `()` and use `zf` directly.`` at compile time.
+  The same fix also catches the more general `let x = 5; x()` case.
+- **A closure or local function's parameter now shadows an imported function
+  of the same name.** `import Logger` makes stdlib's `Logger.i` available as
+  the bare name `i`; a nested `fn go(i, acc) do ... end` then compiled every
+  use of its own `i` to that function's address instead of the parameter.
+  Any binder whose name collided with an imported function was affected, so
+  a program could silently pass a function where it meant a value — for
+  example `Bytes.get(b, i)` receiving a code address as its index. This hit
+  depot's Postgres wire decoder, whose `read_cstring` has exactly this
+  shape, making every compiled database connection fail with
+  `Bytes.get: index out of bounds`. Native backend only; the interpreter
+  always resolved these correctly.
+
+- **A program that repeatedly passes a named function as a value no longer
+  grows memory without bound.** Materializing a top-level function as a
+  first-class value (assigning it to a variable, passing it as a callback,
+  storing it in a list or tuple) allocated a new heap object every time,
+  even when the closure captured nothing — a real leak in any loop that
+  repeatedly took a function value. Such closures are now backed by a
+  single shared object per function instead of a fresh allocation each
+  time. Measured on a 4,000,000-iteration loop: allocations for the
+  materialization step went from 4,000,000 to 0 and peak memory from
+  125.4 MB to 2.9 MB, with identical program output before and after.
+  Closures that capture a variable (`fn x -> x * k` where `k` comes from
+  the enclosing scope) are unaffected by this fix and still leak — tracked
+  as a separate, open issue in `specs/todos.md`.
+
+- **The REPL/JIT's precompiled stdlib prelude no longer emits the static
+  closure globals above.** That optimization is intentionally gated off in
+  REPL/JIT sessions (a REPL evaluation compiles and links a fresh module
+  each time, so a global baked into one JIT'd fragment can't be safely
+  shared or discarded across the session), but the JIT's stdlib-prelude
+  precompilation path was missing the flag that opts a compiled fragment
+  into that exclusion, so a handful of stdlib functions used as values
+  (e.g. `Cluster.parse_addr`) picked up a static closure global anyway.
 
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process
   locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
@@ -143,6 +184,19 @@ git log is authoritative for exact commits.
   0.37** (2,506,057 → 250,044 string allocations over 2,000 parses). Parsing
   is unchanged semantically; `TomlError` column numbers now count bytes
   rather than decoded characters, matching `Json.parse`'s precedent.
+
+- **`Yaml.parse` allocates ~5.4x fewer strings** (5.56 → 1.02 allocs/byte,
+  361-byte document, 2,000 iterations), **`Xml.parse` ~29x fewer** (2.92 →
+  0.10 allocs/byte, 616-byte document), and **`Regex` compile/match ~19x
+  fewer** (compile: 5.82 → ~0 allocs/pattern-byte; match: 1.215 → 0.064
+  allocs/input-byte) — the same byte-index-scanner rewrite as `Json.parse`/
+  `Toml.parse`, applied to the remaining pure-March parsers. `Uri.encode`/
+  `decode`/`decode_query` (the only parts of `Uri` that had the per-byte
+  pattern — `parse`/`to_string`/`merge` were already segment-based) go 4.0x
+  fewer (2.96 → 0.73 allocs/byte). `Csv.read_all`/`each_row` were measured
+  and left unchanged — already byte-at-a-time in the C runtime with no
+  per-character March-level accumulation (0.106 allocs/byte). Parsing is
+  unchanged semantically for all of these.
 
 - **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
   parser used to begin with `string_split(src, "")`, exploding the document

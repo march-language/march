@@ -99,6 +99,10 @@ type ctx = {
   local_names : (string, int) Hashtbl.t;
   (* Tracks which closure wrappers have been generated for top-level fns *)
   emitted_wraps : (string, unit) Hashtbl.t;
+  (* Memo: mangled fn name -> emitted static-closure global symbol.
+     One immortal closure object per top-level function used as a value,
+     replacing a fresh march_alloc(24) at every materialization site. *)
+  static_clos : (string, string) Hashtbl.t;
   (* Buffer for extra wrapper functions emitted at the end *)
   extra_fns : Buffer.t;
   (* Tracks which ADT structural equality functions have been generated.
@@ -250,6 +254,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   poly_ctors  = Hashtbl.create 64;
   type_params = Hashtbl.create 16;
   emitted_wraps = Hashtbl.create 8;
+  static_clos = Hashtbl.create 16;
   extra_fns = Buffer.create 1024;
   emitted_eq_fns = Hashtbl.create 16;
   emitted_dispatch_fns = Hashtbl.create 8;
@@ -631,6 +636,36 @@ let intern_string_site ctx s =
   Buffer.add_string ctx.preamble
     (Printf.sprintf "%s = internal global ptr null\n" cell);
   (bytes, cell)
+
+(* One immortal, statically-initialised closure object per top-level function
+   used as a first-class value.  The object march_alloc would build here is
+   entirely compile-time constant — march_hdr {rc; tag; pad} (16 bytes, see
+   runtime/march_runtime.h) followed by the apply-fn pointer at offset 16,
+   with tag = pad = 0 — so it needs no runtime construction at all: no
+   fill-once helper and no atomic CAS, unlike march_string_lit_static whose
+   bytes only exist at runtime.
+
+   [rc] is MARCH_RC_IMMORTAL (1 << 40, runtime/march_runtime.h:304), which by
+   construction (a) keeps march_decrc/_local's free-on-zero path unreachable
+   and (b) makes the FBIP `rc == 1` uniqueness test always false, so no RC
+   path needs a new immortality guard; march_free, which bypasses the count,
+   already carries one (march_runtime.c:392).
+
+   Emitted as `internal global`, NOT `constant`: a function value still has
+   RC ops emitted against it (needs_rc (TFn _) = true), and a constant may be
+   placed in read-only memory where a stray increment would fault.  Same
+   reasoning, same choice as the string-literal cell. *)
+let intern_static_closure ctx fn_name wrap_name =
+  match Hashtbl.find_opt ctx.static_clos fn_name with
+  | Some g -> g
+  | None ->
+    let g = Printf.sprintf "@%s$static_clo" fn_name in
+    Buffer.add_string ctx.preamble
+      (Printf.sprintf
+         "%s = internal global { i64, i32, i32, ptr } { i64 1099511627776, i32 0, i32 0, ptr @%s }\n"
+         g wrap_name);
+    Hashtbl.replace ctx.static_clos fn_name g;
+    g
 
 (* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
    Every site that COMMITS to a value representation (EAlloc, EReuse,
