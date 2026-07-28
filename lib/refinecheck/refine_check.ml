@@ -4220,7 +4220,7 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
 
    `alias Foo as List` and `use Some.List` can also make the spelling denote
    someone else's function, so either withdraws the alias too. *)
-let is_stdlib_list_file (f : string) : bool = List.mem f !stdlib_source_files
+let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
 
 let list_length_defs_ok (decls : A.decl list) : bool =
   let foreign = ref false in
@@ -4229,7 +4229,7 @@ let list_length_defs_ok (decls : A.decl list) : bool =
     List.iter
       (function
         | A.DFn (fd, sp) when in_list && fd.A.fn_name.A.txt = "length" ->
-          if not (is_stdlib_list_file sp.A.file) then foreign := true
+          if not (is_stdlib_source_file sp.A.file) then foreign := true
         | A.DMod (name, _, ds, _) -> go (name.A.txt = "List") ds
         | A.DAlias (a, _) when a.A.alias_name.A.txt = "List" -> rebound := true
         | A.DUse (u, _) ->
@@ -4253,8 +4253,15 @@ let list_length_defs_ok (decls : A.decl list) : bool =
    compiled artifact, so it is not part of the CAS cache key. *)
 (* [stdlib_files]: the source files the caller loaded as the standard library.
    Only used to decide whether a `List.length` in scope is the real one — see
-   [stdlib_source_files].  Omitting it is the conservative choice (no file is
-   the stdlib's), never an unsound one. *)
+   [stdlib_source_files].
+
+   Omitting it does NOT disable the `List.length` alias.  It makes the answer
+   "no file is the stdlib's", which matters only when a competing
+   `List.length` definition is actually in scope: with none present — the case
+   for every string-parsed test fixture — [list_length_defs_ok] finds nothing
+   foreign and the alias stays enabled.  So the default is safe in the sense
+   that no non-stdlib definition can ever be mistaken for the stdlib's, not in
+   the sense that it turns the feature off. *)
 let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     ?(stdlib_files : string list = []) (errctx : Err.ctx)
     (m : A.module_) : unit =

@@ -438,9 +438,20 @@ let load_stdlib ?(for_js=false) () =
     decls, so a vendored or forked `List` is correctly not in this set. *)
 let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
   let seen = Hashtbl.create 64 in
+  (* Both no-file spellings are excluded. `""` is what a string-parsed fixture
+     carries; `"<none>"` is [Ast.dummy_span]'s, and [load_stdlib_file] gives
+     every stdlib module's wrapping [DMod] a dummy span — so without this the
+     sentinel would be a member of the identity set on every production run,
+     and any `fn length` inside a `mod List` that happened to carry a dummy
+     span would be certified as the standard library's. No such declaration is
+     reachable today (desugar's synthesized `DFn`s all reuse their source
+     declaration's real span), but admitting the sentinel is precisely the
+     class of wrong fact this gate exists to prevent, so the route is closed
+     rather than argued about. *)
   let add (sp : March_ast.Ast.span) =
     let f = sp.March_ast.Ast.file in
-    if f <> "" then Hashtbl.replace seen f ()
+    if f <> "" && f <> March_ast.Ast.dummy_span.March_ast.Ast.file then
+      Hashtbl.replace seen f ()
   in
   let rec go ds =
     List.iter
