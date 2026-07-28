@@ -578,127 +578,55 @@ after, back to back. Commit all sites plus the reviewed snapshot diff.
 
 ---
 
-### Task 4: Size-class freelist for small strings — re-measure first
+### Task 4: Size-class freelist — CLOSED, not built
 
-**Files:**
-- Modify: `runtime/march_runtime.c` (`march_string_alloc`, the `march_decrc` free paths)
-- Test: `test/test_stdlib_suite.ml`
+**Verdict: do not build.** Closed 2026-07-27 on measurement, not estimate.
 
-**Blocking prerequisite:** phase 1's SSO criterion was measured against the leaky
-compiler. The literal fix has since cut `string_small_churn` from 24,000,004 to
-14,000,009 string allocations — 42% of the traffic this target was aimed at is
-already gone. **Re-run the criterion before building anything.**
+`bench/run_string_xlang.sh` runs this benchmark against four baselines chosen to
+separate allocator overhead from representation:
 
-- [ ] **Step 1: Re-measure the criterion**
-
-```bash
-uptime   # must be quiet
-MARCH_STRING_STATS=1 /tmp/post_string_small_churn 2>&1 >/dev/null | grep hist
-# then double the knob and confirm time still scales with allocation count
-sed 's/pfn pairs() : Int do 2000000 end/pfn pairs() : Int do 4000000 end/' \
-  bench/string_small_churn.march > /tmp/churn2x.march
-./_build/default/bin/main.exe --compile --opt 2 /tmp/churn2x.march -o /tmp/churn2x
-for i in 1 2 3; do /usr/bin/time -p /tmp/churn2x 2>&1 >/dev/null | grep real; done
-```
-
-**Decision gate.** Proceed only if ≥40% of allocations are still ≤23 bytes AND
-doubling allocations still roughly doubles wall time. If either fails, **stop and
-report** — the target is no longer indicated and the remaining effort belongs on
-Task 5. Record the numbers either way.
-
-- [ ] **Step 2: Write the failing test**
-
-```ocaml
-(* The freelist must not change observable behaviour, only cost. This asserts
-   the invariant that is easy to break: a recycled cell must be fully
-   reinitialised (rc, tag, len), or a stale refcount resurrects freed memory. *)
-let test_small_string_freelist_reuse () =
-  with_compiled_program ~tag:"march_freelist" ~env_prefix:"MARCH_STRING_STATS=1 "
-    ~src_text:
-      "mod FreeList do\n\
-      \  pfn go(i : Int, n : Int, acc : Int) : Int do\n\
-      \    if i >= n do acc\n\
-      \    else\n\
-      \      let s = String.repeat(\"ab\", 2)\n\
-      \      go(i + 1, n, acc + String.byte_size(s))\n\
-      \    end\n\
-      \  end\n\
-      \  fn main() do println(to_string(go(0, 500000, 0))) end\n\
-       end\n"
-    (fun err_file ->
-       (* Allocation COUNT is unchanged by a freelist -- it changes where the
-          memory comes from, not how many strings are made. Peak live bytes
-          must stay flat: a freelist that never reuses is just a leak. *)
-       let peak = string_stat_of ~stderr_file:err_file "peak_live_bytes" in
-       Alcotest.(check bool)
-         (Printf.sprintf "peak live stays bounded with reuse (got %d)" peak)
-         true (peak < 1_000_000))
-```
-
-- [ ] **Step 3: Implement**
-
-Per-size-class singly-linked freelists for payloads ≤ 23 bytes (classes at 7,
-15, 23), threaded through the cell's own memory when free. `march_string_alloc`
-pops; the `march_decrc` free paths push instead of calling `free`.
-
-**Thread safety is the hard part.** March runs an M:N scheduler with work
-stealing, so strings are allocated and freed across threads. Use a **per-thread**
-freelist (`__thread`) so the fast path needs no atomics — a cell freed on a
-different thread than it was allocated on simply lands in that thread's list,
-which is correct and self-balancing for symmetric workloads. Do not use a shared
-lock-free stack: the ABA problem and the cache-line contention would cost more
-than the malloc it replaces, and `bench/string_parallel_scan` already shows a
-scaling ceiling this could worsen.
-
-Cap each class (e.g. 1024 cells) and fall back to `free()` beyond it, so a
-producer/consumer workload cannot grow one thread's list without bound.
-
-- [ ] **Step 4: Verify — correctness, then leaks, then speed**
-
-```bash
-dune build --root . bin/main.exe && dune build --root . @warm-cache && rm -rf .march/cas/artifacts-v2
-scripts/run-tests.sh 2>&1 | tail -5
-MARCH_SANITIZE=1 <compile a small program> && ./that_program   # ASAN clean
-bash bench/run_string_bench.sh
-```
-
-The full suite plus an ASAN run is the gate here — a recycling allocator that
-gets reinitialisation wrong produces exactly the use-after-free class of bug the
-sanitizer exists to catch, and it will present as unrelated corruption elsewhere.
-
-Then same-session A/B on `string_small_churn`.
-
-- [ ] **Step 5: Commit**
-
----
-
-### Task 5: Container-returning `split` — decision task, then implement
-
-**Blocking prerequisite:** phase 1 recommended "Vec(String)-returning split",
-which does not work as described. `Array` is a March-level persistent trie
-(`stdlib/array.march`), so a `Vec` return allocates trie nodes rather than cons
-cells. `NativeArray` is flat and C-backed but supports only unboxed `int`/`float`
-— **March has no flat array of heap pointers.**
-
-- [ ] **Step 1: Decide the shape, and write the decision down before building**
-
-Three candidates, to be chosen on measurement rather than taste:
-
-| Option | Cost | Risk |
+| | ms | vs March |
 |---|---|---|
-| **A. New RC-aware `StringArray`** — flat C array of string pointers, header + len + ptr[] | Largest win: zero cons cells | A new container type: needs RC semantics (owning array must dec each element on drop — the machinery the recent "deep drop for containers" fix added), plus all nine builtin sites, Perceus/borrow integration, and JS shims |
-| **B. `split_fold(s, sep, init, f)`** — no container at all; call a closure per field | No allocation beyond the fields | ~150K March-closure calls from C per split; closure ABI overhead may exceed the cons cells it saves. **Measure a prototype before committing.** |
-| **C. Do nothing; rely on Task 1** | Free — already done | `String.split` stays slow, but `index_of_from` lets performance-critical code use the `slice_walk` pattern (429ms vs 1117ms) |
+| C++ (`std::string`, has SSO) | 238 | 2.98× faster |
+| C (raw `malloc`) | 400 | 1.77× |
+| Rust (`String`, no SSO — March's representation) | 553 | 1.28× |
+| **March** | **709** | — |
+| Python (`pymalloc` size classes) | 1249 | 0.57× |
 
-Prototype B's closure-call overhead first — it is the cheapest to test and would
-make A unnecessary if it wins. A micro-benchmark calling a March closure 150,000
-times from C answers it in an hour.
+Rust has March's exact representation and is only ~1.3× faster, which **bounds
+what a freelist can win** — a freelist attacks precisely the allocator and
+refcount overhead that separates the two. Meanwhile C++ with inline storage is
+~3× faster and beats raw `malloc`: you cannot out-allocate not allocating.
 
-**Write the verdict into `specs/2026-07-26-string-performance-profile.md`** as an
-addendum, with the numbers, before implementing. Then plan the chosen option as
-its own task list — it is too large to specify blind here.
+So the freelist buys roughly a third, forecloses most of the available gain, and
+composes with nothing. Inline storage is the better use of the same effort — see
+`specs/plans/2026-07-27-string-sso.md`.
 
----
+The gate this task opened with (re-measure the criterion, since the literal fix
+cut the target traffic from 24M to 10M allocations) was answered along the way:
+the criterion still holds — allocations are still small and still proportional to
+time — but the conclusion it pointed at was the wrong fix.
+
+### Task 5: Container-returning `split` — CLOSED, not built
+
+**Verdict: not needed as specified.** Closed 2026-07-27.
+
+Two findings retired it:
+
+1. **March has no flat array of heap pointers to build on.** `Array` is a
+   March-level persistent trie (`stdlib/array.march`), so a `Vec`-returning split
+   allocates trie nodes rather than cons cells — plausibly more allocation, not
+   less. `NativeArray` is flat and C-backed but handles only unboxed `int`/`float`.
+   A zero-cons split therefore needs a new RC-aware container type, making this the
+   largest item on the phase 2 list rather than the cheap one it appeared to be.
+
+2. **Task 1 delivered most of the win without one.** Counting 150K fields in an
+   800KB buffer: `String.split` + `List.length` at 975ms against an
+   `index_of_from` walk at 267ms — **3.7× with effectively zero allocation**.
+
+What remains is narrower than phase 1 implied: callers who genuinely need every
+field retained as a `String`, which the scan pattern does not serve. Nobody has
+shown that is a hot path. Reopen with a workload that demonstrates one.
 
 ## Self-review
 
