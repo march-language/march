@@ -1,5 +1,66 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
+
+Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per
+operand that bought nothing. `"a${s}b"` desugars to `to_string(s)`, which
+Show-dispatches to `Show$String.show` — a synthesized IDENTITY (`fn x -> x`,
+emitted by `emit_builtin_impls` in `lib/tir/lower.ml`, because a string already
+is its own representation). That call was emitted and only inlined away later,
+in the post-Perceus opt loop. Perceus runs FIRST, so it saw a live
+owned-argument call and bracketed it with inc_rc/dec_rc; the inlining that
+followed removed the call and left the pair stranded around a bare alias.
+`string_concat3` borrows all three arguments, so the extra reference was pure
+overhead on every interpolated String operand in every March program.
+
+Two changes in `lib/tir/lower.ml`, both at the source rather than downstream:
+the `Show$String.show` call is elided during lowering (so Perceus never sees a
+call to bracket), and `lower_to_atom_k` no longer binds a fresh temp when the
+lowered RHS is already a *variable* atom (`let v = EAtom (AVar x) in k (AVar v)`
+≡ `k (AVar x)` in ANF, but the alias reads to Perceus as a second owned
+reference). The passthrough is deliberately restricted to `AVar`: a literal
+atom carries no type of its own, so for `ALit (LitAtom …)` the binder's
+`ty_of_expr` ascription is load-bearing — passing it through unbound made
+`println(:x)` print `()`.
+
+Measured on arm64, `"w${a}x"` vs the hand-written `"w" ++ a ++ "x"`, 3M
+iterations, with the interpolating call in the SECOND (warm) benchmark slot:
+181/173ms → 137/133ms, i.e. interpolation now matches the hand-written chain
+exactly, and the two lower to byte-identical TIR. `MARCH_STRING_STATS=1`
+allocation histograms are unchanged, confirming this was refcount traffic and
+not allocation. Pinned by the `interp_string_operand_rc` TIR golden snapshot
+(verified to FAIL on the unfixed compiler at both the lower and perceus
+stages).
+
+**Measurement note.** Benchmarks of this shape carry a large first-position
+warmup penalty: in an A/B where both halves compile to *identical* IR, the
+half that runs first measured ~25% slower (173ms vs 137ms). Any before/after
+claim about interpolation must hold the benchmark slot fixed, or it will
+attribute warmup to the change.
+
+**Interaction with the `string_join` path removal (`fceea07b`, same day).**
+This work was done against a tree where `desugar_interp` still switched to a
+`string_join` cons-list past `interp_join_threshold` (3 segments), which is why
+a 7-segment repro showed no improvement from the RC fix alone — it took the
+join path, not `string_concat3`. `fceea07b` removed that second shape
+entirely, and its commit message closes by noting the residual gap it could not
+explain: "`to_string(x)` where x is statically a String looks like an identity
+that is not being elided; worth a look separately." That is exactly this
+change, so the two compose — join removal made every interpolation take the
+concat3 path, and this makes that path free of the identity's refcount pair.
+
+Measurements taken here before the merge, now of historical interest only:
+`++`/concat3 beat `string_join` at *every* size tested with short (8-byte)
+operands (2 operands 30ms vs 59ms, 8 operands 121ms vs 157ms, 20 operands
+302ms vs 350ms — no crossover in that regime, contradicting the 2026-07-26
+"crossover just under 5" figure, which had not controlled for the warmup
+penalty above). With large (4KB) operands the chain *is* quadratic (4 operands
+16ms vs 13ms, 8 operands 87ms vs 23ms, 32 operands 1236ms vs 97ms) — so the
+concat3-only shape does re-expose large-operand interpolation to quadratic
+copying. Not a regression introduced here, but the reason a length-summing
+`string_concat_n` remains the real fix for that band; tracked in
+`specs/todos.md`.
+
 ## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
 
 Extended `lib/tir/native_map_inline.ml` (the compiler pass behind

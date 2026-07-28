@@ -758,6 +758,13 @@ let ensure_runtime_so () =
     end;
     so_path
 
+(* Substring test used by the MARCH_DUMP_TXT stage filter (see snap_tir). *)
+let contains_substring (hay : string) (needle : string) =
+  let nh = String.length hay and nn = String.length needle in
+  nn = 0 ||
+  (let rec go i = i + nn <= nh && (String.sub hay i nn = needle || go (i + 1)) in
+   go 0)
+
 let dump_tir       = ref false
 let dump_phases    = ref false
 let do_timings     = ref false
@@ -2030,9 +2037,23 @@ let compile filename =
    try
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in
+    (* MARCH_DUMP_TXT=<substring> prints the pretty-printed TIR at every
+       snap_tir checkpoint whose label contains the substring (`all` matches
+       every stage).  --dump-tir only shows the very end of the pipeline, which
+       is too late to tell whether a pass CREATED a construct or merely
+       preserved one; this makes the intermediate stages readable without
+       going through the --dump-phases JSON. *)
+    let dump_txt = Sys.getenv_opt "MARCH_DUMP_TXT" in
     let snap_tir label tir =
       if !dump_phases then
-        phases := March_dump.Dump.tir_phase tir label :: !phases
+        phases := March_dump.Dump.tir_phase tir label :: !phases;
+      match dump_txt with
+      | Some pat when pat = "all" || contains_substring label pat ->
+        Printf.eprintf "===== %s =====\n" label;
+        List.iter (fun fn ->
+          Printf.eprintf "%s\n\n" (March_tir.Pp.string_of_fn_def fn))
+          tir.March_tir.Tir.tm_fns
+      | _ -> ()
     in
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then

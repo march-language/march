@@ -37,6 +37,15 @@ git log is authoritative for exact commits.
   segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
   interpolation dropping to zero.
 
+- **…and interpolating a `String` no longer costs a refcount pair per operand**,
+  which closes the rest of that gap. `"a${s}b"` goes through `to_string(s)`,
+  which for a String resolves to an identity — but the identity call was only
+  removed *after* reference counting had already bracketed it with an atomic
+  increment/decrement, leaving the pair stranded around nothing. The call is now
+  elided during lowering, so no pair is ever created, and interpolation compiles
+  to exactly the same code as the equivalent hand-written `++` chain.
+  Allocation counts are unchanged — this was refcount traffic, not allocation.
+
 
 ### Added
 
@@ -160,6 +169,12 @@ git log is authoritative for exact commits.
   `""` on JS against `"fgh"` interpreted and compiled. Negative arguments now
   clamp the way the C runtime clamps, instead of being read as offsets from the
   end of the string.
+
+- **TIR pipeline stages are now inspectable as text.** `MARCH_DUMP_TXT=<stage>`
+  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
+  the given substring (`all` for every stage). Previously only the very end of
+  the pipeline was readable, via `--dump-tir`, which is too late to tell whether
+  a pass created a construct or merely preserved one.
 
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on
