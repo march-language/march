@@ -11,8 +11,99 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **`cap verified`: an obligation the refinement checker cannot discharge is an
+  error.** March's default stance is to report a refinement violation only when
+  a precondition can *never* hold; anything the checker cannot decide is
+  silence, so correct code is never rejected. A module that declares
+  `cap verified` opts into the inverse: inside it, every skipped **precondition
+  obligation at a call site** is reported, naming the precondition, the callee
+  and the reason it could not be discharged (the predicate is outside the
+  supported fragment, the argument did not reflect, a sort conflict, the float
+  gate, or the solver not deciding). Strictly opt-in and scoped to the module
+  that declares it — a `cap verified` module calling into an ordinary one does
+  not make the callee's module strict, and nested modules do not inherit the
+  capability. Modules that do not declare it behave exactly as before.
+
+  Three limits worth knowing before relying on it: return refinements go through
+  a separate path that files no record, so an undischarged **postcondition** is
+  neither reported nor escalated; `impl`/`interface` method bodies are not
+  walked by this pass and so raise no obligation at all; and there is **no
+  `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
+  checker cannot discharge are an `assert` or removing `cap verified` from the
+  module. It is therefore a tool for small, deliberately-verified modules rather
+  than a whole-codebase setting.
+
+- **`--refine-report`: the checked fraction of your refinements is now a
+  number.** `march --check --refine-report file.march` prints how many
+  refinement obligations were proved, violated, and skipped — with each skip
+  attributed to one of five reasons (unreflectable predicate, unreflectable
+  subject, sort conflict, float-sort gate, solver undecided). Two slices are
+  printed, "user code" and "user + stdlib", because the compiler prepends the
+  whole standard library to every compilation. This exists because March reports
+  a violation only when a predicate can *never* hold, which makes silence
+  ambiguous between "proved" and "not checkable" — an ambiguity that let
+  `{List(a) | len(_) > 0}` ship enforcing nothing while the suite stayed green.
+  CI now ratchets on the whole-program counts — a ceiling on skips *and* a floor
+  on proofs, since a ceiling alone is satisfied by a checker that raises no
+  obligations at all — so a change that quietly stops checking things fails the
+  build. Counts cover precondition obligations raised at call sites;
+  postconditions are not in the ledger.
+
+- **A `List.length` guard now discharges a `len` refinement obligation.** The
+  refinement checker treats `List.length` as an alias of the `len` measure, so
+  an ordinary runtime guard — `if List.length(ys) > 0 do head(ys) else … end` —
+  *proves* the precondition of `fn head(xs : {List(Int) | len(_) > 0})` instead
+  of leaving it unprovable and silently skipped. A contradictory guard
+  (`if List.length(ys) == 0 do head(ys)`) is now reported as a violation.
+  Only the qualified `List.length` is aliased — a bare `length` is left alone —
+  and only when it is the standard library's own, identified by the stdlib
+  sources the compiler actually loaded (so it works the same from a repo
+  checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing anywhere).
+  The alias is withdrawn for the whole module if anything could make that
+  spelling denote a different function: a program defining its own
+  `List.length` in any declaration form (a `fn`, a module-level `let`, an
+  `extern` block, an interface or impl method), a vendored or forked `List`
+  supplied through `MARCH_LIB_PATH`, or rebinding the name `List` via
+  `alias`/`use`/`import`. In those cases the obligation
+  goes back to being unprovable and silently skipped, which is the pre-existing
+  behaviour; the alias never attaches `len`'s meaning to a function that is not
+  the list's length.
+
+- **A byte-length guard now discharges a `String` `len` refinement obligation.**
+  The same treatment for strings: `String.byte_size` and the `string_byte_length`
+  builtin are aliases of the `len` measure, so
+  `if String.byte_size(t) > 0 do slug(t) else … end` *proves* the precondition of
+  `fn slug(s : {String | len(_) > 0})`, and the contradictory `== 0` form is
+  reported as a violation. `len` over a `String` is a **byte** count — `len("é")`
+  is 2, not 1 — so only byte-valued spellings are aliased: `String.codepoint_count`
+  and its legacy alias `grapheme_count` count codepoints and are deliberately left
+  alone. `string_length` is left alone too, for a different reason: it is a byte
+  length today (it lowers to `march_string_byte_length`, and `string_length("é")`
+  is 2), but its *name* reads like a character count, so an alias written now
+  would silently become unsound if the name were ever corrected to match. Use the
+  unambiguous `String.byte_size` in a guard. The same shadowing rules apply: the alias is
+  withdrawn for the whole module if a program defines its own `String.byte_size`
+  (unless it is the standard library's own, by the identity above), rebinds
+  `String` via `alias`/`use`, or binds the name `string_byte_length` itself —
+  whether as a declaration, an import, a `let`, or a parameter. Also fixes a
+  related gap: a guard mentioning a string length in a *path
+  condition* reflected to a symbol unrelated to the one the contract used, so the
+  two could never meet.
+
 ### Fixed
 
+- **`cap no_panic`: an unreflectable divisor refinement is no longer accepted as
+  a proof.** The division-safety check treated "this predicate is outside the
+  checkable fragment" as a discharged obligation, which made a *meaningless*
+  refinement more permissive than no refinement at all: `d : Int` correctly
+  errored, while `d : {Int | is_prime(_)}` — a predicate the checker cannot
+  reflect — passed having proved nothing. Such a divisor is now reported,
+  failing closed exactly as the "solver unavailable or undecided" case already
+  did. A path condition that genuinely proves the divisor non-zero (a `when
+  d != 0` guard) still discharges the obligation. Only `cap no_panic` modules
+  are affected; a refinement the checker *can* reflect is unchanged.
 - **A program that repeatedly passes a capture-free lambda (an anonymous
   function that reads no outer variables, e.g. `fn x -> x * 2`) as a value
   no longer grows memory without bound.** This extends the fix below for

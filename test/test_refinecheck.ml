@@ -38,6 +38,24 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
+   checked with [stdlib_files] declared as the standard library's own sources.
+   Both are needed to exercise the ENABLING branch of the `List.length` measure
+   alias: the alias is allowed only when a `List.length` in scope came from a
+   file the caller identified as stdlib, and no string-parsed fixture (whose
+   span file is "") can ever reach that branch. *)
+let has_refine_error_from ?(stdlib_files = []) ~file src =
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
+  let m =
+    March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~stdlib_files ctx
+    (March_desugar.Desugar.desugar_module m);
+  March_errors.Errors.has_errors ctx
+
 (* Number of ERRORS the refinement pass reports on [src].  A plain boolean
    cannot tell "both violations found" from "one found, one silently lost",
    which is exactly the failure mode the co-occurrence guards below pin. *)
@@ -3052,6 +3070,809 @@ let float_suite =
               end\n"))
   ]
 
+(* ── Measure aliases: `List.length` IS the `len` measure ───────────────────
+   These use [has_refine_error_d] (desugared) because a qualified call is an
+   `EField` chain until desugar flattens it to a dotted `EVar` — which is what
+   the compiler feeds refine_check in production.
+
+   The load-bearing case is the CONTRADICTORY guard.  The "guard discharges"
+   case was already silent before the alias existed — because the obligation
+   was SKIPPED, which from outside is indistinguishable from proved.  Only a
+   guard that must FIRE proves the two symbols actually meet. *)
+let length_alias_suite =
+  [ gated "a List.length guard discharges a len obligation" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod L1 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a contradictory List.length guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod L2 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "an unguarded unknown list stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod L3 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* The alias keys on a SPELLING, and a program may define its own
+       `List.length` — which wins at runtime.  Here it is constantly 99, so the
+       `== 0` branch is DEAD and `head` is never called; the program cannot
+       violate anything.  Aliasing regardless made the checker report a
+       violation on correct code — a wrong fact in the assumption set makes
+       `discharge(¬goal)` succeed.  Silence here is the whole point, so it is
+       load-bearing that the contradictory-guard case above still FIRES: that
+       pair is what separates "the gate works" from "the gate killed the
+       feature". *)
+    gated "a user-defined List.length is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod Q do
+  mod List do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* ── The same competing definition in every OTHER declaration form ─────
+       The gate above once matched `A.DFn` alone and ended its walk in a
+       wildcard, so the three shapes below were invisible: the alias stayed on,
+       the dead `== 0` branch was treated as reachable, and correct code was
+       reported.  That is a false positive, the one error this pass must never
+       make.  Each of these is the `mod Q` case reworded — silence is required,
+       and it is the CONTRADICTORY-guard case above (which must still fire)
+       that proves the fix suppressed a wrong fact rather than the feature. *)
+    gated "a user-defined List.length as a module-level `let` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QLet do
+  mod List do
+    let length = fn xs -> 99
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "an extern-declared List.length is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QExt do
+  mod List do
+    needs Ffi
+    extern "c" : Cap(Ffi) do
+      fn length(xs: List(Int)) : Int = "march_qext_length"
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* The ENTRY module's own declarations are top-level, not a `DMod` — and
+       bin/main.ml strips the stdlib's `DMod List` whenever the entry module
+       shadows it — so `mod List do fn length` defines `List.length` with
+       nothing nested for the walk to see.  The gate now starts its walk with
+       `in_mod = true` when the enclosing module's own name matches.
+
+       HONESTY NOTE: unlike its four neighbours, this case passes against the
+       PRE-fix gate too, so it does not by itself discriminate the hole — a
+       string-parsed fixture has no stdlib prepended, and the discriminating
+       shape needs bin/main.ml's prepend-and-strip.  It is kept because the
+       property it asserts (silence) is the one that must hold, not because it
+       is a witness. *)
+    gated "an entry module named List defining `length` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod List do
+  fn length(xs : List(Int)) : Int do 99 end
+  mod Inner do
+    fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+    fn go(ys : List(Int)) : Int do
+      if List.length(ys) == 0 do head(ys) else 0 end
+    end
+  end
+  fn main() : Int do Inner.go([1]) end
+end|}));
+
+    (* Rebinding the bare segment `List` withdraws the alias too, whichever
+       selector form does it — `use X.List` was handled, the three below were
+       not. *)
+    gated "`import X.{List}` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QIN do
+  import Shim.{List}
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a glob `import X` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGlob do
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* ── The ENABLING branch ───────────────────────────────────────────────
+       Every case above reaches its verdict WITHOUT a `List.length` definition
+       in scope at all, i.e. via the gate's "no defs -> allow" path.  None of
+       them can tell whether the gate's stdlib-identity test works, which is
+       how a revision that never recognised an installed stdlib (`share/march`
+       rather than `stdlib/`) passed the whole suite while the feature was dead
+       in the shipped compiler.
+
+       These two are the same program with a real `mod List do fn length`
+       present, differing ONLY in whether the caller declares that file to be
+       the standard library.  Together they pin both directions of the
+       identity test. *)
+    (let src =
+       {|
+mod S do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     let file = "/opt/march/share/march/list.march" in
+     gated "the alias APPLIES to a List.length the caller calls stdlib" (fun () ->
+         (* Note the directory is `share/march`, an installed layout with no
+            path segment named `stdlib` — identity comes from the caller, not
+            from the shape of the path. *)
+         Alcotest.(check bool) "error" true
+           (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
+
+    (let src =
+       {|
+mod S do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     gated "…and NOT to the same List.length from any other file" (fun () ->
+         Alcotest.(check bool) "no error" false
+           (has_refine_error_from ~stdlib_files:[ "/opt/march/share/march/list.march" ]
+              ~file:"/home/u/proj/stdlib/list.march" src)))
+  ]
+
+(* ── Measure aliases, string side: BYTE length only ────────────────────────
+   `len` over a String reflects to `($strlen t)`, whose meaning is pinned in
+   BYTES by the string-literal axiom (which uses OCaml `String.length`).  So
+   only byte-valued spellings may be aliased to it.
+
+   As on the list side, the load-bearing case is the CONTRADICTORY guard: the
+   "guard discharges" case was already silent before the alias existed, because
+   the obligation was SKIPPED, which from outside is indistinguishable from
+   proved.  Desugared throughout — `String.byte_size(t)` is an `EField` chain
+   until desugar flattens it to a dotted `EVar`. *)
+let string_alias_suite =
+  [ gated "a String.byte_size guard discharges a String len obligation" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S1 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) > 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a contradictory String.byte_size guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod S2 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The builtin `String.byte_size` forwards to, in its own right. *)
+    gated "a contradictory string_byte_length guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod S2b do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* `string_length` is NOT aliased.  It happens to be byte length today —
+       llvm_builtins lowers it to the same `march_string_byte_length` C symbol
+       — so this is an abstention on an ambiguous NAME, not a claim that the
+       two differ.  Silence is what the abstention looks like from outside; if
+       the abstention is ever revisited, revisit this test with it. *)
+    gated "string_length is not aliased to the byte measure" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S3 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Codepoint counts must never reach `$strlen`: "é" is 1 codepoint and 2
+       bytes, so aliasing one would assert a falsehood about the other. *)
+    gated "String.codepoint_count is not aliased to the byte measure" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S4 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.codepoint_count(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* ── The shadowing gate, both directions ───────────────────────────────
+       A program may define its own `mod String do fn byte_size`, which wins at
+       runtime.  Here it is constantly 99, so the `== 0` branch is DEAD and
+       `slug` is never called: the program cannot violate anything, and a
+       report would be a false positive on correct code. *)
+    gated "a user-defined String.byte_size is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QS do
+  mod String do
+    fn byte_size(s : String) : Int do 99 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The same competing definition in the other declaration forms — the
+       `A.DFn`-only hole, string side.  See the list-side comment. *)
+    gated "a user-defined String.byte_size as a module-level `let` is NOT aliased"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSLet do
+  mod String do
+    let byte_size = fn s -> 99
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "an extern-declared String.byte_size is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSExt do
+  mod String do
+    needs Ffi
+    extern "c" : Cap(Ffi) do
+      fn byte_size(s: String) : Int = "march_qsext_byte_size"
+    end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Same shape, same honesty note, as the list-side entry-module case. *)
+    gated "an entry module named String defining `byte_size` is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod String do
+  fn byte_size(s : String) : Int do 99 end
+  mod Inner do
+    fn slug(s : {String | len(_) > 0}) : Int do 1 end
+    fn go(t : String) : Int do
+      if String.byte_size(t) == 0 do slug(t) else 0 end
+    end
+  end
+  fn main() : Int do Inner.go("a") end
+end|}));
+
+    gated "`import X.{String}` withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSIN do
+  import Shim.{String}
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The ENABLING branch.  Every case above reaches its verdict with NO
+       `String.byte_size` definition in scope, i.e. via the gate's "no defs ->
+       allow" path — none of them can tell whether the stdlib-identity test
+       works, which is exactly how a dead feature can pass a whole suite.
+       These two are the same program, differing ONLY in whether the caller
+       declares that file to be the standard library. *)
+    (let src =
+       {|
+mod SG do
+  mod String do
+    fn byte_size(s : String) : Int do 0 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}
+     in
+     let file = "/opt/march/share/march/string.march" in
+     gated "the alias APPLIES to a String.byte_size the caller calls stdlib" (fun () ->
+         Alcotest.(check bool) "error" true
+           (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
+
+    (let src =
+       {|
+mod SG do
+  mod String do
+    fn byte_size(s : String) : Int do 0 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}
+     in
+     gated "…and NOT to the same String.byte_size from any other file" (fun () ->
+         Alcotest.(check bool) "no error" false
+           (has_refine_error_from ~stdlib_files:[ "/opt/march/share/march/string.march" ]
+              ~file:"/home/u/proj/vendor/string.march" src)));
+
+    (* The bare builtin has no stdlib definition to identify, so ANY definition
+       of the name takes it.  Constantly 99 again: the `== 0` branch is dead. *)
+    gated "a user-defined string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QB do
+  fn string_byte_length(s : String) : Int do 99 end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* ── Expression-level shadowing ────────────────────────────────────────
+       A `let` binder shadows the builtin just as a declaration does, and the
+       first cut of the gate scanned declaration forms only.  The body here
+       evaluates to 99, so the `== 0` branch is DEAD, `slug` is never called,
+       and the program cannot violate anything — reporting one was a
+       demonstrated FALSE POSITIVE on correct code.
+
+       Load-bearing as a PAIR with case 2 above, which uses the genuine builtin
+       and must still FIRE: together they separate "the gate sees local
+       binders" from "the gate suppressed the feature into silence". *)
+    gated "a let-bound string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RS do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    let string_byte_length = fn s -> 99
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Same hole, reached through a PARAMETER rather than a `let`. *)
+    gated "a parameter named string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RSP do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String, string_byte_length : (String) -> Int) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a", fn s -> 99) end
+end|}));
+
+    (* A lambda parameter, i.e. a binder found only by descending INTO an
+       expression — the case a declaration-form scan cannot reach at all. *)
+    gated "a lambda parameter named string_byte_length withdraws the bare alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RSL do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    let f = fn string_byte_length -> 99
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* ── Declaration forms that BIND without being descended into ──────────
+       A module-level `let` is never visited by [visit_decls] — yet it binds the
+       name for every sibling `fn` body, which is exactly where obligations are
+       raised.  Reasoning from "the checker never descends into a DLet" is what
+       hid this; the gate's invariant is now "can this construct put the name in
+       scope for a checked body", not "is this construct visited". *)
+    gated "a module-level let string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod DL do
+  let string_byte_length = fn s -> 99
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* An `extern` block declares its functions under their bare names — the
+       same class of hole, reached through a different decl form. *)
+    gated "an extern fn named string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod DX do
+  needs LibC
+  extern "libc": Cap(LibC) do
+    fn string_byte_length(s: String): Int
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}))
+  ]
+
+(* ── Obligation ledger ────────────────────────────────────────────────────
+   The checker reports a violation only when a predicate can NEVER hold, so
+   silence covers three very different outcomes.  These pin that every
+   precondition obligation leaves a COUNTABLE record: a proved one, a violated
+   one, and one the checker could not reflect into SMT at all — the last is the
+   case that used to be indistinguishable from a passing contract. *)
+let obligation_suite =
+  [ gated "a proved precondition is recorded as Proved" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O1 do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(5) end\n\
+              end\n");
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated);
+
+    gated "a violated precondition is recorded as Violated" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O2 do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(0 - 5) end\n\
+              end\n");
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated);
+
+    gated "an unreflectable predicate is recorded as a SKIP, not silence" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O3 do\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n");
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved" 0 proved;
+        Alcotest.(check int) "not violated" 0 violated;
+        Alcotest.(check int) "one skip recorded" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ]
+
+(* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
+   The default stance reports only definite failures; `cap verified` inverts
+   that for the module that asks for it.  The load-bearing test is the third
+   one: if strict mode ever fires for a module that did not opt in, the default
+   stance is broken for every existing program. *)
+let refine_error_texts src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+let cap_verified_suite =
+  [ gated "cap verified: an unreflectable predicate is an ERROR" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod V1 do\n\
+             \  cap verified\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n"));
+
+    gated "cap verified: a PROVED obligation stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V2 do\n\
+             \  cap verified\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(5) end\n\
+              end\n"));
+
+    (* THE test.  Same skip, no `cap verified` — must stay silent. *)
+    gated "WITHOUT cap verified the same skip stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V3 do\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n"));
+
+    (* Scoping, outward: a nested ordinary module inside a `cap verified` one
+       does NOT inherit strictness.  In production bin/main.ml prepends the
+       whole standard library as sibling `DMod`s of the entry module's decls,
+       so inheritance would make every stdlib module strict. *)
+    gated "cap verified does NOT reach into a nested ordinary module" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V4 do\n\
+             \  cap verified\n\
+             \  mod Inner do\n\
+             \    fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \    fn go() : Int do weird(5) end\n\
+             \  end\n\
+             \  fn main() : Int do 0 end\n\
+              end\n"));
+
+    (* Scoping, inward: a nested module may opt in on its own, and doing so
+       must not leave strict mode on for its siblings. *)
+    gated "a nested cap verified module opts in without leaking to siblings" (fun () ->
+        let errs =
+          refine_error_texts
+            "mod V5 do\n\
+            \  mod Inner do\n\
+            \    cap verified\n\
+            \    fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+            \    fn go() : Int do weird(5) end\n\
+            \  end\n\
+            \  fn odd(k : {Int | is_prime(_)}) : Int do k end\n\
+            \  fn main() : Int do odd(5) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "exactly the nested call errors" 1 (List.length errs));
+
+    (* The message must name the obligation and say why it could not be
+       discharged — the whole point is legibility. *)
+    gated "the cap verified error names the predicate, the callee and the reason"
+      (fun () ->
+        let errs =
+          refine_error_texts
+            "mod V6 do\n\
+            \  cap verified\n\
+            \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+            \  fn main() : Int do weird(5) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "one error" 1 (List.length errs);
+        let msg = List.hd errs in
+        let has sub =
+          let n = String.length sub and m = String.length msg in
+          let rec go i = i + n <= m && (String.sub msg i n = sub || go (i + 1)) in
+          go 0
+        in
+        Alcotest.(check bool) "names cap verified" true (has "cap verified");
+        Alcotest.(check bool) "names the predicate" true (has "is_prime");
+        Alcotest.(check bool) "names the callee" true (has "weird");
+        Alcotest.(check bool) "names the reason" true (has "unreflectable-predicate"))
+  ]
+
+(* ── Division-safety reflection hole (Task 8) ──────────────────────────────
+   NOTE: [has_refine_error] runs [Refine_check], which does NOT run the
+   `cap no_panic` division checker — that is a separate pass wired in
+   bin/main.ml.  These tests must call [Division_safety] directly, on the
+   DESUGARED module, exactly as the driver does. *)
+let divsafety_error_texts src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Division_safety.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+let has_divsafety_error src = divsafety_error_texts src <> []
+
+(* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
+   [gated] on z3 — a [gated] hole test would silently SKIP on a z3-less machine,
+   i.e. the test whose whole point is fail-closed behaviour when verification is
+   unavailable would be disabled exactly when verification is unavailable.
+   Case by case: `is_prime` fails at REFLECTION ([smt_of] returns None) before
+   Z3 is consulted; `_ > 0` is discharged by [syntactic_nonzero], which matches
+   the `_` binder directly; a bare `Int` divisor errors in the unrefined branch
+   with no VC built; and every path-condition discharge goes through
+   [path_proves_nonzero], which is purely syntactic.  Verified empirically by
+   running this group with z3 removed from PATH. *)
+let divsafety_hole_suite =
+  [ Alcotest.test_case
+      "cap no_panic: an unreflectable divisor refinement is an ERROR" `Quick
+      (fun () ->
+        (* Before the fix this PASSED: `is_prime` does not reflect, so [smt_of]
+           returned None and division_safety treated that as proof.  Writing a
+           meaningless refinement was more permissive than writing none. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D1 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end\n\
+              end\n"))
+  ; Alcotest.test_case "cap no_panic: a genuine proof still passes" `Quick
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D2 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | _ > 0}) : Int do n / d end\n\
+              end\n"))
+  ; Alcotest.test_case "cap no_panic: a bare Int divisor still errors" `Quick
+      (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D3 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : Int) : Int do n / d end\n\
+              end\n"))
+  ; Alcotest.test_case
+      "cap no_panic: unreflectable-refinement error explains itself" `Quick
+      (fun () ->
+        let errs =
+          divsafety_error_texts
+            "mod D4 do\n\
+            \  cap no_panic\n\
+            \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end\n\
+             end\n"
+        in
+        Alcotest.(check int) "one error" 1 (List.length errs);
+        let msg = List.hd errs in
+        let has sub =
+          let n = String.length sub and m = String.length msg in
+          let rec go i = i + n <= m && (String.sub msg i n = sub || go (i + 1)) in
+          go 0
+        in
+        Alcotest.(check bool) "names the divisor" true (has "`d`");
+        Alcotest.(check bool) "names the cap" true (has "cap no_panic");
+        Alcotest.(check bool) "names the reason" true
+          (has "outside the checkable fragment"))
+  ; Alcotest.test_case
+      "cap no_panic: a CLAUSE guard proving d != 0 is silent (unrefined branch)"
+      `Quick (fun () ->
+        (* CAUTION — this case does NOT exercise the `None`-arm path guard, even
+           though it looks like it should.  Desugaring rewrites a guarded clause
+           into a match, so the refined parameter is no longer visible to
+           [clause_refined_params] and [check_var_divisor] takes the UNREFINED
+           branch, which has always consulted [path_proves_nonzero].  Proof: the
+           same module with a NON-proving clause guard (`when n > 0`) reports
+           "no refinement proves `d != 0`" — the unrefined message, not the
+           unreflectable-fragment one.  Kept as a regression pin on the
+           desugared-guard path; the `None` arm is pinned by D6/D7 below. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D5 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int when d != 0 do n / d end\n\
+              end\n"))
+  ; Alcotest.test_case
+      "cap no_panic: a BODY-LEVEL guard discharges an unreflectable refinement"
+      `Quick (fun () ->
+        (* THIS is the case that exercises the [path_proves_nonzero] call in the
+           new `None` arm: a body-level `if` leaves the parameter list intact, so
+           [check_var_divisor] takes the REFINED branch, `is_prime` fails to
+           reflect, and only the path condition can discharge the obligation.
+           Deleting that call from division_safety.ml makes this test fail (and
+           only this one) — verified. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D6 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do\n\
+             \    if d != 0 do n / d else 0 end\n\
+             \  end\n\
+              end\n"))
+  ; Alcotest.test_case
+      "cap no_panic: a body-level guard that does NOT prove d != 0 still errors"
+      `Quick (fun () ->
+        (* Negative control for D6: the path guard must actually prove the goal.
+           Without this, D6 alone could be satisfied by a path guard that
+           discharges unconditionally. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D7 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do\n\
+             \    if n > 0 do n / d else 0 end\n\
+             \  end\n\
+              end\n"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3082,4 +3903,9 @@ let () =
       ("anon-binder-measures", b1_suite);
       ("record-postcond-propagation", b2_suite);
       ("bool-refinements", bool_suite);
-      ("float-refinements", float_suite) ]
+      ("float-refinements", float_suite);
+      ("length-alias", length_alias_suite);
+      ("string-alias", string_alias_suite);
+      ("obligations", obligation_suite);
+      ("cap-verified", cap_verified_suite);
+      ("divsafety-hole", divsafety_hole_suite) ]

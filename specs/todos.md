@@ -1,5 +1,7 @@
 # March — TODO List
 
+**Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
+**Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV filed earlier the same day — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value, removing a per-materialization leak; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value AND per capture-free lambda value, removing a per-materialization leak in both cases; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
@@ -33,11 +35,71 @@ unenforced a working contract, warning only "Unused variable `lst`".
 both sides — an accept-only witness cannot distinguish a working contract from
 one that checks nothing.
 
-**Follow-up (OPEN).** A runtime `List.length(xs) > 0` guard does not discharge a
-`len(_) > 0` obligation: the `List.length` function and the `len` measure are
-unconnected, so a guarded call is skipped rather than proved. That is a missed
-proof, not a false report, but it is the main thing standing between these
-contracts and being usable on non-literal lists.
+**Follow-up (DONE 2026-07-28).** A runtime `List.length(xs) > 0` guard did not
+discharge a `len(_) > 0` obligation: the `List.length` function and the `len`
+measure were unconnected, so a guarded call was skipped rather than proved. A
+missed proof, not a false report, but it was the main thing standing between
+these contracts and being usable on non-literal lists. Closed — see "Refinement
+legibility" below.
+
+---
+
+## Refinement legibility: `--refine-report`, measure aliases, `cap verified` (DONE 2026-07-28)
+
+**Problem.** March reports a refinement violation only when a predicate can never
+hold; every other outcome is silence, so silence did not distinguish "proved"
+from "not checkable". A contract that checks nothing and a contract that passes
+looked identical from outside — which is how `{List(a) | len(_) > 0}` shipped
+enforcing nothing while the suite stayed green.
+
+**Shipped.**
+- `lib/refinecheck/obligation.ml` — a ledger of every precondition obligation
+  raised at a call site, with a five-way skip reason.
+- `march --check --refine-report FILE` — prints proved/violated/skipped in two
+  labelled slices, "user code" and "user + stdlib" (`bin/main.ml` prepends the
+  whole stdlib). Measured baseline on `stdlib/list.march`: user-only
+  `0 proved, 0 violated, 5 skipped`; user + stdlib `8 proved, 0 violated,
+  28 skipped`.
+- CI ratchet on the whole-program skip count (ceiling 28), in the `conformance`
+  job — `doc-lint` has neither a built compiler nor z3.
+- `List.length` / `String.byte_size` / `string_byte_length` aliased to the `len`
+  measure, so runtime length guards discharge `len` obligations. Narrow and
+  withdrawable; `string_length` deliberately abstained from (byte length today,
+  but the name reads like a character count).
+- `cap verified` — opt-in, per-decl-list: a skipped precondition obligation
+  becomes an error.
+- `cap no_panic` fix: an unreflectable divisor refinement is no longer a proof.
+- Corpus `accept/t118` + `reject/t117`, bracketing the length-guard discharge.
+
+**Follow-ups (OPEN).**
+- **No `@[trusted]` escape hatch.** `cap verified` has no way to accept a single
+  obligation the checker cannot discharge; the only outs are `assert` or dropping
+  the capability. Until this exists, `cap verified` is not usable at scale.
+- **`cap verified` does not cover `DImpl`/`DInterface` method bodies.** The pass
+  walks `DFn` and nested `DMod` only, so calls inside an interface implementation
+  raise no obligation and cannot escalate.
+- **Postconditions are not in the ledger.** `check_post` neither records nor
+  escalates, so `--refine-report` undercounts and `cap verified` silently permits
+  an undischarged return refinement.
+- **A qualified spelling INSIDE a predicate enforces nothing, silently.**
+  `{List(Int) | List.length(_) > 0}` parses and typechecks, and enforces
+  nothing at all: refinement predicates are not run through desugar, so
+  `List.length` stays an `EField` chain rather than the dotted `EVar` the alias
+  keys on, and the obligation is skipped. Pre-existing, not introduced here —
+  but it is the one case this branch leaves invisible, which is exactly the
+  failure mode `--refine-report` exists to surface. At minimum the pass should
+  WARN on an unreflectable qualified call in a predicate; the fuller fix is to
+  desugar predicate expressions the way bodies are. (The supported spelling is
+  the bare measure, `len(_) > 0`.)
+- **A refined parameter's own predicate is not an assumption inside its body.**
+  Inside `fn head_of(xs : {List(Int) | len(_) > 0}) …`, a call to
+  `List.head(xs)` — whose own precondition is the same `len(_) > 0` — is still
+  solver-undecided, because the caller-supplied predicate never enters the
+  assumption set for the body it guards. So non-empty contracts do not COMPOSE:
+  a function that requires non-emptiness cannot pass its argument on to another
+  function that requires the same thing without re-guarding it. This is the
+  practical ceiling on how far the non-empty contracts added in this branch can
+  be threaded through the stdlib.
 
 ---
 

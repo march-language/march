@@ -197,7 +197,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -343,6 +343,7 @@ decl:
   | d = cap_no_extern_decl     { d }
   | d = cap_deterministic_decl { d }
   | d = cap_no_alloc_decl      { d }
+  | d = cap_verified_decl      { d }
   | d = transitions_decl       { d }
   | d = app_decl          { d }
   | d = derive_decl    { d }
@@ -795,6 +796,10 @@ cap_deterministic_decl:
 cap_no_alloc_decl:
   | CAP_NO_ALLOC
     { DOpts (["no_alloc"], mk_span ($loc)) }
+
+cap_verified_decl:
+  | CAP_VERIFIED
+    { DOpts (["verified"], mk_span ($loc)) }
 
 (** Compiler-enforced state-machine transitions:
     transitions Handle do

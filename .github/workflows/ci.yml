@@ -124,6 +124,113 @@ jobs:
           dune shutdown 2>/dev/null || true
           dune build @types-check
 
+      # Refinement checking reports a violation only when a predicate can NEVER
+      # hold; every other outcome is silence. Silence therefore does not
+      # distinguish "proved" from "the checker could not decide it" — an
+      # ambiguity that let `{List(a) | len(_) > 0}` ship enforcing nothing while
+      # the whole suite stayed green. `--refine-report` counts the obligations,
+      # and this step ratchets the count so coverage cannot quietly regress.
+      #
+      # Lives in `conformance`, not beside `scripts/check-docs.sh` in `doc-lint`:
+      # that job is a bare checkout with neither a built compiler nor z3 on PATH,
+      # and this step needs both.
+      - name: Refinement obligation coverage ratchet
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          eval $(opam env)
+          # Measured 2026-07-28 on this file: 8 proved, 0 violated, 28 skipped
+          # (unreflectable-predicate 1, solver-undecided 27). Lower is better —
+          # this is a CEILING on skips, so it may only ever be revised DOWN.
+          baseline=28
+          # A ceiling alone is not a ratchet: if the pass stopped raising
+          # obligations at all, `skipped` would be 0 and the ceiling would be
+          # satisfied by a checker that checks nothing. So pin a FLOOR on the
+          # proved count too. Higher is better — it may only ever be revised UP.
+          proved_floor=8
+          dune build bin/main.exe
+          # A `--check` whose sources hash to an artifact already in the CAS
+          # exits BEFORE parsing (bin/main.ml, the `do_check` lookup), so the
+          # report never runs and the command prints nothing while exiting 0.
+          # `--refine-report` is not part of the cache key, so a plain `--check`
+          # from an earlier step is enough to poison this one. Clear the check
+          # artifacts so the measurement is always real. NOTE this is
+          # artifacts-v2, not `.march/cas/vc` — vc holds solver verdicts and has
+          # no bearing on whether the report prints.
+          rm -rf .march/cas/artifacts-v2
+          ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
+            > /tmp/refine.txt 2>&1 || true
+          cat /tmp/refine.txt
+          # Read the whole-program slice specifically. `--refine-report` prints
+          # two labelled lines (user code, and user + stdlib, because the driver
+          # prepends the entire standard library); a bare `grep -o '[0-9]* skipped'`
+          # would match both and silently compare the wrong one.
+          skipped=$(sed -n \
+            's/^refinement obligations (user + stdlib):.*, \([0-9][0-9]*\) skipped$/\1/p' \
+            /tmp/refine.txt)
+          proved=$(sed -n \
+            's/^refinement obligations (user + stdlib): \([0-9][0-9]*\) proved,.*/\1/p' \
+            /tmp/refine.txt)
+          if [ -z "$skipped" ] || [ -z "$proved" ]; then
+            echo "FAIL: could not find the 'user + stdlib' line in --refine-report output."
+            echo "Three things produce that, in order of likelihood:"
+            echo "  a. the run hit the --check CAS and short-circuited before the"
+            echo "     report — clear .march/cas/artifacts-v2 (the rm above should"
+            echo "     already do this; check it did not get dropped);"
+            echo "  b. the compiler errored before printing;"
+            echo "  c. the report's format changed — update the sed above."
+            echo "This step must never pass vacuously."
+            exit 1
+          fi
+          echo "proved=$proved (floor: $proved_floor)  skipped=$skipped (ceiling: $baseline)"
+          if [ "$proved" -lt "$proved_floor" ]; then
+            echo ""
+            echo "FAIL: refinement obligations PROVED fell from $proved_floor to $proved."
+            echo "The ceiling on skips cannot catch this: a pass that raises no"
+            echo "obligations at all reports 0 skipped and would sail through it."
+            echo "Fewer proofs means contracts that were enforced no longer are."
+            echo ""
+            echo "The most common cause is a measure alias being withdrawn too"
+            echo "eagerly — the gates in lib/refinecheck/refine_check.ml"
+            echo "(stdlib_member_defs_ok / bare_builtin_undefined) suppress on"
+            echo "doubt, so widening one can switch the feature off wholesale."
+            echo "Check the per-reason breakdown printed above: proofs turning"
+            echo "into 'solver-undecided' skips is that signature."
+            exit 1
+          fi
+          if [ "$skipped" -gt "$baseline" ]; then
+            echo ""
+            echo "FAIL: refinement obligation skips rose from $baseline to $skipped."
+            echo "A RISE IN SKIPS MEANS FEWER OBLIGATIONS ARE BEING CHECKED — contracts"
+            echo "that used to be proved are now silently unenforced. This is a"
+            echo "regression even though nothing errored, because March's default"
+            echo "stance turns an undischarged obligation into silence."
+            echo ""
+            echo "What to do:"
+            echo "  1. Run it locally, against a COLD CHECK CACHE:"
+            echo "       rm -rf .march/cas/artifacts-v2"
+            echo "       ./_build/default/bin/main.exe --check \\"
+            echo "         --refine-report stdlib/list.march"
+            echo "     Without that rm, a cached --check exits before the report runs"
+            echo "     and you get empty output, not a smaller number. Add"
+            echo "     'rm -rf .march/cas/vc' as well only if you want z3 to re-decide"
+            echo "     from scratch — that is a separate cache and does not affect"
+            echo "     whether the report prints at all."
+            echo "  2. Diff the per-reason breakdown against the baseline above. A jump"
+            echo "     in 'solver-undecided' usually means a measure alias was withdrawn"
+            echo "     or a guard stopped reflecting; 'unreflectable-predicate' means a"
+            echo "     contract was rewritten outside the supported fragment."
+            echo "  3. A missing z3 does NOT show up as skips falling — it shows up as"
+            echo "     skips RISING. Without a solver every obligation is Unverified,"
+            echo "     so the measured signature is 0 proved / 36 skipped (every one of"
+            echo "     the 8 proofs becomes a skip). If you see that pair, check the"
+            echo "     toolchain step before blaming the code."
+            echo "  4. Fix the regression. Only raise the ceiling if the rise is"
+            echo "     intentional and explained in the commit message; this number is"
+            echo "     meant to travel downward."
+            exit 1
+          fi
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |

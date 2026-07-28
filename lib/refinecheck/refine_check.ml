@@ -415,6 +415,114 @@ let rec list_len (e : A.expr) : int option =
 let registered_measures : string list ref = ref []
 let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measures
 
+(* ── Measure aliases ───────────────────────────────────────────────────────
+   Runtime functions that ARE a measure under a different name.  Reflecting
+   `List.length(xs)` to the same SMT term as `len(xs)` is what lets an ordinary
+   runtime guard discharge a `len` obligation; without it the two are
+   unconnected symbols, the guard translates to nothing, and a guarded call is
+   SKIPPED rather than proved.
+
+   For LIST length, only the QUALIFIED spelling is aliased.  A bare `length`
+   would also catch a user module's own unrelated `fn length(...)`, and an alias
+   is a fact ADDED to the assumption set that `discharge(¬goal)` proves against
+   — so a wrong alias makes violations easier to prove ON CORRECT CODE.  A
+   missed proof is always cheaper than a wrong fact.
+
+   ── STRING length is BYTES, and only byte-valued spellings may be aliased ──
+   `len` over a String reflects to [strlen_fn] (`$strlen`), whose meaning is
+   pinned in BYTES: the string-literal axiom below fixes `($strlen c)` to
+   OCaml's `String.length`, i.e. the literal's UTF-8 byte count.  So only a
+   function that returns a BYTE count may be equated with it.  Aliasing a
+   codepoint count would assert bytes == codepoints, false for every
+   non-ASCII string, and — since assumptions make `discharge(¬goal)` STRONGER
+   — would manufacture violations on correct code.
+
+   Aliased:
+     - `String.byte_size` — stdlib, defined as `string_byte_length(s)`.
+     - `string_byte_length` — the compiler builtin it forwards to.
+
+   NOT aliased:
+     - `String.codepoint_count` / `String.grapheme_count` — codepoints, not
+       bytes.  Equating either with `$strlen` is the unsoundness above.
+     - `string_length` — a deliberate abstention, NOT a semantic claim.  It is
+       byte length today in every backend (typecheck's builtin table types it
+       `String -> Int`; llvm_builtins lowers it to the same
+       `march_string_byte_length` C symbol as `string_byte_length`; eval uses
+       OCaml `String.length`; the wasm runtime reads the same `length` field —
+       all four measured at 2 for "é").  But the NAME does not say "byte", the
+       String module's own documentation steers callers to `byte_size` for
+       bytes and `codepoint_count` for characters, and a future correction of
+       `string_length` to codepoints would silently turn this alias into the
+       false assumption described above.  Callers who want the proof have two
+       precisely-named spellings; abstaining costs them nothing but a rename. *)
+
+(* ── The shadowing gate ────────────────────────────────────────────────────
+   The alias keys on a SPELLING, and March lets a program define its own
+   `List.length`, which then wins at runtime.  Aliasing that to `len` attaches
+   the list-length meaning to a function that is not the list's length: the
+   wrong fact enters the assumption set `discharge(¬goal)` proves against, and
+   a violation becomes provable on code that cannot violate anything.  This is
+   the same hazard [string_len_available] already guards for bare `len` — the
+   moment the name is taken, the built-in meaning is withdrawn.
+
+   Set once per [check_module] by [list_length_defs_ok].  The default is the
+   SUPPRESSING one: a path that forgets to set it loses a proof rather than
+   gains a wrong fact. *)
+let list_length_is_stdlib : bool ref = ref false
+
+(* Same gate, same default, for the `String.byte_size` spelling: true only while
+   it still denotes the standard library's own byte-length function.  A program
+   may define `mod String do fn byte_size … end`, which then wins at runtime;
+   aliasing that would attach `$strlen`'s meaning to an arbitrary function. *)
+let string_byte_size_is_stdlib : bool ref = ref false
+
+(* And for the BARE `string_byte_length`.  This one is not a stdlib March
+   function to be identified — it is a COMPILER BUILTIN (typecheck's builtin
+   table; lowered to the `march_string_byte_length` C symbol), so there is no
+   "the stdlib's own definition" to allow: every binding of that name is a
+   competing one, and withdraws the alias.
+
+   "Every binding" means the ones [bare_builtin_undefined] actually scans —
+   declaration forms plus expression binders (`let`, lambda/`fn` parameters,
+   local `fn`, match binders) throughout every `DFn` clause.  That is exactly
+   the region the checker visits, so it is complete where it needs to be; see
+   that function for the argument.  Default suppressing, like the two above. *)
+let string_byte_length_is_builtin : bool ref = ref false
+
+(* The source files the CALLER loaded as the standard library, supplied to
+   [check_module].  This is an IDENTITY, not a path pattern: bin/main.ml reads
+   it off the stdlib declarations it actually prepended, so it follows
+   `MARCH_STDLIB`, the installed `share/march` layout, and the marshalled
+   stdlib-AST cache automatically, and a vendored `MARCH_LIB_PATH` copy — which
+   arrives as user decls, not stdlib decls — is correctly excluded.
+
+   Empty (the default) means "the caller told us nothing", under which no
+   definition is the stdlib's and the alias is withdrawn the moment any
+   `List.length` is in scope. *)
+let stdlib_source_files : string list ref = ref []
+
+(* All three route to the single name `len`.  Whether `len` then resolves to a
+   `len$x` constant or to `($strlen t)` is decided downstream by
+   [resolve_measure], on the DECLARED BASE TYPE of the argument — so the String
+   spellings need no separate reflection path, and a `String.byte_size` applied
+   to something the checker does not see as a String simply fails to reflect
+   (skipped) rather than asserting a list fact. *)
+let measure_alias (m : string) : string option =
+  match m with
+  | "List.length" when !list_length_is_stdlib -> Some "len"
+  | "String.byte_size" when !string_byte_size_is_stdlib -> Some "len"
+  | "string_byte_length" when !string_byte_length_is_builtin -> Some "len"
+  | _ -> None
+
+(* The measure name [m] denotes, following an alias.  Every dispatch site must
+   normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
+   the guard reflects to one symbol and the predicate to another and the two
+   never meet. *)
+let measure_name (m : string) : string =
+  match measure_alias m with Some m' -> m' | None -> m
+
+let is_measure_app (m : string) : bool = measure_alias m <> None || is_measure m
+
 (* Measures known to be non-negative (so `m(x) >= 0` is a sound axiom).  `len`
    always; a user measure when its body is syntactically non-negative. *)
 let measure_nonneg : string list ref = ref []
@@ -495,7 +603,7 @@ let ctor_of_tester (m : string) : string option =
 
 (* True iff the checker attaches meaning to [m] applied inside a predicate. *)
 let known_predicate_fn (m : string) : bool =
-  is_predicate_operator m || is_measure m || ctor_of_tester m <> None
+  is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
 
 (* measures we soundly axiomatize: name -> its argument ADT name. *)
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
@@ -1159,7 +1267,11 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m ->
+  | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _) when is_measure_app m0 ->
+    (* One normalization point for BOTH sides: a path condition and a predicate
+       are translated by this same function, so aliasing here is what makes
+       `List.length(ys) > 0` and `len(_) > 0` land on the same SMT symbol. *)
+    let m = measure_name m0 in
     (match a with
      | A.EVar { A.txt = x; _ } -> resolve_measure m x
      | _ ->
@@ -1219,7 +1331,9 @@ let rec pred_str (e : A.expr) : string =
   | A.ELit (A.LitFloat f, _) ->
     let s = Printf.sprintf "%.12g" f in
     if String.exists (fun c -> c = '.' || c = 'e' || c = 'E') s then s else s ^ ".0"
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m || ctor_of_tester m <> None ->
+  (* Rendering keeps the name AS WRITTEN — an aliased `List.length(_)` reads
+     back as `List.length(_)`, not as the `len` it was normalized to. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure_app m || ctor_of_tester m <> None ->
     m ^ "(" ^ pred_str a ^ ")"
   | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
@@ -1232,6 +1346,16 @@ let rec pred_str (e : A.expr) : string =
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
+  (* Any other application of a plain IDENTIFIER — an unrecognised predicate
+     such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
+     `cap verified` reports, and rendering it `<predicate>` would name the
+     obligation in a way the user cannot match against their own source.
+     Restricted to identifier heads so operator spellings keep the infix
+     rendering the arms above give them. *)
+  | A.EApp (A.EVar { A.txt = f; _ }, args, _)
+    when f <> ""
+         && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
+    f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | _ -> "<predicate>"
 
 (* Split a rendered S-expression string into its top-level tokens,
@@ -2193,10 +2317,32 @@ let sort_of_ctor (ctor : string) : string option =
   | [ s ] -> Some s
   | _ -> None
 
+(* ── `cap verified`: a skipped obligation becomes an error ───────────────── *)
+(* March's default stance is DEFINITE FAILURE ONLY — an obligation the checker
+   cannot discharge is silence, because a false positive on correct code is the
+   cardinal sin here.  A module that writes `cap verified` opts INTO the
+   inverse: inside it, "the checker could not verify this" is an error rather
+   than silence, so the module's contracts are a guarantee instead of a
+   best effort.
+
+   Strictly OPT-IN.  This flag is false unless the decl list currently being
+   walked itself contains `cap verified`, and it is saved/restored around every
+   nested module by [visit_decls] — so it is scoped exactly like
+   [Division_safety]'s `cap no_panic`.  Two consequences worth stating:
+
+     - a `cap verified` module that CALLS an ordinary module does not make the
+       callee's module strict; only obligations RAISED at call sites lexically
+       inside the strict decl list escalate; and
+     - inheritance into nested modules is deliberately NOT done.  bin/main.ml
+       prepends the entire standard library as sibling `DMod` decls of the
+       entry module's own decls, so an inherited flag would turn every stdlib
+       module strict the moment one user module asked for verification. *)
+let strict_verified = ref false
+
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
-let check_call ~root errctx ~span
+let check_call ~root errctx ~span ~(callee : string)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
@@ -2232,6 +2378,31 @@ let check_call ~root errctx ~span
      [rp.sort] and [sg.param_scalar] are computed from the same declared type,
      so they agree; this spelling also covers a synthesized callback sig. *)
   let self_scalar = scalar_sort_or_int rp.sort in
+  (* Every exit below records an outcome.  All but one of them are silent to the
+     USER by design (the definite-failure stance: only a predicate that can
+     never hold is reported); silent to the LEDGER is what this fixes, so a
+     contract that checks nothing is distinguishable from one that passes.
+     Recording is observation-only — it must never alter control flow. *)
+  let note verdict =
+    Obligation.record
+      { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
+    (* …except inside a `cap verified` module, where a skip is the very thing
+       the user asked to be told about (see [strict_verified]).  `Proved` and
+       `Violated` are unaffected: the latter already reported itself. *)
+    match verdict with
+    | Obligation.Skipped r when !strict_verified ->
+      Err.error errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify precondition `%s` on `%s` \
+            (%s: %s)\n\
+            note: guard the call or strengthen what is known here, rewrite the \
+            predicate into the fragment the checker supports, or remove `cap \
+            verified` from this module — it asks for every obligation to be \
+            discharged"
+           (pred_str rp.pred) callee (Obligation.reason_name r)
+           (Obligation.reason_detail r))
+    | _ -> ()
+  in
   match List.nth_opt args rp.idx with
   | None -> ()
   | Some self_actual ->
@@ -2289,9 +2460,16 @@ let check_call ~root errctx ~span
 
        LENGTH IS IN BYTES.  March's `string_length` builtin is `String.length`
        in the interpreter and an alias for `march_string_byte_length` in native
-       codegen — the language has no codepoint-length primitive at all, so bytes
-       is not a conservative guess, it is the definition.  OCaml's
-       [String.length] over the already-unescaped literal is exactly that. *)
+       codegen, so bytes is not a conservative guess, it is what that builtin
+       means.  OCaml's [String.length] over the already-unescaped literal is
+       exactly that.
+
+       March DOES have a codepoint-length primitive — `String.codepoint_count`,
+       which returns 1 for "é" where every byte-length spelling returns 2.  It
+       is simply not what `$strlen` denotes, and must never be aliased to it;
+       see [measure_alias].  (An earlier revision of this comment claimed the
+       language had no such primitive.  It does, and reasoning from that claim
+       is how a codepoint count nearly got equated with a byte count.) *)
     let str_lit_const (s : string) : Smt.term option =
       if not (string_len_available ()) then None
       else
@@ -2866,6 +3044,20 @@ let check_call ~root errctx ~span
         let adt = Hashtbl.find axiom_measures m in
         decls := (name, Smt.SData adt) :: !decls;
         Some (Smt.App (m, [ Smt.Const name ])))
+      (* `len` over a name ALREADY declared into the `Str` sort is the string
+         length, i.e. the same `($strlen name)` the predicate side produces —
+         and the caller's `name` is the very constant it produced it over (the
+         binder is pre-reflected just above, before path translation, exactly so
+         that this holds).  Without this the two sides split: the predicate says
+         `($strlen t)` while the guard said `len$t`, an unrelated Int constant,
+         and no string guard could ever discharge a string obligation.
+         [path_resolve_var] applies the identical `str_names` rule to plain
+         occurrences, so this keeps measure and variable positions at one sort.
+
+         Unreachable from source until the byte-length aliases existed — March
+         has no callable `len`, so a guard could not mention this measure. *)
+      else if m = "len" && string_len_available () && Hashtbl.mem str_names name then
+        Some (Smt.App (strlen_fn, [ Smt.Const name ]))
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =
@@ -2902,8 +3094,21 @@ let check_call ~root errctx ~span
           smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
             ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
      with
-     | None -> ()
-     | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) -> ()
+     | None ->
+       (* Two different causes reach this arm and they must not be conflated:
+          `Skip` means the SUBJECT (a record actual) did not reflect, while the
+          other modes mean the PREDICATE itself did not.  The distinction was
+          cosmetic while it only fed a debug count; `cap verified` puts the
+          reason in front of a user, and telling someone their perfectly
+          reflectable predicate is unreflectable sends them after the wrong
+          thing. *)
+       note
+         (Obligation.Skipped
+            (match mode with
+             | `Skip -> Obligation.Unreflectable_subject
+             | `Other | `Record _ -> Obligation.Unreflectable_predicate))
+     | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
+       note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
        let decls =
@@ -2924,7 +3129,7 @@ let check_call ~root errctx ~span
            (fun (n, s) -> not (s = Smt.SInt && Hashtbl.mem str_names n))
            decls
        in
-       if sort_conflict decls then ()
+       if sort_conflict decls then note (Obligation.Skipped Obligation.Sort_conflict)
        else
        (* Drop ill-sorted assumptions.  Weakening the hypothesis set can only
           make BOTH discharges harder, so this can only turn a report into a
@@ -2936,7 +3141,8 @@ let check_call ~root errctx ~span
        let sort_of n = List.assoc_opt n decls in
        let is_float n = sort_of n = Some Smt.SFloat in
        let goal = fp_rewrite is_float goal in
-       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then ()
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then
+         note (Obligation.Skipped Obligation.Float_sort_gate)
        else
        let assumptions =
          List.filter_map
@@ -2983,16 +3189,17 @@ let check_call ~root errctx ~span
           - else discharge(goal=¬G) Verified => G never holds     => violation
           - otherwise (G depends on unknowns / solver unsure)     => skip *)
        (match Refine.discharge ~root ~preamble vc with
-        | Refine.Verified -> ()
+        | Refine.Verified -> note Obligation.Proved
         | first ->
           (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
+             note Obligation.Violated;
              Err.error errctx ~span
                (Printf.sprintf
                   "refinement violation: argument does not satisfy precondition `%s`%s\n\
                    note: guard the call (e.g. `if %s do …`) or pass a value known to satisfy it"
                   (pred_str rp.pred) (format_cx (model_of first)) (pred_str rp.pred))
-           | _ -> ())))
+           | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
 (* ── Postconditions: a function's return value must satisfy its return
    refinement.  We check each *tail* expression (a return position) under the
@@ -3740,7 +3947,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
      | Some (Some sg) ->
        let postcond = postcond_of ctx defs in
        List.iter
-         (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+         (fun rp ->
+           check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
          sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
@@ -3750,7 +3958,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         | Some sg ->
           let postcond = postcond_of ctx defs in
           List.iter
-            (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+            (fun rp ->
+              check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
             sg.refined
         | None -> ()));
     List.iter go args
@@ -4067,14 +4276,23 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
         | _ -> ctx)
       ctx decls
   in
-  List.iter
-    (function
-      | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
-      | A.DMod (name, _, ds, _) ->
-        let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
-        visit_decls ~root errctx defs { ctx with modpath } ds
-      | _ -> ())
-    decls
+  (* `cap verified` is scoped to the decl list that declares it — saved and
+     restored here so a nested module neither inherits it nor leaks its own
+     back out.  See [strict_verified] for why inheritance would be wrong. *)
+  let saved_strict = !strict_verified in
+  strict_verified :=
+    List.exists
+      (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
+      decls;
+  Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
+    List.iter
+      (function
+        | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+        | A.DMod (name, _, ds, _) ->
+          let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+          visit_decls ~root errctx defs { ctx with modpath } ds
+        | _ -> ())
+      decls)
 
 (** Register ADT/record sorts for a list of declarations without running the full
     VC pass.  Called by [--check-migration] mode to prime the type tables before
@@ -4110,6 +4328,298 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
       | _ -> [])
     decls
 
+(* Decide whether `List.length` in THIS compilation unit is the stdlib list
+   length — the only reading under which aliasing it to `len` is a true fact.
+   See [list_length_is_stdlib].
+
+   The gate is deliberately COARSE.  A precise answer needs the lexical
+   [resolve_call] resolver, which [smt_of] does not have in scope; and the
+   asymmetry of the two errors is total — over-suppressing costs a missed
+   proof (silence, the status quo ante), under-suppressing costs a FALSE
+   POSITIVE on correct code.  So anything that even looks like a competing
+   `List.length` withdraws the alias for the whole module.
+
+   It cannot key on the module PATH.  bin/main.ml prepends the whole stdlib —
+   including `mod List` — into every module it checks, so "reject any `mod
+   List`" would disable the feature in production.  And the outer `mod Q` is
+   the [module_] record rather than a decl, so a nested `mod List do fn length`
+   lands at path `List.length` too, exactly like the stdlib's: the two are
+   indistinguishable by name alone.
+
+   What separates them is the SOURCE FILE the definition came from, tested
+   against the identity the CALLER supplied in [stdlib_source_files].  It must
+   NOT be inferred from the path's shape: an earlier revision of this gate
+   asked for a parent directory named `stdlib`, which
+
+     - disabled the feature outright in an installed March, where `stdlib/dune`
+       ships the sources to `<prefix>/share/march` (parent `march`), and under
+       any `MARCH_STDLIB` pointing elsewhere; and
+     - accepted ANY file path ending `stdlib/list.march`, so a vendored or
+       forked `List` under `MARCH_LIB_PATH` was taken for the real one and
+       re-opened the false positive it was written to close.
+
+     - `mod Q do mod List do fn length … end end`  -> not a stdlib file -> suppress
+     - a vendored `MARCH_LIB_PATH` `mod List`      -> not a stdlib file -> suppress
+     - the stdlib's own, whatever the layout       -> stdlib file       -> allow
+     - no `List` module at all (the unit tests)    -> no defs           -> allow
+
+   `alias Foo as List` and `use Some.List` can also make the spelling denote
+   someone else's function, so either withdraws the alias too. *)
+let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
+
+(* Is the qualified spelling `<md>.<fn>` still the standard library's own?
+   Parameterised over the pair so the `List.length` and `String.byte_size`
+   aliases share one gate rather than two that can drift apart.
+
+   ── THE INVARIANT (shared with [bare_builtin_undefined]) ───────────────────
+   Ask only: can this declaration make the spelling `<md>.<fn>` denote a
+   function that is not the stdlib's?  Two ways — DEFINE a member named [fn]
+   inside a module named [md], or REBIND the bare segment [md] to some other
+   module.  Everything that can do either must be named here.
+
+   An earlier revision asked instead "is this an `A.DFn` inside a `DMod`?" and
+   ended its walk in a `| _ -> ()` wildcard.  A competing member defined as a
+   module-level `let`, or declared in an `extern` block, was therefore
+   invisible: the alias stayed on, `List.length` was equated with `len`, the
+   dead branch under a contradictory guard was treated as reachable, and
+   CORRECT code was reported — a false positive, the one error this pass must
+   never make.  That is the identical hole [bare_builtin_undefined] had closed
+   for the bare spelling and this gate never inherited; hence the match below
+   is EXHAUSTIVE over [A.decl] with no wildcard, so a new declaration form is a
+   compile error here rather than a silent hole.  The arms that do nothing say
+   so by name, and each is a claim that that form can neither define a member
+   nor rebind a module name; check it rather than trusting it.
+
+   [mod_name] is the ENCLOSING module's own name.  The entry module's
+   declarations are top-level rather than a `DMod` — and bin/main.ml strips the
+   stdlib's `DMod List` whenever the entry module shadows it — so a file
+   `mod List do fn length …` defines `List.length` with nothing nested to see.
+   Starting the walk with `in_mod = true` when the names match closes that.
+
+   Direction of doubt is always to SUPPRESS: a missed proof is silence, the
+   status quo ante; a wrong fact in the assumption set is a false positive. *)
+let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
+    (decls : A.decl list) : bool =
+  let foreign = ref false in
+  let rebound = ref false in
+  (* A member definition only competes if it did NOT come from the standard
+     library's own sources — see [is_stdlib_source_file]. *)
+  let defines in_mod (sp : A.span) b =
+    if in_mod && b && not (is_stdlib_source_file sp.A.file) then foreign := true
+  in
+  let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
+  let rec go in_mod ds =
+    List.iter
+      (function
+        (* ── Can define `<md>.<fn>` ──────────────────────────────────────── *)
+        | A.DFn (fd, sp) -> defines in_mod sp (fd.A.fn_name.A.txt = fn)
+        (* `let length = fn xs -> …` is a member exactly like `fn length`. *)
+        | A.DLet (_, b, sp) -> defines in_mod sp (List.mem fn (pat_binders b.A.bind_pat))
+        (* An `extern` block declares its functions as members of the module
+           that encloses it. *)
+        | A.DExtern (ed, sp) ->
+          defines in_mod sp
+            (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = fn) ed.A.ext_fns)
+        (* Interface/impl methods are reachable under the declaring module's
+           qualified spelling too. *)
+        | A.DInterface (idf, sp) ->
+          defines in_mod sp
+            (List.exists
+               (fun (m : A.method_decl) -> m.A.md_name.A.txt = fn)
+               idf.A.iface_methods)
+        | A.DImpl (idf, sp) ->
+          defines in_mod sp
+            (List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods)
+        (* ── Rebinds the bare segment `<md>` ─────────────────────────────── *)
+        | A.DAlias (a, _) -> if a.A.alias_name.A.txt = md then rebound := true
+        | A.DUse (u, _) ->
+          (* Four selector forms, all of which can put some other module under
+             the bare name `<md>`:
+               `use X.<md>`            — UseSingle, the path's last segment
+               `import X.{<md>, …}`    — UseNames (its list admits upper names)
+               `import X`              — UseAll, a glob that can carry a
+                                         nested module named `<md>`
+               `import X, except: [_]` — UseExcept, ditto unless `<md>` is
+                                         excluded. *)
+          (match u.A.use_sel with
+           | A.UseSingle ->
+             (match List.rev u.A.use_path with
+              | last :: _ :: _ when last.A.txt = md -> rebound := true
+              | _ -> ())
+           | A.UseNames xs -> if mentions_md xs then rebound := true
+           | A.UseExcept xs -> if not (mentions_md xs) then rebound := true
+           | A.UseAll -> rebound := true)
+        (* ── Contains declarations; recurse ──────────────────────────────── *)
+        | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
+        (* A `describe` block does not open a module scope of its own, so its
+           declarations sit at the enclosing module's level. *)
+        | A.DDescribe (_, ds, _) -> go in_mod ds
+        (* ── Can neither define `<md>.<fn>` nor rebind `<md>` ────────────── *)
+        (* Types and their constructors: constructors are capitalised, so they
+           cannot collide with the lowercase `length`/`byte_size`. *)
+        | A.DType _ | A.DAlwaysLinearType _ | A.DTransitions _
+        (* Capitalised entities in their own namespaces; none of them is a
+           module that the bare segment `<md>` could resolve to. *)
+        | A.DActor _ | A.DProtocol _ | A.DSig _ | A.DApp _
+        (* Desugared into `DImpl` before this pass runs; handled above. *)
+        | A.DDeriving _ | A.DSatisfy _
+        (* Capability/compiler directives — no bindings at all. *)
+        | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+        (* Test bodies bind only within themselves. *)
+        | A.DTest _ | A.DSetup _ | A.DSetupAll _ -> ())
+      ds
+  in
+  go (mod_name = md) decls;
+  (not !foreign) && not !rebound
+
+let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"List" ~fn:"length" ~mod_name decls
+
+let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" ~mod_name decls
+
+(* Does any binding construct inside [e] bind [name]?  BINDER positions only —
+   an ordinary `string_byte_length(t)` CALL mentions the name without binding
+   it, so [expr_mentions] (which counts every occurrence) is the wrong tool
+   here: it would report the very uses this alias exists to serve.
+
+   [iter_all] supplies the structure-agnostic descent, so a new expression form
+   is covered as soon as it appears in [children]; this match only has to name
+   the forms that BIND. *)
+let expr_binds_name (name : string) (e : A.expr) : bool =
+  let found = ref false in
+  let is n = n = name in
+  let param (p : A.param) = is p.A.param_name.A.txt in
+  iter_all
+    (fun e ->
+      let here =
+        match e with
+        | A.ELam (ps, _, _) -> List.exists param ps
+        | A.ELetFn (n, ps, _, _, _) -> is n.A.txt || List.exists param ps
+        | A.ELet (b, _) -> List.exists is (pat_binders b.A.bind_pat)
+        | A.ELetQ (p, _, _, _) -> List.exists is (pat_binders p)
+        | A.EMatch (_, brs, _) ->
+          List.exists
+            (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
+            brs
+        | _ -> false
+      in
+      if here then found := true)
+    e;
+  !found
+
+(* Is the BARE name [name] still the compiler builtin?  There is no stdlib
+   March definition of `string_byte_length` to identify (it is an intrinsic),
+   so unlike [stdlib_member_defs_ok] there is no allow-because-stdlib case:
+   any binding of the name is a competing one.
+
+   Deliberately coarse — it does not ask whether the binding is actually in
+   scope at the call, because the errors are asymmetric (over-suppress = a lost
+   proof; under-suppress = a FALSE POSITIVE) and the precise answer needs a
+   lexical resolver this pass does not have here.  A glob `use X.*` (or an
+   `except:` list that does not exclude the name) can import an arbitrary
+   `string_byte_length`, so both count as taking it.
+
+   ── THE INVARIANT ──────────────────────────────────────────────────────────
+   Scan every construct that can BIND [name] into a scope some `DFn` body can
+   see.  That is strictly LARGER than the set the checker descends into, and
+   conflating the two is how this gate has been wrong twice:
+
+     - round 1 scanned declaration forms only, missing a `let`/parameter
+       binding INSIDE a `DFn` body;
+     - round 2 argued the scanned set "is exactly [visit_decls]'s", which is
+       the wrong invariant even though the sentence was true.  [visit_decls]
+       recurses into `DFn`/`DMod` alone — but a module-level `DLet` is never
+       DESCENDED INTO and still BINDS the name for every sibling `DFn`, which
+       is precisely where obligations are raised.  Both misses were the same
+       failure: a real shadowing left the alias active, so a dead `== 0`
+       branch was treated as reachable and a correct program was reported.
+
+   So do not reason about where bodies are visited.  Ask only: can this
+   construct put the name in scope for a checked body?  Two consequences —
+   this walks expression binders via [expr_binds_name] (round 1), and the
+   match below is EXHAUSTIVE over [A.decl] with no wildcard, so a new
+   declaration form is a compile error here rather than a silent hole (round
+   2).  The arms that do nothing say so by name, and each is a claim that that
+   form cannot bind a bare value name; check it rather than trusting it. *)
+let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
+  let taken = ref false in
+  let take b = if b then taken := true in
+  let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
+  let fn_def_takes (fd : A.fn_def) =
+    take (fd.A.fn_name.A.txt = name);
+    List.iter
+      (fun (c : A.fn_clause) ->
+        take (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
+        (* A default-value expression is a binder site too (it can carry a
+           lambda), and [fc_params] holds it outside the body. *)
+        List.iter
+          (function
+            | A.FPDefault (_, d) -> take (expr_binds_name name d)
+            | A.FPNamed _ | A.FPPat _ -> ())
+          c.A.fc_params;
+        (match c.A.fc_guard with Some g -> take (expr_binds_name name g) | None -> ());
+        take (expr_binds_name name c.A.fc_body))
+      fd.A.fn_clauses
+  in
+  let rec go ds =
+    List.iter
+      (function
+        (* ── Binds a bare value name ─────────────────────────────────────── *)
+        | A.DFn (fd, _) -> fn_def_takes fd
+        (* A module-level `let` is never descended into by [visit_decls], yet it
+           binds the name for every sibling `DFn` body — the round-2 hole. *)
+        | A.DLet (_, b, _) ->
+          take (List.mem name (pat_binders b.A.bind_pat));
+          take (expr_binds_name name b.A.bind_expr)
+        (* An `extern` block declares its functions under their bare names. *)
+        | A.DExtern (ed, _) ->
+          take (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
+        (* Interface METHODS are called by bare name and dispatched on the
+           argument's type, so a method of this name takes the spelling; a
+           default body is a binder site as well. *)
+        | A.DInterface (idf, _) ->
+          List.iter
+            (fun (m : A.method_decl) ->
+              take (m.A.md_name.A.txt = name);
+              match m.A.md_default with
+              | Some d -> take (expr_binds_name name d)
+              | None -> ())
+            idf.A.iface_methods
+        | A.DImpl (idf, _) ->
+          List.iter
+            (fun ((mn : A.name), (fd : A.fn_def)) ->
+              take (mn.A.txt = name);
+              fn_def_takes fd)
+            idf.A.impl_methods
+        | A.DAlias (a, _) -> take (a.A.alias_name.A.txt = name)
+        | A.DUse (u, _) ->
+          (match u.A.use_sel with
+           | A.UseAll -> taken := true
+           | A.UseExcept xs -> take (not (named xs))
+           | A.UseNames xs -> take (named xs)
+           | A.UseSingle -> ())
+        (* ── Contains declarations; recurse ──────────────────────────────── *)
+        | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
+        (* ── Cannot bind a bare value name ───────────────────────────────── *)
+        (* Types and their constructors: March constructors are capitalised, so
+           they cannot collide with a lowercase builtin, and they are `ECon`
+           rather than `EVar` at the call anyway. *)
+        | A.DType _ | A.DAlwaysLinearType _ | A.DTransitions _
+        (* Named, capitalised entities with their own namespace. *)
+        | A.DActor _ | A.DProtocol _ | A.DSig _ | A.DApp _
+        (* Desugared into `DImpl` before this pass runs; handled above. *)
+        | A.DDeriving _ | A.DSatisfy _
+        (* Capability/compiler directives — no value bindings at all. *)
+        | A.DNeeds _ | A.DProofCap _ | A.DOpts _
+        (* Test bodies bind only within themselves, and no obligation raised in
+           a sibling `DFn` can see those bindings. *)
+        | A.DTest _ | A.DSetup _ | A.DSetupAll _ -> ())
+      ds
+  in
+  go decls;
+  not !taken
+
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
    gate exists to keep those axioms sound, so with axioms off it has no purpose).
@@ -4117,7 +4627,21 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    sound, no quantifiers, no datatype theory), an escape hatch for the per-query
    cost of quantified/datatype reasoning.  It changes only diagnostics, never the
    compiled artifact, so it is not part of the CAS cache key. *)
-let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.ctx)
+(* [stdlib_files]: the source files the caller loaded as the standard library.
+   Only used to decide whether a `List.length` / `String.byte_size` in scope is
+   the real one — see [stdlib_source_files].  (The bare `string_byte_length`
+   alias does not consult it: that name is a compiler builtin with no stdlib
+   definition, so any definition of it is competing by construction.)
+
+   Omitting it does NOT disable the `List.length` alias.  It makes the answer
+   "no file is the stdlib's", which matters only when a competing
+   `List.length` definition is actually in scope: with none present — the case
+   for every string-parsed test fixture — [list_length_defs_ok] finds nothing
+   foreign and the alias stays enabled.  So the default is safe in the sense
+   that no non-stdlib definition can ever be mistaken for the stdlib's, not in
+   the sense that it turns the feature off. *)
+let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
+    ?(stdlib_files : string list = []) (errctx : Err.ctx)
     (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
@@ -4127,6 +4651,18 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
      reuse for every VC within the module; the content-addressed VC cache still
      preserves cross-module results. *)
   March_refine.Refine.shutdown ();
+  (* The ledger is per-module: without this, counts accumulate across every
+     compilation in one process (the test binary today, an LSP session
+     tomorrow) and a report would describe every module ever checked. *)
+  Obligation.reset ();
+  (* Hygiene: [visit_decls] sets this per decl list, but a prior module must
+     never be able to leave it on. *)
+  strict_verified := false;
+  stdlib_source_files := stdlib_files;
+  let mod_name = m.A.mod_name.A.txt in
+  list_length_is_stdlib := list_length_defs_ok ~mod_name m.A.mod_decls;
+  string_byte_size_is_stdlib := string_byte_size_defs_ok ~mod_name m.A.mod_decls;
+  string_byte_length_is_builtin := bare_builtin_undefined "string_byte_length" m.A.mod_decls;
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

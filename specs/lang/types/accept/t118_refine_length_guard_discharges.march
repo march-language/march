@@ -1,0 +1,39 @@
+-- A runtime `List.length` guard DISCHARGES a `len` measure obligation. The
+-- checker aliases the qualified `List.length` to the `len` measure, so the
+-- ordinary guard `if List.length(ys) > 0` establishes exactly the fact that
+-- `{List(Int) | len(_) > 0}` demands, and the guarded call is PROVED.
+--
+-- Before 2026-07-28 the runtime function and the measure were unconnected
+-- symbols: the guard contributed nothing, the obligation was unprovable, and
+-- the call was silent because it was SKIPPED. Exit 0 therefore cannot, on its
+-- own, tell this file from that state — which is why the discharge is bracketed
+-- from the rejecting side by `reject/t117_refine_length_guard_contradiction`,
+-- where the contradictory `== 0` guard must be reported. Read the pair
+-- together: this file says the guard does not cause a false positive, its
+-- companion says the guard is actually being read.
+--
+-- The alias is deliberately narrow — only the QUALIFIED `List.length`, and only
+-- while it still denotes the standard library's own function. See
+-- specs/lang/refinement-types.md, "Path Sensitivity — Guards Establish Facts".
+mod T118 do
+
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn first_or(ys : List(Int), d : Int) : Int do
+    if List.length(ys) > 0 do
+      head_of(ys)
+    else
+      d
+    end
+  end
+
+  fn main() : Int do
+    first_or([1, 2, 3], 0)
+  end
+
+end

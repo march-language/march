@@ -144,6 +144,60 @@ end
 refinement predicate — you can't call it as an ordinary function. In plain code, like
 the guard above, use `List.length` instead; the solver knows they mean the same thing.)
 
+### The solver really does connect `List.length` to `len`
+
+That last sentence is worth dwelling on, because it hasn't always been true. The
+checker treats the qualified `List.length` as another name for the `len` measure, so a
+guard you'd write anyway — `if List.length(ys) > 0` — establishes exactly the fact the
+contract `{List(Int) | len(_) > 0}` is asking for:
+
+```march
+fn first_or(ys : List(Int), d : Int) : Int do
+  if List.length(ys) > 0 do head(ys) else d end   -- proved
+end
+
+fn broken(ys : List(Int)) : Int do
+  if List.length(ys) == 0 do head(ys) else 0 end  -- compile error
+end
+```
+
+The second one is a compile error because under `len(ys) == 0` the predicate
+`len(ys) > 0` can *never* hold — a definite failure, which is the bar March requires
+before it says anything.
+
+The connection is deliberately narrow, since attaching `len`'s meaning to the wrong
+function is how you'd get a false alarm on correct code. Only the **qualified**
+`List.length` counts (a bare `length` is left alone), and only while it's still the
+standard library's own. If your program defines its own `List.length` — however it
+spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface
+or impl method — ships a forked
+`List` via `MARCH_LIB_PATH`, or rebinds `List` with `alias`/`use`/`import`, the connection is
+dropped for that whole module and you're back to the older behaviour: the obligation
+is skipped, quietly, rather than proved.
+
+### The same for strings — but only the byte-valued names
+
+`len` measures a `String` too, and the same connection is made for
+`String.byte_size` and the `string_byte_length` builtin:
+
+```march
+fn slug(s : {String | len(_) > 0}) : String do String.slice(s, 0, 1) end
+
+fn label(t : String) : String do
+  if String.byte_size(t) > 0 do slug(t) else "?" end   -- proved
+end
+```
+
+Swap the guard for `String.byte_size(t) == 0` and that call becomes a compile error,
+the same way it does for lists.
+
+The catch is that `len` on a String counts **bytes**, so only byte-valued names get
+this treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"`
+where `String.byte_size` returns 2 — and is left alone. So is `string_length`: it
+happens to be a byte length today, but the *name* suggests characters, and a
+connection made on a name that might later be corrected is a bug waiting to happen.
+Reach for `String.byte_size` in a guard; it says what it means.
+
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
 
@@ -253,12 +307,11 @@ Each contract is taken from that function's own panic message, so it never
 demands more than the code already checked, and every `panic` stays in place to
 catch the cases the compiler skips.
 
-One caveat worth knowing before you rely on this: an ordinary
-`List.length(xs) > 0` guard does **not** currently satisfy the requirement. The
-runtime `List.length` function and the `len` measure aren't connected to each
-other, so a guarded call is skipped rather than proved. That's a missed proof
-rather than a false alarm — but it does mean the contracts mostly bite on
-literal lists today, not on lists you've just checked at runtime.
+An ordinary `List.length(xs) > 0` guard **does** satisfy the requirement, so these
+contracts bite on a list you checked at runtime and not just on literals — see
+[the solver really does connect `List.length` to
+`len`](#the-solver-really-does-connect-listlength-to-len) for exactly when that
+connection applies, and the (narrow) circumstances in which it's dropped.
 
 ### The measure soundness gate
 
@@ -418,6 +471,102 @@ the checker can't determine is not an error.
 
 ---
 
+## Seeing What Got Checked — `--refine-report`
+
+Because March stays quiet about anything it can't decide, silence has two very
+different meanings: "I proved this" and "I couldn't tell, so I said nothing." From the
+outside they look identical — which is exactly how a `{List(a) | len(_) > 0}` contract
+once shipped enforcing nothing while every test stayed green.
+
+`--refine-report` turns the checked fraction into a number you can look at:
+
+```
+$ march --check --refine-report stdlib/list.march
+refinement obligations (user code): 0 proved, 0 violated, 5 skipped
+  skipped (solver-undecided): 5
+refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
+  skipped (unreflectable-predicate): 1
+  skipped (solver-undecided): 27
+```
+
+One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
+`--check` whose sources are already in the build cache exits straight away, before
+anything is parsed — so the report never runs and you get **no output at all**, while
+still exiting 0. That looks exactly like "nothing to report", which is the very
+confusion this flag exists to clear up. (`.march/cas/vc` is a different cache, holding
+solver verdicts; clearing that one makes z3 re-decide, but doesn't change whether the
+report prints.)
+
+You get two counts because the compiler quietly prepends the whole standard library to
+every compilation. **User code** counts only the call sites in the file you named —
+that's the one to watch while writing a module. **User + stdlib** counts everything
+raised in the run, which makes a good whole-program coverage number (March's own CI
+fails the build if it climbs, since more skips means less is being checked).
+
+Every skip says *why*: the predicate uses vocabulary the checker can't translate
+(`unreflectable-predicate`), the argument's own value didn't translate
+(`unreflectable-subject`), a symbol would have needed two different sorts
+(`sort-conflict`), the float wellsortedness gate rejected it (`float-sort-gate`), or
+the solver simply didn't decide (`solver-undecided`).
+
+One thing the numbers don't include: they count **preconditions checked at call
+sites**. Return refinements go through a different path that doesn't file a record, so
+a postcondition the checker couldn't discharge won't show up here.
+
+---
+
+## `cap verified` — Making Silence an Error
+
+Everything above is built around never crying wolf: if March can't prove something is
+*definitely* wrong, it keeps quiet. That's the right default, but it means a contract
+can be technically legal and practically inert.
+
+If you want the opposite deal for a particular module — "I want these contracts to be
+a guarantee, and I want to be told when they aren't" — declare `cap verified`. Inside
+that module, a precondition at a call site that the checker can't discharge becomes a
+compile error:
+
+```march
+mod Checked do
+  cap verified
+
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Cons(h, _) -> h
+    Nil        -> panic("empty")
+    end
+  end
+
+  fn ok(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head_of(ys) else 0 end   -- proved, so no error
+  end
+end
+```
+
+Take the guard away and the same call fails the build, telling you which precondition,
+on which function, and why it couldn't be discharged:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
+(solver-undecided: the solver proved neither the predicate nor its negation)
+note: guard the call or strengthen what is known here, rewrite the predicate
+into the fragment the checker supports, or remove `cap verified` from this
+module — it asks for every obligation to be discharged
+```
+
+**Know the edges before you reach for it.** It's strictly opt-in and scoped to the
+module that writes it: a `cap verified` module calling an ordinary one doesn't make
+the callee strict, and nested modules don't inherit it (they can't — the standard
+library arrives as sibling modules, and inheriting would turn all of it strict at
+once). It escalates **preconditions at call sites** only, so an undischarged
+postcondition slips through. It doesn't reach into `impl` or `interface` method
+bodies. And there's **no `@[trusted]` escape hatch yet** — if one obligation in the
+module genuinely can't be discharged, your options are an `assert` or dropping
+`cap verified` entirely. That makes it a good fit for a small, deliberately-verified
+module today, and not yet something to switch on across a codebase.
+
+---
+
 ## Limitations
 
 No refinement system is complete — this one is intentionally a *pragmatic slice* of
@@ -451,12 +600,13 @@ dependent typing. Know the edges:
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
-- **A runtime length check does not discharge a `len` obligation.** The
-  `List.length` function and the `len` measure are unconnected, so guarding with
-  `if List.length(xs) > 0` leaves a call to `{List(a) | len(_) > 0}` *skipped*
-  rather than proved. Non-empty contracts therefore catch literal empty lists
-  reliably, but say nothing about a list you validated at runtime. See
-  [Requiring a non-empty collection](#requiring-a-non-empty-collection).
+- **Only *some* length spellings are connected to `len`.** The qualified
+  `List.length`, `String.byte_size`, and the `string_byte_length` builtin discharge a
+  `len` obligation; a bare `length`, `String.codepoint_count`, and `string_length` do
+  not, and a guard written with those leaves the call *skipped* rather than proved.
+  The connection is also dropped module-wide if the name could denote something other
+  than the standard library's own function. See [the solver really does connect
+  `List.length` to `len`](#the-solver-really-does-connect-listlength-to-len).
 - **Relational postconditions work, within structural recursion.** A predicate
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
   — is proven by supplying the induction hypothesis at each recursive call whose

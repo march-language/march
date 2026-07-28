@@ -62,10 +62,22 @@ fi
 # (filenames and the entry hash embed a per-run content hash — verified: two consecutive
 # runs over identical input produce different en_*.pf_filter names), so `git diff` on the
 # index would fail on every run and teach everyone to ignore it.
+#
+# Listed with `git ls-files`, NOT `find`: only TRACKED files reach GitHub Pages, so only
+# tracked files may influence the digest. A bare `find docs` walks the working tree and
+# silently folds in untracked pages, which makes the committed digest unreproducible for
+# anyone else — including CI, whose clean checkout does not have them. `.gitignore` line
+# 44 ignores `docs/superpowers/` while sibling plans committed before that rule are still
+# tracked, so an ignored `.md` sitting in that directory is the ordinary case, not an
+# exotic one. Observed 2026-07-28: a local plan file there made `--check` pass locally and
+# fail in CI with a digest mismatch and no indication why.
 source_digest() {
-  find docs -type f \( -name '*.md' -o -name '*.html' \) \
-    -not -path 'docs/pagefind/*' \
+  git ls-files -z -- docs \
+    | tr '\0' '\n' \
+    | grep -E '\.(md|html)$' \
+    | grep -v '^docs/pagefind/' \
     | LC_ALL=C sort \
+    | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done \
     | tr '\n' '\0' \
     | xargs -0 "${SHA[@]}" \
     | "${SHA[@]}" \

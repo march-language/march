@@ -1,5 +1,79 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, refinement legibility: `--refine-report`, measure aliases, `cap verified`)
+
+**A refinement obligation now leaves a record, so the checked fraction is a
+number instead of a guess.** March reports a violation only when a predicate can
+NEVER hold; every other outcome is silence, which made silence ambiguous between
+"proved", "the predicate did not reflect", and "the solver did not decide". That
+ambiguity is exactly how `{List(a) | len(_) > 0}` shipped enforcing nothing while
+the suite stayed green (see the 2026-07-27 entry below). `lib/refinecheck/
+obligation.ml` is a ledger of every precondition obligation raised at a call
+site, with a five-way skip reason (`unreflectable-predicate`,
+`unreflectable-subject`, `sort-conflict`, `float-sort-gate`,
+`solver-undecided`), and `march --check --refine-report FILE` prints the
+summary. Two slices are printed — "user code" and "user + stdlib" — because
+`bin/main.ml` prepends the entire standard library to every compilation.
+
+Measured baseline on `stdlib/list.march` (2026-07-28): user-only `0 proved,
+0 violated, 5 skipped`; user + stdlib `8 proved, 0 violated, 28 skipped`
+(unreflectable-predicate 1, solver-undecided 27). CI now ratchets on the 28 (a
+`Refinement obligation coverage ratchet` step in the `conformance` job — it needs
+a built compiler and z3, which the `doc-lint` job has neither of). The ratchet is
+a ceiling on SKIPS, so it may only ever be revised downward; it also trips if z3
+goes missing from PATH, which drives the count to 36. A ceiling alone is not a
+ratchet — a pass that raised no obligations at all would report `0 skipped` and
+sail through it — so the step also asserts a FLOOR on the proved count (8, may
+only be revised upward).
+
+**Runtime length guards now discharge `len` obligations.** The checker aliases
+the qualified `List.length`, `String.byte_size`, and the `string_byte_length`
+builtin to the `len` measure, so an ordinary guard — `if List.length(ys) > 0 do
+head(ys)` — *proves* a `{List(a) | len(_) > 0}` precondition instead of leaving
+it unprovable-and-skipped, and the contradictory `== 0` form is reported. This
+was the "Follow-up (OPEN)" filed with the 2026-07-27 contracts and was the main
+thing keeping them useful only on literal lists. The alias is narrow by design:
+qualified spellings only, only while they denote the standard library's own
+function (identified by the sources the compiler actually loaded, so it survives
+`MARCH_STDLIB` and an installed `share/march`), and withdrawn module-wide the
+moment the name could denote something else — a user definition in ANY
+declaration form (`fn`, a module-level `let`, an `extern` block, an interface or
+impl method, including one at the entry module's own top level when that module
+is itself named `List`/`String`), a vendored `List` via `MARCH_LIB_PATH`, an
+`alias`/`use`/`import` rebinding of `List`/`String` under any selector form
+(single, `.{…}`, glob, `except:`), or any binder of the bare
+`string_byte_length`. The qualified gate `stdlib_member_defs_ok` originally
+matched `A.DFn` alone behind a `| _ -> ()` wildcard, so a competing `let`- or
+`extern`-defined member was invisible and correct code was REPORTED; it is now
+an exhaustive `A.decl` match with no wildcard, the same discipline
+`bare_builtin_undefined` already had. A withdrawn alias returns the
+obligation to being skipped, which is the pre-alias behaviour: never a false
+report. `string_length` is deliberately NOT aliased — it is a byte length today
+(it lowers to `march_string_byte_length`; `string_length("é")` is 2), but the
+name reads like a character count and an alias would silently become unsound if
+the name were ever corrected. `String.codepoint_count` (1 for `"é"`) is the
+codepoint primitive and is likewise left alone.
+
+**`cap verified` inverts the stance, per module.** A decl list that declares it
+turns each skipped precondition obligation into an error naming the predicate,
+the callee, and the reason. Strictly opt-in; scoped to the declaring decl list
+and deliberately NOT inherited by nested modules (the stdlib arrives as sibling
+`DMod`s, so inheritance would make all 111 modules strict at once). Known limits,
+stated because they bound what the capability actually guarantees: postconditions
+are not in the ledger (`check_post` neither records nor escalates), `DImpl`/
+`DInterface` method bodies are not walked by this pass, and there is no
+`@[trusted]` escape hatch yet — so it suits a small deliberately-verified module,
+not a whole codebase.
+
+**Related fix.** `cap no_panic`'s division-safety check treated "this divisor
+refinement is outside the checkable fragment" as a discharged obligation, which
+made a *meaningless* refinement more permissive than none at all: `d : Int`
+errored while `d : {Int | is_prime(_)}` passed having proved nothing. It now
+fails closed, exactly as the solver-unavailable case already did.
+
+Corpus: 218/218 (108 accept, 110 reject) — `accept/t118` and `reject/t117` added,
+bracketing the length-guard discharge from both sides, because an accept-only
+witness exits 0 whether the guard is read or the obligation is merely skipped.
 ## Current State (as of 2026-07-28, static capture-free lambdas)
 
 Extends the static-capture-free-closures fix immediately below (same day):
@@ -421,13 +495,14 @@ contract written in a stdlib signature reaches a user call site at all.
 Unknown lengths stay skipped, never guessed: a `List` the checker cannot see
 into is silent. Verified false-positive-free across the whole stdlib (0
 refinement violations over 111 modules) and the full typing corpus (216/216 —
-107 accept, 109 reject). Suites: refinecheck 245, refine 22, run_compiler 605,
-run_eval 253, run_stdlib 817.
+107 accept, 109 reject, the counts as of this entry; now 218/218). Suites:
+refinecheck 245, refine 22, run_compiler 605, run_eval 253, run_stdlib 817.
 
-**Known limitation.** A runtime `List.length(xs) > 0` guard does NOT discharge a
-`len(_) > 0` obligation — the `List.length` function and the `len` measure are
-unconnected — so a guarded call over a non-literal list is skipped rather than
-proved. A missed proof, not a false report.
+**Known limitation (CLOSED 2026-07-28).** A runtime `List.length(xs) > 0` guard
+did NOT discharge a `len(_) > 0` obligation — the `List.length` function and the
+`len` measure were unconnected — so a guarded call over a non-literal list was
+skipped rather than proved. A missed proof, not a false report. Fixed by the
+measure alias described in the 2026-07-28 entry at the top of this file.
 
 ## Current State (as of 2026-07-27, Json.parse RFC 8259 number scanner)
 
@@ -7796,3 +7871,57 @@ performance change:
 **Not done:** `toml.march`, `yaml.march` and `xml.march` still open with
 `string_split(s, "")` and have the same allocation profile. `string_byte_at`
 is what they need, and it now exists.
+
+## Current State (as of 2026-07-28, `cap no_panic` division safety fails closed on unreflectable refinements)
+
+- **Tests:** 281 refinecheck (was 274), 606 run_compiler — both green.
+- **The hole:** `lib/refinecheck/division_safety.ml`, in `check_var_divisor`'s
+  `Some (_, bdr, pred)` branch, had `| None -> ()` for `smt_of` — commented
+  "predicate not in supported fragment — skip conservatively". At the *solver*
+  boundary the pass already fails closed (`Refine.Refuted` and
+  `Refine.Unverified` both error); at the *reflection* boundary it failed open.
+  Consequence: in a `cap no_panic` module, `fn f(n : Int, d : Int)` correctly
+  errored on `n / d`, but `fn f(n : Int, d : {Int | is_prime(_)})` passed —
+  a meaningless refinement was strictly more permissive than none at all, so
+  the capability's guarantee was never established. Verified by probe before
+  and after (`--check` exit 0 → 1).
+- **Fix:** the `None` arm now reports "division by `d` in `cap no_panic`
+  module: the refinement on `d` is outside the checkable fragment, so it cannot
+  prove `d != 0`", plus the shared `division_suggestion`. A path condition that
+  syntactically proves the divisor non-zero still discharges the obligation,
+  mirroring the unrefined-parameter branch — an unreflectable predicate on a
+  guarded divisor is not a false positive.
+- **Which guard, exactly — a trap worth writing down.** That path-condition
+  discharge fires for a **body-level** `if`/`cond`/match-arm guard, NOT for a
+  clause `when` guard. Desugaring rewrites a guarded clause into a match, so the
+  refined parameter is no longer visible to `clause_refined_params` and
+  `check_var_divisor` takes the *unrefined* branch (which has always consulted
+  `path_proves_nonzero`). Tell them apart by the message: a clause guard that
+  fails reports "no refinement proves `d != 0`", the refined branch reports
+  "outside the checkable fragment". A test written with `when` therefore does
+  **not** pin the refined-branch path guard — it passes identically with that
+  code deleted. Pinned properly by `divsafety-hole` D6 (body-level `if d != 0`,
+  silent) and D7 (body-level `if n > 0`, errors).
+- **None of the `divsafety-hole` tests is z3-gated, deliberately.** All seven are
+  solver-free — `is_prime` fails at reflection before Z3 is consulted, `_ > 0` is
+  discharged by `syntactic_nonzero`, and the path guards are purely syntactic —
+  and gating them would have skipped the fail-closed test on exactly the
+  z3-less machine whose behaviour it exists to pin. Verified by running the
+  group with z3 off PATH: all 7 pass while every other group skips.
+- **Known, deferred:** two pre-existing fail-open shadowing paths remain in this
+  pass, both predating this fix and both preserving parity with the unrefined
+  branch — a path condition about an outer binding is credited to a shadowing
+  inner one (`if d != 0 do let d = 0  n / d` exits 0, accepting a literal
+  division by zero), and a refined param shadowed by a zero let-binding exits 0
+  because the refined branch never consults `let_values`. Same shape as the
+  refinecheck shadow-discipline bugs: a binding construct that retires a name
+  from one fact channel but not the other. Wants its own task.
+- **Blast radius:** no stdlib module declares `cap no_panic`. All 216
+  `specs/lang/types` corpus files keep their accept/reject verdicts, including
+  the division-safety pair `accept/t78` / `reject/t73`, and the 32-test
+  `cap no_panic` group in `run_compiler` is unchanged.
+- **Note for future test authors:** `test_refinecheck.ml`'s `has_refine_error`
+  runs `Refine_check`, which does **not** run the `cap no_panic` division
+  checker — that is a separate pass wired only in `bin/main.ml`. Division-safety
+  tests must call `Division_safety.check_module` on the **desugared** module
+  (helper `has_divsafety_error`), or they pass vacuously.
