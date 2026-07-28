@@ -13,6 +13,23 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
+  parser used to begin with `string_split(src, "")`, exploding the document
+  into one heap string per byte, so its cost scaled with the size of the input
+  rather than with the number of strings in it — a 239-byte document holding
+  ~20 strings cost 261 allocations per parse, 90% of them 7 bytes or smaller.
+  It is now a byte-index scanner that inspects bytes with `string_byte_at` and
+  takes one `string_slice` per token: **261 → 21 allocations per parse**, which
+  is the number of strings the document actually contains. On a 1MB document
+  holding 99,000 strings, one parse went from 1,100,041 string allocations to
+  99,018 — allocation now tracks the document's string count rather than its
+  byte size. `Json.to_string` got the same treatment (a string needing no
+  escaping is now returned as-is, allocating nothing), taking a combined parse
+  + serialize round trip from 486 to 58 allocations per iteration and 1.10s to
+  0.24s over 20,000 iterations. Parsing is unchanged semantically; the only
+  visible difference is that a non-ASCII character in an error message now
+  prints correctly instead of as a single mangled byte.
+
 - **String interpolation is ~1.45× faster** and allocates no intermediate list.
   `"a${x}b${y}c"` now desugars to a plain `++` chain at every length, which the
   compiler folds into three-way concats — where it previously switched to a
@@ -20,8 +37,24 @@ git log is authoritative for exact commits.
   segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
   interpolation dropping to zero.
 
+- **…and interpolating a `String` no longer costs a refcount pair per operand**,
+  which closes the rest of that gap. `"a${s}b"` goes through `to_string(s)`,
+  which for a String resolves to an identity — but the identity call was only
+  removed *after* reference counting had already bracketed it with an atomic
+  increment/decrement, leaving the pair stranded around nothing. The call is now
+  elided during lowering, so no pair is ever created, and interpolation compiles
+  to exactly the same code as the equivalent hand-written `++` chain.
+  Allocation counts are unchanged — this was refcount traffic, not allocation.
+
 
 ### Added
+
+- **`string_byte_at(s, i)`** — reads the byte at a byte offset as `0..255`, or
+  `-1` when out of range, allocating nothing. Before this, the only ways to
+  look at one character of a string from March were `string_split(s, "")` and
+  `string_slice(s, i, 1)`, both of which allocate a heap string per character
+  inspected — so every hand-written scanner in the stdlib paid an allocation
+  per input byte just to decide what the byte was.
 
 - **`String.index_of_from(s, sub, start)`** — substring search from a byte
   offset, returning the index in `s`'s own coordinates so it can be fed
@@ -145,6 +178,20 @@ git log is authoritative for exact commits.
   first. The qualifier is now translated to its declaring type during lowering,
   so an explicitly qualified pattern resolves to exactly the constructor it
   names.
+
+- **`String.slice` returned the wrong text on the JS backend.** The JS runtime
+  implemented `march_string_slice(s, start, len)` as `s.slice(start, len)`,
+  treating the third argument as an END index rather than a LENGTH, so every
+  slice with a non-zero start was wrong — `String.slice("abcdefgh", 5, 3)` gave
+  `""` on JS against `"fgh"` interpreted and compiled. Negative arguments now
+  clamp the way the C runtime clamps, instead of being read as offsets from the
+  end of the string.
+
+- **TIR pipeline stages are now inspectable as text.** `MARCH_DUMP_TXT=<stage>`
+  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
+  the given substring (`all` for every stage). Previously only the very end of
+  the pipeline was readable, via `--dump-tir`, which is too late to tell whether
+  a pass created a construct or merely preserved one.
 
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on
