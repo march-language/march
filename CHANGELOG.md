@@ -11,6 +11,27 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`String.to_uppercase` / `to_lowercase` no longer depend on the process
+  locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
+  a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites
+  `0xC3`, the lead byte of every 2-byte UTF-8 sequence, silently corrupting the
+  encoding. March never calls `setlocale`, but any linked library or embedding
+  application can. Behaviour is now fixed regardless of locale, and the same
+  change made them **~30× faster** (0.60s → 0.02s on `bench/string_case`).
+  Scope is unchanged — ASCII only, non-ASCII bytes pass through untouched.
+
+### Documentation
+
+- `stdlib/string.march` no longer claims the runtime has small-string
+  optimisation. It had stated since 2026-03-19 that "strings of 15 bytes or
+  fewer are stored inline without a heap allocation"; that was never true — every
+  March string is a refcounted heap allocation with a 24-byte header. The header
+  now also states plainly that `grapheme_count` counts *codepoints* despite its
+  name, with the cases where the two differ.
+
+
 ### Changed
 
 - **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
