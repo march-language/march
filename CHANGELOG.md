@@ -88,6 +88,16 @@ git log is authoritative for exact commits.
   generated closure ABI trampolines `alwaysinline`. This gives LLVM useful
   alias and call-boundary facts without changing TIR or ownership semantics.
 
+- The TIR optimizer inlines a private top-level function's body at its call
+  site when that function has exactly one direct, arity-correct reference
+  anywhere in the module, even when the body is not pure. Ordinary pure-only
+  inlining, the 50-node size limit, DCE-root/address-taken/hot-code-reload
+  exclusions, and recursive-SCC detection (extended to cover bare/qualified
+  name aliasing) all still apply; Perceus RC operations and their order are
+  preserved unchanged. No runtime speedup was measured — this is a
+  definition/call-site reduction in emitted LLVM, not a benchmarked
+  optimization.
+
 ### Added
 
 - **Refinement Tier 2: structural induction over recursive functions.** A

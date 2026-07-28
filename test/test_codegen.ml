@@ -3575,6 +3575,166 @@ let test_inline_acyclic_growth_removes_outer_from_llvm () =
     ("DCE removes outer_growth definition" ^ metrics) false
     (contains ir "define i64 @outer_growth(")
 
+let test_inline_alpha_sequence_scope_is_lexical () =
+  let local_target = mk_var "target" March_tir.Tir.TInt in
+  let global_target =
+    mk_var "target" (March_tir.Tir.TFn ([], March_tir.Tir.TInt))
+  in
+  let helper =
+    { March_tir.Tir.fn_name = "helper";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.ESeq
+          (March_tir.Tir.EApp (global_target, []),
+           March_tir.Tir.ELet
+             (local_target, March_tir.Tir.EAtom (ilit 1),
+              March_tir.Tir.EAtom (March_tir.Tir.AVar local_target)));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  match March_tir.Inline.expand_call helper [] with
+  | Some
+      (March_tir.Tir.ESeq
+         (March_tir.Tir.EApp (free_callee, []),
+          March_tir.Tir.ELet
+            (renamed, _, March_tir.Tir.EAtom (March_tir.Tir.AVar local_use)))) ->
+      Alcotest.(check bool) "local binder was freshened" false
+        (String.equal renamed.March_tir.Tir.v_name "target");
+      Alcotest.(check string) "local use follows its binder"
+        renamed.March_tir.Tir.v_name local_use.March_tir.Tir.v_name;
+      Alcotest.(check string)
+        "a binder in the second sequence expression does not scope the first"
+        "target" free_callee.March_tir.Tir.v_name
+  | Some actual ->
+      Alcotest.failf "unexpected alpha-renamed sequence: %s"
+        (March_tir.Tir.show_expr actual)
+  | None -> Alcotest.fail "zero-arity expansion unexpectedly failed"
+
+let test_inline_alpha_case_arms_and_default_are_lexical () =
+  let branch_target = mk_var "target" March_tir.Tir.TInt in
+  let free_target =
+    mk_var "target" (March_tir.Tir.TFn ([], March_tir.Tir.TInt))
+  in
+  let helper =
+    { March_tir.Tir.fn_name = "helper";
+      fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.ECase
+          (ilit 0,
+           [{ March_tir.Tir.br_tag = "Bound";
+              br_vars = [branch_target];
+              br_body =
+                March_tir.Tir.EAtom (March_tir.Tir.AVar branch_target) };
+            { March_tir.Tir.br_tag = "Sibling";
+              br_vars = [];
+              br_body = March_tir.Tir.EApp (free_target, []) }],
+           Some (March_tir.Tir.EApp (free_target, [])));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  match March_tir.Inline.expand_call helper [] with
+  | Some
+      (March_tir.Tir.ECase
+         (_,
+          [{ March_tir.Tir.br_vars = [renamed];
+             br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar local_use);
+             _ };
+           { March_tir.Tir.br_vars = [];
+             br_body = March_tir.Tir.EApp (sibling_callee, []);
+             _ }],
+          Some (March_tir.Tir.EApp (default_callee, [])))) ->
+      Alcotest.(check bool) "branch binder was freshened" false
+        (String.equal renamed.March_tir.Tir.v_name "target");
+      Alcotest.(check string) "branch use follows its binder"
+        renamed.March_tir.Tir.v_name local_use.March_tir.Tir.v_name;
+      Alcotest.(check string) "one case arm does not scope a sibling"
+        "target" sibling_callee.March_tir.Tir.v_name;
+      Alcotest.(check string) "one case arm does not scope the default"
+        "target" default_callee.March_tir.Tir.v_name
+  | Some actual ->
+      Alcotest.failf "unexpected alpha-renamed case: %s"
+        (March_tir.Tir.show_expr actual)
+  | None -> Alcotest.fail "zero-arity expansion unexpectedly failed"
+
+let test_inline_alpha_local_function_params_are_lexical () =
+  let outer_x = mk_var "x" March_tir.Tir.TInt in
+  let local_x = mk_var "x" March_tir.Tir.TInt in
+  let local_fn =
+    { March_tir.Tir.fn_name = "local";
+      fn_params = [local_x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar local_x);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let params, renamed_body =
+    March_tir.Inline.alpha_rename [outer_x]
+      (March_tir.Tir.ELetRec
+         ([local_fn], March_tir.Tir.EAtom (March_tir.Tir.AVar outer_x)))
+  in
+  match params, renamed_body with
+  | [renamed_outer],
+    March_tir.Tir.ELetRec
+      ([{ March_tir.Tir.fn_params = [renamed_local];
+          fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar local_use);
+          _ }],
+       March_tir.Tir.EAtom (March_tir.Tir.AVar outer_use)) ->
+      Alcotest.(check bool) "local parameter was freshened" false
+        (String.equal renamed_local.March_tir.Tir.v_name "x");
+      Alcotest.(check bool) "local parameter shadows the outer parameter" false
+        (String.equal renamed_local.March_tir.Tir.v_name
+           renamed_outer.March_tir.Tir.v_name);
+      Alcotest.(check string) "local body uses its local parameter"
+        renamed_local.March_tir.Tir.v_name local_use.March_tir.Tir.v_name;
+      Alcotest.(check string) "continuation uses the outer parameter"
+        renamed_outer.March_tir.Tir.v_name outer_use.March_tir.Tir.v_name
+  | _ ->
+      Alcotest.failf "unexpected local-function alpha-renaming: %s"
+        (March_tir.Tir.show_expr renamed_body)
+
+let test_inline_alpha_avoids_existing_free_name () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let warmup_params, _ =
+    March_tir.Inline.alpha_rename [x]
+      (March_tir.Tir.EAtom (March_tir.Tir.AVar x))
+  in
+  let warmup_name =
+    match warmup_params with
+    | [param] -> param.March_tir.Tir.v_name
+    | _ -> Alcotest.fail "alpha-renaming changed warmup arity"
+  in
+  let prefix = "x_i" in
+  let counter =
+    int_of_string
+      (String.sub warmup_name (String.length prefix)
+         (String.length warmup_name - String.length prefix))
+  in
+  let colliding_name = Printf.sprintf "%s%d" prefix (counter + 1) in
+  let free_global =
+    mk_var colliding_name
+      (March_tir.Tir.TFn ([], March_tir.Tir.TInt))
+  in
+  let params, body =
+    March_tir.Inline.alpha_rename [x]
+      (March_tir.Tir.ESeq
+         (March_tir.Tir.EApp (free_global, []),
+          March_tir.Tir.EAtom (March_tir.Tir.AVar x)))
+  in
+  match params, body with
+  | [renamed],
+    March_tir.Tir.ESeq
+      (March_tir.Tir.EApp (free_use, []),
+       March_tir.Tir.EAtom (March_tir.Tir.AVar local_use)) ->
+      Alcotest.(check bool)
+        "a fresh binder cannot capture an existing free/global spelling"
+        false
+        (String.equal renamed.March_tir.Tir.v_name
+           free_use.March_tir.Tir.v_name);
+      Alcotest.(check string) "parameter use follows its fresh binder"
+        renamed.March_tir.Tir.v_name local_use.March_tir.Tir.v_name
+  | _ ->
+      Alcotest.failf "unexpected collision-avoidance alpha-renaming: %s"
+        (March_tir.Tir.show_expr body)
+
 let string_fn_ty =
   March_tir.Tir.TFn ([March_tir.Tir.TString], March_tir.Tir.TString)
 
@@ -4275,6 +4435,146 @@ let test_single_use_defref_counts_as_non_direct () =
     (March_tir.Single_use_inline.run ~changed (mk_module [helper; main]));
   Alcotest.(check bool) "ADefRef counts as a non-direct reference" false
     !changed
+
+let test_single_use_rejects_caller_binding_capture () =
+  let x = mk_var "x" March_tir.Tir.TString in
+  let helper =
+    { March_tir.Tir.fn_name = "helper";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body =
+        March_tir.Tir.ESeq
+          (March_tir.Tir.EIncRC (March_tir.Tir.AVar x),
+           call_string "target" (March_tir.Tir.AVar x));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let target =
+    { March_tir.Tir.fn_name = "target";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar x);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let local_target = mk_var "target" March_tir.Tir.TString in
+  let main =
+    mk_fn "main"
+      (March_tir.Tir.ELet
+         (local_target, March_tir.Tir.EAtom (slit "local"),
+          call_string "helper" (slit "argument")))
+  in
+  let changed = ref false in
+  let result =
+    March_tir.Single_use_inline.run ~changed
+      (mk_module [helper; target; main])
+  in
+  Alcotest.(check bool)
+    "unsafe expansion is rejected instead of capturing the free global call"
+    false !changed;
+  match body_of "main" result with
+  | March_tir.Tir.ELet
+      (_, _, March_tir.Tir.EApp (callee, _))
+    when String.equal callee.March_tir.Tir.v_name "helper" -> ()
+  | actual ->
+      Alcotest.failf "capture-prone helper call was rewritten: %s"
+        (March_tir.Tir.show_expr actual)
+
+let test_single_use_bare_address_alias_counts_qualified_target () =
+  let helper = impure_identity "Module.helper" in
+  let bare_helper =
+    March_tir.Tir.AVar (mk_var "helper" string_fn_ty)
+  in
+  let main =
+    mk_fn "main"
+      (March_tir.Tir.ESeq
+         (March_tir.Tir.EAtom bare_helper,
+          call_string "Module.helper" (slit "direct")))
+  in
+  let changed = ref false in
+  ignore
+    (March_tir.Single_use_inline.run ~changed (mk_module [helper; main]));
+  Alcotest.(check bool)
+    "bare address alias and qualified direct call are two references"
+    false !changed
+
+let test_single_use_ambiguous_bare_alias_marks_every_target () =
+  let left = impure_identity "Left.helper" in
+  let right = impure_identity "Right.helper" in
+  let bare_helper =
+    March_tir.Tir.AVar (mk_var "helper" string_fn_ty)
+  in
+  let main =
+    mk_fn "main"
+      (March_tir.Tir.ESeq
+         (March_tir.Tir.EAtom bare_helper,
+          March_tir.Tir.ESeq
+            (call_string "Left.helper" (slit "left"),
+             call_string "Right.helper" (slit "right"))))
+  in
+  let changed = ref false in
+  ignore
+    (March_tir.Single_use_inline.run ~changed
+       (mk_module [left; right; main]));
+  Alcotest.(check bool)
+    "an ambiguous bare alias makes every qualified target non-direct"
+    false !changed
+
+let test_single_use_bare_alias_participates_in_scc () =
+  let x = mk_var "x" March_tir.Tir.TString in
+  let left =
+    { March_tir.Tir.fn_name = "Module.left";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body =
+        March_tir.Tir.ESeq
+          (March_tir.Tir.EIncRC (March_tir.Tir.AVar x),
+           call_string "right" (March_tir.Tir.AVar x));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let right =
+    { March_tir.Tir.fn_name = "Module.right";
+      fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TString;
+      fn_body = call_string "Module.left" (March_tir.Tir.AVar x);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main = mk_fn "main" (March_tir.Tir.EAtom (slit "done")) in
+  let changed = ref false in
+  ignore
+    (March_tir.Single_use_inline.run ~changed
+       (mk_module [left; right; main]));
+  Alcotest.(check bool)
+    "a unique bare alias closes the qualified recursive SCC"
+    false !changed
+
+let test_single_use_exact_extern_precedes_qualified_alias () =
+  let helper = impure_identity "Module.helper" in
+  let extern_helper =
+    { March_tir.Tir.ed_march_name = "helper";
+      ed_c_name = "c_helper";
+      ed_lib_name = "test";
+      ed_js_sym = "helper";
+      ed_params = [March_tir.Tir.TString];
+      ed_consumed = [false];
+      ed_blocking = false;
+      ed_raises = false;
+      ed_ret = March_tir.Tir.TString }
+  in
+  let main = mk_fn "main" (call_string "helper" (slit "extern")) in
+  let module_ =
+    { (mk_module [helper; main]) with
+      March_tir.Tir.tm_externs = [extern_helper] }
+  in
+  let changed = ref false in
+  let result = March_tir.Single_use_inline.run ~changed module_ in
+  Alcotest.(check bool)
+    "an exact extern blocks fallback to a same-suffix qualified function"
+    false !changed;
+  match body_of "main" result with
+  | March_tir.Tir.EApp (callee, _)
+    when String.equal callee.March_tir.Tir.v_name "helper" -> ()
+  | actual ->
+      Alcotest.failf "exact extern call was rewritten as qualified helper: %s"
+        (March_tir.Tir.show_expr actual)
 
 (* ── Known-call optimization ─────────────────────────────────────── *)
 
@@ -10861,6 +11161,14 @@ let codegen_suites =
         Alcotest.test_case "acyclic_candidate_chain" `Quick test_inline_acyclic_candidate_chain;
         Alcotest.test_case "acyclic_growth_removes_outer_from_llvm" `Quick
           test_inline_acyclic_growth_removes_outer_from_llvm;
+        Alcotest.test_case "alpha-renaming keeps sequence scopes lexical" `Quick
+          test_inline_alpha_sequence_scope_is_lexical;
+        Alcotest.test_case "alpha-renaming keeps case scopes lexical" `Quick
+          test_inline_alpha_case_arms_and_default_are_lexical;
+        Alcotest.test_case "alpha-renaming scopes local function parameters"
+          `Quick test_inline_alpha_local_function_params_are_lexical;
+        Alcotest.test_case "alpha-renaming avoids existing free names" `Quick
+          test_inline_alpha_avoids_existing_free_name;
       ]);
       ("single_use_inline", [
         Alcotest.test_case "impure helper is eliminated from emitted LLVM"
@@ -10911,6 +11219,16 @@ let codegen_suites =
           test_single_use_all_atom_positions_counted;
         Alcotest.test_case "ADefRef is a non-direct reference" `Quick
           test_single_use_defref_counts_as_non_direct;
+        Alcotest.test_case "caller binding cannot capture callee free name"
+          `Quick test_single_use_rejects_caller_binding_capture;
+        Alcotest.test_case "bare address aliases a qualified target" `Quick
+          test_single_use_bare_address_alias_counts_qualified_target;
+        Alcotest.test_case "ambiguous bare alias marks every target" `Quick
+          test_single_use_ambiguous_bare_alias_marks_every_target;
+        Alcotest.test_case "bare alias participates in recursive SCC" `Quick
+          test_single_use_bare_alias_participates_in_scc;
+        Alcotest.test_case "exact extern precedes qualified bare alias" `Quick
+          test_single_use_exact_extern_precedes_qualified_alias;
       ]);
       ("known_call", [
         Alcotest.test_case "direct"          `Quick test_known_call_direct;

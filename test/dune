@@ -1720,49 +1720,62 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── One-use impure helper: preserve List RC/effect order while eliminating ──
 ; ── both the named call and definition from optimized emitted LLVM.       ──
 (rule
- (targets native_single_use_inline_rc native_single_use_inline_rc.out)
+ (targets native_single_use_inline_rc
+          native_single_use_inline_rc.out
+          native_single_use_inline_rc_compile_input.march
+          native_single_use_inline_rc_llvm_input.march
+          native_single_use_inline_rc_llvm_input.ll
+          native_single_use_inline_rc_llvm_check.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../runtime)
        (file native/single_use_inline_rc.march)
        (source_tree ../stdlib))
  (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile -o native_single_use_inline_rc
-        native/single_use_inline_rc.march)
-   (with-stdout-to native_single_use_inline_rc.out
-        (system "./native_single_use_inline_rc")))))
-
-(rule
- (targets native_single_use_inline_rc_llvm_check.out)
- (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
-       (file native/single_use_inline_rc.march)
-       (source_tree ../stdlib))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --emit-llvm
-        native/single_use_inline_rc.march)
-   (with-stdout-to native_single_use_inline_rc_llvm_check.out
-    (run bash -c
-     "if grep -Eq '(^|[[:space:]])(call|define)[^@]*@helper\\(' native/single_use_inline_rc.ll; then \
-        echo 'one-use helper call or definition remained in emitted LLVM' >&2; \
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_compile_input.march)
+    (run %{exe:../bin/main.exe} --compile -o native_single_use_inline_rc
+         native_single_use_inline_rc_compile_input.march)
+    (with-stdout-to native_single_use_inline_rc.out
+         (system "./native_single_use_inline_rc"))
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_llvm_input.march)
+    (run %{exe:../bin/main.exe} --emit-llvm
+         native_single_use_inline_rc_llvm_input.march)
+    (with-stdout-to native_single_use_inline_rc_llvm_check.out
+     (run bash -c
+      "check_ir () { \
+        ir=\"$1\"; \
+        if ! test -r \"$ir\"; then \
+          echo \"missing or unreadable LLVM IR: $ir\" >&2; \
+          return 2; \
+        fi; \
+        if grep -Eq '(^|[[:space:]])(call|define)[^@]*@helper\\(' \"$ir\"; then \
+          echo 'one-use helper call or definition remained in emitted LLVM' >&2; \
+          return 3; \
+        else \
+          grep_status=$?; \
+          if test \"$grep_status\" -eq 1; then \
+            echo 'helper eliminated'; \
+            return 0; \
+          fi; \
+          echo \"failed to inspect LLVM IR (grep status $grep_status): $ir\" >&2; \
+          return \"$grep_status\"; \
+        fi; \
+      }; \
+      if check_ir native_single_use_inline_rc_missing.ll >/dev/null 2>&1; then \
+        echo 'LLVM guard accepted a missing file' >&2; \
         exit 1; \
+      else \
+        missing_status=$?; \
+        if test \"$missing_status\" -ne 2; then \
+          echo \"LLVM missing-file guard returned $missing_status, expected 2\" >&2; \
+          exit 1; \
+        fi; \
       fi; \
-      echo 'helper eliminated'")))))
+      echo 'missing LLVM guard rejected absent input'; \
+      check_ir native_single_use_inline_rc_llvm_input.ll"))))))
 
 (rule
  (alias runtest)

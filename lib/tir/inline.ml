@@ -11,6 +11,7 @@
 let inline_size_threshold = 50
 
 module SSet = Set.Make (String)
+module SMap = Map.Make (String)
 
 (** Hot Code Reload boundary config, set by [Opt.run] for the duration of a
     run. When [Some], reloadable (boundary) functions are excluded from the
@@ -127,73 +128,183 @@ let gensym =
   let ctr = ref 0 in
   fun prefix -> incr ctr; Printf.sprintf "%s_i%d" prefix !ctr
 
+let add_var_name names var = SSet.add var.Tir.v_name names
+
+let add_atom_name names = function
+  | Tir.AVar var -> add_var_name names var
+  | Tir.ADefRef def -> SSet.add def.Tir.did_name names
+  | Tir.ALit _ -> names
+
+let add_atom_names names atoms =
+  List.fold_left add_atom_name names atoms
+
+let rec add_expr_names names = function
+  | Tir.EAtom atom -> add_atom_name names atom
+  | Tir.EApp (callee, args) ->
+    add_atom_names (add_var_name names callee) args
+  | Tir.ECallPtr (callee, args) ->
+    add_atom_names (add_atom_name names callee) args
+  | Tir.ELet (var, rhs, body) ->
+    add_expr_names (add_expr_names (add_var_name names var) rhs) body
+  | Tir.ELetRec (fns, body) ->
+    let names =
+      List.fold_left
+        (fun names fn ->
+          let names = SSet.add fn.Tir.fn_name names in
+          List.fold_left add_var_name names fn.Tir.fn_params)
+        names fns
+    in
+    List.fold_left
+      (fun names fn -> add_expr_names names fn.Tir.fn_body)
+      (add_expr_names names body) fns
+  | Tir.ECase (atom, branches, default) ->
+    let names = add_atom_name names atom in
+    let names =
+      List.fold_left
+        (fun names branch ->
+          let names =
+            List.fold_left add_var_name names branch.Tir.br_vars
+          in
+          add_expr_names names branch.Tir.br_body)
+        names branches
+    in
+    Option.fold ~none:names ~some:(add_expr_names names) default
+  | Tir.ETuple atoms
+  | Tir.EAlloc (_, atoms)
+  | Tir.EStackAlloc (_, atoms) ->
+    add_atom_names names atoms
+  | Tir.ERecord fields ->
+    List.fold_left
+      (fun names (_, atom) -> add_atom_name names atom)
+      names fields
+  | Tir.EField (atom, _) ->
+    add_atom_name names atom
+  | Tir.EUpdate (atom, fields) ->
+    List.fold_left
+      (fun names (_, value) -> add_atom_name names value)
+      (add_atom_name names atom) fields
+  | Tir.EFree atom
+  | Tir.EIncRC atom
+  | Tir.EDecRC atom
+  | Tir.EAtomicIncRC atom
+  | Tir.EAtomicDecRC atom ->
+    add_atom_name names atom
+  | Tir.EReuse (reuse, _, args) ->
+    add_atom_names (add_atom_name names reuse) args
+  | Tir.ESeq (first, second) ->
+    add_expr_names (add_expr_names names first) second
+
 let alpha_rename (params : Tir.var list) (body : Tir.expr)
     : (Tir.var list * Tir.expr) =
-  let tbl : (string, string) Hashtbl.t = Hashtbl.create 8 in
-  let new_params = List.map (fun v ->
-    let fresh = gensym v.Tir.v_name in
-    Hashtbl.replace tbl v.Tir.v_name fresh;
-    { v with Tir.v_name = fresh }
-  ) params in
-  let subst_var v =
-    match Hashtbl.find_opt tbl v.Tir.v_name with
+  let used_names =
+    ref
+      (List.fold_left add_var_name
+         (add_expr_names SSet.empty body) params)
+  in
+  let freshen_name env name =
+    let rec choose () =
+      let candidate = gensym name in
+      if SSet.mem candidate !used_names then choose () else candidate
+    in
+    let fresh = choose () in
+    used_names := SSet.add fresh !used_names;
+    (fresh, SMap.add name fresh env)
+  in
+  let freshen_var env v =
+    let fresh, env = freshen_name env v.Tir.v_name in
+    ({ v with Tir.v_name = fresh }, env)
+  in
+  let freshen_vars env vars =
+    let renamed, env =
+      List.fold_left
+        (fun (renamed, env) var ->
+          let var, env = freshen_var env var in
+          (var :: renamed, env))
+        ([], env) vars
+    in
+    (List.rev renamed, env)
+  in
+  let subst_var env v =
+    match SMap.find_opt v.Tir.v_name env with
     | Some n -> { v with Tir.v_name = n }
     | None   -> v
   in
-  let subst_atom = function
-    | Tir.AVar v -> Tir.AVar (subst_var v)
+  let subst_atom env = function
+    | Tir.AVar v -> Tir.AVar (subst_var env v)
     | a          -> a
   in
-  let rec subst_expr = function
-    | Tir.EAtom a            -> Tir.EAtom (subst_atom a)
-    | Tir.EApp (f, args)     -> Tir.EApp (subst_var f, List.map subst_atom args)
-    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (subst_atom f, List.map subst_atom args)
+  let rec subst_expr env = function
+    | Tir.EAtom a            -> Tir.EAtom (subst_atom env a)
+    | Tir.EApp (f, args)     ->
+      Tir.EApp (subst_var env f, List.map (subst_atom env) args)
+    | Tir.ECallPtr (f, args) ->
+      Tir.ECallPtr (subst_atom env f, List.map (subst_atom env) args)
     | Tir.ELet (v, rhs, body) ->
-      let rhs' = subst_expr rhs in          (* process rhs with OLD tbl *)
-      let fresh = gensym v.Tir.v_name in
-      Hashtbl.replace tbl v.Tir.v_name fresh;
-      let v' = { v with Tir.v_name = fresh } in
-      Tir.ELet (v', rhs', subst_expr body)
-    | Tir.ELetRec (fns, b) ->
-      (* Freshen all locally-bound function names first *)
-      let fns_renamed = List.map (fun fd ->
-        let fresh = gensym fd.Tir.fn_name in
-        Hashtbl.replace tbl fd.Tir.fn_name fresh;
-        { fd with Tir.fn_name = fresh }
-      ) fns in
-      (* Then process each body with the updated tbl *)
-      Tir.ELetRec (List.map (fun fd ->
-        { fd with Tir.fn_body = subst_expr fd.Tir.fn_body }) fns_renamed,
-        subst_expr b)
+      let rhs = subst_expr env rhs in
+      let v, body_env = freshen_var env v in
+      Tir.ELet (v, rhs, subst_expr body_env body)
+    | Tir.ELetRec (fns, body) ->
+      let fns, recursive_env =
+        List.fold_left
+          (fun (renamed, env) fn ->
+            let fresh, env = freshen_name env fn.Tir.fn_name in
+            ({ fn with Tir.fn_name = fresh } :: renamed, env))
+          ([], env) fns
+      in
+      let fns = List.rev fns in
+      let fns =
+        List.map
+          (fun fn ->
+            let params, fn_env =
+              freshen_vars recursive_env fn.Tir.fn_params
+            in
+            { fn with
+              Tir.fn_params = params;
+              fn_body = subst_expr fn_env fn.Tir.fn_body })
+          fns
+      in
+      Tir.ELetRec (fns, subst_expr recursive_env body)
     | Tir.ECase (a, branches, default) ->
-      Tir.ECase (subst_atom a,
-        List.map (fun b ->
-          let bound = List.map (fun v ->
-            let fresh = gensym v.Tir.v_name in
-            Hashtbl.replace tbl v.Tir.v_name fresh;
-            { v with Tir.v_name = fresh }
-          ) b.Tir.br_vars in
-          { b with Tir.br_vars = bound; Tir.br_body = subst_expr b.Tir.br_body })
-          branches,
-        Option.map subst_expr default)
-    | Tir.ETuple atoms       -> Tir.ETuple (List.map subst_atom atoms)
+      let branches =
+        List.map
+          (fun branch ->
+            let vars, branch_env = freshen_vars env branch.Tir.br_vars in
+            { branch with
+              Tir.br_vars = vars;
+              Tir.br_body = subst_expr branch_env branch.Tir.br_body })
+          branches
+      in
+      Tir.ECase
+        (subst_atom env a, branches, Option.map (subst_expr env) default)
+    | Tir.ETuple atoms       ->
+      Tir.ETuple (List.map (subst_atom env) atoms)
     | Tir.ERecord fields     ->
-      Tir.ERecord (List.map (fun (k, a) -> (k, subst_atom a)) fields)
-    | Tir.EField (a, f)      -> Tir.EField (subst_atom a, f)
+      Tir.ERecord
+        (List.map (fun (k, a) -> (k, subst_atom env a)) fields)
+    | Tir.EField (a, f)      -> Tir.EField (subst_atom env a, f)
     | Tir.EUpdate (a, fs)    ->
-      Tir.EUpdate (subst_atom a, List.map (fun (k, v) -> (k, subst_atom v)) fs)
-    | Tir.EAlloc (ty, args)  -> Tir.EAlloc (ty, List.map subst_atom args)
-    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map subst_atom args)
-    | Tir.EFree a            -> Tir.EFree (subst_atom a)
-    | Tir.EIncRC a           -> Tir.EIncRC (subst_atom a)
-    | Tir.EDecRC a           -> Tir.EDecRC (subst_atom a)
-    | Tir.EAtomicIncRC a     -> Tir.EAtomicIncRC (subst_atom a)
-    | Tir.EAtomicDecRC a     -> Tir.EAtomicDecRC (subst_atom a)
+      Tir.EUpdate
+        (subst_atom env a,
+         List.map (fun (k, v) -> (k, subst_atom env v)) fs)
+    | Tir.EAlloc (ty, args)  ->
+      Tir.EAlloc (ty, List.map (subst_atom env) args)
+    | Tir.EStackAlloc (ty, args) ->
+      Tir.EStackAlloc (ty, List.map (subst_atom env) args)
+    | Tir.EFree a            -> Tir.EFree (subst_atom env a)
+    | Tir.EIncRC a           -> Tir.EIncRC (subst_atom env a)
+    | Tir.EDecRC a           -> Tir.EDecRC (subst_atom env a)
+    | Tir.EAtomicIncRC a     -> Tir.EAtomicIncRC (subst_atom env a)
+    | Tir.EAtomicDecRC a     -> Tir.EAtomicDecRC (subst_atom env a)
     | Tir.EReuse (a, ty, args) ->
-      Tir.EReuse (subst_atom a, ty, List.map subst_atom args)
-    | Tir.ESeq (e1, e2)      -> Tir.ESeq (subst_expr e1, subst_expr e2)
+      Tir.EReuse
+        (subst_atom env a, ty, List.map (subst_atom env) args)
+    | Tir.ESeq (e1, e2)      ->
+      let e1 = subst_expr env e1 in
+      let e2 = subst_expr env e2 in
+      Tir.ESeq (e1, e2)
   in
-  (new_params, subst_expr body)
+  let params, env = freshen_vars SMap.empty params in
+  (params, subst_expr env body)
 
 (** Substitute parameters for call arguments, wrapped in ANF lets. *)
 let subst_args ?(fn_name="?") params args body =

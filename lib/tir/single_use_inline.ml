@@ -57,19 +57,38 @@ let recursive_names successors =
     successors;
   !recursive
 
-let rewrite_expr ~changed candidates ~bound =
+let rewrite_expr ~changed candidates candidate_free_names resolve_name ~bound =
+  let try_inline_call ~bound ~args ~call candidate_name =
+    match Hashtbl.find_opt candidates candidate_name with
+    | None -> call
+    | Some fn ->
+      let free_names =
+        Option.value ~default:SSet.empty
+          (Hashtbl.find_opt candidate_free_names candidate_name)
+      in
+      (* TIR uses names, rather than distinct local/global identifiers,
+         for [AVar]. Inserting a callee free name beneath an equal
+         caller-local binder would therefore capture it. Renaming only
+         the callee's bound variables cannot repair that provenance
+         loss, so conservatively retain this one call when scopes
+         collide. This keeps the rejection local to the one-use pass
+         instead of alpha-renaming unrelated caller bindings. *)
+      if not (SSet.is_empty (SSet.inter bound free_names)) then call
+      else
+        match Inline.expand_call fn args with
+        | None -> call
+        | Some inlined ->
+          changed := true;
+          inlined
+  in
   let rec rewrite ~bound = function
     | Tir.EApp (callee, args) as call ->
       if SSet.mem callee.Tir.v_name bound then call
       else
-        (match Hashtbl.find_opt candidates callee.Tir.v_name with
-         | None -> call
-         | Some fn ->
-           (match Inline.expand_call fn args with
-            | None -> call
-            | Some inlined ->
-              changed := true;
-              inlined))
+        (match resolve_name callee.Tir.v_name with
+         | [candidate_name] ->
+           try_inline_call ~bound ~args ~call candidate_name
+         | [] | _ :: _ :: _ -> call)
     | Tir.ELet (var, rhs, body) ->
       Tir.ELet
         (var, rewrite ~bound rhs,
@@ -116,12 +135,43 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
     SSet.of_list
       (List.map (fun fn -> fn.Tir.fn_name) module_.Tir.tm_fns)
   in
+  let extern_names =
+    SSet.of_list
+      (List.map
+         (fun extern_ -> extern_.Tir.ed_march_name)
+         module_.Tir.tm_externs)
+  in
+  let aliases : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
+  List.iter
+    (fun fn ->
+      match String.rindex_opt fn.Tir.fn_name '.' with
+      | Some dot when not (Tir_names.is_iface_mangled fn.Tir.fn_name) ->
+        let bare =
+          String.sub fn.Tir.fn_name (dot + 1)
+            (String.length fn.Tir.fn_name - dot - 1)
+        in
+        let targets =
+          Option.value ~default:SSet.empty (Hashtbl.find_opt aliases bare)
+        in
+        Hashtbl.replace aliases bare (SSet.add fn.Tir.fn_name targets)
+      | Some _ | None -> ())
+    module_.Tir.tm_fns;
+  let resolve_name name =
+    if SSet.mem name extern_names then []
+    else if SSet.mem name top_names then [name]
+    else
+      match Hashtbl.find_opt aliases name with
+      | Some targets -> SSet.elements targets
+      | None -> []
+  in
   let summaries : (string, summary) Hashtbl.t = Hashtbl.create 16 in
   let successors : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
+  let free_names : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
   SSet.iter
     (fun name ->
       Hashtbl.add summaries name { count = 0; sole = None };
-      Hashtbl.add successors name SSet.empty)
+      Hashtbl.add successors name SSet.empty;
+      Hashtbl.add free_names name SSet.empty)
     top_names;
   let record name occurrence =
     match Hashtbl.find_opt summaries name with
@@ -131,38 +181,53 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
       summary.sole <-
         if summary.count = 1 then Some occurrence else None
   in
-  let scan_atom ~bound occurrence = function
-    | Tir.AVar var
-      when SSet.mem var.Tir.v_name top_names
-           && not (SSet.mem var.Tir.v_name bound) ->
-      record var.Tir.v_name occurrence
+  let record_free caller name =
+    Hashtbl.replace free_names caller
+      (SSet.add name (Hashtbl.find free_names caller))
+  in
+  let record_resolved occurrence targets =
+    match targets with
+    | [] -> ()
+    | [target] -> record target occurrence
+    | targets -> List.iter (fun target -> record target NonDirect) targets
+  in
+  let scan_atom ~caller ~bound occurrence = function
+    | Tir.AVar var when not (SSet.mem var.Tir.v_name bound) ->
+      record_free caller var.Tir.v_name;
+      record_resolved occurrence (resolve_name var.Tir.v_name)
     | Tir.ADefRef def
       when SSet.mem def.Tir.did_name top_names ->
       record def.Tir.did_name occurrence
     | Tir.AVar _ | Tir.ADefRef _ | Tir.ALit _ -> ()
   in
   let rec scan_expr ~caller ~bound = function
-    | Tir.EAtom atom -> scan_atom ~bound NonDirect atom
+    | Tir.EAtom atom -> scan_atom ~caller ~bound NonDirect atom
     | Tir.EApp (callee, args) ->
       let callee_is_free = not (SSet.mem callee.Tir.v_name bound) in
       if callee_is_free then begin
-        if SSet.mem callee.Tir.v_name top_names then
-          Hashtbl.replace successors caller
-            (SSet.add callee.Tir.v_name (Hashtbl.find successors caller));
+        record_free caller callee.Tir.v_name;
+        let targets = resolve_name callee.Tir.v_name in
+        List.iter
+          (fun target ->
+            Hashtbl.replace successors caller
+              (SSet.add target (Hashtbl.find successors caller)))
+          targets;
+        record_resolved
+          (DirectCall { caller; arity = List.length args })
+          targets;
         if Dispatch_registry.is_sentinel callee.Tir.v_name then
           match Dispatch_registry.lookup callee.Tir.v_name with
           | Some rows ->
             List.iter
-              (fun (_, target) -> record target NonDirect)
+              (fun (_, target) ->
+                record_resolved NonDirect (resolve_name target))
               rows
           | None -> ()
       end;
-      scan_atom ~bound (DirectCall { caller; arity = List.length args })
-        (Tir.AVar callee);
-      List.iter (scan_atom ~bound NonDirect) args
+      List.iter (scan_atom ~caller ~bound NonDirect) args
     | Tir.ECallPtr (callee, args) ->
-      scan_atom ~bound NonDirect callee;
-      List.iter (scan_atom ~bound NonDirect) args
+      scan_atom ~caller ~bound NonDirect callee;
+      List.iter (scan_atom ~caller ~bound NonDirect) args
     | Tir.ELet (var, rhs, body) ->
       scan_expr ~caller ~bound rhs;
       scan_expr ~caller ~bound:(SSet.add var.Tir.v_name bound) body
@@ -183,7 +248,7 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
         fns;
       scan_expr ~caller ~bound:recursive_bound body
     | Tir.ECase (atom, branches, default) ->
-      scan_atom ~bound NonDirect atom;
+      scan_atom ~caller ~bound NonDirect atom;
       List.iter
         (fun branch ->
           let branch_bound =
@@ -197,27 +262,27 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
     | Tir.ETuple atoms
     | Tir.EAlloc (_, atoms)
     | Tir.EStackAlloc (_, atoms) ->
-      List.iter (scan_atom ~bound NonDirect) atoms
+      List.iter (scan_atom ~caller ~bound NonDirect) atoms
     | Tir.ERecord fields ->
       List.iter
-        (fun (_, atom) -> scan_atom ~bound NonDirect atom)
+        (fun (_, atom) -> scan_atom ~caller ~bound NonDirect atom)
         fields
     | Tir.EField (atom, _) ->
-      scan_atom ~bound NonDirect atom
+      scan_atom ~caller ~bound NonDirect atom
     | Tir.EUpdate (atom, fields) ->
-      scan_atom ~bound NonDirect atom;
+      scan_atom ~caller ~bound NonDirect atom;
       List.iter
-        (fun (_, value) -> scan_atom ~bound NonDirect value)
+        (fun (_, value) -> scan_atom ~caller ~bound NonDirect value)
         fields
     | Tir.EFree atom
     | Tir.EIncRC atom
     | Tir.EDecRC atom
     | Tir.EAtomicIncRC atom
     | Tir.EAtomicDecRC atom ->
-      scan_atom ~bound NonDirect atom
+      scan_atom ~caller ~bound NonDirect atom
     | Tir.EReuse (reuse, _, args) ->
-      scan_atom ~bound NonDirect reuse;
-      List.iter (scan_atom ~bound NonDirect) args
+      scan_atom ~caller ~bound NonDirect reuse;
+      List.iter (scan_atom ~caller ~bound NonDirect) args
     | Tir.ESeq (first, second) ->
       scan_expr ~caller ~bound first;
       scan_expr ~caller ~bound second
@@ -260,5 +325,6 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
           in
           { fn with
             Tir.fn_body =
-              rewrite_expr ~changed candidates ~bound fn.Tir.fn_body })
+              rewrite_expr ~changed candidates free_names resolve_name
+                ~bound fn.Tir.fn_body })
         module_.Tir.tm_fns }

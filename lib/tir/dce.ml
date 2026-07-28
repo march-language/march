@@ -66,9 +66,7 @@ let rec called_fns : Tir.expr -> StringSet.t = function
   | Tir.ESeq (e1, e2)       -> StringSet.union (called_fns e1) (called_fns e2)
   | _                        -> StringSet.empty
 
-(** Transitive reachability from entry points.
-    Uses [free_vars] (not [called_fns]) so that closure apply-function
-    pointers stored in EAlloc args are also treated as references. *)
+(** Operational entry/root names preserved by top-level DCE. *)
 let root_names (m : Tir.tir_module) : string list =
   let roots = ref StringSet.empty in
   let add name = roots := StringSet.add name !roots in
@@ -94,6 +92,9 @@ let root_names (m : Tir.tir_module) : string list =
     List.iter (fun (fn : Tir.fn_def) -> add fn.Tir.fn_name) m.Tir.tm_fns;
   StringSet.elements !roots
 
+(** Transitive reachability from entry points.
+    Uses [free_vars] (not [called_fns]) so that closure apply-function
+    pointers stored in EAlloc args are also treated as references. *)
 let reachable_fns (m : Tir.tir_module) : StringSet.t =
   let fn_map : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun fd -> Hashtbl.add fn_map fd.Tir.fn_name fd) m.Tir.tm_fns;

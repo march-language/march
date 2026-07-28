@@ -205,6 +205,16 @@ no runtime speedup was measured.
 reduction-check, TIR property, raw-LLVM elimination, and native RC-order
 regressions
 
+**Corpus-count correction (2026-07-27):** the 93-fixture count above holds at
+the commit it was measured (`d3315b36`). A later rebase onto `main` added one
+unrelated fixture (`native_arr_map_inline_float_box_reuse.march`, float-boxing
+Stage 4 Option A), making the current corpus 94. That fixture was checked
+directly rather than re-running the full corpus pass: its `--dump-phases`
+trace shows identical TIR node counts immediately before and after both
+`tir-opt-{1,2}-single-use-inline` phases, so the pass is a no-op on it and the
+93-fixture aggregate figures above are unchanged for the 94-fixture corpus.
+See `specs/progress.md`'s matching 2026-07-27 entry.
+
 ---
 
 ### 5. Dead Code Elimination  ✅
