@@ -49,6 +49,18 @@ dune build --root "$ROOT" bin/main.exe forge/bin/main.exe
 cp -f _build/default/bin/main.exe _build/default/bin/march
 export PATH="$ROOT/_build/default/bin:$PATH"
 
+# `forge doc` (and every archive task) resolves a global/project toolchain pin via
+# ~/.march/current and re-prepends ITS bin/ to PATH before invoking `march`
+# (forge/lib/toolchain.ml path_prefix, used by Archive_store.run_task) — silently
+# undoing the PATH export above whenever a global toolchain default is set (e.g. an
+# older `march toolchain use`-pinned release). That stale pinned binary can predate
+# builtins the current stdlib depends on and fail with a confusing "unbound variable"
+# for whatever the newest stdlib feature is. Point MARCH_HOME at an empty scratch dir
+# (no `current` symlink, no `.march-version` pin above it matters either way) so
+# toolchain resolution finds nothing and falls back to the fresh compiler already on
+# PATH, per forge/lib/toolchain.ml's documented fallback.
+export MARCH_HOME="$(mktemp -d)"
+
 # Obtain the march_doc generator. `forge doc` discovers it as ./march_doc (cwd-relative),
 # ../march_doc, ~/code/march_doc, or the global archive registry. In CI none exist, so
 # clone the public repo into ./march_doc (it has no external deps).

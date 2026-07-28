@@ -41,6 +41,17 @@ git log is authoritative for exact commits.
   immediately destructured (e.g. `let (a, b) = (x, y)`). No runtime speedup
   was measured — this reduces emitted allocations/struct loads, not
   benchmarked wall-clock time.
+- **`Toml.parse` allocates ~10x fewer strings.** Same character-list-and-append
+  pattern as `Json.parse` had, but worse — `Toml.parse` was allocating ~3.7
+  heap strings per input byte, against JSON's 2.03 before its own rewrite. It
+  is now a byte-index scanner, following the same template: bytes are
+  inspected with `string_byte_at` (no allocation), tokens materialised with
+  one `string_slice`. On a 340-byte document exercising tables, arrays, an
+  inline table, and nested tables, compiled `--opt 2`: **allocs/byte 3.69 →
+  0.37** (2,506,057 → 250,044 string allocations over 2,000 parses). Parsing
+  is unchanged semantically; `TomlError` column numbers now count bytes
+  rather than decoded characters, matching `Json.parse`'s precedent.
+
 - **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
   parser used to begin with `string_split(src, "")`, exploding the document
   into one heap string per byte, so its cost scaled with the size of the input

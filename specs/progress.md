@@ -1,5 +1,53 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, Toml.parse rewritten as a byte-index scanner)
+
+`Toml.parse` allocated **~3.7 heap strings per input byte** — worse than
+`Json.parse`'s pre-rewrite 2.03, and the worst of the pure-March data-format
+parsers measured so far (`stdlib/toml.march`, `stdlib/yaml.march`,
+`stdlib/xml.march`, `stdlib/regex.march`, `stdlib/uri.march`,
+`stdlib/csv.march` — none had a C engine). Same root cause as `Json.parse`
+before `556cf7e9`: state was `(chars : List(String), line, col)`, built once
+via `string_split(src, "")` and walked by consing/unconsing one-character
+strings, with every token — string bodies, bare keys, digit runs — assembled
+via `acc ++ c`, an O(n²)-copying pattern for an n-byte token.
+
+Rewritten to `(src, byte_index, line, col)`: bytes are inspected with
+`string_byte_at` (no allocation) and tokens materialised with a single
+`string_slice`, following the `Json.parse` template exactly. String bodies
+with escapes use the same run-slicing scheme as `Json.scan_string` — segments
+collected only around actual escapes, one slice in the common no-escape case.
+`line`/`col` (needed for `TomlError` positions) are no longer threaded through
+every character step; a raw byte-index scan runs first, and a single
+`reposition` pass rebuilds the line/col state afterward by counting newlines
+crossed. Also replaced `string_to_int_digits`, which re-split its own digit
+string one character at a time via `string_split` to accumulate an `Int` —
+an O(n²) hot path the JSON rewrite never had — with a `string_byte_at` loop.
+
+Measured compiled `--opt 2`, `MARCH_STRING_STATS=1`, a 340-byte document
+(title/owner/database/servers sections, arrays, an inline table, nested
+tables), 2,000 iterations:
+
+    allocs/byte              3.69 -> 0.37   (2,506,057 -> 250,044 allocations)
+    obj_allocs                                3,272,000 -> 1,738,000
+
+Verified via the existing `test_toml.march` describe/test suite (unchanged,
+all passing) plus a 33-case interpreted-vs-native round-trip corpus covering
+all escape forms, multiline basic/literal strings (including embedded
+`"`/`'` runs that don't close a triple-quote), 2/3/4-byte UTF-8 in both keys
+and values, dotted/quoted keys, nested tables, arrays, inline tables,
+array-of-tables, comments, and 7 error cases. One deliberate, minor
+divergence carried over from the JSON precedent: `col` in `TomlError` now
+counts bytes rather than decoded characters (no existing test asserts exact
+`TomlError` positions).
+
+`yaml.march`, `xml.march`, `regex.march`, `uri.march`, `csv.march` remain
+open with the same or an unmeasured allocation profile. `regex.march` is
+flagged as the likely largest remaining win — backtracking re-slices
+repeatedly — but each format has its own scanning shape (YAML's indentation
+sensitivity, XML's tag/attribute grammar, regex backtracking) and needs its
+own measurement before assuming `Json.parse`/`Toml.parse` transfer directly.
+
 ## Current State (as of 2026-07-28, `Json.bad_number` monomorphisation reverted — the typecheck blowup it claimed to fix does not reproduce)
 
 `d21c846b` changed `Json.bad_number` to return a bare message `String`, with

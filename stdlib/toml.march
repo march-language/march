@@ -31,507 +31,486 @@ mod Toml do
 
   type TomlError = TomlError(String, Int, Int)
 
-  -- ── Char utilities ────────────────────────────────────────────────────────
+  -- ── Scanning discipline ───────────────────────────────────────────────────
+  --
+  -- Byte-index cursor over the source string, following the pattern from the
+  -- Json parser rewrite (see commit 556cf7e9): a scan step inspects bytes with
+  -- `string_byte_at` (no allocation) and each token is materialised with a
+  -- single `string_slice` (or, for strings containing escapes, a handful of
+  -- slices joined once). The previous parser did `string_split(src, "")` up
+  -- front and built every token via `acc ++ c` -- one fresh heap string per
+  -- character, and O(n^2) copying for an n-byte token -- which measured at
+  -- 3.72 string allocations per input byte.
+  --
+  -- Structural TOML characters are all ASCII, and every byte of a multibyte
+  -- UTF-8 sequence is >= 0x80, so scanning raw bytes never mistakes a
+  -- multibyte character for a delimiter; multibyte text just passes through
+  -- inside a token slice untouched.
+  --
+  -- State is (src, byte_index, line, col). `line`/`col` are maintained for
+  -- error reporting; `col` counts BYTES rather than decoded characters
+  -- (a minor, deliberate divergence from the previous char-list parser,
+  -- matching the Json rewrite's precedent).
 
-  pfn char_code(c) do char_to_int(c) end
+  pfn is_digit_byte(n) do n >= 48 && n <= 57 end
 
-  pfn is_digit(c) do
-    let n = char_code(c)
-    n >= 48 && n <= 57
-  end
-
-  pfn is_hex(c) do
-    let n = char_code(c)
-    (n >= 48 && n <= 57) || (n >= 65 && n <= 70) || (n >= 97 && n <= 102)
-  end
-
-  pfn is_alpha(c) do
-    let n = char_code(c)
-    (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
-  end
-
-  pfn is_bare_key_char(c) do
-    let n = char_code(c)
+  pfn is_bare_key_byte(n) do
     (n >= 65 && n <= 90) || (n >= 97 && n <= 122) ||
-    (n >= 48 && n <= 57) || c == "-" || c == "_"
-  end
-
-  pfn is_whitespace(c) do c == " " || c == "\t" end
-
-  pfn is_newline(c) do c == "\n" || c == "\r" end
-
-  pfn digit_val(c) do char_code(c) - 48 end
-
-  pfn hex_val(c) do
-    let n = char_code(c)
-    if n >= 48 && n <= 57 do n - 48
-    else if n >= 65 && n <= 70 do n - 55
-    else n - 87
-    end end
+    (n >= 48 && n <= 57) || n == 45 || n == 95
   end
 
   -- ── Parser state ──────────────────────────────────────────────────────────
 
-  -- State is represented as (chars, line, col) where chars = List(String)
-  -- (each element is a single-character string from string_split)
+  pfn make_state(src) do (src, 0, 1, 0) end
 
-  pfn make_state(src) do
-    (string_split(src, ""), 1, 0)
+  pfn st_line(st) do match st do (_, _, l, _) -> l end end
+  pfn st_col(st)  do match st do (_, _, _, c) -> c end end
+
+  pfn cur_byte(st) do
+    match st do (s, i, _, _) -> string_byte_at(s, i) end
   end
-
-  pfn state_pos(st) do
-    match st do (_, line, col) -> (line, col) end
-  end
-
-  pfn state_line(st) do match st do (_, l, _) -> l end end
-  pfn state_col(st)  do match st do (_, _, c) -> c end end
-  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
 
   pfn advance(st) do
     match st do
-    (cs, line, col) ->
-      match cs do
-      Nil -> st
-      Cons(c, rest) ->
-        if c == "\n" do (rest, line + 1, 0)
-        else (rest, line, col + 1)
-        end
+    (s, i, line, col) ->
+      let b = string_byte_at(s, i)
+      if b < 0 do st
+      else if b == 10 do (s, i + 1, line + 1, 0)
+      else (s, i + 1, line, col + 1)
+      end end
+    end
+  end
+
+  pfn at_end(st) do cur_byte(st) < 0 end
+
+  -- Recompute (line, col) after jumping the cursor to byte index `j`,
+  -- counting any newlines crossed. Used after a raw byte-index scan (which
+  -- never touches the state tuple) to rebuild a consistent state once.
+  pfn reposition_go(s, j, k, line, col) do
+    if k >= j do (s, j, line, col)
+    else
+      let b = string_byte_at(s, k)
+      if b == 10 do reposition_go(s, j, k + 1, line + 1, 0)
+      else reposition_go(s, j, k + 1, line, col + 1)
       end
     end
   end
 
-  pfn peek(st) do
-    match state_chars(st) do
-    Nil -> None
-    Cons(c, _) -> Some(c)
-    end
-  end
-
-  pfn peek2(st) do
-    match state_chars(st) do
-    Cons(_, Cons(c, _)) -> Some(c)
-    _ -> None
-    end
-  end
-
-  pfn peek3(st) do
-    match state_chars(st) do
-    Cons(_, Cons(_, Cons(c, _))) -> Some(c)
-    _ -> None
-    end
-  end
-
-  pfn at_end(st) do
-    match state_chars(st) do
-    Nil -> true
-    _   -> false
-    end
+  pfn reposition(st, j) do
+    match st do (s, i0, line0, col0) -> reposition_go(s, j, i0, line0, col0) end
   end
 
   pfn err(st, msg) do
-    Err(TomlError(msg, state_line(st), state_col(st)))
+    Err(TomlError(msg, st_line(st), st_col(st)))
+  end
+
+  pfn err_at(st, fail_i, msg) do
+    err(reposition(st, fail_i), msg)
+  end
+
+  -- Byte width of the UTF-8 character starting with lead byte `b`. Used only
+  -- to slice a whole character back out for an error message.
+  pfn utf8_width(b) do
+    if b < 128 do 1
+    else if b < 224 do 2
+    else if b < 240 do 3
+    else 4 end end end
+  end
+
+  pfn char1(s, i) do string_slice(s, i, utf8_width(string_byte_at(s, i))) end
+
+  pfn char1_at(st) do
+    match st do (s, i, _, _) -> char1(s, i) end
   end
 
   -- ── Skip whitespace & comments ────────────────────────────────────────────
 
   pfn skip_ws(st) do
-    match peek(st) do
-    None -> st
-    Some(c) ->
-      if is_whitespace(c) do skip_ws(advance(st))
-      else st
-      end
+    let b = cur_byte(st)
+    if b == 32 || b == 9 do skip_ws(advance(st))
+    else st
     end
   end
 
   pfn skip_line(st) do
-    match peek(st) do
-    None -> st
-    Some(c) ->
-      match c do
-      "\n" -> advance(st)
-      "\r" ->
-        let st2 = advance(st)
-        match peek(st2) do
-        Some("\n") -> advance(st2)
-        _          -> st2
-        end
-      _ -> skip_line(advance(st))
-      end
-    end
+    let b = cur_byte(st)
+    if b < 0 do st
+    else if b == 10 do advance(st)
+    else if b == 13 do
+      let st2 = advance(st)
+      if cur_byte(st2) == 10 do advance(st2) else st2 end
+    else skip_line(advance(st))
+    end end end
   end
 
   pfn skip_ws_comments(st) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    Some("#") -> skip_ws_comments(skip_line(st1))
-    Some("\n") -> skip_ws_comments(advance(st1))
-    Some("\r") ->
+    let b = cur_byte(st1)
+    if b == 35 do skip_ws_comments(skip_line(st1))
+    else if b == 10 do skip_ws_comments(advance(st1))
+    else if b == 13 do
       let st2 = advance(st1)
-      match peek(st2) do
-      Some("\n") -> skip_ws_comments(advance(st2))
-      _          -> skip_ws_comments(st2)
+      if cur_byte(st2) == 10 do skip_ws_comments(advance(st2))
+      else skip_ws_comments(st2)
       end
-    _ -> st1
-    end
+    else st1
+    end end end
   end
 
   pfn skip_ws_inline(st) do
     -- Skip whitespace but not newlines
     let st1 = skip_ws(st)
-    match peek(st1) do
-    Some("#") -> skip_line(st1)  -- comment ends line
-    _         -> st1
+    if cur_byte(st1) == 35 do skip_line(st1)  -- comment ends line
+    else st1
     end
+  end
+
+  pfn skip_ml_leading_newline(s, i) do
+    let b = string_byte_at(s, i)
+    if b == 10 do i + 1
+    else if b == 13 do
+      if string_byte_at(s, i + 1) == 10 do i + 2 else i + 1 end
+    else i
+    end end
   end
 
   -- ── Expect a specific character ───────────────────────────────────────────
 
   pfn expect_char(st, expected) do
-    match peek(st) do
-    None -> err(st, "expected '" ++ expected ++ "' but got end of input")
-    Some(c) ->
-      if c == expected do Ok(advance(st))
-      else err(st, "expected '" ++ expected ++ "' but got '" ++ c ++ "'")
+    let b = cur_byte(st)
+    if b < 0 do err(st, "expected '" ++ expected ++ "' but got end of input")
+    else if b == string_byte_at(expected, 0) do Ok(advance(st))
+    else err(st, "expected '" ++ expected ++ "' but got '" ++ char1_at(st) ++ "'")
+    end end
+  end
+
+  -- Match a literal `lit` at byte `i`. Returns the index just past it, or -1
+  -- on mismatch. `lit` itself is indexed with string_byte_at, so no list of
+  -- expected chars is ever built.
+  pfn match_lit_go(s, i, lit, j) do
+    let e = string_byte_at(lit, j)
+    if e < 0 do i
+    else
+      let c = string_byte_at(s, i)
+      if c == e do match_lit_go(s, i + 1, lit, j + 1)
+      else -1
       end
+    end
+  end
+
+  -- ── Segment-slicing helpers (shared by string/digit scanners) ────────────
+
+  -- Push the run [start, i) onto `acc` (newest first) if it's non-empty.
+  pfn push_seg(s, start, i, acc) do
+    if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+  end
+
+  -- Materialise `acc` plus the trailing run [start, i): a single slice in the
+  -- common no-escapes case, one string_join if the token was split by escapes.
+  pfn finish_join(s, start, i, acc) do
+    match acc do
+    Nil -> string_slice(s, start, i - start)
+    _   -> string_join(List.reverse(push_seg(s, start, i, acc)), "")
     end
   end
 
   -- ── Parse basic string (double-quoted) ───────────────────────────────────
 
-  pfn parse_escape(st) do
-    match peek(st) do
-    None -> err(st, "unexpected end of input in escape sequence")
-    Some(c) ->
-      let st2 = advance(st)
-      match c do
-      "\"" -> Ok(("\"", st2))
-      "\\" -> Ok(("\\", st2))
-      "n"  -> Ok(("\n", st2))
-      "t"  -> Ok(("\t", st2))
-      "r"  -> Ok(("\r", st2))
-      "b"  -> Ok(("\x08", st2))
-      "f"  -> Ok(("\x0c", st2))
-      "/"  -> Ok(("/", st2))
-      "u"  -> Ok(("\\u", st2))
-      "U"  -> Ok(("\\U", st2))
-      _    -> err(st, "unknown escape sequence: \\" ++ c)
-      end
-    end
+  -- Decode one escape sequence body (the byte after the backslash). `\u` and
+  -- `\U` are passed through literally as "\u"/"\U" -- matching the previous
+  -- parser's behaviour, which never decoded the following hex digits either.
+  pfn unescape_basic(s, epos, e) do
+    if e == 34 do Ok("\"")
+    else if e == 92 do Ok("\\")
+    else if e == 110 do Ok("\n")
+    else if e == 116 do Ok("\t")
+    else if e == 114 do Ok("\r")
+    else if e == 98 do Ok("\x08")
+    else if e == 102 do Ok("\x0c")
+    else if e == 47 do Ok("/")
+    else if e == 117 do Ok("\\u")
+    else if e == 85 do Ok("\\U")
+    else Err("unknown escape sequence: \\" ++ char1(s, epos)) end end end end end end end end end end
   end
 
-  pfn parse_basic_string_chars(st, acc) do
-    match peek(st) do
-    None -> err(st, "unterminated string")
-    Some("\"") -> Ok((acc, advance(st)))
-    Some("\\") ->
-      match parse_escape(advance(st)) do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (esc, st2) -> parse_basic_string_chars(st2, acc ++ esc) end
-      end
-    Some(c) ->
-      if is_newline(c) do err(st, "newline in basic string")
-      else parse_basic_string_chars(advance(st), acc ++ c)
-      end
-    end
-  end
-
-  -- Multiline basic string: strip leading newline, allow escaped newlines
-  pfn parse_ml_basic_chars(st, acc) do
-    match peek(st) do
-    None -> err(st, "unterminated multiline string")
-    Some("\"") ->
-      match peek2(st) do
-      Some("\"") ->
-        match peek3(st) do
-        Some("\"") -> Ok((acc, advance(advance(advance(st)))))
-        _ -> parse_ml_basic_chars(advance(st), acc ++ "\"")
+  -- Single-line basic-string body. `i` is the first content byte (right
+  -- after the opening quote). Returns Ok((value, index past closing quote))
+  -- or Err((message, failure_index)).
+  pfn scan_basic_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated string", i))
+    else if c == 34 do Ok((finish_join(s, start, i, acc), i + 1))
+    else if c == 92 do
+      let e = string_byte_at(s, i + 1)
+      if e < 0 do Err(("unexpected end of input in escape sequence", i + 1))
+      else
+        match unescape_basic(s, i + 1, e) do
+        Err(msg) -> Err((msg, i + 1))
+        Ok(esc) ->
+          scan_basic_go(s, i + 2, i + 2, Cons(esc, push_seg(s, start, i, acc)))
         end
-      _ -> parse_ml_basic_chars(advance(st), acc ++ "\"")
       end
-    Some("\\") ->
-      match parse_escape(advance(st)) do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (esc, st2) -> parse_ml_basic_chars(st2, acc ++ esc) end
+    else if c == 10 || c == 13 do Err(("newline in basic string", i))
+    else scan_basic_go(s, i + 1, start, acc)
+    end end end end
+  end
+
+  -- Multiline basic-string body: allows literal newlines, terminates only on
+  -- an unescaped `"""`. A lone or double `"` that isn't followed by a third
+  -- is ordinary content and is simply scanned past.
+  pfn scan_ml_basic_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated multiline string", i))
+    else if c == 34 do
+      if string_byte_at(s, i + 1) == 34 && string_byte_at(s, i + 2) == 34 do
+        Ok((finish_join(s, start, i, acc), i + 3))
+      else scan_ml_basic_go(s, i + 1, start, acc) end
+    else if c == 92 do
+      let e = string_byte_at(s, i + 1)
+      if e < 0 do Err(("unexpected end of input in escape sequence", i + 1))
+      else
+        match unescape_basic(s, i + 1, e) do
+        Err(msg) -> Err((msg, i + 1))
+        Ok(esc) ->
+          scan_ml_basic_go(s, i + 2, i + 2, Cons(esc, push_seg(s, start, i, acc)))
+        end
       end
-    Some(c) -> parse_ml_basic_chars(advance(st), acc ++ c)
+    else scan_ml_basic_go(s, i + 1, start, acc)
+    end end end
+  end
+
+  -- Scan a single-line basic-string body starting right at `st`'s cursor
+  -- (already past the opening quote). Shared by string values and quoted
+  -- keys, neither of which supports the triple-quoted multiline form.
+  pfn scan_basic_body(st) do
+    match st do
+    (s, i, _, _) ->
+      match scan_basic_go(s, i, i, Nil) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
+      end
     end
   end
 
   pfn parse_basic_string(st) do
-    -- Already consumed the opening "
-    match peek(st) do
-    Some("\"") ->
-      match peek2(st) do
-      Some("\"") ->
+    -- st is already past the opening "
+    match st do
+    (s, i, _, _) ->
+      let b1 = string_byte_at(s, i)
+      let b2 = string_byte_at(s, i + 1)
+      if b1 == 34 && b2 == 34 do
         -- Triple-quoted multiline
-        let st2 = advance(advance(st))
-        -- Skip leading newline
-        let st3 = match peek(st2) do
-          Some("\n") -> advance(st2)
-          Some("\r") ->
-            let s = advance(st2)
-            match peek(s) do Some("\n") -> advance(s) | _ -> s end
-          _ -> st2
-          end
-        match parse_ml_basic_chars(st3, "") do
-        Err(e) -> Err(e)
-        Ok(p) -> match p do (s, st4) -> Ok((TStr(s), st4)) end
+        let i2 = i + 2
+        let i3 = skip_ml_leading_newline(s, i2)
+        match scan_ml_basic_go(s, i3, i3, Nil) do
+        Err((msg, fi)) -> err_at(st, fi, msg)
+        Ok((v, j)) -> Ok((TStr(v), reposition(st, j)))
         end
-      _ ->
+      else if b1 == 34 do
         -- Empty string ""
-        Ok((TStr(""), advance(st)))
-      end
-    _ ->
-      match parse_basic_string_chars(st, "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((TStr(s), st2)) end
-      end
+        Ok((TStr(""), reposition(st, i + 1)))
+      else
+        match scan_basic_body(st) do
+        Err(e) -> Err(e)
+        Ok((v, st2)) -> Ok((TStr(v), st2))
+        end
+      end end
     end
   end
 
   -- ── Parse literal string (single-quoted) ─────────────────────────────────
 
-  pfn parse_literal_chars(st, acc) do
-    match peek(st) do
-    None -> err(st, "unterminated literal string")
-    Some("'") -> Ok((acc, advance(st)))
-    Some(c) ->
-      if is_newline(c) do err(st, "newline in literal string")
-      else parse_literal_chars(advance(st), acc ++ c)
-      end
-    end
+  pfn scan_literal_go(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated literal string", i))
+    else if c == 39 do Ok((string_slice(s, start, i - start), i + 1))
+    else if c == 10 || c == 13 do Err(("newline in literal string", i))
+    else scan_literal_go(s, i + 1, start)
+    end end end
   end
 
-  pfn parse_ml_literal_chars(st, acc) do
-    match peek(st) do
-    None -> err(st, "unterminated multiline literal string")
-    Some("'") ->
-      match peek2(st) do
-      Some("'") ->
-        match peek3(st) do
-        Some("'") -> Ok((acc, advance(advance(advance(st)))))
-        _ -> parse_ml_literal_chars(advance(st), acc ++ "'")
-        end
-      _ -> parse_ml_literal_chars(advance(st), acc ++ "'")
+  pfn scan_ml_literal_go(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err(("unterminated multiline literal string", i))
+    else if c == 39 do
+      if string_byte_at(s, i + 1) == 39 && string_byte_at(s, i + 2) == 39 do
+        Ok((string_slice(s, start, i - start), i + 3))
+      else scan_ml_literal_go(s, i + 1, start) end
+    else scan_ml_literal_go(s, i + 1, start)
+    end end
+  end
+
+  pfn scan_literal_body(st) do
+    match st do
+    (s, i, _, _) ->
+      match scan_literal_go(s, i, i) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
       end
-    Some(c) -> parse_ml_literal_chars(advance(st), acc ++ c)
     end
   end
 
   pfn parse_literal_string(st) do
-    match peek(st) do
-    Some("'") ->
-      match peek2(st) do
-      Some("'") ->
-        let st2 = advance(advance(st))
-        let st3 = match peek(st2) do
-          Some("\n") -> advance(st2)
-          Some("\r") ->
-            let s = advance(st2)
-            match peek(s) do Some("\n") -> advance(s) | _ -> s end
-          _ -> st2
-          end
-        match parse_ml_literal_chars(st3, "") do
-        Err(e) -> Err(e)
-        Ok(p) -> match p do (s, st4) -> Ok((TStr(s), st4)) end
+    match st do
+    (s, i, _, _) ->
+      let b1 = string_byte_at(s, i)
+      let b2 = string_byte_at(s, i + 1)
+      if b1 == 39 && b2 == 39 do
+        let i2 = i + 2
+        let i3 = skip_ml_leading_newline(s, i2)
+        match scan_ml_literal_go(s, i3, i3) do
+        Err((msg, fi)) -> err_at(st, fi, msg)
+        Ok((v, j)) -> Ok((TStr(v), reposition(st, j)))
         end
-      _ -> Ok((TStr(""), advance(st)))
-      end
-    _ ->
-      match parse_literal_chars(st, "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((TStr(s), st2)) end
-      end
+      else if b1 == 39 do
+        Ok((TStr(""), reposition(st, i + 1)))
+      else
+        match scan_literal_body(st) do
+        Err(e) -> Err(e)
+        Ok((v, st2)) -> Ok((TStr(v), st2))
+        end
+      end end
     end
   end
 
   -- ── Parse number (int or float) ───────────────────────────────────────────
 
-  pfn collect_digits_underscores(st, acc) do
-    match peek(st) do
-    Some(c) ->
-      if is_digit(c) do collect_digits_underscores(advance(st), acc ++ c)
-      else
-        match c do
-        "_" ->
-          match peek2(st) do
-          Some(c2) ->
-            if is_digit(c2) do collect_digits_underscores(advance(st), acc)
-            else (acc, st)
-            end
-          _ -> (acc, st)
-          end
-        _ -> (acc, st)
-        end
+  -- Collect a run of digits with '_' separators (dropped from the output).
+  -- Underscores are only consumed when both flanked by digits, matching the
+  -- previous char-list parser exactly.
+  pfn digits_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if is_digit_byte(c) do digits_go(s, i + 1, start, acc)
+    else if c == 95 do
+      if is_digit_byte(string_byte_at(s, i + 1)) do
+        digits_go(s, i + 1, i + 1, push_seg(s, start, i, acc))
+      else (finish_join(s, start, i, acc), i)
       end
-    _ -> (acc, st)
+    else (finish_join(s, start, i, acc), i)
+    end end
+  end
+
+  pfn parse_digits(st) do
+    match st do
+    (s, i, _, _) ->
+      match digits_go(s, i, i, Nil) do
+      (val, j) -> (val, reposition(st, j))
+      end
     end
   end
 
-  pfn parse_digits(st) do collect_digits_underscores(st, "") end
-
-  pfn string_to_int_digits(s, acc) do
-    match string_split(s, "") do
-    Nil -> acc
-    Cons(c, rest) ->
-      string_to_int_digits(String.join(rest, ""), acc * 10 + digit_val(c))
+  pfn digits_to_int_go(s, i, len, acc) do
+    if i >= len do acc
+    else digits_to_int_go(s, i + 1, len, acc * 10 + (string_byte_at(s, i) - 48))
     end
+  end
+
+  pfn digits_to_int(s) do
+    digits_to_int_go(s, 0, string_byte_length(s), 0)
   end
 
   -- Parse exponent part after decimal (e/E [+/-] digits). Returns ("e+NNN", st').
   pfn parse_exp_part(st) do
-    match peek(st) do
-    Some("e") ->
+    let b = cur_byte(st)
+    if b == 101 do
       let st2 = advance(st)
-      match peek(st2) do
-      Some("+") ->
-        let p = parse_digits(advance(st2))
-        let s = match p do (a, _) -> a end
-        let s2 = match p do (_, b) -> b end
-        ("e+" ++ s, s2)
-      Some("-") ->
-        let p = parse_digits(advance(st2))
-        let s = match p do (a, _) -> a end
-        let s2 = match p do (_, b) -> b end
-        ("e-" ++ s, s2)
-      _ ->
-        let p = parse_digits(st2)
-        let s = match p do (a, _) -> a end
-        let s2 = match p do (_, b) -> b end
-        ("e+" ++ s, s2)
-      end
-    Some("E") ->
-      let st2 = advance(st)
-      let p = parse_digits(st2)
-      let s = match p do (a, _) -> a end
-      let s2 = match p do (_, b) -> b end
-      ("e+" ++ s, s2)
-    _ -> ("", st)
-    end
+      let b2 = cur_byte(st2)
+      if b2 == 43 do
+        let (ds, st3) = parse_digits(advance(st2))
+        ("e+" ++ ds, st3)
+      else if b2 == 45 do
+        let (ds, st3) = parse_digits(advance(st2))
+        ("e-" ++ ds, st3)
+      else
+        let (ds, st3) = parse_digits(st2)
+        ("e+" ++ ds, st3)
+      end end
+    else if b == 69 do
+      let (ds, st3) = parse_digits(advance(st))
+      ("e+" ++ ds, st3)
+    else ("", st)
+    end end
   end
 
   pfn parse_number(st, sign) do
     -- sign: 1 or -1
-    match peek(st) do
-    None -> err(st, "expected number")
-    Some(c) ->
-      if not (is_digit(c)) do err(st, "expected digit, got '" ++ c ++ "'")
+    let b = cur_byte(st)
+    if b < 0 do err(st, "expected number")
+    else if not (is_digit_byte(b)) do err(st, "expected digit, got '" ++ char1_at(st) ++ "'")
+    else
+      let (int_str, st2) = parse_digits(st)
+      let int_val = digits_to_int(int_str)
+      let b2 = cur_byte(st2)
+      if b2 == 46 do
+        let st3 = advance(st2)
+        let (frac_str, st4) = parse_digits(st3)
+        let (exp_str, st5) = parse_exp_part(st4)
+        let float_src = int_to_string(int_val) ++ "." ++ frac_str ++ exp_str
+        let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
+        let f2 = if sign < 0 do 0.0 -. f else f end
+        Ok((TFloat(f2), st5))
+      else if b2 == 101 || b2 == 69 do
+        let (exp_str, st5) = parse_exp_part(st2)
+        let float_src = int_to_string(int_val) ++ ".0" ++ exp_str
+        let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
+        let f2 = if sign < 0 do 0.0 -. f else f end
+        Ok((TFloat(f2), st5))
       else
-        let p = parse_digits(st)
-        let int_str = match p do (s, _) -> s end
-        let st2 = match p do (_, s) -> s end
-        let int_val = string_to_int_digits(int_str, 0)
-        match peek(st2) do
-        Some(".") ->
-          let st3 = advance(st2)
-          let p2 = parse_digits(st3)
-          let frac_str = match p2 do (s, _) -> s end
-          let st4 = match p2 do (_, s) -> s end
-          let exp_part = parse_exp_part(st4)
-          let exp_str = match exp_part do (s, _) -> s end
-          let st5 = match exp_part do (_, s) -> s end
-          let float_src = int_to_string(int_val) ++ "." ++ frac_str ++ exp_str
-          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
-          let f2 = if sign < 0 do 0.0 -. f else f end
-          Ok((TFloat(f2), st5))
-        Some("e") ->
-          let exp_part = parse_exp_part(st2)
-          let exp_str = match exp_part do (s, _) -> s end
-          let st5 = match exp_part do (_, s) -> s end
-          let float_src = int_to_string(int_val) ++ ".0" ++ exp_str
-          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
-          let f2 = if sign < 0 do 0.0 -. f else f end
-          Ok((TFloat(f2), st5))
-        Some("E") ->
-          let exp_part = parse_exp_part(st2)
-          let exp_str = match exp_part do (s, _) -> s end
-          let st5 = match exp_part do (_, s) -> s end
-          let float_src = int_to_string(int_val) ++ ".0" ++ exp_str
-          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
-          let f2 = if sign < 0 do 0.0 -. f else f end
-          Ok((TFloat(f2), st5))
-        _ ->
-          let n = if sign < 0 do 0 - int_val else int_val end
-          Ok((TInt(n), st2))
-        end
-      end
-    end
+        let n = if sign < 0 do 0 - int_val else int_val end
+        Ok((TInt(n), st2))
+      end end
+    end end
   end
 
   -- ── Parse value ───────────────────────────────────────────────────────────
 
   pfn parse_value(st) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None -> err(st1, "expected value, got end of input")
-    Some("\"") -> parse_basic_string(advance(st1))
-    Some("'") -> parse_literal_string(advance(st1))
-    Some("[") -> parse_array(advance(st1))
-    Some("{") -> parse_inline_table(advance(st1))
-    Some("t") ->
-      -- true
-      match state_chars(st1) do
-      Cons(_, Cons("r", Cons("u", Cons("e", rest)))) ->
-        Ok((TBool(true), (rest, state_line(st1), state_col(st1) + 4)))
-      _ -> err(st1, "expected 'true'")
-      end
-    Some("f") ->
-      match state_chars(st1) do
-      Cons(_, Cons("a", Cons("l", Cons("s", Cons("e", rest))))) ->
-        Ok((TBool(false), (rest, state_line(st1), state_col(st1) + 5)))
-      _ -> err(st1, "expected 'false'")
-      end
-    Some("i") ->
-      -- inf
-      match state_chars(st1) do
-      Cons(_, Cons("n", Cons("f", rest))) ->
-        Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st1), state_col(st1) + 3)))
-      _ -> err(st1, "expected 'inf'")
-      end
-    Some("n") ->
-      -- nan
-      match state_chars(st1) do
-      Cons(_, Cons("a", Cons("n", rest))) ->
-        Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st1), state_col(st1) + 3)))
-      _ -> err(st1, "expected 'nan'")
-      end
-    Some("+") ->
-      match peek2(st1) do
-      Some("i") ->
-        -- +inf
-        let st2 = advance(advance(st1))
-        match state_chars(st2) do
-        Cons("n", Cons("f", rest)) ->
-          Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
-        _ -> err(st2, "expected 'inf'")
+    match st1 do
+    (s, i1, _, _) ->
+      let b = string_byte_at(s, i1)
+      if b < 0 do err(st1, "expected value, got end of input")
+      else if b == 34 do parse_basic_string(advance(st1))
+      else if b == 39 do parse_literal_string(advance(st1))
+      else if b == 91 do parse_array(advance(st1))
+      else if b == 123 do parse_inline_table(advance(st1))
+      else if b == 116 do
+        let j = match_lit_go(s, i1, "true", 0)
+        if j < 0 do err(st1, "expected 'true'")
+        else Ok((TBool(true), reposition(st1, j))) end
+      else if b == 102 do
+        let j = match_lit_go(s, i1, "false", 0)
+        if j < 0 do err(st1, "expected 'false'")
+        else Ok((TBool(false), reposition(st1, j))) end
+      else if b == 105 do
+        let j = match_lit_go(s, i1, "inf", 0)
+        if j < 0 do err(st1, "expected 'inf'")
+        else Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), reposition(st1, j))) end
+      else if b == 110 do
+        let j = match_lit_go(s, i1, "nan", 0)
+        if j < 0 do err(st1, "expected 'nan'")
+        else Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), reposition(st1, j))) end
+      else if b == 43 do
+        if string_byte_at(s, i1 + 1) == 105 do
+          let j = match_lit_go(s, i1 + 1, "inf", 0)
+          if j < 0 do err_at(st1, i1 + 2, "expected 'inf'")
+          else Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), reposition(st1, j))) end
+        else parse_number(advance(st1), 1)
         end
-      _ -> parse_number(advance(st1), 1)
-      end
-    Some("-") ->
-      match peek2(st1) do
-      Some("i") ->
-        -- -inf
-        let st2 = advance(advance(st1))
-        match state_chars(st2) do
-        Cons("n", Cons("f", rest)) ->
-          Ok((TFloat(match string_to_float("-inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
-        _ -> err(st2, "expected 'inf'")
-        end
-      Some("n") ->
-        -- -nan
-        let st2 = advance(advance(st1))
-        match state_chars(st2) do
-        Cons("a", Cons("n", rest)) ->
-          Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
-        _ -> err(st2, "expected 'nan'")
-        end
-      _ -> parse_number(advance(st1), -1)
-      end
-    Some(c) ->
-      if is_digit(c) do parse_number(st1, 1)
-      else err(st1, "unexpected character '" ++ c ++ "' in value")
-      end
+      else if b == 45 do
+        if string_byte_at(s, i1 + 1) == 105 do
+          let j = match_lit_go(s, i1 + 1, "inf", 0)
+          if j < 0 do err_at(st1, i1 + 2, "expected 'inf'")
+          else Ok((TFloat(match string_to_float("-inf") do Some(x) -> x | None -> 0.0 end), reposition(st1, j))) end
+        else if string_byte_at(s, i1 + 1) == 110 do
+          let j = match_lit_go(s, i1 + 1, "nan", 0)
+          if j < 0 do err_at(st1, i1 + 2, "expected 'nan'")
+          else Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), reposition(st1, j))) end
+        else parse_number(advance(st1), -1)
+        end end
+      else if is_digit_byte(b) do parse_number(st1, 1)
+      else err(st1, "unexpected character '" ++ char1_at(st1) ++ "' in value")
+      end end end end end end end end end end end end
     end
   end
 
@@ -539,30 +518,27 @@ mod Toml do
 
   pfn parse_array_items(st, acc) do
     let st1 = skip_ws_comments(st)
-    match peek(st1) do
-    None -> err(st1, "unterminated array")
-    Some("]") -> Ok((List.reverse(acc), advance(st1)))
-    _ ->
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unterminated array")
+    else if b == 93 do Ok((List.reverse(acc), advance(st1)))
+    else
       match parse_value(st1) do
       Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (v, st2) ->
-          let st3 = skip_ws_comments(st2)
-          match peek(st3) do
-          Some(",") -> parse_array_items(advance(st3), Cons(v, acc))
-          Some("]") -> Ok((List.reverse(Cons(v, acc)), advance(st3)))
-          _ -> err(st3, "expected ',' or ']' in array")
-          end
-        end
+      Ok((v, st2)) ->
+        let st3 = skip_ws_comments(st2)
+        let b2 = cur_byte(st3)
+        if b2 == 44 do parse_array_items(advance(st3), Cons(v, acc))
+        else if b2 == 93 do Ok((List.reverse(Cons(v, acc)), advance(st3)))
+        else err(st3, "expected ',' or ']' in array")
+        end end
       end
-    end
+    end end
   end
 
   pfn parse_array(st) do
     match parse_array_items(st, Nil) do
     Err(e) -> Err(e)
-    Ok(p) -> match p do (items, st2) -> Ok((TArray(items), st2)) end
+    Ok((items, st2)) -> Ok((TArray(items), st2))
     end
   end
 
@@ -570,104 +546,82 @@ mod Toml do
 
   pfn parse_inline_table_pairs(st, acc) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None -> err(st1, "unterminated inline table")
-    Some("}") -> Ok((List.reverse(acc), advance(st1)))
-    _ ->
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unterminated inline table")
+    else if b == 125 do Ok((List.reverse(acc), advance(st1)))
+    else
       match parse_key(st1) do
       Err(e) -> Err(e)
-      Ok(p) ->
-        match p do
-        (key_parts, st2) ->
-          let st3 = skip_ws(st2)
-          match expect_char(st3, "=") do
+      Ok((key_parts, st2)) ->
+        let st3 = skip_ws(st2)
+        match expect_char(st3, "=") do
+        Err(e) -> Err(e)
+        Ok(st4) ->
+          match parse_value(skip_ws(st4)) do
           Err(e) -> Err(e)
-          Ok(st4) ->
-            match parse_value(skip_ws(st4)) do
-            Err(e) -> Err(e)
-            Ok(p2) ->
-              match p2 do
-              (v, st5) ->
-                let st6 = skip_ws(st5)
-                let entry = (String.join(key_parts, "."), v)
-                match peek(st6) do
-                Some(",") -> parse_inline_table_pairs(advance(st6), Cons(entry, acc))
-                Some("}") -> Ok((List.reverse(Cons(entry, acc)), advance(st6)))
-                _ -> err(st6, "expected ',' or '}' in inline table")
-                end
-              end
-            end
+          Ok((v, st5)) ->
+            let st6 = skip_ws(st5)
+            let entry = (String.join(key_parts, "."), v)
+            let b2 = cur_byte(st6)
+            if b2 == 44 do parse_inline_table_pairs(advance(st6), Cons(entry, acc))
+            else if b2 == 125 do Ok((List.reverse(Cons(entry, acc)), advance(st6)))
+            else err(st6, "expected ',' or '}' in inline table")
+            end end
           end
         end
       end
-    end
+    end end
   end
 
   pfn parse_inline_table(st) do
     match parse_inline_table_pairs(st, Nil) do
     Err(e) -> Err(e)
-    Ok(p) -> match p do (pairs, st2) -> Ok((TTable(pairs), st2)) end
+    Ok((pairs, st2)) -> Ok((TTable(pairs), st2))
     end
   end
 
   -- ── Parse key ─────────────────────────────────────────────────────────────
 
-  pfn parse_bare_key(st, acc) do
-    match peek(st) do
-    Some(c) ->
-      if is_bare_key_char(c) do parse_bare_key(advance(st), acc ++ c)
-      else (acc, st)
-      end
-    _ -> (acc, st)
+  pfn bare_key_end(s, i) do
+    if is_bare_key_byte(string_byte_at(s, i)) do bare_key_end(s, i + 1) else i end
+  end
+
+  pfn parse_bare_key(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = bare_key_end(s, i)
+      (string_slice(s, i, j - i), reposition(st, j))
     end
   end
 
   pfn parse_key_segment(st) do
-    match peek(st) do
-    None -> err(st, "expected key")
-    Some("\"") ->
-      match parse_basic_string_chars(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
-      end
-    Some("'") ->
-      match parse_literal_chars(advance(st), "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
-      end
-    Some(c) ->
-      if is_bare_key_char(c) do
-        let p = parse_bare_key(st, "")
-        match p do
-        (k, st2) ->
-          if k == "" do err(st, "empty key")
-          else Ok((k, st2))
-          end
+    let b = cur_byte(st)
+    if b < 0 do err(st, "expected key")
+    else if b == 34 do scan_basic_body(advance(st))
+    else if b == 39 do scan_literal_body(advance(st))
+    else if is_bare_key_byte(b) do
+      match parse_bare_key(st) do
+      (k, st2) ->
+        if k == "" do err(st, "empty key")
+        else Ok((k, st2))
         end
-      else err(st, "expected key, got '" ++ c ++ "'")
       end
-    end
+    else err(st, "expected key, got '" ++ char1_at(st) ++ "'")
+    end end end end
   end
 
   pfn parse_key(st) do
     match parse_key_segment(st) do
     Err(e) -> Err(e)
-    Ok(p) ->
-      match p do
-      (first, st2) ->
-        let st3 = skip_ws(st2)
-        match peek(st3) do
-        Some(".") ->
-          let st4 = skip_ws(advance(st3))
-          match parse_key(st4) do
-          Err(e) -> Err(e)
-          Ok(p2) ->
-            match p2 do
-            (rest, st5) -> Ok((Cons(first, rest), st5))
-            end
-          end
-        _ -> Ok(([first], st3))
+    Ok((first, st2)) ->
+      let st3 = skip_ws(st2)
+      if cur_byte(st3) == 46 do
+        let st4 = skip_ws(advance(st3))
+        match parse_key(st4) do
+        Err(e) -> Err(e)
+        Ok((rest, st5)) -> Ok((Cons(first, rest), st5))
         end
+      else Ok(([first], st3))
       end
     end
   end
@@ -913,65 +867,51 @@ mod Toml do
     let st1 = skip_ws_comments(st)
     if at_end(st1) do Ok(root)
     else
-      match peek(st1) do
-      Some("[") ->
+      let b = cur_byte(st1)
+      if b == 91 do
         let st2 = advance(st1)
-        match peek(st2) do
-        Some("[") ->
+        if cur_byte(st2) == 91 do
           -- Array of tables [[...]]
           match parse_array_table_header(advance(st2)) do
           Err(e) -> Err(e)
-          Ok(p) ->
-            match p do
-            (path, st3) ->
-              let root2 = append_aot(root, path)
-              parse_document(st3, root2, path, path)
-            end
+          Ok((path, st3)) ->
+            let root2 = append_aot(root, path)
+            parse_document(st3, root2, path, path)
           end
-        _ ->
+        else
           -- Regular table [...]
           match parse_table_header(st2) do
           Err(e) -> Err(e)
-          Ok(p) ->
-            match p do
-            (path, st3) ->
-              let root2 = ensure_table_at_path(root, path)
-              if is_err_marker(root2) do
-                err(st3, "type conflict at table header: " ++ String.join(path, "."))
-              else parse_document(st3, root2, path, Nil)
-              end
+          Ok((path, st3)) ->
+            let root2 = ensure_table_at_path(root, path)
+            if is_err_marker(root2) do
+              err(st3, "type conflict at table header: " ++ String.join(path, "."))
+            else parse_document(st3, root2, path, Nil)
             end
           end
         end
-      _ ->
+      else
         -- key = value
         match parse_keyval(st1, root, current_path) do
         Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (new_root, st2) ->
-            let st3 = skip_ws_inline(st2)
-            -- Expect end of line (newline or end of input)
-            if at_end(st3) do Ok(new_root)
-            else
-              match peek(st3) do
-              Some("\n") -> parse_document(advance(st3), new_root, current_path, aot_path)
-              Some("\r") ->
-                let st4 = advance(st3)
-                match peek(st4) do
-                Some("\n") -> parse_document(advance(st4), new_root, current_path, aot_path)
-                _          -> parse_document(st4, new_root, current_path, aot_path)
-                end
-              Some("#") -> parse_document(skip_line(st3), new_root, current_path, aot_path)
-              Some(c)   -> err(st3, "unexpected '" ++ c ++ "' after value")
-              None      -> Ok(new_root)
-              end
-            end
+        Ok((new_root, st2)) ->
+          let st3 = skip_ws_inline(st2)
+          -- Expect end of line (newline or end of input)
+          if at_end(st3) do Ok(new_root)
+          else
+            let b3 = cur_byte(st3)
+            if b3 == 10 do parse_document(advance(st3), new_root, current_path, aot_path)
+            else if b3 == 13 do
+              let st4 = advance(st3)
+              if cur_byte(st4) == 10 do parse_document(advance(st4), new_root, current_path, aot_path)
+              else parse_document(st4, new_root, current_path, aot_path) end
+            else if b3 == 35 do parse_document(skip_line(st3), new_root, current_path, aot_path)
+            else err(st3, "unexpected '" ++ char1_at(st3) ++ "' after value")
+            end end end
           end
         end
-      end
+      end end
     end
-  end
 
   -- ── Public API ────────────────────────────────────────────────────────────
 
