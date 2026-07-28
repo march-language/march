@@ -402,7 +402,7 @@ This eliminates the need for a general function-pointer representation and makes
 
 ### 13. Static Capture-Free Closures  ✅
 
-**Location:** `lib/tir/llvm_ctx.ml` (`intern_static_closure` + `static_clos` memo), `lib/tir/llvm_emit.ml` (both closure-materialization sites)
+**Location:** `lib/tir/llvm_ctx.ml` (`intern_static_closure` + `static_clos` memo), `lib/tir/llvm_emit.ml` (both closure-materialization sites, plus the `EAlloc` arm covering capture-free lambdas)
 **Stage:** LLVM emission (codegen), after Defunctionalization
 
 When a top-level function is materialized as a first-class value (`let f = some_fn`, passed as a callback, stored in a data structure, etc.) and the closure it produces captures nothing, the previous codegen allocated a fresh 24-byte closure object on the heap (`march_alloc(i64 24)`) at *every* materialization site, every time it executed. Because the closure never escapes to anything that would free it via normal RC, and because each materialization allocates independently of any other, repeatedly materializing the same function value as a first-class value leaked one object per materialization — unbounded growth in a loop.
@@ -413,11 +413,17 @@ The fix replaces per-materialization heap allocation with a single immortal `int
 
 **`internal global` vs `constant`:** the global is declared mutable (`internal global`, not `internal constant`) because the refcount field is still touched by ordinary RC inc/dec code emitted at call sites that don't know the pointee is immortal — those operations must remain valid stores. They genuinely execute (they are never-freeing, not no-ops — see above); they simply never drive the refcount out of the immortal range. Marking it `constant` would make those routine RC stores undefined behavior under LLVM's constant-global rules.
 
-**Exclusions (gated off via a single shared `static_closure_ok` predicate):**
+**Extended to capture-free lambdas (2026-07-28):** the same mechanism now also covers anonymous lambda expressions that capture nothing (`fn x -> x * 2` passed directly as a value), not just top-level named functions. The discriminator is derived purely at emission — no `defun.ml` change was needed: any closure-struct allocation (`Tir_names.is_clo_struct`) whose `EAlloc` carries **exactly one** argument (the code pointer; no captured-environment fields) is by construction a capture-free closure and routes to `intern_static_closure` exactly like a top-level function value does. A capturing closure's `EAlloc` always carries at least one additional argument per captured variable, so it never matches this shape and keeps allocating fresh — see "Capturing closures still allocate" below. No `$clo_wrap` trampoline needs to be generated for the lambda case: the lifted apply function defunctionalization already produces has the `(clo_ptr, params…)` closure-call ABI, which is exactly what `intern_static_closure`'s global's code-pointer field expects, so the named-function and lambda cases share the same interning path with no extra indirection.
+
+**Capturing closures still allocate, deliberately:** a closure that captures a free variable has contents that differ per instance (the captured value), so unlike a capture-free closure it cannot be represented as a single module-lifetime static object — collapsing distinct captured environments into one shared global would be a correctness bug, not an optimization. Making capturing closures avoid the per-materialization allocation is a separate, still-open item (see `specs/todos.md`) that needs real ownership work in `lib/tir/perceus.ml`/`lib/tir/borrow.ml` (e.g. proving a closure never escapes its call site), not a codegen-only change like this one.
+
+**Exclusions (gated off via a single shared `static_closure_ok` predicate for the named-function case):**
 - **REPL / JIT** (`ctx.repl`): each REPL evaluation compiles and links a fresh module; a `static_closure_ok`-gated `internal global` baked into one JIT'd module cannot be safely reused or safely thrown away across the REPL's incremental-compilation lifecycle the way an AOT module's globals can.
 - **Hot-reload boundary functions** (`ctx.hr_config` + `Hot_reload.is_reloadable`): this exclusion is defensive, not a fix for a demonstrated staleness bug. The fresh-alloc fallback bakes in the identical `@<fn>$clo_wrap` pointer, and `clo_wrap_define` (`lib/tir/llvm_calls.ml:180-190`) already emits a hardcoded direct `call @<fn>` that bypasses the versioned HCR dispatch table regardless of which materialization path is used — a pre-existing, already-documented HCR gap this change does not touch. The exclusion keeps this change strictly non-regressive for HCR rather than claiming to fix that gap.
 
-**Measured impact** (4,000,000 materializations of a named function value, compiled `--opt 2`):
+The lambda arm (`lib/tir/llvm_emit.ml`'s `EAlloc (TCon (tcon_name, _), [fn_ptr_atom]) when Tir_names.is_clo_struct tcon_name` case) mirrors `static_closure_ok` for the REPL/JIT exclusion (`not ctx.repl`) but is **more conservative** for hot-reload: `static_closure_ok` resolves a March-level dotted name via `Hot_reload.module_of_name` to check whether that *specific* function is a reload boundary, but a defunctionalized lambda's synthetic type-constructor name (`"$Clo_" ^ fn_name ^ "$" ^ uid`) cannot always be unambiguously demangled back to the owning function name (it may itself embed `$`, e.g. inside an interface-impl mangled name). Rather than risk resolving the wrong module, static lambdas are disabled outright whenever `ctx.hr_config` is set at all (`Some _ -> false`, no `is_reloadable` lookup), not just for functions hot-reload actually tracks as boundaries.
+
+**Measured impact, named top-level function values** (4,000,000 materializations, compiled `--opt 2`):
 
 | | obj_allocs | peak RSS | wall |
 |---|---:|---:|---:|
@@ -425,11 +431,18 @@ The fix replaces per-materialization heap allocation with a single immortal `int
 | After | 0 | 2.9 MB | 0.01s |
 | Control (direct call, no fn value) | 0 | 2.9 MB | 0.01s |
 
-Materializing a function value is now as cheap as calling it directly, and the per-materialization leak is gone. This does **not** cover closures that capture a free variable — see `specs/todos.md` for that distinct, still-open leak.
+**Measured impact, capture-free lambda values** (4,000,000 iterations of `apply_it(fn x -> x * 2, i)`, compiled `--opt 2`):
 
-**Effort:** Medium (done) | **Impact:** Removes an unbounded-growth leak; makes capture-free function values free to materialize
+| | obj_allocs | peak RSS |
+|---|---:|---:|
+| Before | 4,000,000 | ~131.5 MB |
+| After | 0 | ~2.99 MB |
+
+Compiled and interpreted output are byte-identical before and after. Materializing a capture-free function value or lambda is now as cheap as calling it directly, and the per-materialization leak is gone in both cases. This does **not** cover closures that capture a free variable — see `specs/todos.md` for that distinct, still-open leak.
+
+**Effort:** Medium (done) | **Impact:** Removes an unbounded-growth leak; makes capture-free function and lambda values free to materialize
 **Dependencies:** After Defunctionalization (needs closure representation established); orthogonal to Perceus/borrow (no ownership-pass changes)
-**Tests:** `llvm_builtins_preamble_golden` ("static closure global replaces per-materialization march_alloc", "static closure global is not emitted in REPL mode"), `test/native/static_closure_no_leak.march` (growth-bounded regression), `test/native/static_closure_semantics.march` (compiled/interpreted parity, no cross-function collision)
+**Tests:** `llvm_builtins_preamble_golden` ("static closure global replaces per-materialization march_alloc", "static closure global is not emitted in REPL mode"), `test/native/static_closure_no_leak.march` (named-function growth-bounded regression), `test/native/static_closure_semantics.march` (compiled/interpreted parity, no cross-function collision). Lambda case: `test_lambda_static_closure_materialization_no_leak_compiled` (`test/test_codegen.ml`, "compiled capture-free lambda materialization does not leak per use"), `test/native/static_lambda_no_leak.march` (native golden: two distinct capture-free lambdas resolve to 4 distinct `$static_clo` globals with none shared, plus a capture-free lambda alongside a capturing one to confirm the discriminator separates them at runtime).
 **Status:** Done (2026-07-28)
 
 ---

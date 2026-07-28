@@ -1,5 +1,74 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, static capture-free lambdas)
+
+Extends the static-capture-free-closures fix immediately below (same day):
+that fix covered a top-level *named* function materialized as a first-class
+value; it did not cover an anonymous *lambda* expression that captures
+nothing, materialized as a value at its own creation site (e.g.
+`apply_it(fn x -> x * 2, i)`) — that case fell between the named-function
+fix and the still-open capturing-closure leak, and kept allocating a fresh
+closure object on every materialization, never freed.
+
+Fixed in the same codegen location (`lib/tir/llvm_emit.ml`'s `EAlloc` arm),
+with no `defun.ml` change needed — the discriminator is derivable purely at
+the LLVM-emission site. `defun.ml` already lifts every lambda to `EAlloc
+(TCon (clo_name, []), fn_ptr_atom :: fv_atoms)`; a lambda that captures
+nothing leaves `fv_atoms = []`, so the `EAlloc` carries **exactly one**
+argument (the lifted apply function's address). That single-argument
+closure-struct shape (`Tir_names.is_clo_struct tcon_name` plus one arg) is
+routed to the same `intern_static_closure` interning path the named-function
+case uses. A capturing lambda's `EAlloc` always carries at least one
+additional argument per captured variable, so it never matches this shape
+and correctly keeps allocating fresh — collapsing distinct captured
+environments into one shared global would be a correctness bug, not an
+optimization. No `$clo_wrap` trampoline is generated for the lambda case:
+the lifted apply function defunctionalization already produces has the
+`(clo_ptr, params…)` closure-call ABI, so the global's code-pointer field
+can point straight at it.
+
+**Gating** mirrors the named-function case for the REPL/JIT (`not
+ctx.repl`), but is *more conservative* for hot-reload: the named-function
+path resolves a March-level dotted name via `Hot_reload.module_of_name` to
+check whether that specific function is a reload boundary, but a
+defunctionalized lambda's synthetic type-constructor name
+(`"$Clo_" ^ fn_name ^ "$" ^ uid`) cannot always be unambiguously demangled
+back to an owning function (it may itself embed `$`, e.g. inside an
+interface-impl mangled name) — so static lambdas are disabled outright
+whenever `ctx.hr_config` is set at all, not just for functions hot-reload
+actually tracks as boundaries.
+
+**Measured** (`MARCH_STRING_STATS=1`, compiled `--opt 2`, 4,000,000
+iterations of `apply_it(fn x -> x * 2, i)`):
+
+| | obj_allocs | peak RSS |
+|---|---:|---:|
+| Before | 4,000,000 | ~131.5 MB |
+| After | 0 | ~2.99 MB |
+
+Compiled and interpreted output are byte-identical before and after — this
+is a pure allocation-strategy change with no observable behavior
+difference. **No wall-clock speedup is claimed** beyond the
+allocation/RSS elimination measured above; this pass was not benchmarked
+for wall-clock time. Proven non-vacuous: disabling the new arm reproduces
+unbounded growth (`LEAKED 20000`-shaped) on the regression test below;
+restoring it gives bounded growth.
+
+**Does not cover capturing closures** (unchanged, separate, still-open
+leak — see `specs/todos.md`) and does not attempt the compiled-only
+zero-arg function-value SIGSEGV filed during the named-function work (also
+still open, predates this branch, unrelated code path).
+
+**Tests:** `test_lambda_static_closure_materialization_no_leak_compiled`
+(`test/test_codegen.ml`, "compiled capture-free lambda materialization does
+not leak per use") plus a native golden `test/native/static_lambda_no_leak.march`
+covering two distinct capture-free lambdas (4 distinct `$static_clo`
+globals confirmed, none shared) and a capture-free lambda alongside a
+capturing one in the same function, confirming the discriminator separates
+the two cases correctly at runtime.
+
+---
+
 ## Current State (as of 2026-07-28, static capture-free closures)
 
 Materializing a top-level function as a first-class value — `let f = some_fn`,
