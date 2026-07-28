@@ -198,7 +198,7 @@ learns the condition; the else-branch learns its negation:
 ```march
 fn get(xs : List(Int), i : Int) : Int do
   if i >= 0 && i < List.length(xs) do
-    at(xs, i)          -- silent: see the caveat below
+    at(xs, i)          -- ok: the guard proves BOTH halves of the precondition
   else
     0
   end
@@ -209,20 +209,36 @@ end
 not a callable in ordinary code — verified live, 2026-07-22; use
 `List.length` in a plain guard expression like the one above.)
 
-> **The `List.length` half of that guard does not actually discharge anything.**
-> The runtime function `List.length` and the `len` measure are unconnected
-> symbols, so `i < List.length(xs)` contributes no fact about `len(xs)`. In the
-> example above the `i >= 0` conjunct genuinely discharges the `_ >= 0` half of
-> `at`'s precondition; the `_ < len(xs)` half is *skipped*, not proved, and the
-> call is silent for that reason rather than because it was verified.
->
-> Verified 2026-07-27 with a control pair: writing the contradictory guard
-> `if i >= List.length(xs) do at(xs, i)` against a precondition of only
-> `{Int | _ < len(xs)}` stays **silent**, while the same precondition with a
-> concrete list (`at([1, 2], 7)`) is reported — so the machinery works and it is
-> specifically the `List.length`→`len` link that is missing. The same gap is why
-> a `List.length(xs) > 0` guard does not discharge a `{List(a) | len(_) > 0}`
-> precondition. This is a missed proof, never a false report.
+### `List.length` is an alias of the `len` measure
+
+The guard above is a genuine proof, not a skip. The checker treats the
+**qualified** `List.length` as an alias of the `len` measure, so
+`i < List.length(xs)` establishes exactly the fact `i < len(xs)` that `at`'s
+precondition asks for. Verified 2026-07-28: `--refine-report` on that program
+reports `1 proved, 0 violated, 0 skipped` for user code.
+
+Until 2026-07-28 the two were unconnected symbols and the guarded call was
+silent because it was *skipped*, not because it was verified. That is fixed; the
+corpus brackets it from both sides (`accept/t118`, `reject/t117`), because an
+accept-only witness exits 0 either way and so cannot tell a working guard from a
+contract that checks nothing.
+
+The alias is deliberately narrow, because attaching `len`'s meaning to the wrong
+function would manufacture false positives:
+
+- **Only the qualified `List.length`.** A bare `length` is left alone.
+- **Only while it is the standard library's own.** The stdlib is identified by
+  the source files the compiler actually loaded, so it works the same from a
+  repo checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing
+  anywhere.
+- **Withdrawn for the whole module** if anything could make that spelling denote
+  a different function — a program defining its own `List.length`, a vendored or
+  forked `List` arriving through `MARCH_LIB_PATH`, or rebinding `List` via
+  `alias`/`use`. In those cases the obligation goes back to unprovable-and-
+  skipped, which is the pre-alias behaviour.
+
+The same treatment applies to strings — see
+[String Refinements](#string-refinements).
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -328,10 +344,23 @@ is derived from that function's own panic message, so the contract is never
 stronger than the check the code already performs, and the `panic` remains as the
 runtime backstop for the arguments the checker skips.
 
-> An ordinary `List.length(ys) > 0` guard does **not** currently discharge this
-> obligation: the runtime `List.length` function and the `len` measure are not
-> connected, so a guarded call is skipped rather than proved. That is a missed
-> proof, not a false report.
+An ordinary `List.length(ys) > 0` guard **does** discharge this obligation, so
+the contract bites on a list you validated at runtime and not only on literals:
+
+```march
+fn first_or(ys : List(Int), d : Int) : Int do
+  if List.length(ys) > 0 do head(ys) else d end   -- proved
+end
+
+fn broken(ys : List(Int)) : Int do
+  if List.length(ys) == 0 do head(ys) else 0 end  -- reported: len(_) > 0 cannot hold
+end
+```
+
+Verified 2026-07-28 (`accept/t118`, `reject/t117`). See
+[`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure)
+for the exact conditions under which the alias applies — and for when it is
+withdrawn, in which case the obligation returns to being skipped.
 
 ### Refining a record over its fields
 
@@ -470,9 +499,46 @@ guessed from context, so `{Int | _ < len(xs)}` over a `List` and
 `{String | len(_) > 0}` over a `String` coexist without ambiguity. If the checker
 cannot tell, it skips the obligation rather than assume.
 
-`len` counts **bytes**, matching the `string_length` builtin exactly (March has no
-codepoint-length primitive). For non-ASCII text a character is several bytes:
-`len("é")` is 2, not 1.
+`len` counts **bytes**. For non-ASCII text a character is several bytes:
+`len("é")` is 2, not 1. March *does* have a codepoint-length primitive —
+`String.codepoint_count`, which returns 1 for `"é"` — and it is deliberately not
+what `len` denotes. (An earlier revision of this page claimed no such primitive
+existed. It does; reasoning from that claim is how a codepoint count nearly got
+equated with a byte count.)
+
+### A byte-length guard discharges a String `len` obligation
+
+Just as `List.length` aliases `len` for lists, the **byte-valued** string-length
+spellings alias `len` for strings — `String.byte_size` and the
+`string_byte_length` builtin:
+
+```march
+fn label(t : String) : String do
+  if String.byte_size(t) > 0 do slug(t) else "?" end   -- proved
+end
+```
+
+Verified 2026-07-28: `--refine-report` on that program reports `1 proved,
+0 violated, 0 skipped` for user code. The contradictory `String.byte_size(t) == 0`
+form is reported as a violation.
+
+Only byte-valued spellings are aliased, because `len` is a byte count:
+
+- `String.codepoint_count` and its legacy alias `grapheme_count` count
+  codepoints, not bytes, and are left alone.
+- `string_length` is **also** a byte length — it lowers to
+  `march_string_byte_length`, and `string_length("é")` is 2 — but it is
+  deliberately *not* aliased. The abstention is about the NAME, not the current
+  semantics: `string_length` reads like a character count, and if it were ever
+  corrected to one, an alias written today would silently become unsound. The
+  unambiguous `String.byte_size` says what it means and is the spelling to use
+  in a guard.
+
+The same withdrawal rules as the list alias apply: a program that defines its own
+`String.byte_size` (unless it *is* the standard library's), rebinds `String` via
+`alias`/`use`, or binds the name `string_byte_length` itself — as a declaration,
+an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
+alias for the whole module, and the obligation returns to being skipped.
 
 ### What String refinements do *not* do
 
@@ -708,6 +774,111 @@ end
 A bare call binds to the nearest enclosing module that defines it (with
 shadowing), so a local helper is never confused with a same-named function
 elsewhere.
+
+---
+
+## Counting the obligations — `--refine-report`
+
+Silence is the default outcome for everything that is not a definite failure, so
+silence alone cannot tell **proved** from **skipped**. That ambiguity is not
+cosmetic: `{List(a) | len(_) > 0}` once shipped enforcing nothing while the test
+suite stayed green, because a contract that checks nothing and a contract that
+passes look identical from outside.
+
+`--refine-report` makes the checked fraction a number:
+
+```
+$ march --check --refine-report stdlib/list.march
+refinement obligations (user code): 0 proved, 0 violated, 5 skipped
+  skipped (solver-undecided): 5
+refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
+  skipped (unreflectable-predicate): 1
+  skipped (solver-undecided): 27
+```
+
+Two slices are printed because the compiler prepends the whole standard library
+to every compilation: **user code** counts only obligations raised at call sites
+in the file you named, **user + stdlib** counts every obligation raised in the
+run. Use the first to judge your own module; use the second as a whole-program
+coverage number (March's CI ratchets on it, so a change that quietly stops
+checking things fails the build).
+
+Each skip is attributed to one of five reasons:
+
+| Reason | What happened |
+|---|---|
+| `unreflectable-predicate` | the predicate uses vocabulary the checker cannot translate to SMT |
+| `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
+| `sort-conflict` | reflecting it would declare one symbol at two different sorts |
+| `float-sort-gate` | the float wellsortedness gate rejected the formula |
+| `solver-undecided` | the solver proved neither the predicate nor its negation |
+
+The ledger records **precondition obligations raised at call sites**. Return
+refinements go through a separate path that does not file a record, so a
+postcondition the checker could not discharge does not appear in these counts.
+
+---
+
+## `cap verified` — turning silence into an error
+
+March's default stance is **definite failure only**: a false positive on correct
+code is the cardinal sin, so anything the checker cannot decide stays silent. A
+module that wants the opposite bargain — "these contracts are a guarantee, not a
+best effort" — declares `cap verified`, and every **precondition obligation at a
+call site** the checker cannot discharge inside it becomes a compile error:
+
+```march
+mod Checked do
+  cap verified
+
+  fn head_of(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+    Cons(h, _) -> h
+    Nil        -> panic("empty")
+    end
+  end
+
+  fn ok(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head_of(ys) else 0 end   -- proved; no error
+  end
+end
+```
+
+Dropping the guard turns the same call into an error naming the precondition,
+the callee, and why it could not be discharged:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head_of`
+(solver-undecided: the solver proved neither the predicate nor its negation)
+note: guard the call or strengthen what is known here, rewrite the predicate
+into the fragment the checker supports, or remove `cap verified` from this
+module — it asks for every obligation to be discharged
+```
+
+Both forms verified 2026-07-28 (guarded: exit 0; unguarded: exit 1 with the
+message above).
+
+**Scope and limits.** State these plainly before relying on it:
+
+- **Strictly opt-in, and scoped to the decl list that declares it.** A
+  `cap verified` module calling into an ordinary one does not make the callee's
+  module strict — only obligations *raised* at call sites lexically inside the
+  strict decl list escalate.
+- **Not inherited by nested modules.** Deliberately: the compiler prepends the
+  entire standard library as sibling module declarations, so an inherited flag
+  would turn every stdlib module strict the moment one user module asked for
+  verification.
+- **Precondition obligations at call sites only.** Same ledger as
+  `--refine-report`: a postcondition the checker cannot discharge is neither
+  recorded nor escalated.
+- **`DImpl` / `DInterface` method bodies are not covered.** The pass walks `DFn`
+  and nested `DMod` declarations; calls made inside an interface implementation
+  raise no obligation and so cannot escalate.
+- **There is no `@[trusted]` escape hatch yet.** The only way to accept an
+  obligation the checker cannot discharge is `assert`, or removing
+  `cap verified` from the module. Until an escape hatch exists, `cap verified`
+  is a tool for small, deliberately-verified modules rather than a whole-codebase
+  setting.
 
 ---
 
@@ -962,14 +1133,18 @@ fact of the corpus: its `apply`'s callback parameter is declared `Int -> Int`
 reach — a caller's own contract is only enforced when it is actually
 declared refined, never inferred from what the callback happens to point to.
 
-The typing corpus now stands at **216 programs (107 accept, 109 reject)**, with
+The typing corpus now stands at **218 programs (108 accept, 110 reject)**, with
 each refinement feature bracketed from BOTH sides. That pairing is deliberate
 and load-bearing: an accept-only witness cannot distinguish a working contract
 from one that silently checks nothing, which is exactly how the `_` and
 named-binder spellings of a measure over the refined value shipped unenforced
 until 2026-07-27 (`accept/t115`–`t117`, `reject/t114`–`t116`; `reject/t116`
 additionally pins that a contract declared in a *stdlib* signature reaches a
-user call site at all). Two witnesses pin soundness rather than a feature:
+user call site at all). The `List.length` → `len` alias added 2026-07-28 is
+bracketed the same way (`accept/t118`, `reject/t117`): the accept file exits 0
+whether the guard is read or the obligation is merely skipped, so only the
+reject file shows the alias is load-bearing. Two witnesses pin soundness rather
+than a feature:
 `accept/t110` (an unproven postcondition must not propagate) and `accept/t113`
 (a NaN-only `Float` predicate must stay satisfiable — it fails the moment
 anyone re-encodes floats as reals).

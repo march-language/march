@@ -124,6 +124,68 @@ jobs:
           dune shutdown 2>/dev/null || true
           dune build @types-check
 
+      # Refinement checking reports a violation only when a predicate can NEVER
+      # hold; every other outcome is silence. Silence therefore does not
+      # distinguish "proved" from "the checker could not decide it" — an
+      # ambiguity that let `{List(a) | len(_) > 0}` ship enforcing nothing while
+      # the whole suite stayed green. `--refine-report` counts the obligations,
+      # and this step ratchets the count so coverage cannot quietly regress.
+      #
+      # Lives in `conformance`, not beside `scripts/check-docs.sh` in `doc-lint`:
+      # that job is a bare checkout with neither a built compiler nor z3 on PATH,
+      # and this step needs both.
+      - name: Refinement obligation coverage ratchet
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          eval $(opam env)
+          # Measured 2026-07-28 on this file: 8 proved, 0 violated, 28 skipped
+          # (unreflectable-predicate 1, solver-undecided 27). Lower is better —
+          # this is a CEILING on skips, so it may only ever be revised DOWN.
+          baseline=28
+          dune build bin/main.exe
+          ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
+            > /tmp/refine.txt 2>&1 || true
+          cat /tmp/refine.txt
+          # Read the whole-program slice specifically. `--refine-report` prints
+          # two labelled lines (user code, and user + stdlib, because the driver
+          # prepends the entire standard library); a bare `grep -o '[0-9]* skipped'`
+          # would match both and silently compare the wrong one.
+          skipped=$(sed -n \
+            's/^refinement obligations (user + stdlib):.*, \([0-9][0-9]*\) skipped$/\1/p' \
+            /tmp/refine.txt)
+          if [ -z "$skipped" ]; then
+            echo "FAIL: could not find the 'user + stdlib' line in --refine-report output."
+            echo "Either the report's format changed (update the sed above) or the"
+            echo "compiler errored before printing it. This step must never pass vacuously."
+            exit 1
+          fi
+          echo "skipped=$skipped (ceiling: $baseline)"
+          if [ "$skipped" -gt "$baseline" ]; then
+            echo ""
+            echo "FAIL: refinement obligation skips rose from $baseline to $skipped."
+            echo "A RISE IN SKIPS MEANS FEWER OBLIGATIONS ARE BEING CHECKED — contracts"
+            echo "that used to be proved are now silently unenforced. This is a"
+            echo "regression even though nothing errored, because March's default"
+            echo "stance turns an undischarged obligation into silence."
+            echo ""
+            echo "What to do:"
+            echo "  1. Run it locally:  ./_build/default/bin/main.exe --check \\"
+            echo "                        --refine-report stdlib/list.march"
+            echo "     (clear .march/cas/vc first if you want a cold, uncached verdict)"
+            echo "  2. Diff the per-reason breakdown against the baseline above. A jump"
+            echo "     in 'solver-undecided' usually means a measure alias was withdrawn"
+            echo "     or a guard stopped reflecting; 'unreflectable-predicate' means a"
+            echo "     contract was rewritten outside the supported fragment."
+            echo "  3. A skips-to-ZERO result (or 'proved' dropping to 0) usually means"
+            echo "     z3 is missing from PATH and refinement checking is disabled"
+            echo "     entirely — check the toolchain step before blaming the code."
+            echo "  4. Fix the regression. Only raise the ceiling if the rise is"
+            echo "     intentional and explained in the commit message; this number is"
+            echo "     meant to travel downward."
+            exit 1
+          fi
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |

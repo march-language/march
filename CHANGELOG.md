@@ -17,14 +17,37 @@ git log is authoritative for exact commits.
   error.** March's default stance is to report a refinement violation only when
   a precondition can *never* hold; anything the checker cannot decide is
   silence, so correct code is never rejected. A module that declares
-  `cap verified` opts into the inverse: inside it, every skipped obligation is
-  reported, naming the precondition, the callee and the reason it could not be
-  discharged (the predicate is outside the supported fragment, the argument did
-  not reflect, a sort conflict, the float gate, or the solver not deciding).
-  Strictly opt-in and scoped to the module that declares it — a `cap verified`
-  module calling into an ordinary one does not make the callee's module strict,
-  and nested modules do not inherit the capability. Modules that do not declare
-  it behave exactly as before.
+  `cap verified` opts into the inverse: inside it, every skipped **precondition
+  obligation at a call site** is reported, naming the precondition, the callee
+  and the reason it could not be discharged (the predicate is outside the
+  supported fragment, the argument did not reflect, a sort conflict, the float
+  gate, or the solver not deciding). Strictly opt-in and scoped to the module
+  that declares it — a `cap verified` module calling into an ordinary one does
+  not make the callee's module strict, and nested modules do not inherit the
+  capability. Modules that do not declare it behave exactly as before.
+
+  Three limits worth knowing before relying on it: return refinements go through
+  a separate path that files no record, so an undischarged **postcondition** is
+  neither reported nor escalated; `impl`/`interface` method bodies are not
+  walked by this pass and so raise no obligation at all; and there is **no
+  `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
+  checker cannot discharge are an `assert` or removing `cap verified` from the
+  module. It is therefore a tool for small, deliberately-verified modules rather
+  than a whole-codebase setting.
+
+- **`--refine-report`: the checked fraction of your refinements is now a
+  number.** `march --check --refine-report file.march` prints how many
+  refinement obligations were proved, violated, and skipped — with each skip
+  attributed to one of five reasons (unreflectable predicate, unreflectable
+  subject, sort conflict, float-sort gate, solver undecided). Two slices are
+  printed, "user code" and "user + stdlib", because the compiler prepends the
+  whole standard library to every compilation. This exists because March reports
+  a violation only when a predicate can *never* hold, which makes silence
+  ambiguous between "proved" and "not checkable" — an ambiguity that let
+  `{List(a) | len(_) > 0}` ship enforcing nothing while the suite stayed green.
+  CI now ratchets on the whole-program skip count, so a change that quietly
+  stops checking things fails the build. Counts cover precondition obligations
+  raised at call sites; postconditions are not in the ledger.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -51,8 +74,12 @@ git log is authoritative for exact commits.
   `fn slug(s : {String | len(_) > 0})`, and the contradictory `== 0` form is
   reported as a violation. `len` over a `String` is a **byte** count — `len("é")`
   is 2, not 1 — so only byte-valued spellings are aliased: `String.codepoint_count`
-  and `grapheme_count` count codepoints and are deliberately left alone, as is the
-  ambiguously-named `string_length`. The same shadowing rules apply: the alias is
+  and its legacy alias `grapheme_count` count codepoints and are deliberately left
+  alone. `string_length` is left alone too, for a different reason: it is a byte
+  length today (it lowers to `march_string_byte_length`, and `string_length("é")`
+  is 2), but its *name* reads like a character count, so an alias written now
+  would silently become unsound if the name were ever corrected to match. Use the
+  unambiguous `String.byte_size` in a guard. The same shadowing rules apply: the alias is
   withdrawn for the whole module if a program defines its own `String.byte_size`
   (unless it is the standard library's own, by the identity above), rebinds
   `String` via `alias`/`use`, or binds the name `string_byte_length` itself —
