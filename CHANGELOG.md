@@ -21,6 +21,25 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **String interpolation of a String is faster.** Interpolating a String-typed
+  operand (`"a${s}b"`) emitted an atomic refcount increment/decrement pair per
+  operand that bought nothing — the `Show$String.show` identity call it goes
+  through was removed only *after* reference counting had already bracketed it.
+  The call is now elided during lowering, so no pair is ever created. Measured
+  ~25% faster on an interpolation-heavy loop, with interpolation now compiling
+  to exactly the same code as the equivalent hand-written `++` chain.
+  Allocation counts are unchanged.
+
+### Fixed
+
+- **`--dump-phases` stages are now readable as text.** `MARCH_DUMP_TXT=<stage>`
+  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
+  the given substring (`all` for every stage). Previously only the very end of
+  the pipeline was inspectable via `--dump-tir`, which is too late to tell
+  whether a pass created a construct or merely preserved one.
+
+### Changed
+
 - **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
   `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
   scan instead of testing every byte offset. Scanning a 1MB buffer for an absent

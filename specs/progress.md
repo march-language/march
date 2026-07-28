@@ -1,5 +1,58 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
+
+Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per
+operand that bought nothing. `"a${s}b"` desugars to `to_string(s)`, which
+Show-dispatches to `Show$String.show` — a synthesized IDENTITY (`fn x -> x`,
+emitted by `emit_builtin_impls` in `lib/tir/lower.ml`, because a string already
+is its own representation). That call was emitted and only inlined away later,
+in the post-Perceus opt loop. Perceus runs FIRST, so it saw a live
+owned-argument call and bracketed it with inc_rc/dec_rc; the inlining that
+followed removed the call and left the pair stranded around a bare alias.
+`string_concat3` borrows all three arguments, so the extra reference was pure
+overhead on every interpolated String operand in every March program.
+
+Two changes in `lib/tir/lower.ml`, both at the source rather than downstream:
+the `Show$String.show` call is elided during lowering (so Perceus never sees a
+call to bracket), and `lower_to_atom_k` no longer binds a fresh temp when the
+lowered RHS is already a *variable* atom (`let v = EAtom (AVar x) in k (AVar v)`
+≡ `k (AVar x)` in ANF, but the alias reads to Perceus as a second owned
+reference). The passthrough is deliberately restricted to `AVar`: a literal
+atom carries no type of its own, so for `ALit (LitAtom …)` the binder's
+`ty_of_expr` ascription is load-bearing — passing it through unbound made
+`println(:x)` print `()`.
+
+Measured on arm64, `"w${a}x"` vs the hand-written `"w" ++ a ++ "x"`, 3M
+iterations, with the interpolating call in the SECOND (warm) benchmark slot:
+181/173ms → 137/133ms, i.e. interpolation now matches the hand-written chain
+exactly, and the two lower to byte-identical TIR. `MARCH_STRING_STATS=1`
+allocation histograms are unchanged, confirming this was refcount traffic and
+not allocation. Pinned by the `interp_string_operand_rc` TIR golden snapshot
+(verified to FAIL on the unfixed compiler at both the lower and perceus
+stages).
+
+**Measurement note.** Benchmarks of this shape carry a large first-position
+warmup penalty: in an A/B where both halves compile to *identical* IR, the
+half that runs first measured ~25% slower (173ms vs 137ms). Any before/after
+claim about interpolation must hold the benchmark slot fixed, or it will
+attribute warmup to the change.
+
+**Still open — the `interp_join_threshold` tradeoff.** The threshold of 3
+segments (`desugar_interp`, `lib/parser/parser.mly`) is unrelated to the above
+but dominates any interpolation with more than one operand, which is why the
+original report's repro (`"w${a}x${b}y${a}z"`, 7 segments) showed no
+improvement: it takes the `string_join` path, not `string_concat3`. Measured
+crossover, arm64, 300k iterations: with SHORT (8-byte) operands the `++`/
+concat3 chain beats `string_join` at every size tested — 2 operands 30ms vs
+59ms, 8 operands 121ms vs 157ms, 20 operands 302ms vs 350ms — so no crossover
+exists in that regime. With LARGE (4KB) operands the chain is genuinely
+quadratic and join is essential: 4 operands 16ms vs 13ms, 8 operands 87ms vs
+23ms, 16 operands 356ms vs 49ms, 32 operands 1236ms vs 97ms. The parser cannot
+know operand SIZE, only count, so raising the threshold trades a ~2x win on
+short interpolations against exposing large-string interpolations to
+quadratic copying. Left at 3 deliberately pending a decision.
+
 ## Current State (as of 2026-07-26, many-part string interpolation desugars to one string_join call)
 
 String interpolation (`"${a}${b}"`) previously desugared to a left-deep chain
