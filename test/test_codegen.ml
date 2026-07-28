@@ -9197,6 +9197,66 @@ let test_string_literal_operand_no_leak_compiled () =
        grow with the iteration count)"
       "BOUNDED" run_out
 
+(* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
+   named fn used as a first-class value now references ONE immortal
+   `internal global` closure object per fn (@<fn>$static_clo, refcount
+   MARCH_RC_IMMORTAL) instead of calling march_alloc(24) at every
+   materialization site evaluation. The old per-materialization allocation
+   was never freed — a genuine leak.
+
+   Same shape as test_string_literal_operand_no_leak_compiled immediately
+   above: read the runtime's own live-object gauge (march_live_allocs)
+   through an extern, warm the materialization site once so its one
+   permanent cell is already live when the baseline is sampled, then re-run
+   the same site at a much larger loop count and assert the growth stays
+   bounded rather than scaling with the iteration count. One static closure
+   per function is the intended permanent cost — the assertion is on
+   GROWTH, not an absolute count. *)
+let test_static_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_staticcloleak"
+    "mod StaticCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  fn double(x : Int) : Int do x * 2 end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      materialize_loop(i + 1, n, acc + apply_it(double, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the materialization site first, so its one permanent static\n\
+     -- closure is already allocated when the baseline is sampled and only\n\
+     -- per-iteration growth can move the gauge.\n\
+    \    let warm = materialize_loop(0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "staticcloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a top-level named fn materialized as a first-class value in a loop \
+       references one immortal static closure per site, not one fresh \
+       allocation per materialization (live-object count must not grow \
+       with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12047,6 +12107,8 @@ let codegen_suites =
       ( "string_literal_codegen", [
           Alcotest.test_case "compiled string literal as `++` operand does not leak per evaluation" `Quick
             test_string_literal_operand_no_leak_compiled;
+          Alcotest.test_case "compiled static closure materialization does not leak per use" `Quick
+            test_static_closure_materialization_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
