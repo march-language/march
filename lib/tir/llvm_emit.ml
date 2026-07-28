@@ -2900,6 +2900,59 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       (ret_ty, r)
     end
 
+  (* ── Capture-free lambda closure: static immortal global ────────────
+     defun.ml:441 lifts EVERY lambda to
+       EAlloc (TCon (clo_name, []), fn_ptr_atom :: fv_atoms)
+     so a lambda that captures nothing leaves fv_atoms = [] — EXACTLY ONE
+     argument, the lifted apply function's address.  Everything the object
+     would hold is then a compile-time constant, so — exactly like a
+     top-level fn used as a first-class value (the [AVar v when ...] arm
+     in [emit_atom] above) — it can be one immortal global instead of a
+     fresh march_alloc at every materialization (which additionally
+     leaked: nothing ever dropped it).
+
+     A closure struct with two or more arguments captures at least one
+     free variable, and its contents differ per instance — it MUST keep
+     allocating.  Sharing one global there would silently share one
+     captured environment across every instance: a correctness bug, not a
+     missed optimization.  Hence the exact single-argument match below,
+     tried before the generic boxed-allocation arm so it takes priority.
+
+     Unlike the top-level-function case, no $clo_wrap trampoline is
+     generated: the lifted apply function already takes
+     (clo_ptr, params...), which IS the closure-dispatch ABI, so field 0
+     can point straight at it.
+
+     Eligibility mirrors [static_closure_ok] (REPL/JIT fragments and hot-
+     reload boundaries both need per-materialization objects) EXCEPT for
+     hot-reload: [static_closure_ok] expects a March-level dotted name to
+     resolve the owning module, but [tcon_name] here is
+     "$Clo_" ^ fn_name ^ "$" ^ uid, and fn_name cannot always be recovered
+     unambiguously (it may itself contain "$", e.g. an interface-impl
+     mangled name).  Conservatively: static lambdas are disabled outright
+     whenever hot-reload is configured at all, rather than risk resolving
+     the wrong module. *)
+  | Tir.EAlloc (Tir.TCon (tcon_name, _), [fn_ptr_atom])
+    when Tir_names.is_clo_struct tcon_name
+         && (not ctx.repl)
+         && (match ctx.hr_config with None -> true | Some _ -> false)
+         && (match fn_ptr_atom with
+             | Tir.AVar _ | Tir.ADefRef _ -> true
+             | Tir.ALit _ -> false) ->
+    let apply_sym =
+      match fn_ptr_atom with
+      | Tir.AVar v    -> llvm_name v.Tir.v_name
+      | Tir.ADefRef d -> llvm_name d.Tir.did_name
+      | Tir.ALit _    ->
+        (* Excluded by the match guard above — defun.ml always builds
+           fn_ptr_atom as an AVar naming the lifted apply function, never a
+           literal. Kept as a hard failure (not a silent fallback) so a
+           future defun.ml change that violates the invariant is caught
+           here rather than miscompiling silently. *)
+        assert false
+    in
+    ("ptr", Llvm_ctx.intern_static_closure ctx tcon_name apply_sym)
+
   (* ── Heap allocation ───────────────────────────────────────────────── *)
   | Tir.EAlloc (Tir.TCon (ctor, alloc_params), args) ->
     (* EAlloc ctor key is "TypeName.CtorName"; repr_of_ty needs the TypeName. *)

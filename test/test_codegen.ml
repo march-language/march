@@ -11252,6 +11252,52 @@ let test_static_closure_global_replaces_alloc () =
   Alcotest.(check bool) "no per-materialization march_alloc(i64 24) remains"
     false (Test_helpers.contains "march_alloc(i64 24)" ir)
 
+(** A capture-free lambda's closure struct is EAlloc(TCon("$Clo_..", []),
+    [fn_ptr]) — defun.ml lifts every lambda this way, and an empty capture
+    list leaves exactly one arg. Its contents are then entirely compile-time
+    constant, so — like a top-level fn used as a value — it must reference
+    one immortal static global rather than allocate per materialization. *)
+let test_capture_free_lambda_uses_static_global () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let alloc = mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [main]) in
+  Alcotest.(check bool) "capture-free lambda gets a static closure global"
+    true (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "no per-materialization closure alloc remains"
+    false (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** A capturing lambda's closure struct carries 2+ args (fn_ptr plus one
+    entry per free variable) — its contents differ per instance, so it MUST
+    keep allocating.  Sharing one global here would silently share one
+    captured environment across every instance: a correctness bug, not a
+    missed optimization.  This is the guard on the discriminator: it must
+    admit ONLY the exact single-argument shape. *)
+let test_capturing_lambda_still_allocates () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$2", []) in
+  let captured = mk_var "k" March_tir.Tir.TInt in
+  let fn_ptr_atom =
+    March_tir.Tir.AVar (mk_var "lam$apply$2" (March_tir.Tir.TPtr March_tir.Tir.TUnit)) in
+  let alloc =
+    March_tir.Tir.EAlloc (clo_ty, [fn_ptr_atom; March_tir.Tir.AVar captured]) in
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [captured];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [main]) in
+  (* header(16) + fn_ptr(8) + one capture(8) = 32 bytes, not the 24-byte
+     size of a capture-free closure (header + fn_ptr only) — confirmed
+     against real compiled output for `fn x -> x * k` (one capture). *)
+  Alcotest.(check bool) "capturing lambda still allocates per materialization"
+    true (Test_helpers.contains "march_alloc(i64 32)" ir)
+
 (** REPL fragments are separate modules; a per-fragment static global would
     hand out different pointers for the same fn across fragments, and can
     collide under the ORC backend's shared JITDylib. The REPL must keep the
@@ -12280,6 +12326,10 @@ let codegen_suites =
             test_preamble_wrapper_delegates;
           Alcotest.test_case "static closure global replaces per-materialization march_alloc" `Quick
             test_static_closure_global_replaces_alloc;
+          Alcotest.test_case "capture-free lambda uses static closure global" `Quick
+            test_capture_free_lambda_uses_static_global;
+          Alcotest.test_case "capturing lambda still allocates per materialization" `Quick
+            test_capturing_lambda_still_allocates;
           Alcotest.test_case "static closure global is not emitted in REPL mode" `Quick
             test_static_closure_not_emitted_in_repl_mode;
           Alcotest.test_case "static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
