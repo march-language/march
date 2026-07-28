@@ -16,10 +16,12 @@ Fixed in codegen (`lib/tir/llvm_ctx.ml`'s new `intern_static_closure` +
 compile-time constants (fixed code pointer, no per-instance captured
 environment), so it can be emitted once as an immortal `internal global`
 (`@<fn>$static_clo`, LLVM type `{i64,i32,i32,ptr}`, refcount pre-set to
-`MARCH_RC_IMMORTAL` = 1099511627776 so ordinary RC inc/dec on it are
-no-ops) instead of allocated per materialization. Memoized by function name,
-so repeated materializations of the same function share one global and
-distinct functions get distinct globals (no collision).
+`MARCH_RC_IMMORTAL` = 1099511627776) instead of allocated per materialization.
+Ordinary RC inc/dec still execute against the global at call sites (e.g.
+`march_incrc_local` against `@<fn>$static_clo`) — they are *never-freeing*,
+not no-ops, since the refcount starts and stays at the immortal sentinel.
+Memoized by function name, so repeated materializations of the same function
+share one global and distinct functions get distinct globals (no collision).
 
 **Measured** (4,000,000 materializations of a named function value, compiled
 `--opt 2`):
@@ -35,9 +37,15 @@ the leak is gone. **Gated off** for the REPL/JIT (`ctx.repl` — each REPL
 evaluation compiles and links a fresh module, so a global baked into one
 JIT'd module can't be safely shared or safely discarded across the REPL's
 incremental-compilation lifecycle) and hot-reload boundary functions
-(`ctx.hr_config` + `Hot_reload.is_reloadable` — a hot-reloadable function's
-code pointer is expected to change at runtime when swapped, which would
-leave a static global's baked-in pointer stale).
+(`ctx.hr_config` + `Hot_reload.is_reloadable`). This exclusion is defensive
+rather than a fix for a demonstrated staleness bug: the fresh-alloc fallback
+bakes the identical `@<fn>$clo_wrap` pointer into the closure it allocates,
+and `clo_wrap_define` (`lib/tir/llvm_calls.ml:180-190`) already emits a
+hardcoded direct `call @<fn>` that bypasses the versioned HCR dispatch table
+regardless of which path materializes the value — a pre-existing,
+already-documented HCR gap this change does not touch. The exclusion exists
+to keep this change strictly non-regressive for HCR, not to claim it fixes
+that gap.
 
 **Does not cover capturing closures** — a closure that captures a free
 variable differs per instance and cannot be a module-lifetime static

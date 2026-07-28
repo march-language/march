@@ -27,6 +27,15 @@ git log is authoritative for exact commits.
   the enclosing scope) are unaffected by this fix and still leak — tracked
   as a separate, open issue in `specs/todos.md`.
 
+- **The REPL/JIT's precompiled stdlib prelude no longer emits the static
+  closure globals above.** That optimization is intentionally gated off in
+  REPL/JIT sessions (a REPL evaluation compiles and links a fresh module
+  each time, so a global baked into one JIT'd fragment can't be safely
+  shared or discarded across the session), but the JIT's stdlib-prelude
+  precompilation path was missing the flag that opts a compiled fragment
+  into that exclusion, so a handful of stdlib functions used as values
+  (e.g. `Cluster.parse_addr`) picked up a static closure global anyway.
+
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process
   locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
   a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites

@@ -3860,7 +3860,7 @@ let emit_repl_fn_with_closure_slot ?fast_math ~n ~bind_name ~dest_slot
   Llvm_repl.emit_repl_fn_with_closure_slot ~emit_expr
     ?fast_math ~n ~bind_name ~dest_slot ~prev_slots ?extern_fns ~types fn
 
-let emit_fns_fragment ~types ~fns ?extern_fns ?repl () : string =
-  Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ?repl ()
+let emit_fns_fragment ~types ~fns ?extern_fns ~repl () : string =
+  Llvm_repl.emit_fns_fragment ~emit_expr ~types ~fns ?extern_fns ~repl ()
 
 let llvm_ty_of_tir = Llvm_repl.llvm_ty_of_tir

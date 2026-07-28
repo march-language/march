@@ -11287,6 +11287,49 @@ let test_static_closure_not_emitted_in_repl_mode () =
   Alcotest.(check bool) "REPL mode emits no static closure global"
     false (Test_helpers.contains "$static_clo" ir)
 
+(** Regression for the finding that the JIT's stdlib-prelude fragment call
+    ([precompile_stdlib] in [lib/jit/repl_jit.ml]) went through
+    [Llvm_emit.emit_fns_fragment] WITHOUT [~repl:true], so a top-level fn
+    materialized as a first-class value inside that fragment silently got a
+    static closure global — exactly the thing [static_closure_ok] is meant to
+    forbid in REPL/JIT mode (a per-fragment global would hand out different
+    pointers for the same fn across fragments, and the ORC backend loads each
+    fragment as its own module). The existing REPL-mode coverage above only
+    drives [emit_repl_expr]; it can't catch a second REPL-mode entry point
+    (`emit_fns_fragment`) forgetting to pass `~repl:true`, because that call
+    site is separate code entirely. This test drives `emit_fns_fragment`
+    itself — the exact function precompile_stdlib calls — with `~repl:true`
+    and asserts no `$static_clo` global is emitted for a fn materialized as a
+    value inside the fragment. Prior to the fix (missing `~repl:true` at
+    repl_jit.ml:823) this scenario is precisely what let 13 `$static_clo`
+    symbols leak into `~/.cache/march/stdlib_prelude_*.so`. *)
+let test_static_closure_not_emitted_in_fns_fragment_repl_mode () =
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let fn_ty = March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt) in
+  let target =
+    { March_tir.Tir.fn_name = "target"; fn_params = [x];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body = app "+" [March_tir.Tir.AVar x; ilit 1];
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  (* A second fn that materializes `target` as a first-class value — mirrors
+     how a stdlib fn like `Cluster.parse_addr` passes a named fn as a value
+     (e.g. into a HOF) inside the precompiled prelude fragment. *)
+  let holder =
+    { March_tir.Tir.fn_name = "holder"; fn_params = [];
+      fn_ret_ty = fn_ty;
+      fn_body = March_tir.Tir.EAtom (March_tir.Tir.AVar (mk_var "target" fn_ty));
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir =
+    March_tir.Llvm_emit.emit_fns_fragment
+      ~types:[] ~fns:[target; holder] ~repl:true ()
+  in
+  Alcotest.(check bool) "fns_fragment in repl mode emits no static closure global"
+    false (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "fns_fragment in repl mode still materializes via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
 (* ── Robustness: an unreadable sibling directory must not crash the compiler ──
    The compiler auto-discovers sibling `.march` modules in the entry file's own
    source directory (`resolve_imports` plus the early-CAS sibling hash both walk
@@ -12239,6 +12282,8 @@ let codegen_suites =
             test_static_closure_global_replaces_alloc;
           Alcotest.test_case "static closure global is not emitted in REPL mode" `Quick
             test_static_closure_not_emitted_in_repl_mode;
+          Alcotest.test_case "static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
+            test_static_closure_not_emitted_in_fns_fragment_repl_mode;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
