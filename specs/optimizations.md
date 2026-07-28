@@ -400,6 +400,40 @@ This eliminates the need for a general function-pointer representation and makes
 
 ---
 
+### 13. Static Capture-Free Closures  ✅
+
+**Location:** `lib/tir/llvm_ctx.ml` (`intern_static_closure` + `static_clos` memo), `lib/tir/llvm_emit.ml` (both closure-materialization sites)
+**Stage:** LLVM emission (codegen), after Defunctionalization
+
+When a top-level function is materialized as a first-class value (`let f = some_fn`, passed as a callback, stored in a data structure, etc.) and the closure it produces captures nothing, the previous codegen allocated a fresh 24-byte closure object on the heap (`march_alloc(i64 24)`) at *every* materialization site, every time it executed. Because the closure never escapes to anything that would free it via normal RC, and because each materialization allocates independently of any other, repeatedly materializing the same function value as a first-class value leaked one object per materialization — unbounded growth in a loop.
+
+The fix replaces per-materialization heap allocation with a single immortal `internal global` per top-level function used as a value: `@<fn>$static_clo`, of LLVM type `{i64, i32, i32, ptr}` (refcount, tag, size, code pointer), refcount pre-set to `MARCH_RC_IMMORTAL` (1099511627776) so RC inc/dec on it are no-ops. `intern_static_closure` memoizes by function name so repeated materializations of the same function within a module resolve to the same global, and distinct functions get distinct globals (no collision — verified in `test/native/static_closure_semantics.march`).
+
+**Why this object can be fully static, unlike (e.g.) the string-literal cell pattern:** a capture-free closure's entire contents are compile-time constants — the code pointer is a fixed address, and there is no per-instance captured environment to fill in at runtime. A string-literal cell still needs a runtime fill-once (length, hash) because those depend on the literal's own bytes, which is why that pattern uses lazy initialization instead of a fully-constant global. Here there is nothing left to compute at runtime, so the global can be emitted with its final contents baked in at compile time.
+
+**`internal global` vs `constant`:** the global is declared mutable (`internal global`, not `internal constant`) because the refcount field is still touched by ordinary RC inc/dec code emitted at call sites that don't know the pointee is immortal — those operations must remain valid stores, just no-ops in effect since the value never crosses out of the immortal range. Marking it `constant` would make those routine RC stores undefined behavior under LLVM's constant-global rules.
+
+**Exclusions (gated off via a single shared `static_closure_ok` predicate):**
+- **REPL / JIT** (`ctx.repl`): each REPL evaluation compiles and links a fresh module; a `static_closure_ok`-gated `internal global` baked into one JIT'd module cannot be safely reused or safely thrown away across the REPL's incremental-compilation lifecycle the way an AOT module's globals can.
+- **Hot-reload boundary functions** (`ctx.hr_config` + `Hot_reload.is_reloadable`): a hot-reloadable function's code pointer is expected to change at runtime when the function is swapped; a static global baked with the old code pointer would go stale across a reload.
+
+**Measured impact** (4,000,000 materializations of a named function value, compiled `--opt 2`):
+
+| | obj_allocs | peak RSS | wall |
+|---|---:|---:|---:|
+| Before | 4,000,000 | 125.4 MB | 0.09s |
+| After | 0 | 2.9 MB | 0.01s |
+| Control (direct call, no fn value) | 0 | 2.9 MB | 0.01s |
+
+Materializing a function value is now as cheap as calling it directly, and the per-materialization leak is gone. This does **not** cover closures that capture a free variable — see `specs/todos.md` for that distinct, still-open leak.
+
+**Effort:** Medium (done) | **Impact:** Removes an unbounded-growth leak; makes capture-free function values free to materialize
+**Dependencies:** After Defunctionalization (needs closure representation established); orthogonal to Perceus/borrow (no ownership-pass changes)
+**Tests:** `llvm_builtins_preamble_golden` ("static closure global replaces per-materialization march_alloc", "static closure global is not emitted in REPL mode"), `test/native/static_closure_no_leak.march` (growth-bounded regression), `test/native/static_closure_semantics.march` (compiled/interpreted parity, no cross-function collision)
+**Status:** Done (2026-07-28)
+
+---
+
 ## Planned Optimizations
 
 ### P1 — Let-Floating / Join Points

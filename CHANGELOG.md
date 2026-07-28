@@ -13,6 +13,20 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A program that repeatedly passes a named function as a value no longer
+  grows memory without bound.** Materializing a top-level function as a
+  first-class value (assigning it to a variable, passing it as a callback,
+  storing it in a list or tuple) allocated a new heap object every time,
+  even when the closure captured nothing — a real leak in any loop that
+  repeatedly took a function value. Such closures are now backed by a
+  single shared object per function instead of a fresh allocation each
+  time. Measured on a 4,000,000-iteration loop: allocations for the
+  materialization step went from 4,000,000 to 0 and peak memory from
+  125.4 MB to 2.9 MB, with identical program output before and after.
+  Closures that capture a variable (`fn x -> x * k` where `k` comes from
+  the enclosing scope) are unaffected by this fix and still leak — tracked
+  as a separate, open issue in `specs/todos.md`.
+
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process
   locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
   a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites
