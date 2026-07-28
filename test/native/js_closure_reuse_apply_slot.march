@@ -1,0 +1,49 @@
+-- A closure allocated inside a match arm whose scrutinee cell is dead gets
+-- rewritten by Perceus from EAlloc to EReuse. The JS backend must still emit
+-- the apply-function slot (_0) as the RAW function, not its $clo wrapper —
+-- otherwise ECallPtr's `f._0(f, x)` dispatch calls a record and dies with
+-- "TypeError: f._0 is not a function".
+mod JsClosureReuseApplySlot do
+  type Payload = JustN(Int) | Many(List(Int))
+
+  pfn rev(xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons(h, t) -> rev(t, Cons(h, acc))
+    end
+  end
+
+  -- A user-defined higher-order helper: applies `f` via closure dispatch.
+  pfn map_list(xs, f, acc) do
+    match xs do
+    Nil -> rev(acc, Nil)
+    Cons(h, t) -> map_list(t, f, Cons(f(h), acc))
+    end
+  end
+
+  fn render(p) do
+    match p do
+    JustN(n) -> int_to_string(n)
+    -- `Many`'s cell is dead here, so the closure below is allocated via EReuse.
+    Many(xs) ->
+      let strs = map_list(xs, fn x -> int_to_string(x) ++ "!", Nil)
+      String.join(strs, ",")
+    end
+  end
+
+  fn main() do
+    println(render(JustN(7)))
+    println(render(Many(Cons(1, Cons(2, Cons(3, Nil))))))
+
+    -- The originally reported symptom: Json.to_string over both container
+    -- kinds, whose Array/Object arms hit exactly this shape in stdlib/json.march.
+    match Json.parse("[1,2]") do
+    Ok(v) -> println(Json.to_string(v))
+    Err(e) -> println(e)
+    end
+    match Json.parse("{\"a\":1}") do
+    Ok(v) -> println(Json.to_string(v))
+    Err(e) -> println(e)
+    end
+  end
+end

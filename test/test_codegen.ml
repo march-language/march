@@ -10356,6 +10356,55 @@ let test_msgpack_cross_module_ctor_resolution_compiled () =
     ~expected:"1\nint:7\narray\nmap"
     ()
 
+(** MODULE-qualified constructor pattern whose bare name collides (compiled-only).
+
+    Sibling of [test_msgpack_cross_module_ctor_resolution_compiled] above, but
+    exercising the other direction — a USER module that writes the documented
+    qualified-pattern syntax (`Json.Array(_)`), i.e. a MODULE prefix.
+
+    `ctor_info` keys are TYPE-qualified ("JsonValue.Array"), so a module-qualified
+    pattern tag ("Json.Array") matched no key: [qualified_br_key]'s fold compares
+    the written qualifier only against each key's TYPE segment, and the module
+    `Json` declares the type `JsonValue` — the two names differ, so nothing
+    matched and the tag DEGRADED to the bare ctor "Array". [Llvm_data.ctor_entry]
+    then resolved that bare name by an ambiguous ".Array" suffix scan across all
+    types, and picked `Msgpack.Value.Array` — which, because `Value` is a
+    same-short-name colliding type (Msgpack + DataFrame), carries a globally
+    unique 0x0200_00xx collision tag. Switching on that constant against a value
+    built with `JsonValue.Array`'s tag 4 could never match, so the arm FAILED OPEN
+    to the `_` arm: no error, no warning, no crash, silently wrong answer.
+
+    `Object` masked the bug — Msgpack has no `Object` ctor, so the ambiguous
+    suffix scan had exactly one candidate and happened to land on the right one.
+    The test therefore asserts all three (`Array`, `Null`, `Object`): a fixture
+    that only checked `Object` would have passed pre-fix.
+
+    Interpreted was always correct — this is a pure codegen parity divergence. *)
+let test_module_qualified_colliding_ctor_pattern_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_module_qualified_ctor_pattern"
+    ~src:"mod ModQualCtorPattern do\n\
+         \  fn describe(s : String) : String do\n\
+         \    match Json.parse(s) do\n\
+         \      Ok(Json.Array(_))  -> \"array\"\n\
+         \      Ok(Json.Null)      -> \"null\"\n\
+         \      Ok(Json.Object(_)) -> \"object\"\n\
+         \      Ok(Json.Str(_))    -> \"str\"\n\
+         \      Ok(_)              -> \"other\"\n\
+         \      Err(e)             -> \"err:\" ++ e\n\
+         \    end\n\
+         \  end\n\
+         \  fn main() do\n\
+         \    println(describe(\"[1]\"))\n\
+         \    println(describe(\"null\"))\n\
+         \    println(describe(\"{\\\"a\\\":1}\"))\n\
+         \    println(describe(\"\\\"hi\\\"\"))\n\
+         \    println(describe(\"7\"))\n\
+         \  end\n\
+          end\n"
+    ~expected:"array\nnull\nobject\nstr\nother"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings are VERBATIM COPIES of llvm_emit.ml's deleted
@@ -11799,6 +11848,8 @@ let codegen_suites =
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
             test_msgpack_cross_module_ctor_resolution_compiled;
+          Alcotest.test_case "module-qualified pattern for colliding ctor name" `Quick
+            test_module_qualified_colliding_ctor_pattern_compiled;
         ] );
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
