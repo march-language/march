@@ -215,6 +215,51 @@ out-of-bounds index into a literal tree is caught, and `size(t) >= 0` is known f
 `Tree`/`Forest` pair), and the built-in `List` is modelled too, so a user
 `length` measure over `List(a)` reasons the same way as `size`.
 
+### Requiring a non-empty collection
+
+In the examples above the measure describes a *different* parameter — `len(xs)`
+bounds the index `i`. A measure can just as well describe the refined value
+**itself**, which is how you say "this list must not be empty":
+
+```march
+fn head(xs : {List(a) | len(_) > 0}) : a do ... end
+```
+
+Inside the predicate you can name the refined value three ways, and they all mean
+the same thing and are checked identically — the anonymous `_`, your own binder,
+or the parameter's name:
+
+```march
+fn head(xs : {List(a)     | len(_)  > 0}) : a do ... end
+fn head(xs : {v : List(a) | len(v)  > 0}) : a do ... end
+fn head(xs : {List(a)     | len(xs) > 0}) : a do ... end
+```
+
+Pass a list the compiler can see is empty and you get an error; pass one it can
+see is non-empty and it says nothing; pass one it can't see into and it stays
+quiet rather than guessing:
+
+```march
+head([])            -- error: `len(_) > 0` can never hold here
+head([1, 2])        -- fine
+fn f(ys : List(Int)) : Int do head(ys) end   -- skipped: length unknown
+```
+
+Thirteen standard-library functions that panic on an empty argument now carry
+this contract — `List.head`, `tail`, `last`, `minimum_int`, `maximum_int`, the
+prelude's `head`/`tail`, `Stats.mean`/`min_val`/`max_val`, `Gen.element`/`one_of`,
+and `Random.choice` — so `List.head([])` is a compile error rather than a crash.
+Each contract is taken from that function's own panic message, so it never
+demands more than the code already checked, and every `panic` stays in place to
+catch the cases the compiler skips.
+
+One caveat worth knowing before you rely on this: an ordinary
+`List.length(xs) > 0` guard does **not** currently satisfy the requirement. The
+runtime `List.length` function and the `len` measure aren't connected to each
+other, so a guarded call is skipped rather than proved. That's a missed proof
+rather than a false alarm — but it does mean the contracts mostly bite on
+literal lists today, not on lists you've just checked at runtime.
+
 ### The measure soundness gate
 
 The solver trusts a `@[measure]` completely — it treats the function's body as a fact
@@ -290,6 +335,89 @@ negative literal (which March has no direct spelling for) still works.
 
 ---
 
+## Constructor Tags — Refining over ADT Variants
+
+Refinements aren't limited to numbers and sizes. You can also require that a
+value is a *particular variant* of a union type. Every constructor — in your own
+types, and in the built-in `Option`, `Result` and `List` — implicitly comes with
+an `is_<Ctor>` **tester** you can use inside a predicate. You don't declare
+these; writing `type Shape = Circle(Int) | Square(Int)` gives you `is_Circle`
+and `is_Square` for free.
+
+That lets a function say "I need the populated case" in its own signature:
+
+```march
+fn unwrap(o : {Option(Int) | is_Some(_)}) : Int do ... end
+
+unwrap(Some(1))   -- fine
+unwrap(None)      -- error: `None` can never satisfy `is_Some(_)`
+```
+
+This is what backs the standard library's `Option.unwrap`/`expect` and
+`Result.unwrap`/`unwrap_err`/`expect`, so `Option.unwrap(None)` and
+`Result.unwrap(Err("boom"))` are now compile errors rather than runtime panics.
+
+The tester name is **exact-case**. `is_Some` is the tester for the constructor
+`Some`; `is_some` is *not* a tester — it's the lowercase stdlib helper
+`Option.is_some`. Get the case wrong and you don't silently get a different
+meaning, you get a warning that the refinement isn't being checked:
+
+> `is_some` is not a measure or known predicate, so this refinement is not
+> checked. Annotate the function `@[measure]`, or use a supported predicate.
+
+### Facts from a `match`
+
+A constructor literal at the call site is the easy case. The more useful one is
+a `match`: entering an arm tells the checker what the scrutinee's tag is for
+everything inside that arm.
+
+```march
+fn f(x : Option(Int)) : Int do
+  match x do
+    None    -> unwrap(x)   -- error: inside this arm, `x` is definitely `None`
+    Some(v) -> unwrap(x)   -- fine: inside this arm, `x` is definitely `Some`
+  end
+end
+```
+
+This narrowing is deliberately conservative. Where it stops, the checker goes
+quiet rather than guessing — so these are all *silence*, never false alarms:
+
+- **The scrutinee has to be a plain variable.** `match mk() do …` matches an
+  expression, and there's no stable name to attach a fact to, so nothing inside
+  the arms is narrowed. Bind it with a `let` first if you want the fact.
+- **A pattern that rebinds the name ends it.** Matching `y` with `Some(x) ->`
+  tells you nothing about `x` — that `x` is a fresh name for the payload, not
+  for the scrutinee.
+- **An `as` pattern isn't narrowed.** `None as z ->` binds the whole scrutinee
+  under a second name, but the arm's head is an `as` pattern rather than a bare
+  constructor pattern, so no tag fact is recorded — not for `z`, and not for the
+  scrutinee. Write `None ->` if you want the narrowing.
+- **An ambiguous constructor name is skipped.** If two types in scope both
+  declare a constructor `Row`, then `is_Row` doesn't identify a particular type
+  and isn't checked.
+- **Rebinding the name discards the fact.** A narrowing is recorded against a
+  *name*, so anything that rebinds that name inside the arm — a `let`, a `let?`,
+  a lambda parameter, an inner `match` binder — drops it:
+
+  ```march
+  match x do
+    None ->
+      let x = Some(1)
+      unwrap(x)     -- fine: this `x` is a different value
+    Some(v) -> v
+  end
+  ```
+
+  This is the same rule that governs facts established by an `if` guard, and
+  it's what keeps a fact about an outer value from being wrongly attributed to
+  an inner one.
+
+As everywhere else, the definite-failure stance applies: an `Option` whose tag
+the checker can't determine is not an error.
+
+---
+
 ## Limitations
 
 No refinement system is complete — this one is intentionally a *pragmatic slice* of
@@ -299,7 +427,13 @@ dependent typing. Know the edges:
   Predicates over other types aren't supported. `Float` predicates are
   **comparisons only**; float arithmetic inside one is skipped rather than
   guessed at, and a `Float` sitting inside a record or a constructor is opaque.
-  See [Bool and Float Refinements](#bool-and-float-refinements).
+  See [Bool and Float Refinements](#bool-and-float-refinements) and
+  [Constructor Tags](#constructor-tags--refining-over-adt-variants).
+- **Tag narrowing stops at several ordinary shapes.** A `match` on an
+  expression rather than a variable, an `as` pattern, a pattern that rebinds the
+  name, an ambiguous constructor name, and any rebinding of the name inside the
+  arm all leave the call *unchecked* rather than reported. See
+  [Facts from a `match`](#facts-from-a-match).
 - **Incomplete (by the definite-failure stance).** The checker catches values
   that are *definitely* wrong and stays silent otherwise. It will not prove
   every true property; quantified/measure facts in particular sometimes return
@@ -317,6 +451,12 @@ dependent typing. Know the edges:
 - **Measures see structure, not elements.** Element values inside a data
   structure are opaque to a measure (`size`/`len`/`depth` never inspect them).
   Measures are single-argument, structurally recursive, and return `Int`/`Bool`.
+- **A runtime length check does not discharge a `len` obligation.** The
+  `List.length` function and the `len` measure are unconnected, so guarding with
+  `if List.length(xs) > 0` leaves a call to `{List(a) | len(_) > 0}` *skipped*
+  rather than proved. Non-empty contracts therefore catch literal empty lists
+  reliably, but say nothing about a list you validated at runtime. See
+  [Requiring a non-empty collection](#requiring-a-non-empty-collection).
 - **Relational postconditions work, within structural recursion.** A predicate
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`
   — is proven by supplying the induction hypothesis at each recursive call whose

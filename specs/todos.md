@@ -1,8 +1,43 @@
 # March — TODO List
 
-**Last updated:** 2026-07-27 (`Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
+**Last updated:** 2026-07-27 (non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## A measure over the refined value only worked under one spelling (FIXED 2026-07-27)
+
+**Symptom.** `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` parsed,
+typechecked, and enforced nothing: `head([])` compiled clean. Only the third
+spelling, naming the parameter itself (`{List(a) | len(xs) > 0}`), reported.
+
+**Root cause.** In `lib/refinecheck/refine_check.ml`, the non-axiom-measure
+branch (list `len`, user measures without axioms) resolved the refined value to
+a fresh non-negative constant when the name was the binder (`_` or `v`), and to
+the call's ACTUAL argument only when the name matched a parameter. A fresh
+constant makes the predicate satisfiable at every call site, so under the
+definite-failure stance it was never a violation — silence, not a wrong answer.
+The string and axiom-measure paths on either side of it already resolved
+against the actual; this branch was the odd one out.
+
+**Why it went unnoticed.** The corpus and the suites only ever exercised `len`
+in its RELATIONAL form (`{Int | _ < len(xs)}`, where the measure names a
+*different* parameter — that path was always correct). Nothing exercised a
+measure over the refined value itself for a list. Two silent consequences: the
+`_` idiom the docs teach gave no enforcement at all, and renaming a parameter
+unenforced a working contract, warning only "Unused variable `lst`".
+
+**Fix.** All three spellings resolve against the same actual. Pinned by
+`accept/t115`–`t117` and `reject/t114`–`t116`, which bracket each spelling from
+both sides — an accept-only witness cannot distinguish a working contract from
+one that checks nothing.
+
+**Follow-up (OPEN).** A runtime `List.length(xs) > 0` guard does not discharge a
+`len(_) > 0` obligation: the `List.length` function and the `len` measure are
+unconnected, so a guarded call is skipped rather than proved. That is a missed
+proof, not a false report, but it is the main thing standing between these
+contracts and being usable on non-literal lists.
 
 ---
 

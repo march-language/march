@@ -1,0 +1,25 @@
+-- A non-empty-collection precondition written with the ANONYMOUS binder, and a
+-- call that plainly satisfies it. The refined value here is the list itself, so
+-- `len(_)` measures the very argument being checked — unlike the relational
+-- `{Int | _ < len(xs)}` form, where the measure names a DIFFERENT parameter.
+--
+-- Witnesses that the documented `_` idiom actually enforces. Until 2026-07-27
+-- this spelling reflected the refined value to a fresh non-negative constant
+-- instead of to the actual argument: the predicate was then satisfiable for
+-- every call, so it was never a definite failure and the contract silently
+-- checked nothing. See specs/lang/refinement-types.md, "Refining a collection
+-- over its own length".
+mod T115 do
+
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn main() : Int do
+    head([1, 2, 3])
+  end
+
+end
