@@ -1,5 +1,66 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
+
+Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per
+operand that bought nothing. `"a${s}b"` desugars to `to_string(s)`, which
+Show-dispatches to `Show$String.show` — a synthesized IDENTITY (`fn x -> x`,
+emitted by `emit_builtin_impls` in `lib/tir/lower.ml`, because a string already
+is its own representation). That call was emitted and only inlined away later,
+in the post-Perceus opt loop. Perceus runs FIRST, so it saw a live
+owned-argument call and bracketed it with inc_rc/dec_rc; the inlining that
+followed removed the call and left the pair stranded around a bare alias.
+`string_concat3` borrows all three arguments, so the extra reference was pure
+overhead on every interpolated String operand in every March program.
+
+Two changes in `lib/tir/lower.ml`, both at the source rather than downstream:
+the `Show$String.show` call is elided during lowering (so Perceus never sees a
+call to bracket), and `lower_to_atom_k` no longer binds a fresh temp when the
+lowered RHS is already a *variable* atom (`let v = EAtom (AVar x) in k (AVar v)`
+≡ `k (AVar x)` in ANF, but the alias reads to Perceus as a second owned
+reference). The passthrough is deliberately restricted to `AVar`: a literal
+atom carries no type of its own, so for `ALit (LitAtom …)` the binder's
+`ty_of_expr` ascription is load-bearing — passing it through unbound made
+`println(:x)` print `()`.
+
+Measured on arm64, `"w${a}x"` vs the hand-written `"w" ++ a ++ "x"`, 3M
+iterations, with the interpolating call in the SECOND (warm) benchmark slot:
+181/173ms → 137/133ms, i.e. interpolation now matches the hand-written chain
+exactly, and the two lower to byte-identical TIR. `MARCH_STRING_STATS=1`
+allocation histograms are unchanged, confirming this was refcount traffic and
+not allocation. Pinned by the `interp_string_operand_rc` TIR golden snapshot
+(verified to FAIL on the unfixed compiler at both the lower and perceus
+stages).
+
+**Measurement note.** Benchmarks of this shape carry a large first-position
+warmup penalty: in an A/B where both halves compile to *identical* IR, the
+half that runs first measured ~25% slower (173ms vs 137ms). Any before/after
+claim about interpolation must hold the benchmark slot fixed, or it will
+attribute warmup to the change.
+
+**Interaction with the `string_join` path removal (`fceea07b`, same day).**
+This work was done against a tree where `desugar_interp` still switched to a
+`string_join` cons-list past `interp_join_threshold` (3 segments), which is why
+a 7-segment repro showed no improvement from the RC fix alone — it took the
+join path, not `string_concat3`. `fceea07b` removed that second shape
+entirely, and its commit message closes by noting the residual gap it could not
+explain: "`to_string(x)` where x is statically a String looks like an identity
+that is not being elided; worth a look separately." That is exactly this
+change, so the two compose — join removal made every interpolation take the
+concat3 path, and this makes that path free of the identity's refcount pair.
+
+Measurements taken here before the merge, now of historical interest only:
+`++`/concat3 beat `string_join` at *every* size tested with short (8-byte)
+operands (2 operands 30ms vs 59ms, 8 operands 121ms vs 157ms, 20 operands
+302ms vs 350ms — no crossover in that regime, contradicting the 2026-07-26
+"crossover just under 5" figure, which had not controlled for the warmup
+penalty above). With large (4KB) operands the chain *is* quadratic (4 operands
+16ms vs 13ms, 8 operands 87ms vs 23ms, 32 operands 1236ms vs 97ms) — so the
+concat3-only shape does re-expose large-operand interpolation to quadratic
+copying. Not a regression introduced here, but the reason a length-summing
+`string_concat_n` remains the real fix for that band; tracked in
+`specs/todos.md`.
+
 ## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
 
 Extended `lib/tir/native_map_inline.ml` (the compiler pass behind
@@ -6975,3 +7036,140 @@ No changes to code in this pass — audit only. Both findings in `specs/todos.md
 **Resolution:** `scripts/gen-docs-search-index.sh` regenerates the index into `docs/pagefind/` (194 files, 1.7 MB) and it is committed — the same model the 114 generated stdlib API pages already use, and the only way anything reaches march-lang.org. Verified that GitHub's Jekyll copies all 193 served files verbatim, `.pf_fragment` / `.pf_index` / `wasm.*.pagefind` extensions included, and that full-text search works end-to-end against a pure `jekyll build` output with no post-build step (the exact production shape). `deploy-pages.yml`'s Pagefind step is retained so the secondary site stays correct, and `build-search-index.sh` now `rm -rf`s its output directory first, since the committed copy now lands in `_site` during the Jekyll build and Pagefind's filenames are content-hashed (a merge would accumulate orphaned shards).
 
 **Staleness guard, and why it is not a byte diff.** Pagefind's output is deliberately not reproducible — two consecutive runs over byte-identical input produce different content-hashed filenames (`en_5a30fea.pf_filter` vs `en_ca11dc6.pf_filter`) and a different entry hash — so `git diff --exit-code docs/pagefind/` would fail on every run and train everyone to ignore it. Instead `gen-docs-search-index.sh --check` compares a SHA-256 over all `docs/**/*.{md,html}` (paths included, so renames count; `docs/pagefind/` itself excluded) against `docs/pagefind/.source-digest`, and runs in CI's `doc-lint` job. Verified non-vacuous: appending one comment line to `docs/tour.md` makes it exit 1 with both digests printed, and reverting restores exit 0.
+
+---
+
+## Current State (as of 2026-07-27, Json.parse rewritten as a byte-index scanner; `string_byte_at` builtin added)
+
+`Json.parse` allocated **~2 heap strings per INPUT BYTE**, independent of how
+many strings the document actually contained, because it began with
+`string_split(src, "")` — one heap string per byte — and then rebuilt each
+token by consing those single-byte strings and `string_join`-ing them.
+`Json.to_string`/`escape_str` did the same thing on the output side. Measured
+on a 239-byte document containing ~20 distinct strings, compiled `--opt 2`,
+20,000 iterations, `MARCH_STRING_STATS=1`:
+
+| | before | after |
+|---|---|---|
+| allocs / parse (parse only) | 261 | **21** |
+| allocs / iteration (parse + to_string) | 486 | **58** |
+| `hist_le7` share of all allocs | 90% | 31% |
+| obj_allocs / parse (parse only) | 641 | 153 |
+| wall clock, parse only | 0.67s | **0.14s** |
+| wall clock, parse + to_string | 1.10s | **0.24s** |
+
+21 allocations per parse is the number of strings in the document, which is the
+floor for a parser that returns owned `String`s. Same-session interleaved A/B,
+4 rounds, identical to 0.01s each round.
+
+**It scales, which was the point.** On a 1,001,001-byte document (11,000
+objects, 99,000 contained strings), parsed once, compiled `--opt 2`:
+
+| | before | after |
+|---|---|---|
+| string allocs | 1,100,041 | **99,018** |
+| obj_allocs | 2,816,019 | 792,015 |
+| peak_live_bytes | 2,662,216 | 2,002,183 |
+
+99,018 against 99,000 strings actually in the document — allocation now tracks
+the document's string COUNT rather than its byte SIZE, which is the whole
+change in one number. Both versions were verified to produce the same structure
+(element 0's `name`, element 10,999's `email`, and `None` at index 11,000).
+Wall clock on this document was 3-5x better but is not quoted precisely: the
+machine was under concurrent load (1-minute load average 17.7) and the readings
+ranged 0.23-0.43s before against 0.06-0.16s after. Allocation counts are
+load-independent and are the reliable figure here.
+
+**The enabling primitive: `string_byte_at(s, i) : Int`** (byte value `0..255`,
+`-1` out of range). Before it, March had NO way to look at one character of a
+string without allocating — `string_split(s, "")` and `string_slice(s, i, 1)`
+both allocate a heap string per character inspected. That is why the naive
+"just don't split the string up front" fix does not work on its own: the
+scanner still needs to inspect essentially every byte to find token boundaries,
+and every one of those inspections was an allocation. Wired at the usual sites:
+`typecheck.ml`, `eval.ml`, `defun.ml` (`builtin_names`), `borrow.ml` (both the
+`march_`-mangled and unmangled tables), `llvm_builtins.ml` (entry + `PDeclare`),
+`js_emit.ml` (runtime-delegated list), `runtime/march_runtime.{c,h}`, and
+`runtime/march_runtime.mjs`. Verified byte-identical across interpreted, native
+`--opt 2`, and `--target js`.
+
+**A dead end worth recording: `string_to_codepoints` is interpreter-only.** The
+first rewrite walked `string_to_codepoints(src)` (a `List(Int)`, so inspecting a
+byte costs no string) alongside a byte offset. It passed the full 825-test
+stdlib suite — because those tests run INTERPRETED — and then failed to LINK
+when compiled: `string_to_codepoints` has no entry in `llvm_builtins.ml`,
+`defun.ml`, `js_emit.ml`, or the C runtime. `string_from_codepoint` is
+interpreter-only in exactly the same way. Neither is rejected at typecheck time,
+so the failure surfaces as an undefined symbol at the clang link step, far from
+the call. A green stdlib suite does NOT establish that stdlib code compiles.
+
+**Why the final version scans BYTES rather than characters.** Every JSON
+structural character is ASCII and every byte of a UTF-8 multibyte sequence is
+`>= 0x80`, so a byte scanner can never mistake a continuation byte for a
+delimiter. Multibyte text is stepped over one byte at a time and passes through
+untouched inside the token slice. This removes the whole class of bug the
+codepoint version had to defend against: deriving a byte offset from decoded
+codepoints requires a width table, and `string_to_codepoints` emits a raw byte
+and advances ONE byte when it meets a truncated multibyte sequence, so on
+malformed UTF-8 the offset silently drifts and the parser slices at the wrong
+boundary. The byte scanner needs no width table, no guard, and no
+decode/re-encode round trip.
+
+**Behaviour is unchanged** across a 48-case corpus (literals, numbers, all
+escape forms including leading/trailing/adjacent escapes, 2-, 3- and 4-byte
+UTF-8 in both keys and values, nesting, whitespace, and 16 error cases),
+diffed old-vs-new: identical, error message text included, and identical again
+between interpreted and native. Two deliberate differences, both improvements:
+a non-ASCII character in an error message now prints as itself instead of the
+mojibake the old byte-split produced (`'é'`, was `'<?>'`), and the keyword
+mismatch message names the keyword (`expected 'null'`) rather than the single
+byte (`expected 'l'`).
+
+**Found and fixed in passing — `String.slice` was wrong on the JS backend.**
+`march_string_slice(s, start, len)` in `runtime/march_runtime.mjs` was
+implemented as `s.slice(start, len)`, i.e. treating the third argument as an END
+index rather than a LENGTH, so every slice with a non-zero start returned the
+wrong text: `String.slice("abcdefgh", 5, 3)` gave `""` on JS versus `"fgh"`
+interpreted and native. This had to be fixed for the rewrite to be safe — the
+new parser slices at non-zero offsets constantly, where the old `string_split`
+version never called `string_slice` at all. Clamping is now spelled out to
+mirror the C runtime, because JS reads a negative index as an offset from the
+end where C clamps to 0. The three checked-in copies of `march_runtime.mjs` that
+were byte-identical to the canonical `runtime/` one (`test/native/`,
+`test/whole_program/`, `docs/assets/perihelion/`) were re-synced;
+`docs/assets/tetris/` was already on an older divergent copy and was left alone.
+
+**Three pre-existing bugs found but NOT fixed here**, to keep this a pure
+performance change:
+
+0. **A qualified constructor PATTERN silently fails to match when COMPILED** if
+   its bare name is shared by another stdlib ADT. `match Json.parse("[1]") do
+   Ok(Json.Array(_)) -> ...` takes the `_` branch compiled and the correct
+   branch interpreted; same for `Json.Null`. `Json.Str`/`Object`/`Number`
+   match fine. The failing names are exactly the shared ones — `Array` is
+   declared in both `json.march` and `msgpack.march`, `Null` in `dataframe`,
+   `json` and `msgpack` — so the `Json.` qualification is being dropped and the
+   pattern compiled against another ADT's tag. It fails OPEN (no error, no
+   warning, just the wrong branch), which is how it survived this long. Same
+   family as the earlier `lookup_ctor` current-module-preference fix, but that
+   addressed references from inside stdlib; this is a USER module that
+   explicitly qualifies, where qualification should win outright. Reproduced
+   identically against the pre-rewrite `json.march`. This is why the 1MB scale
+   check above probes structure with `Json.get_at`/`Json.get` rather than an
+   `Array(xs)` pattern.
+
+1. **`Json.to_string` crashes on any Object on the JS backend** —
+   `TypeError: f._0 is not a function` from `Json$map_list`, thrown by the
+   match-lambda `fn kv -> match kv do (k, v) -> ... end` passed to `map_list`.
+   Reproduces identically on the pre-change parser at the identical input, so it
+   is untouched by this work. The JS *parse* path is verified correct, including
+   multibyte keys and values.
+2. **The JSON number scanner rejects a signed exponent** — `1e-5` stops the
+   scan at the `-`, and `string_to_float("1e")` then fails. Preserved verbatim
+   from the old `json_is_num_char` (digits, `.`, `e`, `E`) so this change stays
+   measurable as pure performance; the restriction is flagged in a comment at
+   `is_num_byte`.
+
+**Not done:** `toml.march`, `yaml.march` and `xml.march` still open with
+`string_split(s, "")` and have the same allocation profile. `string_byte_at`
+is what they need, and it now exists.

@@ -1,0 +1,25 @@
+-- String interpolation of a String-typed operand must not cost a refcount
+-- pair.  `"a${s}b"` desugars to `to_string(s)`, which Show-dispatches to
+-- `Show$String.show` — a synthesized IDENTITY (a string already is its own
+-- representation).  Lowering elides that call outright: emitting it and
+-- relying on a later pass to inline it away is not free, because Perceus runs
+-- FIRST and brackets the (still-present) owned-argument call with an
+-- inc_rc/dec_rc pair that the subsequent inlining leaves stranded.
+--
+-- The gate is the perceus snapshot: `interp` must contain NO inc_rc on `s`,
+-- and must lower to exactly the same shape as the hand-written `chain` below,
+-- which passes the variable to string_concat3 directly.
+mod InterpStringOperandRc do
+  fn interp(s : String) : String do
+    "a${s}b"
+  end
+
+  fn chain(s : String) : String do
+    "a" ++ s ++ "b"
+  end
+
+  fn main() do
+    println(interp("x"))
+    println(chain("x"))
+  end
+end
