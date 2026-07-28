@@ -26,11 +26,29 @@
 mod Regex do
 
   -- ── Internal types ────────────────────────────────────────────────────────
+  --
+  -- Both the pattern compiler and the matcher work over byte codes (Ints),
+  -- not one-char Strings.  `RALit` and `RAClass` used to carry 1-char
+  -- Strings; matching a pattern like "[a-zA-Z0-9_]+" against every position
+  -- of the haystack called `char_at`, which does a `string_slice` (a fresh
+  -- heap allocation) for EVERY byte inspected, and `compile` exploded the
+  -- whole pattern into one 1-char String per byte via `string_chars` before
+  -- parsing it.  A 49-byte pattern matched once allocated ~285 strings — 5.8
+  -- per pattern byte.  `string_byte_at` returns a byte (0..255, or -1 past
+  -- the end) with no allocation at all, so representing atoms and classes as
+  -- Ints instead removes essentially all of that.
+  --
+  -- This is safe for the same reason it is in `Json`/`Toml`: `string_chars`
+  -- (and the old `char_at`) actually split a String into raw BYTES, not
+  -- decoded Unicode characters (see `march_string_chars` in the runtime), so
+  -- switching to `string_byte_at` changes nothing about which characters a
+  -- pattern can match — including UTF-8 multibyte input, whose continuation
+  -- bytes are >= 0x80 and can never collide with an ASCII regex metachar.
 
   ptype RegexAtom =
-      RALit(String)
+      RALit(Int)                  -- byte code of the literal
     | RAAny
-    | RAClass(Bool, List(String))   -- Bool = negated
+    | RAClass(Bool, List(Int))    -- Bool = negated; Int = byte code
     | RADigit
     | RAWord
     | RASpace
@@ -54,36 +72,48 @@ mod Regex do
     end
   end
 
-  pfn list_contains_str(xs, x) do
+  pfn list_contains_int(xs, x) do
     match xs do
     Nil -> false
-    Cons(h, t) -> if h == x do true else list_contains_str(t, x) end
+    Cons(h, t) -> if h == x do true else list_contains_int(t, x) end
     end
   end
 
-  -- Get the byte at position pos in string s (as a 1-char string).
-  -- Returns "" if out of bounds.
-  pfn char_at(s, pos) do
-    let len = string_byte_length(s)
-    if pos < 0 || pos >= len do ""
-    else string_slice(s, pos, 1) end
+  -- Byte-code classifiers (ASCII only), mirroring the runtime's
+  -- `march_char_is_digit` / `march_char_is_alphanumeric` /
+  -- `march_char_is_whitespace`, but over a byte code rather than a 1-char
+  -- String so no allocation is needed to test a position.
+  pfn is_digit_byte(b) do
+    b >= 48 && b <= 57
   end
 
-  -- Test whether the atom matches the character at position pos in string s.
+  pfn is_alnum_byte(b) do
+    is_digit_byte(b) || (b >= 97 && b <= 122) || (b >= 65 && b <= 90)
+  end
+
+  pfn is_word_byte(b) do
+    is_alnum_byte(b) || b == 95   -- '_'
+  end
+
+  pfn is_space_byte(b) do
+    b == 32 || b == 9 || b == 10 || b == 13 || b == 12 || b == 11
+  end
+
+  -- Test whether the atom matches the byte at position pos in string s.
   pfn atom_matches(atom, s, pos) do
-    let c = char_at(s, pos)
-    if c == "" do false
+    let c = string_byte_at(s, pos)
+    if c < 0 do false
     else match atom do
     RALit(lit) -> c == lit
     RAAny -> true
-    RADigit -> char_is_digit(c)
-    RAWord -> char_is_alphanumeric(c) || c == "_"
-    RASpace -> char_is_whitespace(c)
-    RANotDigit -> !char_is_digit(c)
-    RANotWord -> !(char_is_alphanumeric(c) || c == "_")
-    RANotSpace -> !char_is_whitespace(c)
-    RAClass(negated, class_chars) -> do
-      let found = list_contains_str(class_chars, c)
+    RADigit -> is_digit_byte(c)
+    RAWord -> is_word_byte(c)
+    RASpace -> is_space_byte(c)
+    RANotDigit -> !is_digit_byte(c)
+    RANotWord -> !is_word_byte(c)
+    RANotSpace -> !is_space_byte(c)
+    RAClass(negated, class_bytes) -> do
+      let found = list_contains_int(class_bytes, c)
       if negated do !found else found end
     end
     end
@@ -177,120 +207,140 @@ mod Regex do
   end
 
   -- ── Pattern parser ────────────────────────────────────────────────────────
+  --
+  -- Byte-index scanner over the pattern string, in the same style as
+  -- `Json.parse` / `Toml.parse`: `i` is the current byte offset into
+  -- `pattern`, inspected with `string_byte_at` (no allocation).  The only
+  -- allocation on this path is `char_from_int` when building an error
+  -- message — an off-the-hot-path cost, same as `Json.char_at`.
+  --
+  -- Byte codes used below: '*'=42 '+'=43 '-'=45 '.'=46 '?'=63 '['=91 '\\'=92
+  -- ']'=93 '^'=94 '$'=36 'd'=100 'D'=68 'w'=119 'W'=87 's'=115 'S'=83
+  -- 'n'=110 'r'=114 't'=116.
 
-  -- Parse a character class body (between [ and ]).
-  -- Returns Ok((class_chars, remaining_chars)) or Err(message).
-  pfn parse_class_body(chars, acc) do
-    match chars do
-    Nil -> Err("unterminated character class '[...]'")
-    Cons("]", rest) -> Ok((rev(acc, Nil), rest))
-    Cons("\\", Cons(e, rest2)) -> do
-      let ch =
-        if e == "n" do char_from_int(10)
-        else if e == "r" do char_from_int(13)
-        else if e == "t" do char_from_int(9)
-        else e end end end
-      parse_class_body(rest2, Cons(ch, acc))
-    end
-    Cons(c1, Cons("-", Cons(c2, rest2))) -> do
-      -- Range notation: expand c1..c2
-      if c2 == "]" do
-        -- '-' at end: treat as literal
-        parse_class_body(Cons("-", Cons(c2, rest2)), Cons(c1, acc))
+  -- Parse a character class body (between [ and ]), starting at byte `i`
+  -- (the byte just after '[' or "[^").
+  -- Returns Ok((class_bytes, next_i)) or Err(message).
+  pfn parse_class_body(pattern, i, acc) do
+    let b = string_byte_at(pattern, i)
+    if b < 0 do Err("unterminated character class '[...]'")
+    else if b == 93 do Ok((rev(acc, Nil), i + 1))
+    else if b == 92 do do
+      let e = string_byte_at(pattern, i + 1)
+      if e < 0 do Err("unterminated character class '[...]'")
       else do
-        let lo = char_to_int(c1)
-        let hi = char_to_int(c2)
-        fn add_range(code, a) do
-          if code > hi do a
-          else add_range(code + 1, Cons(char_from_int(code), a)) end
-        end
-        parse_class_body(rest2, add_range(lo, acc)) end
+        let ch =
+          if e == 110 do 10
+          else if e == 114 do 13
+          else if e == 116 do 9
+          else e end end end
+        parse_class_body(pattern, i + 2, Cons(ch, acc))
       end
     end
-    Cons(c, rest) -> parse_class_body(rest, Cons(c, acc))
     end
+    else do
+      -- Possible range notation: b '-' c2 expands b..c2 inclusive.
+      let dash = string_byte_at(pattern, i + 1)
+      if dash == 45 do
+        let c2 = string_byte_at(pattern, i + 2)
+        if c2 == 93 || c2 < 0 do
+          -- '-' at end (or class truncated): treat '-' as literal.
+          parse_class_body(pattern, i + 1, Cons(b, acc))
+        else do
+          let lo = b
+          let hi = c2
+          fn add_range(code, a) do
+            if code > hi do a
+            else add_range(code + 1, Cons(code, a)) end
+          end
+          parse_class_body(pattern, i + 3, add_range(lo, acc))
+        end
+        end
+      else
+        parse_class_body(pattern, i + 1, Cons(b, acc))
+      end
+    end
+    end end end
   end
 
-  -- Parse one atom from the pattern character list.
-  -- Returns Ok((atom, remaining_chars)) or Err(message).
-  pfn parse_atom(chars) do
-    match chars do
-    Nil -> Err("expected atom but reached end of pattern")
-    Cons(".", rest) -> Ok((RAAny, rest))
-    Cons("\\", Cons(e, rest)) -> do
-      let atom =
-        if e == "d" do Ok(RADigit)
-        else if e == "D" do Ok(RANotDigit)
-        else if e == "w" do Ok(RAWord)
-        else if e == "W" do Ok(RANotWord)
-        else if e == "s" do Ok(RASpace)
-        else if e == "S" do Ok(RANotSpace)
-        else Ok(RALit(e)) end end end end end end
-      match atom do
-      Err(msg) -> Err(msg)
-      Ok(a) -> Ok((a, rest))
+  -- Parse one atom from the pattern starting at byte `i`.
+  -- Returns Ok((atom, next_i)) or Err(message).
+  pfn parse_atom(pattern, i) do
+    let b = string_byte_at(pattern, i)
+    if b < 0 do Err("expected atom but reached end of pattern")
+    else if b == 46 do Ok((RAAny, i + 1))
+    else if b == 92 do do
+      let e = string_byte_at(pattern, i + 1)
+      if e < 0 do
+        -- Trailing lone backslash: treat as a literal backslash.
+        Ok((RALit(92), i + 1))
+      else do
+        let atom =
+          if e == 100 do RADigit
+          else if e == 68 do RANotDigit
+          else if e == 119 do RAWord
+          else if e == 87 do RANotWord
+          else if e == 115 do RASpace
+          else if e == 83 do RANotSpace
+          else RALit(e) end end end end end end
+        Ok((atom, i + 2))
+      end
       end
     end
-    Cons("[", rest) -> do
-      let (negated, rest2) =
-        match rest do
-        Cons("^", r) -> (true, r)
-        _ -> (false, rest)
-        end
-      match parse_class_body(rest2, Nil) do
+    else if b == 91 do do
+      let (negated, i2) =
+        if string_byte_at(pattern, i + 1) == 94 do (true, i + 2)
+        else (false, i + 1) end
+      match parse_class_body(pattern, i2, Nil) do
       Err(e) -> Err(e)
-      Ok((class_chars, remaining)) -> Ok((RAClass(negated, class_chars), remaining))
+      Ok((class_bytes, next_i)) -> Ok((RAClass(negated, class_bytes), next_i))
       end
     end
-    Cons(c, rest) -> do
-      if c == "*" || c == "+" || c == "?" do
-        Err("quantifier '" ++ c ++ "' without preceding atom")
-      else Ok((RALit(c), rest)) end
+    else do
+      if b == 42 || b == 43 || b == 63 do
+        Err("quantifier '" ++ char_from_int(b) ++ "' without preceding atom")
+      else Ok((RALit(b), i + 1)) end
     end
-    end
+    end end end end
   end
 
-  -- Parse the quantifier after an atom.
-  pfn parse_quant(chars) do
-    match chars do
-    Cons("*", rest) -> (QZeroOrMore, rest)
-    Cons("+", rest) -> (QOneOrMore, rest)
-    Cons("?", rest) -> (QOptional, rest)
-    _ -> (QOne, chars)
-    end
+  -- Parse the quantifier (if any) starting at byte `i`.
+  pfn parse_quant(pattern, i) do
+    let b = string_byte_at(pattern, i)
+    if b == 42 do (QZeroOrMore, i + 1)
+    else if b == 43 do (QOneOrMore, i + 1)
+    else if b == 63 do (QOptional, i + 1)
+    else (QOne, i) end end end
   end
 
   -- Parse all items from the pattern, stopping at end or '$'.
-  pfn parse_items(chars, acc) do
-    match chars do
-    Nil -> Ok((rev(acc, Nil), false, Nil))
-    Cons("$", Nil) -> Ok((rev(acc, Nil), true, Nil))
-    Cons("$", rest) -> do
-      -- '$' in the middle: treat rest as literal (simplification)
-      Ok((rev(acc, Nil), true, rest))
-    end
-    _ -> do
-      match parse_atom(chars) do
+  -- Returns Ok((items, anchor_end, next_i)) or Err(message).
+  pfn parse_items(pattern, i, acc) do
+    let b = string_byte_at(pattern, i)
+    if b < 0 do Ok((rev(acc, Nil), false, i))
+    else if b == 36 do
+      -- '$' anchors the end.  A '$' in the middle of the pattern is
+      -- treated the same way (simplification): parsing simply stops here.
+      Ok((rev(acc, Nil), true, i + 1))
+    else do
+      match parse_atom(pattern, i) do
       Err(e) -> Err(e)
-      Ok((atom, rest_cs)) -> do
-        let (quant, rest_cs2) = parse_quant(rest_cs)
-        parse_items(rest_cs2, Cons(RegexItem(atom, quant), acc))
+      Ok((atom, i2)) -> do
+        let (quant, i3) = parse_quant(pattern, i2)
+        parse_items(pattern, i3, Cons(RegexItem(atom, quant), acc))
       end
       end
     end
-    end
+    end end
   end
 
   -- Parse a complete regex pattern string.
   -- Returns Ok(RegexPattern) or Err(message).
   pfn compile(pattern) do
-    let chars = string_chars(pattern)
-    let (anchor_start, chars2) =
-      match chars do
-      Cons("^", rest) -> (true, rest)
-      _ -> (false, chars)
-      end
-    match parse_items(chars2, Nil) do
+    let (anchor_start, i0) =
+      if string_byte_at(pattern, 0) == 94 do (true, 1)
+      else (false, 0) end
+    match parse_items(pattern, i0, Nil) do
     Err(e) -> Err(e)
     Ok((items, anchor_end, _)) -> Ok(RegexPattern(anchor_start, items, anchor_end))
     end

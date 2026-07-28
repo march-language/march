@@ -52,9 +52,10 @@ mod Uri do
     "%" ++ hex_nibble(code / 16) ++ hex_nibble(code % 16)
   end
 
-  -- Decode two hex chars to a byte value. Returns -1 on bad input.
-  pfn hex_val(c) do
-    let code = char_to_int(c)
+  -- Decode a hex digit BYTE VALUE (as from string_byte_at, not a char) to
+  -- its numeric value 0–15. Returns -1 on bad input (including -1 itself,
+  -- string_byte_at's past-the-end sentinel).
+  pfn hex_digit_val(code) do
     if code >= 48 && code <= 57 do code - 48         -- '0'–'9'
     else if code >= 65 && code <= 70 do code - 55    -- 'A'–'F'
     else if code >= 97 && code <= 102 do code - 87   -- 'a'–'f'
@@ -156,23 +157,79 @@ mod Uri do
       Uri.encode("café")         -- "caf%C3%A9"
   """
   fn encode(s) do
-    let chars = string_chars(s)
-    fn go(cs, acc) do
-      match cs do
-      Nil -> string_join(rev_list(acc), "")
-      Cons(c, rest) ->
-        let code = char_to_int(c)
-        let part =
-          if is_unreserved(code) do string_from_chars(Cons(c, Nil))
-          else percent_encode_byte(code) end
-        go(rest, Cons(part, acc))
+    let len = string_length(s)
+    -- Byte-index cursor: `start` marks the beginning of the current run of
+    -- unreserved bytes that can be sliced out in one call. `acc` holds
+    -- already-materialised segments (newest first). The common case — a
+    -- string with no bytes needing escaping — reaches the end with `acc`
+    -- still Nil and returns a single slice of the whole string.
+    fn scan(i, start, acc) do
+      if i >= len do
+        match acc do
+        Nil -> string_slice(s, start, i - start)
+        _ ->
+          let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+          string_join(rev_list(acc2), "")
+        end
+      else do
+        let code = string_byte_at(s, i)
+        if is_unreserved(code) do scan(i + 1, start, acc)
+        else do
+          let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+          scan(i + 1, i + 1, Cons(percent_encode_byte(code), acc2))
+        end
+        end
+      end
       end
     end
-    go(chars, Nil)
+    scan(0, 0, Nil)
+  end
+
+  -- Shared byte-index scanner for percent-decoding. `start` marks the
+  -- beginning of the current un-escaped run; `acc` holds already-materialised
+  -- segments (newest first). The common case — no %XX escapes and (when
+  -- `plus_is_space` is false) no '+' — reaches the end with `acc` still Nil
+  -- and returns a single slice of the whole string, exactly like `encode`
+  -- above and `Json.scan_string`.
+  --
+  -- `plus_is_space` lets `decode_query` fold the "+" == space convention
+  -- into the same single pass instead of pre-processing the string with
+  -- string_replace_all before decoding it.
+  pfn decode_scan(s, len, i, start, acc, plus_is_space) do
+    if i >= len do
+      match acc do
+      Nil -> string_slice(s, start, i - start)
+      _ ->
+        let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+        string_join(rev_list(acc2), "")
+      end
+    else do
+      let c = string_byte_at(s, i)
+      if c == 37 do -- '%'
+        let hi = string_byte_at(s, i + 1)
+        let lo = string_byte_at(s, i + 2)
+        let h = hex_digit_val(hi)
+        let l = hex_digit_val(lo)
+        if h >= 0 && l >= 0 do
+          let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+          let byte_val = h * 16 + l
+          decode_scan(s, len, i + 3, i + 3, Cons(char_from_int(byte_val), acc2), plus_is_space)
+        else
+          decode_scan(s, len, i + 1, start, acc, plus_is_space)
+        end
+      else if plus_is_space && c == 43 do -- '+'
+        let acc2 = if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+        decode_scan(s, len, i + 1, i + 1, Cons(" ", acc2), plus_is_space)
+      else
+        decode_scan(s, len, i + 1, start, acc, plus_is_space)
+      end
+      end
+    end
+    end
   end
 
   doc """
-  Decode a percent-encoded URI component.
+  Percent-decode a URI component.
 
   %XX sequences are decoded to their byte values; + is left unchanged
   (use decode_query for form-encoded values where + means space).
@@ -182,30 +239,7 @@ mod Uri do
       Uri.decode("no-encoding")    -- "no-encoding"
   """
   fn decode(s) do
-    let chars = string_chars(s)
-    fn go(cs, acc) do
-      match cs do
-      Nil -> string_join(rev_list(acc), "")
-      Cons(c, rest) ->
-        if c == "%" do
-          match rest do
-          Cons(hi, Cons(lo, rest2)) ->
-            let h = hex_val(hi)
-            let l = hex_val(lo)
-            if h >= 0 && l >= 0 do
-              let byte_val = h * 16 + l
-              go(rest2, Cons(char_from_int(byte_val), acc))
-            else
-              go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
-            end
-          _ -> go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
-          end
-        else
-          go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
-        end
-      end
-    end
-    go(chars, Nil)
+    decode_scan(s, string_length(s), 0, 0, Nil, false)
   end
 
   doc """
@@ -249,7 +283,7 @@ mod Uri do
     else
       let pairs = string_split(s, "&")
       fn decode_plus(t) do
-        decode(string_replace_all(t, "+", "%20"))
+        decode_scan(t, string_length(t), 0, 0, Nil, true)
       end
       fn go(ps, acc) do
         match ps do
