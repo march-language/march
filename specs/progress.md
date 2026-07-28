@@ -1,5 +1,97 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, static capture-free closures)
+
+Materializing a top-level function as a first-class value — `let f = some_fn`,
+passing it as a callback, storing it in a list/tuple — allocated a fresh
+24-byte closure object (`march_alloc(i64 24)`) at **every** materialization,
+every time it executed, when the closure captured nothing. That object was
+never released via normal RC (it never escapes to anything that would free
+it), so repeatedly materializing the same function value leaked one
+allocation per materialization — unbounded growth in a loop.
+
+Fixed in codegen (`lib/tir/llvm_ctx.ml`'s new `intern_static_closure` +
+`static_clos` memo, consumed at both closure-materialization sites in
+`lib/tir/llvm_emit.ml`): a capture-free closure's contents are entirely
+compile-time constants (fixed code pointer, no per-instance captured
+environment), so it can be emitted once as an immortal `internal global`
+(`@<fn>$static_clo`, LLVM type `{i64,i32,i32,ptr}`, refcount pre-set to
+`MARCH_RC_IMMORTAL` = 1099511627776) instead of allocated per materialization.
+Ordinary RC inc/dec still execute against the global at call sites (e.g.
+`march_incrc_local` against `@<fn>$static_clo`) — they are *never-freeing*,
+not no-ops, since the refcount starts and stays at the immortal sentinel.
+Memoized by function name, so repeated materializations of the same function
+share one global and distinct functions get distinct globals (no collision).
+
+**Measured** (4,000,000 materializations of a named function value, compiled
+`--opt 2`):
+
+| | obj_allocs | peak RSS | wall |
+|---|---:|---:|---:|
+| Before | 4,000,000 | 125.4 MB | 0.09s |
+| After | 0 | 2.9 MB | 0.01s |
+| Control (direct call, no fn value) | 0 | 2.9 MB | 0.01s |
+
+Materializing a function value is now as cheap as calling it directly, and
+the leak is gone. **Gated off** for the REPL/JIT (`ctx.repl` — each REPL
+evaluation compiles and links a fresh module, so a global baked into one
+JIT'd module can't be safely shared or safely discarded across the REPL's
+incremental-compilation lifecycle) and hot-reload boundary functions
+(`ctx.hr_config` + `Hot_reload.is_reloadable`). This exclusion is defensive
+rather than a fix for a demonstrated staleness bug: the fresh-alloc fallback
+bakes the identical `@<fn>$clo_wrap` pointer into the closure it allocates,
+and `clo_wrap_define` (`lib/tir/llvm_calls.ml:180-190`) already emits a
+hardcoded direct `call @<fn>` that bypasses the versioned HCR dispatch table
+regardless of which path materializes the value — a pre-existing,
+already-documented HCR gap this change does not touch. The exclusion exists
+to keep this change strictly non-regressive for HCR, not to claim it fixes
+that gap.
+
+**Does not cover capturing closures** — a closure that captures a free
+variable differs per instance and cannot be a module-lifetime static
+object, so it still leaks one allocation per materialization (confirmed via
+the same `MARCH_STRING_STATS=1` methodology: 4,000,000 iterations reports
+`obj_allocs 4000000`, peak RSS 131.6 MB, against 2.9 MB / 0 allocs for the
+capture-free control). Filed as a new open item in `specs/todos.md` — it
+needs a genuine ownership fix in `lib/tir/perceus.ml`/`lib/tir/borrow.ml`,
+not a codegen change, and is deliberately out of scope here.
+
+**Benchmark controls:** `bench/list_ops.march` (the HOF/closure-heavy
+benchmark) and `bench/binary_trees.march` were run before/after (built from
+this commit and from its parent `fbea848b`), both orders, to control for
+this machine's documented ~25% first-position warmup penalty. Neither
+benchmark materializes a named top-level function as a first-class value
+(both use inline lambdas passed directly as arguments), so neither exercises
+this optimization's fast path, and neither showed a measurable difference:
+`list_ops` ran ~0.27s cold / ~0.08s warm regardless of before/after or
+ordering; `binary_trees` ran ~0.34-0.55s with RSS flat at ~6.3MB regardless
+of before/after or ordering. No runtime speedup is claimed from this change
+beyond the allocation/RSS elimination measured directly above — the honest
+headline is the leak fix, not a general speedup.
+
+Also found and verified during this work, independent of the static-closure
+change and predating it (bisected to `fbea848b`, the parent commit):
+materializing a **zero-arity** named top-level function as a first-class
+value and then invoking it through that value SIGSEGVs when compiled
+(`--opt 2`, exit 139) while printing the correct value interpreted. Reproduced
+directly on 2026-07-28. Filed as a new open item in `specs/todos.md`; full
+bisection detail in
+`.superpowers/sdd/2026-07-28-static-capture-free-closures/task-3-report.md`.
+
+**Test counts:** `run_compiler` 605, `run_eval` 256, `run_codegen` 501 (all
+`-e`, all exit 0). `run_stdlib -q` 780 (exit 0). `run_stdlib -e` (full,
+including Slow) 825 tests, 1 pre-existing failure —
+`adversarial-regressions` #39 (`MARCH_SANITIZE` sanitized-binary timeout),
+confirmed host-level and unrelated to this change: a trivial
+`clang -fsanitize=address` C program (`int main(void){return 0;}`) also
+hung on this machine when checked directly, matching the machine-wide ASAN
+hazard already on record in this file (2026-07-18 entry) rather than a
+March regression. No `.ml` files changed in this pass (docs only); these
+counts confirm the suite is unaffected by the doc updates and match the
+counts already verified in Task 3.
+
+---
+
 ## Current State (as of 2026-07-28, Yaml/Xml/Regex/Uri rewritten as byte-index scanners; Csv measured, left as-is)
 
 Continuation of the `Toml.parse` rewrite below: the same byte-index-scanner

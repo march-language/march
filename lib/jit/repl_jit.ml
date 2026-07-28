@@ -821,7 +821,7 @@ let precompile_stdlib ctx
         tir.March_tir.Tir.tm_fns in
       if stdlib_fns <> [] then begin
         let ir = March_tir.Llvm_emit.emit_fns_fragment
-          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns () in
+          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns ~repl:true () in
         let n = next_id ctx in
         let ll_path = Filename.concat ctx.tmp_dir
           (Printf.sprintf "stdlib_prelude_%d.ll" n) in
