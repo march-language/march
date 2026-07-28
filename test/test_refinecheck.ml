@@ -3052,6 +3052,51 @@ let float_suite =
               end\n"))
   ]
 
+(* ── Measure aliases: `List.length` IS the `len` measure ───────────────────
+   These use [has_refine_error_d] (desugared) because a qualified call is an
+   `EField` chain until desugar flattens it to a dotted `EVar` — which is what
+   the compiler feeds refine_check in production.
+
+   The load-bearing case is the CONTRADICTORY guard.  The "guard discharges"
+   case was already silent before the alias existed — because the obligation
+   was SKIPPED, which from outside is indistinguishable from proved.  Only a
+   guard that must FIRE proves the two symbols actually meet. *)
+let length_alias_suite =
+  [ gated "a List.length guard discharges a len obligation" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod L1 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a contradictory List.length guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod L2 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "an unguarded unknown list stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod L3 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+  fn main() : Int do go([1]) end
+end|}))
+  ]
+
 (* ── Obligation ledger ────────────────────────────────────────────────────
    The checker reports a violation only when a predicate can NEVER hold, so
    silence covers three very different outcomes.  These pin that every
@@ -3128,4 +3173,5 @@ let () =
       ("record-postcond-propagation", b2_suite);
       ("bool-refinements", bool_suite);
       ("float-refinements", float_suite);
+      ("length-alias", length_alias_suite);
       ("obligations", obligation_suite) ]

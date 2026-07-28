@@ -11,6 +11,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+
+- **A `List.length` guard now discharges a `len` refinement obligation.** The
+  refinement checker treats `List.length` as an alias of the `len` measure, so
+  an ordinary runtime guard — `if List.length(ys) > 0 do head(ys) else … end` —
+  *proves* the precondition of `fn head(xs : {List(Int) | len(_) > 0})` instead
+  of leaving it unprovable and silently skipped. A contradictory guard
+  (`if List.length(ys) == 0 do head(ys)`) is now reported as a violation.
+  Only the qualified spelling is aliased; a bare `length` is deliberately left
+  alone so a user function of that name is never mistaken for the list measure.
+
 ### Fixed
 
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process

@@ -415,6 +415,32 @@ let rec list_len (e : A.expr) : int option =
 let registered_measures : string list ref = ref []
 let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measures
 
+(* ── Measure aliases ───────────────────────────────────────────────────────
+   Runtime functions that ARE a measure under a different name.  Reflecting
+   `List.length(xs)` to the same SMT term as `len(xs)` is what lets an ordinary
+   runtime guard discharge a `len` obligation; without it the two are
+   unconnected symbols, the guard translates to nothing, and a guarded call is
+   SKIPPED rather than proved.
+
+   Only the QUALIFIED spelling is aliased.  A bare `length` would also catch a
+   user module's own unrelated `fn length(...)`, and an alias is a fact ADDED
+   to the assumption set that `discharge(¬goal)` proves against — so a wrong
+   alias makes violations easier to prove ON CORRECT CODE.  A missed proof is
+   always cheaper than a wrong fact.
+
+   `String.byte_size` is deliberately NOT here — see Task 5. *)
+let measure_alias (m : string) : string option =
+  match m with "List.length" -> Some "len" | _ -> None
+
+(* The measure name [m] denotes, following an alias.  Every dispatch site must
+   normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
+   the guard reflects to one symbol and the predicate to another and the two
+   never meet. *)
+let measure_name (m : string) : string =
+  match measure_alias m with Some m' -> m' | None -> m
+
+let is_measure_app (m : string) : bool = measure_alias m <> None || is_measure m
+
 (* Measures known to be non-negative (so `m(x) >= 0` is a sound axiom).  `len`
    always; a user measure when its body is syntactically non-negative. *)
 let measure_nonneg : string list ref = ref []
@@ -495,7 +521,7 @@ let ctor_of_tester (m : string) : string option =
 
 (* True iff the checker attaches meaning to [m] applied inside a predicate. *)
 let known_predicate_fn (m : string) : bool =
-  is_predicate_operator m || is_measure m || ctor_of_tester m <> None
+  is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
 
 (* measures we soundly axiomatize: name -> its argument ADT name. *)
 let axiom_measures : (string, string) Hashtbl.t = Hashtbl.create 16
@@ -1159,7 +1185,11 @@ let rec smt_of ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
   (* A measure application m(e): m(var) reflects to a consistent measure symbol;
      m(expr) is evaluated via resolve_measure_app (e.g. concrete_len for a list);
      len(list-literal) is computed concretely without needing resolve_measure_app. *)
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m ->
+  | A.EApp (A.EVar { A.txt = m0; _ }, [ a ], _) when is_measure_app m0 ->
+    (* One normalization point for BOTH sides: a path condition and a predicate
+       are translated by this same function, so aliasing here is what makes
+       `List.length(ys) > 0` and `len(_) > 0` land on the same SMT symbol. *)
+    let m = measure_name m0 in
     (match a with
      | A.EVar { A.txt = x; _ } -> resolve_measure m x
      | _ ->
@@ -1219,7 +1249,9 @@ let rec pred_str (e : A.expr) : string =
   | A.ELit (A.LitFloat f, _) ->
     let s = Printf.sprintf "%.12g" f in
     if String.exists (fun c -> c = '.' || c = 'e' || c = 'E') s then s else s ^ ".0"
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure m || ctor_of_tester m <> None ->
+  (* Rendering keeps the name AS WRITTEN — an aliased `List.length(_)` reads
+     back as `List.length(_)`, not as the `len` it was normalized to. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _) when is_measure_app m || ctor_of_tester m <> None ->
     m ^ "(" ^ pred_str a ^ ")"
   | A.ECon ({ A.txt = ctor; _ }, [], _) -> ctor
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
