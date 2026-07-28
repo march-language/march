@@ -2951,7 +2951,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
            here rather than miscompiling silently. *)
         assert false
     in
-    ("ptr", Llvm_ctx.intern_static_closure ctx tcon_name apply_sym)
+    ("ptr", Llvm_ctx.intern_static_closure ctx (llvm_name tcon_name) apply_sym)
 
   (* ── Heap allocation ───────────────────────────────────────────────── *)
   | Tir.EAlloc (Tir.TCon (ctor, alloc_params), args) ->

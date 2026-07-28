@@ -19,13 +19,18 @@ git log is authoritative for exact commits.
   named functions to lambda expressions: such a lambda was allocated fresh
   on every materialization and never freed, even though its contents never
   change. It is now backed by a single shared object, the same way a named
-  function value already is. Measured on a 4,000,000-iteration loop calling
-  `apply_it(fn x -> x * 2, i)`: allocations for the materialization step
-  went from 4,000,000 to 0 and peak memory from about 131.5 MB to about
-  3.0 MB, with identical program output before and after. Lambdas that
-  capture a variable from the enclosing scope are unaffected by this fix
-  and still leak — same open issue as the named-function capturing case
-  below, tracked in `specs/todos.md`.
+  function value already is. The fix is not limited to anonymous lambda
+  literals: any capture-free defunctionalized closure is covered, including
+  local named helpers (e.g. the `go` accumulators `defun.ml` lifts out of
+  `ELetRec`-bound local functions in stdlib code such as `List.map`), since
+  they are lowered through the exact same closure-struct shape. Measured on
+  a 4,000,000-iteration loop calling `apply_it(fn x -> x * 2, i)`:
+  allocations for the materialization step went from 4,000,000 to 0 and
+  peak memory from about 131.5 MB to about 3.0 MB, with identical program
+  output before and after. Lambdas that capture a variable from the
+  enclosing scope are unaffected by this fix and still leak — same open
+  issue as the named-function capturing case below, tracked in
+  `specs/todos.md`.
 
 - **A program that repeatedly passes a named function as a value no longer
   grows memory without bound.** Materializing a top-level function as a

@@ -27,6 +27,15 @@ the lifted apply function defunctionalization already produces has the
 `(clo_ptr, params…)` closure-call ABI, so the global's code-pointer field
 can point straight at it.
 
+**Scope is broader than "anonymous lambda expressions":** `defun.ml` lifts
+*every* `ELetRec`-bound local function through this same closure-struct
+path, so any capture-free defunctionalized closure is covered — including
+local named helpers, not just `fn ... -> ...` literals. Confirmed by
+compiling a `List.map` call and inspecting the emitted IR: the stdlib's
+recursive `go` accumulator (a local named helper) is capture-free and
+shows up as `@$Clo_go$<uid>$static_clo`, an immortal module-lifetime
+global, exactly like a user-written lambda would.
+
 **Gating** mirrors the named-function case for the REPL/JIT (`not
 ctx.repl`), but is *more conservative* for hot-reload: the named-function
 path resolves a March-level dotted name via `Hot_reload.module_of_name` to

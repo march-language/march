@@ -11352,7 +11352,12 @@ let test_capturing_lambda_still_allocates () =
      size of a capture-free closure (header + fn_ptr only) — confirmed
      against real compiled output for `fn x -> x * k` (one capture). *)
   Alcotest.(check bool) "capturing lambda still allocates per materialization"
-    true (Test_helpers.contains "march_alloc(i64 32)" ir)
+    true (Test_helpers.contains "march_alloc(i64 32)" ir);
+  (* The primary correctness risk of this optimization is a shared captured
+     environment across instances — this negative assertion is the one that
+     actually names that risk, not just the allocation-count positive above. *)
+  Alcotest.(check bool) "capturing lambda gets no static global"
+    false (Test_helpers.contains "$static_clo" ir)
 
 (** REPL fragments are separate modules; a per-fragment static global would
     hand out different pointers for the same fn across fragments, and can
@@ -11431,6 +11436,74 @@ let test_static_closure_not_emitted_in_fns_fragment_repl_mode () =
     false (Test_helpers.contains "$static_clo" ir);
   Alcotest.(check bool) "fns_fragment in repl mode still materializes via fresh march_alloc(24)"
     true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** Lambda-bodied twin of [test_static_closure_not_emitted_in_repl_mode]. The
+    two existing REPL-exclusion tests above both materialize a top-level
+    NAMED function, which exercises [static_closure_ok] via the named-fn arm
+    in [emit_atom] — not the newer [EAlloc (TCon (tcon_name, []), [fn_ptr_atom])]
+    arm added for capture-free lambdas. Nothing previously pinned
+    `not ctx.repl` for that arm; this drives the exact same capture-free
+    closure-struct shape as [test_capture_free_lambda_uses_static_global]
+    through [emit_repl_expr] (which builds its ctx with [~repl:true]) and
+    asserts the REPL fallback (fresh [march_alloc(i64 24)], no
+    [$static_clo]) still holds. *)
+let test_capture_free_lambda_not_emitted_in_repl_mode () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let body = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let ir =
+    March_tir.Llvm_emit.emit_repl_expr
+      ~n:0 ~ret_ty:clo_ty ~prev_slots:[] ~fns:[] ~types:[] body
+  in
+  Alcotest.(check bool) "REPL mode still materializes lambda via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir);
+  Alcotest.(check bool) "REPL mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir)
+
+(** Lambda-bodied twin of [test_static_closure_not_emitted_in_fns_fragment_repl_mode].
+    Same rationale as the twin above: the fns_fragment REPL entry point
+    (the exact one [precompile_stdlib] calls, see [lib/jit/repl_jit.ml])
+    needs its own lambda-path coverage, not just the named-fn one. *)
+let test_capture_free_lambda_not_emitted_in_fns_fragment_repl_mode () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let alloc = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let holder =
+    { March_tir.Tir.fn_name = "holder"; fn_params = [];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir =
+    March_tir.Llvm_emit.emit_fns_fragment
+      ~types:[] ~fns:[holder] ~repl:true ()
+  in
+  Alcotest.(check bool) "fns_fragment in repl mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "fns_fragment in repl mode still materializes lambda via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** [static_closure_ok] mirroring for hot-reload is conditional on the whole
+    [ctx.hr_config], not on resolving a March-level dotted name (the lambda
+    arm's [tcon_name] is a synthetic "$Clo_..." string, not always
+    unambiguously mappable back to an owning module — see the comment above
+    the lambda [EAlloc] arm in [lib/tir/llvm_emit.ml]). This drives
+    [emit_module ~hot_reload:(Some cfg)] over a program containing a
+    capture-free lambda and asserts no [$static_clo] global is emitted. *)
+let test_capture_free_lambda_not_emitted_under_hot_reload () =
+  let open March_tir.Tir in
+  let clo_ty = TCon ("$Clo_lam$1", []) in
+  let alloc = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let main : fn_def =
+    { fn_name = "Blog.main"; fn_params = []; fn_ret_ty = clo_ty;
+      fn_kind = FnNormal; fn_body = alloc }
+  in
+  let m : tir_module =
+    { tm_name = "Blog"; tm_fns = [main]; tm_types = [];
+      tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let ir = March_tir.Llvm_emit.emit_module
+             ~hot_reload:(Some (March_tir.Hot_reload.default_config "Blog")) m in
+  Alcotest.(check bool) "hot-reload mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir)
 
 (* ── Robustness: an unreadable sibling directory must not crash the compiler ──
    The compiler auto-discovers sibling `.march` modules in the entry file's own
@@ -12392,6 +12465,12 @@ let codegen_suites =
             test_static_closure_not_emitted_in_repl_mode;
           Alcotest.test_case "static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
             test_static_closure_not_emitted_in_fns_fragment_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted in REPL mode" `Quick
+            test_capture_free_lambda_not_emitted_in_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
+            test_capture_free_lambda_not_emitted_in_fns_fragment_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted under hot-reload" `Quick
+            test_capture_free_lambda_not_emitted_under_hot_reload;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
