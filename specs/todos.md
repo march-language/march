@@ -1,8 +1,40 @@
 # March — TODO List
 
-**Last updated:** 2026-07-27 (deep drop for containers released without destructuring; see Done.)
+**Last updated:** 2026-07-27 (`Json.parse` signed exponents; see below.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## `Json.parse` rejected signed exponents (FIXED 2026-07-27)
+
+**Symptom.** `Json.parse("1e-5")` returned `Err("invalid number: 1e")`. Same for
+`2.5E+10` and `1e-308` — every JSON number with a signed exponent.
+
+**Cause.** `json_is_num_char` in `stdlib/json.march` accepted only digits, `.`,
+`e`, `E` — never `+`/`-`. `parse_number` stripped one leading `-` before the
+scan, so a sign was only handled in the mantissa position. The scan stopped at
+the `-` in `1e-5` and `string_to_float("1e")` returned `None`. Long-standing;
+the character set predates the byte-index scanner work.
+
+**Fix.** Replaced the predicate + `json_collect_num` with an RFC 8259 grammar
+scanner (`json_scan_digits`/`_int`/`_frac`/`_exp`) that validates
+`["-"] int [frac] [exp]` during the scan. `+`/`-` accepted only straight after
+`e`/`E`, so `1-2` still scans as `1` then errors on the trailing `-`.
+Validating shape here rather than deferring to `string_to_float` (strtod /
+`float_of_string`) also closes forms JSON does not allow: `1.` and `01` parsed
+before and are now rejected, as are `+1`, `Infinity`, `0x10`, `.5`.
+
+**Also fixed alongside.** `test/stdlib/test_json.march` was dead — wired into no
+runner, and no longer typechecking (bare `Null`/`Bool`/`Str`/`Array` went
+ambiguous once `Msgpack`/`IOList` landed the same constructor names).
+Constructors qualified, file registered in `test/test_stdlib_march.ml` with
+`json.march` loaded before `iolist`/`msgpack` so bare-constructor precedence is
+unchanged. 48 tests now run in CI (26 new).
+
+**Open follow-up.** A test .march file can silently drop out of the build like
+this again — nothing checks that every `test/stdlib/test_*.march` is registered
+in `test_stdlib_march.ml`. A directory-vs-registry assertion would catch it.
 
 ---
 

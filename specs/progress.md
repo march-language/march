@@ -1,5 +1,40 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, Json.parse RFC 8259 number scanner)
+
+`Json.parse` rejected every JSON number with a signed exponent — `1e-5`,
+`2.5E+10`, `1e-308` all failed with `invalid number: 1e`. The number-body
+predicate (`json_is_num_char` in `stdlib/json.march`) accepted only digits,
+`.`, `e`, `E`; `parse_number` stripped a single leading `-` before the scan, so
+a sign was only ever handled in the mantissa position, never after an exponent
+marker. The scan stopped at the `-`, sliced `"1e"`, and `string_to_float("1e")`
+returned `None`. Long-standing — the character set predates the byte-index
+scanner work and was preserved verbatim through it.
+
+Replaced the character-set predicate + `json_collect_num` accumulator with a
+scanner that validates RFC 8259's grammar (`["-"] int [frac] [exp]`) as it
+goes: `json_scan_digits` / `json_scan_int` / `json_scan_frac` / `json_scan_exp`.
+`+`/`-` are accepted *only* immediately after `e`/`E` — blanket-accepting `-`
+in the number body would make `1-2` scan as the single token `"1-2"` and change
+the error for malformed input.
+
+Validating shape during the scan also stops `Json.parse` inheriting whatever
+`string_to_float` happens to admit. That builtin is `strtod` (native) /
+`float_of_string` (interpreter) backed, so deferring to it let non-JSON forms
+through: `1.` and `01` both parsed before this change. Now rejected, along with
+`+1`, `Infinity`, `0x10`, `.5`, `1e`, `1e-` (several of those were already
+rejected upstream in `parse_value`, and still are). Verified identical
+interpreted and compiled (`--opt 2`) over a 22-case corpus.
+
+`test/stdlib/test_json.march` had rotted out of the build entirely: it was
+referenced by no runner, and no longer typechecked against the current stdlib
+(bare `Null`/`Bool`/`Str`/`Array` became ambiguous once `Msgpack` and `IOList`
+landed the same constructor names). Constructors qualified as `Json.*`, and the
+file wired into `test/test_stdlib_march.ml` — `json.march` is loaded before
+`iolist.march`/`msgpack.march` so their same-named constructors keep winning
+bare lookups exactly as before. 48 tests, previously running nowhere, now run
+in CI; 26 of them are new, covering the exponent forms and the RFC shape rules.
+
 ## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
 
 Extended `lib/tir/native_map_inline.ml` (the compiler pass behind

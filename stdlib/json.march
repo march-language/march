@@ -115,37 +115,113 @@ mod Json do
     parse_string_go(chars, Nil)
   end
 
-  -- Top-level predicate for JSON number characters.
-  -- Extracted to avoid capturing char_is_digit as a free variable in a closure.
-  pfn json_is_num_char(c) do
-    char_is_digit(c) || c == "." || c == "e" || c == "E"
+  -- Render the number characters scanned so far (they are held reversed)
+  -- for use in error messages.
+  pfn json_num_so_far(acc) do
+    string_join(rev(acc, Nil), "")
   end
 
-  -- Top-level accumulator loop for collecting number characters.
-  pfn json_collect_num(cs, acc) do
+  -- Consume a run of ASCII digits onto the reversed accumulator `acc`.
+  -- Returns (acc', remaining, count) where count is the number consumed here.
+  pfn json_scan_digits(cs, acc, n) do
     match cs do
-    Nil -> (rev(acc, Nil), Nil)
+    Nil -> (acc, Nil, n)
     Cons(c, rest) -> do
-      if json_is_num_char(c) do json_collect_num(rest, Cons(c, acc))
-      else (rev(acc, Nil), cs) end
+      if char_is_digit(c) do json_scan_digits(rest, Cons(c, acc), n + 1)
+      else (acc, cs, n) end
     end
     end
   end
 
-  -- Parse a JSON number.
+  -- int = "0" / (digit1-9 *DIGIT).  A leading zero may not be followed by
+  -- another digit, so "01" is rejected.
+  pfn json_scan_int(cs, acc) do
+    match cs do
+    Nil -> Err("invalid number: " ++ json_num_so_far(acc))
+    Cons(c, rest) -> do
+      if c == "0" do
+        match rest do
+        Cons(d, _) ->
+          if char_is_digit(d) do
+            Err("invalid number: leading zeros are not allowed in "
+                ++ json_num_so_far(Cons(d, Cons(c, acc))))
+          else Ok((Cons(c, acc), rest)) end
+        Nil -> Ok((Cons(c, acc), Nil))
+        end
+      else if char_is_digit(c) do
+        let (acc1, cs1, _) = json_scan_digits(rest, Cons(c, acc), 1)
+        Ok((acc1, cs1))
+      else Err("invalid number: " ++ json_num_so_far(Cons(c, acc))) end end
+    end
+    end
+  end
+
+  -- frac = "." 1*DIGIT.  Absent is fine; a "." with no digits after it is not.
+  pfn json_scan_frac(cs, acc) do
+    match cs do
+    Nil -> Ok((acc, Nil))
+    Cons(c, rest) -> do
+      if c == "." do
+        let (acc1, cs1, n) = json_scan_digits(rest, Cons(c, acc), 0)
+        if n == 0 do Err("invalid number: " ++ json_num_so_far(acc1))
+        else Ok((acc1, cs1)) end
+      else Ok((acc, cs)) end
+    end
+    end
+  end
+
+  -- exp = ("e" / "E") ["+" / "-"] 1*DIGIT.  The sign is accepted ONLY here,
+  -- immediately after the exponent marker — accepting "+"/"-" anywhere in the
+  -- number body would make "1-2" scan as the single token "1-2".
+  pfn json_scan_exp(cs, acc) do
+    match cs do
+    Nil -> Ok((acc, Nil))
+    Cons(c, rest) -> do
+      if c == "e" || c == "E" do
+        let (acc0, cs0) =
+          match rest do
+          Cons(s, rest2) ->
+            if s == "+" || s == "-" do (Cons(s, Cons(c, acc)), rest2)
+            else (Cons(c, acc), rest) end
+          Nil -> (Cons(c, acc), Nil)
+          end
+        let (acc1, cs1, n) = json_scan_digits(cs0, acc0, 0)
+        if n == 0 do Err("invalid number: " ++ json_num_so_far(acc1))
+        else Ok((acc1, cs1)) end
+      else Ok((acc, cs)) end
+    end
+    end
+  end
+
+  -- Parse a JSON number per RFC 8259:
+  --   number = ["-"] int [frac] [exp]
+  -- The shape is validated during the scan rather than deferred to
+  -- string_to_float: that builtin is strtod/float_of_string-backed and would
+  -- otherwise admit forms JSON does not ("+1", "Infinity", "0x10", "1.").
   -- chars starts at '-' or a digit.
   pfn parse_number(chars) do
-    -- Handle optional leading minus
-    let (sign, chars2) =
+    let (acc0, cs0) =
       match chars do
-      Cons(c, rest) -> if c == "-" do ("-", rest) else ("", chars) end
-      Nil -> ("", Nil)
+      Cons(c, rest) -> if c == "-" do (Cons("-", Nil), rest) else (Nil, chars) end
+      Nil -> (Nil, Nil)
       end
-    let (num_chars, remaining) = json_collect_num(chars2, Nil)
-    let num_str = sign ++ string_join(num_chars, "")
-    match string_to_float(num_str) do
-    None -> Err("invalid number: " ++ num_str)
-    Some(f) -> Ok((Number(f), remaining))
+    match json_scan_int(cs0, acc0) do
+    Err(e) -> Err(e)
+    Ok((acc1, cs1)) ->
+      match json_scan_frac(cs1, acc1) do
+      Err(e) -> Err(e)
+      Ok((acc2, cs2)) ->
+        match json_scan_exp(cs2, acc2) do
+        Err(e) -> Err(e)
+        Ok((acc3, cs3)) -> do
+          let num_str = json_num_so_far(acc3)
+          match string_to_float(num_str) do
+          None -> Err("invalid number: " ++ num_str)
+          Some(f) -> Ok((Number(f), cs3))
+          end
+        end
+        end
+      end
     end
   end
 
