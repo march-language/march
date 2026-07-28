@@ -479,9 +479,14 @@ let string_byte_size_is_stdlib : bool ref = ref false
 (* And for the BARE `string_byte_length`.  This one is not a stdlib March
    function to be identified — it is a COMPILER BUILTIN (typecheck's builtin
    table; lowered to the `march_string_byte_length` C symbol), so there is no
-   "the stdlib's own definition" to allow.  Any definition or import of that
-   name in scope is therefore necessarily a competing one, and withdraws the
-   alias.  Default suppressing, like the two above. *)
+   "the stdlib's own definition" to allow: every binding of that name is a
+   competing one, and withdraws the alias.
+
+   "Every binding" means the ones [bare_builtin_undefined] actually scans —
+   declaration forms plus expression binders (`let`, lambda/`fn` parameters,
+   local `fn`, match binders) throughout every `DFn` clause.  That is exactly
+   the region the checker visits, so it is complete where it needs to be; see
+   that function for the argument.  Default suppressing, like the two above. *)
 let string_byte_length_is_builtin : bool ref = ref false
 
 (* The source files the CALLER loaded as the standard library, supplied to
@@ -2407,9 +2412,16 @@ let check_call ~root errctx ~span ~(callee : string)
 
        LENGTH IS IN BYTES.  March's `string_length` builtin is `String.length`
        in the interpreter and an alias for `march_string_byte_length` in native
-       codegen — the language has no codepoint-length primitive at all, so bytes
-       is not a conservative guess, it is the definition.  OCaml's
-       [String.length] over the already-unescaped literal is exactly that. *)
+       codegen, so bytes is not a conservative guess, it is what that builtin
+       means.  OCaml's [String.length] over the already-unescaped literal is
+       exactly that.
+
+       March DOES have a codepoint-length primitive — `String.codepoint_count`,
+       which returns 1 for "é" where every byte-length spelling returns 2.  It
+       is simply not what `$strlen` denotes, and must never be aliased to it;
+       see [measure_alias].  (An earlier revision of this comment claimed the
+       language had no such primitive.  It does, and reasoning from that claim
+       is how a codepoint count nearly got equated with a byte count.) *)
     let str_lit_const (s : string) : Smt.term option =
       if not (string_len_available ()) then None
       else
@@ -4317,24 +4329,85 @@ let list_length_defs_ok (decls : A.decl list) : bool =
 let string_byte_size_defs_ok (decls : A.decl list) : bool =
   stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" decls
 
+(* Does any binding construct inside [e] bind [name]?  BINDER positions only —
+   an ordinary `string_byte_length(t)` CALL mentions the name without binding
+   it, so [expr_mentions] (which counts every occurrence) is the wrong tool
+   here: it would report the very uses this alias exists to serve.
+
+   [iter_all] supplies the structure-agnostic descent, so a new expression form
+   is covered as soon as it appears in [children]; this match only has to name
+   the forms that BIND. *)
+let expr_binds_name (name : string) (e : A.expr) : bool =
+  let found = ref false in
+  let is n = n = name in
+  let param (p : A.param) = is p.A.param_name.A.txt in
+  iter_all
+    (fun e ->
+      let here =
+        match e with
+        | A.ELam (ps, _, _) -> List.exists param ps
+        | A.ELetFn (n, ps, _, _, _) -> is n.A.txt || List.exists param ps
+        | A.ELet (b, _) -> List.exists is (pat_binders b.A.bind_pat)
+        | A.ELetQ (p, _, _, _) -> List.exists is (pat_binders p)
+        | A.EMatch (_, brs, _) ->
+          List.exists
+            (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
+            brs
+        | _ -> false
+      in
+      if here then found := true)
+    e;
+  !found
+
 (* Is the BARE name [name] still the compiler builtin?  There is no stdlib
    March definition of `string_byte_length` to identify (it is an intrinsic),
    so unlike [stdlib_member_defs_ok] there is no allow-because-stdlib case:
-   ANY definition or import of the name is a competing one.
+   any binding of the name is a competing one.
 
-   Deliberately coarse — it does not ask whether the definition is actually in
+   Deliberately coarse — it does not ask whether the binding is actually in
    scope at the call, because the errors are asymmetric (over-suppress = a lost
    proof; under-suppress = a FALSE POSITIVE) and the precise answer needs a
    lexical resolver this pass does not have here.  A glob `use X.*` (or an
    `except:` list that does not exclude the name) can import an arbitrary
-   `string_byte_length`, so both count as taking the name. *)
+   `string_byte_length`, so both count as taking it.
+
+   WHAT IT SCANS, and why that is enough.  Declaration forms alone are NOT:
+   a `let string_byte_length = fn s -> 99` (or a parameter of that name) also
+   shadows the builtin, and missing it under-suppressed — a demonstrated false
+   positive on correct code, since the shadowed body makes the `== 0` branch
+   dead.  So this also walks expression binders, via [expr_binds_name], over
+   every `DFn` clause: its parameters, its guard, and its body.
+
+   That set is exactly [visit_decls]'s: the checker reaches a call site only
+   through `DFn` bodies nested in `DMod`s, and never enters a `DTest`,
+   `DImpl`, `DActor`, `DApp` or `DLet` body at all.  So a binding the scan
+   cannot see also sits somewhere no obligation is ever raised, and cannot
+   produce the false positive this gate exists to prevent.  If [visit_decls]
+   ever grows a decl form, this must grow the same one. *)
 let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
   let taken = ref false in
   let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
   let rec go ds =
     List.iter
       (function
-        | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> taken := true
+        | A.DFn (fd, _) ->
+          if fd.A.fn_name.A.txt = name then taken := true;
+          List.iter
+            (fun (c : A.fn_clause) ->
+              if List.exists (fun b -> b = name) (List.concat_map fnparam_binders c.A.fc_params)
+              then taken := true;
+              (* A default-value expression is a binder site too (it can carry a
+                 lambda), and [fc_params] holds it outside the body. *)
+              List.iter
+                (function
+                  | A.FPDefault (_, d) -> if expr_binds_name name d then taken := true
+                  | A.FPNamed _ | A.FPPat _ -> ())
+                c.A.fc_params;
+              (match c.A.fc_guard with
+               | Some g -> if expr_binds_name name g then taken := true
+               | None -> ());
+              if expr_binds_name name c.A.fc_body then taken := true)
+            fd.A.fn_clauses
         | A.DMod (_, _, ds, _) -> go ds
         | A.DAlias (a, _) when a.A.alias_name.A.txt = name -> taken := true
         | A.DUse (u, _) ->

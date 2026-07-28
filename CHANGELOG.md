@@ -42,8 +42,9 @@ git log is authoritative for exact commits.
   ambiguously-named `string_length`. The same shadowing rules apply: the alias is
   withdrawn for the whole module if a program defines its own `String.byte_size`
   (unless it is the standard library's own, by the identity above), rebinds
-  `String` via `alias`/`use`, or defines or imports a `string_byte_length` of its
-  own. Also fixes a related gap: a guard mentioning a string length in a *path
+  `String` via `alias`/`use`, or binds the name `string_byte_length` itself —
+  whether as a declaration, an import, a `let`, or a parameter. Also fixes a
+  related gap: a guard mentioning a string length in a *path
   condition* reflected to a symbol unrelated to the one the contract used, so the
   two could never meet.
 

@@ -3344,6 +3344,58 @@ mod QB do
     if string_byte_length(t) == 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
+end|}));
+
+    (* ── Expression-level shadowing ────────────────────────────────────────
+       A `let` binder shadows the builtin just as a declaration does, and the
+       first cut of the gate scanned declaration forms only.  The body here
+       evaluates to 99, so the `== 0` branch is DEAD, `slug` is never called,
+       and the program cannot violate anything — reporting one was a
+       demonstrated FALSE POSITIVE on correct code.
+
+       Load-bearing as a PAIR with case 2 above, which uses the genuine builtin
+       and must still FIRE: together they separate "the gate sees local
+       binders" from "the gate suppressed the feature into silence". *)
+    gated "a let-bound string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RS do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    let string_byte_length = fn s -> 99
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Same hole, reached through a PARAMETER rather than a `let`. *)
+    gated "a parameter named string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RSP do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String, string_byte_length : (String) -> Int) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a", fn s -> 99) end
+end|}));
+
+    (* A lambda parameter, i.e. a binder found only by descending INTO an
+       expression — the case a declaration-form scan cannot reach at all. *)
+    gated "a lambda parameter named string_byte_length withdraws the bare alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod RSL do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    let f = fn string_byte_length -> 99
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
 end|}))
   ]
 
