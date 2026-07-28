@@ -429,8 +429,23 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
    always cheaper than a wrong fact.
 
    `String.byte_size` is deliberately NOT here — see Task 5. *)
+
+(* ── The shadowing gate ────────────────────────────────────────────────────
+   The alias keys on a SPELLING, and March lets a program define its own
+   `List.length`, which then wins at runtime.  Aliasing that to `len` attaches
+   the list-length meaning to a function that is not the list's length: the
+   wrong fact enters the assumption set `discharge(¬goal)` proves against, and
+   a violation becomes provable on code that cannot violate anything.  This is
+   the same hazard [string_len_available] already guards for bare `len` — the
+   moment the name is taken, the built-in meaning is withdrawn.
+
+   Set once per [check_module] by [scan_list_length_defs].  The default is the
+   SUPPRESSING one: a path that forgets to set it loses a proof rather than
+   gains a wrong fact. *)
+let list_length_is_stdlib : bool ref = ref false
+
 let measure_alias (m : string) : string option =
-  match m with "List.length" -> Some "len" | _ -> None
+  match m with "List.length" when !list_length_is_stdlib -> Some "len" | _ -> None
 
 (* The measure name [m] denotes, following an alias.  Every dispatch site must
    normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
@@ -4156,6 +4171,65 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
       | _ -> [])
     decls
 
+(* Decide whether `List.length` in THIS compilation unit is the stdlib list
+   length — the only reading under which aliasing it to `len` is a true fact.
+   See [list_length_is_stdlib].
+
+   The gate is deliberately COARSE.  A precise answer needs the lexical
+   [resolve_call] resolver, which [smt_of] does not have in scope; and the
+   asymmetry of the two errors is total — over-suppressing costs a missed
+   proof (silence, the status quo ante), under-suppressing costs a FALSE
+   POSITIVE on correct code.  So anything that even looks like a competing
+   `List.length` withdraws the alias for the whole module.
+
+   It cannot key on the module PATH.  bin/main.ml prepends the whole stdlib —
+   including `mod List` — into every module it checks, so "reject any `mod
+   List`" would disable the feature in production.  And the outer `mod Q` is
+   the [module_] record rather than a decl, so the reviewer's nested repro
+   lands at path `List.length` too, exactly like the stdlib's: the two are
+   indistinguishable by name alone.
+
+   What separates them is the SOURCE FILE the definition came from.  A
+   definition counts as the real list length only when its span points at the
+   stdlib's own `stdlib/list.march`; every other `List.length` in the unit —
+   a user's, or one from a string-parsed test fixture — withdraws the alias.
+
+     - `mod Q do mod List do fn length … end end`  -> non-stdlib span -> suppress
+     - a user file that itself defines `mod List`  -> non-stdlib span -> suppress
+     - the stdlib's own, alone                     -> stdlib span     -> allow
+     - no `List` module at all (the unit tests)    -> no defs         -> allow
+
+   The path test is a heuristic, and it fails SAFE: an unrecognised stdlib
+   layout suppresses the alias and costs a proof, never a false fact.
+
+   `alias Foo as List` and `use Some.List` can also make the spelling denote
+   someone else's function, so either withdraws the alias too. *)
+let is_stdlib_list_file (f : string) : bool =
+  Filename.basename f = "list.march"
+  && Filename.basename (Filename.dirname f) = "stdlib"
+
+let list_length_defs_ok (decls : A.decl list) : bool =
+  let foreign = ref false in
+  let rebound = ref false in
+  let rec go in_list ds =
+    List.iter
+      (function
+        | A.DFn (fd, sp) when in_list && fd.A.fn_name.A.txt = "length" ->
+          if not (is_stdlib_list_file sp.A.file) then foreign := true
+        | A.DMod (name, _, ds, _) -> go (name.A.txt = "List") ds
+        | A.DAlias (a, _) when a.A.alias_name.A.txt = "List" -> rebound := true
+        | A.DUse (u, _) ->
+          (* `use X.List` (importing the module itself) rebinds the bare
+             segment `List` to whatever module that path names. *)
+          (match u.A.use_sel, List.rev u.A.use_path with
+           | A.UseSingle, last :: _ :: _ when last.A.txt = "List" -> rebound := true
+           | _ -> ())
+        | _ -> ())
+      ds
+  in
+  go false decls;
+  (not !foreign) && not !rebound
+
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
    gate exists to keep those axioms sound, so with axioms off it has no purpose).
@@ -4177,6 +4251,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
      compilation in one process (the test binary today, an LSP session
      tomorrow) and a report would describe every module ever checked. *)
   Obligation.reset ();
+  list_length_is_stdlib := list_length_defs_ok m.A.mod_decls;
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

@@ -3094,6 +3094,30 @@ mod L3 do
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
   fn go(ys : List(Int)) : Int do head(ys) end
   fn main() : Int do go([1]) end
+end|}));
+
+    (* The alias keys on a SPELLING, and a program may define its own
+       `List.length` — which wins at runtime.  Here it is constantly 99, so the
+       `== 0` branch is DEAD and `head` is never called; the program cannot
+       violate anything.  Aliasing regardless made the checker report a
+       violation on correct code — a wrong fact in the assumption set makes
+       `discharge(¬goal)` succeed.  Silence here is the whole point, so it is
+       load-bearing that the contradictory-guard case above still FIRES: that
+       pair is what separates "the gate works" from "the gate killed the
+       feature". *)
+    gated "a user-defined List.length is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod Q do
+  mod List do
+    fn length(xs : List(Int)) : Int do 99 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
 end|}))
   ]
 
