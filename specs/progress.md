@@ -77,6 +77,67 @@ capturing one in the same function, confirming the discriminator separates
 the two cases correctly at runtime.
 
 ---
+## Current State (as of 2026-07-28, zero-arg function-value SIGSEGV fixed)
+
+**A zero-arg top-level function materialized as a first-class value, then
+invoked through that value, now rejects at `--check` instead of crashing
+compiled `--opt 2` (exit 139).** Filed the same day as an open item during
+the static-closure work below (`specs/todos.md`):
+
+```march
+mod Main do
+  fn answer() : Int do 42 end
+  fn main() : () do
+    let zf = answer
+    println(int_to_string(zf()))
+  end
+end
+```
+
+**Root cause:** typechecker gap, not codegen — codegen faithfully compiles
+what the typechecker says. March's zero-param T-Abs convention collapses a
+`fn`'s type to its bare return type (no `TArrow`), so `answer` referenced
+bare is genuinely typed `Int`; `zf()` — calling a plain non-arrow value —
+was silently accepted by `infer_app`'s `| [], t -> t` base case (needed so a
+genuine zero-arg `fn()` call still typechecks). This is the exact hole the
+`root_cap()` fix (2026-07-22, below) identified but deliberately left open
+for the general local-value case, pending a way to distinguish "a disguised
+zero-arg fn alias" from "a genuine plain value" without false-positiving on
+legitimate code.
+
+**Fix (`lib/typecheck/typecheck.ml`):** rather than a negative "not a known
+function" signal (tried first — `env.fn_arities`'s absence — and found
+unsafe: a bulk `import Mod` clears `fn_arities` entries via `bind_var`'s
+existing shadow discipline, so at multi-file scale one module's `import`
+wiped a shared fn's registration for every module checked afterward, see the
+`specs/todos.md` entry for the reproduction), the fix adds a new POSITIVE,
+narrowly-scoped `env.plain_let_names : StringSet.t`, populated at exactly one
+site — a simple, non-linear `let name = expr` binding (`Ast.PatVar`, in the
+`Ast.ELet` case of `infer_block`) — excluding an RHS that is itself a lambda
+literal (`let g = fn -> body`, which collapses to its body type under plain
+inference the same way a zero-arg `fn` does, and is real, tested, legitimate
+behavior — `test/native/unit_callback_zero_arg.march`). `Ast.EApp`'s handler
+rejects a zero-arg call `f()` when `f`'s name is in `plain_let_names` and its
+resolved type is concretely non-arrow. Local `fn ... end` (`Ast.ELetFn`)
+bindings are now also registered in `fn_arities` (previously top-level-only),
+so aliasing one through a plain `let` is caught too, while calling it
+directly (including from a sibling local fn defined afterward) still
+typechecks. Qualified (`Mod.member()`) and bare builtin (`pmap_threshold()`)
+calls are unaffected since they never flow through `Ast.ELet`.
+
+Fixing this also exposed (not introduced) a pre-existing, unrelated parser
+glomming ambiguity in one test fixture: a bare local var immediately followed
+on the next line by a `()`-led expression parses as a call on that var
+(documented in `specs/lang` parser notes) — `test_srec_pingpong_loop_typechecks`
+had been silently relying on this glomming interpretation "succeeding" (returning
+a value that was simply discarded) rather than actually running two separate
+statements; adjusted to avoid the ambiguous shape.
+
+7 new/updated tests in `test/test_compiler.ml`'s `typecheck` group (the
+pre-existing `let x = 5; x()` "known gap" pin test is now inverted to assert
+the error). Full suite green: compiler 611/611, eval 256/256, codegen
+502/502 (LLVM IR validity gate clean), stdlib (quick) 780/780;
+`scripts/check-docs.sh` clean.
 
 ## Current State (as of 2026-07-28, static capture-free closures)
 
