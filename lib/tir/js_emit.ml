@@ -590,6 +590,7 @@ and emit_val_impl ctx expr =
           | "string_split" | "string_split_first" | "string_replace"
           | "string_replace_all" | "string_repeat" | "string_pad_left"
           | "string_pad_right" | "string_index_of" | "string_index_of_from"
+          | "string_byte_at"
           | "string_last_index_of"
           | "char_from_int" | "byte_to_char" | "char_to_int"
           | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace"
@@ -842,14 +843,17 @@ and emit_stmts_impl ctx expr =
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
   | Tir.EFree _ -> ()
 
-  (* EReuse in terminal position: Perceus reuses old's slot — in JS emit a fresh object *)
+  (* EReuse in terminal position: Perceus reuses old's slot — in JS emit a fresh
+     object. Shares emit_tagged_alloc with the value-position forms so the
+     closure apply-slot rule cannot diverge here either. No fixture currently
+     reaches this arm with a $Clo tag, so this is guarding the shape rather than
+     fixing an observed miscompile — but a divergent copy of this emission is
+     exactly what produced the EReuse apply-slot bug. *)
   | Tir.EReuse (_, ty, args) ->
-    let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
     emit_indent ctx;
-    emit ctx (Printf.sprintf "return { $: %S" tag);
-    List.iteri (fun i a ->
-      emit ctx (Printf.sprintf ", _%d: " i); emit_atom ctx a) args;
-    emit ctx " };\n"
+    emit ctx "return ";
+    emit_tagged_alloc ctx ty args;
+    emit ctx ";\n"
 
   | e ->
     emit_indent ctx;

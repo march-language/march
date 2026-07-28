@@ -1994,6 +1994,7 @@ let builtin_bindings : (string * scheme) list =
     ("string_pad_left",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_pad_right",    Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_byte_length",  Mono (TArrow (t_string, t_int)));
+    ("string_byte_at",      Mono (TArrow (t_string, TArrow (t_int, t_int))));
     ("string_split_first",   Mono (TArrow (t_string, TArrow (t_string, t_option (TTuple [t_string; t_string])))));
     ("string_grapheme_count",Mono (TArrow (t_string, t_int)));
     (* Char primitives — in March, a "char" is a single-char String *)

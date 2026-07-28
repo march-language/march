@@ -166,6 +166,7 @@ int64_t march_poly_eq(void *a, void *b);
 int64_t march_poly_compare(void *a, void *b);
 /* Extended string builtins used by the compiled stdlib. */
 int64_t march_string_byte_length(void *s);
+int64_t march_string_byte_at(void *s, int64_t i);
 int64_t march_string_is_empty(void *s);
 void   *march_string_to_int(void *s);
 void   *march_string_join(void *list, void *sep);
