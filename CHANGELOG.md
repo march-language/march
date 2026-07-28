@@ -13,6 +13,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`cap verified`: an obligation the refinement checker cannot discharge is an
+  error.** March's default stance is to report a refinement violation only when
+  a precondition can *never* hold; anything the checker cannot decide is
+  silence, so correct code is never rejected. A module that declares
+  `cap verified` opts into the inverse: inside it, every skipped obligation is
+  reported, naming the precondition, the callee and the reason it could not be
+  discharged (the predicate is outside the supported fragment, the argument did
+  not reflect, a sort conflict, the float gate, or the solver not deciding).
+  Strictly opt-in and scoped to the module that declares it — a `cap verified`
+  module calling into an ordinary one does not make the callee's module strict,
+  and nested modules do not inherit the capability. Modules that do not declare
+  it behave exactly as before.
+
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
   an ordinary runtime guard — `if List.length(ys) > 0 do head(ys) else … end` —

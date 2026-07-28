@@ -3481,6 +3481,107 @@ let obligation_suite =
           (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
+(* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
+   The default stance reports only definite failures; `cap verified` inverts
+   that for the module that asks for it.  The load-bearing test is the third
+   one: if strict mode ever fires for a module that did not opt in, the default
+   stance is broken for every existing program. *)
+let refine_error_texts src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+let cap_verified_suite =
+  [ gated "cap verified: an unreflectable predicate is an ERROR" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error
+             "mod V1 do\n\
+             \  cap verified\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n"));
+
+    gated "cap verified: a PROVED obligation stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V2 do\n\
+             \  cap verified\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(5) end\n\
+              end\n"));
+
+    (* THE test.  Same skip, no `cap verified` — must stay silent. *)
+    gated "WITHOUT cap verified the same skip stays silent" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V3 do\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n"));
+
+    (* Scoping, outward: a nested ordinary module inside a `cap verified` one
+       does NOT inherit strictness.  In production bin/main.ml prepends the
+       whole standard library as sibling `DMod`s of the entry module's decls,
+       so inheritance would make every stdlib module strict. *)
+    gated "cap verified does NOT reach into a nested ordinary module" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error
+             "mod V4 do\n\
+             \  cap verified\n\
+             \  mod Inner do\n\
+             \    fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \    fn go() : Int do weird(5) end\n\
+             \  end\n\
+             \  fn main() : Int do 0 end\n\
+              end\n"));
+
+    (* Scoping, inward: a nested module may opt in on its own, and doing so
+       must not leave strict mode on for its siblings. *)
+    gated "a nested cap verified module opts in without leaking to siblings" (fun () ->
+        let errs =
+          refine_error_texts
+            "mod V5 do\n\
+            \  mod Inner do\n\
+            \    cap verified\n\
+            \    fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+            \    fn go() : Int do weird(5) end\n\
+            \  end\n\
+            \  fn odd(k : {Int | is_prime(_)}) : Int do k end\n\
+            \  fn main() : Int do odd(5) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "exactly the nested call errors" 1 (List.length errs));
+
+    (* The message must name the obligation and say why it could not be
+       discharged — the whole point is legibility. *)
+    gated "the cap verified error names the predicate, the callee and the reason"
+      (fun () ->
+        let errs =
+          refine_error_texts
+            "mod V6 do\n\
+            \  cap verified\n\
+            \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+            \  fn main() : Int do weird(5) end\n\
+             end\n"
+        in
+        Alcotest.(check int) "one error" 1 (List.length errs);
+        let msg = List.hd errs in
+        let has sub =
+          let n = String.length sub and m = String.length msg in
+          let rec go i = i + n <= m && (String.sub msg i n = sub || go (i + 1)) in
+          go 0
+        in
+        Alcotest.(check bool) "names cap verified" true (has "cap verified");
+        Alcotest.(check bool) "names the predicate" true (has "is_prime");
+        Alcotest.(check bool) "names the callee" true (has "weird");
+        Alcotest.(check bool) "names the reason" true (has "unreflectable-predicate"))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3514,4 +3615,5 @@ let () =
       ("float-refinements", float_suite);
       ("length-alias", length_alias_suite);
       ("string-alias", string_alias_suite);
-      ("obligations", obligation_suite) ]
+      ("obligations", obligation_suite);
+      ("cap-verified", cap_verified_suite) ]

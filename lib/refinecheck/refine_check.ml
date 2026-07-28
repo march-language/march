@@ -1346,6 +1346,16 @@ let rec pred_str (e : A.expr) : string =
     binop op a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
   | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) -> "-" ^ pred_str a
+  (* Any other application of a plain IDENTIFIER — an unrecognised predicate
+     such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
+     `cap verified` reports, and rendering it `<predicate>` would name the
+     obligation in a way the user cannot match against their own source.
+     Restricted to identifier heads so operator spellings keep the infix
+     rendering the arms above give them. *)
+  | A.EApp (A.EVar { A.txt = f; _ }, args, _)
+    when f <> ""
+         && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
+    f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | _ -> "<predicate>"
 
 (* Split a rendered S-expression string into its top-level tokens,
@@ -2307,6 +2317,28 @@ let sort_of_ctor (ctor : string) : string option =
   | [ s ] -> Some s
   | _ -> None
 
+(* ── `cap verified`: a skipped obligation becomes an error ───────────────── *)
+(* March's default stance is DEFINITE FAILURE ONLY — an obligation the checker
+   cannot discharge is silence, because a false positive on correct code is the
+   cardinal sin here.  A module that writes `cap verified` opts INTO the
+   inverse: inside it, "the checker could not verify this" is an error rather
+   than silence, so the module's contracts are a guarantee instead of a
+   best effort.
+
+   Strictly OPT-IN.  This flag is false unless the decl list currently being
+   walked itself contains `cap verified`, and it is saved/restored around every
+   nested module by [visit_decls] — so it is scoped exactly like
+   [Division_safety]'s `cap no_panic`.  Two consequences worth stating:
+
+     - a `cap verified` module that CALLS an ordinary module does not make the
+       callee's module strict; only obligations RAISED at call sites lexically
+       inside the strict decl list escalate; and
+     - inheritance into nested modules is deliberately NOT done.  bin/main.ml
+       prepends the entire standard library as sibling `DMod` decls of the
+       entry module's own decls, so an inherited flag would turn every stdlib
+       module strict the moment one user module asked for verification. *)
+let strict_verified = ref false
+
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
@@ -2353,7 +2385,23 @@ let check_call ~root errctx ~span ~(callee : string)
      Recording is observation-only — it must never alter control flow. *)
   let note verdict =
     Obligation.record
-      { Obligation.span; callee; predicate = pred_str rp.pred; verdict }
+      { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
+    (* …except inside a `cap verified` module, where a skip is the very thing
+       the user asked to be told about (see [strict_verified]).  `Proved` and
+       `Violated` are unaffected: the latter already reported itself. *)
+    match verdict with
+    | Obligation.Skipped r when !strict_verified ->
+      Err.error errctx ~span
+        (Printf.sprintf
+           "`cap verified` module: cannot verify precondition `%s` on `%s` \
+            (%s: %s)\n\
+            note: guard the call or strengthen what is known here, rewrite the \
+            predicate into the fragment the checker supports, or remove `cap \
+            verified` from this module — it asks for every obligation to be \
+            discharged"
+           (pred_str rp.pred) callee (Obligation.reason_name r)
+           (Obligation.reason_detail r))
+    | _ -> ()
   in
   match List.nth_opt args rp.idx with
   | None -> ()
@@ -3046,7 +3094,19 @@ let check_call ~root errctx ~span ~(callee : string)
           smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
             ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
      with
-     | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate)
+     | None ->
+       (* Two different causes reach this arm and they must not be conflated:
+          `Skip` means the SUBJECT (a record actual) did not reflect, while the
+          other modes mean the PREDICATE itself did not.  The distinction was
+          cosmetic while it only fed a debug count; `cap verified` puts the
+          reason in front of a user, and telling someone their perfectly
+          reflectable predicate is unreflectable sends them after the wrong
+          thing. *)
+       note
+         (Obligation.Skipped
+            (match mode with
+             | `Skip -> Obligation.Unreflectable_subject
+             | `Other | `Record _ -> Obligation.Unreflectable_predicate))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->
@@ -4216,14 +4276,23 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
         | _ -> ctx)
       ctx decls
   in
-  List.iter
-    (function
-      | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
-      | A.DMod (name, _, ds, _) ->
-        let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
-        visit_decls ~root errctx defs { ctx with modpath } ds
-      | _ -> ())
-    decls
+  (* `cap verified` is scoped to the decl list that declares it — saved and
+     restored here so a nested module neither inherits it nor leaks its own
+     back out.  See [strict_verified] for why inheritance would be wrong. *)
+  let saved_strict = !strict_verified in
+  strict_verified :=
+    List.exists
+      (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
+      decls;
+  Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
+    List.iter
+      (function
+        | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+        | A.DMod (name, _, ds, _) ->
+          let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+          visit_decls ~root errctx defs { ctx with modpath } ds
+        | _ -> ())
+      decls)
 
 (** Register ADT/record sorts for a list of declarations without running the full
     VC pass.  Called by [--check-migration] mode to prime the type tables before
@@ -4506,6 +4575,9 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      compilation in one process (the test binary today, an LSP session
      tomorrow) and a report would describe every module ever checked. *)
   Obligation.reset ();
+  (* Hygiene: [visit_decls] sets this per decl list, but a prior module must
+     never be able to leave it on. *)
+  strict_verified := false;
   stdlib_source_files := stdlib_files;
   list_length_is_stdlib := list_length_defs_ok m.A.mod_decls;
   string_byte_size_is_stdlib := string_byte_size_defs_ok m.A.mod_decls;
