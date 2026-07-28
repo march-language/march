@@ -2196,7 +2196,7 @@ let sort_of_ctor (ctor : string) : string option =
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
-let check_call ~root errctx ~span
+let check_call ~root errctx ~span ~(callee : string)
     ~(postcond : string -> A.expr list -> (string * A.expr * string option) option)
     (sg : fn_sig) (args : A.expr list)
     (path : (A.expr * bool) list) (rp : rparam) (sc : scope) (re : recenv) : unit =
@@ -2232,6 +2232,15 @@ let check_call ~root errctx ~span
      [rp.sort] and [sg.param_scalar] are computed from the same declared type,
      so they agree; this spelling also covers a synthesized callback sig. *)
   let self_scalar = scalar_sort_or_int rp.sort in
+  (* Every exit below records an outcome.  All but one of them are silent to the
+     USER by design (the definite-failure stance: only a predicate that can
+     never hold is reported); silent to the LEDGER is what this fixes, so a
+     contract that checks nothing is distinguishable from one that passes.
+     Recording is observation-only — it must never alter control flow. *)
+  let note verdict =
+    Obligation.record
+      { Obligation.span; callee; predicate = pred_str rp.pred; verdict }
+  in
   match List.nth_opt args rp.idx with
   | None -> ()
   | Some self_actual ->
@@ -2902,8 +2911,9 @@ let check_call ~root errctx ~span
           smt_of ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
             ~resolve_tester ~resolve_str_lit:str_lit_const rp.pred)
      with
-     | None -> ()
-     | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) -> ()
+     | None -> note (Obligation.Skipped Obligation.Unreflectable_predicate)
+     | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
+       note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->
        (* de-duplicate decls (a symbol may be requested twice) *)
        let decls =
@@ -2924,7 +2934,7 @@ let check_call ~root errctx ~span
            (fun (n, s) -> not (s = Smt.SInt && Hashtbl.mem str_names n))
            decls
        in
-       if sort_conflict decls then ()
+       if sort_conflict decls then note (Obligation.Skipped Obligation.Sort_conflict)
        else
        (* Drop ill-sorted assumptions.  Weakening the hypothesis set can only
           make BOTH discharges harder, so this can only turn a report into a
@@ -2936,7 +2946,8 @@ let check_call ~root errctx ~span
        let sort_of n = List.assoc_opt n decls in
        let is_float n = sort_of n = Some Smt.SFloat in
        let goal = fp_rewrite is_float goal in
-       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then ()
+       if not (float_wellsorted is_float goal && formula_wellsorted sort_of goal) then
+         note (Obligation.Skipped Obligation.Float_sort_gate)
        else
        let assumptions =
          List.filter_map
@@ -2983,16 +2994,17 @@ let check_call ~root errctx ~span
           - else discharge(goal=¬G) Verified => G never holds     => violation
           - otherwise (G depends on unknowns / solver unsure)     => skip *)
        (match Refine.discharge ~root ~preamble vc with
-        | Refine.Verified -> ()
+        | Refine.Verified -> note Obligation.Proved
         | first ->
           (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
            | Refine.Verified ->
+             note Obligation.Violated;
              Err.error errctx ~span
                (Printf.sprintf
                   "refinement violation: argument does not satisfy precondition `%s`%s\n\
                    note: guard the call (e.g. `if %s do …`) or pass a value known to satisfy it"
                   (pred_str rp.pred) (format_cx (model_of first)) (pred_str rp.pred))
-           | _ -> ())))
+           | _ -> note (Obligation.Skipped Obligation.Solver_undecided))))
 
 (* ── Postconditions: a function's return value must satisfy its return
    refinement.  We check each *tail* expression (a return position) under the
@@ -3740,7 +3752,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
      | Some (Some sg) ->
        let postcond = postcond_of ctx defs in
        List.iter
-         (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+         (fun rp ->
+           check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
          sg.refined
      | _ ->
        (* Not a resolvable NAMED callee: fall back to the callee env — a call
@@ -3750,7 +3763,8 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list) (sc :
         | Some sg ->
           let postcond = postcond_of ctx defs in
           List.iter
-            (fun rp -> check_call ~root errctx ~span:sp ~postcond sg args path rp sc re)
+            (fun rp ->
+              check_call ~root errctx ~span:sp ~callee:fname ~postcond sg args path rp sc re)
             sg.refined
         | None -> ()));
     List.iter go args
@@ -4127,6 +4141,10 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
      reuse for every VC within the module; the content-addressed VC cache still
      preserves cross-module results. *)
   March_refine.Refine.shutdown ();
+  (* The ledger is per-module: without this, counts accumulate across every
+     compilation in one process (the test binary today, an LSP session
+     tomorrow) and a report would describe every module ever checked. *)
+  Obligation.reset ();
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

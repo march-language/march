@@ -3052,6 +3052,51 @@ let float_suite =
               end\n"))
   ]
 
+(* ── Obligation ledger ────────────────────────────────────────────────────
+   The checker reports a violation only when a predicate can NEVER hold, so
+   silence covers three very different outcomes.  These pin that every
+   precondition obligation leaves a COUNTABLE record: a proved one, a violated
+   one, and one the checker could not reflect into SMT at all — the last is the
+   case that used to be indistinguishable from a passing contract. *)
+let obligation_suite =
+  [ gated "a proved precondition is recorded as Proved" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O1 do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(5) end\n\
+              end\n");
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated);
+
+    gated "a violated precondition is recorded as Violated" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O2 do\n\
+             \  fn takepos(k : {Int | _ >= 0}) : Int do k end\n\
+             \  fn main() : Int do takepos(0 - 5) end\n\
+              end\n");
+        let _, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "violated" 1 violated);
+
+    gated "an unreflectable predicate is recorded as a SKIP, not silence" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore
+          (has_refine_error
+             "mod O3 do\n\
+             \  fn weird(k : {Int | is_prime(_)}) : Int do k end\n\
+             \  fn main() : Int do weird(5) end\n\
+              end\n");
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved" 0 proved;
+        Alcotest.(check int) "not violated" 0 violated;
+        Alcotest.(check int) "one skip recorded" 1
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3082,4 +3127,5 @@ let () =
       ("anon-binder-measures", b1_suite);
       ("record-postcond-propagation", b2_suite);
       ("bool-refinements", bool_suite);
-      ("float-refinements", float_suite) ]
+      ("float-refinements", float_suite);
+      ("obligations", obligation_suite) ]
