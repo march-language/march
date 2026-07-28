@@ -230,6 +230,72 @@ Nothing here says to build SSO now — it is a String ABI change touching
 says the decision is between "a third, cheaply" and "3×, expensively", which is
 a different question from the one the phase 2 plan posed.
 
+## Addendum, 2026-07-27: what SSO would actually take in March
+
+### The encouraging part: the RC hot path needs no changes
+
+March already tags immediates, and `IS_HEAP_PTR` already rejects them:
+
+    immediate integer n  -> ptr = (n << 1) | 1   (low bit set)
+    heap pointer p       -> ptr = p              (low bit clear)
+
+    #define IS_HEAP_PTR(p) \
+        (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
+
+`march_incrc` and `march_decrc` both begin with `if (!IS_HEAP_PTR(p)) return;`.
+So **an inline string carrying the tag bit is refcount-free with no change to the
+RC path** — normally the most invasive part of retrofitting SSO, and here it is
+already done.
+
+### The constraining part: capacity
+
+A tagged immediate has 64 bits total. One bit distinguishes immediate from
+pointer; a second is needed to distinguish an inline string from an immediate
+*integer*, which already claims the low-bit-set encoding. Three more bits hold
+the length (0-7). That leaves **7 bytes of payload**.
+
+Against the measured distribution on `bench/string_small_churn` (10,000,009
+allocations on current main):
+
+| inline capacity | allocations eliminated | what it costs |
+|---|---|---|
+| **7 bytes** (fits the existing tag scheme) | **42%** | runtime + codegen only; no ABI change, no RC change |
+| 15 bytes | 61% | String becomes a 2-word value — ABI change across every signature, closure, and FFI boundary |
+| 23 bytes | 80% | 3 words, or reusing the 24-byte header; same ABI change, larger |
+
+C++ gets its 3× with 15 bytes (libstdc++) or 22 (libc++), which is why it
+captures so much more than 7 bytes would.
+
+### What 7-byte inline strings would break
+
+Bounded, and all in one layer: roughly 30 runtime functions dereference
+`((march_string *)p)->len` or `->data` and would each need a tag check first,
+plus the codegen sites that construct and consume strings. The FFI boundary
+needs materialization before handing a pointer to C. The JS backend is
+unaffected (strings are JS strings there).
+
+Notably it is **not** a type-system change: `String` stays one type, and nothing
+in typecheck, mono, or defun needs to know.
+
+### Honest assessment
+
+7-byte inline strings are the only variant that fits March's existing
+representation, and they address 42% of allocations. That is real, and it is
+strictly better than the freelist option, which the cross-language data bounds at
+roughly a third and which does not compose with anything.
+
+But 7 bytes is genuinely small for the workload that motivated this. HTTP header
+names — `content-type` at 12 bytes, `user-agent` at 10 — mostly miss it. The
+42% figure comes from one synthetic benchmark whose string sizes were chosen to
+straddle the 23-byte boundary, not from a real corpus.
+
+**Before building anything, measure the size distribution of a real workload**
+(a `bench/tfb` run, or a CSV/JSON parse) rather than `string_small_churn`. If
+real short strings cluster at 8-20 bytes, 7-byte inline storage misses most of
+them and the whole approach is worth less than this analysis suggests. That
+measurement is cheap — the `MARCH_STRING_STATS` histogram already exists — and it
+decides whether the ceiling is 42% or much lower.
+
 ## Recommendation for phase 2
 
 1. **Fix the two RC leaks first.** They are not string work, they block the
