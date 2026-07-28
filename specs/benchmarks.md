@@ -157,7 +157,7 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 | Memory bandwidth | Pure map-and-copy, no search |
 
 **Comparison baseline:** C (in-place `toupper` loop), Rust (`to_uppercase`), Go (`strings.ToUpper`), Python (`str.upper`).
-**What to watch:** Paired with `string_scan` — if both are slow the ceiling is memory bandwidth, not the search loop, and no cleverness in `index_of` will help. Under `MARCH_STRING_STATS=1` this should report ~400MB copied; a reading near 1MB means the byte-loop builders lost their copy accounting again (they don't call `memcpy`, so they're counted explicitly).
+**What to watch:** Paired with `string_scan` — if both are slow the ceiling is memory bandwidth, not the search loop, and no cleverness in `index_of` will help. **Its checksum cannot detect the conversion being optimized away** (it sums `byte_size`, which case conversion leaves unchanged), so judge a suspicious speedup by `copy_bytes` under `MARCH_STRING_STATS=1` — it should stay near 400MB. Under `MARCH_STRING_STATS=1` this should report ~400MB copied; a reading near 1MB means the byte-loop builders lost their copy accounting again (they don't call `memcpy`, so they're counted explicitly).
 
 ---
 
