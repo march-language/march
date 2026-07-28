@@ -439,10 +439,22 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
    the same hazard [string_len_available] already guards for bare `len` — the
    moment the name is taken, the built-in meaning is withdrawn.
 
-   Set once per [check_module] by [scan_list_length_defs].  The default is the
+   Set once per [check_module] by [list_length_defs_ok].  The default is the
    SUPPRESSING one: a path that forgets to set it loses a proof rather than
    gains a wrong fact. *)
 let list_length_is_stdlib : bool ref = ref false
+
+(* The source files the CALLER loaded as the standard library, supplied to
+   [check_module].  This is an IDENTITY, not a path pattern: bin/main.ml reads
+   it off the stdlib declarations it actually prepended, so it follows
+   `MARCH_STDLIB`, the installed `share/march` layout, and the marshalled
+   stdlib-AST cache automatically, and a vendored `MARCH_LIB_PATH` copy — which
+   arrives as user decls, not stdlib decls — is correctly excluded.
+
+   Empty (the default) means "the caller told us nothing", under which no
+   definition is the stdlib's and the alias is withdrawn the moment any
+   `List.length` is in scope. *)
+let stdlib_source_files : string list ref = ref []
 
 let measure_alias (m : string) : string option =
   match m with "List.length" when !list_length_is_stdlib -> Some "len" | _ -> None
@@ -4185,28 +4197,30 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    It cannot key on the module PATH.  bin/main.ml prepends the whole stdlib —
    including `mod List` — into every module it checks, so "reject any `mod
    List`" would disable the feature in production.  And the outer `mod Q` is
-   the [module_] record rather than a decl, so the reviewer's nested repro
+   the [module_] record rather than a decl, so a nested `mod List do fn length`
    lands at path `List.length` too, exactly like the stdlib's: the two are
    indistinguishable by name alone.
 
-   What separates them is the SOURCE FILE the definition came from.  A
-   definition counts as the real list length only when its span points at the
-   stdlib's own `stdlib/list.march`; every other `List.length` in the unit —
-   a user's, or one from a string-parsed test fixture — withdraws the alias.
+   What separates them is the SOURCE FILE the definition came from, tested
+   against the identity the CALLER supplied in [stdlib_source_files].  It must
+   NOT be inferred from the path's shape: an earlier revision of this gate
+   asked for a parent directory named `stdlib`, which
 
-     - `mod Q do mod List do fn length … end end`  -> non-stdlib span -> suppress
-     - a user file that itself defines `mod List`  -> non-stdlib span -> suppress
-     - the stdlib's own, alone                     -> stdlib span     -> allow
-     - no `List` module at all (the unit tests)    -> no defs         -> allow
+     - disabled the feature outright in an installed March, where `stdlib/dune`
+       ships the sources to `<prefix>/share/march` (parent `march`), and under
+       any `MARCH_STDLIB` pointing elsewhere; and
+     - accepted ANY file path ending `stdlib/list.march`, so a vendored or
+       forked `List` under `MARCH_LIB_PATH` was taken for the real one and
+       re-opened the false positive it was written to close.
 
-   The path test is a heuristic, and it fails SAFE: an unrecognised stdlib
-   layout suppresses the alias and costs a proof, never a false fact.
+     - `mod Q do mod List do fn length … end end`  -> not a stdlib file -> suppress
+     - a vendored `MARCH_LIB_PATH` `mod List`      -> not a stdlib file -> suppress
+     - the stdlib's own, whatever the layout       -> stdlib file       -> allow
+     - no `List` module at all (the unit tests)    -> no defs           -> allow
 
    `alias Foo as List` and `use Some.List` can also make the spelling denote
    someone else's function, so either withdraws the alias too. *)
-let is_stdlib_list_file (f : string) : bool =
-  Filename.basename f = "list.march"
-  && Filename.basename (Filename.dirname f) = "stdlib"
+let is_stdlib_list_file (f : string) : bool = List.mem f !stdlib_source_files
 
 let list_length_defs_ok (decls : A.decl list) : bool =
   let foreign = ref false in
@@ -4237,7 +4251,12 @@ let list_length_defs_ok (decls : A.decl list) : bool =
    sound, no quantifiers, no datatype theory), an escape hatch for the per-query
    cost of quantified/datatype reasoning.  It changes only diagnostics, never the
    compiled artifact, so it is not part of the CAS cache key. *)
-let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.ctx)
+(* [stdlib_files]: the source files the caller loaded as the standard library.
+   Only used to decide whether a `List.length` in scope is the real one — see
+   [stdlib_source_files].  Omitting it is the conservative choice (no file is
+   the stdlib's), never an unsound one. *)
+let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
+    ?(stdlib_files : string list = []) (errctx : Err.ctx)
     (m : A.module_) : unit =
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
@@ -4251,6 +4270,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true) (errctx : Err.
      compilation in one process (the test binary today, an LSP session
      tomorrow) and a report would describe every module ever checked. *)
   Obligation.reset ();
+  stdlib_source_files := stdlib_files;
   list_length_is_stdlib := list_length_defs_ok m.A.mod_decls;
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;

@@ -38,6 +38,24 @@ let has_refine_error_d src =
   March_refinecheck.Refine_check.check_module ctx (March_desugar.Desugar.desugar_module (parse src));
   March_errors.Errors.has_errors ctx
 
+(* Same as [has_refine_error_d], but parsed AS IF it came from [file] and
+   checked with [stdlib_files] declared as the standard library's own sources.
+   Both are needed to exercise the ENABLING branch of the `List.length` measure
+   alias: the alias is allowed only when a `List.length` in scope came from a
+   file the caller identified as stdlib, and no string-parsed fixture (whose
+   span file is "") can ever reach that branch. *)
+let has_refine_error_from ?(stdlib_files = []) ~file src =
+  let lexbuf = Lexing.from_string src in
+  lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = file };
+  let m =
+    March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  in
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ~stdlib_files ctx
+    (March_desugar.Desugar.desugar_module m);
+  March_errors.Errors.has_errors ctx
+
 (* Number of ERRORS the refinement pass reports on [src].  A plain boolean
    cannot tell "both violations found" from "one found, one silently lost",
    which is exactly the failure mode the co-occurrence guards below pin. *)
@@ -3118,7 +3136,58 @@ mod Q do
     if List.length(ys) == 0 do head(ys) else 0 end
   end
   fn main() : Int do go([1]) end
-end|}))
+end|}));
+
+    (* ── The ENABLING branch ───────────────────────────────────────────────
+       Every case above reaches its verdict WITHOUT a `List.length` definition
+       in scope at all, i.e. via the gate's "no defs -> allow" path.  None of
+       them can tell whether the gate's stdlib-identity test works, which is
+       how a revision that never recognised an installed stdlib (`share/march`
+       rather than `stdlib/`) passed the whole suite while the feature was dead
+       in the shipped compiler.
+
+       These two are the same program with a real `mod List do fn length`
+       present, differing ONLY in whether the caller declares that file to be
+       the standard library.  Together they pin both directions of the
+       identity test. *)
+    (let src =
+       {|
+mod S do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     let file = "/opt/march/share/march/list.march" in
+     gated "the alias APPLIES to a List.length the caller calls stdlib" (fun () ->
+         (* Note the directory is `share/march`, an installed layout with no
+            path segment named `stdlib` — identity comes from the caller, not
+            from the shape of the path. *)
+         Alcotest.(check bool) "error" true
+           (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
+
+    (let src =
+       {|
+mod S do
+  mod List do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}
+     in
+     gated "…and NOT to the same List.length from any other file" (fun () ->
+         Alcotest.(check bool) "no error" false
+           (has_refine_error_from ~stdlib_files:[ "/opt/march/share/march/list.march" ]
+              ~file:"/home/u/proj/stdlib/list.march" src)))
   ]
 
 (* ── Obligation ledger ────────────────────────────────────────────────────

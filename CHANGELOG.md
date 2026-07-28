@@ -20,12 +20,16 @@ git log is authoritative for exact commits.
   of leaving it unprovable and silently skipped. A contradictory guard
   (`if List.length(ys) == 0 do head(ys)`) is now reported as a violation.
   Only the qualified `List.length` is aliased — a bare `length` is left alone —
-  and the alias is withdrawn for the whole module if anything in it could make
-  that spelling denote a different function (a program defining its own
-  `List.length`, or rebinding the name `List` via `alias`/`use`). In those cases
-  the obligation goes back to being unprovable and silently skipped, which is
-  the pre-existing behaviour; the alias never attaches `len`'s meaning to a
-  function that is not the list's length.
+  and only when it is the standard library's own, identified by the stdlib
+  sources the compiler actually loaded (so it works the same from a repo
+  checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing anywhere).
+  The alias is withdrawn for the whole module if anything could make that
+  spelling denote a different function: a program defining its own
+  `List.length`, a vendored or forked `List` supplied through `MARCH_LIB_PATH`,
+  or rebinding the name `List` via `alias`/`use`. In those cases the obligation
+  goes back to being unprovable and silently skipped, which is the pre-existing
+  behaviour; the alias never attaches `len`'s meaning to a function that is not
+  the list's length.
 
 ### Fixed
 

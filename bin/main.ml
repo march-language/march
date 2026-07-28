@@ -424,6 +424,35 @@ let load_stdlib ?(for_js=false) () =
       with _ -> ());
       decls
 
+(** The set of source files a batch of stdlib declarations actually came from.
+
+    The refinement checker needs to know whether a `List.length` in scope is
+    the real stdlib one before it may treat it as the `len` measure (see
+    [Refine_check.stdlib_source_files]); a wrong answer there is a false
+    positive on correct code. Reading the identity off the declarations we are
+    about to prepend — rather than pattern-matching the path — is what makes it
+    agree with [find_stdlib_dir]'s resolution order (repo `stdlib/`, an
+    installed `share/march`, `MARCH_STDLIB`) AND with the marshalled stdlib-AST
+    cache, whose spans carry whatever directory the entry was written from.
+    Declarations arriving via `MARCH_LIB_PATH` are user decls, not stdlib
+    decls, so a vendored or forked `List` is correctly not in this set. *)
+let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
+  let seen = Hashtbl.create 64 in
+  let add (sp : March_ast.Ast.span) =
+    let f = sp.March_ast.Ast.file in
+    if f <> "" then Hashtbl.replace seen f ()
+  in
+  let rec go ds =
+    List.iter
+      (function
+        | March_ast.Ast.DMod (_, _, inner, sp) -> add sp; go inner
+        | March_ast.Ast.DFn (_, sp) -> add sp
+        | _ -> ())
+      ds
+  in
+  go decls;
+  Hashtbl.fold (fun f () acc -> f :: acc) seen []
+
 (** Typecheck [stdlib_decls] once and cache the resulting environment, so a
     combined check/compile can seed pass 1 from it (via
     [Typecheck.check_module_core]'s [?seed_env]) instead of re-typechecking
@@ -1178,7 +1207,8 @@ let run_test_cmd args =
     in
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
-    March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+    March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+      ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
     if !refine_report then print_refine_report ~filename ~user_files ();
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
@@ -1786,7 +1816,8 @@ let compile filename =
      See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
-  March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+  March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
+    ~stdlib_files:(stdlib_span_files stdlib_decls) errors desugared;
   if !refine_report then print_refine_report ~filename ~user_files ();
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
