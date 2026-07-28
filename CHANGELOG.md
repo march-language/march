@@ -20,6 +20,17 @@ git log is authoritative for exact commits.
   a segfault when compiled. It now reports `` `zf` is not a function — it
   has type `Int`. Remove the `()` and use `zf` directly.`` at compile time.
   The same fix also catches the more general `let x = 5; x()` case.
+- **A closure or local function's parameter now shadows an imported function
+  of the same name.** `import Logger` makes stdlib's `Logger.i` available as
+  the bare name `i`; a nested `fn go(i, acc) do ... end` then compiled every
+  use of its own `i` to that function's address instead of the parameter.
+  Any binder whose name collided with an imported function was affected, so
+  a program could silently pass a function where it meant a value — for
+  example `Bytes.get(b, i)` receiving a code address as its index. This hit
+  depot's Postgres wire decoder, whose `read_cstring` has exactly this
+  shape, making every compiled database connection fail with
+  `Bytes.get: index out of bounds`. Native backend only; the interpreter
+  always resolved these correctly.
 
 - **A program that repeatedly passes a named function as a value no longer
   grows memory without bound.** Materializing a top-level function as a

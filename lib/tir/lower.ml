@@ -354,7 +354,17 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let self_ty_pre = Tir.TFn (param_tys', ret_ty_pre) in
     let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
     Hashtbl.replace _fn_param_types fn_name self_ty_pre;
-    let fn_body' = lower_expr env fn_body in
+    (* The params shadow import aliases inside the body.  Registering only
+       [fn_name] above left them unbound as far as [resolve_use_alias] is
+       concerned, so a param whose name matched an imported fn — depot's
+       `fn go(i, acc)` against stdlib's [Logger.i], reached by any file with
+       `import Logger` — lowered to that fn's address instead of the
+       parameter. *)
+    let fn_body' =
+      Lower_state.with_scope_locals
+        (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
+        (fun () -> lower_expr env fn_body)
+    in
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr env fn_body in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = fn_body';
@@ -753,7 +763,15 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       | _ ->
         Hashtbl.replace _fn_param_types v.v_name v.v_ty
     ) params';
-    let body' = lower_expr env body in
+    (* Every param also shadows import aliases for the body, whether or not it
+       carried a usable type above: the [TVar "_"] arm removes the name from
+       _fn_param_types, which would otherwise let [resolve_use_alias] rewrite a
+       reference to it into some imported module's same-named fn. *)
+    let body' =
+      Lower_state.with_scope_locals
+        (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
+        (fun () -> lower_expr env body)
+    in
     List.iter (fun (name, saved) ->
       match saved with
       | Some ty -> Hashtbl.replace _fn_param_types name ty
@@ -868,7 +886,15 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let param_tys' = List.map (fun v -> v.Tir.v_ty) params' in
     let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
     Hashtbl.replace _fn_param_types fn_name (Tir.TFn (param_tys', ret_ty_pre));
-    let body' = lower_expr env body in
+    (* The params shadow import aliases inside the body.  Unlike [ELam] above
+       this path never registered them anywhere, so a param whose name matched
+       an imported fn (depot's `fn go(i, acc)` vs stdlib's [Logger.i]) was
+       resolved to that fn's address instead of the parameter. *)
+    let body' =
+      Lower_state.with_scope_locals
+        (List.map (fun (v : Tir.var) -> v.Tir.v_name) params')
+        (fun () -> lower_expr env body)
+    in
     (match saved_fn with
      | Some t -> Hashtbl.replace _fn_param_types fn_name t
      | None -> Hashtbl.remove _fn_param_types fn_name);
