@@ -1,5 +1,52 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-28, `Json.bad_number` monomorphisation reverted — the typecheck blowup it claimed to fix does not reproduce)
+
+`d21c846b` changed `Json.bad_number` to return a bare message `String`, with
+the three callers wrapping it in `Err` themselves, on the stated grounds that
+returning `Err(msg)` directly gave the helper the type `Result(a, String)` —
+polymorphic in an `Ok` payload it never produces — and that instantiating that
+scheme at each call site made typechecking any caller of `Json.parse` explode
+("six call sites went from ~1.5s to non-terminating"). **That measurement does
+not reproduce, and the workaround is reverted here.** `bad_number` returns
+`Err(...)` again, exactly as before `d21c846b`.
+
+A/B over the two helper shapes the commit names (a `println`-with-`++`-concat
+helper, and a `JsonValue`-returning helper), at 6/12/16/22 call sites, three
+interleaved reps each, same compiler binary, only the staged
+`_build/default/stdlib/json.march` differing, `--check` so only typechecking
+is timed: **polymorphic and monomorphic are indistinguishable at every point** —
+~1.03–1.10s on a cold stdlib and ~57ms warm, for both variants, with no growth
+in call-site count. Scaling the concat shape to 80 call sites is likewise flat
+(1110ms → 1203ms from 10 to 80 sites). The 22-case number corpus produces
+byte-identical output before and after the revert.
+
+Two measurement hazards explain how the original numbers could have been
+reached, and are worth knowing for any future typecheck benchmark:
+
+- **`~/.cache/march/stdlib_tcenv_cli_<hash>.bin`** (`bin/main.ml`
+  `get_stdlib_tc_env`) caches the whole typechecked stdlib env, keyed on a
+  digest of the stdlib AST and living under `$HOME` — so it is shared across
+  every worktree and session on the machine. A cold run pays ~1.0s; a warm one
+  ~57ms. Comparing a cold run of one variant against a warm run of the other
+  manufactures an 18× difference out of nothing. Any stdlib-typecheck timing
+  must state which side of that cache it is on.
+- **A stale `_build/default/stdlib/`** — the compiler resolves stdlib
+  exe-relative, and `dune build bin/main.exe` does not restage it. The copy
+  found in this worktree was a whole generation old (the pre-`556cf7e9`
+  char-list parser), so `1e-5` reported `ERR invalid number: 1e` from a
+  compiler built at HEAD. `dune build @install` refreshes it. The original
+  "reproduces identically with `json.march` reverted to 61f92b95" control was
+  performed by swapping that same staged file, so it was not necessarily
+  measuring the stdlib it appeared to be.
+
+The separate claim in `d21c846b`'s message — that a helper concatenating its
+input around `Json.to_string` drives the typechecker to ~16GB RSS at 22 call
+sites — also does not reproduce: the exact program runs in 1157ms at HEAD,
+including under the originating worktree's own compiler binary with the
+pre-fix stdlib staged. Whatever produced that run is not present in any
+compiler build on this machine, and no commit after `ad8e81f1` touches `lib/`.
+
 ## Current State (as of 2026-07-27, non-empty-collection contracts + measure-over-self binder spellings)
 
 **Non-empty-collection preconditions are now enforceable, and 13 stdlib
