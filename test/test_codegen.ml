@@ -9257,6 +9257,62 @@ let test_static_closure_materialization_no_leak_compiled () =
        with the iteration count)"
       "BOUNDED" run_out
 
+(* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml), lambda form:
+   the precedent immediately above materializes a top-level named fn
+   (`double`) as a first-class value. This test exercises the shape Task 1
+   was actually written for — a capture-free LAMBDA literal, whose closure
+   struct is `EAlloc(TCon("$Clo_..", []), [fn_ptr])` with exactly one
+   argument. Before Task 1, `apply_it(fn x -> x * 2, i)` at 4,000,000
+   iterations allocated 4,000,000 closures and never freed any of them (no
+   dec_rc/free anywhere in the loop) — a genuine leak, not churn. Same
+   growth-assertion shape as the two tests above: warm the materialization
+   site once, sample march_live_allocs as a baseline, re-run the same site
+   at a much larger loop count, and assert the growth stays bounded rather
+   than scaling with the iteration count. *)
+let test_lambda_static_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_lambdacloleak"
+    "mod LambdaCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the materialization site first, so its one permanent static\n\
+     -- closure is already allocated when the baseline is sampled and only\n\
+     -- per-iteration growth can move the gauge.\n\
+    \    let warm = materialize_loop(0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "lambdacloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a capture-free lambda literal materialized as a first-class value in \
+       a loop references one immortal static closure per site, not one \
+       fresh allocation per materialization (live-object count must not \
+       grow with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -11252,6 +11308,57 @@ let test_static_closure_global_replaces_alloc () =
   Alcotest.(check bool) "no per-materialization march_alloc(i64 24) remains"
     false (Test_helpers.contains "march_alloc(i64 24)" ir)
 
+(** A capture-free lambda's closure struct is EAlloc(TCon("$Clo_..", []),
+    [fn_ptr]) — defun.ml lifts every lambda this way, and an empty capture
+    list leaves exactly one arg. Its contents are then entirely compile-time
+    constant, so — like a top-level fn used as a value — it must reference
+    one immortal static global rather than allocate per materialization. *)
+let test_capture_free_lambda_uses_static_global () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let alloc = mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [main]) in
+  Alcotest.(check bool) "capture-free lambda gets a static closure global"
+    true (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "no per-materialization closure alloc remains"
+    false (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** A capturing lambda's closure struct carries 2+ args (fn_ptr plus one
+    entry per free variable) — its contents differ per instance, so it MUST
+    keep allocating.  Sharing one global here would silently share one
+    captured environment across every instance: a correctness bug, not a
+    missed optimization.  This is the guard on the discriminator: it must
+    admit ONLY the exact single-argument shape. *)
+let test_capturing_lambda_still_allocates () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$2", []) in
+  let captured = mk_var "k" March_tir.Tir.TInt in
+  let fn_ptr_atom =
+    March_tir.Tir.AVar (mk_var "lam$apply$2" (March_tir.Tir.TPtr March_tir.Tir.TUnit)) in
+  let alloc =
+    March_tir.Tir.EAlloc (clo_ty, [fn_ptr_atom; March_tir.Tir.AVar captured]) in
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [captured];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [main]) in
+  (* header(16) + fn_ptr(8) + one capture(8) = 32 bytes, not the 24-byte
+     size of a capture-free closure (header + fn_ptr only) — confirmed
+     against real compiled output for `fn x -> x * k` (one capture). *)
+  Alcotest.(check bool) "capturing lambda still allocates per materialization"
+    true (Test_helpers.contains "march_alloc(i64 32)" ir);
+  (* The primary correctness risk of this optimization is a shared captured
+     environment across instances — this negative assertion is the one that
+     actually names that risk, not just the allocation-count positive above. *)
+  Alcotest.(check bool) "capturing lambda gets no static global"
+    false (Test_helpers.contains "$static_clo" ir)
+
 (** REPL fragments are separate modules; a per-fragment static global would
     hand out different pointers for the same fn across fragments, and can
     collide under the ORC backend's shared JITDylib. The REPL must keep the
@@ -11329,6 +11436,74 @@ let test_static_closure_not_emitted_in_fns_fragment_repl_mode () =
     false (Test_helpers.contains "$static_clo" ir);
   Alcotest.(check bool) "fns_fragment in repl mode still materializes via fresh march_alloc(24)"
     true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** Lambda-bodied twin of [test_static_closure_not_emitted_in_repl_mode]. The
+    two existing REPL-exclusion tests above both materialize a top-level
+    NAMED function, which exercises [static_closure_ok] via the named-fn arm
+    in [emit_atom] — not the newer [EAlloc (TCon (tcon_name, []), [fn_ptr_atom])]
+    arm added for capture-free lambdas. Nothing previously pinned
+    `not ctx.repl` for that arm; this drives the exact same capture-free
+    closure-struct shape as [test_capture_free_lambda_uses_static_global]
+    through [emit_repl_expr] (which builds its ctx with [~repl:true]) and
+    asserts the REPL fallback (fresh [march_alloc(i64 24)], no
+    [$static_clo]) still holds. *)
+let test_capture_free_lambda_not_emitted_in_repl_mode () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let body = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let ir =
+    March_tir.Llvm_emit.emit_repl_expr
+      ~n:0 ~ret_ty:clo_ty ~prev_slots:[] ~fns:[] ~types:[] body
+  in
+  Alcotest.(check bool) "REPL mode still materializes lambda via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir);
+  Alcotest.(check bool) "REPL mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir)
+
+(** Lambda-bodied twin of [test_static_closure_not_emitted_in_fns_fragment_repl_mode].
+    Same rationale as the twin above: the fns_fragment REPL entry point
+    (the exact one [precompile_stdlib] calls, see [lib/jit/repl_jit.ml])
+    needs its own lambda-path coverage, not just the named-fn one. *)
+let test_capture_free_lambda_not_emitted_in_fns_fragment_repl_mode () =
+  let clo_ty = March_tir.Tir.TCon ("$Clo_lam$1", []) in
+  let alloc = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let holder =
+    { March_tir.Tir.fn_name = "holder"; fn_params = [];
+      fn_ret_ty = clo_ty;
+      fn_body = alloc;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let ir =
+    March_tir.Llvm_emit.emit_fns_fragment
+      ~types:[] ~fns:[holder] ~repl:true ()
+  in
+  Alcotest.(check bool) "fns_fragment in repl mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir);
+  Alcotest.(check bool) "fns_fragment in repl mode still materializes lambda via fresh march_alloc(24)"
+    true (Test_helpers.contains "march_alloc(i64 24)" ir)
+
+(** [static_closure_ok] mirroring for hot-reload is conditional on the whole
+    [ctx.hr_config], not on resolving a March-level dotted name (the lambda
+    arm's [tcon_name] is a synthetic "$Clo_..." string, not always
+    unambiguously mappable back to an owning module — see the comment above
+    the lambda [EAlloc] arm in [lib/tir/llvm_emit.ml]). This drives
+    [emit_module ~hot_reload:(Some cfg)] over a program containing a
+    capture-free lambda and asserts no [$static_clo] global is emitted. *)
+let test_capture_free_lambda_not_emitted_under_hot_reload () =
+  let open March_tir.Tir in
+  let clo_ty = TCon ("$Clo_lam$1", []) in
+  let alloc = Test_helpers.mk_closure_alloc "$Clo_lam$1" "lam$apply$1" in
+  let main : fn_def =
+    { fn_name = "Blog.main"; fn_params = []; fn_ret_ty = clo_ty;
+      fn_kind = FnNormal; fn_body = alloc }
+  in
+  let m : tir_module =
+    { tm_name = "Blog"; tm_fns = [main]; tm_types = [];
+      tm_externs = []; tm_exports = []; tm_tests = []; tm_io_fns = [] }
+  in
+  let ir = March_tir.Llvm_emit.emit_module
+             ~hot_reload:(Some (March_tir.Hot_reload.default_config "Blog")) m in
+  Alcotest.(check bool) "hot-reload mode emits no static closure global for a lambda"
+    false (Test_helpers.contains "$static_clo" ir)
 
 (* ── Robustness: an unreadable sibling directory must not crash the compiler ──
    The compiler auto-discovers sibling `.march` modules in the entry file's own
@@ -12152,6 +12327,8 @@ let codegen_suites =
             test_string_literal_operand_no_leak_compiled;
           Alcotest.test_case "compiled static closure materialization does not leak per use" `Quick
             test_static_closure_materialization_no_leak_compiled;
+          Alcotest.test_case "compiled capture-free lambda materialization does not leak per use" `Quick
+            test_lambda_static_closure_materialization_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
@@ -12280,10 +12457,20 @@ let codegen_suites =
             test_preamble_wrapper_delegates;
           Alcotest.test_case "static closure global replaces per-materialization march_alloc" `Quick
             test_static_closure_global_replaces_alloc;
+          Alcotest.test_case "capture-free lambda uses static closure global" `Quick
+            test_capture_free_lambda_uses_static_global;
+          Alcotest.test_case "capturing lambda still allocates per materialization" `Quick
+            test_capturing_lambda_still_allocates;
           Alcotest.test_case "static closure global is not emitted in REPL mode" `Quick
             test_static_closure_not_emitted_in_repl_mode;
           Alcotest.test_case "static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
             test_static_closure_not_emitted_in_fns_fragment_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted in REPL mode" `Quick
+            test_capture_free_lambda_not_emitted_in_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted via emit_fns_fragment ~repl:true" `Quick
+            test_capture_free_lambda_not_emitted_in_fns_fragment_repl_mode;
+          Alcotest.test_case "capture-free lambda static closure global is not emitted under hot-reload" `Quick
+            test_capture_free_lambda_not_emitted_under_hot_reload;
         ] );
       ( "compiler_robustness", [
           Alcotest.test_case "unreadable sibling dir does not crash --check" `Quick
