@@ -89,7 +89,7 @@ mod List do
   -- ---- Access ----
 
   doc "Returns the first element. Panics on empty list."
-  fn head(xs : List(a)) : a do
+  fn head(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Cons(h, _) -> h
     Nil        -> panic("List.head: empty list")
@@ -97,7 +97,7 @@ mod List do
   end
 
   doc "Returns the tail (all but first element). Panics on empty list."
-  fn tail(xs : List(a)) : List(a) do
+  fn tail(xs : {List(a) | len(_) > 0}) : List(a) do
     match xs do
     Cons(_, t) -> t
     Nil        -> panic("List.tail: empty list")
@@ -121,7 +121,7 @@ mod List do
   end
 
   doc "Returns the last element. Panics on empty list."
-  fn last(xs : List(a)) : a do
+  fn last(xs : {List(a) | len(_) > 0}) : a do
     match xs do
     Nil        -> panic("List.last: empty list")
     Cons(x, Nil) -> x
@@ -761,7 +761,7 @@ mod List do
   end
 
   doc "Returns the minimum integer in the list. Panics if empty."
-  fn minimum_int(xs : List(Int)) : Int do
+  fn minimum_int(xs : {List(Int) | len(_) > 0}) : Int do
     fn go(lst : List(Int), m : Int) : Int do
       match lst do
       Nil        -> m
@@ -775,7 +775,7 @@ mod List do
   end
 
   doc "Returns the maximum integer in the list. Panics if empty."
-  fn maximum_int(xs : List(Int)) : Int do
+  fn maximum_int(xs : {List(Int) | len(_) > 0}) : Int do
     fn go(lst : List(Int), m : Int) : Int do
       match lst do
       Nil        -> m

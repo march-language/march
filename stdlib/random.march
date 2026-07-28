@@ -301,7 +301,7 @@ mod Random do
   Pick a uniform element from a non-empty list.
   Returns `(element, new_rng)`.  Panics on empty input.
   """
-  fn choice(rng : Rng, xs : List(a)) : (a, Rng) do
+  fn choice(rng : Rng, xs : {List(a) | len(_) > 0}) : (a, Rng) do
     match xs do
     Nil -> panic("Random.choice: empty list")
     _ -> do

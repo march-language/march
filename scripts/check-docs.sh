@@ -45,10 +45,10 @@ lint_docs() {
     echo CLAUDE.md
     echo syntax_reference.md
     echo specs/perceus-invariants.md
-    find docs -name '*.md' 2>/dev/null || true
-    find specs/features -name '*.md' 2>/dev/null || true
-    find specs/lang -name '*.md' 2>/dev/null || true
-    find specs/impl -name '*.md' 2>/dev/null || true
+    find docs -type f -name '*.md' 2>/dev/null || true
+    find specs/features -type f -name '*.md' 2>/dev/null || true
+    find specs/lang -type f -name '*.md' 2>/dev/null || true
+    find specs/impl -type f -name '*.md' 2>/dev/null || true
     echo .claude/skills/march-lang/SKILL.md
   } | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done \
     | grep -vE '/plans/|/superpowers/'   # historical/plan corpora & vendored plugin docs are not current-truth
@@ -95,7 +95,7 @@ done < <(lint_docs)
 # preceding "modules" (not the first number on the line) so phrases like
 # "Phase 1 ... 57 stdlib modules" compare 57, not 1.
 
-actual=$(find stdlib -maxdepth 1 -name '*.march' | wc -l | tr -d ' ')
+actual=$(find stdlib -maxdepth 1 -type f -name '*.march' | wc -l | tr -d ' ')
 
 echo "== Check B: stdlib module count (actual: $actual) =="
 b_problems=0
@@ -166,12 +166,12 @@ gr_parse="specs/lang/grammar/parse"
 gr_reject="specs/lang/grammar/reject"
 gr_index="specs/lang/grammar/INDEX.md"
 
-g_actual=$(find "$g_dir" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
-ta_actual=$(find "$t_accept" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
-tr_actual=$(find "$t_reject" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+g_actual=$(find "$g_dir" -maxdepth 1 -type f -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+ta_actual=$(find "$t_accept" -maxdepth 1 -type f -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+tr_actual=$(find "$t_reject" -maxdepth 1 -type f -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
 tt_actual=$((ta_actual + tr_actual))
-grp_actual=$(find "$gr_parse" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
-grr_actual=$(find "$gr_reject" -maxdepth 1 -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+grp_actual=$(find "$gr_parse" -maxdepth 1 -type f -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
+grr_actual=$(find "$gr_reject" -maxdepth 1 -type f -name '*.march' 2>/dev/null | wc -l | tr -d ' ')
 grt_actual=$((grp_actual + grr_actual))
 
 echo "== Check C: conformance-corpus INDEX counts (golden: $g_actual; types: $tt_actual = $ta_actual accept + $tr_actual reject; grammar: $grt_actual = $grp_actual parse + $grr_actual reject) =="

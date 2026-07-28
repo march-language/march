@@ -1,0 +1,27 @@
+-- The same non-empty precondition applied to a list the checker cannot see
+-- into. `ys` is an opaque parameter, so its length is UNKNOWN — the predicate
+-- `len(_) > 0` is satisfiable, hence not a definite failure, hence silent.
+--
+-- This is the safety half of t115: making the `_` spelling enforce must not
+-- turn "I cannot tell" into a report. Under March's definite-failure stance an
+-- unknown is skipped, never guessed; a report here would be a FALSE POSITIVE,
+-- and false positives on a stdlib contract like `List.head` would break every
+-- caller that guards its list by a means the checker cannot read.
+mod T116 do
+
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil        -> panic("empty")
+    end
+  end
+
+  fn go(ys : List(Int)) : Int do
+    head(ys)
+  end
+
+  fn main() : Int do
+    go([1])
+  end
+
+end

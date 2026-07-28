@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: refinement violation
+-- The NAMED-binder spelling of reject/t114. `{v : List(Int) | len(v) > 0}` must
+-- reject the empty literal exactly as the anonymous `_` form does, because both
+-- name the same refined value.
+--
+-- Paired with accept/t117 this brackets the named spelling from both sides: it
+-- must fire here and stay silent there. A spelling that only ever accepts is
+-- indistinguishable from one that checks nothing.
+mod T115 do
+
+  fn last(xs : {v : List(Int) | len(v) > 0}) : Int do
+    match xs do
+      Cons(h, Nil) -> h
+      Cons(_, t)   -> last(t)
+      Nil          -> panic("empty")
+    end
+  end
+
+  fn main() : Int do
+    last([])
+  end
+
+end

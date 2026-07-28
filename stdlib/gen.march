@@ -292,7 +292,7 @@ mod Gen do
   element (which is assumed to be the "simplest" by user convention).
   Panics on empty input.
   """
-  fn element(xs : List(a)) : Generator(a) do
+  fn element(xs : {List(a) | len(_) > 0}) : Generator(a) do
     match xs do
     Nil -> panic("Gen.element: empty list")
     Cons(first, _) -> do
@@ -365,7 +365,7 @@ mod Gen do
   end
 
   doc "Uniform choice among a non-empty list of generators."
-  fn one_of(gens : List(Generator(a))) : Generator(a) do
+  fn one_of(gens : {List(Generator(a)) | len(_) > 0}) : Generator(a) do
     match gens do
     Nil -> panic("Gen.one_of: empty list")
     _ -> do
