@@ -129,6 +129,19 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Json.to_string` crashed on every JSON array and object under `--target js`.**
+  It died with `TypeError: f._0 is not a function`, while the same program was
+  correct interpreted and compiled native. The cause was not in `json.march`: a
+  closure allocated inside a match arm whose scrutinee cell is dead gets
+  rewritten by Perceus from `EAlloc` to `EReuse`, and the JS backend's `EReuse`
+  and `EStackAlloc` cases were missing the rule `EAlloc` had — a closure's apply
+  function lives in slot `_0` and must be emitted as the raw function, not as
+  the `name$clo` wrapper *object*. Closure dispatch then did `f._0(f, x)` on a
+  record instead of a function. This hit any lambda passed to a user-defined
+  higher-order function from a reuse-eligible match arm, so `Json.to_string` was
+  the symptom rather than the bug. The three allocation forms now share one
+  emitter, so they cannot drift apart again.
+
 - **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
   three tables under "Results" on
   [/docs/simd-benchmarks/](https://march-lang.org/docs/simd-benchmarks/) were

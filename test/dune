@@ -2873,6 +2873,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
 
+; js_closure_reuse_apply_slot — a closure allocated in a match arm where the
+; scrutinee cell is dead is rewritten by Perceus from EAlloc to EReuse. The JS
+; backend's EReuse/EStackAlloc branches lacked EAlloc's "$Clo" special case, so
+; the apply-fn slot (_0) was emitted as the `name$clo` wrapper record instead of
+; the raw function — ECallPtr's `f._0(f, x)` dispatch then called a record:
+; "TypeError: f._0 is not a function". Hit every `Json.to_string` on a JSON
+; array or object; not json-specific (any lambda passed to a user-defined HOF
+; from a reuse-eligible arm).
+(rule
+ (targets js_closure_reuse_apply_slot.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_closure_reuse_apply_slot.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_closure_reuse_apply_slot.mjs native/js_closure_reuse_apply_slot.march)))
+
+(rule
+ (targets js_closure_reuse_apply_slot.out)
+ (deps js_closure_reuse_apply_slot.mjs march_runtime.mjs)
+ (action (with-stdout-to js_closure_reuse_apply_slot.out (run node js_closure_reuse_apply_slot.mjs))))
+
+(rule (alias runtest) (action (diff native/js_closure_reuse_apply_slot.expected js_closure_reuse_apply_slot.out)))
+
 ; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
 ; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
 ; const. Pins native/JS parity with the interpreter (values in the fixture).

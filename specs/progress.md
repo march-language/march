@@ -1,5 +1,38 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, JS closure apply-slot fix in EReuse/EStackAlloc)
+
+Fixed a JS-backend codegen bug that broke `Json.to_string` on every JSON array
+or object (`TypeError: f._0 is not a function`), while the same program ran
+correctly interpreted and compiled native.
+
+Root cause was in `lib/tir/js_emit.ml`, not `stdlib/json.march`. The JS closure
+layout is `{$: "$Clo_name", _0: apply_fn, _1: fv1, ...}`, and post-Defun
+dispatch calls `f._0(f, args)`. Slot `_0` must therefore hold the *raw* apply
+function — but `emit_atom` deliberately rewrites a module-level function name to
+its `name$clo` wrapper (an object, `{_0: fn}`) so bare function references work
+as first-class values. `EAlloc` handled this with an `is_clo` check that emitted
+slot 0 via `emit_atom_raw`; `EStackAlloc` and `EReuse` — the two rewrites
+escape-analysis and Perceus produce *from* `EAlloc` — did not. A closure
+allocated in a match arm whose scrutinee cell is dead becomes `EReuse` (the cell
+is reusable), so its apply slot got the wrapper object and dispatch called a
+record instead of a function.
+
+`json.march`'s `Array`/`Object` arms hit exactly this shape (match on `jv`, then
+allocate a lambda for the local `map_list` helper), but the bug is general: any
+lambda passed to a user-defined higher-order function from a reuse-eligible
+match arm. Confirmed general with a JSON-free reproduction. Diagnosis note: the
+distinguishing evidence was marking `EAlloc`/`EStackAlloc`/`EReuse` with
+separate emitted comments — the first hypothesis (`EStackAlloc`, which
+`known_call.ml:71` shows does carry closures) was wrong, and only the marker
+ruled it out.
+
+The three allocation forms now share one `emit_tagged_alloc` helper, so the
+closure rule cannot be applied to one and missed by the others again. Pinned by
+`test/native/js_closure_reuse_apply_slot.{march,expected}` (a dune-rule JS
+pipeline test — needs `dune build @runtest`, not the alcotest binaries), which
+covers both the general shape and `Json.to_string` over an array and an object.
+
 ## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
 
 Extended `lib/tir/native_map_inline.ml` (the compiler pass behind
