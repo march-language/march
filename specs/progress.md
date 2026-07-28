@@ -1,5 +1,166 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-27, Json.parse RFC 8259 number scanner)
+
+`Json.parse` rejected every JSON number with a signed exponent — `1e-5`,
+`2.5E+10`, `1e-308` all failed with `invalid number: 1e`. The number-body
+predicate (`is_num_byte` in `stdlib/json.march`) accepted only digits, `.`,
+`e`, `E`; `parse_number` stepped past a single leading `-` before the scan, so
+a sign was only ever handled in the mantissa position, never after an exponent
+marker. The scan stopped at the `-`, sliced `"1e"`, and `string_to_float("1e")`
+returned `None`. Long-standing — the character set predates the byte-index
+scanner rewrite (`556cf7e9`) and was preserved verbatim through it, with a
+comment at `is_num_byte` flagging it as a deliberate deferral so that rewrite
+stayed a pure performance change.
+
+Replaced `is_num_byte`/`scan_number_end` with a scanner that validates RFC
+8259's grammar (`["-"] int [frac] [exp]`) as it goes, in the same byte-index
+style: `is_digit_byte` / `scan_digits` / `scan_int` / `scan_frac` / `scan_exp`,
+each returning the index it stopped at. `+`/`-` are accepted *only* immediately
+after `e`/`E` — treating them as ordinary number bytes would make `1-2` scan as
+the single token `"1-2"` and change the error for malformed input.
+`string_byte_at` returns `-1` past the end of the string, so every scan
+terminates at EOF without a bounds check. Errors quote the offending slice via
+`bad_number(s, start, e)`, so `1e-` still reports `invalid number: 1e-`.
+
+Validating shape during the scan also stops `Json.parse` inheriting whatever
+`string_to_float` happens to admit. That builtin is `strtod` (native) /
+`float_of_string` (interpreter) backed, so deferring to it let non-JSON forms
+through: `1.` and `01` both parsed before this change. Now rejected, along with
+`+1`, `Infinity`, `0x10`, `.5`, `1e`, `1e-` (several of those were already
+rejected upstream in `parse_value`, and still are). Verified identical
+interpreted and compiled (`--opt 2`) over a 22-case corpus.
+
+`test/stdlib/test_json.march` had rotted out of the build entirely: it was
+referenced by no runner, and no longer typechecked against the current stdlib
+(bare `Null`/`Bool`/`Str`/`Array` became ambiguous once `Msgpack` and `IOList`
+landed the same constructor names). Constructors qualified as `Json.*`, and the
+file wired into `test/test_stdlib_march.ml` — `json.march` is loaded before
+`iolist.march`/`msgpack.march` so their same-named constructors keep winning
+bare lookups exactly as before. 48 tests, previously running nowhere, now run
+in CI; 26 of them are new, covering the exponent forms and the RFC shape rules.
+
+## Current State (as of 2026-07-27, module-qualified ctor pattern silently failed to match compiled)
+
+Fixed a silent-wrong-answer codegen bug: a MODULE-qualified constructor
+pattern whose bare ctor name is declared by more than one module compiled
+into a `switch` case that could never fire, so the arm **failed open** to
+the catch-all — no error, no warning, no crash. The interpreter was always
+correct, making this a pure compiled/interpreted parity divergence.
+
+Repro (`Json.Array`/`Json.Null` fall through compiled, match interpreted):
+
+```march
+match Json.parse("[1]") do
+Ok(Json.Array(_)) -> println("array")
+Ok(_)             -> println("fell through")   -- compiled took THIS arm
+Err(_)            -> println("err")
+end
+```
+
+`Json.Object(_)` matched correctly throughout, which is what made the bug
+survive so long — see "why the obvious fixture misses it" below.
+
+**Root cause.** Codegen keys `Llvm_ctx.ctor_info` by TYPE
+(`"JsonValue.Array"`), and `Llvm_case.qualified_br_key` resolves a written
+qualifier by comparing it only against a key's *type* segment. But the
+documented qualified-pattern syntax (`specs/lang/pattern-matching.md`,
+"Qualified Constructor Patterns") writes a *module* — and `Json` declares
+the type `JsonValue`, `Msgpack` declares `Value`. The two names differ, so
+neither the `ktype = qual` nor the `last_seg ktype = qtail` comparison could
+ever fire, no key matched, and the tag DEGRADED to the bare ctor `"Array"`.
+`Llvm_data.ctor_entry` then resolved that bare name by its ambiguous
+`".<ctor>"` suffix scan over every type in the program, tie-broken by
+hashtable order — and landed on `Msgpack.Value.Array`. Because `Value` is a
+same-short-name colliding type (Msgpack + DataFrame), its ctors carry
+globally-unique tags from the disjoint `0x0200_0000` range (Task 1 of the
+ctor-module-identity plan), so the emitted case constant was `33554472`
+against a value built with `JsonValue.Array`'s tag `4`. Confirmed directly in
+`--emit-llvm`: the switch compared `i32 33554472` while every `store i32` in
+the whole module was in the range 0–5.
+
+**Why it could not be fixed in codegen.** The obvious repair — fall back to
+the scrutinee's own type when the qualifier resolves nothing — is dead code
+here. Instrumenting `qualified_br_key` showed `scrut_ty = TVar _` for all
+three patterns: the scrutinee is a destructured sub-pattern variable (the
+`Ok(...)` payload), and `lower_match` mints those with `unknown_ty`, so by
+codegen the type names nothing at all. The qualifier has to be translated
+while module structure is still in hand.
+
+**Fix** (`lib/tir/lower_state.ml`, `lib/tir/lower_match.ml`). The existing
+`compute_shared_ctor_collisions` walk over all decls already collects, per
+declared variant type, its module prefix and ctor names; it now also indexes
+that same data two other ways — `module_ctor_type_tbl` ((module prefix, ctor)
+→ declaring type's short name, or `None` when that module declares the ctor
+on two different types) and `type_ctor_tbl` ((short type name, ctor)).
+`pat_tag_and_subs`'s qualified branch consults them after the existing narrow
+collision path declines: a qualifier that is really a TYPE (`List.Cons`, or
+the 3-segment `Mod.Type.Ctor` form the collision path emits) is left
+untouched since it already exact-matches a `ctor_info` key, and an ambiguous
+module passes through unchanged rather than guessing. Otherwise the tag is
+rewritten to `"JsonValue.Array"`, which `qualified_br_key` then satisfies on
+its FIRST check (`Hashtbl.mem ctor_info br_tag`) — no codegen change at all.
+
+Note this also makes the previously-passing `Msgpack.Array` direction
+*deterministic* rather than accidentally correct: it too was degrading to the
+bare name and merely winning the hashtable coin-flip.
+
+**Why the obvious fixture misses it** (worth remembering when writing the
+regression). The failure is name-dependent, not construct-dependent: only
+`Array` and `Null` are declared by two stdlib modules, so only those two
+misresolve. `Object` is unique to `JsonValue`, so its ambiguous suffix scan
+had exactly one candidate and silently landed right; `Str` is declared by
+both but at the *same* tag position (3) in each, so the wrong lookup returned
+the right number. A fixture checking only `Object`, or only `Str`, passes
+pre-fix and proves nothing. The new test asserts `Array`, `Null`, `Object`,
+`Str` and a non-matching fallthrough together, and was confirmed RED before
+the fix (`array`/`null` → `other`).
+
+**JS backend was never affected** — `js_emit` discriminates on the ctor-name
+string (`{ $: "Array" }`), not a numeric tag, so no tag identity is involved.
+
+**Tests.** New `test_module_qualified_colliding_ctor_pattern_compiled` in
+`test/test_codegen.ml`, registered under the existing
+`cross_module_ctor_resolution` group alongside its sibling
+`test_msgpack_cross_module_ctor_resolution_compiled` (the same bug family
+approached from the stdlib-internal side). Also verified by hand on a
+user-module reproduction: two nested modules `A`/`B` declaring types `T`/`U`
+that share the ctor names `Node`/`Leaf`, matched via `A.Node`/`B.Node`, plus
+`List.Cons`/`List.Nil` type-qualified patterns to confirm the untouched path
+— compiled output matches interpreted on every arm.
+
+## Current State (as of 2026-07-27, JS closure apply-slot fix in EReuse/EStackAlloc)
+
+Fixed a JS-backend codegen bug that broke `Json.to_string` on every JSON array
+or object (`TypeError: f._0 is not a function`), while the same program ran
+correctly interpreted and compiled native.
+
+Root cause was in `lib/tir/js_emit.ml`, not `stdlib/json.march`. The JS closure
+layout is `{$: "$Clo_name", _0: apply_fn, _1: fv1, ...}`, and post-Defun
+dispatch calls `f._0(f, args)`. Slot `_0` must therefore hold the *raw* apply
+function — but `emit_atom` deliberately rewrites a module-level function name to
+its `name$clo` wrapper (an object, `{_0: fn}`) so bare function references work
+as first-class values. `EAlloc` handled this with an `is_clo` check that emitted
+slot 0 via `emit_atom_raw`; `EStackAlloc` and `EReuse` — the two rewrites
+escape-analysis and Perceus produce *from* `EAlloc` — did not. A closure
+allocated in a match arm whose scrutinee cell is dead becomes `EReuse` (the cell
+is reusable), so its apply slot got the wrapper object and dispatch called a
+record instead of a function.
+
+`json.march`'s `Array`/`Object` arms hit exactly this shape (match on `jv`, then
+allocate a lambda for the local `map_list` helper), but the bug is general: any
+lambda passed to a user-defined higher-order function from a reuse-eligible
+match arm. Confirmed general with a JSON-free reproduction. Diagnosis note: the
+distinguishing evidence was marking `EAlloc`/`EStackAlloc`/`EReuse` with
+separate emitted comments — the first hypothesis (`EStackAlloc`, which
+`known_call.ml:71` shows does carry closures) was wrong, and only the marker
+ruled it out.
+
+The three allocation forms now share one `emit_tagged_alloc` helper, so the
+closure rule cannot be applied to one and missed by the others again. Pinned by
+`test/native/js_closure_reuse_apply_slot.{march,expected}` (a dune-rule JS
+pipeline test — needs `dune build @runtest`, not the alcotest binaries), which
+covers both the general shape and `Json.to_string` over an array and an object.
 ## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
 
 Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per
@@ -409,6 +570,76 @@ The phase 1 peak-RSS and peak-live columns were measured against the leaky
 compiler and must be re-taken before any memory-based criterion is applied;
 timing, allocation counts and copy volumes were unaffected and carry the
 verdicts above.
+
+## 2026-07-27 — Single-use private-function inlining measured and verified
+
+The TIR optimizer now runs a separately named `single-use-inline` pass after
+ordinary pure-function inlining and before constant propagation. It relocates
+a syntactically impure body only when the function has exactly one total
+reference and that reference is an arity-correct direct call. The 50-node
+limit, DCE-root boundary, recursive-SCC exclusion, address-taking and
+collision-dispatch guards, and hot-code-reload boundary remain conservative.
+Because Perceus has already made ownership explicit, substitution preserves
+the existing RC operations and their order.
+
+**Corpus measurement:** all 93 current non-JS top-level native fixtures
+compiled with `--dump-phases --emit-llvm` (0 failures; 488.67 s command wall
+time). Final raw LLVM contains 1,869 matched March definitions and 2,310
+residual direct calls. On the exact 91-fixture published-baseline set,
+definitions fell 2,029 → 1,853 (176 removed) and published residual calls
+fell 2,468 → 2,294 (174 fewer, 7.05%). A same-source no-pass control at
+`91afbe99` measured 2,470 → 2,294 calls, attributing 176 removed calls and
+definitions across the same 51 affected fixtures; the two-call difference
+from the published baseline predates this pass. Across all 93 current
+fixtures, the control measured 180 removed calls/definitions, 156 distinct
+bodies, across 53 fixtures; 159/180 removed occurrences contain explicit RC
+operations. `specs/optimizations.md` records the body-size and RC
+distributions and the dump-metric distinction.
+
+**Verification:** focused codegen groups passed (`single_use_inline` 24/24,
+combined `inline` 30/30, DCE 6/6, mutual TCO 8/8, reduction checks 4/4);
+hot reload passed 35/35; TIR eval selection passed 62/62; TIR
+pipeline/pass/invariant properties passed 16/16. Full codegen passed 478/478
+in 256.141 s command wall time, including the 93-fixture native LLVM verifier
+(one unrelated cross-sysroot case was tool-skipped because its external
+sysroot is absent). `dune build @install` and `scripts/check-docs.sh` passed.
+
+The standalone golden sanitizer gate did **not** pass on this host:
+`./specs/lang/golden/sanitize.sh` exited 1 with `0 clean, 46 failed`. Every
+golden compiled, then every sanitized binary hit the script's 25-second
+watchdog with rc 142; none emitted an AddressSanitizer, UBSan, or
+LeakSanitizer diagnostic. This broad host ASAN failure includes trivial
+literal/arithmetic goldens and matches the independently reproduced
+host-sensitive watchdog recorded by the preceding task. No claim is made
+that full `dune runtest` or the sanitizer gate is green, and the fixed-port
+node aliases remain quarantined.
+
+All measurements above are compiler output or regression-command wall time.
+No runtime speedup was measured.
+
+**Corpus-count correction (2026-07-27, post-review fix wave):** the 93-fixture
+count above was accurate for the commit it was measured at
+(`d3315b3624bdbcf11ce8cf001f355fc0fe28cf57`). A later rebase onto `main`
+brought in one unrelated fixture, `test/native/native_arr_map_inline_float_box_reuse.march`
+(float-boxing Stage 4 Option A), bringing the current non-JS top-level native
+corpus to 94. Rather than re-run the full ~488s/~465s two-pass corpus
+measurement for one added fixture, that fixture was independently checked:
+its `--dump-phases` trace shows an identical TIR node count immediately
+before and after both `tir-opt-{1,2}-single-use-inline` phases (13,062 →
+13,062 in the first fixed-point iteration, 5,610 → 5,610 in the second) — the
+pass is a no-op on it, since the fixture defines only `main` plus
+Defun-lifted map-loop closures, none of which is an eligible single-caller
+private top-level function. The 93-fixture aggregate figures above (180
+removed occurrences, 156 distinct bodies, 53 affected fixtures) therefore
+still hold unchanged for the current 94-fixture corpus; this note exists so
+the fixture count itself does not go stale. The fix wave also addressed the
+final review's three Critical findings (caller-binding capture rejection in
+`single_use_inline.ml`; a persistent lexically-scoped alpha-renaming
+environment replacing the prior single mutable table in `inline.ml`; and
+bare/qualified-alias canonicalization in reference and SCC accounting) and
+the non-hermetic native-LLVM Dune gate (Important #5: sequenced compile/emit
+copies onto distinct basenames, and the `grep` exit-status handling now
+distinguishes "no match" from a real error).
 
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 

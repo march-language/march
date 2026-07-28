@@ -1717,6 +1717,78 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/newtype_counter.expected native_newtype_counter.out)))
 
+; ── One-use impure helper: preserve List RC/effect order while eliminating ──
+; ── both the named call and definition from optimized emitted LLVM.       ──
+(rule
+ (targets native_single_use_inline_rc
+          native_single_use_inline_rc.out
+          native_single_use_inline_rc_compile_input.march
+          native_single_use_inline_rc_llvm_input.march
+          native_single_use_inline_rc_llvm_input.ll
+          native_single_use_inline_rc_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/single_use_inline_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_compile_input.march)
+    (run %{exe:../bin/main.exe} --compile -o native_single_use_inline_rc
+         native_single_use_inline_rc_compile_input.march)
+    (with-stdout-to native_single_use_inline_rc.out
+         (system "./native_single_use_inline_rc"))
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_llvm_input.march)
+    (run %{exe:../bin/main.exe} --emit-llvm
+         native_single_use_inline_rc_llvm_input.march)
+    (with-stdout-to native_single_use_inline_rc_llvm_check.out
+     (run bash -c
+      "check_ir () { \
+        ir=\"$1\"; \
+        if ! test -r \"$ir\"; then \
+          echo \"missing or unreadable LLVM IR: $ir\" >&2; \
+          return 2; \
+        fi; \
+        if grep -Eq '(^|[[:space:]])(call|define)[^@]*@helper\\(' \"$ir\"; then \
+          echo 'one-use helper call or definition remained in emitted LLVM' >&2; \
+          return 3; \
+        else \
+          grep_status=$?; \
+          if test \"$grep_status\" -eq 1; then \
+            echo 'helper eliminated'; \
+            return 0; \
+          fi; \
+          echo \"failed to inspect LLVM IR (grep status $grep_status): $ir\" >&2; \
+          return \"$grep_status\"; \
+        fi; \
+      }; \
+      if check_ir native_single_use_inline_rc_missing.ll >/dev/null 2>&1; then \
+        echo 'LLVM guard accepted a missing file' >&2; \
+        exit 1; \
+      else \
+        missing_status=$?; \
+        if test \"$missing_status\" -ne 2; then \
+          echo \"LLVM missing-file guard returned $missing_status, expected 2\" >&2; \
+          exit 1; \
+        fi; \
+      fi; \
+      echo 'missing LLVM guard rejected absent input'; \
+      check_ir native_single_use_inline_rc_llvm_input.ll"))))))
+
+(rule
+ (alias runtest)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
+(rule
+ (alias single_use_inline_rc)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
 ; ── P6 Milestone 2: Option niche (None=0, Some(x)=x) — safe_div + greet. ──
 (rule
  (targets native_option_niche native_option_niche.out)
@@ -2872,6 +2944,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (with-stdout-to js_random_determinism.out (run node js_random_determinism.mjs))))
 
 (rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
+
+; js_closure_reuse_apply_slot — a closure allocated in a match arm where the
+; scrutinee cell is dead is rewritten by Perceus from EAlloc to EReuse. The JS
+; backend's EReuse/EStackAlloc branches lacked EAlloc's "$Clo" special case, so
+; the apply-fn slot (_0) was emitted as the `name$clo` wrapper record instead of
+; the raw function — ECallPtr's `f._0(f, x)` dispatch then called a record:
+; "TypeError: f._0 is not a function". Hit every `Json.to_string` on a JSON
+; array or object; not json-specific (any lambda passed to a user-defined HOF
+; from a reuse-eligible arm).
+(rule
+ (targets js_closure_reuse_apply_slot.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_closure_reuse_apply_slot.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_closure_reuse_apply_slot.mjs native/js_closure_reuse_apply_slot.march)))
+
+(rule
+ (targets js_closure_reuse_apply_slot.out)
+ (deps js_closure_reuse_apply_slot.mjs march_runtime.mjs)
+ (action (with-stdout-to js_closure_reuse_apply_slot.out (run node js_closure_reuse_apply_slot.mjs))))
+
+(rule (alias runtest) (action (diff native/js_closure_reuse_apply_slot.expected js_closure_reuse_apply_slot.out)))
 
 ; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
 ; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner

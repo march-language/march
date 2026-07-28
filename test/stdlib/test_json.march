@@ -10,7 +10,7 @@ describe "Json" do
     test "parse null" do
       match Json.parse("null") do
       Err(e) -> panic("parse null failed: " ++ e)
-      Ok(v) -> match v do Null -> () | _ -> panic("expected Null") end
+      Ok(v) -> match v do Json.Null -> () | _ -> panic("expected Null") end
       end
     end
 
@@ -21,14 +21,14 @@ describe "Json" do
     test "parse true" do
       match Json.parse("true") do
       Err(e) -> panic("parse true failed: " ++ e)
-      Ok(v) -> match v do Bool(b) -> assert b | _ -> panic("expected Bool") end
+      Ok(v) -> match v do Json.Bool(b) -> assert b | _ -> panic("expected Bool") end
       end
     end
 
     test "parse false" do
       match Json.parse("false") do
       Err(e) -> panic("parse false failed: " ++ e)
-      Ok(v) -> match v do Bool(b) -> assert not(b) | _ -> panic("expected Bool") end
+      Ok(v) -> match v do Json.Bool(b) -> assert not(b) | _ -> panic("expected Bool") end
       end
     end
 
@@ -84,6 +84,146 @@ describe "Json" do
       end
     end
 
+    test "parse unsigned exponent" do
+      match Json.parse("1e5") do
+      Err(e) -> panic("parse 1e5 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Number(f) -> assert (f == 100000.0)
+        _ -> panic("expected Number")
+        end
+      end
+      end
+    end
+
+    test "parse negative exponent" do
+      match Json.parse("1e-5") do
+      Err(e) -> panic("parse 1e-5 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Number(f) -> assert (f * 100000.0 > 0.99 && f * 100000.0 < 1.01)
+        _ -> panic("expected Number")
+        end
+      end
+      end
+    end
+
+    test "parse capital E with explicit plus exponent" do
+      match Json.parse("2.5E+10") do
+      Err(e) -> panic("parse 2.5E+10 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Number(f) -> assert (f == 25000000000.0)
+        _ -> panic("expected Number")
+        end
+      end
+      end
+    end
+
+    test "parse denormal-range negative exponent" do
+      match Json.parse("1e-308") do
+      Err(e) -> panic("parse 1e-308 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        -- Can't write 1e-308 as a March literal (no exponent syntax), so
+        -- just pin that the exponent was actually applied.
+        Number(f) -> assert (f > 0.0 && f < 0.0000001)
+        _ -> panic("expected Number")
+        end
+      end
+      end
+    end
+
+    test "parse negative number with signed exponent" do
+      match Json.parse("-1.5e-3") do
+      Err(e) -> panic("parse -1.5e-3 failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Number(f) -> assert (f > -0.00151 && f < -0.00149)
+        _ -> panic("expected Number")
+        end
+      end
+      end
+    end
+
+    test "parse signed exponents inside an array" do
+      match Json.parse("[1e-5, 2.5E+10]") do
+      Err(e) -> panic("parse array of exponents failed: " ++ e)
+      Ok(v) -> do
+        match v do
+        Json.Array(Cons(Number(a), Cons(Number(b), Nil))) ->
+          assert (a > 0.0 && a < 0.001 && b == 25000000000.0)
+        _ -> panic("expected two-element Array of Number")
+        end
+      end
+      end
+    end
+
+    test "reject bare exponent marker" do
+      match Json.parse("1e") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 1e to be rejected")
+      end
+    end
+
+    test "reject exponent marker with only a sign" do
+      match Json.parse("1e-") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 1e- to be rejected")
+      end
+    end
+
+    test "reject digit minus digit" do
+      match Json.parse("1-2") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 1-2 to be rejected")
+      end
+    end
+
+    -- RFC 8259 shape rules that strtod / float_of_string would otherwise admit.
+
+    test "reject leading plus" do
+      match Json.parse("+1") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected +1 to be rejected")
+      end
+    end
+
+    test "reject Infinity" do
+      match Json.parse("Infinity") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected Infinity to be rejected")
+      end
+    end
+
+    test "reject hexadecimal literal" do
+      match Json.parse("0x10") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 0x10 to be rejected")
+      end
+    end
+
+    test "reject leading zeros" do
+      match Json.parse("01") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 01 to be rejected")
+      end
+    end
+
+    test "reject trailing decimal point" do
+      match Json.parse("1.") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected 1. to be rejected")
+      end
+    end
+
+    test "reject bare minus sign" do
+      match Json.parse("-") do
+      Err(_) -> assert true
+      Ok(_) -> panic("expected - to be rejected")
+      end
+    end
+
   end
 
   describe "parse strings" do
@@ -93,7 +233,7 @@ describe "Json" do
       Err(e) -> panic("parse string failed: " ++ e)
       Ok(v) -> do
         match v do
-        Str(s) -> assert (s == "hello")
+        Json.Str(s) -> assert (s == "hello")
         _ -> panic("expected Str")
         end
       end
@@ -105,7 +245,7 @@ describe "Json" do
       Err(e) -> panic("parse empty string failed: " ++ e)
       Ok(v) -> do
         match v do
-        Str(s) -> assert (s == "")
+        Json.Str(s) -> assert (s == "")
         _ -> panic("expected Str")
         end
       end
@@ -121,7 +261,7 @@ describe "Json" do
       Err(e) -> panic("parse empty array failed: " ++ e)
       Ok(v) -> do
         match v do
-        Array(xs) -> assert (List.length(xs) == 0)
+        Json.Array(xs) -> assert (List.length(xs) == 0)
         _ -> panic("expected Array")
         end
       end
@@ -133,7 +273,7 @@ describe "Json" do
       Err(e) -> panic("parse int array failed: " ++ e)
       Ok(v) -> do
         match v do
-        Array(xs) -> assert (List.length(xs) == 3)
+        Json.Array(xs) -> assert (List.length(xs) == 3)
         _ -> panic("expected Array")
         end
       end
@@ -145,7 +285,7 @@ describe "Json" do
       Err(e) -> panic("parse mixed array failed: " ++ e)
       Ok(v) -> do
         match v do
-        Array(xs) -> assert (List.length(xs) == 4)
+        Json.Array(xs) -> assert (List.length(xs) == 4)
         _ -> panic("expected Array")
         end
       end
@@ -176,7 +316,7 @@ describe "Json" do
         None -> panic("key not found")
         Some(val) ->
           match val do
-          Str(s) -> assert (s == "value")
+          Json.Str(s) -> assert (s == "value")
           _ -> panic("expected Str")
           end
         end
@@ -235,7 +375,7 @@ describe "Json" do
           None -> panic("name missing")
           Some(name_val) ->
             match name_val do
-            Str(s) -> assert (s == "Alice")
+            Json.Str(s) -> assert (s == "Alice")
             _ -> panic("name not Str")
             end
           end
@@ -252,7 +392,7 @@ describe "Json" do
         None -> panic("nested path missing")
         Some(val) ->
           match val do
-          Str(s) -> assert (s == "Alice")
+          Json.Str(s) -> assert (s == "Alice")
           _ -> panic("expected Str")
           end
         end
@@ -282,12 +422,12 @@ describe "Json" do
     end
 
     test "to_string array" do
-      let arr = Array(Cons(Number(1.0), Cons(Number(2.0), Cons(Number(3.0), Nil))))
+      let arr = Json.Array(Cons(Number(1.0), Cons(Number(2.0), Cons(Number(3.0), Nil))))
       assert (Json.to_string(arr) == "[1,2,3]")
     end
 
     test "to_string object" do
-      let obj = Object(Cons(("key", Str("val")), Nil))
+      let obj = Object(Cons(("key", Json.Str("val")), Nil))
       assert (Json.to_string(obj) == "{\"key\":\"val\"}")
     end
 

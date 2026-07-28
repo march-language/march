@@ -183,6 +183,51 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Json.parse` rejected JSON numbers with a signed exponent.** `1e-5`,
+  `2.5E+10` and `1e-308` all failed with `invalid number: 1e` — the number
+  scanner accepted `+`/`-` only in the mantissa position, so it stopped at the
+  sign after the exponent marker and handed a truncated `"1e"` to
+  `string_to_float`. The scanner now follows RFC 8259's grammar
+  (`["-"] int [frac] [exp]`), accepting a sign immediately after `e`/`E`.
+  `1-2` still parses as `1` followed by a trailing-character error, as before.
+
+- **`Json.parse` accepted number forms JSON does not allow.** Shape is now
+  validated during the scan instead of being left to `string_to_float`
+  (`strtod` / `float_of_string`), which is more permissive than JSON: `1.` and
+  `01` previously parsed and are now rejected, joining `+1`, `Infinity`,
+  `0x10` and `.5`. This is a behavior change for input that was never valid
+  JSON — anything conforming to RFC 8259 parses as it did before.
+
+- **A module-qualified constructor pattern could silently never match when
+  compiled.** `match Json.parse(s) do Ok(Json.Array(_)) -> ... end` matched
+  correctly interpreted but fell through to the catch-all arm in a compiled
+  binary — no error, no warning, no crash, just the wrong branch. It affected
+  any qualified pattern whose bare constructor name is declared by more than one
+  module: in the standard library that is `Array` and `Null` (both
+  `Json.JsonValue` and `Msgpack.Value` declare them), so `Json.Array(_)` and
+  `Json.Null` were the visible casualties, while `Json.Object(_)` — a name
+  unique to `JsonValue` — worked. Codegen identifies constructors by their
+  *type* (`JsonValue.Array`), but the documented qualified-pattern syntax writes
+  a *module* (`Json.Array`); when the two names differ the qualifier resolved to
+  nothing and the pattern fell back to matching on the bare name, which then
+  picked whichever module's constructor the compiler happened to enumerate
+  first. The qualifier is now translated to its declaring type during lowering,
+  so an explicitly qualified pattern resolves to exactly the constructor it
+  names.
+
+- **`Json.to_string` crashed on every JSON array and object under `--target js`.**
+  It died with `TypeError: f._0 is not a function`, while the same program was
+  correct interpreted and compiled native. The cause was not in `json.march`: a
+  closure allocated inside a match arm whose scrutinee cell is dead gets
+  rewritten by Perceus from `EAlloc` to `EReuse`, and the JS backend's `EReuse`
+  and `EStackAlloc` cases were missing the rule `EAlloc` had — a closure's apply
+  function lives in slot `_0` and must be emitted as the raw function, not as
+  the `name$clo` wrapper *object*. Closure dispatch then did `f._0(f, x)` on a
+  record instead of a function. This hit any lambda passed to a user-defined
+  higher-order function from a reuse-eligible match arm, so `Json.to_string` was
+  the symptom rather than the bug. The three allocation forms now share one
+  emitter, so they cannot drift apart again.
+
 - **`String.slice` returned the wrong text on the JS backend.** The JS runtime
   implemented `march_string_slice(s, start, len)` as `s.slice(start, len)`,
   treating the third argument as an END index rather than a LENGTH, so every
@@ -301,6 +346,16 @@ git log is authoritative for exact commits.
   non-null allocation whose argument is its allocation size, and marks
   generated closure ABI trampolines `alwaysinline`. This gives LLVM useful
   alias and call-boundary facts without changing TIR or ownership semantics.
+
+- The TIR optimizer inlines a private top-level function's body at its call
+  site when that function has exactly one direct, arity-correct reference
+  anywhere in the module, even when the body is not pure. Ordinary pure-only
+  inlining, the 50-node size limit, DCE-root/address-taken/hot-code-reload
+  exclusions, and recursive-SCC detection (extended to cover bare/qualified
+  name aliasing) all still apply; Perceus RC operations and their order are
+  preserved unchanged. No runtime speedup was measured — this is a
+  definition/call-site reduction in emitted LLVM, not a benchmarked
+  optimization.
 
 ### Added
 

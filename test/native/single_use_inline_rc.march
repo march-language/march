@@ -1,0 +1,14 @@
+mod SingleUseInlineRc do
+  fn helper(xs : List(Int)) : Int do
+    println("helper:start")
+    let n = List.length(xs)
+    println("helper:end")
+    n
+  end
+
+  fn main() : Unit do
+    let xs = [10, 20, 30]
+    let n = helper(xs)
+    println(n)
+  end
+end
