@@ -1,0 +1,33 @@
+mod Main do
+  fn double(x : Int) : Int do x * 2 end
+  fn triple(x : Int) : Int do x * 3 end
+  fn add(a : Int, b : Int) : Int do a + b end
+
+  fn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  fn apply_twice(f : Int -> Int, n : Int) : Int do apply_it(f, apply_it(f, n)) end
+
+  fn main() : () do
+    -- same fn materialized twice, both used
+    println(apply_it(double, 5) + apply_it(double, 7))
+    -- two distinct fns must not share one global
+    println(apply_it(double, 10))
+    println(apply_it(triple, 10))
+    -- through two levels of HOF
+    println(apply_twice(double, 3))
+    -- multi-arg fn called directly
+    println(add(4, 5))
+    -- multi-arg fn materialized as a value and called through it
+    let af = add
+    println(af(7, 8))
+    -- fn value stored in a data structure and retrieved
+    let fs = [double, triple, double]
+    match fs do
+      [f1, f2, f3] -> println(f1(2) + f2(2) + f3(2))
+      _ -> println(-1)
+    end
+    -- fn value stored in a tuple, retrieved, and used
+    let pair = (double, triple)
+    let (pf, pg) = pair
+    println(pf(6) + pg(6))
+  end
+end

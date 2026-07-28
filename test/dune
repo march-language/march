@@ -1833,6 +1833,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_static_closure_no_leak.out native/static_closure_no_leak.expected)
  (action (diff native/static_closure_no_leak.expected native_static_closure_no_leak.out)))
 
+; ── Static capture-free closures, function-value semantics: repeated        ──
+; ── materialization of one fn, two distinct fns (must not collide on one   ──
+; ── static global), nested HOF threading, a multi-arg fn value, and fn     ──
+; ── values stored in a list/tuple, all compared against interpreted output.──
+(rule
+ (targets native_static_closure_semantics native_static_closure_semantics.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/static_closure_semantics.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_static_closure_semantics
+         native/static_closure_semantics.march)
+    (with-stdout-to native_static_closure_semantics.out
+         (system "./native_static_closure_semantics"))))))
+
+(rule
+ (alias runtest)
+ (deps native_static_closure_semantics.out native/static_closure_semantics.expected)
+ (action (diff native/static_closure_semantics.expected native_static_closure_semantics.out)))
+
 ; ── Tuple projection forwarding, RC-relevant case: heap-typed (String)     ──
 ; ── tuple elements, including the same heap value duplicated into both    ──
 ; ── slots (let t = (s, s)), destructured and used independently. This is  ──
