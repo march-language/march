@@ -3033,11 +3033,39 @@ void *march_string_replace_all(void *s, void *old, void *new_) {
     return result;
 }
 
+/* ASCII-only case mapping, deliberately NOT ctype.h's tolower/toupper.
+ *
+ * Two reasons, one correctness and one speed:
+ *
+ * 1. ctype.h is LOCALE-SENSITIVE, and March strings are UTF-8. Under a
+ *    single-byte locale, tolower rewrites bytes >= 0x80 — measured on macOS,
+ *    en_US.ISO8859-1 maps 0xC3 to 0xE3, and 0xC3 is the lead byte of every
+ *    2-byte UTF-8 sequence. That silently corrupts the encoding. March never
+ *    calls setlocale, but any linked library or embedding application can, and
+ *    then these functions change behaviour underneath it. Depending on global
+ *    process state for string semantics is not a defensible contract.
+ *
+ * 2. The unsigned-wrap comparison is branch-free and lets the compiler
+ *    vectorize the surrounding loop, where a call to tolower cannot be.
+ *
+ * Scope is unchanged: ASCII only. Non-ASCII bytes pass through untouched,
+ * which is what the previous implementation effectively did in the "C" locale
+ * and what the stdlib docs describe. Full Unicode case mapping is a different
+ * feature (it is not byte-wise — it changes string length). */
+static inline char march_ascii_lower(char c) {
+    unsigned char u = (unsigned char)c;
+    return (char)((unsigned char)(u - 'A') < 26u ? (unsigned char)(u + 32) : u);
+}
+static inline char march_ascii_upper(char c) {
+    unsigned char u = (unsigned char)c;
+    return (char)((unsigned char)(u - 'a') < 26u ? (unsigned char)(u - 32) : u);
+}
+
 void *march_string_to_lowercase(void *s) {
     march_string *ss = (march_string *)s;
     march_string *r = march_string_alloc(ss->len);
     for (int64_t i = 0; i < ss->len; i++) {
-        r->data[i] = (char)tolower((unsigned char)ss->data[i]);
+        r->data[i] = march_ascii_lower(ss->data[i]);
     }
     r->data[ss->len] = '\0';
     str_stats_copied(ss->len);
@@ -3048,7 +3076,7 @@ void *march_string_to_uppercase(void *s) {
     march_string *ss = (march_string *)s;
     march_string *r = march_string_alloc(ss->len);
     for (int64_t i = 0; i < ss->len; i++) {
-        r->data[i] = (char)toupper((unsigned char)ss->data[i]);
+        r->data[i] = march_ascii_upper(ss->data[i]);
     }
     r->data[ss->len] = '\0';
     str_stats_copied(ss->len);
