@@ -7508,7 +7508,7 @@ is what they need, and it now exists.
 
 ## Current State (as of 2026-07-28, `cap no_panic` division safety fails closed on unreflectable refinements)
 
-- **Tests:** 279 refinecheck (was 274), 606 run_compiler — both green.
+- **Tests:** 281 refinecheck (was 274), 606 run_compiler — both green.
 - **The hole:** `lib/refinecheck/division_safety.ml`, in `check_var_divisor`'s
   `Some (_, bdr, pred)` branch, had `| None -> ()` for `smt_of` — commented
   "predicate not in supported fragment — skip conservatively". At the *solver*
@@ -7522,9 +7522,34 @@ is what they need, and it now exists.
 - **Fix:** the `None` arm now reports "division by `d` in `cap no_panic`
   module: the refinement on `d` is outside the checkable fragment, so it cannot
   prove `d != 0`", plus the shared `division_suggestion`. A path condition that
-  syntactically proves the divisor non-zero (a `when d != 0` guard) still
-  discharges the obligation, mirroring the unrefined-parameter branch — an
-  unreflectable predicate on a guarded divisor is not a false positive.
+  syntactically proves the divisor non-zero still discharges the obligation,
+  mirroring the unrefined-parameter branch — an unreflectable predicate on a
+  guarded divisor is not a false positive.
+- **Which guard, exactly — a trap worth writing down.** That path-condition
+  discharge fires for a **body-level** `if`/`cond`/match-arm guard, NOT for a
+  clause `when` guard. Desugaring rewrites a guarded clause into a match, so the
+  refined parameter is no longer visible to `clause_refined_params` and
+  `check_var_divisor` takes the *unrefined* branch (which has always consulted
+  `path_proves_nonzero`). Tell them apart by the message: a clause guard that
+  fails reports "no refinement proves `d != 0`", the refined branch reports
+  "outside the checkable fragment". A test written with `when` therefore does
+  **not** pin the refined-branch path guard — it passes identically with that
+  code deleted. Pinned properly by `divsafety-hole` D6 (body-level `if d != 0`,
+  silent) and D7 (body-level `if n > 0`, errors).
+- **None of the `divsafety-hole` tests is z3-gated, deliberately.** All seven are
+  solver-free — `is_prime` fails at reflection before Z3 is consulted, `_ > 0` is
+  discharged by `syntactic_nonzero`, and the path guards are purely syntactic —
+  and gating them would have skipped the fail-closed test on exactly the
+  z3-less machine whose behaviour it exists to pin. Verified by running the
+  group with z3 off PATH: all 7 pass while every other group skips.
+- **Known, deferred:** two pre-existing fail-open shadowing paths remain in this
+  pass, both predating this fix and both preserving parity with the unrefined
+  branch — a path condition about an outer binding is credited to a shadowing
+  inner one (`if d != 0 do let d = 0  n / d` exits 0, accepting a literal
+  division by zero), and a refined param shadowed by a zero let-binding exits 0
+  because the refined branch never consults `let_values`. Same shape as the
+  refinecheck shadow-discipline bugs: a binding construct that retires a name
+  from one fact channel but not the other. Wants its own task.
 - **Blast radius:** no stdlib module declares `cap no_panic`. All 216
   `specs/lang/types` corpus files keep their accept/reject verdicts, including
   the division-safety pair `accept/t78` / `reject/t73`, and the 32-test

@@ -3600,8 +3600,19 @@ let divsafety_error_texts src =
 
 let has_divsafety_error src = divsafety_error_texts src <> []
 
+(* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
+   [gated] on z3 — a [gated] hole test would silently SKIP on a z3-less machine,
+   i.e. the test whose whole point is fail-closed behaviour when verification is
+   unavailable would be disabled exactly when verification is unavailable.
+   Case by case: `is_prime` fails at REFLECTION ([smt_of] returns None) before
+   Z3 is consulted; `_ > 0` is discharged by [syntactic_nonzero], which matches
+   the `_` binder directly; a bare `Int` divisor errors in the unrefined branch
+   with no VC built; and every path-condition discharge goes through
+   [path_proves_nonzero], which is purely syntactic.  Verified empirically by
+   running this group with z3 removed from PATH. *)
 let divsafety_hole_suite =
-  [ gated "cap no_panic: an unreflectable divisor refinement is an ERROR"
+  [ Alcotest.test_case
+      "cap no_panic: an unreflectable divisor refinement is an ERROR" `Quick
       (fun () ->
         (* Before the fix this PASSED: `is_prime` does not reflect, so [smt_of]
            returned None and division_safety treated that as proof.  Writing a
@@ -3612,21 +3623,24 @@ let divsafety_hole_suite =
              \  cap no_panic\n\
              \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end\n\
               end\n"))
-  ; gated "cap no_panic: a genuine proof still passes" (fun () ->
+  ; Alcotest.test_case "cap no_panic: a genuine proof still passes" `Quick
+      (fun () ->
         Alcotest.(check bool) "no error" false
           (has_divsafety_error
              "mod D2 do\n\
              \  cap no_panic\n\
              \  fn f(n : Int, d : {Int | _ > 0}) : Int do n / d end\n\
               end\n"))
-  ; gated "cap no_panic: a bare Int divisor still errors" (fun () ->
+  ; Alcotest.test_case "cap no_panic: a bare Int divisor still errors" `Quick
+      (fun () ->
         Alcotest.(check bool) "error" true
           (has_divsafety_error
              "mod D3 do\n\
              \  cap no_panic\n\
              \  fn f(n : Int, d : Int) : Int do n / d end\n\
               end\n"))
-  ; gated "cap no_panic: unreflectable-refinement error explains itself"
+  ; Alcotest.test_case
+      "cap no_panic: unreflectable-refinement error explains itself" `Quick
       (fun () ->
         let errs =
           divsafety_error_texts
@@ -3646,15 +3660,54 @@ let divsafety_hole_suite =
         Alcotest.(check bool) "names the cap" true (has "cap no_panic");
         Alcotest.(check bool) "names the reason" true
           (has "outside the checkable fragment"))
-  ; gated "cap no_panic: a guard still discharges an unreflectable refinement"
-      (fun () ->
-        (* The path condition genuinely proves d != 0, so the unreflectable
-           predicate is irrelevant — this must NOT become a false positive. *)
+  ; Alcotest.test_case
+      "cap no_panic: a CLAUSE guard proving d != 0 is silent (unrefined branch)"
+      `Quick (fun () ->
+        (* CAUTION — this case does NOT exercise the `None`-arm path guard, even
+           though it looks like it should.  Desugaring rewrites a guarded clause
+           into a match, so the refined parameter is no longer visible to
+           [clause_refined_params] and [check_var_divisor] takes the UNREFINED
+           branch, which has always consulted [path_proves_nonzero].  Proof: the
+           same module with a NON-proving clause guard (`when n > 0`) reports
+           "no refinement proves `d != 0`" — the unrefined message, not the
+           unreflectable-fragment one.  Kept as a regression pin on the
+           desugared-guard path; the `None` arm is pinned by D6/D7 below. *)
         Alcotest.(check bool) "no error" false
           (has_divsafety_error
              "mod D5 do\n\
              \  cap no_panic\n\
              \  fn f(n : Int, d : {Int | is_prime(_)}) : Int when d != 0 do n / d end\n\
+              end\n"))
+  ; Alcotest.test_case
+      "cap no_panic: a BODY-LEVEL guard discharges an unreflectable refinement"
+      `Quick (fun () ->
+        (* THIS is the case that exercises the [path_proves_nonzero] call in the
+           new `None` arm: a body-level `if` leaves the parameter list intact, so
+           [check_var_divisor] takes the REFINED branch, `is_prime` fails to
+           reflect, and only the path condition can discharge the obligation.
+           Deleting that call from division_safety.ml makes this test fail (and
+           only this one) — verified. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error
+             "mod D6 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do\n\
+             \    if d != 0 do n / d else 0 end\n\
+             \  end\n\
+              end\n"))
+  ; Alcotest.test_case
+      "cap no_panic: a body-level guard that does NOT prove d != 0 still errors"
+      `Quick (fun () ->
+        (* Negative control for D6: the path guard must actually prove the goal.
+           Without this, D6 alone could be satisfied by a path guard that
+           discharges unconditionally. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error
+             "mod D7 do\n\
+             \  cap no_panic\n\
+             \  fn f(n : Int, d : {Int | is_prime(_)}) : Int do\n\
+             \    if n > 0 do n / d else 0 end\n\
+             \  end\n\
               end\n"))
   ]
 
