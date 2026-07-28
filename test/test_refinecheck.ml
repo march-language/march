@@ -3190,6 +3190,163 @@ end|}
               ~file:"/home/u/proj/stdlib/list.march" src)))
   ]
 
+(* ── Measure aliases, string side: BYTE length only ────────────────────────
+   `len` over a String reflects to `($strlen t)`, whose meaning is pinned in
+   BYTES by the string-literal axiom (which uses OCaml `String.length`).  So
+   only byte-valued spellings may be aliased to it.
+
+   As on the list side, the load-bearing case is the CONTRADICTORY guard: the
+   "guard discharges" case was already silent before the alias existed, because
+   the obligation was SKIPPED, which from outside is indistinguishable from
+   proved.  Desugared throughout — `String.byte_size(t)` is an `EField` chain
+   until desugar flattens it to a dotted `EVar`. *)
+let string_alias_suite =
+  [ gated "a String.byte_size guard discharges a String len obligation" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S1 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) > 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a contradictory String.byte_size guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod S2 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The builtin `String.byte_size` forwards to, in its own right. *)
+    gated "a contradictory string_byte_length guard IS a violation" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod S2b do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* `string_length` is NOT aliased.  It happens to be byte length today —
+       llvm_builtins lowers it to the same `march_string_byte_length` C symbol
+       — so this is an abstention on an ambiguous NAME, not a claim that the
+       two differ.  Silence is what the abstention looks like from outside; if
+       the abstention is ever revisited, revisit this test with it. *)
+    gated "string_length is not aliased to the byte measure" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S3 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* Codepoint counts must never reach `$strlen`: "é" is 1 codepoint and 2
+       bytes, so aliasing one would assert a falsehood about the other. *)
+    gated "String.codepoint_count is not aliased to the byte measure" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod S4 do
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.codepoint_count(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* ── The shadowing gate, both directions ───────────────────────────────
+       A program may define its own `mod String do fn byte_size`, which wins at
+       runtime.  Here it is constantly 99, so the `== 0` branch is DEAD and
+       `slug` is never called: the program cannot violate anything, and a
+       report would be a false positive on correct code. *)
+    gated "a user-defined String.byte_size is NOT aliased" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QS do
+  mod String do
+    fn byte_size(s : String) : Int do 99 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The ENABLING branch.  Every case above reaches its verdict with NO
+       `String.byte_size` definition in scope, i.e. via the gate's "no defs ->
+       allow" path — none of them can tell whether the stdlib-identity test
+       works, which is exactly how a dead feature can pass a whole suite.
+       These two are the same program, differing ONLY in whether the caller
+       declares that file to be the standard library. *)
+    (let src =
+       {|
+mod SG do
+  mod String do
+    fn byte_size(s : String) : Int do 0 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}
+     in
+     let file = "/opt/march/share/march/string.march" in
+     gated "the alias APPLIES to a String.byte_size the caller calls stdlib" (fun () ->
+         Alcotest.(check bool) "error" true
+           (has_refine_error_from ~stdlib_files:[ file ] ~file src)));
+
+    (let src =
+       {|
+mod SG do
+  mod String do
+    fn byte_size(s : String) : Int do 0 end
+  end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}
+     in
+     gated "…and NOT to the same String.byte_size from any other file" (fun () ->
+         Alcotest.(check bool) "no error" false
+           (has_refine_error_from ~stdlib_files:[ "/opt/march/share/march/string.march" ]
+              ~file:"/home/u/proj/vendor/string.march" src)));
+
+    (* The bare builtin has no stdlib definition to identify, so ANY definition
+       of the name takes it.  Constantly 99 again: the `== 0` branch is dead. *)
+    gated "a user-defined string_byte_length withdraws the bare alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QB do
+  fn string_byte_length(s : String) : Int do 99 end
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}))
+  ]
+
 (* ── Obligation ledger ────────────────────────────────────────────────────
    The checker reports a violation only when a predicate can NEVER hold, so
    silence covers three very different outcomes.  These pin that every
@@ -3267,4 +3424,5 @@ let () =
       ("bool-refinements", bool_suite);
       ("float-refinements", float_suite);
       ("length-alias", length_alias_suite);
+      ("string-alias", string_alias_suite);
       ("obligations", obligation_suite) ]

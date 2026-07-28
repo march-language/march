@@ -422,13 +422,39 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
    unconnected symbols, the guard translates to nothing, and a guarded call is
    SKIPPED rather than proved.
 
-   Only the QUALIFIED spelling is aliased.  A bare `length` would also catch a
-   user module's own unrelated `fn length(...)`, and an alias is a fact ADDED
-   to the assumption set that `discharge(¬goal)` proves against — so a wrong
-   alias makes violations easier to prove ON CORRECT CODE.  A missed proof is
-   always cheaper than a wrong fact.
+   For LIST length, only the QUALIFIED spelling is aliased.  A bare `length`
+   would also catch a user module's own unrelated `fn length(...)`, and an alias
+   is a fact ADDED to the assumption set that `discharge(¬goal)` proves against
+   — so a wrong alias makes violations easier to prove ON CORRECT CODE.  A
+   missed proof is always cheaper than a wrong fact.
 
-   `String.byte_size` is deliberately NOT here — see Task 5. *)
+   ── STRING length is BYTES, and only byte-valued spellings may be aliased ──
+   `len` over a String reflects to [strlen_fn] (`$strlen`), whose meaning is
+   pinned in BYTES: the string-literal axiom below fixes `($strlen c)` to
+   OCaml's `String.length`, i.e. the literal's UTF-8 byte count.  So only a
+   function that returns a BYTE count may be equated with it.  Aliasing a
+   codepoint count would assert bytes == codepoints, false for every
+   non-ASCII string, and — since assumptions make `discharge(¬goal)` STRONGER
+   — would manufacture violations on correct code.
+
+   Aliased:
+     - `String.byte_size` — stdlib, defined as `string_byte_length(s)`.
+     - `string_byte_length` — the compiler builtin it forwards to.
+
+   NOT aliased:
+     - `String.codepoint_count` / `String.grapheme_count` — codepoints, not
+       bytes.  Equating either with `$strlen` is the unsoundness above.
+     - `string_length` — a deliberate abstention, NOT a semantic claim.  It is
+       byte length today in every backend (typecheck's builtin table types it
+       `String -> Int`; llvm_builtins lowers it to the same
+       `march_string_byte_length` C symbol as `string_byte_length`; eval uses
+       OCaml `String.length`; the wasm runtime reads the same `length` field —
+       all four measured at 2 for "é").  But the NAME does not say "byte", the
+       String module's own documentation steers callers to `byte_size` for
+       bytes and `codepoint_count` for characters, and a future correction of
+       `string_length` to codepoints would silently turn this alias into the
+       false assumption described above.  Callers who want the proof have two
+       precisely-named spellings; abstaining costs them nothing but a rename. *)
 
 (* ── The shadowing gate ────────────────────────────────────────────────────
    The alias keys on a SPELLING, and March lets a program define its own
@@ -444,6 +470,20 @@ let is_measure (m : string) : bool = m = "len" || List.mem m !registered_measure
    gains a wrong fact. *)
 let list_length_is_stdlib : bool ref = ref false
 
+(* Same gate, same default, for the `String.byte_size` spelling: true only while
+   it still denotes the standard library's own byte-length function.  A program
+   may define `mod String do fn byte_size … end`, which then wins at runtime;
+   aliasing that would attach `$strlen`'s meaning to an arbitrary function. *)
+let string_byte_size_is_stdlib : bool ref = ref false
+
+(* And for the BARE `string_byte_length`.  This one is not a stdlib March
+   function to be identified — it is a COMPILER BUILTIN (typecheck's builtin
+   table; lowered to the `march_string_byte_length` C symbol), so there is no
+   "the stdlib's own definition" to allow.  Any definition or import of that
+   name in scope is therefore necessarily a competing one, and withdraws the
+   alias.  Default suppressing, like the two above. *)
+let string_byte_length_is_builtin : bool ref = ref false
+
 (* The source files the CALLER loaded as the standard library, supplied to
    [check_module].  This is an IDENTITY, not a path pattern: bin/main.ml reads
    it off the stdlib declarations it actually prepended, so it follows
@@ -456,8 +496,18 @@ let list_length_is_stdlib : bool ref = ref false
    `List.length` is in scope. *)
 let stdlib_source_files : string list ref = ref []
 
+(* All three route to the single name `len`.  Whether `len` then resolves to a
+   `len$x` constant or to `($strlen t)` is decided downstream by
+   [resolve_measure], on the DECLARED BASE TYPE of the argument — so the String
+   spellings need no separate reflection path, and a `String.byte_size` applied
+   to something the checker does not see as a String simply fails to reflect
+   (skipped) rather than asserting a list fact. *)
 let measure_alias (m : string) : string option =
-  match m with "List.length" when !list_length_is_stdlib -> Some "len" | _ -> None
+  match m with
+  | "List.length" when !list_length_is_stdlib -> Some "len"
+  | "String.byte_size" when !string_byte_size_is_stdlib -> Some "len"
+  | "string_byte_length" when !string_byte_length_is_builtin -> Some "len"
+  | _ -> None
 
 (* The measure name [m] denotes, following an alias.  Every dispatch site must
    normalize through this BEFORE consulting [is_measure]/[resolve_measure], or
@@ -2934,6 +2984,20 @@ let check_call ~root errctx ~span ~(callee : string)
         let adt = Hashtbl.find axiom_measures m in
         decls := (name, Smt.SData adt) :: !decls;
         Some (Smt.App (m, [ Smt.Const name ])))
+      (* `len` over a name ALREADY declared into the `Str` sort is the string
+         length, i.e. the same `($strlen name)` the predicate side produces —
+         and the caller's `name` is the very constant it produced it over (the
+         binder is pre-reflected just above, before path translation, exactly so
+         that this holds).  Without this the two sides split: the predicate says
+         `($strlen t)` while the guard said `len$t`, an unrelated Int constant,
+         and no string guard could ever discharge a string obligation.
+         [path_resolve_var] applies the identical `str_names` rule to plain
+         occurrences, so this keeps measure and variable positions at one sort.
+
+         Unreachable from source until the byte-length aliases existed — March
+         has no callable `len`, so a guard could not mention this measure. *)
+      else if m = "len" && string_len_available () && Hashtbl.mem str_names name then
+        Some (Smt.App (strlen_fn, [ Smt.Const name ]))
       else measure_of_var m name
     in
     let path_resolve_tester ctor arg =
@@ -4222,27 +4286,68 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    someone else's function, so either withdraws the alias too. *)
 let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
 
-let list_length_defs_ok (decls : A.decl list) : bool =
+(* Is the qualified spelling `<md>.<fn>` still the standard library's own?
+   Parameterised over the pair so the `List.length` and `String.byte_size`
+   aliases share one gate rather than two that can drift apart. *)
+let stdlib_member_defs_ok ~(md : string) ~(fn : string) (decls : A.decl list) : bool =
   let foreign = ref false in
   let rebound = ref false in
-  let rec go in_list ds =
+  let rec go in_mod ds =
     List.iter
       (function
-        | A.DFn (fd, sp) when in_list && fd.A.fn_name.A.txt = "length" ->
+        | A.DFn (fd, sp) when in_mod && fd.A.fn_name.A.txt = fn ->
           if not (is_stdlib_source_file sp.A.file) then foreign := true
-        | A.DMod (name, _, ds, _) -> go (name.A.txt = "List") ds
-        | A.DAlias (a, _) when a.A.alias_name.A.txt = "List" -> rebound := true
+        | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
+        | A.DAlias (a, _) when a.A.alias_name.A.txt = md -> rebound := true
         | A.DUse (u, _) ->
-          (* `use X.List` (importing the module itself) rebinds the bare
-             segment `List` to whatever module that path names. *)
+          (* `use X.<md>` (importing the module itself) rebinds the bare
+             segment `<md>` to whatever module that path names. *)
           (match u.A.use_sel, List.rev u.A.use_path with
-           | A.UseSingle, last :: _ :: _ when last.A.txt = "List" -> rebound := true
+           | A.UseSingle, last :: _ :: _ when last.A.txt = md -> rebound := true
            | _ -> ())
         | _ -> ())
       ds
   in
   go false decls;
   (not !foreign) && not !rebound
+
+let list_length_defs_ok (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"List" ~fn:"length" decls
+
+let string_byte_size_defs_ok (decls : A.decl list) : bool =
+  stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" decls
+
+(* Is the BARE name [name] still the compiler builtin?  There is no stdlib
+   March definition of `string_byte_length` to identify (it is an intrinsic),
+   so unlike [stdlib_member_defs_ok] there is no allow-because-stdlib case:
+   ANY definition or import of the name is a competing one.
+
+   Deliberately coarse — it does not ask whether the definition is actually in
+   scope at the call, because the errors are asymmetric (over-suppress = a lost
+   proof; under-suppress = a FALSE POSITIVE) and the precise answer needs a
+   lexical resolver this pass does not have here.  A glob `use X.*` (or an
+   `except:` list that does not exclude the name) can import an arbitrary
+   `string_byte_length`, so both count as taking the name. *)
+let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
+  let taken = ref false in
+  let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
+  let rec go ds =
+    List.iter
+      (function
+        | A.DFn (fd, _) when fd.A.fn_name.A.txt = name -> taken := true
+        | A.DMod (_, _, ds, _) -> go ds
+        | A.DAlias (a, _) when a.A.alias_name.A.txt = name -> taken := true
+        | A.DUse (u, _) ->
+          (match u.A.use_sel with
+           | A.UseAll -> taken := true
+           | A.UseExcept xs -> if not (named xs) then taken := true
+           | A.UseNames xs -> if named xs then taken := true
+           | A.UseSingle -> ())
+        | _ -> ())
+      ds
+  in
+  go decls;
+  not !taken
 
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
@@ -4252,8 +4357,10 @@ let list_length_defs_ok (decls : A.decl list) : bool =
    cost of quantified/datatype reasoning.  It changes only diagnostics, never the
    compiled artifact, so it is not part of the CAS cache key. *)
 (* [stdlib_files]: the source files the caller loaded as the standard library.
-   Only used to decide whether a `List.length` in scope is the real one — see
-   [stdlib_source_files].
+   Only used to decide whether a `List.length` / `String.byte_size` in scope is
+   the real one — see [stdlib_source_files].  (The bare `string_byte_length`
+   alias does not consult it: that name is a compiler builtin with no stdlib
+   definition, so any definition of it is competing by construction.)
 
    Omitting it does NOT disable the `List.length` alias.  It makes the answer
    "no file is the stdlib's", which matters only when a competing
@@ -4279,6 +4386,8 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Obligation.reset ();
   stdlib_source_files := stdlib_files;
   list_length_is_stdlib := list_length_defs_ok m.A.mod_decls;
+  string_byte_size_is_stdlib := string_byte_size_defs_ok m.A.mod_decls;
+  string_byte_length_is_builtin := bare_builtin_undefined "string_byte_length" m.A.mod_decls;
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending

@@ -31,6 +31,22 @@ git log is authoritative for exact commits.
   behaviour; the alias never attaches `len`'s meaning to a function that is not
   the list's length.
 
+- **A byte-length guard now discharges a `String` `len` refinement obligation.**
+  The same treatment for strings: `String.byte_size` and the `string_byte_length`
+  builtin are aliases of the `len` measure, so
+  `if String.byte_size(t) > 0 do slug(t) else … end` *proves* the precondition of
+  `fn slug(s : {String | len(_) > 0})`, and the contradictory `== 0` form is
+  reported as a violation. `len` over a `String` is a **byte** count — `len("é")`
+  is 2, not 1 — so only byte-valued spellings are aliased: `String.codepoint_count`
+  and `grapheme_count` count codepoints and are deliberately left alone, as is the
+  ambiguously-named `string_length`. The same shadowing rules apply: the alias is
+  withdrawn for the whole module if a program defines its own `String.byte_size`
+  (unless it is the standard library's own, by the identity above), rebinds
+  `String` via `alias`/`use`, or defines or imports a `string_byte_length` of its
+  own. Also fixes a related gap: a guard mentioning a string length in a *path
+  condition* reflected to a symbol unrelated to the one the contract used, so the
+  two could never meet.
+
 ### Fixed
 
 - **`String.to_uppercase` / `to_lowercase` no longer depend on the process
