@@ -1,0 +1,40 @@
+mod Main do
+  fn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+
+  fn go(i : Int, acc : Int) : Int do
+    if i <= 0 do
+      acc
+    else
+      go(i - 1, acc + apply_it(fn x -> x * 2, i))
+    end
+  end
+
+  fn make_adder(k : Int) : Int -> Int do fn x -> x + k end
+
+  fn main() : () do
+    -- a capture-free lambda used repeatedly across a loop: every call site
+    -- materializes `fn x -> x * 2` anew, and all of them must reference the
+    -- same immortal static closure without corrupting each other's results
+    println(go(1000, 0))
+    println(go(2000, 0))
+
+    -- two different capture-free lambdas at two different call sites must
+    -- get two DISTINCT static globals, not collide on one
+    println(apply_it(fn x -> x * 2, 10))
+    println(apply_it(fn x -> x * 3, 10))
+
+    -- a capture-free lambda alongside a capturing one in the same program:
+    -- the discriminator (exactly one EAlloc arg = capture-free) must route
+    -- each to the right path at runtime. `make_adder` returns a capturing
+    -- lambda (captures k); `fn x -> x * 2` below captures nothing.
+    let add5 = make_adder(5)
+    let add10 = make_adder(10)
+    println(add5(1) + add10(1))
+    println(apply_it(fn x -> x * 2, 7) + add5(7))
+
+    -- capturing lambdas materialized from the SAME site with different
+    -- captured environments must not share state
+    println(add5(100))
+    println(add10(100))
+  end
+end
