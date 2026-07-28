@@ -5401,10 +5401,17 @@ let test_cprop_tuple_field_result_escape_unchanged () =
 
 let test_cprop_tuple_dce_removes_allocation_from_llvm () =
   (* let t = (x, y) in let a = t.$fv0 in let b = t.$fv1 in a + b
-     After the full Opt fixed point, CProp folds both projections to x/y,
-     t becomes provably unused, and DCE removes the ETuple binding in the
-     same iteration — assert the emitted LLVM for tuple_sum contains no
-     struct field load (getelementptr) at all. *)
+     CProp folds both projections to x/y, t becomes provably unused, and DCE
+     removes the ETuple binding — assert the emitted LLVM for tuple_sum
+     contains no struct field load (getelementptr) at all.
+
+     Deliberately run only Cprop + Dce here rather than the full Opt fixed
+     point: with the whole pipeline (Inline / Single_use_inline), this tiny
+     tuple_sum gets fully inlined into main and constant-folded away, so
+     "@tuple_sum" would never appear in the emitted module and the
+     getelementptr assertion below would pass vacuously no matter what CProp
+     does. Isolating the two passes under test keeps tuple_sum as its own
+     function so the scoped assertion is actually exercising the fold. *)
   let x = mk_var "x" March_tir.Tir.TInt in
   let y = mk_var "y" March_tir.Tir.TInt in
   let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
@@ -5435,8 +5442,19 @@ let test_cprop_tuple_dce_removes_allocation_from_llvm () =
       fn_kind = March_tir.Tir.FnNormal }
   in
   let module_ = mk_module [tuple_sum; main] in
-  let optimized = March_tir.Opt.run module_ in
-  let ir = March_tir.Llvm_emit.emit_module optimized in
+  let changed = ref true in
+  let after_cprop = ref module_ in
+  while !changed do
+    changed := false;
+    after_cprop := March_tir.Cprop.run ~changed !after_cprop
+  done;
+  let dce_changed = ref true in
+  let optimized = ref !after_cprop in
+  while !dce_changed do
+    dce_changed := false;
+    optimized := March_tir.Dce.run ~changed:dce_changed !optimized
+  done;
+  let ir = March_tir.Llvm_emit.emit_module !optimized in
   let contains haystack needle =
     let needle_len = String.length needle in
     let rec search index =
@@ -5445,8 +5463,50 @@ let test_cprop_tuple_dce_removes_allocation_from_llvm () =
     in
     search 0
   in
+  (* Slice the emitted module down to just tuple_sum's `define` so the
+     assertion can't accidentally pass because of what main (or the module
+     preamble) does or doesn't emit. *)
+  let find_substring haystack needle start =
+    let needle_len = String.length needle in
+    let hay_len = String.length haystack in
+    let rec search index =
+      if index + needle_len > hay_len then None
+      else if String.sub haystack index needle_len = needle then Some index
+      else search (index + 1)
+    in
+    search start
+  in
+  let define_marker = "define" in
+  let tuple_sum_marker = "@tuple_sum" in
+  let tuple_sum_define_start =
+    match find_substring ir tuple_sum_marker 0 with
+    | None -> Alcotest.fail "expected emitted IR to contain a definition for @tuple_sum"
+    | Some tuple_sum_idx ->
+      (* Find the nearest `define` preceding the @tuple_sum occurrence — the
+         start of its own function definition. *)
+      let rec last_define_before idx best =
+        match find_substring ir define_marker idx with
+        | Some found when found < tuple_sum_idx -> last_define_before (found + 1) (Some found)
+        | _ -> best
+      in
+      (match last_define_before 0 None with
+       | Some d -> d
+       | None -> Alcotest.fail "expected a `define` line preceding @tuple_sum")
+  in
+  let tuple_sum_define_end =
+    match find_substring ir define_marker (tuple_sum_define_start + String.length define_marker) with
+    | Some next_define -> next_define
+    | None -> String.length ir
+  in
+  let tuple_sum_ir =
+    String.sub ir tuple_sum_define_start (tuple_sum_define_end - tuple_sum_define_start)
+  in
+  Alcotest.(check bool) "tuple_sum slice actually contains tuple_sum's definition"
+    true (contains tuple_sum_ir tuple_sum_marker);
+  Alcotest.(check bool) "tuple_sum slice excludes main's definition"
+    false (contains tuple_sum_ir "@main");
   Alcotest.(check bool) "no tuple struct field load (getelementptr) survives in tuple_sum"
-    false (contains ir "getelementptr")
+    false (contains tuple_sum_ir "getelementptr")
 
 (* ── P12: variable copy propagation ─────────────────────────────────────── *)
 

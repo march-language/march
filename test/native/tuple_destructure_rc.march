@@ -1,0 +1,18 @@
+mod Main do
+  fn dup_pair(s : String) : String do
+    let t = (s, s)
+    let (a, b) = t
+    a ++ b
+  end
+
+  fn mixed_pair(s : String, n : Int) : String do
+    let t = (s, n)
+    let (a, b) = t
+    a ++ int_to_string(b)
+  end
+
+  fn main() : () do
+    println(dup_pair("hi"))
+    println(mixed_pair("n=", 42))
+  end
+end

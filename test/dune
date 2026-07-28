@@ -1811,6 +1811,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_tuple_destructure_dce.out native/tuple_destructure_dce.expected)
  (action (diff native/tuple_destructure_dce.expected native_tuple_destructure_dce.out)))
 
+; ── Tuple projection forwarding, RC-relevant case: heap-typed (String)     ──
+; ── tuple elements, including the same heap value duplicated into both    ──
+; ── slots (let t = (s, s)), destructured and used independently. This is  ──
+; ── the shape most likely to reveal an RC undercount if the CProp fold    ──
+; ── interacts badly with Perceus's field-level dup insertion.             ──
+(rule
+ (targets native_tuple_destructure_rc native_tuple_destructure_rc.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/tuple_destructure_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_tuple_destructure_rc
+         native/tuple_destructure_rc.march)
+    (with-stdout-to native_tuple_destructure_rc.out
+         (system "./native_tuple_destructure_rc"))))))
+
+(rule
+ (alias runtest)
+ (deps native_tuple_destructure_rc.out native/tuple_destructure_rc.expected)
+ (action (diff native/tuple_destructure_rc.expected native_tuple_destructure_rc.out)))
+
 ; ── P6 Milestone 2: Option niche (None=0, Some(x)=x) — safe_div + greet. ──
 (rule
  (targets native_option_niche native_option_niche.out)
