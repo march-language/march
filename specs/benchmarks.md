@@ -210,6 +210,33 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/run_string_xlang.sh — cross-language `string_small_churn`
+
+**Command:** `bash bench/run_string_xlang.sh`
+**Expected output:** every implementation prints `checksum=17793810`
+
+Runs `bench/string_small_churn.march` against four baselines, each chosen to
+separate an explanation a single number cannot:
+
+| Baseline | Source | Why it is here |
+|---|---|---|
+| Rust | `bench/rust/string_small_churn.rs` | `String` has **no** small-string optimization — March's exact representation. Isolates allocator + refcount overhead. |
+| C++ | `bench/cpp/string_small_churn.cpp` | `std::string` **has** SSO. Bounds the prize from inline storage. The only C++ in the repo, added deliberately as a one-off for this question. |
+| C | `bench/c/string_small_churn.c` | Raw `malloc`, no header, no refcount — the floor. |
+| Python | `bench/python/string_small_churn.py` | `pymalloc` is itself a size-class freelist, in a much slower language. |
+
+**What to watch:** the run FAILS if any implementation's checksum differs — that
+means they are not doing the same work and the timings are meaningless. A
+missing toolchain is reported as SKIPPED rather than silently omitted (Go is not
+installed on the primary dev machine). Load average is printed and warned on;
+compare the *ratios* within one run, never absolute milliseconds across runs.
+
+Measured 2026-07-27: C++ 246ms, C 411ms, Rust 566ms, March 741ms, Python
+1305ms. See `specs/2026-07-26-string-performance-profile.md` for what that says
+about the freelist-versus-SSO decision.
+
+---
+
 ## bench/string_parallel_scan.march — Shared-buffer scan at 1/2/4/8 workers
 
 **Command:** count `"QQ"` occurrences in a 40MB buffer, chunked across 1, 2, 4, 8 workers

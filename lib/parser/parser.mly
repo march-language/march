@@ -30,59 +30,37 @@
     Parse_errors.collect_parse_error msg hint pos;
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
-  (* Desugar a string interpolation into concatenation + to_string calls.
+  (* Desugar a string interpolation into a `++` chain + to_string calls:
+       prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+     where to_string is the polymorphic builtin.
 
-     Two shapes, picked by part count:
+     A left-deep `++` chain re-copies the growing prefix at every link, which
+     would be O(k^2) for k parts — but desugar collapses chains of 3+ into
+     three-way concats (lib/desugar/desugar.ml, fold_concat3), so the emitted
+     chain costs ceil((k-1)/2) allocations and no intermediate list.
 
-     - Few parts (<= [interp_join_threshold] segments) → a left-deep `++`
-       chain, exactly as before:
-         prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
-     - Many parts → a single string_join over the segment list:
-         string_join([prefix, to_string(e1), s1, to_string(e2), s2, ...], "")
+     This deliberately emits ONE shape.  An earlier version emitted
+     `string_join` over a cons list past a part-count threshold, which was a
+     win against a raw `++` chain but is a LOSS against concat3 folding: the
+     list costs a cons cell per part.  Measured on current main, 7 segments at
+     2M iterations — `string_join` 519ms (1 string + 8 cons cells per
+     iteration) against concat3 folding at 287ms (3 strings, no cons cells).
+     Interpolation was 1.8x slower than writing the identical thing with `++`.
 
-     Why both: a `++` chain re-copies the growing prefix on every append, so a
-     k-part interpolation copies O(k^2) bytes (march_string_concat allocates +
-     copies fresh each call), whereas string_join sums the lengths in one pass
-     and copies in a second — O(n).  But the join has to materialize a list
-     first, and those cons cells cost more than the extra copy for short
-     interpolations, which are overwhelmingly the common case.  Measured on
-     arm64 at 2M iterations with short segments:
-
-       segments   `++` chain   string_join
-       2          231ms        303ms
-       3          307ms        356ms
-       5          589ms        564ms
-
-     so the crossover sits just under 5 segments; 3 is a conservative cutoff
-     that leaves every ordinary "text ${x} text" string on the faster path.
-
-     `to_string` is the polymorphic builtin.  Both shapes are reconstructed
-     back into `"${...}"` source by the formatter (lib/format/format.ml,
-     try_collect_interp) and decomposed part-wise by the ~H sigil lowering
-     (lib/desugar/desugar.ml, decompose_concat) — a new shape here must be
-     taught to both, or `~H` silently stops HTML-escaping its interpolations. *)
-  let interp_join_threshold = 3
-
+     Emitting one shape also removes a standing hazard: the formatter
+     reconstructs `"${...}"` source from this AST (lib/format/format.ml,
+     try_collect_interp) and the ~H sigil lowering decomposes it part-wise
+     (lib/desugar/desugar.ml, decompose_concat).  Every extra shape has to be
+     taught to both, and twice now a missing case there silently disabled HTML
+     auto-escaping — a failure that fails OPEN. *)
   let desugar_interp prefix parts sp =
     let to_s e = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
-    let elems =
-      List.concat_map (fun (e, seg) ->
-          if seg = "" then [to_s e] else [to_s e; ELit (LitString seg, sp)]
-        ) parts
-    in
-    let segments = prefix :: elems in
-    if List.length segments <= interp_join_threshold then
-      let cat a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
-      List.fold_left cat prefix elems
-    else
-      let list_expr =
-        List.fold_right
-          (fun e acc -> ECon ({ txt = "Cons"; span = sp }, [e; acc], sp))
-          segments
-          (ECon ({ txt = "Nil"; span = sp }, [], sp))
-      in
-      EApp (EVar { txt = "string_join"; span = sp },
-            [list_expr; ELit (LitString "", sp)], sp)
+    let cat a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
+    List.fold_left (fun acc (e, seg) ->
+        let with_e = cat acc (to_s e) in
+        if seg = "" then with_e
+        else cat with_e (ELit (LitString seg, sp))
+      ) prefix parts
 
   (** Join a dotted module path into a single name, e.g. [A; B; C] → "A.B.C".
       Used for `mod A.B.C do ... end` declarations. *)
