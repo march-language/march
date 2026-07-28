@@ -864,6 +864,45 @@ let do_check       = ref false   (* --check: typecheck only, no codegen or eval 
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
+let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+(* --refine-report: bin/main.ml prepends the full stdlib into every module
+   before checking it (see stdlib_decls below), so the raw ledger is
+   dominated by stdlib obligations and a single unlabelled count would tell a
+   user nothing about their own program. Report the user-code slice AND the
+   whole-ledger (user + stdlib) slice, clearly labelled, using the same
+   "is this span in a file we loaded as user code" test the diagnostic
+   printer uses just below each check_module call site. *)
+let print_refine_report ~filename ~user_files () =
+  let is_user_span (span : March_ast.Ast.span) =
+    let f = span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
+  in
+  let summarize obligations =
+    let proved = ref 0 and violated = ref 0 in
+    let skips = Hashtbl.create 8 in
+    List.iter
+      (fun (o : March_refinecheck.Obligation.t) ->
+        match o.verdict with
+        | March_refinecheck.Obligation.Proved -> incr proved
+        | March_refinecheck.Obligation.Violated -> incr violated
+        | March_refinecheck.Obligation.Skipped r ->
+          Hashtbl.replace skips r (1 + Option.value ~default:0 (Hashtbl.find_opt skips r)))
+      obligations;
+    (!proved, !violated, Hashtbl.fold (fun r n acc -> (r, n) :: acc) skips [])
+  in
+  let print_block label (proved, violated, skips) =
+    let skipped = List.fold_left (fun a (_, n) -> a + n) 0 skips in
+    Printf.eprintf "refinement obligations (%s): %d proved, %d violated, %d skipped\n"
+      label proved violated skipped;
+    List.iter
+      (fun (r, n) ->
+        Printf.eprintf "  skipped (%s): %d\n" (March_refinecheck.Obligation.reason_name r) n)
+      (List.sort compare skips)
+  in
+  let all_obligations = March_refinecheck.Obligation.all () in
+  let user_obligations = List.filter (fun (o : March_refinecheck.Obligation.t) -> is_user_span o.span) all_obligations in
+  print_block "user code" (summarize user_obligations);
+  print_block "user + stdlib" (summarize all_obligations)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false
@@ -1140,6 +1179,7 @@ let run_test_cmd args =
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+    if !refine_report then print_refine_report ~filename ~user_files ();
     (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
     March_refinecheck.Division_safety.check_module errors desugared;
     (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
@@ -1747,6 +1787,7 @@ let compile filename =
   let (errors, type_map, typecheck_env) = March_typecheck.Typecheck.check_module_full desugared in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms errors desugared;
+  if !refine_report then print_refine_report ~filename ~user_files ();
   (* Division-safety: Z3-backed check for `cap no_panic` modules. *)
   March_refinecheck.Division_safety.check_module errors desugared;
   (* Allocation checker: flag heap-allocating exprs in `cap no_alloc` modules. *)
@@ -3723,6 +3764,8 @@ let () =
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
+    ("--refine-report", Arg.Set refine_report,
+     " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
