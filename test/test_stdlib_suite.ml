@@ -11627,20 +11627,31 @@ let test_compiled_sanitize_clean_exit () =
        with no way to recover short of an operator finding and killing the
        process by hand. A timeout here fails loudly (never silently), so a
        recurrence is still real signal -- just one that can't take down
-       everything else. *)
+       everything else.
+
+       Bound is overridable via MARCH_SANITIZE_TIMEOUT (seconds) for local
+       fast-fail iteration; CI and default local runs keep the generous 30s
+       so a merely-loaded (not fully wedged) machine doesn't start flaking
+       on this test more than it already does. *)
+    let timeout_secs =
+      match Sys.getenv_opt "MARCH_SANITIZE_TIMEOUT" with
+      | Some s -> ( try float_of_string s with _ -> 30.0 )
+      | None -> 30.0
+    in
     let result =
-      run_with_timeout ~timeout_secs:30.0 ~stdout_file:out_file
+      run_with_timeout ~timeout_secs ~stdout_file:out_file
         [| "/usr/bin/env"; "ASAN_OPTIONS=detect_leaks=0"; bin |]
     in
     let run_rc =
       match result with
       | `Timeout ->
         Alcotest.failf
-          "sanitized binary did not exit within 30s (killed). If this \
+          "sanitized binary did not exit within %.0fs (killed). If this \
            recurs, first rule out a machine-wide ASAN environment issue \
            before assuming a March regression: compile and run a trivial \
            unrelated `clang -fsanitize=address` C program under the same \
            load -- if THAT also hangs, this is not this test's fault."
+          timeout_secs
       | `Exited rc -> rc
     in
     Alcotest.(check int)
