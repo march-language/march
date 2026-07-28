@@ -9257,6 +9257,62 @@ let test_static_closure_materialization_no_leak_compiled () =
        with the iteration count)"
       "BOUNDED" run_out
 
+(* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml), lambda form:
+   the precedent immediately above materializes a top-level named fn
+   (`double`) as a first-class value. This test exercises the shape Task 1
+   was actually written for — a capture-free LAMBDA literal, whose closure
+   struct is `EAlloc(TCon("$Clo_..", []), [fn_ptr])` with exactly one
+   argument. Before Task 1, `apply_it(fn x -> x * 2, i)` at 4,000,000
+   iterations allocated 4,000,000 closures and never freed any of them (no
+   dec_rc/free anywhere in the loop) — a genuine leak, not churn. Same
+   growth-assertion shape as the two tests above: warm the materialization
+   site once, sample march_live_allocs as a baseline, re-run the same site
+   at a much larger loop count, and assert the growth stays bounded rather
+   than scaling with the iteration count. *)
+let test_lambda_static_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_lambdacloleak"
+    "mod LambdaCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+    \      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+     -- Warm the materialization site first, so its one permanent static\n\
+     -- closure is already allocated when the baseline is sampled and only\n\
+     -- per-iteration growth can move the gauge.\n\
+    \    let warm = materialize_loop(0, 100, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "lambdacloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a capture-free lambda literal materialized as a first-class value in \
+       a loop references one immortal static closure per site, not one \
+       fresh allocation per materialization (live-object count must not \
+       grow with the iteration count)"
+      "BOUNDED" run_out
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12198,6 +12254,8 @@ let codegen_suites =
             test_string_literal_operand_no_leak_compiled;
           Alcotest.test_case "compiled static closure materialization does not leak per use" `Quick
             test_static_closure_materialization_no_leak_compiled;
+          Alcotest.test_case "compiled capture-free lambda materialization does not leak per use" `Quick
+            test_lambda_static_closure_materialization_no_leak_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick

@@ -1860,6 +1860,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps native_static_closure_semantics.out native/static_closure_semantics.expected)
  (action (diff native/static_closure_semantics.expected native_static_closure_semantics.out)))
 
+; ── Static capture-free closures, LAMBDA form (Task 2 of the same effort): ──
+; ── the two fixtures above materialize a top-level named fn as a value.    ──
+; ── This one covers capture-free LAMBDA literals directly — repeated       ──
+; ── materialization of one lambda, two distinct capture-free lambdas       ──
+; ── (must not collide on one static global), and a capture-free lambda     ──
+; ── alongside a capturing one, proving the single-argument discriminator   ──
+; ── in lib/tir/llvm_emit.ml separates them correctly at runtime. This      ──
+; ── fixture diffs stdout ONLY; the allocation-growth assertion lives in    ──
+; ── test/test_codegen.ml ("compiled capture-free lambda materialization    ──
+; ── does not leak per use", verified non-vacuous against a disabled arm).  ──
+(rule
+ (targets native_static_lambda_no_leak native_static_lambda_no_leak.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/static_lambda_no_leak.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_static_lambda_no_leak
+         native/static_lambda_no_leak.march)
+    (with-stdout-to native_static_lambda_no_leak.out
+         (system "./native_static_lambda_no_leak"))))))
+
+(rule
+ (alias runtest)
+ (deps native_static_lambda_no_leak.out native/static_lambda_no_leak.expected)
+ (action (diff native/static_lambda_no_leak.expected native_static_lambda_no_leak.out)))
+
 ; ── Tuple projection forwarding, RC-relevant case: heap-typed (String)     ──
 ; ── tuple elements, including the same heap value duplicated into both    ──
 ; ── slots (let t = (s, s)), destructured and used independently. This is  ──
