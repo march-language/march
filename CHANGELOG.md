@@ -162,6 +162,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Json.parse` rejected JSON numbers with a signed exponent.** `1e-5`,
+  `2.5E+10` and `1e-308` all failed with `invalid number: 1e` — the number
+  scanner accepted `+`/`-` only in the mantissa position, so it stopped at the
+  sign after the exponent marker and handed a truncated `"1e"` to
+  `string_to_float`. The scanner now follows RFC 8259's grammar
+  (`["-"] int [frac] [exp]`), accepting a sign immediately after `e`/`E`.
+  `1-2` still parses as `1` followed by a trailing-character error, as before.
+
+- **`Json.parse` accepted number forms JSON does not allow.** Shape is now
+  validated during the scan instead of being left to `string_to_float`
+  (`strtod` / `float_of_string`), which is more permissive than JSON: `1.` and
+  `01` previously parsed and are now rejected, joining `+1`, `Infinity`,
+  `0x10` and `.5`. This is a behavior change for input that was never valid
+  JSON — anything conforming to RFC 8259 parses as it did before.
+
 - **`String.slice` returned the wrong text on the JS backend.** The JS runtime
   implemented `march_string_slice(s, start, len)` as `s.slice(start, len)`,
   treating the third argument as an END index rather than a LENGTH, so every

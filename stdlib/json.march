@@ -158,31 +158,89 @@ mod Json do
     else scan_string(s, i + 1, start, acc) end end end
   end
 
-  -- Bytes that may appear in a JSON number body, matching the previous parser
-  -- exactly: digits, '.', 'e', 'E'.  A leading '-' is consumed by parse_number
-  -- before the scan starts.
+  -- Number scanning follows RFC 8259's grammar directly:
+  --   number = ["-"] int [frac] [exp]
+  --   int    = "0" / (digit1-9 *DIGIT)
+  --   frac   = "." 1*DIGIT
+  --   exp    = ("e" / "E") ["+" / "-"] 1*DIGIT
+  -- Bytes: '+'=43, '-'=45, '.'=46, '0'=48, '9'=57, 'E'=69, 'e'=101.
+  -- string_byte_at returns -1 past the end, so every scan terminates there.
   --
-  -- NOTE (pre-existing, deliberately preserved so this stays a pure
-  -- performance change): a signed exponent such as `1e-5` is NOT accepted —
-  -- the scan stops at the '-' and `string_to_float("1e")` then fails.  Fixing
-  -- that is a separate semantic change.
-  pfn is_num_byte(c) do
-    (c >= 48 && c <= 57) || c == 46 || c == 101 || c == 69
+  -- The shape is validated here rather than deferred to string_to_float: that
+  -- builtin is strtod/float_of_string-backed and admits forms JSON does not
+  -- ("+1", "Infinity", "0x10", "1.", "01").
+  pfn is_digit_byte(c) do
+    c >= 48 && c <= 57
   end
 
-  pfn scan_number_end(s, i) do
-    if is_num_byte(string_byte_at(s, i)) do scan_number_end(s, i + 1)
+  -- Index just past a run of ASCII digits starting at `i` (may be `i` itself).
+  pfn scan_digits(s, i) do
+    if is_digit_byte(string_byte_at(s, i)) do scan_digits(s, i + 1)
     else i end
+  end
+
+  -- The number occupying [start, e) — used to quote the offender in errors.
+  pfn bad_number(s, start, e) do
+    Err("invalid number: " ++ string_slice(s, start, e - start))
+  end
+
+  -- int = "0" / (digit1-9 *DIGIT).  A leading zero may not be followed by
+  -- another digit, so "01" is rejected.
+  pfn scan_int(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c == 48 do
+      if is_digit_byte(string_byte_at(s, i + 1)) do
+        Err("invalid number: leading zeros are not allowed in "
+            ++ string_slice(s, start, i + 2 - start))
+      else Ok(i + 1) end
+    else if is_digit_byte(c) do Ok(scan_digits(s, i + 1))
+    else bad_number(s, start, i + 1) end end
+  end
+
+  -- frac = "." 1*DIGIT.  Absent is fine; a '.' with no digits after it is not.
+  pfn scan_frac(s, i, start) do
+    if string_byte_at(s, i) == 46 do
+      let e = scan_digits(s, i + 1)
+      if e == i + 1 do bad_number(s, start, e)
+      else Ok(e) end
+    else Ok(i) end
+  end
+
+  -- exp = ("e" / "E") ["+" / "-"] 1*DIGIT.  The sign is accepted ONLY here,
+  -- immediately after the exponent marker — treating '+'/'-' as ordinary
+  -- number bytes would make "1-2" scan as the single token "1-2" and change
+  -- the error reported for malformed input.
+  pfn scan_exp(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c == 101 || c == 69 do
+      let sgn = string_byte_at(s, i + 1)
+      let d0 = if sgn == 43 || sgn == 45 do i + 2 else i + 1 end
+      let e = scan_digits(s, d0)
+      if e == d0 do bad_number(s, start, e)
+      else Ok(e) end
+    else Ok(i) end
   end
 
   -- Parse a JSON number.  `i` is at '-' or a digit.
   pfn parse_number(s, i) do
     let i2 = if string_byte_at(s, i) == 45 do i + 1 else i end
-    let e = scan_number_end(s, i2)
-    let num_str = string_slice(s, i, e - i)
-    match string_to_float(num_str) do
-    None -> Err("invalid number: " ++ num_str)
-    Some(f) -> Ok((Number(f), e))
+    match scan_int(s, i2, i) do
+    Err(e) -> Err(e)
+    Ok(i3) ->
+      match scan_frac(s, i3, i) do
+      Err(e) -> Err(e)
+      Ok(i4) ->
+        match scan_exp(s, i4, i) do
+        Err(e) -> Err(e)
+        Ok(e2) -> do
+          let num_str = string_slice(s, i, e2 - i)
+          match string_to_float(num_str) do
+          None -> Err("invalid number: " ++ num_str)
+          Some(f) -> Ok((Number(f), e2))
+          end
+        end
+        end
+      end
     end
   end
 
