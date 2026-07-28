@@ -1,15 +1,20 @@
 -- String module: functions for working with UTF-8 encoded strings.
 --
--- March strings are immutable UTF-8 byte sequences.  The runtime uses a
--- fat-pointer representation with small-string optimisation (SSO): strings
--- of 15 bytes or fewer are stored inline without a heap allocation.
+-- March strings are immutable UTF-8 byte sequences.  Every string is a
+-- refcounted heap allocation with a 24-byte header — there is NO small-string
+-- optimisation, so even a 3-byte string costs a malloc.  (This comment
+-- previously claimed a fat-pointer representation with 15-byte inline storage.
+-- That was never true; see specs/2026-07-26-string-performance-profile.md for
+-- what the representation actually costs, measured.)
 --
 -- Key naming conventions:
 -- - Functions with `byte_` in their name operate on raw byte offsets (O(1)).
 -- - `codepoint_count` counts Unicode codepoints (NOT user-perceived
 --   graphemes — combining characters and emoji clusters count as multiple
---   codepoints).  `grapheme_count` is a legacy alias retained for
---   backward compatibility.
+--   codepoints).  `grapheme_count` is a legacy ALIAS for it and counts
+--   codepoints too, despite the name: `"e" ++ combining-acute` is one grapheme
+--   but both functions return 2, and a ZWJ emoji sequence is one grapheme but
+--   both return 3.  Prefer `codepoint_count`, whose name matches what it does.
 -- - Use `byte_size` for performance-critical paths.
 
 mod String do
