@@ -115,7 +115,7 @@ Peephole rewrites based on algebraic identity and strength-reduction rules.
 Inlines small, pure, non-recursive functions at call sites. Alpha-renames inlined bodies to prevent variable capture.
 
 **Eligibility criteria:**
-- Function body ≤ 15 TIR nodes (configurable via `inline_size_threshold`)
+- Function body ≤ 50 TIR nodes (configurable via `inline_size_threshold`)
 - Function body is pure (no effects; checked by `lib/tir/purity.ml`)
 - Function is non-recursive (does not call itself)
 - Does not call another inlining candidate (prevents infinite fixed-point expansion)
@@ -127,6 +127,93 @@ Inlines small, pure, non-recursive functions at call sites. Alpha-renames inline
 **Effort:** Low (done) | **Impact:** High
 **Dependencies:** Pairs with Fold and Simplify for maximum benefit
 **Tests:** `test_inline_*` group in `test/test_march.ml`
+
+---
+
+### 4a. Single-Use Private-Function Inlining  ✅
+
+**Location:** `lib/tir/single_use_inline.ml`
+**Stage:** TIR (Opt coordinator), after ordinary `inline` and before `cprop`
+
+Relocates a small, syntactically impure top-level function into its only
+direct call site. The pass retains `Inline.inline_size_threshold = 50` and
+runs in the fixed-point order `inline → single-use-inline → cprop → fold →
+simplify → fusion → dce`.
+
+Eligibility requires exactly one **total** free top-level reference in the
+current artifact, not merely one caller. That occurrence must be an
+arity-correct direct `EApp`; any occurrence as a value, argument, closure
+field, indirect-call target, `ADefRef`, or other atom position makes the
+function address-taken and excludes it. Syntactically pure functions remain
+the ordinary inliner's responsibility.
+
+The impure-body case is sound because one substitution relocates observable
+operations rather than duplicating them. The pass excludes DCE roots
+(`main`/qualified main, exports, tests, setup, migrations, and the no-seed
+fallback), every recursive direct-call SCC, collision-dispatch targets, and
+hot-code-reload boundary functions. Existing alpha-renaming and
+arity-checked ANF substitution preserve lexical scope and argument binding.
+
+Perceus runs before this optimization, so ownership operations are already
+explicit. Inlining must preserve every `EIncRC`, `EDecRC`, atomic RC, `EFree`,
+and `EReuse` operation and their order; it does not synthesize, combine,
+remove, or reorder RC work. Downstream impurity-aware DCE may remove only
+bindings and now-unreachable named definitions under its existing rules.
+
+**Measured emitted-LLVM result (2026-07-27):** all 93 current non-JS top-level
+native fixtures compiled successfully. Their final output contains 1,869
+matched March definitions and 2,310 residual direct calls to those
+definitions. On the exact 91-fixture set used by the published baseline,
+2,029 definitions became 1,853 (176 removed), while the published 2,468
+residual calls became 2,294 (174 fewer, 7.05%). A same-source no-pass control
+at `91afbe99` measured 2,470 → 2,294 calls and 2,029 → 1,853 definitions,
+attributing 176 removed calls and definitions across the same 51 fixtures;
+the two-call difference from the published baseline predates this pass.
+
+Across all 93 current fixtures, the same no-pass control measured 2,049 →
+1,869 definitions and 2,490 → 2,310 calls: 180 removed call/definition
+occurrences, 156 distinct bodies, across 53 fixtures. Of those occurrences,
+159 contain explicit RC operations. The final-phase dump distributions were:
+
+| Serialized `body_size` | Removed definitions |
+| ---: | ---: |
+| 1–10 | 23 |
+| 11–20 | 71 |
+| 21–25 | 30 |
+| 26–30 | 17 |
+| 31–40 | 21 |
+| 41–50 | 13 |
+| 51+ | 5 |
+
+| Serialized `rc_ops` | Removed definitions |
+| ---: | ---: |
+| 0 | 21 |
+| 1 | 42 |
+| 2 | 39 |
+| 3 | 32 |
+| 4 | 20 |
+| 5–9 | 20 |
+| 10–19 | 6 |
+
+The pass still enforces `Inline.node_count <= 50`. The dump serializer's
+`body_size` is a visualization counter that weights aggregate atom lists
+differently, so five removed definitions serialize as 51–56 even though they
+meet the pass's 50-node predicate. These are compiler-output measurements;
+no runtime speedup was measured.
+
+**Tests:** `single_use_inline`, `inline`, DCE, hot-reload boundary, mutual-TCO,
+reduction-check, TIR property, raw-LLVM elimination, and native RC-order
+regressions
+
+**Corpus-count correction (2026-07-27):** the 93-fixture count above holds at
+the commit it was measured (`d3315b36`). A later rebase onto `main` added one
+unrelated fixture (`native_arr_map_inline_float_box_reuse.march`, float-boxing
+Stage 4 Option A), making the current corpus 94. That fixture was checked
+directly rather than re-running the full corpus pass: its `--dump-phases`
+trace shows identical TIR node counts immediately before and after both
+`tir-opt-{1,2}-single-use-inline` phases, so the pass is a no-op on it and the
+93-fixture aggregate figures above are unchanged for the 94-fixture corpus.
+See `specs/progress.md`'s matching 2026-07-27 entry.
 
 ---
 
@@ -702,14 +789,53 @@ What's left is making the *operations* on those columns actually use the fast
   (P10 Phase 2 correction, above) for free. `Min`/`Max`/`Std`/`Variance`/`Median`
   unchanged: no vectorized reduction primitive exists for those (would need new
   runtime builtins), and `Median` needs the full sorted list regardless.
-- **Investigated, deferred:** `col_add_col`/`ColExpr::Add/Sub/Mul/Div` (column-column
-  arithmetic) and `fill_null` (data array zipped against a null-bitmap array) both
-  round-trip through `List`/boxed-`Value` conversions for what look like `map`-shaped
-  ops, but are actually **two-array** operations — `NativeArray.map_int`/`map_float`
-  only take one array, so neither can use the Phase 2b/2c inlining without a new
-  `map2`/zip-with `NativeArray` primitive (new runtime builtin + LLVM codegen support,
-  likely needing its own Phase-2b/2c-style closure-inlining treatment). Real,
-  scoped, compiler-side work — not started.
+- **Done (2026-07-27):** `NativeArray.map2_int`/`map2_float` — a genuine two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length mismatch),
+  plus `NativeArray.to_float_arr` (widen a `NativeIntArr` to `NativeFloatArr`) for
+  mixed-type column arithmetic. Full stack: runtime C (`native_{int,float}_arr_map2`
+  in `runtime/march_runtime.c`, using the same wire-tagged/boxed closure-call ABI as
+  `map`'s `clo_call_*` helpers, plus 2-arg variants `clo_call_int_int_int`/
+  `clo_call_dbl_dbl_dbl`), interpreter (`lib/eval/eval.ml`), typechecker
+  (`lib/typecheck/typecheck.ml`), and compiled-path registration (`llvm_builtins.ml`
+  table + preamble `PDeclare`s, `defun.ml`'s `builtin_names`). `DataFrame.col_add_col`
+  now uses these instead of `List.zip`/`List.map`/`native_*_arr_from_list` for all
+  four `IntCol`/`FloatCol` combinations. Regression test: `test/native/native_arr_map2.march`.
+  Shipped correctness-first — `map2` did not initially get its own
+  Phase-2b/2c/Option-A/B-style closure-inlining or vectorization treatment (still
+  dispatched through the C runtime's opaque closure-pointer call per element).
+- **Done (2026-07-27, same day):** `map2` closure-inlining/vectorization. Extended
+  `lib/tir/native_map_inline.ml` (the Phase 2b/2c/Stage-4 pass behind `map`'s
+  numbers above) to also recognize the two-array `map2` call shape — same
+  eligibility bar (fresh, single-use, non-capturing-or-single-capture callback),
+  same synthetic-inline-name mechanism, same `Float`-boxing Stage 4 Option B
+  unboxed clone for a concrete-`Float` signature — via four new mirror functions
+  (`find_target_call2`/`subst_call2`/`find_target_call_var2`/`subst_call_capturing2`)
+  matching a 3-arg call (2 leading `NativeArray` args + closure) instead of `map`'s
+  2-arg one, plus `apply_fn_table`'s arity filter widened to accept a 2-param
+  ($clo+a+b) apply fn alongside the existing 1-param one. `lib/tir/llvm_emit.ml`
+  gained `emit_native_map2_inline_loop`, mirroring `emit_native_map_inline_loop`
+  with two source-array reads and a 2-argument direct call. One thing with no
+  single-array equivalent: the inlined loop bypasses
+  `native_int_arr_map2`/`native_float_arr_map2` (and their own length checks)
+  entirely, so it needed its own length-mismatch panic
+  (`native_arr_map2_check_len`, `runtime/march_runtime.c`, emitted once in the
+  loop's preheader — no per-iteration cost) to preserve
+  `NativeArray.map2_*`'s documented contract; verified with a dedicated
+  regression fixture expecting exit 1
+  (`test/native/native_arr_map2_inline_length_panic.march`), not just the happy
+  path. Measured **~47x** on the `bench/simd_map2.march` cross-language
+  benchmark: 299.2 ms → 6.4 ms (5M elements), now beating hand-written OCaml and
+  within 3x of NumPy — see `docs/simd-benchmarks.md`'s "Fix history: map2".
+  Regression test: `test/native/native_arr_map2_inline.march` (correctness — Int
+  and Float, non-capturing and capturing, plus a reused-closure fallback case)
+  plus an `--emit-llvm` structural check
+  (exactly 2 unboxed `$mapfast$` clones, zero boxing calls in either, exactly 1
+  remaining general non-inlined `native_int_arr_map2` call for the
+  reused-elsewhere case).
+- **Still out of scope:** `ColExpr::Add/Sub/Mul/Div` (the lazy-expression path, as
+  opposed to `col_add_col`'s eager one) and `fill_null` (data array zipped against a
+  `TypedArray(Bool)` null-bitmap, not another `NativeArray` — a different shape than
+  `map2` covers) have not been rewired.
 - **Found, filed separately, not fixed:** `DataFrame.eval_agg` has ~40ms of fixed
   per-call overhead in compiled builds, unrelated to the actual aggregation —
   confirmed via isolated benchmark and confirmed pre-existing (not caused by the
@@ -722,16 +848,17 @@ What's left is making the *operations* on those columns actually use the fast
   others are pointer/hash-heavy, not data-parallel.
 
 Combined with P9 (columnar layout), the column representation and the now-vectorized
-aggregations move March DataFrame queries closer to Polars-competitive — the
-two-array-arithmetic gap above is the main remaining piece.
+aggregations AND two-array arithmetic move March DataFrame queries closer to
+Polars-competitive — `ColExpr`'s lazy-expression path and `fill_null` are the main
+remaining pieces.
 
 ---
 
-**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, not started
-**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 (aggregations) low, done; Phase 3 (two-array ops) medium, done
+**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2; ~47× for map2 specifically (299ms → 6.4ms, 5M elements)
 **Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
-**Benchmark:** `bench/array_numeric.march`
-**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops not started
+**Benchmark:** `bench/array_numeric.march`, `bench/simd_sum.march`/`simd_map.march`/`simd_map2.march` (cross-language, see `docs/simd-benchmarks.md`)
+**Status:** Phase 0–2c done; Phase 3 aggregations done; Phase 3 two-array ops done (primitive, `col_add_col` rewiring, AND inlining/vectorization all done)
 
 ---
 

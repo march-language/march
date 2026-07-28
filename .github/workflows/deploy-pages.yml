@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      # The search index is built from docs/ but by a script outside it; without this a
+      # change to the indexer alone would never reach the live site.
+      - 'scripts/build-search-index.sh'
   workflow_dispatch:
 
 permissions:
@@ -31,6 +34,20 @@ jobs:
         env:
           JEKYLL_ENV: production
         run: bundle exec jekyll build --baseurl "" --destination ../_site
+
+      # Pin Node rather than relying on whatever the runner image happens to ship, so
+      # `npx pagefind` can't start failing on an image bump.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Pagefind crawls the BUILT site, so it must run after Jekyll and before deploy.
+      # This is what makes one ⌘K search cover both the Jekyll pages and the 114
+      # pre-generated stdlib API pages. The script fails the build if the index comes
+      # out empty, so a dropped `data-pagefind-body` can't ship a dead search box.
+      - name: Build search index (Pagefind)
+        run: scripts/build-search-index.sh _site
 
       - name: Deploy built site to march-language.github.io
         uses: peaceiris/actions-gh-pages@v4

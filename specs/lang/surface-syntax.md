@@ -551,6 +551,15 @@ String/list concat: `++`
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
 
+Each `++` allocates and copies both operands into a new string/list. A chain
+of them (`a ++ b ++ c`) is collapsed into three-way concats by the compiler, so
+k parts cost `ceil((k-1)/2)` allocations rather than k-1 — but using `++` as a
+loop accumulator (`acc = acc ++ x`) still copies `acc` again on every iteration,
+which is O(n²) overall. String interpolation (`"${a}${b}"`) desugars to exactly
+the same `++` chain and gets the same treatment. For accumulating many segments
+across loop iterations, use `IOList` (`stdlib/iolist.march`), which builds a
+tree and defers concatenation to a single O(n) pass at the end.
+
 ---
 
 ## Pipe

@@ -43,6 +43,401 @@ run_eval 253, run_stdlib 817.
 unconnected — so a guarded call over a non-literal list is skipped rather than
 proved. A missed proof, not a false report.
 
+## Current State (as of 2026-07-27, Json.parse RFC 8259 number scanner)
+
+`Json.parse` rejected every JSON number with a signed exponent — `1e-5`,
+`2.5E+10`, `1e-308` all failed with `invalid number: 1e`. The number-body
+predicate (`is_num_byte` in `stdlib/json.march`) accepted only digits, `.`,
+`e`, `E`; `parse_number` stepped past a single leading `-` before the scan, so
+a sign was only ever handled in the mantissa position, never after an exponent
+marker. The scan stopped at the `-`, sliced `"1e"`, and `string_to_float("1e")`
+returned `None`. Long-standing — the character set predates the byte-index
+scanner rewrite (`556cf7e9`) and was preserved verbatim through it, with a
+comment at `is_num_byte` flagging it as a deliberate deferral so that rewrite
+stayed a pure performance change.
+
+Replaced `is_num_byte`/`scan_number_end` with a scanner that validates RFC
+8259's grammar (`["-"] int [frac] [exp]`) as it goes, in the same byte-index
+style: `is_digit_byte` / `scan_digits` / `scan_int` / `scan_frac` / `scan_exp`,
+each returning the index it stopped at. `+`/`-` are accepted *only* immediately
+after `e`/`E` — treating them as ordinary number bytes would make `1-2` scan as
+the single token `"1-2"` and change the error for malformed input.
+`string_byte_at` returns `-1` past the end of the string, so every scan
+terminates at EOF without a bounds check. Errors quote the offending slice via
+`bad_number(s, start, e)`, so `1e-` still reports `invalid number: 1e-`.
+
+Validating shape during the scan also stops `Json.parse` inheriting whatever
+`string_to_float` happens to admit. That builtin is `strtod` (native) /
+`float_of_string` (interpreter) backed, so deferring to it let non-JSON forms
+through: `1.` and `01` both parsed before this change. Now rejected, along with
+`+1`, `Infinity`, `0x10`, `.5`, `1e`, `1e-` (several of those were already
+rejected upstream in `parse_value`, and still are). Verified identical
+interpreted and compiled (`--opt 2`) over a 22-case corpus.
+
+`test/stdlib/test_json.march` had rotted out of the build entirely: it was
+referenced by no runner, and no longer typechecked against the current stdlib
+(bare `Null`/`Bool`/`Str`/`Array` became ambiguous once `Msgpack` and `IOList`
+landed the same constructor names). Constructors qualified as `Json.*`, and the
+file wired into `test/test_stdlib_march.ml` — `json.march` is loaded before
+`iolist.march`/`msgpack.march` so their same-named constructors keep winning
+bare lookups exactly as before. 48 tests, previously running nowhere, now run
+in CI; 26 of them are new, covering the exponent forms and the RFC shape rules.
+
+## Current State (as of 2026-07-27, module-qualified ctor pattern silently failed to match compiled)
+
+Fixed a silent-wrong-answer codegen bug: a MODULE-qualified constructor
+pattern whose bare ctor name is declared by more than one module compiled
+into a `switch` case that could never fire, so the arm **failed open** to
+the catch-all — no error, no warning, no crash. The interpreter was always
+correct, making this a pure compiled/interpreted parity divergence.
+
+Repro (`Json.Array`/`Json.Null` fall through compiled, match interpreted):
+
+```march
+match Json.parse("[1]") do
+Ok(Json.Array(_)) -> println("array")
+Ok(_)             -> println("fell through")   -- compiled took THIS arm
+Err(_)            -> println("err")
+end
+```
+
+`Json.Object(_)` matched correctly throughout, which is what made the bug
+survive so long — see "why the obvious fixture misses it" below.
+
+**Root cause.** Codegen keys `Llvm_ctx.ctor_info` by TYPE
+(`"JsonValue.Array"`), and `Llvm_case.qualified_br_key` resolves a written
+qualifier by comparing it only against a key's *type* segment. But the
+documented qualified-pattern syntax (`specs/lang/pattern-matching.md`,
+"Qualified Constructor Patterns") writes a *module* — and `Json` declares
+the type `JsonValue`, `Msgpack` declares `Value`. The two names differ, so
+neither the `ktype = qual` nor the `last_seg ktype = qtail` comparison could
+ever fire, no key matched, and the tag DEGRADED to the bare ctor `"Array"`.
+`Llvm_data.ctor_entry` then resolved that bare name by its ambiguous
+`".<ctor>"` suffix scan over every type in the program, tie-broken by
+hashtable order — and landed on `Msgpack.Value.Array`. Because `Value` is a
+same-short-name colliding type (Msgpack + DataFrame), its ctors carry
+globally-unique tags from the disjoint `0x0200_0000` range (Task 1 of the
+ctor-module-identity plan), so the emitted case constant was `33554472`
+against a value built with `JsonValue.Array`'s tag `4`. Confirmed directly in
+`--emit-llvm`: the switch compared `i32 33554472` while every `store i32` in
+the whole module was in the range 0–5.
+
+**Why it could not be fixed in codegen.** The obvious repair — fall back to
+the scrutinee's own type when the qualifier resolves nothing — is dead code
+here. Instrumenting `qualified_br_key` showed `scrut_ty = TVar _` for all
+three patterns: the scrutinee is a destructured sub-pattern variable (the
+`Ok(...)` payload), and `lower_match` mints those with `unknown_ty`, so by
+codegen the type names nothing at all. The qualifier has to be translated
+while module structure is still in hand.
+
+**Fix** (`lib/tir/lower_state.ml`, `lib/tir/lower_match.ml`). The existing
+`compute_shared_ctor_collisions` walk over all decls already collects, per
+declared variant type, its module prefix and ctor names; it now also indexes
+that same data two other ways — `module_ctor_type_tbl` ((module prefix, ctor)
+→ declaring type's short name, or `None` when that module declares the ctor
+on two different types) and `type_ctor_tbl` ((short type name, ctor)).
+`pat_tag_and_subs`'s qualified branch consults them after the existing narrow
+collision path declines: a qualifier that is really a TYPE (`List.Cons`, or
+the 3-segment `Mod.Type.Ctor` form the collision path emits) is left
+untouched since it already exact-matches a `ctor_info` key, and an ambiguous
+module passes through unchanged rather than guessing. Otherwise the tag is
+rewritten to `"JsonValue.Array"`, which `qualified_br_key` then satisfies on
+its FIRST check (`Hashtbl.mem ctor_info br_tag`) — no codegen change at all.
+
+Note this also makes the previously-passing `Msgpack.Array` direction
+*deterministic* rather than accidentally correct: it too was degrading to the
+bare name and merely winning the hashtable coin-flip.
+
+**Why the obvious fixture misses it** (worth remembering when writing the
+regression). The failure is name-dependent, not construct-dependent: only
+`Array` and `Null` are declared by two stdlib modules, so only those two
+misresolve. `Object` is unique to `JsonValue`, so its ambiguous suffix scan
+had exactly one candidate and silently landed right; `Str` is declared by
+both but at the *same* tag position (3) in each, so the wrong lookup returned
+the right number. A fixture checking only `Object`, or only `Str`, passes
+pre-fix and proves nothing. The new test asserts `Array`, `Null`, `Object`,
+`Str` and a non-matching fallthrough together, and was confirmed RED before
+the fix (`array`/`null` → `other`).
+
+**JS backend was never affected** — `js_emit` discriminates on the ctor-name
+string (`{ $: "Array" }`), not a numeric tag, so no tag identity is involved.
+
+**Tests.** New `test_module_qualified_colliding_ctor_pattern_compiled` in
+`test/test_codegen.ml`, registered under the existing
+`cross_module_ctor_resolution` group alongside its sibling
+`test_msgpack_cross_module_ctor_resolution_compiled` (the same bug family
+approached from the stdlib-internal side). Also verified by hand on a
+user-module reproduction: two nested modules `A`/`B` declaring types `T`/`U`
+that share the ctor names `Node`/`Leaf`, matched via `A.Node`/`B.Node`, plus
+`List.Cons`/`List.Nil` type-qualified patterns to confirm the untouched path
+— compiled output matches interpreted on every arm.
+
+## Current State (as of 2026-07-27, JS closure apply-slot fix in EReuse/EStackAlloc)
+
+Fixed a JS-backend codegen bug that broke `Json.to_string` on every JSON array
+or object (`TypeError: f._0 is not a function`), while the same program ran
+correctly interpreted and compiled native.
+
+Root cause was in `lib/tir/js_emit.ml`, not `stdlib/json.march`. The JS closure
+layout is `{$: "$Clo_name", _0: apply_fn, _1: fv1, ...}`, and post-Defun
+dispatch calls `f._0(f, args)`. Slot `_0` must therefore hold the *raw* apply
+function — but `emit_atom` deliberately rewrites a module-level function name to
+its `name$clo` wrapper (an object, `{_0: fn}`) so bare function references work
+as first-class values. `EAlloc` handled this with an `is_clo` check that emitted
+slot 0 via `emit_atom_raw`; `EStackAlloc` and `EReuse` — the two rewrites
+escape-analysis and Perceus produce *from* `EAlloc` — did not. A closure
+allocated in a match arm whose scrutinee cell is dead becomes `EReuse` (the cell
+is reusable), so its apply slot got the wrapper object and dispatch called a
+record instead of a function.
+
+`json.march`'s `Array`/`Object` arms hit exactly this shape (match on `jv`, then
+allocate a lambda for the local `map_list` helper), but the bug is general: any
+lambda passed to a user-defined higher-order function from a reuse-eligible
+match arm. Confirmed general with a JSON-free reproduction. Diagnosis note: the
+distinguishing evidence was marking `EAlloc`/`EStackAlloc`/`EReuse` with
+separate emitted comments — the first hypothesis (`EStackAlloc`, which
+`known_call.ml:71` shows does carry closures) was wrong, and only the marker
+ruled it out.
+
+The three allocation forms now share one `emit_tagged_alloc` helper, so the
+closure rule cannot be applied to one and missed by the others again. Pinned by
+`test/native/js_closure_reuse_apply_slot.{march,expected}` (a dune-rule JS
+pipeline test — needs `dune build @runtest`, not the alcotest binaries), which
+covers both the general shape and `Json.to_string` over an array and an object.
+## Current State (as of 2026-07-27, interpolating a String no longer costs a refcount pair)
+
+Interpolating a String-typed operand cost an atomic inc_rc/dec_rc pair per
+operand that bought nothing. `"a${s}b"` desugars to `to_string(s)`, which
+Show-dispatches to `Show$String.show` — a synthesized IDENTITY (`fn x -> x`,
+emitted by `emit_builtin_impls` in `lib/tir/lower.ml`, because a string already
+is its own representation). That call was emitted and only inlined away later,
+in the post-Perceus opt loop. Perceus runs FIRST, so it saw a live
+owned-argument call and bracketed it with inc_rc/dec_rc; the inlining that
+followed removed the call and left the pair stranded around a bare alias.
+`string_concat3` borrows all three arguments, so the extra reference was pure
+overhead on every interpolated String operand in every March program.
+
+Two changes in `lib/tir/lower.ml`, both at the source rather than downstream:
+the `Show$String.show` call is elided during lowering (so Perceus never sees a
+call to bracket), and `lower_to_atom_k` no longer binds a fresh temp when the
+lowered RHS is already a *variable* atom (`let v = EAtom (AVar x) in k (AVar v)`
+≡ `k (AVar x)` in ANF, but the alias reads to Perceus as a second owned
+reference). The passthrough is deliberately restricted to `AVar`: a literal
+atom carries no type of its own, so for `ALit (LitAtom …)` the binder's
+`ty_of_expr` ascription is load-bearing — passing it through unbound made
+`println(:x)` print `()`.
+
+Measured on arm64, `"w${a}x"` vs the hand-written `"w" ++ a ++ "x"`, 3M
+iterations, with the interpolating call in the SECOND (warm) benchmark slot:
+181/173ms → 137/133ms, i.e. interpolation now matches the hand-written chain
+exactly, and the two lower to byte-identical TIR. `MARCH_STRING_STATS=1`
+allocation histograms are unchanged, confirming this was refcount traffic and
+not allocation. Pinned by the `interp_string_operand_rc` TIR golden snapshot
+(verified to FAIL on the unfixed compiler at both the lower and perceus
+stages).
+
+**Measurement note.** Benchmarks of this shape carry a large first-position
+warmup penalty: in an A/B where both halves compile to *identical* IR, the
+half that runs first measured ~25% slower (173ms vs 137ms). Any before/after
+claim about interpolation must hold the benchmark slot fixed, or it will
+attribute warmup to the change.
+
+**Interaction with the `string_join` path removal (`fceea07b`, same day).**
+This work was done against a tree where `desugar_interp` still switched to a
+`string_join` cons-list past `interp_join_threshold` (3 segments), which is why
+a 7-segment repro showed no improvement from the RC fix alone — it took the
+join path, not `string_concat3`. `fceea07b` removed that second shape
+entirely, and its commit message closes by noting the residual gap it could not
+explain: "`to_string(x)` where x is statically a String looks like an identity
+that is not being elided; worth a look separately." That is exactly this
+change, so the two compose — join removal made every interpolation take the
+concat3 path, and this makes that path free of the identity's refcount pair.
+
+Measurements taken here before the merge, now of historical interest only:
+`++`/concat3 beat `string_join` at *every* size tested with short (8-byte)
+operands (2 operands 30ms vs 59ms, 8 operands 121ms vs 157ms, 20 operands
+302ms vs 350ms — no crossover in that regime, contradicting the 2026-07-26
+"crossover just under 5" figure, which had not controlled for the warmup
+penalty above). With large (4KB) operands the chain *is* quadratic (4 operands
+16ms vs 13ms, 8 operands 87ms vs 23ms, 32 operands 1236ms vs 97ms) — so the
+concat3-only shape does re-expose large-operand interpolation to quadratic
+copying. Not a regression introduced here, but the reason a length-summing
+`string_concat_n` remains the real fix for that band; tracked in
+`specs/todos.md`.
+
+## Current State (as of 2026-07-27, map2 closure-inlining/vectorization — ~47x)
+
+Extended `lib/tir/native_map_inline.ml` (the compiler pass behind
+`map_int`/`map_float`'s auto-vectorization — see the 2026-07-27 entry below
+for the primitive this closes the loop on) to also recognize
+`NativeArray.map2_int`/`map2_float`'s two-array call shape. Same
+eligibility bar as `map` (a fresh, single-use, non-capturing-or-single-capture
+closure), same `Float`-boxing Stage 4 Option B unboxed clone for a
+concrete-`Float` signature — four new mirror functions
+(`find_target_call2`/`subst_call2`/`find_target_call_var2`/
+`subst_call_capturing2`) match a 3-arg call (2 leading `NativeArray` args +
+closure) instead of `map`'s 2-arg one, and `apply_fn_table`'s arity filter
+now accepts a 2-param ($clo+a+b) apply fn alongside the existing 1-param one.
+`lib/tir/llvm_emit.ml` gained `emit_native_map2_inline_loop`, mirroring the
+single-array loop with two source-array reads and a 2-argument direct call.
+
+One wrinkle with no single-array equivalent: the inlined loop bypasses
+`native_int_arr_map2`/`native_float_arr_map2` (and their own
+length-mismatch checks) entirely — calls the lifted apply fn directly
+instead — so it needed its own length-mismatch panic
+(`native_arr_map2_check_len`, `runtime/march_runtime.c`) to preserve
+`NativeArray.map2_*`'s documented "panics on length mismatch" contract.
+Emitted once in the loop's preheader (not per-iteration), so it costs
+nothing in the hot path. Verified with a dedicated regression fixture
+expecting exit 1 (`test/native/native_arr_map2_inline_length_panic.march`),
+not just the happy-path fixture
+(`test/native/native_arr_map2_inline.march`: Int + Float, non-capturing +
+capturing, plus a closure that's reused elsewhere — confirmed via
+`--emit-llvm` that it correctly falls back to the general path, not
+inlined).
+
+Measured on the cross-language SIMD benchmark added the same day
+(`bench/simd_map2.march`, 5M elements): **299.2 ms → 6.4 ms, ~47x** —
+previously slower than naive interpreted Python, now beating hand-written
+OCaml and within 3x of NumPy. Full before/after write-up in
+`docs/simd-benchmarks.md` ("Fix history: map2"). See
+`specs/optimizations.md` §P10 "Phase 3".
+
+## Current State (as of 2026-07-27, cross-language SIMD benchmarks — March vs OCaml/Rust/Elixir/Python/NumPy)
+
+New benchmark set (`bench/simd_{sum,map,map2}.march` + OCaml/Rust/Elixir/
+Python/NumPy equivalents, wired into `bench/run_benchmarks.sh`) grounding the
+SIMD vectorization work in real cross-language numbers instead of only
+internal `-emit-llvm` structural checks. One correction along the way: the
+first version measured whole-process wall-clock like the project's other
+benchmarks, which turned out to mostly measure March building a 5M-element
+boxed `List` (~200ms) rather than the actual vectorized operation (~1ms) — a
+genuinely misleading number. Fixed by having every language self-time only
+the operation and report it via a `TIME_MS` line, and by using manual loops
+for OCaml (its `Array.fold_left`/`Array.map` box every float through a
+polymorphic closure, ~5x slower — not representative of real OCaml numeric
+code; Rust's iterator-based versions were checked against a manual-loop
+control and found already at parity, so kept as-is).
+
+Results at first publish: `sum`/`map` genuine wins (March ties NumPy, is
+competitive with hand-written OCaml/Rust); `map2` was the honest
+counterpoint — 299ms, no vectorization treatment, slower than naive
+interpreted Python. Published as `docs/simd-vectorization.md`'s "Benchmarks"
+section and a dedicated `docs/simd-benchmarks.md` page (machine profile,
+methodology, per-source-file GitHub links, explicit "shared dev machine, not
+idle" caveat with the load average at run time). `map2`'s gap was closed the
+same day — see the entry above.
+
+## Current State (as of 2026-07-26, many-part string interpolation desugars to one string_join call)
+
+String interpolation (`"${a}${b}"`) previously desugared to a left-deep chain
+of `++` calls (`prefix ++ to_string(e1) ++ s1 ++ ...`), which re-copies the
+growing prefix on every append — O(k²) total bytes copied for a k-part
+interpolation, since `march_string_concat` allocates and copies fresh on each
+call. `desugar_interp` (`lib/parser/parser.mly`) now switches on segment
+count: past `interp_join_threshold` (3) segments it builds a `Cons`/`Nil`
+list of the parts and emits a single `string_join(parts, "")` call, which is
+already a proper two-pass O(n) join (`march_string_join`) — no runtime change
+needed. At or below the threshold it keeps emitting the `++` chain, because
+materializing the cons cells costs more than the extra copy at that size:
+measured on arm64 over 2M iterations with short segments, `++` vs
+`string_join` is 231/303ms at 2 segments, 307/356ms at 3, and 589/564ms at 5,
+so the crossover sits just under 5.
+
+Both shapes therefore reach the rest of the pipeline, and two consumers pattern-match
+the desugared form and had to learn the join shape:
+`try_collect_interp` (`lib/format/format.ml`), which reconstructs `"${...}"`
+source for the formatter — without it the formatter printed a literal
+`string_join([...], "")` call and the stdlib idempotency tests failed — and
+`decompose_concat` (`lib/desugar/desugar.ml`), which splits a `~H` sigil into
+per-part IOList segments. The latter is the sharp edge: `html_interp_to_iolist`
+identifies dynamic parts by matching `to_string(e)` *per part*, so a shape it
+cannot see through collapses the template into one opaque part and silently
+disables HTML auto-escaping (verified: `~H"<p>${evil}</p>"` emitted raw
+`<script>` tags before the fix, escaped after). `test/test_eval.ml` asserts
+both desugarings (`parse interp` for the `++` shape, `parse interp many` for
+the join shape). `specs/lang/surface-syntax.md`'s operator reference now notes
+that `++` itself is still O(n) per call (so accumulating via `acc = acc ++ x`
+in a loop is still O(n²)) and points at `IOList` for that case —
+`stdlib/string.march`'s `String.concat` doc already carried the same note.
+## Current State (as of 2026-07-27, string performance phase 2 tasks 1-3)
+
+Three string optimizations landed against the phase 1 profile, each verified by
+a same-session A/B — absolute timings on this machine are not comparable across
+runs, so every claim below re-measured its baseline alongside the change.
+
+**`String.index_of_from`** (`runtime/march_runtime.c` + the nine builtin sites)
+takes a start offset and returns the index in the haystack's own coordinates.
+Its absence forced an O(n²) shape on any tokenizer — without it the only way to
+find the next separator is to slice off the tail and search again, re-copying
+the remainder every step, which is why two phase 1 benchmarks had to be written
+around it. Counting 150K fields in an 800KB buffer: `String.split` +
+`List.length` at 975ms against an `index_of_from` walk at **267ms**, with
+effectively zero allocation against ~9M strings plus ~9M cons cells.
+
+**memchr-based substring search.** A shared `march_memmem` two-stage helper —
+memchr for candidate first bytes, memcmp to confirm — now backs `index_of`,
+`index_of_from`, `contains`, `split`, `replace` and `replace_all`.
+`last_index_of` stays scalar because it scans backwards. libc's memchr is
+SIMD-optimised everywhere we target, so this gets vector scanning with no
+intrinsics and no per-arch code, the same reasoning behind
+`march_http_parse_simd.c`'s scalar fallback. `bench/string_scan` **809ms →
+20.8ms (39×)**, `string_parallel_scan` 390 → 171ms, `string_split_large` 1108 →
+928ms, and unchanged where no search is involved. Throughput went from ~0.5 GB/s
+to ~40 GB/s. A failed candidate resumes at `hit+1`, not `hit+nlen` — needles
+overlap, and skipping the whole needle loses the match in `("aaaa","aa")` at
+index 1. `replace_all` also stopped copying byte by byte between matches, which
+RAISES its reported `copy_bytes`: the old loop wrote through `buf[out++]` and
+bypassed the counter, so the previous figure undercounted.
+
+**Three-way concat folding** (`lib/desugar/desugar.ml`). A left-deep `++` chain
+allocates k-1 intermediates and re-copies the growing prefix at each link;
+folding in groups of three gives `ceil((k-1)/2)`. A 5-part chain over 100K
+iterations went 400,004 → 200,004 allocations, and `bench/string_small_churn`
+888.9 → 710.5ms with copying down 145.7 → 112.6MB. Fixed arity rather than a
+variadic n-ary concat because March builtin signatures are `Mono (TArrow ...)`;
+the only variable-length alternative is `string_join`, whose cons-list
+materialization measured at 59% of its cost at k=5.
+
+The concat rewrite lives in desugar rather than the parser or TIR, and the
+reason is load-bearing: the parser is where PR #90 broke the formatter's
+`"${...}"` reconstruction and silently disabled `~H` HTML escaping, while TIR is
+ANF — by then a chain is let-bound temporaries with `dec_rc` interleaved, a
+liveness analysis rather than a tree rewrite. **The `~H` bug was reintroduced
+anyway and caught by test**: `ESigil` desugars its content before HTML lowering,
+so the chain reached `html_interp_to_iolist` as one opaque `concat3` and it
+stopped matching `to_string(e)` per part. `decompose_concat` now flattens
+`concat3` as well as `++`. That failure mode fails open — the template still
+renders, just unsafely — which is why the codegen test guarding it earns its
+keep.
+
+## Current State (as of 2026-07-27, NativeArray.map2 primitive + DataFrame.col_add_col rewiring)
+
+New two-array zip-with primitive, `NativeArray.map2_int`/`map2_float` (plus
+`to_float_arr` for widening a `NativeIntArr`), unblocking `DataFrame.col_add_col`
+(column-column arithmetic) from a `List.zip`/`List.map`/`native_*_arr_from_list`
+round-trip — the last piece of the P10 Phase 3 "two-array ops" survey (aggregations
+were already done; `col_add_col`/`fill_null` were the two identified two-array
+shapes, `fill_null` remains out of scope since it zips against a `TypedArray(Bool)`
+mask, not another `NativeArray`).
+
+Full stack, all four layers: runtime C (`native_{int,float}_arr_map2` in
+`runtime/march_runtime.c`, reusing `map`'s wire-tagged/boxed closure-call ABI via
+new 2-arg helpers `clo_call_int_int_int`/`clo_call_dbl_dbl_dbl`), interpreter
+(`lib/eval/eval.ml`), typechecker (`lib/typecheck/typecheck.ml`), and
+compiled-path registration (`lib/tir/llvm_builtins.ml` table + preamble
+`PDeclare`s — matched in `test/test_codegen.ml`'s golden preamble string —
+plus `lib/tir/defun.ml`'s `builtin_names`). `stdlib/dataframe.march`'s
+`col_add_col` rewired for `IntCol+IntCol`, `IntCol+FloatCol`, `FloatCol+FloatCol`,
+`FloatCol+IntCol`. Verified byte-identical output between interpreted and
+compiled modes, including the length-mismatch error path. Regression test:
+`test/native/native_arr_map2.march`.
+
+Scoped to correctness only — `map2` does not (yet) get the Phase-2b/2c/Option-A/B
+closure-inlining/vectorization treatment `map_int`/`map_float` have; each element
+still dispatches through the C runtime's closure-pointer call. That inlining is a
+natural follow-up, not started. See `specs/optimizations.md` §P10 "Phase 3".
+
 ## Current State (as of 2026-07-27, deep drop for containers released without destructuring)
 
 Compiled March now reclaims an aggregate that is released WITHOUT being
@@ -163,6 +558,131 @@ fully checked. 245 refinecheck tests (was 236), exit 0 on a cold VC cache;
 `test_refine`, `run_compiler`, `run_eval` and `scripts/check-docs.sh` all clean.
 An adversarial sweep and a 12-violation-kind file both run with **zero**
 `(error` lines on a tee'd solver channel.
+## Current State (as of 2026-07-27, string performance phase 1: measurement)
+
+The measurement apparatus that decides March's string representation question,
+built so the decision rests on data rather than on asymptotic reasoning. Three
+parts: opt-in runtime counters, a six-program benchmark corpus, and a harness.
+
+**Counters** (`MARCH_STRING_STATS=1`, `runtime/march_runtime.c`): allocation
+count and payload bytes, a size histogram bucketed at 7/15/23/31/63/255 bytes,
+bytes copied, frees, peak live bytes, and non-string (`march_alloc`) object
+counts. Hooked into `march_string_alloc` and **both** `march_decrc` free paths.
+Off by default behind a lazy env check shaped like `gc_trace_on`, relaxed
+atomics throughout; the "zero cost when off" claim is measured at −0.34%, not
+assumed. 23 bytes is the load-bearing bucket boundary — what would fit inline in
+the footprint the 24-byte `march_string` header already occupies. The
+`obj_allocs` counter was added mid-implementation after the split/slice pair
+proved unable to attribute cons-cell cost without it: cons cells are not
+strings, so they never reach `march_string_alloc`, and the two benchmarks
+reported near-identical `allocs` (9,000,126 vs 9,000,006) where the real
+difference is 9,000,120 vs 0.
+
+**Corpus** (`bench/string_{scan,case,split_large,slice_walk,small_churn,parallel_scan}.march`,
+documented in `specs/benchmarks.md`): each isolates one cost. `split_large` and
+`slice_walk` are a matched pair — same buffer, same field shape, differing only
+in whether a list is built — and their difference is what separates cons-cell
+cost from copy cost.
+
+**Harness** (`bench/run_string_bench.sh` → `bench/STRING_RESULTS.md`): median of
+5, peak RSS via `getrusage` with per-platform unit normalization (bytes on
+macOS, kilobytes on Linux), cross-checked against `/usr/bin/time -l` to within
+0.2%. Checksums are asserted, not printed, so a benchmark whose work is
+optimized away fails rather than reporting a fast number; the gate was proved to
+fire by corrupting an expected value.
+
+**Verdicts** (`specs/2026-07-26-string-performance-profile.md`), against
+criteria fixed in the spec before measuring: small-string optimization
+**indicated** (91.7% of allocations ≤23 bytes; doubling allocations doubles wall
+time); array-returning `split` **indicated** (split is 1.82× slower than
+slice-walk while copying only 1.43× the bytes — the difference is 9M cons
+cells); borrowed views **not indicated** (copy volume is 0.55–0.79× of input,
+not the ≥2× the criterion required — every field is copied exactly once);
+SIMD search worth doing at ~0.5 GB/s but not the largest win; phase 3's
+contention gate **triggered** (parallel scan plateaus at 3.97× on 8 workers of a
+10-performance-core machine, unexplained by cores or bandwidth).
+
+**Blocker found — since FIXED on main.** The harness turned up two
+compiled-only RC leaks, both with minimal repros, both absent when interpreted:
+`x ++ "literal"` re-allocated and leaked the literal on every evaluation, and a
+container released without being destructured never freed its contents —
+`split_large` showed 9,000,126 allocations against **3** frees, RSS growing
+~9.3MB per iteration. Both were fixed independently (immortal cell per literal
+site; `fix(codegen): deep drop for containers released without destructuring`).
+The phase 1 peak-RSS and peak-live columns were measured against the leaky
+compiler and must be re-taken before any memory-based criterion is applied;
+timing, allocation counts and copy volumes were unaffected and carry the
+verdicts above.
+
+## 2026-07-27 — Single-use private-function inlining measured and verified
+
+The TIR optimizer now runs a separately named `single-use-inline` pass after
+ordinary pure-function inlining and before constant propagation. It relocates
+a syntactically impure body only when the function has exactly one total
+reference and that reference is an arity-correct direct call. The 50-node
+limit, DCE-root boundary, recursive-SCC exclusion, address-taking and
+collision-dispatch guards, and hot-code-reload boundary remain conservative.
+Because Perceus has already made ownership explicit, substitution preserves
+the existing RC operations and their order.
+
+**Corpus measurement:** all 93 current non-JS top-level native fixtures
+compiled with `--dump-phases --emit-llvm` (0 failures; 488.67 s command wall
+time). Final raw LLVM contains 1,869 matched March definitions and 2,310
+residual direct calls. On the exact 91-fixture published-baseline set,
+definitions fell 2,029 → 1,853 (176 removed) and published residual calls
+fell 2,468 → 2,294 (174 fewer, 7.05%). A same-source no-pass control at
+`91afbe99` measured 2,470 → 2,294 calls, attributing 176 removed calls and
+definitions across the same 51 affected fixtures; the two-call difference
+from the published baseline predates this pass. Across all 93 current
+fixtures, the control measured 180 removed calls/definitions, 156 distinct
+bodies, across 53 fixtures; 159/180 removed occurrences contain explicit RC
+operations. `specs/optimizations.md` records the body-size and RC
+distributions and the dump-metric distinction.
+
+**Verification:** focused codegen groups passed (`single_use_inline` 24/24,
+combined `inline` 30/30, DCE 6/6, mutual TCO 8/8, reduction checks 4/4);
+hot reload passed 35/35; TIR eval selection passed 62/62; TIR
+pipeline/pass/invariant properties passed 16/16. Full codegen passed 478/478
+in 256.141 s command wall time, including the 93-fixture native LLVM verifier
+(one unrelated cross-sysroot case was tool-skipped because its external
+sysroot is absent). `dune build @install` and `scripts/check-docs.sh` passed.
+
+The standalone golden sanitizer gate did **not** pass on this host:
+`./specs/lang/golden/sanitize.sh` exited 1 with `0 clean, 46 failed`. Every
+golden compiled, then every sanitized binary hit the script's 25-second
+watchdog with rc 142; none emitted an AddressSanitizer, UBSan, or
+LeakSanitizer diagnostic. This broad host ASAN failure includes trivial
+literal/arithmetic goldens and matches the independently reproduced
+host-sensitive watchdog recorded by the preceding task. No claim is made
+that full `dune runtest` or the sanitizer gate is green, and the fixed-port
+node aliases remain quarantined.
+
+All measurements above are compiler output or regression-command wall time.
+No runtime speedup was measured.
+
+**Corpus-count correction (2026-07-27, post-review fix wave):** the 93-fixture
+count above was accurate for the commit it was measured at
+(`d3315b3624bdbcf11ce8cf001f355fc0fe28cf57`). A later rebase onto `main`
+brought in one unrelated fixture, `test/native/native_arr_map_inline_float_box_reuse.march`
+(float-boxing Stage 4 Option A), bringing the current non-JS top-level native
+corpus to 94. Rather than re-run the full ~488s/~465s two-pass corpus
+measurement for one added fixture, that fixture was independently checked:
+its `--dump-phases` trace shows an identical TIR node count immediately
+before and after both `tir-opt-{1,2}-single-use-inline` phases (13,062 →
+13,062 in the first fixed-point iteration, 5,610 → 5,610 in the second) — the
+pass is a no-op on it, since the fixture defines only `main` plus
+Defun-lifted map-loop closures, none of which is an eligible single-caller
+private top-level function. The 93-fixture aggregate figures above (180
+removed occurrences, 156 distinct bodies, 53 affected fixtures) therefore
+still hold unchanged for the current 94-fixture corpus; this note exists so
+the fixture count itself does not go stale. The fix wave also addressed the
+final review's three Critical findings (caller-binding capture rejection in
+`single_use_inline.ml`; a persistent lexically-scoped alpha-renaming
+environment replacing the prior single mutable table in `inline.ml`; and
+bare/qualified-alias canonicalization in reference and SCC accounting) and
+the non-hermetic native-LLVM Dune gate (Important #5: sequenced compile/emit
+copies onto distinct basenames, and the `grep` exit-status handling now
+distinguishes "no match" from a real error).
 
 ## Current State (as of 2026-07-26, verified refinement Tier 2 structural induction)
 
@@ -6692,3 +7212,168 @@ No changes to code in this pass — audit only. Both findings in `specs/todos.md
 **Known, accepted cost:** the *original* boxed apply fn is left in the module alongside its unboxed clone — `Native_map_inline.run` executes after Opt's DCE pass, so the now-dead original (nothing calls it once the rewrite redirects the call site) is never swept. Not a correctness issue, just unnecessary compiled/linked dead code; a reachability check to drop it is a plausible follow-up, not attempted here.
 
 **Along the way:** hit the same stale-`_build/default/runtime`-copy issue as before (see `project_build_runtime_stale_copy.md`), this time in this worktree specifically, after merging in unrelated upstream commits. Fixed the same way: `dune build --root . @bin/warm-cache`.
+
+## Current State (as of 2026-07-27, docs site — site-wide ⌘K search via Pagefind)
+
+**march-lang.org gained full-text search across every page, plus stdlib symbol lookup, behind one `⌘K` / `Ctrl+K` / `/` shortcut** (`docs/_includes/search.html`, `scripts/build-search-index.sh`, `scripts/serve-docs.sh`, `.github/workflows/deploy-pages.yml`). The site previously had no search at all outside the generated API reference.
+
+**Why Pagefind, and why a post-build step:** the searchable site is two families of pages that share no source format — ~53 Jekyll pages rendered from `docs/**/*.md`, and 114 pre-generated standalone HTML files under `docs/docs/stdlib/` emitted by the *external* `march_doc` tool (auto-cloned by `scripts/gen-stdlib-docs.sh`, not in this repo). Pagefind crawls the *built* `_site/`, which is the only point at which both are the same kind of artifact. The index ships with the site; there is no search service at runtime and no CDN dependency. 167 pages indexed.
+
+**Opt-in inclusion.** Pages carry `data-pagefind-body`; Pagefind's rule is that once *any* page in a crawl has that attribute, only pages with it are indexed — so the playground, Tetris, perihelion and decision-graph pages stay out with no exclusion rules. The four layouts (`default`, `docs`, `cookbook`, `landing`) set it on their content element with a `data-pagefind-filter="section:…"` tag that drives the Guide/Cookbook/Stdlib/Home result labels. The stdlib pages can't set it — we don't own their generator — so `build-search-index.sh` injects it into `_site/docs/stdlib/*.html` (`<main id="main">`, which holds module content only; the ~1900-line symbol sidebar is a sibling `<nav id="sb">` and correctly stays out). Injecting into the *build output* means a future stdlib regeneration can never undo it.
+
+**Two search tiers in one box.** Pagefind indexes stdlib pages at PAGE granularity — searching `push` lands on `Queue.html` with no anchor. So the modal also loads `docs/docs/stdlib/search-index.json` (the symbol index `march_doc` already emits: 2038 entries, ~57 KB gzipped, fetched lazily on first keystroke in parallel with Pagefind) and renders a capped "Standard library" group above the prose results, linking to the definition anchor directly (`Array.html#fn-push`, using the generator's own `#fn-`/`#type-`/`#iface-` scheme). Symbols match on NAME only, exact or prefix (plus `_`-boundary prefixes, so `string` finds `to_string`); a `Module.member` pair is recognised (`List.map`), and any other multi-word query skips the symbol tier entirely. This is deliberately narrower than the stdlib page's own scorer, which also matches signatures, docstrings and Levenshtein neighbours — that would flood prose queries across 2038 names. Verified: `push`→`Array.push` first; `List.map`→`List.map` first; `to_string`→5 hits; `Array`→module page first; `how do supervisors restart children`→**zero** symbols.
+
+**Non-obvious bug fixed during review:** the full-screen scrim covered only a sliver at the top of the page. Cause is a CSS containing-block rule, not a z-index or sizing mistake — the layouts render the include inside their nav, and both `.d-nav` and `.m-nav` set `backdrop-filter`, which makes an element a containing block for `position: fixed` DESCENDANTS. Measured in-page: the overlay was `846×126` (the nav's box) versus `846×998` (the viewport) once reparented. Fixed by moving the overlay to `<body>` at init, which is robust against any layout later gaining a `transform`/`filter` on an ancestor.
+
+**Idle panel.** A bare `⌘K` shows recent searches (localStorage, capped at 5, written only when a query actually leads somewhere, `try`/`catch`-wrapped for Safari private browsing) above curated starting points. Those links are generated by Liquid from `site.pages` by `nav_order`, not hardcoded, so a renamed permalink can't leave a dead suggestion. Nothing is preselected in the idle state — auto-highlighting would make an unmodified `⌘K`+Enter navigate somewhere the user never chose.
+
+**Guard against silent rot:** `build-search-index.sh` fails the build if the index comes out with fewer than 100 pages. Pagefind exits 0 and still writes a `pagefind/` directory when it indexes nothing, so a dropped `data-pagefind-body` would otherwise ship a search box that finds nothing, with a green CI run.
+
+**Local workflow:** `scripts/serve-docs.sh` (jekyll build → pagefind → serve `_site`). Plain `jekyll serve` cannot be used — it rebuilds `_site` and wipes the index — and the modal says so explicitly, but only on localhost; visitors get a plain "search is unavailable" message. The script also exports a UTF-8 locale, without which Jekyll's SCSS converter dies with `Invalid US-ASCII character "\xE2"`.
+
+**Verified:** built and driven live in a browser across all four layouts in both light and dark themes (the toggling layouts use a `.light` class on `<html>`, the generated stdlib pages use `data-theme='light'`; the modal matches both). Keyboard nav, `Esc`, `/`, recents record/replay/clear, and `↵` on a symbol row landing on a real anchor (`/docs/stdlib/Array.html#fn-push`, confirmed present with signature `push(v, elem)`) all checked. No console errors. `scripts/check-docs.sh` green.
+
+**Not done:** the 114 generated API pages keep their own `⌘K` symbol modal, so the keystroke still means something narrower there. Unifying it requires a change to the separate `march_doc` repo plus regenerating and committing all 114 files — deliberately left as a follow-up.
+
+**Correction, same day — the index had to be committed, because `deploy-pages.yml` does not serve production.** The entry above described the index as shipping via the CI post-build step. That step works, but it publishes to the `march-language.github.io` repo, and **march-lang.org is a different Pages site**: `march-language/march` itself, configured `cname march-lang.org, source {branch: main, path: /docs}` — GitHub's own legacy Jekyll over `docs/`, which admits no post-build hook. Confirmed via the Pages API on both repos plus a live A/B (`/pagefind/pagefind.js` → 200 on `march-language.github.io`, 404 on `march-lang.org`, while `/docs/tour/` served the new markup on both). The misreading came from `scripts/gen-stdlib-docs.sh`'s header comment, which asserted `deploy-pages.yml` serves march-lang.org; that comment is now corrected in place.
+
+**Resolution:** `scripts/gen-docs-search-index.sh` regenerates the index into `docs/pagefind/` (194 files, 1.7 MB) and it is committed — the same model the 114 generated stdlib API pages already use, and the only way anything reaches march-lang.org. Verified that GitHub's Jekyll copies all 193 served files verbatim, `.pf_fragment` / `.pf_index` / `wasm.*.pagefind` extensions included, and that full-text search works end-to-end against a pure `jekyll build` output with no post-build step (the exact production shape). `deploy-pages.yml`'s Pagefind step is retained so the secondary site stays correct, and `build-search-index.sh` now `rm -rf`s its output directory first, since the committed copy now lands in `_site` during the Jekyll build and Pagefind's filenames are content-hashed (a merge would accumulate orphaned shards).
+
+**Staleness guard, and why it is not a byte diff.** Pagefind's output is deliberately not reproducible — two consecutive runs over byte-identical input produce different content-hashed filenames (`en_5a30fea.pf_filter` vs `en_ca11dc6.pf_filter`) and a different entry hash — so `git diff --exit-code docs/pagefind/` would fail on every run and train everyone to ignore it. Instead `gen-docs-search-index.sh --check` compares a SHA-256 over all `docs/**/*.{md,html}` (paths included, so renames count; `docs/pagefind/` itself excluded) against `docs/pagefind/.source-digest`, and runs in CI's `doc-lint` job. Verified non-vacuous: appending one comment line to `docs/tour.md` makes it exit 1 with both digests printed, and reverting restores exit 0.
+
+---
+
+## Current State (as of 2026-07-27, Json.parse rewritten as a byte-index scanner; `string_byte_at` builtin added)
+
+`Json.parse` allocated **~2 heap strings per INPUT BYTE**, independent of how
+many strings the document actually contained, because it began with
+`string_split(src, "")` — one heap string per byte — and then rebuilt each
+token by consing those single-byte strings and `string_join`-ing them.
+`Json.to_string`/`escape_str` did the same thing on the output side. Measured
+on a 239-byte document containing ~20 distinct strings, compiled `--opt 2`,
+20,000 iterations, `MARCH_STRING_STATS=1`:
+
+| | before | after |
+|---|---|---|
+| allocs / parse (parse only) | 261 | **21** |
+| allocs / iteration (parse + to_string) | 486 | **58** |
+| `hist_le7` share of all allocs | 90% | 31% |
+| obj_allocs / parse (parse only) | 641 | 153 |
+| wall clock, parse only | 0.67s | **0.14s** |
+| wall clock, parse + to_string | 1.10s | **0.24s** |
+
+21 allocations per parse is the number of strings in the document, which is the
+floor for a parser that returns owned `String`s. Same-session interleaved A/B,
+4 rounds, identical to 0.01s each round.
+
+**It scales, which was the point.** On a 1,001,001-byte document (11,000
+objects, 99,000 contained strings), parsed once, compiled `--opt 2`:
+
+| | before | after |
+|---|---|---|
+| string allocs | 1,100,041 | **99,018** |
+| obj_allocs | 2,816,019 | 792,015 |
+| peak_live_bytes | 2,662,216 | 2,002,183 |
+
+99,018 against 99,000 strings actually in the document — allocation now tracks
+the document's string COUNT rather than its byte SIZE, which is the whole
+change in one number. Both versions were verified to produce the same structure
+(element 0's `name`, element 10,999's `email`, and `None` at index 11,000).
+Wall clock on this document was 3-5x better but is not quoted precisely: the
+machine was under concurrent load (1-minute load average 17.7) and the readings
+ranged 0.23-0.43s before against 0.06-0.16s after. Allocation counts are
+load-independent and are the reliable figure here.
+
+**The enabling primitive: `string_byte_at(s, i) : Int`** (byte value `0..255`,
+`-1` out of range). Before it, March had NO way to look at one character of a
+string without allocating — `string_split(s, "")` and `string_slice(s, i, 1)`
+both allocate a heap string per character inspected. That is why the naive
+"just don't split the string up front" fix does not work on its own: the
+scanner still needs to inspect essentially every byte to find token boundaries,
+and every one of those inspections was an allocation. Wired at the usual sites:
+`typecheck.ml`, `eval.ml`, `defun.ml` (`builtin_names`), `borrow.ml` (both the
+`march_`-mangled and unmangled tables), `llvm_builtins.ml` (entry + `PDeclare`),
+`js_emit.ml` (runtime-delegated list), `runtime/march_runtime.{c,h}`, and
+`runtime/march_runtime.mjs`. Verified byte-identical across interpreted, native
+`--opt 2`, and `--target js`.
+
+**A dead end worth recording: `string_to_codepoints` is interpreter-only.** The
+first rewrite walked `string_to_codepoints(src)` (a `List(Int)`, so inspecting a
+byte costs no string) alongside a byte offset. It passed the full 825-test
+stdlib suite — because those tests run INTERPRETED — and then failed to LINK
+when compiled: `string_to_codepoints` has no entry in `llvm_builtins.ml`,
+`defun.ml`, `js_emit.ml`, or the C runtime. `string_from_codepoint` is
+interpreter-only in exactly the same way. Neither is rejected at typecheck time,
+so the failure surfaces as an undefined symbol at the clang link step, far from
+the call. A green stdlib suite does NOT establish that stdlib code compiles.
+
+**Why the final version scans BYTES rather than characters.** Every JSON
+structural character is ASCII and every byte of a UTF-8 multibyte sequence is
+`>= 0x80`, so a byte scanner can never mistake a continuation byte for a
+delimiter. Multibyte text is stepped over one byte at a time and passes through
+untouched inside the token slice. This removes the whole class of bug the
+codepoint version had to defend against: deriving a byte offset from decoded
+codepoints requires a width table, and `string_to_codepoints` emits a raw byte
+and advances ONE byte when it meets a truncated multibyte sequence, so on
+malformed UTF-8 the offset silently drifts and the parser slices at the wrong
+boundary. The byte scanner needs no width table, no guard, and no
+decode/re-encode round trip.
+
+**Behaviour is unchanged** across a 48-case corpus (literals, numbers, all
+escape forms including leading/trailing/adjacent escapes, 2-, 3- and 4-byte
+UTF-8 in both keys and values, nesting, whitespace, and 16 error cases),
+diffed old-vs-new: identical, error message text included, and identical again
+between interpreted and native. Two deliberate differences, both improvements:
+a non-ASCII character in an error message now prints as itself instead of the
+mojibake the old byte-split produced (`'é'`, was `'<?>'`), and the keyword
+mismatch message names the keyword (`expected 'null'`) rather than the single
+byte (`expected 'l'`).
+
+**Found and fixed in passing — `String.slice` was wrong on the JS backend.**
+`march_string_slice(s, start, len)` in `runtime/march_runtime.mjs` was
+implemented as `s.slice(start, len)`, i.e. treating the third argument as an END
+index rather than a LENGTH, so every slice with a non-zero start returned the
+wrong text: `String.slice("abcdefgh", 5, 3)` gave `""` on JS versus `"fgh"`
+interpreted and native. This had to be fixed for the rewrite to be safe — the
+new parser slices at non-zero offsets constantly, where the old `string_split`
+version never called `string_slice` at all. Clamping is now spelled out to
+mirror the C runtime, because JS reads a negative index as an offset from the
+end where C clamps to 0. The three checked-in copies of `march_runtime.mjs` that
+were byte-identical to the canonical `runtime/` one (`test/native/`,
+`test/whole_program/`, `docs/assets/perihelion/`) were re-synced;
+`docs/assets/tetris/` was already on an older divergent copy and was left alone.
+
+**Three pre-existing bugs found but NOT fixed here**, to keep this a pure
+performance change:
+
+0. **A qualified constructor PATTERN silently fails to match when COMPILED** if
+   its bare name is shared by another stdlib ADT. `match Json.parse("[1]") do
+   Ok(Json.Array(_)) -> ...` takes the `_` branch compiled and the correct
+   branch interpreted; same for `Json.Null`. `Json.Str`/`Object`/`Number`
+   match fine. The failing names are exactly the shared ones — `Array` is
+   declared in both `json.march` and `msgpack.march`, `Null` in `dataframe`,
+   `json` and `msgpack` — so the `Json.` qualification is being dropped and the
+   pattern compiled against another ADT's tag. It fails OPEN (no error, no
+   warning, just the wrong branch), which is how it survived this long. Same
+   family as the earlier `lookup_ctor` current-module-preference fix, but that
+   addressed references from inside stdlib; this is a USER module that
+   explicitly qualifies, where qualification should win outright. Reproduced
+   identically against the pre-rewrite `json.march`. This is why the 1MB scale
+   check above probes structure with `Json.get_at`/`Json.get` rather than an
+   `Array(xs)` pattern.
+
+1. **`Json.to_string` crashes on any Object on the JS backend** —
+   `TypeError: f._0 is not a function` from `Json$map_list`, thrown by the
+   match-lambda `fn kv -> match kv do (k, v) -> ... end` passed to `map_list`.
+   Reproduces identically on the pre-change parser at the identical input, so it
+   is untouched by this work. The JS *parse* path is verified correct, including
+   multibyte keys and values.
+2. **The JSON number scanner rejects a signed exponent** — `1e-5` stops the
+   scan at the `-`, and `string_to_float("1e")` then fails. Preserved verbatim
+   from the old `json_is_num_char` (digits, `.`, `e`, `E`) so this change stays
+   measurable as pure performance; the restriction is flagged in a comment at
+   `is_num_byte`.
+
+**Not done:** `toml.march`, `yaml.march` and `xml.march` still open with
+`string_split(s, "")` and have the same allocation profile. `string_byte_at`
+is what they need, and it now exists.

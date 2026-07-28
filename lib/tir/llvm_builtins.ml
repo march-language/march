@@ -159,10 +159,14 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
   { march_name = "string_byte_length"; c_name = Some "march_string_byte_length"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_length(ptr %s)" };
+  { march_name = "string_byte_at"; c_name = Some "march_string_byte_at"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_string_byte_at(ptr %s, i64 %i)" };
   { march_name = "string_is_empty"; c_name = Some "march_string_is_empty"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_is_empty(ptr %s)" };
   { march_name = "string_to_int"; c_name = Some "march_string_to_int"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_int(ptr %s)" };
+  { march_name = "string_concat3"; c_name = Some "march_string_concat3"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_concat3(ptr %a, ptr %b, ptr %c)" };
   { march_name = "string_join"; c_name = Some "march_string_join"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_join(ptr %list, ptr %sep)" };
   { march_name = "float_abs"; c_name = Some "march_float_abs"; ret_ty = Some Tir.TFloat;
@@ -269,6 +273,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_string_grapheme_count(ptr %s)" };
   { march_name = "string_index_of"; c_name = Some "march_string_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of(ptr %s, ptr %sub)" };
+  { march_name = "string_index_of_from"; c_name = Some "march_string_index_of_from"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_index_of_from(ptr %s, ptr %sub, i64 %start)" };
   { march_name = "string_last_index_of"; c_name = Some "march_string_last_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)" };
   { march_name = "string_to_float"; c_name = Some "march_string_to_float"; ret_ty = Some (Tir.TCon ("Option", [Tir.TFloat]));
@@ -585,6 +591,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @native_int_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_int_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map(ptr %arr, ptr %f)" };
+  { march_name = "native_int_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
+  { march_name = "native_int_arr_to_float_arr"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_to_float_arr(ptr %arr)" };
   { march_name = "native_int_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_from_list(ptr %lst)" };
   { march_name = "native_int_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TInt]));
@@ -609,6 +619,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sumsq_dev(ptr %arr, double %mean)" };
   { march_name = "native_float_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map(ptr %arr, ptr %f)" };
+  { march_name = "native_float_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_map2(ptr %arr1, ptr %arr2, ptr %f)" };
   { march_name = "native_float_arr_from_list"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_from_list(ptr %lst)" };
   { march_name = "native_float_arr_to_list"; c_name = None; ret_ty = Some (Tir.TCon ("List", [Tir.TFloat]));
@@ -621,6 +633,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_alloc_raw(i64 %len)" };
   { march_name = "native_float_arr_alloc_raw"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_alloc_raw(i64 %len)" };
+  { march_name = "native_arr_map2_check_len"; c_name = None; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)" };
   { march_name = "unix_time"; c_name = Some "march_unix_time"; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "tcp_connect"; c_name = Some "march_tcp_connect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
@@ -961,8 +975,10 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_hash_string";
   PDeclare "march_hash_bool";
   PDeclare "march_string_byte_length";
+  PDeclare "march_string_byte_at";
   PDeclare "march_string_is_empty";
   PDeclare "march_string_to_int";
+  PDeclare "march_string_concat3";
   PDeclare "march_string_join";
   PComment "; Float builtins";
   PDeclare "march_float_abs";
@@ -1020,6 +1036,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_pad_right";
   PDeclare "march_string_grapheme_count";
   PDeclare "march_string_index_of";
+  PDeclare "march_string_index_of_from";
   PDeclare "march_string_last_index_of";
   PDeclare "march_string_to_float";
   PComment "; List builtins";
@@ -1225,6 +1242,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_int_arr_max";
   PDeclare "native_int_arr_sumsq_dev";
   PDeclare "native_int_arr_map";
+  PDeclare "native_int_arr_map2";
+  PDeclare "native_int_arr_to_float_arr";
   PDeclare "native_int_arr_from_list";
   PDeclare "native_int_arr_to_list";
   PDeclare "native_int_arr_filter_mask";
@@ -1238,11 +1257,13 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_max";
   PDeclare "native_float_arr_sumsq_dev";
   PDeclare "native_float_arr_map";
+  PDeclare "native_float_arr_map2";
   PDeclare "native_float_arr_from_list";
   PDeclare "native_float_arr_to_list";
   PDeclare "native_float_arr_filter_mask";
   PDeclare "native_int_arr_alloc_raw";
   PDeclare "native_float_arr_alloc_raw";
+  PDeclare "native_arr_map2_check_len";
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_tcp_connect";

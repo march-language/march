@@ -11,7 +11,107 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`String.to_uppercase` / `to_lowercase` no longer depend on the process
+  locale.** They used C's `tolower`/`toupper`, which are locale-sensitive: under
+  a single-byte locale (measured: `en_US.ISO8859-1` on macOS) `tolower` rewrites
+  `0xC3`, the lead byte of every 2-byte UTF-8 sequence, silently corrupting the
+  encoding. March never calls `setlocale`, but any linked library or embedding
+  application can. Behaviour is now fixed regardless of locale, and the same
+  change made them **~30× faster** (0.60s → 0.02s on `bench/string_case`).
+  Scope is unchanged — ASCII only, non-ASCII bytes pass through untouched.
+
+### Documentation
+
+- `stdlib/string.march` no longer claims the runtime has small-string
+  optimisation. It had stated since 2026-03-19 that "strings of 15 bytes or
+  fewer are stored inline without a heap allocation"; that was never true — every
+  March string is a refcounted heap allocation with a 24-byte header. The header
+  now also states plainly that `grapheme_count` counts *codepoints* despite its
+  name, with the cases where the two differ.
+
+
+### Changed
+
+- **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
+  parser used to begin with `string_split(src, "")`, exploding the document
+  into one heap string per byte, so its cost scaled with the size of the input
+  rather than with the number of strings in it — a 239-byte document holding
+  ~20 strings cost 261 allocations per parse, 90% of them 7 bytes or smaller.
+  It is now a byte-index scanner that inspects bytes with `string_byte_at` and
+  takes one `string_slice` per token: **261 → 21 allocations per parse**, which
+  is the number of strings the document actually contains. On a 1MB document
+  holding 99,000 strings, one parse went from 1,100,041 string allocations to
+  99,018 — allocation now tracks the document's string count rather than its
+  byte size. `Json.to_string` got the same treatment (a string needing no
+  escaping is now returned as-is, allocating nothing), taking a combined parse
+  + serialize round trip from 486 to 58 allocations per iteration and 1.10s to
+  0.24s over 20,000 iterations. Parsing is unchanged semantically; the only
+  visible difference is that a non-ASCII character in an error message now
+  prints correctly instead of as a single mangled byte.
+
+- **String interpolation is ~1.45× faster** and allocates no intermediate list.
+  `"a${x}b${y}c"` now desugars to a plain `++` chain at every length, which the
+  compiler folds into three-way concats — where it previously switched to a
+  `string_join` over a cons list past a size threshold. Measured at seven
+  segments over 2M iterations: 519ms → 358ms, with the eight cons cells per
+  interpolation dropping to zero.
+
+- **…and interpolating a `String` no longer costs a refcount pair per operand**,
+  which closes the rest of that gap. `"a${s}b"` goes through `to_string(s)`,
+  which for a String resolves to an identity — but the identity call was only
+  removed *after* reference counting had already bracketed it with an atomic
+  increment/decrement, leaving the pair stranded around nothing. The call is now
+  elided during lowering, so no pair is ever created, and interpolation compiles
+  to exactly the same code as the equivalent hand-written `++` chain.
+  Allocation counts are unchanged — this was refcount traffic, not allocation.
+
+
 ### Added
+
+- **`string_byte_at(s, i)`** — reads the byte at a byte offset as `0..255`, or
+  `-1` when out of range, allocating nothing. Before this, the only ways to
+  look at one character of a string from March were `string_split(s, "")` and
+  `string_slice(s, i, 1)`, both of which allocate a heap string per character
+  inspected — so every hand-written scanner in the stdlib paid an allocation
+  per input byte just to decide what the byte was.
+
+- **`String.index_of_from(s, sub, start)`** — substring search from a byte
+  offset, returning the index in `s`'s own coordinates so it can be fed
+  straight back in when tokenizing. Without it, scanning for successive
+  separators means slicing off the tail and searching again, which copies the
+  remaining bytes at every step and makes a full tokenize O(n²).
+
+- **`NativeArray.map2_int`/`map2_float`/`to_float_arr`** — a two-array
+  zip-with primitive (`f(a_elem, b_elem) = out_elem`, panics on length
+  mismatch) and Int→Float widening helper, for numeric ops over two
+  `NativeArray`s at once. `DataFrame.col_add_col` (column-column arithmetic)
+  now uses these instead of round-tripping through `List.zip`/`List.map`.
+
+- **The docs site gained full-text search on ⌘K / Ctrl-K.** Every page on
+  march-lang.org — the guides, the cookbook, and all 114 standard-library API
+  pages — is now searchable from one box, opened with `⌘K`, `Ctrl+K`, `/`, or
+  the Search button in the nav. Results are grouped by area (Guide, Cookbook,
+  Stdlib) and include in-page heading links, so `↵` jumps straight to the
+  relevant section rather than the top of the page. The index is built by
+  [Pagefind](https://pagefind.app/) as a post-build step over the generated
+  site, ships with it, and needs no search service at runtime.
+
+  The same box also does **standard-library symbol lookup**, which previously
+  worked only from inside the API reference itself. Typing a function or type
+  name (`push`, `to_string`, `List.map`) puts a "Standard library" group above
+  the prose results, each entry showing its kind and signature and linking
+  directly to the definition's anchor — `Array.html#fn-push` rather than the
+  top of the module page. Symbols are matched on name only, exactly or by
+  prefix, so multi-word prose queries return prose results alone. The API
+  reference pages keep their own `⌘K` for now.
+
+  The index is committed at `docs/pagefind/` because march-lang.org is served
+  by GitHub's own Jekyll running over `docs/`, which has no post-build hook —
+  the same reason the generated stdlib API pages are committed. A CI check
+  fails the build if a docs change lands without a regenerated index, since a
+  stale index means the live search silently returns outdated results.
 
 - **Session-type protocols gained a `stop` step to exit a `loop`.** A `loop
   do … end` protocol projects to the recursive µ-type `Rec X. S[X]` and,
@@ -75,6 +175,29 @@ git log is authoritative for exact commits.
   obligation — the runtime function and the `len` measure are not connected, so
   a guarded call is skipped rather than proved.
 
+### Changed
+
+- **Substring search is much faster.** `index_of`, `index_of_from`, `contains`,
+  `split`, `replace` and `replace_all` now use a two-stage `memchr`+`memcmp`
+  scan instead of testing every byte offset. Scanning a 1MB buffer for an absent
+  needle went from ~809ms to ~21ms in `bench/string_scan` (roughly 0.5 GB/s to
+  40 GB/s). `replace_all` additionally bulk-copies the spans between matches
+  rather than one byte at a time.
+
+- **Chained string concatenation allocates half as much.** `a ++ b ++ c` and
+  longer chains are folded into three-way concats, so k parts cost
+  `ceil((k-1)/2)` allocations instead of `k-1` and stop re-copying the growing
+  prefix at every link. Measured 20% faster on a short-string building
+  benchmark, with 23% less copying. Two-part `a ++ b` is unchanged.
+
+- **`NativeArray.map2_int`/`map2_float` vectorize.** Extended the same
+  compiler pass that lets `map_int`/`map_float` compile to real SIMD to also
+  recognize `map2`'s two-array call shape — same eligibility bar, same
+  boxing-free clone for a concrete-`Float` callback. Measured **~47x** on a
+  5M-element benchmark (299 ms → 6.4 ms); previously slower than naive
+  interpreted Python for the same operation, now beating hand-written OCaml.
+  See `docs/simd-benchmarks.md`.
+
 ### Fixed
 
 - **A measure over the refined value only worked under one of its three
@@ -88,6 +211,74 @@ git log is authoritative for exact commits.
   with no diagnostic beyond an incidental unused-variable warning. All three
   spellings now resolve against the same actual, as the string and
   axiom-measure paths already did.
+
+- **`Json.parse` rejected JSON numbers with a signed exponent.** `1e-5`,
+  `2.5E+10` and `1e-308` all failed with `invalid number: 1e` — the number
+  scanner accepted `+`/`-` only in the mantissa position, so it stopped at the
+  sign after the exponent marker and handed a truncated `"1e"` to
+  `string_to_float`. The scanner now follows RFC 8259's grammar
+  (`["-"] int [frac] [exp]`), accepting a sign immediately after `e`/`E`.
+  `1-2` still parses as `1` followed by a trailing-character error, as before.
+
+- **`Json.parse` accepted number forms JSON does not allow.** Shape is now
+  validated during the scan instead of being left to `string_to_float`
+  (`strtod` / `float_of_string`), which is more permissive than JSON: `1.` and
+  `01` previously parsed and are now rejected, joining `+1`, `Infinity`,
+  `0x10` and `.5`. This is a behavior change for input that was never valid
+  JSON — anything conforming to RFC 8259 parses as it did before.
+
+- **A module-qualified constructor pattern could silently never match when
+  compiled.** `match Json.parse(s) do Ok(Json.Array(_)) -> ... end` matched
+  correctly interpreted but fell through to the catch-all arm in a compiled
+  binary — no error, no warning, no crash, just the wrong branch. It affected
+  any qualified pattern whose bare constructor name is declared by more than one
+  module: in the standard library that is `Array` and `Null` (both
+  `Json.JsonValue` and `Msgpack.Value` declare them), so `Json.Array(_)` and
+  `Json.Null` were the visible casualties, while `Json.Object(_)` — a name
+  unique to `JsonValue` — worked. Codegen identifies constructors by their
+  *type* (`JsonValue.Array`), but the documented qualified-pattern syntax writes
+  a *module* (`Json.Array`); when the two names differ the qualifier resolved to
+  nothing and the pattern fell back to matching on the bare name, which then
+  picked whichever module's constructor the compiler happened to enumerate
+  first. The qualifier is now translated to its declaring type during lowering,
+  so an explicitly qualified pattern resolves to exactly the constructor it
+  names.
+
+- **`Json.to_string` crashed on every JSON array and object under `--target js`.**
+  It died with `TypeError: f._0 is not a function`, while the same program was
+  correct interpreted and compiled native. The cause was not in `json.march`: a
+  closure allocated inside a match arm whose scrutinee cell is dead gets
+  rewritten by Perceus from `EAlloc` to `EReuse`, and the JS backend's `EReuse`
+  and `EStackAlloc` cases were missing the rule `EAlloc` had — a closure's apply
+  function lives in slot `_0` and must be emitted as the raw function, not as
+  the `name$clo` wrapper *object*. Closure dispatch then did `f._0(f, x)` on a
+  record instead of a function. This hit any lambda passed to a user-defined
+  higher-order function from a reuse-eligible match arm, so `Json.to_string` was
+  the symptom rather than the bug. The three allocation forms now share one
+  emitter, so they cannot drift apart again.
+
+- **`String.slice` returned the wrong text on the JS backend.** The JS runtime
+  implemented `march_string_slice(s, start, len)` as `s.slice(start, len)`,
+  treating the third argument as an END index rather than a LENGTH, so every
+  slice with a non-zero start was wrong — `String.slice("abcdefgh", 5, 3)` gave
+  `""` on JS against `"fgh"` interpreted and compiled. Negative arguments now
+  clamp the way the C runtime clamps, instead of being read as offsets from the
+  end of the string.
+
+- **TIR pipeline stages are now inspectable as text.** `MARCH_DUMP_TXT=<stage>`
+  prints the pretty-printed TIR at any pipeline checkpoint whose label contains
+  the given substring (`all` for every stage). Previously only the very end of
+  the pipeline was readable, via `--dump-tir`, which is too late to tell whether
+  a pass created a construct or merely preserved one.
+
+- **The SIMD Benchmarks results tables rendered as raw pipe characters.** The
+  three tables under "Results" on
+  [/docs/simd-benchmarks/](https://march-lang.org/docs/simd-benchmarks/) were
+  wrapped in `<div style="overflow-x:auto">`. Kramdown does not parse markdown
+  inside a raw HTML block unless the element carries `markdown="1"`, so each
+  table was emitted verbatim as text. The wrapper was also redundant — the docs
+  layout already sets `display:block; overflow-x:auto` on content tables, which
+  is why the same page's other two tables were fine — so it is simply removed.
 
 - **Discarding a container no longer leaks its contents.** March reclaimed an
   aggregate only by *destructuring* it; releasing one that was never pattern-
@@ -142,9 +333,29 @@ git log is authoritative for exact commits.
   the new code. The driver now resolves the runtime directory once and
   registers it with the CAS, so the key always digests the sources actually
   compiled; `MARCH_RUNTIME_DIR` overrides the search, mirroring `MARCH_STDLIB`.
+- **`MARCH_STRING_STATS=1`** — an opt-in profiling mode for compiled binaries.
+  Set the environment variable and the program prints string-allocation
+  statistics to stderr at exit: allocation count and bytes, a size histogram,
+  bytes copied, frees, peak live bytes, and non-string heap allocations. Off by
+  default and measured at −0.34% overhead when off. Intended for answering
+  "where is this program's string cost going?" without a profiler.
+
+- **String benchmark suite** — six benchmarks in `bench/` (`string_scan`,
+  `string_case`, `string_split_large`, `string_slice_walk`,
+  `string_small_churn`, `string_parallel_scan`), each isolating one cost, run
+  by `bash bench/run_string_bench.sh` into `bench/STRING_RESULTS.md`. Documented
+  in `specs/benchmarks.md`; findings in
+  `specs/2026-07-26-string-performance-profile.md`.
 
 ### Changed
 
+- String interpolation with many parts (`"${a}${b}${c}${d}"`) now desugars to
+  a single `string_join` call over all parts instead of a left-deep chain of
+  `++`, which re-copied the growing prefix on every append. This makes a
+  k-part interpolation O(n) instead of O(k²) in total bytes copied, with no
+  change in the resulting string value. Short interpolations (up to three
+  segments, e.g. `"count: ${n}"`) keep the `++` chain, which measures faster
+  at that size than materializing a list to join.
 - Compiled `NativeArray.map_float` with a plain, concretely-typed
   callback (`fn x -> x *. 2.0 +. 1.0`, a captured scalar, or similar — no
   generic/unresolved types involved) no longer allocates at all for each
@@ -164,6 +375,16 @@ git log is authoritative for exact commits.
   non-null allocation whose argument is its allocation size, and marks
   generated closure ABI trampolines `alwaysinline`. This gives LLVM useful
   alias and call-boundary facts without changing TIR or ownership semantics.
+
+- The TIR optimizer inlines a private top-level function's body at its call
+  site when that function has exactly one direct, arity-correct reference
+  anywhere in the module, even when the body is not pure. Ordinary pure-only
+  inlining, the 50-node size limit, DCE-root/address-taken/hot-code-reload
+  exclusions, and recursive-SCC detection (extended to cover bare/qualified
+  name aliasing) all still apply; Perceus RC operations and their order are
+  preserved unchanged. No runtime speedup was measured — this is a
+  definition/call-site reduction in emitted LLVM, not a benchmarked
+  optimization.
 
 ### Added
 

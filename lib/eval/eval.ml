@@ -4492,6 +4492,30 @@ let base_env : env =
             | None   -> VCon ("None", [])
           end
         | _ -> eval_error "string_index_of: expected two strings"))
+  (* Offset-aware search.  Clamping must mirror march_string_index_of_from in
+     runtime/march_runtime.c exactly — negative start to 0, start past the end
+     to None, empty needle matching AT the clamped start — or interpreted and
+     compiled runs disagree and the divergence surfaces far from here. *)
+  ; ("string_index_of_from", VBuiltin ("string_index_of_from", function
+        | [VString s; VString sub; VInt start] ->
+          let ls = String.length s and lsub = String.length sub in
+          let start = if start < 0 then 0 else start in
+          if start > ls then VCon ("None", [])
+          else if lsub = 0 then VCon ("Some", [VInt start])
+          else if lsub > ls - start then VCon ("None", [])
+          else begin
+            let result = ref None in
+            (try
+               for i = start to ls - lsub do
+                 if String.sub s i lsub = sub then
+                   (result := Some i; raise Exit)
+               done
+             with Exit -> ());
+            match !result with
+            | Some i -> VCon ("Some", [VInt i])
+            | None   -> VCon ("None", [])
+          end
+        | _ -> eval_error "string_index_of_from: expected (String, String, Int)"))
   ; ("string_replace", VBuiltin ("string_replace", function
         | [VString s; VString old_; VString new_] ->
           let lold = String.length old_ in
@@ -4557,6 +4581,9 @@ let base_env : env =
           List.fold_right (fun p acc -> VCon ("Cons", [VString p; acc]))
             parts (VCon ("Nil", []))
         | _ -> eval_error "string_split: expected two strings"))
+  ; ("string_concat3", VBuiltin ("string_concat3", function
+        | [VString a; VString b; VString c] -> VString (a ^ b ^ c)
+        | _ -> eval_error "string_concat3: expected three strings"))
   ; ("string_join", VBuiltin ("string_join", function
         | [lst; VString sep] ->
           let rec to_strings = function
@@ -4684,6 +4711,14 @@ let base_env : env =
           if ls >= width then VString s
           else VString (s ^ String.make (width - ls) fill.[0])
         | _ -> eval_error "string_pad_right: expected string, int, char-string"))
+  (* Byte-indexed random access.  Clamping must mirror march_string_byte_at in
+     runtime/march_runtime.c exactly — out of range (negative or >= len) is -1,
+     never a trap — or interpreted and compiled runs disagree. *)
+  ; ("string_byte_at", VBuiltin ("string_byte_at", function
+        | [VString s; VInt i] ->
+          if i < 0 || i >= String.length s then VInt (-1)
+          else VInt (Char.code s.[i])
+        | _ -> eval_error "string_byte_at: expected (String, Int)"))
   ; ("string_byte_length", VBuiltin ("string_byte_length", function
         | [VString s] -> VInt (String.length s)
         | _ -> eval_error "string_byte_length: expected string"))
@@ -7393,6 +7428,23 @@ let base_env : env =
           done;
           VNativeIntArr b
         | _ -> eval_error "native_int_arr_map: expected (NativeIntArr, fn)"))
+  ; ("native_int_arr_map2", VBuiltin ("native_int_arr_map2", function
+        | [VNativeIntArr a; VNativeIntArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_int_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i); VInt b.(i)] with
+             | VInt v -> out.(i) <- v
+             | v -> eval_error "native_int_arr_map2: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeIntArr out
+        | _ -> eval_error "native_int_arr_map2: expected (NativeIntArr, NativeIntArr, fn)"))
+  ; ("native_int_arr_to_float_arr", VBuiltin ("native_int_arr_to_float_arr", function
+        | [VNativeIntArr a] -> VNativeFloatArr (Array.map float_of_int a)
+        | _ -> eval_error "native_int_arr_to_float_arr: expected NativeIntArr"))
   ; ("native_int_arr_fold", VBuiltin ("native_int_arr_fold", function
         | [acc0; VNativeIntArr a; f] ->
           let acc = ref acc0 in
@@ -7480,6 +7532,20 @@ let base_env : env =
           done;
           VNativeFloatArr b
         | _ -> eval_error "native_float_arr_map: expected (NativeFloatArr, fn)"))
+  ; ("native_float_arr_map2", VBuiltin ("native_float_arr_map2", function
+        | [VNativeFloatArr a; VNativeFloatArr b; f] ->
+          let n = Array.length a in
+          if Array.length b <> n then
+            eval_error "native_float_arr_map2: array length mismatch (%d vs %d)" n (Array.length b);
+          let out = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i); VFloat b.(i)] with
+             | VFloat v -> out.(i) <- v
+             | v -> eval_error "native_float_arr_map2: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeFloatArr out
+        | _ -> eval_error "native_float_arr_map2: expected (NativeFloatArr, NativeFloatArr, fn)"))
   ; ("native_float_arr_fold", VBuiltin ("native_float_arr_fold", function
         | [acc0; VNativeFloatArr a; f] ->
           let acc = ref acc0 in

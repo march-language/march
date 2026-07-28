@@ -1,0 +1,58 @@
+-- Regression: NativeArray.map2 inlining/vectorization.
+--
+-- Native_map_inline.ml's map/map2 machinery share the same eligibility bar
+-- and the same synthetic-name/direct-call trick (see
+-- test/native/native_arr_map_inline_unboxed.march and
+-- test/native/native_arr_map_inline_capture.march for the single-array
+-- case) -- map2 just has 2 leading NativeArray args before the trailing
+-- closure arg instead of 1, and a 2-param ($clo, a, b) apply fn instead of
+-- 1-param. A concrete all-Float callback gets the same boxing-free
+-- $mapfast$ clone (Float-boxing Stage 4, Option B) map_float does.
+--
+-- One thing with no equivalent in the single-array case: the inlined loop
+-- bypasses native_int_arr_map2/native_float_arr_map2 entirely (direct call
+-- to the lifted apply fn instead), so it needs its own length-mismatch
+-- check to preserve NativeArray.map2_*'s documented "panics on length
+-- mismatch" contract -- see native_arr_map2_check_len
+-- (runtime/march_runtime.c), emitted once in the loop's preheader. Covered
+-- by the separate native_arr_map2_inline_length_panic.march fixture (this
+-- one is correctness-only -- the panic case necessarily exits nonzero).
+--
+-- Exercises: Int non-capturing (boxed inline path -- Int has no float box
+-- to eliminate, so this only drops the closure-pointer indirection, not
+-- allocation), Float non-capturing all-Float (unboxed $mapfast$ clone,
+-- genuinely vectorizes), Float capturing all-Float (same unboxed
+-- treatment -- captures don't block Option B, see the single-array test's
+-- doc comment), and a closure that captures AND is reused elsewhere (must
+-- fall back to the general closure-call path, since it's used more than
+-- once) to confirm the eligibility guard still excludes it correctly.
+mod Main do
+  fn main() : () do
+    -- Int, non-capturing.
+    let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = NativeArray.from_list_int(Cons(10, Cons(20, Cons(30, Nil))))
+    println(NativeArray.to_list_int(NativeArray.map2_int(a, b, fn (x, y) -> x + y)))
+    -- [11, 22, 33]
+
+    -- Float, non-capturing, all-Float signature (unboxed clone).
+    let fa = NativeArray.from_list_float(Cons(1.0, Cons(2.0, Cons(3.0, Nil))))
+    let fb = NativeArray.from_list_float(Cons(10.0, Cons(20.0, Cons(30.0, Nil))))
+    println(NativeArray.to_list_float(NativeArray.map2_float(fa, fb, fn (x, y) -> x +. y)))
+    -- [11., 22., 33.]
+
+    -- Float, capturing a scalar (still unboxed -- captures don't block
+    -- Option B; the captured Float is already stored/loaded at its own
+    -- concrete type in the closure struct, never boxed).
+    let scale = 3.0
+    println(NativeArray.to_list_float(NativeArray.map2_float(fa, fb, fn (x, y) -> x +. y +. scale)))
+    -- [14., 25., 36.]
+
+    -- Captures AND is reused elsewhere: must fall back to the general path.
+    let k = 5
+    let closure = fn (x, y) -> x + y + k
+    println(NativeArray.to_list_int(NativeArray.map2_int(a, b, closure)))
+    -- [16, 27, 38]
+    println(closure(100, 200))
+    -- 305
+  end
+end

@@ -43,249 +43,356 @@ mod Json do
     end
   end
 
-  -- Skip ASCII whitespace characters.
-  pfn skip_ws(chars) do
-    match chars do
-    Nil -> Nil
-    Cons(c, rest) -> do
-      if c == " " || c == "\t" || c == "\n" || c == "\r" do skip_ws(rest)
-      else chars end
-    end
-    end
+  -- ── Scanning discipline ───────────────────────────────────────────────────
+  --
+  -- The scanner is a byte-index cursor over the source string: it inspects one
+  -- byte at a time with `string_byte_at` (which allocates nothing) and
+  -- materialises each token with a single `string_slice`.
+  --
+  -- The previous parser instead did `string_split(src, "")` up front, which
+  -- allocates one heap string per input byte and dominated the cost of
+  -- `parse`: on a 239-byte document holding ~20 distinct strings it allocated
+  -- 486 strings per parse — 2.03 per input byte, 90% of them <=7 bytes — so
+  -- the cost scaled with the size of the document rather than with the number
+  -- of strings in it.
+  --
+  -- Scanning BYTES rather than decoded characters is safe here and is what
+  -- keeps this simple: every JSON structural character is ASCII, and every
+  -- byte of a UTF-8 multibyte sequence is >= 0x80, so a multibyte character
+  -- can never be mistaken for a delimiter.  Multibyte text is stepped over one
+  -- byte at a time and passes through untouched inside the token slice, so no
+  -- decoding and no byte/character offset mapping is needed anywhere.
+  --
+  -- `string_byte_at` returns -1 past the end of the string, which is not a
+  -- valid byte, so end-of-input falls out of the same comparison as any other
+  -- terminator and needs no separate length check.
+
+  -- Byte width of the UTF-8 character starting with lead byte `b`.  Used only
+  -- to slice a whole character back out for an error message.
+  pfn utf8_width(b) do
+    if b < 128 do 1
+    else if b < 224 do 2
+    else if b < 240 do 3
+    else 4 end end end
   end
 
-  -- Inner loop for match_literal: walk char lists in parallel.
-  pfn match_literal_go(cs, es, expected) do
-    match es do
-    Nil -> Ok(cs)
-    Cons(e, et) -> do
-      match cs do
-      Nil -> Err("unexpected end of input, expected: " ++ expected)
-      Cons(c, ct) ->
-        if c == e do match_literal_go(ct, et, expected)
-        else Err("expected '" ++ e ++ "' but found '" ++ c ++ "'") end
+  -- The offending character at byte `i`, for an error message.  Error paths
+  -- only, so this allocation is off the hot path.
+  pfn char_at(s, i) do
+    string_slice(s, i, utf8_width(string_byte_at(s, i)))
+  end
+
+  -- Skip ASCII whitespace, returning the next byte index.
+  pfn skip_ws(s, i) do
+    let c = string_byte_at(s, i)
+    if c == 32 || c == 9 || c == 10 || c == 13 do skip_ws(s, i + 1)
+    else i end
+  end
+
+  -- Match keyword `lit` at byte `i`.  Returns Ok(index just past it).
+  -- `lit` is itself indexed with string_byte_at, so no char list is built.
+  pfn match_lit_go(s, i, lit, j) do
+    let e = string_byte_at(lit, j)
+    if e < 0 do Ok(i)
+    else do
+      let c = string_byte_at(s, i)
+      if c == e do match_lit_go(s, i + 1, lit, j + 1)
+      else if c < 0 do Err("unexpected end of input, expected: " ++ lit)
+      else Err("expected '" ++ lit ++ "' but found '" ++ char_at(s, i) ++ "'") end end
+    end end
+  end
+
+  pfn match_lit(s, i, lit) do
+    match_lit_go(s, i, lit, 0)
+  end
+
+  -- Decode one escape sequence body (the byte AFTER the backslash).
+  pfn unescape(s, i, e) do
+    if e == 34 do Ok("\"")
+    else if e == 92 do Ok("\\")
+    else if e == 47 do Ok("/")
+    else if e == 110 do Ok(char_from_int(10))
+    else if e == 114 do Ok(char_from_int(13))
+    else if e == 116 do Ok(char_from_int(9))
+    else if e == 98 do Ok(char_from_int(8))
+    else if e == 102 do Ok(char_from_int(12))
+    else Err("unknown escape sequence: \\" ++ char_at(s, i)) end end end end end end end end
+  end
+
+  -- Scan a string body.  `i` is the current byte, `start` the byte where the
+  -- current unescaped run began, `acc` the already-materialised segments
+  -- (newest first).  Returns Ok((value, index just past the closing quote)).
+  --
+  -- The common case — no escapes — reaches the closing quote with `acc` still
+  -- Nil and returns ONE slice for the whole token.  Escapes split the token
+  -- into runs, and each run is still sliced once rather than assembled byte by
+  -- byte.
+  pfn scan_string(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err("unterminated string literal")
+    else if c == 34 do
+      match acc do
+      Nil -> Ok((string_slice(s, start, i - start), i + 1))
+      _ -> do
+        let acc2 =
+          if i > start do Cons(string_slice(s, start, i - start), acc)
+          else acc end
+        Ok((string_join(rev(acc2, Nil), ""), i + 1))
+      end
+      end
+    else if c == 92 do do
+      let e = string_byte_at(s, i + 1)
+      if e < 0 do Err("unexpected end of input in string escape")
+      else
+        match unescape(s, i + 1, e) do
+        Err(msg) -> Err(msg)
+        Ok(ch) -> do
+          let acc2 =
+            if i > start do Cons(string_slice(s, start, i - start), acc)
+            else acc end
+          scan_string(s, i + 2, i + 2, Cons(ch, acc2))
+        end
+        end
       end
     end
-    end
+    else scan_string(s, i + 1, start, acc) end end end
   end
 
-  -- Try to match a prefix string against the head of a char list.
-  -- Returns Ok(remaining) or Err(message).
-  pfn match_literal(chars, expected) do
-    let exp_chars = string_split(expected, "")
-    match_literal_go(chars, exp_chars, expected)
+  -- Number scanning follows RFC 8259's grammar directly:
+  --   number = ["-"] int [frac] [exp]
+  --   int    = "0" / (digit1-9 *DIGIT)
+  --   frac   = "." 1*DIGIT
+  --   exp    = ("e" / "E") ["+" / "-"] 1*DIGIT
+  -- Bytes: '+'=43, '-'=45, '.'=46, '0'=48, '9'=57, 'E'=69, 'e'=101.
+  -- string_byte_at returns -1 past the end, so every scan terminates there.
+  --
+  -- The shape is validated here rather than deferred to string_to_float: that
+  -- builtin is strtod/float_of_string-backed and admits forms JSON does not
+  -- ("+1", "Infinity", "0x10", "1.", "01").
+  pfn is_digit_byte(c) do
+    c >= 48 && c <= 57
   end
 
-  -- Inner loop for parse_string_inner.
-  -- Extracted as top-level pfn to avoid capturing char_from_int as a free variable.
-  pfn parse_string_go(cs, acc) do
-    match cs do
-    Nil -> Err("unterminated string literal")
-    Cons(c, rest) -> do
-      if c == "\"" do
-        Ok((string_join(rev(acc, Nil), ""), rest))
-      else if c == "\\" do
-        match rest do
-        Nil -> Err("unexpected end of input in string escape")
-        Cons(e, rest2) -> do
-          let ec =
-            if e == "\"" do Ok("\"")
-            else if e == "\\" do Ok("\\")
-            else if e == "/" do Ok("/")
-            else if e == "n" do Ok(char_from_int(10))
-            else if e == "r" do Ok(char_from_int(13))
-            else if e == "t" do Ok(char_from_int(9))
-            else if e == "b" do Ok(char_from_int(8))
-            else if e == "f" do Ok(char_from_int(12))
-            else Err("unknown escape sequence: \\" ++ e) end end end end end end end end
-          match ec do
-          Err(msg) -> Err(msg)
-          Ok(ch) -> parse_string_go(rest2, Cons(ch, acc))
+  -- Index just past a run of ASCII digits starting at `i` (may be `i` itself).
+  pfn scan_digits(s, i) do
+    if is_digit_byte(string_byte_at(s, i)) do scan_digits(s, i + 1)
+    else i end
+  end
+
+  -- Error message quoting the number occupying [start, e).
+  --
+  -- Returns the message, NOT an `Err`: returning `Err(msg)` here would give
+  -- this helper the type `Result(a, String)`, polymorphic in the Ok payload it
+  -- never produces, and instantiating that fresh at every call site made
+  -- typechecking a caller of `Json.parse` blow up — six call sites of one
+  -- Json-returning helper went from ~1.5s to non-terminating.  Callers wrap it
+  -- in `Err` themselves so the type stays monomorphic.
+  pfn bad_number(s, start, e) do
+    "invalid number: " ++ string_slice(s, start, e - start)
+  end
+
+  -- int = "0" / (digit1-9 *DIGIT).  A leading zero may not be followed by
+  -- another digit, so "01" is rejected.
+  pfn scan_int(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c == 48 do
+      if is_digit_byte(string_byte_at(s, i + 1)) do
+        Err("invalid number: leading zeros are not allowed in "
+            ++ string_slice(s, start, i + 2 - start))
+      else Ok(i + 1) end
+    else if is_digit_byte(c) do Ok(scan_digits(s, i + 1))
+    else Err(bad_number(s, start, i + 1)) end end
+  end
+
+  -- frac = "." 1*DIGIT.  Absent is fine; a '.' with no digits after it is not.
+  pfn scan_frac(s, i, start) do
+    if string_byte_at(s, i) == 46 do
+      let e = scan_digits(s, i + 1)
+      if e == i + 1 do Err(bad_number(s, start, e))
+      else Ok(e) end
+    else Ok(i) end
+  end
+
+  -- exp = ("e" / "E") ["+" / "-"] 1*DIGIT.  The sign is accepted ONLY here,
+  -- immediately after the exponent marker — treating '+'/'-' as ordinary
+  -- number bytes would make "1-2" scan as the single token "1-2" and change
+  -- the error reported for malformed input.
+  pfn scan_exp(s, i, start) do
+    let c = string_byte_at(s, i)
+    if c == 101 || c == 69 do
+      let sgn = string_byte_at(s, i + 1)
+      let d0 = if sgn == 43 || sgn == 45 do i + 2 else i + 1 end
+      let e = scan_digits(s, d0)
+      if e == d0 do Err(bad_number(s, start, e))
+      else Ok(e) end
+    else Ok(i) end
+  end
+
+  -- Parse a JSON number.  `i` is at '-' or a digit.
+  pfn parse_number(s, i) do
+    let i2 = if string_byte_at(s, i) == 45 do i + 1 else i end
+    match scan_int(s, i2, i) do
+    Err(e) -> Err(e)
+    Ok(i3) ->
+      match scan_frac(s, i3, i) do
+      Err(e) -> Err(e)
+      Ok(i4) ->
+        match scan_exp(s, i4, i) do
+        Err(e) -> Err(e)
+        Ok(e2) -> do
+          let num_str = string_slice(s, i, e2 - i)
+          match string_to_float(num_str) do
+          None -> Err("invalid number: " ++ num_str)
+          Some(f) -> Ok((Number(f), e2))
           end
         end
         end
-      else parse_string_go(rest, Cons(c, acc)) end end
-    end
-    end
-  end
-
-  -- Parse a JSON string (chars is AFTER the opening quote).
-  -- Returns Ok((string_value, remaining_chars)) or Err(message).
-  pfn parse_string_inner(chars) do
-    parse_string_go(chars, Nil)
-  end
-
-  -- Top-level predicate for JSON number characters.
-  -- Extracted to avoid capturing char_is_digit as a free variable in a closure.
-  pfn json_is_num_char(c) do
-    char_is_digit(c) || c == "." || c == "e" || c == "E"
-  end
-
-  -- Top-level accumulator loop for collecting number characters.
-  pfn json_collect_num(cs, acc) do
-    match cs do
-    Nil -> (rev(acc, Nil), Nil)
-    Cons(c, rest) -> do
-      if json_is_num_char(c) do json_collect_num(rest, Cons(c, acc))
-      else (rev(acc, Nil), cs) end
-    end
-    end
-  end
-
-  -- Parse a JSON number.
-  -- chars starts at '-' or a digit.
-  pfn parse_number(chars) do
-    -- Handle optional leading minus
-    let (sign, chars2) =
-      match chars do
-      Cons(c, rest) -> if c == "-" do ("-", rest) else ("", chars) end
-      Nil -> ("", Nil)
       end
-    let (num_chars, remaining) = json_collect_num(chars2, Nil)
-    let num_str = sign ++ string_join(num_chars, "")
-    match string_to_float(num_str) do
-    None -> Err("invalid number: " ++ num_str)
-    Some(f) -> Ok((Number(f), remaining))
     end
   end
 
-  -- Parse a JSON value from a character list.
-  -- Returns Ok((JsonValue, remaining_chars)) or Err(message).
-  pfn parse_value(chars) do
-    let cs = skip_ws(chars)
-    match cs do
-    Nil -> Err("unexpected end of input")
-    Cons(c, rest) -> do
-      if c == "n" do
-        match match_literal(cs, "null") do
-        Err(e) -> Err(e)
-        Ok(remaining) -> Ok((Null, remaining))
-        end
-      else if c == "t" do
-        match match_literal(cs, "true") do
-        Err(e) -> Err(e)
-        Ok(remaining) -> Ok((Bool(true), remaining))
-        end
-      else if c == "f" do
-        match match_literal(cs, "false") do
-        Err(e) -> Err(e)
-        Ok(remaining) -> Ok((Bool(false), remaining))
-        end
-      else if c == "\"" do
-        match parse_string_inner(rest) do
-        Err(e) -> Err(e)
-        Ok((s, remaining)) -> Ok((Str(s), remaining))
-        end
-      else if c == "[" do
-        parse_array(skip_ws(rest))
-      else if c == "{" do
-        parse_object(skip_ws(rest))
-      else if char_is_digit(c) || c == "-" do
-        parse_number(cs)
-      else Err("unexpected character: '" ++ c ++ "'") end end end end end end end
-    end
-    end
+  -- Parse a JSON value.  Returns Ok((JsonValue, next byte index)).
+  pfn parse_value(s, i0) do
+    let i = skip_ws(s, i0)
+    let c = string_byte_at(s, i)
+    if c < 0 do Err("unexpected end of input")
+    else if c == 110 do
+      match match_lit(s, i, "null") do
+      Err(e) -> Err(e)
+      Ok(j) -> Ok((Null, j))
+      end
+    else if c == 116 do
+      match match_lit(s, i, "true") do
+      Err(e) -> Err(e)
+      Ok(j) -> Ok((Bool(true), j))
+      end
+    else if c == 102 do
+      match match_lit(s, i, "false") do
+      Err(e) -> Err(e)
+      Ok(j) -> Ok((Bool(false), j))
+      end
+    else if c == 34 do
+      match scan_string(s, i + 1, i + 1, Nil) do
+      Err(e) -> Err(e)
+      Ok((str, j)) -> Ok((Str(str), j))
+      end
+    else if c == 91 do parse_array(s, skip_ws(s, i + 1))
+    else if c == 123 do parse_object(s, skip_ws(s, i + 1))
+    else if (c >= 48 && c <= 57) || c == 45 do parse_number(s, i)
+    else Err("unexpected character: '" ++ char_at(s, i) ++ "'")
+    end end end end end end end end
   end
 
   -- Inner loop for parse_array.
-  pfn parse_array_elements(cs, acc) do
-    match parse_value(cs) do
+  pfn parse_array_elements(s, i, acc) do
+    match parse_value(s, i) do
     Err(e) -> Err(e)
-    Ok((v, remaining)) -> do
-      let cs2 = skip_ws(remaining)
-      match cs2 do
-      Nil -> Err("unterminated array, expected ',' or ']'")
-      Cons(sep, rest2) ->
-        if sep == "]" do Ok((Array(rev(Cons(v, acc), Nil)), rest2))
-        else if sep == "," do parse_array_elements(skip_ws(rest2), Cons(v, acc))
-        else Err("expected ',' or ']' in array, found: '" ++ sep ++ "'") end end
-      end
+    Ok((v, j)) -> do
+      let k = skip_ws(s, j)
+      let sep = string_byte_at(s, k)
+      if sep < 0 do Err("unterminated array, expected ',' or ']'")
+      else if sep == 93 do Ok((Array(rev(Cons(v, acc), Nil)), k + 1))
+      else if sep == 44 do parse_array_elements(s, skip_ws(s, k + 1), Cons(v, acc))
+      else Err("expected ',' or ']' in array, found: '" ++ char_at(s, k) ++ "'")
+      end end end
     end
     end
   end
 
-  -- Parse a JSON array (chars is AFTER the '[').
-  pfn parse_array(chars) do
-    match chars do
-    Nil -> Err("unterminated array")
-    Cons(c, rest) -> do
-      if c == "]" do Ok((Array(Nil), rest))
-      else parse_array_elements(chars, Nil) end
-    end
-    end
+  -- Parse a JSON array (`i` is just AFTER the '[').
+  pfn parse_array(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err("unterminated array")
+    else if c == 93 do Ok((Array(Nil), i + 1))
+    else parse_array_elements(s, i, Nil) end end
   end
 
   -- Inner loop for parse_object.
-  pfn parse_pairs(cs, acc) do
-    let cs2 = skip_ws(cs)
-    match cs2 do
-    Nil -> Err("unterminated object")
-    Cons(q, rest2) ->
-      if q == "\"" do
-        match parse_string_inner(rest2) do
-        Err(e) -> Err(e)
-        Ok((key, after_key)) -> do
-          let cs3 = skip_ws(after_key)
-          match cs3 do
-          Nil -> Err("expected ':' after object key")
-          Cons(colon, rest3) ->
-            if colon == ":" do
-              match parse_value(skip_ws(rest3)) do
-              Err(e) -> Err(e)
-              Ok((v, after_val)) -> do
-                let cs4 = skip_ws(after_val)
-                match cs4 do
-                Nil -> Err("unterminated object, expected ',' or '}'")
-                Cons(sep, rest4) ->
-                  if sep == "}" do
-                    Ok((Object(rev(Cons((key, v), acc), Nil)), rest4))
-                  else if sep == "," do
-                    parse_pairs(skip_ws(rest4), Cons((key, v), acc))
-                  else Err("expected ',' or '}' in object, found: '" ++ sep ++ "'") end end
-                end
-              end
-              end
-            else Err("expected ':' after object key, found: '" ++ colon ++ "'") end
+  pfn parse_pairs(s, i0, acc) do
+    let i = skip_ws(s, i0)
+    let q = string_byte_at(s, i)
+    if q < 0 do Err("unterminated object")
+    else if q == 34 do
+      match scan_string(s, i + 1, i + 1, Nil) do
+      Err(e) -> Err(e)
+      Ok((key, j)) -> do
+        let k = skip_ws(s, j)
+        let colon = string_byte_at(s, k)
+        if colon < 0 do Err("expected ':' after object key")
+        else if colon == 58 do
+          match parse_value(s, skip_ws(s, k + 1)) do
+          Err(e) -> Err(e)
+          Ok((v, m)) -> do
+            let p = skip_ws(s, m)
+            let sep = string_byte_at(s, p)
+            if sep < 0 do Err("unterminated object, expected ',' or '}'")
+            else if sep == 125 do Ok((Object(rev(Cons((key, v), acc), Nil)), p + 1))
+            else if sep == 44 do parse_pairs(s, skip_ws(s, p + 1), Cons((key, v), acc))
+            else Err("expected ',' or '}' in object, found: '" ++ char_at(s, p) ++ "'")
+            end end end
           end
-        end
-        end
-      else Err("expected '\"' for object key, found: '" ++ q ++ "'") end
-    end
+          end
+        else Err("expected ':' after object key, found: '" ++ char_at(s, k) ++ "'")
+        end end
+      end
+      end
+    else Err("expected '\"' for object key, found: '" ++ char_at(s, i) ++ "'")
+    end end
   end
 
-  -- Parse a JSON object (chars is AFTER the '{').
-  pfn parse_object(chars) do
-    match chars do
-    Nil -> Err("unterminated object")
-    Cons(c, rest) -> do
-      if c == "}" do Ok((Object(Nil), rest))
-      else parse_pairs(chars, Nil) end
-    end
-    end
+  -- Parse a JSON object (`i` is just AFTER the '{').
+  pfn parse_object(s, i) do
+    let c = string_byte_at(s, i)
+    if c < 0 do Err("unterminated object")
+    else if c == 125 do Ok((Object(Nil), i + 1))
+    else parse_pairs(s, i, Nil) end end
   end
 
-  -- Escape a string for JSON output.
-  pfn escape_string_chars(chars, acc) do
-    match chars do
-    Nil -> string_join(rev(acc, Nil), "")
-    Cons(c, rest) -> do
-      let code = char_to_int(c)
-      let esc =
-        if c == "\"" do "\\\""
-        else if c == "\\" do "\\\\"
-        else if code == 10 do "\\n"
-        else if code == 13 do "\\r"
-        else if code == 9  do "\\t"
-        else if code == 8  do "\\b"
-        else if code == 12 do "\\f"
-        else c end end end end end end end
-      escape_string_chars(rest, Cons(esc, acc))
-    end
+  -- ── Escaping (output side) ────────────────────────────────────────────────
+  --
+  -- Same slice-per-run discipline as scan_string, for the same reason: the
+  -- previous version split every emitted string into one heap string per
+  -- character.  A string needing no escapes is returned as-is, allocating
+  -- nothing at all.
+
+  pfn escape_of(c) do
+    if c == 34 do Some("\\\"")
+    else if c == 92 do Some("\\\\")
+    else if c == 10 do Some("\\n")
+    else if c == 13 do Some("\\r")
+    else if c == 9  do Some("\\t")
+    else if c == 8  do Some("\\b")
+    else if c == 12 do Some("\\f")
+    else None end end end end end end end
+  end
+
+  pfn escape_go(s, i, start, acc) do
+    let c = string_byte_at(s, i)
+    if c < 0 do
+      match acc do
+      Nil -> s
+      _ -> do
+        let acc2 =
+          if i > start do Cons(string_slice(s, start, i - start), acc)
+          else acc end
+        string_join(rev(acc2, Nil), "")
+      end
+      end
+    else
+      match escape_of(c) do
+      None -> escape_go(s, i + 1, start, acc)
+      Some(esc) -> do
+        let acc2 =
+          if i > start do Cons(string_slice(s, start, i - start), acc)
+          else acc end
+        escape_go(s, i + 1, i + 1, Cons(esc, acc2))
+      end
+      end
     end
   end
 
   pfn escape_str(s) do
-    escape_string_chars(string_split(s, ""), Nil)
+    escape_go(s, 0, 0, Nil)
   end
 
   pfn map_list(xs, f, acc) do
@@ -307,15 +414,12 @@ mod Json do
       Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
   """
   fn parse(s) do
-    let chars = string_split(s, "")
-    match parse_value(chars) do
+    match parse_value(s, 0) do
     Err(e) -> Err(e)
-    Ok((v, remaining)) -> do
-      let rest = skip_ws(remaining)
-      match rest do
-      Nil -> Ok(v)
-      Cons(c, _) -> Err("unexpected character after JSON value: '" ++ c ++ "'")
-      end
+    Ok((v, i)) -> do
+      let j = skip_ws(s, i)
+      if string_byte_at(s, j) < 0 do Ok(v)
+      else Err("unexpected character after JSON value: '" ++ char_at(s, j) ++ "'") end
     end
     end
   end

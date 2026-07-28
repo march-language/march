@@ -1717,6 +1717,78 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/newtype_counter.expected native_newtype_counter.out)))
 
+; ── One-use impure helper: preserve List RC/effect order while eliminating ──
+; ── both the named call and definition from optimized emitted LLVM.       ──
+(rule
+ (targets native_single_use_inline_rc
+          native_single_use_inline_rc.out
+          native_single_use_inline_rc_compile_input.march
+          native_single_use_inline_rc_llvm_input.march
+          native_single_use_inline_rc_llvm_input.ll
+          native_single_use_inline_rc_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/single_use_inline_rc.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_compile_input.march)
+    (run %{exe:../bin/main.exe} --compile -o native_single_use_inline_rc
+         native_single_use_inline_rc_compile_input.march)
+    (with-stdout-to native_single_use_inline_rc.out
+         (system "./native_single_use_inline_rc"))
+    (copy native/single_use_inline_rc.march
+          native_single_use_inline_rc_llvm_input.march)
+    (run %{exe:../bin/main.exe} --emit-llvm
+         native_single_use_inline_rc_llvm_input.march)
+    (with-stdout-to native_single_use_inline_rc_llvm_check.out
+     (run bash -c
+      "check_ir () { \
+        ir=\"$1\"; \
+        if ! test -r \"$ir\"; then \
+          echo \"missing or unreadable LLVM IR: $ir\" >&2; \
+          return 2; \
+        fi; \
+        if grep -Eq '(^|[[:space:]])(call|define)[^@]*@helper\\(' \"$ir\"; then \
+          echo 'one-use helper call or definition remained in emitted LLVM' >&2; \
+          return 3; \
+        else \
+          grep_status=$?; \
+          if test \"$grep_status\" -eq 1; then \
+            echo 'helper eliminated'; \
+            return 0; \
+          fi; \
+          echo \"failed to inspect LLVM IR (grep status $grep_status): $ir\" >&2; \
+          return \"$grep_status\"; \
+        fi; \
+      }; \
+      if check_ir native_single_use_inline_rc_missing.ll >/dev/null 2>&1; then \
+        echo 'LLVM guard accepted a missing file' >&2; \
+        exit 1; \
+      else \
+        missing_status=$?; \
+        if test \"$missing_status\" -ne 2; then \
+          echo \"LLVM missing-file guard returned $missing_status, expected 2\" >&2; \
+          exit 1; \
+        fi; \
+      fi; \
+      echo 'missing LLVM guard rejected absent input'; \
+      check_ir native_single_use_inline_rc_llvm_input.ll"))))))
+
+(rule
+ (alias runtest)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
+(rule
+ (alias single_use_inline_rc)
+ (deps native_single_use_inline_rc_llvm_check.out)
+ (action
+  (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
+
 ; ── P6 Milestone 2: Option niche (None=0, Some(x)=x) — safe_div + greet. ──
 (rule
  (targets native_option_niche native_option_niche.out)
@@ -2873,6 +2945,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_random_determinism.expected js_random_determinism.out)))
 
+; js_closure_reuse_apply_slot — a closure allocated in a match arm where the
+; scrutinee cell is dead is rewritten by Perceus from EAlloc to EReuse. The JS
+; backend's EReuse/EStackAlloc branches lacked EAlloc's "$Clo" special case, so
+; the apply-fn slot (_0) was emitted as the `name$clo` wrapper record instead of
+; the raw function — ECallPtr's `f._0(f, x)` dispatch then called a record:
+; "TypeError: f._0 is not a function". Hit every `Json.to_string` on a JSON
+; array or object; not json-specific (any lambda passed to a user-defined HOF
+; from a reuse-eligible arm).
+(rule
+ (targets js_closure_reuse_apply_slot.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/js_closure_reuse_apply_slot.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_closure_reuse_apply_slot.mjs native/js_closure_reuse_apply_slot.march)))
+
+(rule
+ (targets js_closure_reuse_apply_slot.out)
+ (deps js_closure_reuse_apply_slot.mjs march_runtime.mjs)
+ (action (with-stdout-to js_closure_reuse_apply_slot.out (run node js_closure_reuse_apply_slot.mjs))))
+
+(rule (alias runtest) (action (diff native/js_closure_reuse_apply_slot.expected js_closure_reuse_apply_slot.out)))
+
 ; js_let_shadowing — self-referencing block-`let` shadowing on the JS target:
 ; `let x = <expr using x>` must read the outer x, not TDZ on a hoisted inner
 ; const. Pins native/JS parity with the interpreter (values in the fixture).
@@ -3465,6 +3559,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; that captures AND is reused elsewhere, both as the map callback and
 ; called directly) must fall back to the general closure-call path, since
 ; it's used more than once.
+; Regression: NativeArray.map2_int / map2_float / to_float_arr, and
+; DataFrame.col_add_col's rewiring onto them (P10 map2 primitive) instead
+; of the List.zip/List.map/native_*_arr_from_list round-trip. Correctness
+; only — this fixture does not exercise the map-inline machinery.
+(rule
+ (targets native_arr_map2 native_arr_map2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map2
+        native/native_arr_map2.march)
+   (with-stdout-to native_arr_map2.out
+        (system "./native_arr_map2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2.expected native_arr_map2.out)))
+
 (rule
  (targets native_arr_map_inline_capture native_arr_map_inline_capture.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3595,6 +3710,81 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
   (run bash -c
    "read -r nclones boxcalls < native_arr_map_inline_unboxed_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 || { echo \"expected 2 unboxed \\$mapfast\\$ clones with zero boxing calls in their bodies (found clones=$nclones boxcalls=$boxcalls)\" >&2; exit 1; }")))
+
+; map2 (two-array) counterpart of the map inlining/vectorization machinery
+; above (P10, added 2026-07-27 alongside the map2 primitive itself). Same
+; eligibility bar, same $mapfast$ unboxed-clone trick for a concrete
+; all-Float callback; the fixture also exercises Int (boxed inline path)
+; and the reused-elsewhere fallback. Assert correctness (the .expected diff
+; below), that exactly 2 $mapfast$ clones exist (the two all-Float cases)
+; with zero boxing calls in either body, that exactly 1 general
+; (non-inlined) native_int_arr_map2 call remains (the reused-closure
+; fallback correctly NOT taking the inline path), and that the inline
+; loop's own length-mismatch check is present.
+(rule
+ (targets native_arr_map2_inline native_arr_map2_inline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_map2_inline
+        native/native_arr_map2_inline.march)
+   (with-stdout-to native_arr_map2_inline.out
+        (system "./native_arr_map2_inline")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2_inline.expected native_arr_map2_inline.out)))
+
+(rule
+ (targets native_arr_map2_inline_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_map2_inline.march)
+   (with-stdout-to native_arr_map2_inline_llvm_check.out
+    (run bash -c
+     "echo \"$(grep -c '^define double @.*\\$mapfast\\$' native/native_arr_map2_inline.ll) $(awk '/^define double @.*\\$mapfast\\$/{flag=1} flag{print} /^}/{flag=0}' native/native_arr_map2_inline.ll | (grep -c 'march_alloc_float\\|march_unbox_float' || true)) $(grep -c '= call ptr @native_int_arr_map2(ptr' native/native_arr_map2_inline.ll) $(grep -c 'call void @native_arr_map2_check_len' native/native_arr_map2_inline.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_map2_inline_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nclones boxcalls ngeneral nchecks < native_arr_map2_inline_llvm_check.out; \
+    test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
+
+; Separate fixture: the map2 inline loop's own length-mismatch check
+; (native_arr_map2_check_len) must panic identically to the non-inlined
+; native_int_arr_map2/native_float_arr_map2 functions' check, since the
+; inline path bypasses those entirely. Kept out of the correctness fixture
+; above because a panic necessarily exits nonzero.
+(rule
+ (targets native_arr_map2_inline_length_panic)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_map2_inline_length_panic.march)
+       (source_tree ../stdlib))
+ (action
+  (run %{exe:../bin/main.exe} --compile -o native_arr_map2_inline_length_panic
+       native/native_arr_map2_inline_length_panic.march)))
+
+(rule
+ (targets native_arr_map2_inline_length_panic.err)
+ (deps native_arr_map2_inline_length_panic)
+ (action
+  (with-accepted-exit-codes 1
+   (with-stderr-to native_arr_map2_inline_length_panic.err
+    (run ./native_arr_map2_inline_length_panic)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_map2_inline_length_panic.expected native_arr_map2_inline_length_panic.err)))
 
 (rule
  (targets native_float_generic_field_abi native_float_generic_field_abi.out)

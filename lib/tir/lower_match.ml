@@ -190,7 +190,48 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
             | Tir.AVar { Tir.v_ty = Tir.TCon (type_name, _); _ } ->
               qual ^ type_name ^ "." ^ short_tag
             | _ -> tag)
-         | None -> tag)
+         | None ->
+           (* MODULE-qualified pattern (`Json.Array(_)`) outside the narrow
+              collision set above. Codegen keys [ctor_info] by TYPE
+              ("JsonValue.Array") and [Llvm_case.qualified_br_key] resolves a
+              written qualifier only against a key's TYPE segment — so a module
+              qualifier whose module name differs from the type name it declares
+              (Json/JsonValue, Msgpack/Value: the common case) matched nothing
+              and DEGRADED to the bare ctor. [Llvm_data.ctor_entry] then resolved
+              that bare name by an ambiguous ".<ctor>" suffix scan across all
+              types, picking by hashtable order: a ctor name shared with another
+              ADT (stdlib `Array`/`Null` are declared by both Json.JsonValue and
+              Msgpack.Value) could land on the sibling type, whose tag this
+              scrutinee's values never carry — so the arm FAILED OPEN to `_`
+              with no error, no warning and no crash, while the interpreter
+              matched correctly (P0: qualified-ctor-pattern silent fallthrough,
+              2026-07-27). Translating the qualifier here, where module
+              structure is still known, gives [qualified_br_key] an exact
+              [ctor_info] hit on its FIRST check.
+
+              Resolution cannot be deferred to codegen: the scrutinee is
+              typically a destructured sub-pattern variable ([lower_match] mints
+              those with [unknown_ty]), so by then its [Tir.ty] is [TVar "_"] and
+              names no type at all.
+
+              A qualifier that is really a TYPE ("List.Cons", or the 3-segment
+              "Mod.Type.Ctor" form the collision path above emits, whose
+              qualifier tail is the type) is left untouched — it already exact-
+              matches a [ctor_info] key. An ambiguous module (two of its types
+              declaring the same ctor) resolves to [None] and likewise passes
+              through unchanged, preserving today's behavior rather than
+              guessing. *)
+           let qual_tail =
+             let q = String.sub tag 0 i in
+             match String.rindex_opt q '.' with
+             | Some j -> String.sub q (j + 1) (String.length q - j - 1)
+             | None   -> q
+           in
+           if Lower_state.type_declares_ctor qual_tail short_tag then tag
+           else
+             (match Lower_state.module_ctor_type qual short_tag with
+              | Some type_name -> type_name ^ "." ^ short_tag
+              | None -> tag))
     in
     Some (tag, subs)
   | Ast.PatTuple (subs, _) ->

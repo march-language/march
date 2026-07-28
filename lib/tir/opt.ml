@@ -8,10 +8,11 @@
     - Known_call second: converts ECallPtr → EApp for statically-known closures,
       enabling Inline to see and inline the lifted apply functions
     - Inline third: exposes literal arguments at inlined call sites
-    - CProp fourth: propagates those literals through let chains
-    - Fold fifth: evaluates now-literal arithmetic
-    - Simplify sixth: identity laws / strength reduction on folded results
-    - Fusion.run_struct seventh: collapses chains of record-update operations
+    - Single_use_inline fourth: inlines functions with one remaining call site
+    - CProp fifth: propagates those literals through let chains
+    - Fold sixth: evaluates now-literal arithmetic
+    - Simplify seventh: identity laws / strength reduction on folded results
+    - Fusion.run_struct eighth: collapses chains of record-update operations
     - DCE last: removes let bindings made dead by folding/simplification
 
     The optional [~snap] callback is invoked after each individual pass with
@@ -22,6 +23,7 @@ let named_passes = [
   "join-points", Join_points.run;
   "known-call",  Known_call.run;
   "inline",      Inline.run;
+  "single-use-inline", Single_use_inline.run;
   "cprop",       Cprop.run;
   "fold",        Fold.run;
   "simplify",    (fun ~changed m -> Simplify.run ~changed m);

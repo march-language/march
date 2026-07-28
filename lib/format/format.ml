@@ -314,8 +314,14 @@ let rec try_collect_list acc = function
   | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> try_collect_list (hd :: acc) tl
   | _ -> None
 
-(** Try to reconstruct string interpolation from desugared
-    prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+(** Try to reconstruct string interpolation from its desugared form:
+      prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+    which is what [desugar_interp] in [lib/parser/parser.mly] emits, and which
+    user code can also write by hand.
+
+    The formatter runs on the PARSED module, before desugar, so it never sees
+    the [string_concat3] folding that desugar applies afterwards.
+
     Returns Some (prefix_str, [(expr, suffix_str); ...]) if the pattern matches,
     where the original source was "prefix${e1}s1${e2}s2". *)
 let try_collect_interp expr =
@@ -358,8 +364,9 @@ let rec expr_inline = function
        let[@warning "-8"] ECon ({ txt; _ }, args, _) = e in
        Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args)))
   | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
-  (* Reconstruct string interpolation: ++ / to_string chain → "${expr}" *)
-  | EApp (EVar { txt = "++"; _ }, [_; _], _) as e when try_collect_interp e <> None ->
+  (* Reconstruct string interpolation: ++ chain → "${expr}" *)
+  | EApp (EVar { txt = "++"; _ }, [_; _], _) as e
+    when try_collect_interp e <> None ->
     let[@warning "-8"] Some (prefix, parts) = try_collect_interp e in
     let needs_triple = String.contains prefix '\n' ||
       List.exists (fun (_, s) -> String.contains s '\n') parts in

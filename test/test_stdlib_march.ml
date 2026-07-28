@@ -94,6 +94,10 @@ let all_stdlib_decls =
     "map.march";
     "math.march";
     "string.march";
+    (* Loaded before iolist/msgpack so their same-named constructors (Str,
+       Array, ...) keep winning bare lookups exactly as they did before
+       json.march joined this list. *)
+    "json.march";
     "iolist.march";
     "http.march";
     "http_transport.march";
@@ -287,6 +291,10 @@ let () =
     ("seq", [
       Alcotest.test_case "Seq module"
         `Quick (run_stdlib_test "test_seq.march" "TestSeq");
+    ]);
+    ("json", [
+      Alcotest.test_case "Json module"
+        `Quick (run_stdlib_test "test_json.march" "TestJson");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"

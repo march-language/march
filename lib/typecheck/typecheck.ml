@@ -1976,9 +1976,11 @@ let builtin_bindings : (string * scheme) list =
     ("string_starts_with",  Mono (TArrow (t_string, TArrow (t_string, t_bool))));
     ("string_ends_with",    Mono (TArrow (t_string, TArrow (t_string, t_bool))));
     ("string_index_of",     Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
+    ("string_index_of_from", Mono (TArrow (t_string, TArrow (t_string, TArrow (t_int, t_option t_int)))));
     ("string_replace",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
+    ("string_concat3",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_join",         Mono (TArrow (t_list t_string, TArrow (t_string, t_string))));
     ("string_trim",         Mono (TArrow (t_string, t_string)));
     ("string_trim_start",   Mono (TArrow (t_string, t_string)));
@@ -1992,6 +1994,7 @@ let builtin_bindings : (string * scheme) list =
     ("string_pad_left",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_pad_right",    Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_byte_length",  Mono (TArrow (t_string, t_int)));
+    ("string_byte_at",      Mono (TArrow (t_string, TArrow (t_int, t_int))));
     ("string_split_first",   Mono (TArrow (t_string, TArrow (t_string, t_option (TTuple [t_string; t_string])))));
     ("string_grapheme_count",Mono (TArrow (t_string, t_int)));
     (* Char primitives — in March, a "char" is a single-char String *)
@@ -2344,6 +2347,12 @@ let builtin_bindings : (string * scheme) list =
     ("native_int_arr_map",
        Mono (TArrow (TCon ("NativeIntArr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeIntArr", [])))));
+    ("native_int_arr_map2",
+       Mono (TArrow (TCon ("NativeIntArr", []),
+             TArrow (TCon ("NativeIntArr", []),
+             TArrow (TArrow (t_int, TArrow (t_int, t_int)), TCon ("NativeIntArr", []))))));
+    ("native_int_arr_to_float_arr",
+       Mono (TArrow (TCon ("NativeIntArr", []), TCon ("NativeFloatArr", []))));
     ("native_int_arr_fold",
        poly1 (fun a ->
          TArrow (a, TArrow (TCon ("NativeIntArr", []),
@@ -2373,6 +2382,10 @@ let builtin_bindings : (string * scheme) list =
     ("native_float_arr_map",
        Mono (TArrow (TCon ("NativeFloatArr", []),
              TArrow (TArrow (t_float, t_float), TCon ("NativeFloatArr", [])))));
+    ("native_float_arr_map2",
+       Mono (TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TArrow (t_float, TArrow (t_float, t_float)), TCon ("NativeFloatArr", []))))));
     ("native_float_arr_fold",
        poly1 (fun a ->
          TArrow (a, TArrow (TCon ("NativeFloatArr", []),

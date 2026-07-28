@@ -225,6 +225,37 @@ let shared_ctor_collision_type (module_prefix : string) (ctor_name : string)
   : string option =
   Hashtbl.find_opt shared_ctor_collision_tbl (module_prefix, ctor_name)
 
+(** [(module_prefix, ctor_name)] → [Some short_type_name] when module
+    [module_prefix] (trailing-dot form, e.g. "Json.") declares EXACTLY ONE
+    variant type carrying [ctor_name], [None] when it declares two or more
+    (ambiguous — no rewrite is safe). Unlike [shared_ctor_collision_tbl] above
+    this covers EVERY declared variant type, not just the narrow public +
+    impl-bearing same-short-name collision set: its job is not collision
+    disambiguation but translating the documented MODULE-qualified pattern
+    syntax into the TYPE-qualified key that codegen's [ctor_info] is keyed by.
+    Populated alongside it, from the same walk over the same decls. *)
+let module_ctor_type_tbl : (string * string, string option) Hashtbl.t =
+  Hashtbl.create 64
+
+(** [(short_type_name, ctor_name)] of every declared variant — lets a qualifier
+    that is really a TYPE name (`List.Cons`) be told apart from one that is a
+    MODULE name (`Json.Array`), so only the latter gets rewritten. *)
+let type_ctor_tbl : (string * string, unit) Hashtbl.t = Hashtbl.create 64
+
+(** Short type name declaring [ctor_name] in module [module_prefix]
+    (trailing-dot form), or [None] when the module declares no such ctor or
+    declares it on more than one type. See [module_ctor_type_tbl]. *)
+let module_ctor_type (module_prefix : string) (ctor_name : string)
+  : string option =
+  match Hashtbl.find_opt module_ctor_type_tbl (module_prefix, ctor_name) with
+  | Some (Some t) -> Some t
+  | _ -> None
+
+(** True when a declared variant TYPE named [type_name] (short name) carries
+    [ctor_name]. See [type_ctor_tbl]. *)
+let type_declares_ctor (type_name : string) (ctor_name : string) : bool =
+  Hashtbl.mem type_ctor_tbl (type_name, ctor_name)
+
 (** Populate [shared_ctor_collision_tbl] from [decls], mirroring
     [lib/eval/eval.ml]'s [compute_type_collision_set] exactly (descend into
     [DMod], accumulating a "Sub.Sub2." prefix; collect each
@@ -302,6 +333,25 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
       ) ds
   in
   walk "" decls;
+  (* Same [by_short] data, indexed the two other ways codegen needs it (see
+     [module_ctor_type_tbl] / [type_ctor_tbl]). Every candidate in one
+     [by_short] bucket is a DISTINCT qualified declaration ([add_qualified]
+     dedups on the qualified name), so seeing the same (prefix, ctor) key twice
+     with different short names genuinely means that module declares the ctor on
+     two different types — recorded as [None] so no rewrite is attempted. *)
+  Hashtbl.reset module_ctor_type_tbl;
+  Hashtbl.reset type_ctor_tbl;
+  Hashtbl.iter (fun short candidates ->
+      List.iter (fun (prefix, _, _, ctors) ->
+          List.iter (fun c ->
+              Hashtbl.replace type_ctor_tbl (short, c) ();
+              match Hashtbl.find_opt module_ctor_type_tbl (prefix, c) with
+              | None -> Hashtbl.replace module_ctor_type_tbl (prefix, c) (Some short)
+              | Some (Some s) when String.equal s short -> ()
+              | Some _ -> Hashtbl.replace module_ctor_type_tbl (prefix, c) None
+            ) ctors
+        ) candidates
+    ) by_short;
   Hashtbl.iter (fun short candidates ->
       if List.length candidates >= 2 then begin
         let public_candidates =

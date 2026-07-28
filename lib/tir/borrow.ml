@@ -53,6 +53,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_eq",          [true; true]);
   ("march_string_concat",      [true; true]);
   ("march_string_byte_length", [true]);
+  ("march_string_byte_at",     [true; false]);
   ("march_string_grapheme_count", [true]);
   ("march_string_is_empty",    [true]);
   ("march_string_to_int",      [true]);
@@ -88,7 +89,9 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_eq",            [true; true]);
   ("string_concat",        [true; true]);
   ("++",                   [true; true]);
+  ("string_concat3",       [true; true; true]);
   ("string_byte_length",   [true]);
+  ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
   ("string_to_int",        [true]);
@@ -105,6 +108,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_split",         [true; true]);
   ("string_split_first",   [true; true]);
   ("string_index_of",      [true; true]);
+  ("string_index_of_from", [true; true; true]);
   ("string_last_index_of", [true; true]);
   ("string_replace",       [true; true; true]);
   ("string_replace_all",   [true; true; true]);

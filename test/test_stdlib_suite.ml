@@ -11190,6 +11190,403 @@ let test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union () =
     Alcotest.(check string) "writer caps = IO.FileWrite ONLY (not the artifact union)"
       "IO.FileWrite" (find_caps "writer")
 
+(* ── String measurement counters (MARCH_STRING_STATS) ─────────────────────
+   Phase 1 of the string performance work (see
+   specs/2026-07-26-string-performance-design.md).  The representation
+   decision — small-string optimisation vs. borrowed views vs. neither —
+   rests on these numbers, so they are validated rather than trusted: a
+   histogram that miscounts would silently produce the wrong architecture. *)
+
+(* Parse the `march_string_stats <key> <value>` lines a stats-enabled binary
+   writes to stderr at exit.  Fails the test (rather than defaulting to 0) if
+   a key is absent, since a missing counter and a zero counter mean very
+   different things. *)
+let string_stat_of ~stderr_file key =
+  let contents = read_file_contents stderr_file in
+  let lines = String.split_on_char '\n' contents in
+  let prefix = "march_string_stats " ^ key ^ " " in
+  let plen = String.length prefix in
+  match List.find_opt (fun l ->
+      String.length l > plen && String.sub l 0 plen = prefix) lines with
+  | Some l -> int_of_string (String.trim (String.sub l plen (String.length l - plen)))
+  | None ->
+    Alcotest.failf "no `march_string_stats %s` line in stderr (got: %s)"
+      key (String.concat " | " (List.filter (fun l -> l <> "") lines))
+
+(* Compile [src_text] as a standalone program, run it with the given env
+   prefix, and hand the caller the stderr path.  Returns None only on the
+   legitimate clang-absent skip. *)
+let with_compiled_program ~tag ~src_text ~env_prefix f =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file tag "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (tag ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp (tag ^ "_bin") in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let err_file = Filename.concat tmp "err.txt" in
+    let rc =
+      Sys.command
+        (Printf.sprintf "%s%s > /dev/null 2> %s"
+           env_prefix (Filename.quote bin) (Filename.quote err_file))
+    in
+    Alcotest.(check int) "compiled program exits 0" 0 rc;
+    f err_file
+
+(* Compile [src_text] and return its STDOUT, both compiled and interpreted.
+   A builtin has two implementations — the runtime C function and eval.ml's
+   VBuiltin — and nothing forces them to agree, so they drift silently unless a
+   test runs the same program both ways. *)
+let compiled_and_interpreted_stdout ~tag ~src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file tag "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (tag ^ ".march") in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  (* Interpreted first: it needs no clang, so it still runs on a toolchain-less
+     machine where the compiled half legitimately skips. *)
+  let interp_out = Filename.concat tmp "interp.txt" in
+  let irc =
+    Sys.command
+      (Printf.sprintf "%s %s > %s 2>/dev/null"
+         (Filename.quote main_exe) (Filename.quote src) (Filename.quote interp_out))
+  in
+  Alcotest.(check int) "interpreted run exits 0" 0 irc;
+  let interpreted = String.trim (read_file_contents interp_out) in
+  let bin = Filename.concat tmp (tag ^ "_bin") in
+  match compile_march_or_skip ~main_exe ~bin ~src () with
+  | None -> (interpreted, None)   (* legitimate, counted skip: no clang *)
+  | Some bin ->
+    let out = Filename.concat tmp "compiled.txt" in
+    let rc =
+      Sys.command
+        (Printf.sprintf "%s > %s 2>/dev/null" (Filename.quote bin) (Filename.quote out))
+    in
+    Alcotest.(check int) "compiled run exits 0" 0 rc;
+    (interpreted, Some (String.trim (read_file_contents out)))
+
+(* The size histogram must be EXACT, not approximate: the SSO criterion is a
+   fraction of allocations in the small buckets, so an off-by-N histogram
+   changes the architectural verdict.  String.repeat allocates exactly one
+   string per call, so 100 calls producing 12 bytes and 100 producing 40 must
+   appear as exactly 100 in hist_le15 and 100 in hist_le63.  The loops keep
+   each string live only briefly, which also exercises the free path.
+
+   Deliberately NOT 4-byte strings: println, to_string and stdlib internals
+   allocate their own short-lived strings, which the counter correctly counts,
+   so the <=7 bucket carries unrelated traffic (measured: 302 for 100 loop
+   allocations) and could not support an exact assertion.  12 and 40 bytes sit
+   in buckets nothing else in this program touches, which is what lets both
+   checks stay exact rather than degrading to >=. *)
+let test_string_stats_histogram_exact () =
+  with_compiled_program ~tag:"march_strstats"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrStats do\n\
+      \  pfn small(i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.repeat(\"abcd\", 3)\n\
+      \      small(i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  pfn big(i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.repeat(\"abcd\", 10)\n\
+      \      big(i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    println(to_string(small(0, 100, 0) + big(0, 100, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let get k = string_stat_of ~stderr_file:err_file k in
+       Alcotest.(check int) "hist_le15 counts the 100 twelve-byte strings"
+         100 (get "hist_le15");
+       Alcotest.(check int) "hist_le63 counts the 100 forty-byte strings"
+         100 (get "hist_le63");
+       Alcotest.(check bool) "allocs covers both loops" true (get "allocs" >= 200);
+       Alcotest.(check bool) "peak_live_bytes is positive" true
+         (get "peak_live_bytes" > 0))
+
+(* Bytes-copied is the counter that discriminates "borrowed views would help"
+   from "allocation volume is the problem" — the two have different fixes, and
+   wall time alone cannot tell them apart.  100 slices of 1000 bytes must
+   report at least 100_000 copied bytes; a zero here would mean the memcpy
+   sites were never converted, and the views decision would rest on a blank
+   number that looks like evidence. *)
+let test_string_stats_copy_bytes () =
+  with_compiled_program ~tag:"march_strcopy"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrCopy do\n\
+      \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = String.slice(buf, i, 1000)\n\
+      \      go(buf, i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
+      \    println(to_string(go(buf, 0, 100, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let copied = string_stat_of ~stderr_file:err_file "copy_bytes" in
+       Alcotest.(check bool)
+         (Printf.sprintf "copy_bytes >= 100_000 for 100 x 1000-byte slices (got %d)"
+            copied)
+         true (copied >= 100_000))
+
+(* Byte-loop builders must be counted too.  to_lowercase/to_uppercase/reverse
+   transform while they copy, so they write through a hand-rolled loop after
+   march_string_alloc rather than calling memcpy — and were therefore invisible
+   to the march_str_copy wrapper.  Caught by bench/string_case reporting ~1MB
+   copied for 400MB of real work: a two-orders-of-magnitude undercount in the
+   very benchmark built to measure transform cost, which would have been read
+   as "copying is negligible here" when the opposite is true.
+   50 round-trips of a 10_000-byte buffer move ~1_000_000 bytes. *)
+let test_string_stats_copy_bytes_byte_loops () =
+  with_compiled_program ~tag:"march_strcase"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod StrCase do\n\
+      \  pfn go(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let up = String.to_uppercase(buf)\n\
+      \      let lo = String.to_lowercase(up)\n\
+      \      go(buf, i + 1, n, acc + String.byte_size(lo))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do\n\
+      \    let buf = String.repeat(\"abcdefghij\", 1000)\n\
+      \    println(to_string(go(buf, 0, 50, 0)))\n\
+      \  end\n\
+       end\n"
+    (fun err_file ->
+       let copied = string_stat_of ~stderr_file:err_file "copy_bytes" in
+       Alcotest.(check bool)
+         (Printf.sprintf
+            "case conversions counted: copy_bytes >= 1_000_000 (got %d)" copied)
+         true (copied >= 1_000_000))
+
+(* Control: stats stay OFF unless the env var is set.  Without this, the test
+   above could pass against an always-on implementation that would corrupt
+   every other test's stderr expectations and tax the hot allocation path. *)
+let test_string_stats_off_by_default () =
+  with_compiled_program ~tag:"march_strstats_off" ~env_prefix:""
+    ~src_text:
+      "mod Off do\n  fn main() do println(String.repeat(\"x\", 3)) end\nend\n"
+    (fun err_file ->
+       let contents = read_file_contents err_file in
+       Alcotest.(check bool) "no stats emitted without the env var" false
+         (List.exists
+            (fun l ->
+               let p = "march_string_stats" in
+               String.length l >= String.length p
+               && String.sub l 0 (String.length p) = p)
+            (String.split_on_char '\n' contents)))
+
+(* ── String.index_of_from ────────────────────────────────────────────────
+   Offset-aware search.  Without it, tokenizing means slicing off the tail and
+   searching again, re-copying the remaining bytes at every step — O(n²) for a
+   full pass.  That is not hypothetical: it forced bench/string_slice_walk to
+   walk by arithmetic instead of by searching, and bench/string_parallel_scan
+   to count hits via replace_all rather than by scanning.
+
+   The result is an index in S's OWN coordinates, not relative to `start`, so a
+   caller can feed it straight back in as the next start.  Returning a relative
+   index would make every caller add offsets by hand, which is precisely the
+   kind of thing that is wrong in the third caller.
+
+   Clamping is pinned deliberately: negative start clamps to 0, start past the
+   end yields None, and an empty needle matches AT start (clamped) — mirroring
+   how march_string_index_of already treats an empty needle as matching at 0. *)
+let index_of_from_probe_src =
+  (* The helper is called `render`, NOT `show`: `show` is the built-in Show
+     dispatch method, and a user function of that name does not win the call --
+     the probe silently reaches the builtin instead and the match fails on a
+     bare Int. *)
+  "mod IdxFrom do\n\
+  \  fn render(o : Option(Int)) : String do\n\
+  \    match o do\n\
+  \    Some(k) -> to_string(k)\n\
+  \    None    -> \"none\"\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    let s = \"a,b,c\"\n\
+  \    println(render(String.index_of_from(s, \",\", 0)))\n\
+  \    println(render(String.index_of_from(s, \",\", 2)))\n\
+  \    println(render(String.index_of_from(s, \",\", 4)))\n\
+  \    println(render(String.index_of_from(s, \"\", 3)))\n\
+  \    println(render(String.index_of_from(s, \",\", 0 - 5)))\n\
+  \    println(render(String.index_of_from(s, \",\", 99)))\n\
+  \    println(render(String.index_of_from(\"aaaa\", \"aa\", 1)))\n\
+  \  end\n\
+   end\n"
+
+let index_of_from_expected = "1\n3\nnone\n3\n1\nnone\n1"
+
+let test_string_index_of_from () =
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_idxfrom"
+      ~src_text:index_of_from_probe_src
+  in
+  Alcotest.(check string) "interpreted offsets and clamping"
+    index_of_from_expected interpreted;
+  match compiled with
+  | None -> ()  (* clang absent: interpreted half still asserted above *)
+  | Some out ->
+    Alcotest.(check string) "compiled matches interpreted (builtin parity)"
+      index_of_from_expected out
+
+(* ── Substring search edge cases ─────────────────────────────────────────
+   Pinned BEFORE the search implementation is rewritten to a memchr-based
+   two-stage scan, and asserted for compiled AND interpreted so the rewrite
+   cannot quietly change one of them.
+
+   These are the cases a fast scanner gets wrong:
+     * a candidate first byte that fails on the rest ("abcabd" / "abd") —
+       exercises the reject-and-resume path, where an off-by-one silently
+       skips a real match;
+     * a match at the very last possible offset, and a needle exactly as long
+       as the haystack — the boundary where `remaining >= nlen` decides;
+     * a needle LONGER than the haystack, which must not read past the end;
+     * an empty needle, which every March search treats as matching at 0;
+     * overlapping candidates ("aaaa" / "aa"), where a naive resume past the
+       whole needle rather than one byte reports the wrong index;
+     * an adjacent-separator split ("a,,b"), which must yield an empty field
+       rather than collapsing.
+
+   Not covered here, deliberately: embedded NUL bytes. March string literals
+   have no escape for them, so a test would need Bytes round-tripping and would
+   be testing that path as much as this one. The implementation must still
+   never use strstr/strchr — march_string is length-counted, and NUL is
+   ordinary data. *)
+let search_edge_probe_src =
+  "mod Search do\n\
+  \  fn render(o : Option(Int)) : String do\n\
+  \    match o do\n\
+  \    Some(k) -> to_string(k)\n\
+  \    None    -> \"none\"\n\
+  \    end\n\
+  \  end\n\
+  \  fn main() do\n\
+  \    println(render(String.index_of(\"abcabd\", \"abd\")))\n\
+  \    println(render(String.index_of(\"aaaa\", \"aaaa\")))\n\
+  \    println(render(String.index_of(\"aaa\", \"aaaa\")))\n\
+  \    println(render(String.index_of(\"xxxxy\", \"y\")))\n\
+  \    println(render(String.index_of(\"abc\", \"\")))\n\
+  \    println(render(String.index_of(\"aaaa\", \"aa\")))\n\
+  \    println(render(String.index_of_from(\"aaaa\", \"aa\", 1)))\n\
+  \    println(to_string(String.contains(\"abcabd\", \"abd\")))\n\
+  \    println(to_string(String.contains(\"abcabd\", \"abe\")))\n\
+  \    println(to_string(List.length(String.split(\"a,,b\", \",\"))))\n\
+  \    println(String.replace_all(\"aXbXc\", \"X\", \"--\"))\n\
+  \    println(render(String.last_index_of(\"abcabc\", \"bc\")))\n\
+  \  end\n\
+   end\n"
+
+let search_edge_expected =
+  "3\n0\nnone\n4\n0\n0\n1\ntrue\nfalse\n3\na--b--c\n4"
+
+let test_string_search_edge_cases () =
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_search" ~src_text:search_edge_probe_src
+  in
+  Alcotest.(check string) "interpreted search edge cases"
+    search_edge_expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled matches interpreted"
+      search_edge_expected out
+
+(* A chain of `++` must produce ONE string, not one per link.
+   `a ++ b ++ c ++ d ++ e` parses left-deep, so evaluating it naively allocates
+   four strings and copies the growing prefix at every step -- O(k^2) bytes for
+   k parts. Collapsed into a single n-ary concat it is one allocation and one
+   copy pass.
+
+   Asserting on the ALLOCATION COUNT rather than on elapsed time makes this a
+   real regression gate: timing on this machine is not comparable across runs
+   (see the phase 2 plan's global constraints), while allocation counts are
+   exact and load-independent. *)
+let test_concat_chain_single_allocation () =
+  with_compiled_program ~tag:"march_catn"
+    ~env_prefix:"MARCH_STRING_STATS=1 "
+    ~src_text:
+      "mod CatN do\n\
+      \  pfn go(a : String, b : String, i : Int, n : Int, acc : Int) : Int do\n\
+      \    if i >= n do acc\n\
+      \    else\n\
+      \      let s = a ++ b ++ a ++ b ++ a\n\
+      \      go(a, b, i + 1, n, acc + String.byte_size(s))\n\
+      \    end\n\
+      \  end\n\
+      \  fn main() do println(to_string(go(\"xx\", \"yy\", 0, 100000, 0))) end\n\
+       end\n"
+    (fun err_file ->
+       let allocs = string_stat_of ~stderr_file:err_file "allocs" in
+       (* 100_000 iterations of a 5-part chain.
+            left-deep `++`:        4 allocations each (3 intermediates + result)
+                                   -> measured 400_004 before this change
+            concat3 folding:       2 each — concat3(concat3(a,b,a), b, a)
+                                   -> measured 200_004 after
+          The bound is 250_000: comfortably below the old 4-per-iteration and
+          above the 2-per-iteration the fixed-arity fold actually achieves.
+          Not 1 per iteration: string_concat3 is fixed-arity because March
+          builtin signatures are `Mono (TArrow ...)` and cannot be variadic, so
+          a 5-part chain needs two of them. *)
+       Alcotest.(check bool)
+         (Printf.sprintf
+            "5-part chain allocates ~2 per iteration, not 4 (got %d)"
+            allocs)
+         true (allocs < 250_000))
+
+(* The collapse must not change the VALUE, only the allocation count. Chains of
+   every length from 2 to 6, with empty operands mixed in, since an n-ary copy
+   loop that mishandles a zero-length part corrupts the result silently. *)
+let test_concat_chain_values () =
+  let src =
+    "mod CatVal do\n\
+    \  fn main() do\n\
+    \    let a = \"a\"\n\
+    \    let e = \"\"\n\
+    \    println(a ++ a)\n\
+    \    println(a ++ a ++ a)\n\
+    \    println(a ++ a ++ a ++ a)\n\
+    \    println(a ++ a ++ a ++ a ++ a ++ a)\n\
+    \    println(e ++ a ++ e ++ a ++ e)\n\
+    \    println(a ++ e ++ e)\n\
+    \    println(e ++ e ++ e)\n\
+    \  end\n\
+     end\n"
+  in
+  (* The final line is the empty string (e ++ e ++ e), which the stdout helper
+     trims -- so the expectation ends at the single "a". *)
+  let expected = "aa\naaa\naaaa\naaaaaa\naa\na" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_catval" ~src_text:src
+  in
+  Alcotest.(check string) "interpreted concat chain values" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
 (* Regression: MARCH_SANITIZE=1 binaries aborted at process exit on macOS
    arm64 (SIGTRAP, exit 133) after printing correct output.  Root cause: the
    scheduler's setup_alt_stack() replaced ASAN's per-thread alternate signal
@@ -11230,20 +11627,31 @@ let test_compiled_sanitize_clean_exit () =
        with no way to recover short of an operator finding and killing the
        process by hand. A timeout here fails loudly (never silently), so a
        recurrence is still real signal -- just one that can't take down
-       everything else. *)
+       everything else.
+
+       Bound is overridable via MARCH_SANITIZE_TIMEOUT (seconds) for local
+       fast-fail iteration; CI and default local runs keep the generous 30s
+       so a merely-loaded (not fully wedged) machine doesn't start flaking
+       on this test more than it already does. *)
+    let timeout_secs =
+      match Sys.getenv_opt "MARCH_SANITIZE_TIMEOUT" with
+      | Some s -> ( try float_of_string s with _ -> 30.0 )
+      | None -> 30.0
+    in
     let result =
-      run_with_timeout ~timeout_secs:30.0 ~stdout_file:out_file
+      run_with_timeout ~timeout_secs ~stdout_file:out_file
         [| "/usr/bin/env"; "ASAN_OPTIONS=detect_leaks=0"; bin |]
     in
     let run_rc =
       match result with
       | `Timeout ->
         Alcotest.failf
-          "sanitized binary did not exit within 30s (killed). If this \
+          "sanitized binary did not exit within %.0fs (killed). If this \
            recurs, first rule out a machine-wide ASAN environment issue \
            before assuming a March regression: compile and run a trivial \
            unrelated `clang -fsanitize=address` C program under the same \
            load -- if THAT also hangs, this is not this test's fault."
+          timeout_secs
       | `Exited rc -> rc
     in
     Alcotest.(check int)
@@ -12740,6 +13148,22 @@ let stdlib_suites =
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
+        Alcotest.test_case "string stats: size histogram is exact" `Slow
+          test_string_stats_histogram_exact;
+        Alcotest.test_case "string stats: off unless MARCH_STRING_STATS is set" `Slow
+          test_string_stats_off_by_default;
+        Alcotest.test_case "string stats: bytes copied are tallied" `Slow
+          test_string_stats_copy_bytes;
+        Alcotest.test_case "string stats: byte-loop builders counted too" `Slow
+          test_string_stats_copy_bytes_byte_loops;
+        Alcotest.test_case "String.index_of_from: offsets, clamping, parity" `Slow
+          test_string_index_of_from;
+        Alcotest.test_case "substring search: edge cases, compiled + interpreted" `Slow
+          test_string_search_edge_cases;
+        Alcotest.test_case "concat chain: one allocation, not one per link" `Slow
+          test_concat_chain_single_allocation;
+        Alcotest.test_case "concat chain: values unchanged at every length" `Slow
+          test_concat_chain_values;
         Alcotest.test_case "interp http_server_listen: idle client does not block second client (event-loop fix)" `Slow
           test_interp_http_server_idle_client_does_not_block_others;
       ]);
