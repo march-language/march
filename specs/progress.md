@@ -92,6 +92,66 @@ counts already verified in Task 3.
 
 ---
 
+## Current State (as of 2026-07-28, Yaml/Xml/Regex/Uri rewritten as byte-index scanners; Csv measured, left as-is)
+
+Continuation of the `Toml.parse` rewrite below: the same byte-index-scanner
+treatment applied to the remaining pure-March data-format parsers named in
+`specs/2026-07-26-string-performance-profile.md`.
+
+**`Yaml.parse`**: 5.56 allocs/byte before → **1.02 after** (5.4x), on a
+361-byte document, 2,000 iterations. Same char-list-and-append pattern as
+Json/Toml. Byte-value dispatch used `match` rather than `if`/`else-if`
+chains where practical, avoiding the chained-`if` end-counting pitfall
+that consumed most of the Toml rewrite's iteration count (see that section
+below). Verified against the existing `test_yaml.march` suite plus a 20-case
+round-trip corpus (block/flow structures, escapes, comments, document
+separators, multibyte UTF-8, malformed input).
+
+**`Xml.parse`**: 2.92 allocs/byte before → **0.10 after** (~29x), on a
+616-byte document, 2,000 iterations — the largest reduction of the batch.
+Entity-bearing text/attribute scanning uses `Json.scan_string`'s run-slicing
+scheme; comment/CDATA/PI bodies (no entities) collapse to one delimiter scan
+plus one slice. The output-side entity-escaping serializers had the same
+per-character bug and were fixed too. Verified against `test_xml.march` plus
+a 10-case round-trip corpus.
+
+**`Regex`**: a different shape from the others — a compiler (parser-shaped,
+same fix) plus a backtracking matcher (which re-sliced the haystack via
+`string_slice(s, pos, 1)` on every position probed, including every
+backtrack). Compile phase: 5.82 → **~0 allocs/pattern-byte**. Match phase
+(`find_all`+`replace_all`, 265-byte input): 1.215 → **0.064 allocs/input-byte**
+(~19x). Fix: `RALit`/`RAClass` now carry `Int` byte codes instead of 1-char
+`String`s. Verified against the existing 18-case `test_regex.march` suite
+plus a 62-case round-trip corpus (literals, classes, escapes, anchors,
+quantifiers, edge cases), interpreted and compiled.
+
+**`Uri.encode`/`decode`/`decode_query`**: 2.96 → **0.73 allocs/byte** (4.0x),
+on a 157-byte URL exercised through every public function, 5,000 iterations.
+Narrower in scope than the others — `Uri.parse`/`to_string`/`merge` already
+used segment-based splitting and needed no change; the cost was isolated to
+percent-encode/decode, including `decode_query`'s separate `string_replace_all`
+pre-pass for `+`-means-space, now folded into the same scan. Found (and left
+alone, pre-existing and out of scope) a real bug: `Uri.parse` mis-parses a
+scheme-less relative reference with no leading `/` as having an authority,
+which breaks `Uri.merge`'s dot-segment resolution over such references.
+
+**`Csv`**: measured, not touched. `read_all`/`each_row` are thin March
+wrappers around C-runtime builtins that already scan byte-at-a-time with a
+fixed stack buffer and one allocation per emitted field — 0.106 allocs/byte
+on a 284-byte document, already below where the other parsers land *after*
+their rewrites.
+
+All five changes verified together: combined `stdlib/{yaml,xml,regex,uri}.march`
+build cleanly against the already-landed `stdlib/toml.march` rewrite, and the
+full `dune build --root . @runtest` suite passes with only the pre-existing
+environmental `MARCH_SANITIZE` ASAN-timeout failure (confirmed unrelated by
+hanging an unrelated trivial `clang -fsanitize=address` binary identically).
+
+This closes the pure-March parser sweep from
+`specs/2026-07-26-string-performance-profile.md`: every format parser named
+there (`Json`, `Toml`, `Yaml`, `Xml`, `Regex`, `Uri`) is now either rewritten
+or confirmed already efficient (`Csv`).
+
 ## Current State (as of 2026-07-28, Toml.parse rewritten as a byte-index scanner)
 
 `Toml.parse` allocated **~3.7 heap strings per input byte** — worse than

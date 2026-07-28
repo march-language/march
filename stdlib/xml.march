@@ -37,187 +37,295 @@ mod Xml do
   -- Stack frame used by the iterative parser (open element being built).
   type XmlFrame = XmlFrame(String, List((String, String)), List(XmlNode))
 
-  -- ── Parser state ─────────────────────────────────────────────────────────
+  -- ── Scanning discipline ───────────────────────────────────────────────────
+  --
+  -- Byte-index cursor over the source string, following the pattern used for
+  -- Json.parse (commit 556cf7e9) and Toml.parse (commit "perf(toml): rewrite
+  -- parser as a byte-index scanner"): a scan step inspects bytes with
+  -- `string_byte_at` (no allocation) and each token is materialised with a
+  -- single `string_slice` (or, for text/attribute content containing entity
+  -- references, a handful of slices joined once). The previous parser did
+  -- `string_split(src, "")` up front and built every token via `acc ++ c` --
+  -- one fresh heap string per character, and O(n^2) copying for an n-byte
+  -- token.
+  --
+  -- Structural XML characters are all ASCII, and every byte of a multibyte
+  -- UTF-8 sequence is >= 0x80, so scanning raw bytes never mistakes a
+  -- multibyte character for a delimiter; multibyte text just passes through
+  -- inside a token slice untouched.
+  --
+  -- State is (src, byte_index, line, col). `col` counts BYTES rather than
+  -- decoded characters (a minor, deliberate divergence from the previous
+  -- char-list parser, matching the Json/Toml rewrites' precedent).
 
-  pfn make_state(src) do (string_split(src, ""), 1, 0) end
-  pfn state_line(st) do match st do (_, l, _) -> l end end
-  pfn state_col(st)  do match st do (_, _, c) -> c end end
-  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
+  -- ── Parser state ──────────────────────────────────────────────────────────
+
+  pfn make_state(src) do (src, 0, 1, 0) end
+
+  pfn st_line(st) do match st do (_, _, l, _) -> l end end
+  pfn st_col(st)  do match st do (_, _, _, c) -> c end end
+
+  pfn cur_byte(st) do
+    match st do (s, i, _, _) -> string_byte_at(s, i) end
+  end
 
   pfn advance(st) do
     match st do
-    (cs, line, col) ->
-      match cs do
-      Nil -> st
-      Cons(c, rest) ->
-        if c == "\n" do (rest, line + 1, 0)
-        else (rest, line, col + 1)
-        end
+    (s, i, line, col) ->
+      let b = string_byte_at(s, i)
+      if b < 0 do st
+      else if b == 10 do (s, i + 1, line + 1, 0)
+      else (s, i + 1, line, col + 1)
+      end end
+    end
+  end
+
+  pfn at_end(st) do cur_byte(st) < 0 end
+
+  -- The byte one past the cursor (used for two-character lookahead).
+  pfn next_byte(st) do
+    match st do (s, i, _, _) -> string_byte_at(s, i + 1) end
+  end
+
+  -- Recompute (line, col) after jumping the cursor to byte index `j`,
+  -- counting any newlines crossed. Used after a raw byte-index scan (which
+  -- never touches the state tuple) to rebuild a consistent state once.
+  pfn reposition_go(s, j, k, line, col) do
+    if k >= j do (s, j, line, col)
+    else
+      let b = string_byte_at(s, k)
+      if b == 10 do reposition_go(s, j, k + 1, line + 1, 0)
+      else reposition_go(s, j, k + 1, line, col + 1)
       end
     end
   end
 
-  pfn peek(st) do
-    match state_chars(st) do
-    Nil -> None
-    Cons(c, _) -> Some(c)
+  pfn reposition(st, j) do
+    match st do (s, i0, line0, col0) -> reposition_go(s, j, i0, line0, col0) end
+  end
+
+  pfn err(st, msg) do
+    Err(XmlError(msg, st_line(st), st_col(st)))
+  end
+
+  pfn err_at(st, fail_i, msg) do
+    err(reposition(st, fail_i), msg)
+  end
+
+  -- Byte width of the UTF-8 character starting with lead byte `b`. Used only
+  -- to slice a whole character back out for an error message.
+  pfn utf8_width(b) do
+    if b < 128 do 1
+    else if b < 224 do 2
+    else if b < 240 do 3
+    else 4 end end end
+  end
+
+  pfn char1(s, i) do string_slice(s, i, utf8_width(string_byte_at(s, i))) end
+
+  pfn char1_at(st) do
+    match st do (s, i, _, _) -> char1(s, i) end
+  end
+
+  -- ── Segment-slicing helpers (shared by text/attr-value scanners) ─────────
+
+  -- Push the run [start, i) onto `acc` (newest first) if it's non-empty.
+  pfn push_seg(s, start, i, acc) do
+    if i > start do Cons(string_slice(s, start, i - start), acc) else acc end
+  end
+
+  -- Materialise `acc` plus the trailing run [start, i): a single slice in the
+  -- common no-entity case, one string_join if the token was split by entity
+  -- references.
+  pfn finish_join(s, start, i, acc) do
+    match acc do
+    Nil -> string_slice(s, start, i - start)
+    _   -> string_join(List.reverse(push_seg(s, start, i, acc)), "")
     end
   end
 
-  pfn peek2(st) do
-    match state_chars(st) do
-    Cons(_, Cons(c, _)) -> Some(c)
-    _ -> None
+  -- Match a literal `lit` at byte `i`. Returns the index just past it, or -1
+  -- on mismatch. `lit` is itself indexed with string_byte_at, so no list of
+  -- expected chars is ever built.
+  pfn match_lit_go(s, i, lit, j) do
+    let e = string_byte_at(lit, j)
+    if e < 0 do i
+    else
+      let c = string_byte_at(s, i)
+      if c == e do match_lit_go(s, i + 1, lit, j + 1)
+      else -1
+      end
     end
   end
 
-  -- ── Char utilities ────────────────────────────────────────────────────────
-
-  pfn is_ws(c) do c == " " || c == "\t" || c == "\n" || c == "\r" end
-
-  pfn is_name_start(c) do
-    let n = char_to_int(c)
-    (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || c == "_" || c == ":"
+  -- True if `lit` matches starting at the cursor.
+  pfn starts_with(st, lit) do
+    match st do (s, i, _, _) -> match_lit_go(s, i, lit, 0) >= 0 end
   end
 
-  pfn is_name_char(c) do
-    let n = char_to_int(c)
+  -- Advance the cursor past `n` bytes of an already-matched ASCII literal
+  -- (never crosses a newline in practice, but reposition stays correct
+  -- either way).
+  pfn skip_n(st, n) do
+    match st do (_, i, _, _) -> reposition(st, i + n) end
+  end
+
+  -- Find the first byte index >= i at which `lit` matches, or -1 if `lit`
+  -- never occurs before the end of the string.
+  pfn find_lit(s, i, lit) do
+    if match_lit_go(s, i, lit, 0) >= 0 do i
+    else
+      let b = string_byte_at(s, i)
+      if b < 0 do -1
+      else find_lit(s, i + 1, lit)
+      end
+    end
+  end
+
+  -- Find the first ';' at or after byte index i, or -1 if none.
+  pfn find_semi(s, i) do
+    let b = string_byte_at(s, i)
+    if b < 0 do -1
+    else if b == 59 do i
+    else find_semi(s, i + 1)
+    end end
+  end
+
+  -- ── Byte-class predicates ─────────────────────────────────────────────────
+
+  pfn is_ws_byte(b) do b == 32 || b == 9 || b == 10 || b == 13 end
+
+  pfn is_name_start_byte(n) do
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n == 95 || n == 58
+  end
+
+  pfn is_name_char_byte(n) do
     (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || (n >= 48 && n <= 57) ||
-    c == "_" || c == ":" || c == "-" || c == "."
+    n == 95 || n == 58 || n == 45 || n == 46
   end
 
   -- ── Skip whitespace ───────────────────────────────────────────────────────
 
   pfn skip_ws(st) do
-    match peek(st) do
-    Some(c) ->
-      if is_ws(c) do skip_ws(advance(st))
-      else st
-      end
-    _ -> st
+    if is_ws_byte(cur_byte(st)) do skip_ws(advance(st))
+    else st
     end
   end
 
-  -- ── Collect name chars ────────────────────────────────────────────────────
+  -- ── Parse a name (tag name / attribute name) ─────────────────────────────
 
-  pfn collect_name(st, acc) do
-    match peek(st) do
-    Some(c) ->
-      if is_name_char(c) do collect_name(advance(st), acc ++ c)
-      else (acc, st)
-      end
-    _ -> (acc, st)
-    end
+  pfn name_end(s, i) do
+    if is_name_char_byte(string_byte_at(s, i)) do name_end(s, i + 1) else i end
   end
 
   pfn parse_name(st) do
-    match peek(st) do
-    None -> Err(XmlError("expected name but got end of input", state_line(st), state_col(st)))
-    Some(c) ->
-      if is_name_start(c) do
-        let p = collect_name(advance(st), c)
-        Ok(match p do (n, s) -> (n, s) end)
-      else Err(XmlError("expected name start char, got '" ++ c ++ "'", state_line(st), state_col(st)))
-      end
+    match st do
+    (s, i, _, _) ->
+      let b = string_byte_at(s, i)
+      if b < 0 do err(st, "expected name but got end of input")
+      else if is_name_start_byte(b) do
+        let j = name_end(s, i)
+        Ok((string_slice(s, i, j - i), reposition(st, j)))
+      else err(st, "expected name start char, got '" ++ char1_at(st) ++ "'")
+      end end
     end
   end
 
   -- ── Entity reference ──────────────────────────────────────────────────────
 
-  pfn parse_entity(st) do
-    -- Already consumed '&'. Reads until ';'.
-    match peek(st) do
-    None -> Err(XmlError("unterminated entity reference", state_line(st), state_col(st)))
-    Some("l") ->
+  -- `i` is the byte index right after '&'. Returns Ok((decoded, next_index))
+  -- or Err((message, failure_index)).
+  pfn parse_entity_at(s, i) do
+    let b = string_byte_at(s, i)
+    if b < 0 do Err(("unterminated entity reference", i))
+    else if b == 108 do
       -- &lt;
-      match state_chars(st) do
-      Cons(_, Cons("t", Cons(";", rest))) ->
-        Ok(("<", (rest, state_line(st), state_col(st) + 3)))
-      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      let j = match_lit_go(s, i, "lt;", 0)
+      if j < 0 do Err(("unknown entity", i))
+      else Ok(("<", j))
       end
-    Some("g") ->
+    else if b == 103 do
       -- &gt;
-      match state_chars(st) do
-      Cons(_, Cons("t", Cons(";", rest))) ->
-        Ok((">", (rest, state_line(st), state_col(st) + 3)))
-      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      let j = match_lit_go(s, i, "gt;", 0)
+      if j < 0 do Err(("unknown entity", i))
+      else Ok((">", j))
       end
-    Some("a") ->
+    else if b == 97 do
       -- &amp; or &apos;
-      match state_chars(st) do
-      Cons(_, Cons("m", Cons("p", Cons(";", rest)))) ->
-        Ok(("&", (rest, state_line(st), state_col(st) + 4)))
-      Cons(_, Cons("p", Cons("o", Cons("s", Cons(";", rest))))) ->
-        Ok(("'", (rest, state_line(st), state_col(st) + 5)))
-      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
-      end
-    Some("q") ->
-      -- &quot;
-      match state_chars(st) do
-      Cons(_, Cons("u", Cons("o", Cons("t", Cons(";", rest))))) ->
-        Ok(("\"", (rest, state_line(st), state_col(st) + 5)))
-      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
-      end
-    Some("#") ->
-      -- Numeric character reference: skip to ';' and return '?'
-      let st2 = advance(st)
-      match collect_until_semi(st2, "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (_, st3) -> Ok(("?", st3)) end
-      end
-    _ ->
-      -- Unknown entity: skip to ';'
-      match collect_until_semi(st, "") do
-      Err(e) -> Err(e)
-      Ok(p) -> match p do (_, st3) -> Ok(("?", st3)) end
-      end
-    end
-  end
-
-  pfn collect_until_semi(st, acc) do
-    match peek(st) do
-    None -> Err(XmlError("unterminated entity", state_line(st), state_col(st)))
-    Some(";") -> Ok((acc, advance(st)))
-    Some(c) -> collect_until_semi(advance(st), acc ++ c)
-    end
-  end
-
-  -- ── Collect text with entity expansion ───────────────────────────────────
-
-  pfn collect_text(st, acc, stop_at_lt) do
-    match peek(st) do
-    None -> Ok((acc, st))
-    Some("<") ->
-      if stop_at_lt do Ok((acc, st))
-      else collect_text(advance(st), acc ++ "<", stop_at_lt)
-      end
-    Some("&") ->
-      match parse_entity(advance(st)) do
-      Err(e) -> Err(e)
-      Ok(p) ->
-        match p do (ch, st2) -> collect_text(st2, acc ++ ch, stop_at_lt) end
-      end
-    Some(c) -> collect_text(advance(st), acc ++ c, stop_at_lt)
-    end
-  end
-
-  -- ── Collect attr value (stops at quote, expands entities) ────────────────
-
-  pfn collect_attr_value(st, acc, quote) do
-    match peek(st) do
-    None -> Err(XmlError("unterminated attribute value", state_line(st), state_col(st)))
-    Some(c) ->
-      if c == quote do Ok((acc, advance(st)))
+      let j1 = match_lit_go(s, i, "amp;", 0)
+      if j1 >= 0 do Ok(("&", j1))
       else
-        match c do
-        "&" ->
-          match parse_entity(advance(st)) do
-          Err(e) -> Err(e)
-          Ok(p) ->
-            match p do (ch, st2) -> collect_attr_value(st2, acc ++ ch, quote) end
-          end
-        _ -> collect_attr_value(advance(st), acc ++ c, quote)
+        let j2 = match_lit_go(s, i, "apos;", 0)
+        if j2 >= 0 do Ok(("'", j2))
+        else Err(("unknown entity", i))
         end
+      end
+    else if b == 113 do
+      -- &quot;
+      let j = match_lit_go(s, i, "quot;", 0)
+      if j < 0 do Err(("unknown entity", i))
+      else Ok(("\"", j))
+      end
+    else if b == 35 do
+      -- Numeric character reference: skip to ';' and return '?'
+      let j = find_semi(s, i + 1)
+      if j < 0 do Err(("unterminated entity", i))
+      else Ok(("?", j + 1))
+      end
+    else
+      -- Unknown entity: skip to ';'
+      let j = find_semi(s, i)
+      if j < 0 do Err(("unterminated entity", i))
+      else Ok(("?", j + 1))
+      end
+    end end end end end end end
+
+  -- ── Collect text with entity expansion (stops at '<') ────────────────────
+
+  pfn collect_text_go(s, i, start, acc) do
+    let b = string_byte_at(s, i)
+    if b < 0 do Ok((finish_join(s, start, i, acc), i))
+    else if b == 60 do Ok((finish_join(s, start, i, acc), i))
+    else if b == 38 do
+      match parse_entity_at(s, i + 1) do
+      Err(e) -> Err(e)
+      Ok((ch, ni)) -> collect_text_go(s, ni, ni, Cons(ch, push_seg(s, start, i, acc)))
+      end
+    else collect_text_go(s, i + 1, start, acc)
+    end end end
+  end
+
+  pfn collect_text(st) do
+    match st do
+    (s, i, _, _) ->
+      match collect_text_go(s, i, i, Nil) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
+      end
+    end
+  end
+
+  -- ── Collect attr value (stops at quote byte, expands entities) ───────────
+
+  pfn collect_attr_value_go(s, i, start, acc, quote_byte) do
+    let b = string_byte_at(s, i)
+    if b < 0 do Err(("unterminated attribute value", i))
+    else if b == quote_byte do Ok((finish_join(s, start, i, acc), i + 1))
+    else if b == 38 do
+      match parse_entity_at(s, i + 1) do
+      Err(e) -> Err(e)
+      Ok((ch, ni)) -> collect_attr_value_go(s, ni, ni, Cons(ch, push_seg(s, start, i, acc)), quote_byte)
+      end
+    else collect_attr_value_go(s, i + 1, start, acc, quote_byte)
+    end end end
+  end
+
+  pfn collect_attr_value(st, quote_byte) do
+    match st do
+    (s, i, _, _) ->
+      match collect_attr_value_go(s, i, i, Nil, quote_byte) do
+      Err((msg, fi)) -> err_at(st, fi, msg)
+      Ok((v, j)) -> Ok((v, reposition(st, j)))
       end
     end
   end
@@ -226,115 +334,80 @@ mod Xml do
 
   pfn parse_attrs(st, acc) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None -> Err(XmlError("unexpected EOF in attributes", state_line(st1), state_col(st1)))
-    Some("/") -> Ok((List.reverse(acc), st1))
-    Some(">") -> Ok((List.reverse(acc), st1))
-    Some(c) ->
-      if is_name_start(c) do
-        match parse_name(st1) do
-        Err(e) -> Err(e)
-        Ok(p) ->
-          match p do
-          (attr_name, st2) ->
-            let st3 = skip_ws(st2)
-            match peek(st3) do
-            Some("=") ->
-              let st4 = skip_ws(advance(st3))
-              match peek(st4) do
-              Some("\"") ->
-                match collect_attr_value(advance(st4), "", "\"") do
-                Err(e) -> Err(e)
-                Ok(p2) ->
-                  match p2 do
-                  (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
-                  end
+    let b = cur_byte(st1)
+    if b < 0 do err(st1, "unexpected EOF in attributes")
+    else if b == 47 do Ok((List.reverse(acc), st1))
+    else if b == 62 do Ok((List.reverse(acc), st1))
+    else if is_name_start_byte(b) do
+      match parse_name(st1) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (attr_name, st2) ->
+          let st3 = skip_ws(st2)
+          if cur_byte(st3) == 61 do
+            let st4 = skip_ws(advance(st3))
+            let b4 = cur_byte(st4)
+            if b4 == 34 do
+              match collect_attr_value(advance(st4), 34) do
+              Err(e) -> Err(e)
+              Ok(p2) ->
+                match p2 do
+                (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
                 end
-              Some("'") ->
-                match collect_attr_value(advance(st4), "", "'") do
-                Err(e) -> Err(e)
-                Ok(p2) ->
-                  match p2 do
-                  (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
-                  end
-                end
-              _ -> Err(XmlError("expected quote after '='", state_line(st4), state_col(st4)))
               end
-            _ ->
-              -- Boolean attribute (no value)
-              parse_attrs(st3, Cons((attr_name, ""), acc))
-            end
+            else if b4 == 39 do
+              match collect_attr_value(advance(st4), 39) do
+              Err(e) -> Err(e)
+              Ok(p2) ->
+                match p2 do
+                (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
+                end
+              end
+            else err(st4, "expected quote after '='")
+            end end
+          else
+            -- Boolean attribute (no value)
+            parse_attrs(st3, Cons((attr_name, ""), acc))
           end
         end
-      else Err(XmlError("unexpected '" ++ c ++ "' in attributes", state_line(st1), state_col(st1)))
       end
-    end
-  end
-
-  -- ── Advance past N chars ──────────────────────────────────────────────────
-
-  pfn advance_n(st, n) do
-    if n <= 0 do st
-    else advance_n(advance(st), n - 1)
-    end
-  end
-
-  -- ── Check if next chars match a target string ─────────────────────────────
-
-  pfn starts_with_chars(st, target) do
-    let chars = string_split(target, "")
-    check_prefix(state_chars(st), chars)
-  end
-
-  pfn check_prefix(cs, target) do
-    match target do
-    Nil -> true
-    Cons(t, rest) ->
-      match cs do
-      Nil -> false
-      Cons(c, crest) ->
-        if c == t do check_prefix(crest, rest)
-        else false
-        end
-      end
-    end
+    else err(st1, "unexpected '" ++ char1_at(st1) ++ "' in attributes")
+    end end end end
   end
 
   -- ── Collect comment body <!-- ... --> ────────────────────────────────────
 
-  pfn collect_comment_body(st, acc) do
-    if starts_with_chars(st, "-->") do
-      Ok((acc, advance_n(st, 3)))
-    else
-      match peek(st) do
-      None -> Err(XmlError("unterminated comment", state_line(st), state_col(st)))
-      Some(c) -> collect_comment_body(advance(st), acc ++ c)
+  pfn collect_comment_body(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = find_lit(s, i, "-->")
+      if j < 0 do err(st, "unterminated comment")
+      else Ok((string_slice(s, i, j - i), reposition(st, j + 3)))
       end
     end
   end
 
   -- ── Collect CDATA body <![CDATA[ ... ]]> ─────────────────────────────────
 
-  pfn collect_cdata_body(st, acc) do
-    if starts_with_chars(st, "]]>") do
-      Ok((acc, advance_n(st, 3)))
-    else
-      match peek(st) do
-      None -> Err(XmlError("unterminated CDATA", state_line(st), state_col(st)))
-      Some(c) -> collect_cdata_body(advance(st), acc ++ c)
+  pfn collect_cdata_body(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = find_lit(s, i, "]]>")
+      if j < 0 do err(st, "unterminated CDATA")
+      else Ok((string_slice(s, i, j - i), reposition(st, j + 3)))
       end
     end
   end
 
   -- ── Collect PI body <?target data?> ──────────────────────────────────────
 
-  pfn collect_pi_body(st, acc) do
-    if starts_with_chars(st, "?>") do
-      Ok((acc, advance_n(st, 2)))
-    else
-      match peek(st) do
-      None -> Err(XmlError("unterminated PI", state_line(st), state_col(st)))
-      Some(c) -> collect_pi_body(advance(st), acc ++ c)
+  pfn collect_pi_body(st) do
+    match st do
+    (s, i, _, _) ->
+      let j = find_lit(s, i, "?>")
+      if j < 0 do err(st, "unterminated PI")
+      else Ok((string_slice(s, i, j - i), reposition(st, j + 2)))
       end
     end
   end
@@ -346,17 +419,17 @@ mod Xml do
   -- any legitimate DOCTYPE declaration.
   pfn skip_doctype(st, depth, max_chars) do
     if max_chars == 0 do
-      Err(XmlError("DOCTYPE too large", state_line(st), state_col(st)))
+      err(st, "DOCTYPE too large")
     else
-      match peek(st) do
-      None -> Err(XmlError("unterminated DOCTYPE", state_line(st), state_col(st)))
-      Some(">") ->
+      let b = cur_byte(st)
+      if b < 0 do err(st, "unterminated DOCTYPE")
+      else if b == 62 do
         if depth == 0 do Ok(advance(st))
         else skip_doctype(advance(st), depth - 1, max_chars - 1)
         end
-      Some("[") -> skip_doctype(advance(st), depth + 1, max_chars - 1)
-      _ -> skip_doctype(advance(st), depth, max_chars - 1)
-      end
+      else if b == 91 do skip_doctype(advance(st), depth + 1, max_chars - 1)
+      else skip_doctype(advance(st), depth, max_chars - 1)
+      end end end
     end
   end
 
@@ -372,195 +445,188 @@ mod Xml do
 
   pfn xml_loop(st, stack) do
     let st1 = skip_ws(st)
-    match peek(st1) do
-    None ->
+    let b = cur_byte(st1)
+    if b < 0 do
       match stack do
-      Nil -> Err(XmlError("empty document: no root element", state_line(st1), state_col(st1)))
+      Nil -> err(st1, "empty document: no root element")
       Cons(XmlFrame(t, _, _), _) ->
-        Err(XmlError("unexpected EOF: unclosed tag <" ++ t ++ ">", state_line(st1), state_col(st1)))
+        err(st1, "unexpected EOF: unclosed tag <" ++ t ++ ">")
       end
-    Some(c) ->
-      if c == "<" do
-        let st2 = advance(st1)
-        match peek(st2) do
+    else if b == 60 do
+      let st2 = advance(st1)
+      let b2 = cur_byte(st2)
 
-        Some("/") ->
-          -- Closing tag </name>
-          let st3 = advance(st2)
-          match parse_name(st3) do
-          Err(e) -> Err(e)
-          Ok(pname) ->
-            match pname do
-            (close_name, st4) ->
-              let st5 = skip_ws(st4)
-              match peek(st5) do
-              Some(">") ->
-                let st6 = advance(st5)
-                match stack do
-                Nil ->
-                  Err(XmlError("unexpected closing tag </" ++ close_name ++ ">", state_line(st5), state_col(st5)))
-                Cons(XmlFrame(open_name, attrs, rev_kids), parent_stack) ->
-                  if close_name != open_name do
-                    Err(XmlError("mismatched tag: </" ++ open_name ++ "> expected, got </" ++ close_name ++ ">", state_line(st5), state_col(st5)))
-                  else
-                    let element = Element(open_name, attrs, List.reverse(rev_kids))
-                    match parent_stack do
-                    Nil ->
-                      -- Root element complete; only whitespace/EOF may follow
-                      let st7 = skip_ws(st6)
-                      match peek(st7) do
-                      None -> Ok(element)
-                      _ -> Err(XmlError("trailing content after root element", state_line(st7), state_col(st7)))
-                      end
-                    Cons(XmlFrame(pt, pa, pkids), gps) ->
-                      xml_loop(st6, Cons(XmlFrame(pt, pa, Cons(element, pkids)), gps))
+      if b2 == 47 do
+        -- Closing tag </name>
+        let st3 = advance(st2)
+        match parse_name(st3) do
+        Err(e) -> Err(e)
+        Ok(pname) ->
+          match pname do
+          (close_name, st4) ->
+            let st5 = skip_ws(st4)
+            if cur_byte(st5) == 62 do
+              let st6 = advance(st5)
+              match stack do
+              Nil ->
+                err(st5, "unexpected closing tag </" ++ close_name ++ ">")
+              Cons(XmlFrame(open_name, attrs, rev_kids), parent_stack) ->
+                if close_name != open_name do
+                  err(st5, "mismatched tag: </" ++ open_name ++ "> expected, got </" ++ close_name ++ ">")
+                else
+                  let element = Element(open_name, attrs, List.reverse(rev_kids))
+                  match parent_stack do
+                  Nil ->
+                    -- Root element complete; only whitespace/EOF may follow
+                    let st7 = skip_ws(st6)
+                    if at_end(st7) do Ok(element)
+                    else err(st7, "trailing content after root element")
                     end
+                  Cons(XmlFrame(pt, pa, pkids), gps) ->
+                    xml_loop(st6, Cons(XmlFrame(pt, pa, Cons(element, pkids)), gps))
                   end
                 end
-              _ -> Err(XmlError("expected '>' after closing tag name", state_line(st5), state_col(st5)))
               end
+            else err(st5, "expected '>' after closing tag name")
             end
           end
+        end
 
-        Some("!") ->
-          let st3 = advance(st2)
-          match peek(st3) do
-          Some("-") ->
-            -- Comment: <!--
-            match peek2(st3) do
-            Some("-") ->
-              match collect_comment_body(advance_n(st3, 2), "") do
-              Err(e) -> Err(e)
-              Ok(p) ->
-                match p do
-                (body, st4) ->
-                  match stack do
-                  Nil -> xml_loop(st4, stack)
-                  Cons(XmlFrame(t, a, kids), rest) ->
-                    xml_loop(st4, Cons(XmlFrame(t, a, Cons(Comment(body), kids)), rest))
-                  end
-                end
-              end
-            _ -> Err(XmlError("expected '--' for comment", state_line(st3), state_col(st3)))
-            end
-          Some("[") ->
-            -- CDATA: <![CDATA[
-            if starts_with_chars(st3, "[CDATA[") do
-              match collect_cdata_body(advance_n(st3, 7), "") do
-              Err(e) -> Err(e)
-              Ok(p) ->
-                match p do
-                (body, st4) ->
-                  match stack do
-                  Nil -> Err(XmlError("CDATA before root element", state_line(st3), state_col(st3)))
-                  Cons(XmlFrame(t, a, kids), rest) ->
-                    xml_loop(st4, Cons(XmlFrame(t, a, Cons(CData(body), kids)), rest))
-                  end
-                end
-              end
-            else Err(XmlError("expected CDATA section", state_line(st3), state_col(st3)))
-            end
-          _ ->
-            -- DOCTYPE or other declaration: skip to matching '>'
-            match skip_doctype(st3, 0, 65536) do
+      else if b2 == 33 do
+        let st3 = advance(st2)
+        let b3 = cur_byte(st3)
+        if b3 == 45 do
+          -- Comment: <!--
+          if next_byte(st3) == 45 do
+            match collect_comment_body(advance(advance(st3))) do
             Err(e) -> Err(e)
-            Ok(st4) -> xml_loop(st4, stack)
+            Ok(p) ->
+              match p do
+              (body, st4) ->
+                match stack do
+                Nil -> xml_loop(st4, stack)
+                Cons(XmlFrame(t, a, kids), rest) ->
+                  xml_loop(st4, Cons(XmlFrame(t, a, Cons(Comment(body), kids)), rest))
+                end
+              end
             end
+          else err(st3, "expected '--' for comment")
           end
-
-        Some("?") ->
-          -- Processing instruction
-          let st3 = advance(st2)
-          match parse_name(st3) do
+        else if b3 == 91 do
+          -- CDATA: <![CDATA[
+          if starts_with(st3, "[CDATA[") do
+            match collect_cdata_body(skip_n(st3, 7)) do
+            Err(e) -> Err(e)
+            Ok(p) ->
+              match p do
+              (body, st4) ->
+                match stack do
+                Nil -> err(st3, "CDATA before root element")
+                Cons(XmlFrame(t, a, kids), rest) ->
+                  xml_loop(st4, Cons(XmlFrame(t, a, Cons(CData(body), kids)), rest))
+                end
+              end
+            end
+          else err(st3, "expected CDATA section")
+          end
+        else
+          -- DOCTYPE or other declaration: skip to matching '>'
+          match skip_doctype(st3, 0, 65536) do
           Err(e) -> Err(e)
-          Ok(p) ->
-            match p do
-            (pi_target, st4) ->
-              let st5 = skip_ws(st4)
-              match collect_pi_body(st5, "") do
-              Err(e) -> Err(e)
-              Ok(p2) ->
-                match p2 do
-                (pi_data, st6) ->
-                  match stack do
-                  Nil -> xml_loop(st6, stack)
-                  Cons(XmlFrame(t, a, kids), rest) ->
-                    xml_loop(st6, Cons(XmlFrame(t, a, Cons(ProcessingInstruction(pi_target, pi_data), kids)), rest))
-                  end
+          Ok(st4) -> xml_loop(st4, stack)
+          end
+        end end
+
+      else if b2 == 63 do
+        -- Processing instruction
+        let st3 = advance(st2)
+        match parse_name(st3) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (pi_target, st4) ->
+            let st5 = skip_ws(st4)
+            match collect_pi_body(st5) do
+            Err(e) -> Err(e)
+            Ok(p2) ->
+              match p2 do
+              (pi_data, st6) ->
+                match stack do
+                Nil -> xml_loop(st6, stack)
+                Cons(XmlFrame(t, a, kids), rest) ->
+                  xml_loop(st6, Cons(XmlFrame(t, a, Cons(ProcessingInstruction(pi_target, pi_data), kids)), rest))
                 end
               end
             end
           end
-
-        _ ->
-          -- Opening element tag (or the root element)
-          match parse_name(st2) do
-          Err(e) -> Err(e)
-          Ok(p) ->
-            match p do
-            (tag_name, st3) ->
-              let st4 = skip_ws(st3)
-              match parse_attrs(st4, []) do
-              Err(e) -> Err(e)
-              Ok(p2) ->
-                match p2 do
-                (attrs, st5) ->
-                  match peek(st5) do
-                  Some("/") ->
-                    -- Self-closing <tag ... />
-                    let st6 = advance(st5)
-                    match peek(st6) do
-                    Some(">") ->
-                      let st7 = advance(st6)
-                      let self_elem = Element(tag_name, attrs, [])
-                      match stack do
-                      Nil ->
-                        let st8 = skip_ws(st7)
-                        match peek(st8) do
-                        None -> Ok(self_elem)
-                        _ -> Err(XmlError("trailing content after root element", state_line(st8), state_col(st8)))
-                        end
-                      Cons(XmlFrame(t, a, kids), rest) ->
-                        xml_loop(st7, Cons(XmlFrame(t, a, Cons(self_elem, kids)), rest))
-                      end
-                    _ -> Err(XmlError("expected '>' after '/'", state_line(st6), state_col(st6)))
-                    end
-                  Some(">") ->
-                    -- Opening tag: push new frame
-                    xml_loop(advance(st5), Cons(XmlFrame(tag_name, attrs, []), stack))
-                  Some(bad) ->
-                    Err(XmlError("unexpected '" ++ bad ++ "' in tag", state_line(st5), state_col(st5)))
-                  None ->
-                    Err(XmlError("unexpected EOF in tag", state_line(st5), state_col(st5)))
-                  end
-                end
-              end
-            end
-          end
-
         end
+
       else
-        -- Text content (including entities)
-        match stack do
-        Nil ->
-          Err(XmlError("text content before root element", state_line(st1), state_col(st1)))
-        Cons(XmlFrame(t, a, kids), rest) ->
-          match collect_text(st1, "", true) do
-          Err(e) -> Err(e)
-          Ok(p) ->
-            match p do
-            (txt, st2) ->
-              let new_kids =
-                match txt do
-                "" -> kids
-                _  -> Cons(Text(txt), kids)
-                end
-              xml_loop(st2, Cons(XmlFrame(t, a, new_kids), rest))
+        -- Opening element tag (or the root element)
+        match parse_name(st2) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (tag_name, st3) ->
+            let st4 = skip_ws(st3)
+            match parse_attrs(st4, []) do
+            Err(e) -> Err(e)
+            Ok(p2) ->
+              match p2 do
+              (attrs, st5) ->
+                let b5 = cur_byte(st5)
+                if b5 == 47 do
+                  -- Self-closing <tag ... />
+                  let st6 = advance(st5)
+                  if cur_byte(st6) == 62 do
+                    let st7 = advance(st6)
+                    let self_elem = Element(tag_name, attrs, [])
+                    match stack do
+                    Nil ->
+                      let st8 = skip_ws(st7)
+                      if at_end(st8) do Ok(self_elem)
+                      else err(st8, "trailing content after root element")
+                      end
+                    Cons(XmlFrame(t, a, kids), rest) ->
+                      xml_loop(st7, Cons(XmlFrame(t, a, Cons(self_elem, kids)), rest))
+                    end
+                  else err(st6, "expected '>' after '/'")
+                  end
+                else if b5 == 62 do
+                  -- Opening tag: push new frame
+                  xml_loop(advance(st5), Cons(XmlFrame(tag_name, attrs, []), stack))
+                else if b5 < 0 do
+                  err(st5, "unexpected EOF in tag")
+                else
+                  err(st5, "unexpected '" ++ char1_at(st5) ++ "' in tag")
+                end end end
+              end
             end
+          end
+        end
+      end end end
+
+    else
+      -- Text content (including entities)
+      match stack do
+      Nil ->
+        err(st1, "text content before root element")
+      Cons(XmlFrame(t, a, kids), rest) ->
+        match collect_text(st1) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (txt, st2) ->
+            let new_kids =
+              match txt do
+              "" -> kids
+              _  -> Cons(Text(txt), kids)
+              end
+            xml_loop(st2, Cons(XmlFrame(t, a, new_kids), rest))
           end
         end
       end
-    end
+    end end
   end
 
   -- ── Public API ────────────────────────────────────────────────────────────
@@ -734,30 +800,30 @@ mod Xml do
 
   -- ── Serialization ─────────────────────────────────────────────────────────
 
-  pfn escape_xml_text(s) do
-    let chars = string_split(s, "")
-    let escaped = List.map(chars, fn c ->
-      match c do
-      "<" -> "&lt;"
-      ">" -> "&gt;"
-      "&" -> "&amp;"
-      _   -> c
-      end)
-    String.join(escaped, "")
+  pfn escape_xml_text_go(s, i, start, acc) do
+    let b = string_byte_at(s, i)
+    if b < 0 do finish_join(s, start, i, acc)
+    else if b == 60 do escape_xml_text_go(s, i + 1, i + 1, Cons("&lt;", push_seg(s, start, i, acc)))
+    else if b == 62 do escape_xml_text_go(s, i + 1, i + 1, Cons("&gt;", push_seg(s, start, i, acc)))
+    else if b == 38 do escape_xml_text_go(s, i + 1, i + 1, Cons("&amp;", push_seg(s, start, i, acc)))
+    else escape_xml_text_go(s, i + 1, start, acc)
+    end end end end
   end
 
-  pfn escape_xml_attr(s) do
-    let chars = string_split(s, "")
-    let escaped = List.map(chars, fn c ->
-      match c do
-      "<"  -> "&lt;"
-      ">"  -> "&gt;"
-      "&"  -> "&amp;"
-      "\"" -> "&quot;"
-      _    -> c
-      end)
-    String.join(escaped, "")
+  pfn escape_xml_text(s) do escape_xml_text_go(s, 0, 0, Nil) end
+
+  pfn escape_xml_attr_go(s, i, start, acc) do
+    let b = string_byte_at(s, i)
+    if b < 0 do finish_join(s, start, i, acc)
+    else if b == 60 do escape_xml_attr_go(s, i + 1, i + 1, Cons("&lt;", push_seg(s, start, i, acc)))
+    else if b == 62 do escape_xml_attr_go(s, i + 1, i + 1, Cons("&gt;", push_seg(s, start, i, acc)))
+    else if b == 38 do escape_xml_attr_go(s, i + 1, i + 1, Cons("&amp;", push_seg(s, start, i, acc)))
+    else if b == 34 do escape_xml_attr_go(s, i + 1, i + 1, Cons("&quot;", push_seg(s, start, i, acc)))
+    else escape_xml_attr_go(s, i + 1, start, acc)
+    end end end end end
   end
+
+  pfn escape_xml_attr(s) do escape_xml_attr_go(s, 0, 0, Nil) end
 
   pfn node_to_string(node) do
     match node do

@@ -75,6 +75,19 @@ git log is authoritative for exact commits.
   is unchanged semantically; `TomlError` column numbers now count bytes
   rather than decoded characters, matching `Json.parse`'s precedent.
 
+- **`Yaml.parse` allocates ~5.4x fewer strings** (5.56 → 1.02 allocs/byte,
+  361-byte document, 2,000 iterations), **`Xml.parse` ~29x fewer** (2.92 →
+  0.10 allocs/byte, 616-byte document), and **`Regex` compile/match ~19x
+  fewer** (compile: 5.82 → ~0 allocs/pattern-byte; match: 1.215 → 0.064
+  allocs/input-byte) — the same byte-index-scanner rewrite as `Json.parse`/
+  `Toml.parse`, applied to the remaining pure-March parsers. `Uri.encode`/
+  `decode`/`decode_query` (the only parts of `Uri` that had the per-byte
+  pattern — `parse`/`to_string`/`merge` were already segment-based) go 4.0x
+  fewer (2.96 → 0.73 allocs/byte). `Csv.read_all`/`each_row` were measured
+  and left unchanged — already byte-at-a-time in the C runtime with no
+  per-character March-level accumulation (0.106 allocs/byte). Parsing is
+  unchanged semantically for all of these.
+
 - **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
   parser used to begin with `string_split(src, "")`, exploding the document
   into one heap string per byte, so its cost scaled with the size of the input
