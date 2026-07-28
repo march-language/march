@@ -179,16 +179,9 @@ mod Json do
     else i end
   end
 
-  -- Error message quoting the number occupying [start, e).
-  --
-  -- Returns the message, NOT an `Err`: returning `Err(msg)` here would give
-  -- this helper the type `Result(a, String)`, polymorphic in the Ok payload it
-  -- never produces, and instantiating that fresh at every call site made
-  -- typechecking a caller of `Json.parse` blow up — six call sites of one
-  -- Json-returning helper went from ~1.5s to non-terminating.  Callers wrap it
-  -- in `Err` themselves so the type stays monomorphic.
+  -- The number occupying [start, e) — used to quote the offender in errors.
   pfn bad_number(s, start, e) do
-    "invalid number: " ++ string_slice(s, start, e - start)
+    Err("invalid number: " ++ string_slice(s, start, e - start))
   end
 
   -- int = "0" / (digit1-9 *DIGIT).  A leading zero may not be followed by
@@ -201,14 +194,14 @@ mod Json do
             ++ string_slice(s, start, i + 2 - start))
       else Ok(i + 1) end
     else if is_digit_byte(c) do Ok(scan_digits(s, i + 1))
-    else Err(bad_number(s, start, i + 1)) end end
+    else bad_number(s, start, i + 1) end end
   end
 
   -- frac = "." 1*DIGIT.  Absent is fine; a '.' with no digits after it is not.
   pfn scan_frac(s, i, start) do
     if string_byte_at(s, i) == 46 do
       let e = scan_digits(s, i + 1)
-      if e == i + 1 do Err(bad_number(s, start, e))
+      if e == i + 1 do bad_number(s, start, e)
       else Ok(e) end
     else Ok(i) end
   end
@@ -223,7 +216,7 @@ mod Json do
       let sgn = string_byte_at(s, i + 1)
       let d0 = if sgn == 43 || sgn == 45 do i + 2 else i + 1 end
       let e = scan_digits(s, d0)
-      if e == d0 do Err(bad_number(s, start, e))
+      if e == d0 do bad_number(s, start, e)
       else Ok(e) end
     else Ok(i) end
   end
