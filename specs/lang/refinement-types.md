@@ -796,6 +796,15 @@ refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
   skipped (solver-undecided): 27
 ```
 
+> **Clear `.march/cas/artifacts-v2` first.** A `--check` run whose sources hash to
+> an artifact already in the CAS exits immediately, before parsing — so the
+> report never runs and the command prints **nothing** while still exiting 0.
+> That is indistinguishable from "no obligations found", which is precisely the
+> ambiguity this flag exists to remove, so always run it against a cold check
+> cache. (`.march/cas/vc` is a *different* cache — solver verdicts, not check
+> artifacts. Clearing it forces z3 to re-decide; it does not affect whether the
+> report prints.)
+
 Two slices are printed because the compiler prepends the whole standard library
 to every compilation: **user code** counts only obligations raised at call sites
 in the file you named, **user + stdlib** counts every obligation raised in the

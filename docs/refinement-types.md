@@ -173,21 +173,28 @@ standard library's own. If your program defines its own `List.length`, ships a f
 dropped for that whole module and you're back to the older behaviour: the obligation
 is skipped, quietly, rather than proved.
 
-The same holds for strings — `String.byte_size` (and the `string_byte_length`
-builtin) are names for `len` over a `String`:
+### The same for strings — but only the byte-valued names
+
+`len` measures a `String` too, and the same connection is made for
+`String.byte_size` and the `string_byte_length` builtin:
 
 ```march
+fn slug(s : {String | len(_) > 0}) : String do String.slice(s, 0, 1) end
+
 fn label(t : String) : String do
   if String.byte_size(t) > 0 do slug(t) else "?" end   -- proved
 end
 ```
 
-Note that `len` on a String counts **bytes**, so only byte-valued spellings get this
-treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"` where
-`String.byte_size` returns 2 — and is left alone. So is `string_length`: it happens to
-be a byte length today, but the *name* suggests characters, and a connection made on
-a name that might later be corrected is a bug waiting to happen. Reach for
-`String.byte_size` in a guard; it says what it means.
+Swap the guard for `String.byte_size(t) == 0` and that call becomes a compile error,
+the same way it does for lists.
+
+The catch is that `len` on a String counts **bytes**, so only byte-valued names get
+this treatment. `String.codepoint_count` counts codepoints — it returns 1 for `"é"`
+where `String.byte_size` returns 2 — and is left alone. So is `string_length`: it
+happens to be a byte length today, but the *name* suggests characters, and a
+connection made on a name that might later be corrected is a bug waiting to happen.
+Reach for `String.byte_size` in a guard; it says what it means.
 
 `match` arm guards (`when`) work the same way. An `assert(p)` acts as an
 **assume** — it injects `p` as a fact for the code that follows:
@@ -479,6 +486,14 @@ refinement obligations (user + stdlib): 8 proved, 0 violated, 28 skipped
   skipped (unreflectable-predicate): 1
   skipped (solver-undecided): 27
 ```
+
+One wrinkle to know before you run it: clear `.march/cas/artifacts-v2` first. A
+`--check` whose sources are already in the build cache exits straight away, before
+anything is parsed — so the report never runs and you get **no output at all**, while
+still exiting 0. That looks exactly like "nothing to report", which is the very
+confusion this flag exists to clear up. (`.march/cas/vc` is a different cache, holding
+solver verdicts; clearing that one makes z3 re-decide, but doesn't change whether the
+report prints.)
 
 You get two counts because the compiler quietly prepends the whole standard library to
 every compilation. **User code** counts only the call sites in the file you named —

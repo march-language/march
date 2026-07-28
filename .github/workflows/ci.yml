@@ -144,6 +144,15 @@ jobs:
           # this is a CEILING on skips, so it may only ever be revised DOWN.
           baseline=28
           dune build bin/main.exe
+          # A `--check` whose sources hash to an artifact already in the CAS
+          # exits BEFORE parsing (bin/main.ml, the `do_check` lookup), so the
+          # report never runs and the command prints nothing while exiting 0.
+          # `--refine-report` is not part of the cache key, so a plain `--check`
+          # from an earlier step is enough to poison this one. Clear the check
+          # artifacts so the measurement is always real. NOTE this is
+          # artifacts-v2, not `.march/cas/vc` — vc holds solver verdicts and has
+          # no bearing on whether the report prints.
+          rm -rf .march/cas/artifacts-v2
           ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
             > /tmp/refine.txt 2>&1 || true
           cat /tmp/refine.txt
@@ -156,8 +165,13 @@ jobs:
             /tmp/refine.txt)
           if [ -z "$skipped" ]; then
             echo "FAIL: could not find the 'user + stdlib' line in --refine-report output."
-            echo "Either the report's format changed (update the sed above) or the"
-            echo "compiler errored before printing it. This step must never pass vacuously."
+            echo "Three things produce that, in order of likelihood:"
+            echo "  a. the run hit the --check CAS and short-circuited before the"
+            echo "     report — clear .march/cas/artifacts-v2 (the rm above should"
+            echo "     already do this; check it did not get dropped);"
+            echo "  b. the compiler errored before printing;"
+            echo "  c. the report's format changed — update the sed above."
+            echo "This step must never pass vacuously."
             exit 1
           fi
           echo "skipped=$skipped (ceiling: $baseline)"
@@ -170,9 +184,15 @@ jobs:
             echo "stance turns an undischarged obligation into silence."
             echo ""
             echo "What to do:"
-            echo "  1. Run it locally:  ./_build/default/bin/main.exe --check \\"
-            echo "                        --refine-report stdlib/list.march"
-            echo "     (clear .march/cas/vc first if you want a cold, uncached verdict)"
+            echo "  1. Run it locally, against a COLD CHECK CACHE:"
+            echo "       rm -rf .march/cas/artifacts-v2"
+            echo "       ./_build/default/bin/main.exe --check \\"
+            echo "         --refine-report stdlib/list.march"
+            echo "     Without that rm, a cached --check exits before the report runs"
+            echo "     and you get empty output, not a smaller number. Add"
+            echo "     'rm -rf .march/cas/vc' as well only if you want z3 to re-decide"
+            echo "     from scratch — that is a separate cache and does not affect"
+            echo "     whether the report prints at all."
             echo "  2. Diff the per-reason breakdown against the baseline above. A jump"
             echo "     in 'solver-undecided' usually means a measure alias was withdrawn"
             echo "     or a guard stopped reflecting; 'unreflectable-predicate' means a"
