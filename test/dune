@@ -1789,6 +1789,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action
   (diff native/single_use_inline_rc.expected native_single_use_inline_rc.out)))
 
+; ── Tuple projection forwarding: a tuple literal immediately destructured ──
+; ── compiles and runs identically whether or not the intermediate tuple  ──
+; ── binding survives DCE.                                                ──
+(rule
+ (targets native_tuple_destructure_dce native_tuple_destructure_dce.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/tuple_destructure_dce.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (run %{exe:../bin/main.exe} --compile -o native_tuple_destructure_dce
+         native/tuple_destructure_dce.march)
+    (with-stdout-to native_tuple_destructure_dce.out
+         (system "./native_tuple_destructure_dce"))))))
+
+(rule
+ (alias runtest)
+ (deps native_tuple_destructure_dce.out native/tuple_destructure_dce.expected)
+ (action (diff native/tuple_destructure_dce.expected native_tuple_destructure_dce.out)))
+
 ; ── P6 Milestone 2: Option niche (None=0, Some(x)=x) — safe_div + greet. ──
 (rule
  (targets native_option_niche native_option_niche.out)

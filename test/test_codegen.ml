@@ -5399,6 +5399,55 @@ let test_cprop_tuple_field_result_escape_unchanged () =
    | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 7))) -> ()
    | e -> Alcotest.failf "expected t.$fv0=7, got: %s" (March_tir.Tir.show_expr e))
 
+let test_cprop_tuple_dce_removes_allocation_from_llvm () =
+  (* let t = (x, y) in let a = t.$fv0 in let b = t.$fv1 in a + b
+     After the full Opt fixed point, CProp folds both projections to x/y,
+     t becomes provably unused, and DCE removes the ETuple binding in the
+     same iteration — assert the emitted LLVM for tuple_sum contains no
+     struct field load (getelementptr) at all. *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let ty_t = March_tir.Tir.TTuple [March_tir.Tir.TInt; March_tir.Tir.TInt] in
+  let t = mk_var "t" ty_t in
+  let field0 = March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 0) in
+  let field1 = March_tir.Tir.EField (March_tir.Tir.AVar t, March_tir.Tir_names.fv_field 1) in
+  let a = mk_var "a" March_tir.Tir.TInt in
+  let b = mk_var "b" March_tir.Tir.TInt in
+  let final_body =
+    March_tir.Tir.ELet (t, March_tir.Tir.ETuple [March_tir.Tir.AVar x; March_tir.Tir.AVar y],
+      March_tir.Tir.ELet (a, field0,
+        March_tir.Tir.ELet (b, field1,
+          app "+" [March_tir.Tir.AVar a; March_tir.Tir.AVar b])))
+  in
+  let tuple_sum =
+    { March_tir.Tir.fn_name = "tuple_sum"; fn_params = [x; y];
+      fn_ret_ty = March_tir.Tir.TInt; fn_body = final_body;
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let main =
+    { March_tir.Tir.fn_name = "main"; fn_params = [];
+      fn_ret_ty = March_tir.Tir.TInt;
+      fn_body =
+        March_tir.Tir.EApp
+          (mk_var "tuple_sum"
+             (March_tir.Tir.TFn ([March_tir.Tir.TInt; March_tir.Tir.TInt], March_tir.Tir.TInt)),
+           [ilit 3; ilit 4]);
+      fn_kind = March_tir.Tir.FnNormal }
+  in
+  let module_ = mk_module [tuple_sum; main] in
+  let optimized = March_tir.Opt.run module_ in
+  let ir = March_tir.Llvm_emit.emit_module optimized in
+  let contains haystack needle =
+    let needle_len = String.length needle in
+    let rec search index =
+      index + needle_len <= String.length haystack
+      && (String.sub haystack index needle_len = needle || search (index + 1))
+    in
+    search 0
+  in
+  Alcotest.(check bool) "no tuple struct field load (getelementptr) survives in tuple_sum"
+    false (contains ir "getelementptr")
+
 (* ── P12: variable copy propagation ─────────────────────────────────────── *)
 
 (** P12 basic: let x = y in x + 1  →  y + 1
@@ -11580,6 +11629,8 @@ let codegen_suites =
           test_cprop_no_tuple_field_collision_with_closure_capture;
         Alcotest.test_case "tuple_field_result_escape_unchanged" `Quick
           test_cprop_tuple_field_result_escape_unchanged;
+        Alcotest.test_case "tuple_dce_removes_allocation_from_llvm" `Quick
+          test_cprop_tuple_dce_removes_allocation_from_llvm;
         Alcotest.test_case "var_alias"               `Quick test_cprop_var_alias;
         Alcotest.test_case "var_chain"               `Quick test_cprop_var_chain;
         Alcotest.test_case "no_alias_closure"        `Quick test_cprop_var_no_alias_closure;

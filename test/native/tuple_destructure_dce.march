@@ -1,0 +1,12 @@
+mod Main do
+  fn sum_pair(x : Int, y : Int) : Int do
+    let t = (x, y)
+    let (a, b) = t
+    a + b
+  end
+
+  fn main() : () do
+    println(sum_pair(3, 4))
+    println(sum_pair(100, -37))
+  end
+end
