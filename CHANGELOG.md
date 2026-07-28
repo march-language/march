@@ -13,6 +13,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Calling a variable that holds a zero-argument function value (`let zf =
+  answer; zf()`) is now a clear `--check` error instead of a runtime crash.**
+  Assigning a top-level (or local) zero-arg function to a plain variable and
+  then calling that variable used to typecheck silently and then crash with
+  a segfault when compiled. It now reports `` `zf` is not a function — it
+  has type `Int`. Remove the `()` and use `zf` directly.`` at compile time.
+  The same fix also catches the more general `let x = 5; x()` case.
+
 - **A program that repeatedly passes a named function as a value no longer
   grows memory without bound.** Materializing a top-level function as a
   first-class value (assigning it to a variable, passing it as a callback,
