@@ -13,6 +13,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- The TIR optimizer folds a tuple element access to its source value when
+  the tuple was just constructed (`let t = (a, b) in t.0` behaves like `a`
+  at the compiler level), the same optimization already applied to record
+  field access. Removes the tuple allocation wherever a tuple literal is
+  immediately destructured (e.g. `let (a, b) = (x, y)`). No runtime speedup
+  was measured — this reduces emitted allocations/struct loads, not
+  benchmarked wall-clock time.
 - **`Json.parse` allocates ~12x fewer strings and runs ~4.8x faster.** The
   parser used to begin with `string_split(src, "")`, exploding the document
   into one heap string per byte, so its cost scaled with the size of the input

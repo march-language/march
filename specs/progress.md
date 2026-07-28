@@ -532,6 +532,39 @@ compiler and must be re-taken before any memory-based criterion is applied;
 timing, allocation counts and copy volumes were unaffected and carry the
 verdicts above.
 
+## 2026-07-28 — Tuple projection forwarding
+
+`lib/tir/cprop.ml`'s existing known-shape `EField` folding (P13) now tracks
+`ETuple` bindings the same way it already tracks `ERecord`: `let t = (a, b)
+in t.$fv0` folds to `a`. Tuple fields are keyed by `Tir_names.fv_field i`
+(0-based), matching `lib/tir/lower.ml`'s tuple-destructure lowering
+convention exactly, so ordinary `let (a, b) = rhs` destructuring — and any
+tuple literal immediately projected — benefits with zero lowering changes.
+DCE removes the resulting dead tuple binding in the same `Opt` fixed-point
+iteration; no changes to `dce.ml` or `opt.ml`.
+
+The `$fvN` field-name format is shared with closure-capture struct fields
+(`defun.ml`, 1-based); this is safe because `field_env` population is gated
+entirely on a binding's own shape (`ETuple`/`ERecord`/`EUpdate`/alias), never
+on the field-name string — a closure-capture struct is built via `EAlloc`,
+never `ETuple`, so it can never be mistaken for one. Pinned by
+`no_tuple_field_collision_with_closure_capture`.
+
+**Discovered, not fixed:** `perceus.ml`'s `dup_field_results` (pre-Perceus
+escape-safety dup for a bare field-result) matches only `TRecord`, never
+`TTuple` — a pre-existing gap, orthogonal to this post-Perceus cprop
+peephole. Filed as a follow-up.
+
+**Tests:** 7 new `cprop` group cases plus native golden
+`tuple_destructure_dce`; focused `cprop`/`inline`/`single_use_inline`/`dce`/
+`known_call`/`fusion` groups and full `run_codegen` all pass.
+`bench/list_ops.march` and `bench/binary_trees.march` run clean as
+no-regression controls — neither benchmark currently builds a tuple literal
+and immediately destructures it, so no runtime speedup was measured (nor
+claimed) by this change; its effect is fewer emitted allocations/struct
+loads wherever that pattern occurs, the same class of gain as the LLVM
+attribute, SCC-inliner, and single-use-inlining work immediately before it.
+
 ## 2026-07-27 — Single-use private-function inlining measured and verified
 
 The TIR optimizer now runs a separately named `single-use-inline` pass after

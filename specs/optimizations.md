@@ -939,26 +939,30 @@ RC-safety: same rule as existing CProp — skip EFree/EIncRC/EDecRC argument pos
 
 ---
 
-### P13 — EField of Known Record/Update
+### P13 — EField of Known Record, Update, or Tuple  ✅
 
-**Location (planned):** `lib/tir/cprop.ml` or new `lib/tir/field_fold.ml`
-**Stage:** TIR (Opt coordinator — after CProp/Fold)
+**Location:** `lib/tir/cprop.ml`
+**Stage:** TIR (Opt coordinator — after Known_call/Inline/Single_use_inline, before Fold)
 
-When a record is constructed and a field accessed immediately, the allocation and field load can be eliminated:
+When a record or tuple is constructed and a field/element is accessed immediately, the allocation and field load can be eliminated:
 
 ```
-let r = { x = a, y = b } in r.x   →   a
-let r2 = { r with x = new_val } in r2.x  →  new_val
+let r = { x = a, y = b } in r.x          →   a
+let r2 = { r with x = new_val } in r2.x  →   new_val
+let t = (a, b) in t.$fv0                 →   a
 ```
 
-Fires after inlining record-returning functions, constructor accessors, and `EUpdate` chains (of which struct fusion already handles the update→update case, but not update→field).
+Fires after inlining record/tuple-returning functions, constructor accessors, and `EUpdate` chains (of which struct fusion already handles the update→update case, but not update→field). The tuple case shares the exact same `field_env`/`EField` fold machinery as the record case — a tuple's positional fields are keyed by `Tir_names.fv_field i` (0-based), matching `lib/tir/lower.ml`'s tuple-destructure lowering convention, so `let (a, b) = rhs` (which desugars to that same `EField` shape) benefits automatically with no lowering change.
 
-**Implementation:** Track `let v = ERecord(fields)` in a third CProp env entry type. On `EField(AVar v, k)`, look up the env and substitute with `fields[k]`. For `EUpdate(AVar base, new_fields)`: field is in `new_fields` → use `new_fields[k]`; else delegate to base record's env entry.
+**Implementation:** `field_env : (string * (string * Tir.atom) list) list` in `cprop.ml`, populated from `let v = ERecord(fields)`, `let v = ETuple(atoms)` (keyed positionally), `EUpdate(base, new_fields)` (record-only — merged with the base's known fields), and known-shape aliases (`let v2 = v1`). `EField(AVar v, k)` looks up `v` in `field_env` and substitutes `fields[k]` when found, for either origin.
 
-**Effort:** Medium (~60 lines) | **Impact:** Medium
-**Dependencies:** CProp (same env extension pattern); struct fusion (orthogonal)
-**Tests:** `cprop` group — `field_fold_record`, `field_fold_alias`, `field_fold_update`
-**Status:** Done (commit 471bb42 + review fixes)
+**Safety note:** `Tir_names.fv_field`'s `"$fv" ^ i` naming is shared with closure-capture struct fields (`lib/tir/defun.ml`, 1-based) — collision-safe because `field_env` is populated purely by a binding's own shape, never by the field-name string; a closure-capture struct is built via `EAlloc`, never `ETuple`, so it can never enter `field_env`.
+
+**Effort:** Small (~15 lines, on top of the already-shipped record case) | **Impact:** Small–Medium (DCE-enabling; removes an allocation/struct wherever a tuple literal is built and immediately destructured — e.g. multi-value-return-then-destructure, pair accumulators)
+**Dependencies:** CProp (same env extension pattern, no new pass); DCE (removes the now-dead tuple binding in the same fixed-point iteration, unchanged)
+**Tests:** `cprop` group — `field_fold_tuple`, `field_fold_tuple_second_element`, `field_fold_tuple_alias`, `field_fold_tuple_non_literal_element`, `no_tuple_field_collision_with_closure_capture`, `tuple_field_result_escape_unchanged`, `tuple_dce_removes_allocation_from_llvm`; native golden `tuple_destructure_dce`
+**Status:** Done (record case: commit 471bb42 + review fixes; tuple extension: this plan)
+**Known pre-existing, unrelated gap found during this work (not fixed here):** `lib/tir/perceus.ml`'s `dup_field_results` (the pre-Perceus escape-safety normalization for a field returned bare in result position) matches only `Tir.TRecord`, never `Tir.TTuple` — a tuple field returned directly from a function may not get the same dup-on-escape a record field gets. Orthogonal to this post-Perceus cprop peephole; filed as a follow-up, not addressed by this change.
 
 ---
 
