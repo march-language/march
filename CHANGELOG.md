@@ -108,6 +108,29 @@ git log is authoritative for exact commits.
   error rather than a new silent hole. Modules that declare no capability are
   unaffected. Witnessed by `specs/lang/types/{accept/t119,reject/t120}`.
 
+- **`cap verified`: a length guard that "silently stopped counting" now says so,
+  instead of blaming the solver.** The `List.length` / `String.byte_size` /
+  `string_byte_length` measure aliases are withdrawn for the whole compilation
+  unit whenever anything in it could make the spelling denote something else —
+  by design, since under the default stance the only cost is a missed proof. In
+  a `cap verified` module a missed proof is an error, and it read
+  `solver-undecided: the solver proved neither the predicate nor its negation`
+  on code carrying exactly the guard the feature asks for. Both of its
+  suggestions ("guard the call", "rewrite the predicate") were things the author
+  had already done, because the real cause was a name binding somewhere else —
+  a nested `mod Internal do mod List do fn length …` that is reachable only as
+  `Q.Internal.List.length` and does not win at runtime, or an unrelated
+  function's local `let string_byte_length = n + 1`, or, worst of all, a
+  definition in a `MARCH_LIB_PATH` dependency the author never opened. Such a
+  skip is now reported as `alias-withdrawn`, naming the spelling whose alias
+  went and pointing at the binding that took it. Attribution is conservative:
+  it applies only when the predicate actually mentions the affected measure
+  **and** this call site is guarded by the withdrawn spelling, so a genuinely
+  undecided obligation — including one in a module that has a withdrawn alias
+  elsewhere — still reads `solver-undecided`. Which obligations are suppressed
+  is completely unchanged; only what the user is told changed. The reason also
+  appears in `--refine-report`.
+
 - **`cap no_panic`: an unreflectable divisor refinement is no longer accepted as
   a proof.** The division-safety check treated "this predicate is outside the
   checkable fragment" as a discharged obligation, which made a *meaningless*

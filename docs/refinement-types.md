@@ -506,8 +506,9 @@ fails the build if it climbs, since more skips means less is being checked).
 Every skip says *why*: the predicate uses vocabulary the checker can't translate
 (`unreflectable-predicate`), the argument's own value didn't translate
 (`unreflectable-subject`), a symbol would have needed two different sorts
-(`sort-conflict`), the float wellsortedness gate rejected it (`float-sort-gate`), or
-the solver simply didn't decide (`solver-undecided`).
+(`sort-conflict`), the float wellsortedness gate rejected it (`float-sort-gate`), a
+measure alias the guard relied on had been withdrawn (`alias-withdrawn` — see below),
+or the solver simply didn't decide (`solver-undecided`).
 
 One thing the numbers don't include: they count **preconditions checked at call
 sites**. Return refinements go through a different path that doesn't file a record, so
@@ -553,6 +554,34 @@ note: guard the call or strengthen what is known here, rewrite the predicate
 into the fragment the checker supports, or remove `cap verified` from this
 module — it asks for every obligation to be discharged
 ```
+
+### When the guard is right and the error still fires
+
+The length aliases (`List.length`, `String.byte_size`, `string_byte_length`) are
+withdrawn for the **whole compilation unit** as soon as anything in it binds that
+name — the check is syntactic and doesn't ask whether the competing binding could
+actually win where you called it. Normally that costs you nothing but a proof. Inside
+`cap verified` it costs you a build, so the message says so rather than blaming the
+solver:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head`
+(alias-withdrawn: the guard uses `List.length`, but this compilation unit also
+BINDS that name, so the checker withdrew its built-in measure meaning and the
+guard proved nothing)
+note: a binding of `List.length` elsewhere in this compilation unit
+(ver3.march:5) withdrew the alias for the WHOLE unit, including this call — …
+```
+
+The culprit can be somewhere you'd never suspect: a nested `mod Internal do mod List
+do fn length …` that nothing can even call as `List.length`, an unrelated function's
+`let string_byte_length = n + 1`, or a definition inside a `MARCH_LIB_PATH` dependency
+you never opened. The span in the note is where to look; rename that binding, or state
+the fact you need as a refinement instead of a runtime guard.
+
+You'll only see this reason when the predicate mentions the affected measure *and*
+this call is guarded by the withdrawn spelling — an unguarded call still reports
+`solver-undecided`, as it should.
 
 **Know the edges before you reach for it.** It's strictly opt-in and scoped to the
 module that writes it: a `cap verified` module calling an ordinary one doesn't make

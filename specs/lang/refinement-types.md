@@ -814,7 +814,7 @@ run. Use the first to judge your own module; use the second as a whole-program
 coverage number (March's CI ratchets on it, so a change that quietly stops
 checking things fails the build).
 
-Each skip is attributed to one of five reasons:
+Each skip is attributed to one of six reasons:
 
 | Reason | What happened |
 |---|---|
@@ -822,7 +822,14 @@ Each skip is attributed to one of five reasons:
 | `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
+| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) that this compilation unit had withdrawn, because something in the unit binds that name |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
+
+`alias-withdrawn` is a refinement of `solver-undecided`, not a separate failure:
+the VC was built and the solver ran, it just arrived without the fact that would
+have discharged it. It is reported separately because the *action* differs — the
+call is already guarded, and what has to change is a name binding elsewhere in
+the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 
 The ledger records **precondition obligations raised at call sites**. Return
 refinements go through a separate path that does not file a record, so a
@@ -868,6 +875,63 @@ module — it asks for every obligation to be discharged
 
 Both forms verified 2026-07-28 (guarded: exit 0; unguarded: exit 1 with the
 message above).
+
+### A withdrawn alias names itself
+
+The measure aliases (`List.length`, `String.byte_size`, `string_byte_length`)
+are withdrawn for the **whole compilation unit** the moment anything in it could
+make the spelling denote a different function — see the shadowing rules under
+each alias above. The gate is unit-global and syntactic on purpose: it does not
+ask whether the competing binding could actually win at this call, because the
+precise answer needs a resolver the pass does not have there, and the errors are
+asymmetric (over-suppress = a missed proof, silence; under-suppress = a false
+positive on correct code).
+
+Under `cap verified` a missed proof is not silence, so a withdrawal is visible —
+and it must not be mistaken for a solver failure. This program is guarded by the
+exact idiom the alias exists for, and is still an error:
+
+```march
+mod Ver3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end
+```
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head`
+(alias-withdrawn: the guard uses `List.length`, but this compilation unit also
+BINDS that name, so the checker withdrew its built-in measure meaning and the
+guard proved nothing)
+note: a binding of `List.length` elsewhere in this compilation unit
+(ver3.march:5) withdrew the alias for the WHOLE unit, including this call — the
+gate is unit-global and syntactic, so it does not matter whether that binding
+could ever win here.  Rename it, move it out of this unit, or restate the fact
+as a refinement the checker can use directly
+```
+
+The nested `length` is reachable only as `Ver3.Internal.List.length` and does
+**not** win at runtime — the gate does not care, and that is the point of the
+message. The same applies to a bare-name binding anywhere in the unit, including
+one in an unrelated function (`let string_byte_length = n + 1`) or in a
+`MARCH_LIB_PATH` dependency you never opened; the reported span is where to
+look.
+
+Attribution is conservative, so this reason never displaces a genuine one: it
+requires that the predicate mention the affected measure **and** that this call
+site apply the withdrawn spelling in a guard. An unguarded call in a module that
+happens to contain a competing definition still reads `solver-undecided`.
+
+Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
+span; an unguarded call in the same module still reports `solver-undecided`).
 
 **Scope and limits.** State these plainly before relying on it:
 

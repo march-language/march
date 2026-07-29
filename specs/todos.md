@@ -1,11 +1,47 @@
 # March — TODO List
 
+**Last updated:** 2026-07-29 (a withdrawn measure alias now explains itself: a `cap verified` module no longer says `solver-undecided` when the real cause is that a `List.length`/`String.byte_size`/`string_byte_length` binding elsewhere in the unit withdrew the alias — suppression unchanged, only the attribution; earlier the same day: `cap no_panic` discharges a divisor refinement before rejecting it, and the capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-29 (`cap no_panic` now DISCHARGES a divisor refinement before rejecting it — `{v : Int | v * v > 0}` is a complete proof of `v != 0` and was being reported as unreflectable — and reads negated path conditions on both routes; earlier the same day: capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV filed earlier the same day — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value, removing a per-materialization leak; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value AND per capture-free lambda value, removing a per-materialization leak in both cases; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## A withdrawn measure alias blamed the solver under `cap verified` (FIXED 2026-07-29)
+
+The `List.length` / `String.byte_size` / `string_byte_length` measure aliases are
+withdrawn for the whole compilation unit by unit-global, syntactic gates — the
+right design, and free under the default stance, where a withdrawal costs only a
+missed proof. `cap verified` made a missed proof a hard error, and the error
+still pointed at z3:
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head`
+(solver-undecided: the solver proved neither the predicate nor its negation)
+```
+
+on code guarded by `if List.length(ys) > 0 do head(ys) else 0 end` — the exact
+idiom the alias exists for. The cause was elsewhere: a nested
+`mod Internal do mod List do fn length …`, reachable only as
+`Q.Internal.List.length` and which does not win at runtime; or an unrelated
+function's `let string_byte_length = n + 1`; or a definition inside a
+`MARCH_LIB_PATH` dependency, which breaks verification in an entry file
+invisibly. Every remedy the note offered had already been applied.
+
+Fixed by changing the ATTRIBUTION, not the suppression (over-suppression is the
+safe direction and stays bit-for-bit). The gates return the span of the
+competing binding, `check_module` records each withdrawal, and a skip is
+re-attributed to a new `Obligation.Alias_withdrawn of string` before it is
+recorded, so `--refine-report` and the diagnostic agree. Attribution requires
+all three of: reason is `Solver_undecided`, the predicate mentions the aliased
+measure, and this call site applies the withdrawn spelling in a path condition —
+so a genuinely undecided obligation, including one in a module that has a
+withdrawn alias elsewhere, still reads `solver-undecided`. Refinecheck 302 tests
+(new `alias-attribution` group of 5, two of them controls), typing corpus
+222/222, stdlib sweep empty.
 
 ---
 

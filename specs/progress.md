@@ -1,5 +1,58 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, a withdrawn measure alias explains itself)
+
+**A `cap verified` module rejected correct code and blamed the solver.** The
+`List.length` / `String.byte_size` / `string_byte_length` measure-alias gates
+are unit-global and syntactic: anything that could make the spelling denote
+another function withdraws the alias for the whole unit. That is right, and it
+is FREE under the default definite-failure stance — a withdrawal costs a missed
+proof, i.e. silence. `cap verified` inverted the cost, and the message did not
+follow:
+
+```march
+mod Ver3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end
+```
+
+→ ``cannot verify precondition `len(_) > 0` on `head` (solver-undecided: the
+solver proved neither the predicate nor its negation)``. That nested `length`
+is reachable only as `Ver3.Internal.List.length` and does not win at runtime;
+the call IS guarded, by the exact idiom the alias exists to serve; and both
+remedies the note offered were ones the author had already applied. The same
+error fires for an `Int` local named `string_byte_length` in an *unrelated*
+function, and — worst — for a definition in a `MARCH_LIB_PATH` dependency the
+author never opened.
+
+The suppression is not the bug and is unchanged; the ATTRIBUTION was. The gates
+now return the span of the competing binding alongside their verdict
+(`stdlib_member_defs_ok`, `bare_builtin_undefined`; `expr_binds_name` is now
+`expr_binder_span <> None` so the two cannot drift), `check_module` records each
+withdrawal as `{wd_spelling; wd_measure; wd_span}`, and a skipped obligation is
+re-attributed to a new `Obligation.Alias_withdrawn of string` — BEFORE it is
+recorded, so `--refine-report` and the diagnostic agree.
+
+Attribution is deliberately conjunctive, because a wrong attribution is worse
+than a vague one: the reason must be `Solver_undecided` (a withdrawal removes an
+assumption, so it cannot cause an earlier reflection or sort failure), the
+predicate must mention the measure the alias routes to, and THIS call site must
+apply the withdrawn spelling in a path condition. Anything else keeps the
+general message — pinned by two controls, one of them a module that *has* a
+withdrawn alias but an unguarded call, which still reads `solver-undecided`.
+
+Measured: refinecheck 302 tests (was 297; new `alias-attribution` group of 5),
+typing corpus 222/222, stdlib sweep empty.
+
 ## Current State (as of 2026-07-29, `cap no_panic` discharges before it rejects)
 
 **A divisor refinement that PROVES the obligation was being rejected for being
