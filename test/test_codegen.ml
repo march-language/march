@@ -229,6 +229,29 @@ let test_tir_names_specialize_mangle () =
     (March_tir.Tir_names.is_iface_mangled
        (March_tir.Tir_names.specialize_mangle "map" "Int"))
 
+let test_tir_names_strip_specialization_suffix () =
+  (* No '.' at all: first '$' is the specialization separator. *)
+  Alcotest.(check string) "println$String -> println" "println"
+    (March_tir.Tir_names.strip_specialization_suffix "println$String");
+  (* '$' after the last '.': ordinary specialized generic fn. *)
+  Alcotest.(check string) "List.map$Int -> List.map" "List.map"
+    (March_tir.Tir_names.strip_specialization_suffix "List.map$Int");
+  (* '$' before the last '.' is part of an interface-impl mangle (base);
+     only the '$' AFTER the last '.' is the specialization separator. *)
+  Alcotest.(check string) "Show$List.show$Int -> Show$List.show" "Show$List.show"
+    (March_tir.Tir_names.strip_specialization_suffix "Show$List.show$Int");
+  (* No '$' at all: unchanged. *)
+  Alcotest.(check string) "map (no $) -> map" "map"
+    (March_tir.Tir_names.strip_specialization_suffix "map");
+  (* Round-trips against the actual producer, specialize_mangle. *)
+  Alcotest.(check string) "round-trip through specialize_mangle" "println"
+    (March_tir.Tir_names.strip_specialization_suffix
+       (March_tir.Tir_names.specialize_mangle "println" "String"));
+  let iface_base = March_tir.Tir_names.iface_mangle ~iface:"Show" ~ty:"List" ~meth:"show" in
+  Alcotest.(check string) "round-trip through iface + specialize mangle" iface_base
+    (March_tir.Tir_names.strip_specialization_suffix
+       (March_tir.Tir_names.specialize_mangle iface_base "List_Int"))
+
 let test_tir_names_bool_tags () =
   Alcotest.(check string) "synthetic_true_tag" "True" March_tir.Tir_names.synthetic_true_tag;
   Alcotest.(check string) "synthetic_false_tag" "False" March_tir.Tir_names.synthetic_false_tag;
@@ -11709,6 +11732,7 @@ let codegen_suites =
           Alcotest.test_case "is_try_call"                 `Quick test_tir_names_try_call;
           Alcotest.test_case "test/setup fn names"         `Quick test_tir_names_test_and_setup_fn_names;
           Alcotest.test_case "specialize_mangle"           `Quick test_tir_names_specialize_mangle;
+          Alcotest.test_case "strip_specialization_suffix" `Quick test_tir_names_strip_specialization_suffix;
           Alcotest.test_case "bool tags"                   `Quick test_tir_names_bool_tags;
         ] );
       ( "fnfused_coverage", [

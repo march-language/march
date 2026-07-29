@@ -70,13 +70,20 @@ let direct_candidate_calls candidates expr =
   in
   collect SSet.empty expr
 
-(** Return candidates that participate in recursive call-graph SCCs. *)
-let recursive_candidate_names (candidates : (string, Tir.fn_def) Hashtbl.t)
+(** Tarjan's SCC algorithm, generic over any [name -> successor names] graph.
+    Returns the subset of graph nodes that participate in a call-graph cycle:
+    an SCC with more than one member, or a singleton with a direct self-edge.
+    Both inliner passes (this module's [recursive_candidate_names], keyed off
+    [direct_candidate_calls], and [Single_use_inline.run], keyed off its own
+    reference-counting scan) need exactly this "which candidates are
+    recursive, so exclude them from inlining" computation — only the way the
+    [successors] table gets built differs between them. Keep this the single
+    implementation: a subtle SCC bug (an off-by-one in [lowlinks], a missed
+    self-loop) is easy to introduce and hard to notice in either caller, and
+    having two hand-rolled copies is exactly the "same predicate re-derived
+    twice, one goes stale" trap this codebase has been bitten by before. *)
+let recursive_names_in_graph (successors : (string, SSet.t) Hashtbl.t)
     : SSet.t =
-  let successors : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
-  Hashtbl.iter (fun name fn ->
-    Hashtbl.add successors name (direct_candidate_calls candidates fn.Tir.fn_body)
-  ) candidates;
   let indices : (string, int) Hashtbl.t = Hashtbl.create 16 in
   let lowlinks : (string, int) Hashtbl.t = Hashtbl.create 16 in
   let index = ref 0 in
@@ -122,6 +129,15 @@ let recursive_candidate_names (candidates : (string, Tir.fn_def) Hashtbl.t)
     if not (Hashtbl.mem indices name) then strongconnect name
   ) successors;
   !recursive
+
+(** Return candidates that participate in recursive call-graph SCCs. *)
+let recursive_candidate_names (candidates : (string, Tir.fn_def) Hashtbl.t)
+    : SSet.t =
+  let successors : (string, SSet.t) Hashtbl.t = Hashtbl.create 16 in
+  Hashtbl.iter (fun name fn ->
+    Hashtbl.add successors name (direct_candidate_calls candidates fn.Tir.fn_body)
+  ) candidates;
+  recursive_names_in_graph successors
 
 (** Alpha-rename: give each parameter and let-bound variable a fresh name. *)
 let gensym =

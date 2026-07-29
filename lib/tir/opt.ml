@@ -19,6 +19,17 @@
     a label of the form ["tir-opt-{iter}-{pass}"] and the post-pass module.
     When [~snap] is omitted (or is a no-op) behaviour is identical to before. *)
 
+(* NOTE — [Beta_adt] is deliberately NOT in this list.  It runs once,
+   PRE-Perceus (bin/main.ml, "tir-beta-adt-pre").  That placement is
+   load-bearing for [Single_use_inline]'s capture guard: pre-Perceus a
+   collapsed case-branch binder is still a plain copy that Cprop/Dce
+   erase, whereas post-Perceus it becomes "let f = inc_rc $fN; $fN" and
+   would survive — depositing a plain, user-chosen name into a scope that
+   is lexically dead but still live in codegen's flat-per-function
+   [var_slot].  Moving Beta_adt into this loop (or adding any other
+   post-Perceus case-of-known-constructor reduction) would make a
+   currently-unreachable variable-capture bug reachable.  See the guard
+   comment in lib/tir/single_use_inline.ml before changing this. *)
 let named_passes = [
   "join-points", Join_points.run;
   "known-call",  Known_call.run;

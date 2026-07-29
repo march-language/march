@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-07-29 (`cap no_panic` now retires every fact about a name a `let`/lambda/`match`/local-`fn` rebinds — `if d == 0 do 0 else (let d = 0; 10 / d) end` passed `--check` and then panicked; earlier the same day: a withdrawn measure alias explains itself, `cap no_panic` discharges a divisor refinement before rejecting it, capability walks exhaustive over `A.decl`; see below and Done.)
+**Last updated:** 2026-07-29 (`cap no_panic` now retires every fact about a name a `let`/lambda/`match`/local-`fn` rebinds — `if d == 0 do 0 else (let d = 0; 10 / d) end` passed `--check` and then panicked; earlier the same day: a withdrawn measure alias explains itself, `cap no_panic` discharges a divisor refinement before rejecting it, capability walks exhaustive over `A.decl`; also merged in: the optimizer's purity oracle no longer misjudges a monomorphized builtin call as pure (2026-07-28); see below and Done.)
 **Last updated:** 2026-07-29 (a withdrawn measure alias now explains itself: a `cap verified` module no longer says `solver-undecided` when the real cause is that a `List.length`/`String.byte_size`/`string_byte_length` binding elsewhere in the unit withdrew the alias — suppression unchanged, only the attribution; earlier the same day: `cap no_panic` discharges a divisor refinement before rejecting it, and the capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-29 (`cap no_panic` now DISCHARGES a divisor refinement before rejecting it — `{v : Int | v * v > 0}` is a complete proof of `v != 0` and was being reported as unreflectable — and reads negated path conditions on both routes; earlier the same day: capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
@@ -176,6 +176,63 @@ call sites (nothing assumes it either — a missing check, not an unsound one);
 and a provably violated obligation is reported regardless of any capability, so
 ordinary modules with a definitely-broken precondition in an impl body or
 top-level `let` newly fail to build.
+
+---
+
+## Purity oracle mismatched monomorphized builtin names (FIXED 2026-07-28)
+
+**Symptom.** `lib/tir/purity.ml`'s `is_pure_ext` matched an `EApp` callee's name
+against `impure_builtins` (bare names like `"println"`) with exact `List.mem`
+equality. Monomorphization (`lib/tir/mono.ml`'s `mangle_name`, via
+`Tir_names.specialize_mangle`) rewrites calls to specialized names before
+`Opt.run` (which consumes the purity oracle) ever sees them — `println` becomes
+`println$String`. The exact match failed, so `println$String` (and every other
+specialized impure builtin) was silently classified PURE.
+
+**Consequence.** `test/native/single_use_inline_rc.march` (wired at `test/dune`,
+alias `single_use_inline_rc`) was vacuous: its `helper` (calls `println` twice,
+zero RC ops in its body — a borrowed `List(Int)` param, string literals, scalar
+return) was eliminated by the ordinary `Inline` pass regardless of whether
+`single_use_inline.ml` ran at all, because `Inline` requires purity and the
+buggy oracle said `helper` was pure. No live miscompile was found or is claimed
+— DCE does not drop dead impure-looking bindings, and impure-inlining output
+parity held across the corpus — this was a latent correctness defect in the
+oracle plus a real test-integrity gap.
+
+**Fix.** Added `Tir_names.strip_specialization_suffix` (next to
+`specialize_mangle`, `lib/tir/tir_names.ml`) as the single home for inverting
+the "$"-suffix mangling convention: find the last `.` (or start of string),
+take the first `$` at-or-after that position, truncate there. This correctly
+leaves an interface-impl mangle's own `.`-preceding `$` (e.g.
+`"Show$List.show"`) untouched while stripping only the specialization suffix
+(`"Show$List.show$Int"` -> `"Show$List.show"`; `"println$String"` -> `"println"`;
+`"List.map$Int"` -> `"List.map"`). `purity.ml`'s `EApp` case now matches the
+stripped base name against `impure_builtins` (and the transitive impure-fn set),
+so a specialized impure builtin is no longer misclassified. Unit tests added in
+`test/test_codegen.ml`'s `tir_names` group covering all three shapes plus the
+no-`$`-at-all case and round-trips through `specialize_mangle`/`iface_mangle`.
+
+**Verified non-vacuous.** With the fix applied, disabling
+`single_use_inline.ml`'s eligibility predicate (`if false && ...` at line 309)
+and recompiling `single_use_inline_rc.march` with `--emit-llvm` leaves `@helper`
+in the emitted LLVM (both `define` and `call`) — the native test's grep guard
+would now fail. Restoring the predicate eliminates `@helper` again. The test
+genuinely exercises `single_use_inline` now.
+
+**Behavior shift measured, smaller than initially anticipated.** Because
+`Opt.run` runs after Perceus RC-insertion, most function bodies already contain
+`EIncRC`/`EDecRC`/etc. and were already classified impure by the pre-existing
+RC-op check, independent of this bug. The builtin-name gap only flips
+classification for bodies with zero RC ops that call a specialized impure
+builtin — the `single_use_inline_rc.march` shape is the paradigm case. No TIR
+golden snapshot changed (`test/run_snapshots.exe`'s corpus stops at
+post-Perceus, before `Opt.run`/the affected passes ever execute) and no other
+test's pass/fail status changed. Full suite results: `run_codegen` 509/509,
+`run_compiler` 612/612, `run_eval` 256/256, `run_stdlib -q` clean (Slow tests
+skipped), `run_snapshots` 33/33, `dune build @runtest` 4179/4179 plus one
+pre-existing unrelated failure (`adversarial-regressions` #39, an ASAN-binary
+30s-timeout under machine load — reproduces identically on unmodified `HEAD`,
+confirmed by reverting the fix and rerunning before restoring it).
 
 ---
 

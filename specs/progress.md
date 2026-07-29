@@ -292,6 +292,57 @@ still walked only `DFn`/`DMod`, so a refined signature declared on an `impl`
 method was invisible to callers *while the widened walk assumed it inside the
 body* — assume-without-check, not merely a missing contract.
 
+## Current State (as of 2026-07-28, purity oracle: monomorphized builtin names)
+
+**Fixed a latent purity-oracle defect and the vacuous test it caused.**
+`lib/tir/purity.ml`'s `is_pure_ext` matched an `EApp` callee's `v_name` against
+`impure_builtins` (bare names like `"println"`) with exact string equality, but
+monomorphization rewrites calls to specialized names before `Opt.run` (the
+consumer of this oracle) runs — `println` becomes `println$String` via
+`lib/tir/mono.ml`'s `mangle_name`/`Tir_names.specialize_mangle`. The exact match
+silently missed every specialized impure builtin, classifying it PURE.
+
+New `Tir_names.strip_specialization_suffix` (`lib/tir/tir_names.ml`, next to
+`specialize_mangle`) is the single home for inverting that mangling: find the
+last `.` (or string start), take the first `$` at-or-after it, truncate there —
+this correctly distinguishes an interface-impl mangle's own `.`-preceding `$`
+(`"Show$List.show"`, left as base) from a specialization suffix appended after
+the last `.` (`"List.map$Int"` -> `"List.map"`, `"Show$List.show$Int"` ->
+`"Show$List.show"`, `"println$String"` -> `"println"`). `purity.ml` now matches
+the stripped base. Unit tests in `test/test_codegen.ml`'s `tir_names` group.
+
+No live miscompile was found (DCE does not drop impure-looking dead bindings;
+impure-inlining output parity held across the corpus) — this closes a latent
+soundness gap in the oracle, not an observed wrong-output bug. The main
+practical consequence was test-integrity: `test/native/single_use_inline_rc.march`
+(alias `single_use_inline_rc` in `test/dune`) passed regardless of whether
+`lib/tir/single_use_inline.ml` ran at all, because its `helper` (calls
+`println` twice, zero RC ops — borrowed `List(Int)` param, string literals,
+scalar return) was eliminated by the ordinary `Inline` pass under the buggy
+oracle. Verified de-vacuumed: disabling `single_use_inline`'s eligibility
+predicate and recompiling with `--emit-llvm` leaves `@helper` (`define` and
+`call`) in the emitted IR — the test's grep guard would now catch that.
+Restoring the predicate eliminates `@helper` again.
+
+Behavior-shift measurement: because `Opt.run` runs after Perceus RC-insertion,
+most bodies already contained RC ops and were already impure under the
+pre-existing (independent) RC-op check — the builtin-name gap only flips
+classification for the zero-RC-op shape above. No TIR golden snapshot changed
+(`run_snapshots`' corpus stops at post-Perceus, before `Opt.run` and the
+affected passes — `Inline`/`single_use_inline`/`dce`/`fusion` — ever run), and
+no other test's pass/fail status moved.
+
+**Test counts:** `run_compiler` 612, `run_eval` 256, `run_codegen` 509 (all
+`-e`, all exit 0). `run_stdlib -q` 780 (exit 0). `run_snapshots` 33/33.
+`dune build @runtest`: 4179/4179 plus one pre-existing unrelated failure,
+`adversarial-regressions` #39 (`MARCH_SANITIZE` sanitized-binary 30s timeout
+under machine load) — reproduces byte-for-byte on unmodified `HEAD` (confirmed
+by temporarily reverting the fix, rebuilding, and rerunning that one test
+before restoring the fix), consistent with the machine-wide ASAN hazard
+already on record in this file (2026-07-18 entry).
+
+---
+
 ## Current State (as of 2026-07-28, refinement legibility: `--refine-report`, measure aliases, `cap verified`)
 
 **A refinement obligation now leaves a record, so the checked fraction is a

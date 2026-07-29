@@ -350,8 +350,13 @@
   var debounce   = null;
   var queryToken = 0;      // guards against an older query resolving after a newer one
 
-  Array.prototype.forEach.call(document.querySelectorAll('[data-ms-open]'), function (el) {
-    el.addEventListener('click', open);
+  // Delegated rather than bound per-element: this script runs synchronously at its
+  // position in the document, so a static querySelectorAll would miss any trigger
+  // markup a layout places LATER in the DOM (e.g. a mobile drawer nested in a sidebar
+  // that comes after this include). Delegation binds once and matches triggers
+  // regardless of where — or when — they appear.
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('[data-ms-open]')) open();
   });
 
   // Show the platform-correct hint rather than always claiming ⌘.
