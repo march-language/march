@@ -2338,7 +2338,21 @@ static void march_thunk_trampoline(void *arg) {
          * If the caller still holds the handle, this drops RC from 2 → 1. */
         march_decrc(task);
     }
-    march_decrc(clo);   /* release the reference taken at spawn time */
+    /* No march_decrc(clo) here. lib/tir/perceus.ml's insert_apply_fn_clo_drop
+     * (see lib/tir/borrow.ml's $clo-ownership pin) now makes a CAPTURING
+     * thunk's own apply function release its one reference to $clo
+     * internally, as the last thing it does before returning. Decrementing
+     * it again here double-consumed that single reference — confirmed via a
+     * single-capture task_spawn thunk called through this trampoline,
+     * SIGABRT("RC underflow") on every run before this fix, clean after.
+     * A CAPTURE-FREE thunk's apply function does NOT drop $clo (see the
+     * fv-extraction guard in insert_apply_fn_clo_drop) because natively its
+     * closure is llvm_emit's immortal static global, where a decrement was
+     * always a no-op — so removing this decrc changes nothing for that case
+     * either. (Under the REPL/JIT a capture-free closure is a real
+     * allocation and this removal does leave it unreleased when spawned via
+     * task_spawn from a fragment — a narrow, documented leak, not a crash;
+     * see specs/todos.md.) */
     march_sched_exit();
 }
 
