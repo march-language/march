@@ -525,7 +525,31 @@ let infer_module (m : Tir.tir_module) : borrow_map =
     List.fold_left (fun acc fn ->
       let n = List.length fn.Tir.fn_params in
       let modes = Array.init n (fun i ->
-        Rc_types.borrow_eligible (List.nth fn.Tir.fn_params i).Tir.v_ty
+        (* Param 0 of an apply function is [$clo], and it is OWNED by the
+           callee per the closure-apply ABI — pinned here rather than left to
+           the fixpoint, which cannot discover it: an apply function's only
+           use of $clo is [EField] extraction of captured variables, and
+           [owned_in]'s EField case is defined as non-owning, so $clo would
+           stay borrow-classified forever.
+
+           This pin is what makes [Perceus.insert_apply_fn_clo_drop] sound.
+           There are TWO independent notions of "$clo is borrowed" and they
+           must agree: this map (what CALLERS consult in Perceus's [EApp]
+           case) and the per-function [borrowed] set (what suppresses the
+           callee's own drop).  Flipping only the latter makes the caller
+           filter $clo out of [non_borrowed_args] — emitting NO [EIncRC] even
+           when the closure is live after the call — while the callee starts
+           decrementing, so the callee releases the caller's only reference.
+           A prior attempt did exactly that and produced 3 double-frees plus 8
+           stdlib crashes.  With this pin [find_inc_vars] increments a
+           live-after closure and transfers the reference when it is not.
+
+           It must live in [init], NOT in the post-fixpoint extern seeding
+           below: [owned_in] consults [is_borrowed] during iteration, so a
+           late seed would leave callers-of-callers classified against the
+           stale answer. *)
+        if i = 0 && Tir_names.is_apply_fn fn.Tir.fn_name then false
+        else Rc_types.borrow_eligible (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc
     ) StringMap.empty m.Tir.tm_fns

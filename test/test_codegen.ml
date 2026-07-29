@@ -9336,6 +9336,261 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
        grow with the iteration count)"
       "BOUNDED" run_out
 
+(* CAPTURING closures — the shape the two static-closure tests above cannot
+   reach.  A lambda that captures a variable cannot be a static global: each
+   materialization is a genuine `march_alloc` holding the captured values.
+   Before the $clo ownership drop (lib/tir/perceus.ml
+   [insert_apply_fn_clo_drop], sound only alongside the apply-fn param-0 pin
+   in lib/tir/borrow.ml [infer_module]) NOTHING released it — the caller side
+   deferred to the callee and the callee never dropped, so a 4,000,000-
+   iteration loop allocated 4,000,000 closures and freed none (~125 MB peak
+   RSS versus ~2.9 MB for the capture-free control).
+
+   Same growth-assertion shape as the two tests above, and deliberately so:
+   this one FAILS on a build with only the callee drop and no pin (the
+   closure is freed while the caller still holds it — a double-free, not a
+   leak) and equally on a build with neither. *)
+let test_capturing_closure_materialization_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_capcloleak"
+    "mod CapCloLeak do\n\
+    \  needs Ffi\n\
+    \  needs IO.Foreign\n\
+    \  extern \"m\" : Cap(Ffi) do\n\
+    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
+    \  end\n\
+    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
+    \  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do\n\
+    \    if i >= n do acc\n\
+    \    else\n\
+     -- `fn x -> x * k` captures k, so this allocates a real closure struct\n\
+     -- every iteration; it can never be routed to a static global.\n\
+    \      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))\n\
+    \    end\n\
+    \  end\n\
+    \  fn main() : Unit do\n\
+    \    let warm = materialize_loop(0, 100, 2, 0)\n\
+    \    let base = live_allocs()\n\
+    \    let bulk = materialize_loop(0, 20000, 2, 0)\n\
+    \    let grew = live_allocs() - base\n\
+    \    if warm + bulk > 0 && grew <= 8 do\n\
+    \      println(\"BOUNDED\")\n\
+    \    else\n\
+    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "capcloleakbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "a CAPTURING lambda materialized in a loop must release each closure \
+       struct: the live-object count must not grow with the iteration count"
+      "BOUNDED" run_out
+
+(* NOTE — the companion invariant, "the $clo drop must NOT be emitted for a
+   CAPTURE-FREE apply function", is pinned by this suite's existing
+   "stdlib List.length via precompile" JIT test rather than by a test added
+   here, and deliberately so: native measurement cannot observe it at all.
+   [Llvm_emit.static_closure_ok] is `not ctx.repl && ..`, so natively a
+   capture-free closure is the immortal global where a decrement is a no-op —
+   but under the REPL/JIT it is a real `march_alloc` with rc = 1, and an
+   unguarded drop frees it on the first call.  The next dispatch then jumps
+   through the zeroed apply-fn slot: EXC_BAD_ACCESS at address 0x0 with
+   frame #0 = 0x0 — a jump to a null code pointer, not a data
+   use-after-free.  Removing the `prefix_has_fv_extraction` guard in
+   [Perceus.insert_apply_fn_clo_drop] reproduces that SIGSEGV there while
+   every native program in the corpus stays green. *)
+
+(* __try_call / __try_call_val — the callee-side $clo drop (see the two tests
+   above) is only sound when every C-runtime call site that invokes a
+   closure's apply function agrees on the calling convention. The runtime
+   originally decref'd the thunk itself AFTER calling it once — a second
+   consumption of the same reference the drop already released, since the
+   drop fires as the FIRST thing the apply function does (right after
+   extracting its captures, before any of the actual body runs), so it has
+   already executed by the time the runtime's own decrc would fire, on both
+   the normal-return and the panic (longjmp) path.
+
+   This is flaky, not deterministic: the freed memory frequently still looks
+   valid enough that the double-decrement doesn't crash immediately (a
+   classic use-after-free signature). Measured before the runtime fix
+   (removing the explicit `march_decrc(thunk)` in both __try_call and
+   __try_call_val, runtime/march_runtime.c): 6 crashes ("RC underflow") out
+   of 30 runs of a single-capture __try_call thunk. 0/30 after. A single
+   clean run proves nothing here — this test alone cannot pin a heap-timing
+   bug, so treat any future regression suspicion the same way: loop the
+   binary directly, don't trust one pass. *)
+let test_try_call_single_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallcap"
+    "mod TryCallCap do\n\
+    \  fn main() : Unit do\n\
+    \    let threshold = 5\n\
+    \    match __try_call(fn _ -> threshold > 0) do\n\
+    \    Ok(_) -> println(\"ok\")\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 30 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a single-capture __try_call thunk must not double-consume its \
+         closure's reference — flaky heap-corruption bug, run repeatedly"
+        "ok" run_out
+    done
+
+let test_try_call_val_single_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallvalcap"
+    "mod TryCallValCap do\n\
+    \  fn main() : Unit do\n\
+    \    let base = \"hi\"\n\
+    \    match __try_call_val(fn _ -> base ++ \"!\") do\n\
+    \    Ok(v) -> println(\"ok: \" ++ v)\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallvalcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 30 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a single-capture __try_call_val thunk must not double-consume its \
+         closure's reference — flaky heap-corruption bug, run repeatedly"
+        "ok: hi!" run_out
+    done
+
+(* The panic (longjmp) path: the drop fires before the body runs, so it must
+   also be safe when the body never returns normally. *)
+let test_try_call_panic_with_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallpanic"
+    "mod TryCallPanic do\n\
+    \  fn main() : Unit do\n\
+    \    let label = \"boom\"\n\
+    \    match __try_call(fn _ -> panic(label)) do\n\
+    \    Ok(_) -> println(\"ok\")\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallpanicbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 15 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        "a panicking single-capture __try_call thunk must not double-consume \
+         its closure's reference"
+        true (Test_helpers.contains "boom" run_out)
+    done
+
+(* NativeArray.map_int/map_float et al. and TypedArray.map/fold — a THIRD
+   family of call sites sharing the same double-consumption bug as
+   __try_call above, but shaped differently: instead of one call plus an
+   explicit runtime decrc, these call the SAME closure once PER ELEMENT
+   without transferring ownership on each call. Both the C-runtime general
+   path (runtime/march_runtime.c's native_int_arr_map/native_float_arr_map/
+   march_typed_array_map/march_typed_array_fold, all via march_incrc before
+   each per-element call plus one march_decrc after the loop) and the
+   compiled-loop fast path (lib/tir/llvm_emit.ml's
+   emit_native_map_inline_loop/emit_native_map2_inline_loop, Phase 2c) share
+   this fix.
+
+   This repro deliberately exercises the case that must fall back to the
+   GENERAL path rather than the inline loop: a closure that captures a free
+   variable AND is called again after the map, so it is not single-use
+   (Native_map_inline.ml declines to rewrite it — any Perceus-inserted RC op
+   on the closure counts as an extra use). Confirmed via TIR dump before
+   writing this test: `inc_rc closure; NativeArray.map_int(a1, closure)`,
+   proving the closure is a transferred-but-still-live reference at that
+   call site, not a last-use consume. *)
+let test_native_array_map_reused_capturing_closure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
+    "mod ArrMapCap do\n\
+    \  fn main() : Unit do\n\
+    \    let k = 7\n\
+    \    let closure = fn x -> x + k\n\
+    \    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))\n\
+    \    let a2 = NativeArray.map_int(a1, closure)\n\
+    \    println(NativeArray.to_list_int(a2))\n\
+    \    println(int_to_string(closure(100)))\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "arrmapcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 20 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a capturing closure reused after NativeArray.map_int must not be \
+         freed mid-map (general C-runtime path, not the inline fast path)"
+        "[8, 9, 10]\n107" run_out
+    done
+
+(* Signal.watch — a FOURTH family, and the most severe: unlike __try_call
+   (one call) or the array builtins (N calls but the whole map finishes and
+   releases in one process step), a watcher closure is held for the
+   program's entire lifetime and can be invoked an UNBOUNDED number of times,
+   once per signal delivery. Before this fix (runtime/march_runtime.c's
+   march_signal_drain, march_incrc before each apply() call) a CAPTURING
+   watcher's apply function released its one $clo reference on the very
+   first delivery — the table then held a dangling pointer, and the SECOND
+   delivery dispatched through freed memory. Confirmed deterministic (not
+   flaky like __try_call's UAF): every run crashed on delivery 2 before the
+   fix, every run below is clean after it. *)
+let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
+    "mod SigWatchCap do\n\
+    \  fn main() do\n\
+    \    let k = 99\n\
+    \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    println(\"done\")\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "sigwatchcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
+    for _ = 1 to 25 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        "a capturing Signal.watch handler delivered 3 times must not be \
+         freed after the first delivery (long-lived, unbounded-repeat call site)"
+        true
+        (ir_contains run_out "done" && ir_contains run_out "EXIT:0"
+         && not (ir_contains run_out "RC underflow"))
+    done
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12353,6 +12608,20 @@ let codegen_suites =
             test_static_closure_materialization_no_leak_compiled;
           Alcotest.test_case "compiled capture-free lambda materialization does not leak per use" `Quick
             test_lambda_static_closure_materialization_no_leak_compiled;
+          Alcotest.test_case "compiled capturing lambda materialization does not leak per use" `Quick
+            test_capturing_closure_materialization_no_leak_compiled;
+        ] );
+      ( "try_call_capture_ownership_codegen", [
+          Alcotest.test_case "single-capture __try_call thunk: no double-free (30x)" `Quick
+            test_try_call_single_capture_no_double_free_compiled;
+          Alcotest.test_case "single-capture __try_call_val thunk: no double-free (30x)" `Quick
+            test_try_call_val_single_capture_no_double_free_compiled;
+          Alcotest.test_case "single-capture __try_call thunk panics: no double-free (15x)" `Quick
+            test_try_call_panic_with_capture_no_double_free_compiled;
+          Alcotest.test_case "NativeArray.map_int: reused capturing closure not freed mid-map (20x)" `Quick
+            test_native_array_map_reused_capturing_closure_compiled;
+          Alcotest.test_case "Signal.watch: capturing handler survives repeated delivery (25x)" `Quick
+            test_signal_watch_capturing_handler_repeated_delivery_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick
