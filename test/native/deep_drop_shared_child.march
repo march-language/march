@@ -1,0 +1,47 @@
+-- Regression: a container released without being destructured must not be
+-- read after it is freed.
+--
+-- Drop.run synthesizes, per constructor arm,
+--
+--   case x of Rec(xs, _) -> let freed = march_decrc_freed(x) in
+--                           case freed of True -> drop(xs)
+--
+-- which relies on the arm reading its fields at branch ENTRY, while the box
+-- is still alive.  Every arm begins with that same let, so Join_points'
+-- peel_common_let floated it above the ECase — its safety conditions covered
+-- the branches' pattern-bound variables but not the scrutinee itself.  The
+-- emitted code freed the box and then read its tag and fields, a
+-- use-after-free that SIGSEGVs under macOS's allocator and is silently
+-- tolerated by glibc (green Linux CI, red macOS CI).
+--
+-- `bump` rebuilds the record sharing its list, so `base` and `sent` are
+-- distinct boxes over one list; `pick` returns `sent` and drops `base`.
+mod Main do
+  needs IO.Console
+
+type Rec = Rec(List(String), Int)
+type Res = Ok2(Rec) | Err2(Int)
+
+fn bump(r : Rec, n : Int) : Rec do
+  match r do
+  Rec(xs, _) -> Rec(xs, n)
+  end
+end
+
+fn pick(stale : Rec, res : Res) : Rec do
+  match res do
+  Ok2(c)  -> c
+  Err2(_) -> stale
+  end
+end
+
+fn main() do
+  let base  = Rec(["a", "b"], 0)
+  let sent  = bump(base, 200)
+  let out   = pick(base, Ok2(sent))
+  match out do
+  Rec(xs, n) -> println(int_to_string(n) ++ " " ++ String.join(xs, ","))
+  end
+end
+
+end
