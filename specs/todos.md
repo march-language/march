@@ -127,11 +127,22 @@ corpus 220/220, `--refine-report` counts on `stdlib/list.march` unchanged.
 Pinned by `test/test_refinecheck.ml`'s `walk-coverage` group and corpus
 witnesses `accept/t119` / `reject/t120`.
 
-**Still open (filed here, not fixed):** `collect_all_defs` — the table of which
-functions HAVE contracts — also walks only `DFn`/`DMod`, so a refined signature
-on an `impl` or `interface` method is invisible to callers. That is the
-opposite failure (a missing contract rather than a missing check) and wants its
-own fix.
+**Follow-up, FIXED 2026-07-29 (same day, review round 1).** `collect_all_defs` —
+the table of which functions HAVE contracts — also walked only `DFn`/`DMod`, and
+that was worse than "a missing contract": the widened walk ASSUMED an impl
+method's parameter refinement while nothing obliged any caller, so
+`fn run(b, k : {Int | k != 0})` made `m / k` provable under `cap no_panic` while
+`run(Box(4), 0)` compiled and divided by zero at run time. Impl-method
+signatures are now registered (`adoptable_impl_methods` is the single, shared
+adoption rule), and an unadopted contract is stripped from the body too so it
+binds nobody rather than only the body. Witnesses `reject/t124` / `accept/t125`.
+
+Two residuals remain, both stated in `specs/lang/refinement-types.md`:
+a refinement written in an `interface`'s OWN method signature is not enforced at
+call sites (nothing assumes it either — a missing check, not an unsound one);
+and a provably violated obligation is reported regardless of any capability, so
+ordinary modules with a definitely-broken precondition in an impl body or
+top-level `let` newly fail to build.
 
 ---
 

@@ -159,6 +159,70 @@ Measured: refinecheck 297 tests (was 294; new `divsafety-entailment` group,
 whose control case is deliberately UNgated so it runs on a z3-less machine),
 `run_compiler` 612, typing corpus 222/222, stdlib sweep empty.
 
+## Current State (as of 2026-07-29, impl-method contracts oblige their callers)
+
+**Widening the decl walk created a worse bug than the one it fixed, for one
+day.** Once both passes walked `impl` method bodies, an impl method's parameter
+refinement became a FACT the checker ASSUMED — while `collect_all_defs`, the
+table of which functions have contracts, still walked only `DFn`/`DMod`, so no
+caller was ever obliged to establish it:
+
+```march
+impl Runner(Box) do
+  fn run(b, k : {Int | k != 0}) : Int do match b do Box(m) -> m / k end end
+end
+fn main() do println(int_to_string(run(Box(4), 0))) end
+```
+
+`--check` exit 0 under `cap no_panic`; run it, `division by zero`. Not a
+regression — pre-widening the body was not walked, so the program was accepted
+then too — but post-widening the compiler *walks the body, discharges the
+division against a contract nothing enforces, and reports success*. Walking a
+body and enforcing a signature are different guarantees, and holding one while
+advertising the other is worse than holding neither.
+
+`collect_all_defs` now registers impl-method signatures. Registration is
+deliberately conservative and `adoptable_impl_methods` is its single definition,
+shared by both passes so they cannot drift: a method name is adopted only when
+no `fn` in the same decl list owns it and exactly one `impl` defines it, because
+a call resolved by NAME cannot tell two impls' contracts apart and checking
+correct code against a predicate it never touches is the one failure this
+subsystem must never have. **Unadopted contracts fail CLOSED**, not silent:
+`visit_fn ~assume_params:false` and `division_safety`'s matching strip both run
+the body through `strip_param_refinements`, so an unenforced refinement is
+unusable in BOTH directions. The postcondition check still sees the original
+`fn_def` — a return refinement is verified, not assumed.
+
+**A fifth wildcard walk, in desugar.** `strip_entry_self_qual` handled only
+`fn`/`let`/`actor`/`mod`, so `OuterB.g(-9)` written inside an `impl` method of
+entry module `OuterB` survived unstripped, resolved to nothing, and silently
+raised no obligation — while the identical call in a sibling `fn` was reported.
+Exhaustive now, and covering interface defaults, app hooks, tests, setup blocks,
+describe blocks and actor invariants. A **fourth**, `warn_predicate_decls`, was
+also widened: the "not a measure or known predicate" warning never fired for a
+refinement on an impl/interface method, precisely where the widened checks now
+consume such predicates.
+
+**Two residuals, stated because they bound the guarantee.** A refinement written
+in an `interface`'s own method signature (`fn run : a -> {Int | _ > 0} -> Int`)
+is still not enforced at call sites — nothing assumes it either, so it is a
+missing check rather than an unsound one. And a *provably violated* obligation
+is reported regardless of any capability, so widening the walk **can newly fail
+a build with no `cap` directive at all** (an impl body or top-level `let` with a
+definitely-broken precondition). True positives, but a real behaviour change for
+ordinary modules; `CHANGELOG.md` says so.
+
+Blast radius re-measured after every step: stdlib `--check` output byte-identical
+across all 111 modules (`diff -r` of full per-file diagnostics, not a grep),
+stdlib grep sweep empty, `examples/`+`demo/` 55 files 0 hits, typing corpus
+225/225, `--refine-report` on `stdlib/list.march` unchanged (user-only `0 proved,
+0 violated, 5 skipped`; user + stdlib `8 proved, 0 violated, 28 skipped`), so the
+CI ratchet does not move. Pinned by `walk-coverage` (17 cases: the
+assume-without-check repro and its satisfied control, the ambiguous fail-closed
+strip and its unambiguous control, the self-qualified call, and one firing case
+per descended decl form each paired with a no-capability control) plus corpus
+witnesses `reject/t124` / `accept/t125`.
+
 ## Current State (as of 2026-07-29, capability walks made exhaustive over `A.decl`)
 
 **`cap no_panic` accepted a division by zero that crashed at run time.** Both
@@ -196,11 +260,11 @@ Blast radius measured, not assumed: the stdlib sweep is empty (all 111 modules'
 violated, 28 skipped`). Pinned by `test/test_refinecheck.ml`'s `walk-coverage`
 group (294 tests, was 290) and corpus witnesses `accept/t119` / `reject/t120`.
 
-**Known residual (not fixed here).** `collect_all_defs`, the table that records
-which functions HAVE contracts, still walks only `DFn`/`DMod`. A refined
-signature declared on an `impl` or `interface` method is therefore invisible to
-callers — a separate hole, in the opposite direction (a missing contract, not a
-missing check).
+**Known residual at the time (FIXED 2026-07-29, see the entry above).**
+`collect_all_defs`, the table that records which functions HAVE contracts,
+still walked only `DFn`/`DMod`, so a refined signature declared on an `impl`
+method was invisible to callers *while the widened walk assumed it inside the
+body* — assume-without-check, not merely a missing contract.
 
 ## Current State (as of 2026-07-28, refinement legibility: `--refine-report`, measure aliases, `cap verified`)
 
