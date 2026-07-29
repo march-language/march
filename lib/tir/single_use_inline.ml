@@ -1,3 +1,65 @@
+(** Single-use, impure-body inlining pass.
+
+    Relocates a top-level function's body to its single call site — the
+    complement of [Inline], which only handles syntactically *pure*
+    candidates. Scope:
+    - Impure-only: candidacy is gated on
+      [not (Purity.is_pure fn.Tir.fn_body)] below. A syntactically pure
+      function stays [Inline]'s responsibility (it can be duplicated freely
+      across several call sites, so it doesn't need this pass's
+      single-reference restriction). This pass exists because an impure body
+      may only ever be relocated, never duplicated: duplicating it would
+      duplicate its observable side effects, so it is only sound when there
+      is exactly one call site to move it to.
+    - Exhaustive reference counting: the eligibility test is "exactly one
+      *total* free top-level reference in the whole artifact, and that
+      occurrence is an arity-correct direct [EApp]". [scan_atom]/[scan_expr]
+      below must visit every atom position in every body with no gaps —
+      that's why [ADefRef], closure-stored atoms, [ECallPtr] targets, etc.
+      all count via [NonDirect] rather than being skipped. A future new
+      [Tir.expr]/[Tir.atom] constructor MUST be added to these scan
+      functions too, or a real (uncounted) second reference would make the
+      function wrongly look single-use.
+    - This pass never deletes a function definition: [run] below rebuilds
+      [tm_fns] with every [fn_def] intact and only rewrites [fn_body] at call
+      sites, leaving deletion to DCE's independent reachability analysis.
+      That is why an under-count in the reference scan above degrades to a
+      *code-size* hazard rather than a soundness one: the original
+      definition survives, so a missed second caller still reaches a whole,
+      correct copy of the body — it just also gets a duplicate relocated
+      into the (wrongly-believed) sole call site. Each dynamic call still
+      executes exactly one copy of the body; nothing dangles and no
+      side effect fires an extra time. This is the main reason the pass is
+      forgiving of its own edge cases — but it is not a license to be sloppy
+      in the scan, since silent code bloat is still a real defect.
+    - Post-Perceus, "impure" is a very wide net. [Purity.is_pure] (used
+      unparameterized here, i.e. with no known-impure user functions) treats
+      any body containing [EIncRC]/[EDecRC]/[EFree]/[EReuse]/atomic-RC or an
+      [ECallPtr] as impure — see `lib/tir/purity.ml`. Because this pass runs
+      inside [Opt.run] strictly after Perceus (see below), essentially every
+      non-trivial function body already carries RC ops by construction, so
+      almost every candidate is "impure" in this sense and falls to this
+      pass rather than to [Inline.run] (which requires purity). In practice
+      this pass, not [Inline.run], does most of the single-call-site
+      inlining once Perceus has run — despite the "impure-only" framing
+      above sounding like a narrow carve-out. Keep that in mind when judging
+      the blast radius of a change here: it is not a rarely-hit corner case.
+    - Perceus must already have run. Ownership operations ([EIncRC],
+      [EDecRC], [EFree], [EReuse], the atomic RC variants) are relocated
+      verbatim, in their original order, alongside the body they annotate —
+      soundness depends on those ops already being explicit in the TIR by
+      the time this pass runs. Nothing here asserts that; the ordering is
+      enforced only by [Opt.named_passes] running after
+      [March_tir.Perceus.perceus] in the driver (see `bin/main.ml`, and the
+      pass-order comment atop `lib/tir/opt.ml`). If that invocation order
+      is ever changed — e.g. `Opt.run` moved ahead of `Perceus.perceus`, or
+      a caller runs `Opt.run` standalone on pre-Perceus TIR — this pass
+      would silently relocate a pre-RC body as if it carried real RC ops,
+      miscompiling with no error at any stage. There is no cheap way to
+      assert this locally (the pass has no reliable, zero-cost signal that
+      RC insertion has or hasn't happened yet), so watch this ordering by
+      hand when touching the pass list. *)
+
 module SSet = Set.Make (String)
 
 type occurrence =
@@ -8,54 +70,6 @@ type summary = {
   mutable count : int;
   mutable sole : occurrence option;
 }
-
-let recursive_names successors =
-  let indices : (string, int) Hashtbl.t = Hashtbl.create 16 in
-  let lowlinks : (string, int) Hashtbl.t = Hashtbl.create 16 in
-  let index = ref 0 in
-  let stack = ref [] in
-  let on_stack = ref SSet.empty in
-  let recursive = ref SSet.empty in
-  let rec strongconnect name =
-    Hashtbl.add indices name !index;
-    Hashtbl.add lowlinks name !index;
-    incr index;
-    stack := name :: !stack;
-    on_stack := SSet.add name !on_stack;
-    SSet.iter
-      (fun successor ->
-        if not (Hashtbl.mem indices successor) then begin
-          strongconnect successor;
-          Hashtbl.replace lowlinks name
-            (min (Hashtbl.find lowlinks name)
-               (Hashtbl.find lowlinks successor))
-        end else if SSet.mem successor !on_stack then
-          Hashtbl.replace lowlinks name
-            (min (Hashtbl.find lowlinks name)
-               (Hashtbl.find indices successor)))
-      (Hashtbl.find successors name);
-    if Hashtbl.find lowlinks name = Hashtbl.find indices name then begin
-      let rec pop_component component =
-        match !stack with
-        | member :: rest ->
-          stack := rest;
-          on_stack := SSet.remove member !on_stack;
-          let component = SSet.add member component in
-          if String.equal member name then component
-          else pop_component component
-        | [] -> assert false
-      in
-      let component = pop_component SSet.empty in
-      if SSet.cardinal component > 1
-         || SSet.mem name (Hashtbl.find successors name) then
-        recursive := SSet.union component !recursive
-    end
-  in
-  Hashtbl.iter
-    (fun name _ ->
-      if not (Hashtbl.mem indices name) then strongconnect name)
-    successors;
-  !recursive
 
 let rewrite_expr ~changed candidates candidate_free_names resolve_name ~bound =
   let try_inline_call ~bound ~args ~call candidate_name =
@@ -295,7 +309,7 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
       scan_expr ~caller:fn.Tir.fn_name ~bound fn.Tir.fn_body)
     module_.Tir.tm_fns;
   let roots = SSet.of_list (Dce.root_names module_) in
-  let recursive = recursive_names successors in
+  let recursive = Inline.recursive_names_in_graph successors in
   let candidates : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter
     (fun fn ->
