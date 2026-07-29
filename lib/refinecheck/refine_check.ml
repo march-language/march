@@ -4408,6 +4408,27 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
     if in_mod && b && not (is_stdlib_source_file sp.A.file) then foreign := true
   in
   let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
+  (* A `use`/`alias` competes for the bare name `<md>` on the same terms a
+     member definition does: only when it is the PROGRAM's, not the standard
+     library's.  Without this the exclusion was asymmetric — [defines] already
+     ignored stdlib spans — and one `import` added inside stdlib withdrew the
+     alias for every program compiled with that stdlib.
+
+     That happened: #112 added `import Process` to stdlib/system.march to
+     dedupe System.ProcessResult.  It is a glob (`UseAll`), which this scan
+     treats as "could carry a nested module named List", so `List.length`
+     stopped being recognised as the stdlib's and every
+     `{List(a) | len(_) > 0}` contract silently stopped being enforced —
+     caught only by specs/lang/types/reject/t117, whose whole purpose is to
+     notice the alias going missing.
+
+     Scoping makes this sound beyond the stdlib case: an import inside
+     `mod System` binds names in System's body, not in the module being
+     checked.  This stays conservative for user code and only stops the
+     stdlib's own internals from speaking for the program. *)
+  let rebinds (sp : A.span) b =
+    if b && not (is_stdlib_source_file sp.A.file) then rebound := true
+  in
   let rec go in_mod ds =
     List.iter
       (function
@@ -4431,8 +4452,8 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
           defines in_mod sp
             (List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods)
         (* ── Rebinds the bare segment `<md>` ─────────────────────────────── *)
-        | A.DAlias (a, _) -> if a.A.alias_name.A.txt = md then rebound := true
-        | A.DUse (u, _) ->
+        | A.DAlias (a, sp) -> rebinds sp (a.A.alias_name.A.txt = md)
+        | A.DUse (u, sp) ->
           (* Four selector forms, all of which can put some other module under
              the bare name `<md>`:
                `use X.<md>`            — UseSingle, the path's last segment
@@ -4443,12 +4464,13 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
                                          excluded. *)
           (match u.A.use_sel with
            | A.UseSingle ->
-             (match List.rev u.A.use_path with
-              | last :: _ :: _ when last.A.txt = md -> rebound := true
-              | _ -> ())
-           | A.UseNames xs -> if mentions_md xs then rebound := true
-           | A.UseExcept xs -> if not (mentions_md xs) then rebound := true
-           | A.UseAll -> rebound := true)
+             rebinds sp
+               (match List.rev u.A.use_path with
+                | last :: _ :: _ -> last.A.txt = md
+                | _ -> false)
+           | A.UseNames xs -> rebinds sp (mentions_md xs)
+           | A.UseExcept xs -> rebinds sp (not (mentions_md xs))
+           | A.UseAll -> rebinds sp true)
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
         (* A `describe` block does not open a module scope of its own, so its
