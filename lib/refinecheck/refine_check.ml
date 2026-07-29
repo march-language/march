@@ -1874,38 +1874,112 @@ let sig_of_clause (c : A.fn_clause) : fn_sig =
    bare call that resolves to a non-refined sibling must NOT fall through to a
    refined function of the same name in an enclosing module — that would check
    the wrong predicate (a false positive). *)
+let sig_of_fn (fd : A.fn_def) : fn_sig =
+  let base =
+    match fd.A.fn_clauses with
+    | c :: _ -> sig_of_clause c
+    | [] ->
+      { param_names = []; param_str = []; param_scalar = []; refined = []
+      ; ret = None; ret_sort = None }
+  in
+  match return_refine_sorted fd with
+  | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
+  | None -> { base with ret = None; ret_sort = None }
+
+(* Record the signature when EITHER side carries a refinement: a function with
+   only a refined *return* must be resolvable so its postcondition reaches call
+   sites, even though it has no refined params of its own to check. *)
+let entry_of_sig (sg : fn_sig) : fn_sig option =
+  if sg.refined <> [] || Option.is_some sg.ret then Some sg else None
+
+(* ── Which `impl` method contracts may be trusted ──────────────────────────
+   An `impl` method is callable under the enclosing module's spelling exactly
+   like a `fn`, and [visit_decl] now walks its BODY and would ASSUME its
+   parameter refinements as facts.  A predicate assumed inside a body but never
+   demanded of any caller is assume-without-check: `fn run(b, k : {Int|k != 0})`
+   made `m / k` dischargeable under `cap no_panic` while `run(Box(4), 0)` was
+   accepted, and the program divided by zero at run time.  Registering the
+   contract in [collect_all_defs] is what obliges the caller.
+
+   But a name only denotes ONE contract when it is unambiguous.  It is not when
+
+     - a `fn` in the same decl list already owns the name (a module with both
+       `fn map` and `impl Functor(T) do fn map`), or
+     - two impls define the method (`impl Show(Int)` / `impl Show(String)` both
+       give `show`),
+
+   because a call resolved by NAME cannot tell which contract applies, and
+   checking correct code against a predicate it never touches is the one
+   failure this subsystem must never have.  So: adoptable names get their
+   contract registered (callers obliged, body may assume); the rest are
+   registered nowhere AND have their bodies walked with parameter refinements
+   STRIPPED.  Unenforced means unusable in BOTH directions.
+
+   This function is the single definition of that rule.  [division_safety]
+   consults it too, so the two passes cannot drift apart. *)
+let adoptable_impl_methods (decls : A.decl list) : string list =
+  let fns = Hashtbl.create 16 in
+  let counts = Hashtbl.create 16 in
+  List.iter
+    (function
+      | A.DFn (fd, _) -> Hashtbl.replace fns fd.A.fn_name.A.txt ()
+      | A.DImpl (idf, _) ->
+        List.iter
+          (fun ((mn : A.name), _) ->
+            Hashtbl.replace counts mn.A.txt
+              (1 + Option.value ~default:0 (Hashtbl.find_opt counts mn.A.txt)))
+          idf.A.impl_methods
+      | _ -> ())
+    decls;
+  Hashtbl.fold
+    (fun name n acc -> if n = 1 && not (Hashtbl.mem fns name) then name :: acc else acc)
+    counts []
+
 let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   let tbl = Hashtbl.create 128 in
+  let qualify prefix n = if prefix = "" then n else prefix ^ "." ^ n in
   let rec go prefix decls =
+    let adoptable = adoptable_impl_methods decls in
     List.iter
       (function
         | A.DFn (fd, _) ->
-          let key = if prefix = "" then fd.A.fn_name.A.txt else prefix ^ "." ^ fd.A.fn_name.A.txt in
-          let base =
-            match fd.A.fn_clauses with
-            | c :: _ -> sig_of_clause c
-            | [] ->
-              { param_names = []; param_str = []; param_scalar = []; refined = []
-              ; ret = None; ret_sort = None }
-          in
-          let sg =
-            match return_refine_sorted fd with
-            | Some (b, p, srt) -> { base with ret = Some (b, p); ret_sort = srt }
-            | None -> { base with ret = None; ret_sort = None }
-          in
-          (* Record the signature when EITHER side carries a refinement: a
-             function with only a refined *return* must be resolvable so its
-             postcondition reaches call sites, even though it has no refined
-             params of its own to check. *)
-          Hashtbl.replace tbl key
-            (if sg.refined <> [] || Option.is_some sg.ret then Some sg else None)
-        | A.DMod (name, _, ds, _) ->
-          go (if prefix = "" then name.A.txt else prefix ^ "." ^ name.A.txt) ds
+          Hashtbl.replace tbl (qualify prefix fd.A.fn_name.A.txt) (entry_of_sig (sig_of_fn fd))
+        | A.DImpl (idf, _) ->
+          List.iter
+            (fun ((mn : A.name), (fd : A.fn_def)) ->
+              if List.mem mn.A.txt adoptable then
+                Hashtbl.replace tbl (qualify prefix mn.A.txt) (entry_of_sig (sig_of_fn fd)))
+            idf.A.impl_methods
+        | A.DMod (name, _, ds, _) -> go (qualify prefix name.A.txt) ds
         | _ -> ())
       decls
   in
   go "" decls;
   tbl
+
+(* Erase parameter refinements from [fd], leaving the return refinement alone.
+   A stripped parameter contributes no fact to [scope], so a body checked with
+   it can discharge nothing from a predicate no caller was obliged to
+   establish.  The return refinement is CHECKED rather than assumed, so it
+   stays: dropping it would lose a real check, and checking it against the
+   original (unstripped) parameters is what [visit_fn] keeps doing. *)
+let strip_param_refinements (fd : A.fn_def) : A.fn_def =
+  let rec strip = function
+    | A.TyRefine (t, _, _) -> strip t
+    | A.TyLinear (l, t) -> A.TyLinear (l, strip t)
+    | t -> t
+  in
+  let param (p : A.param) = { p with A.param_ty = Option.map strip p.A.param_ty } in
+  let fp = function
+    | A.FPNamed p -> A.FPNamed (param p)
+    | A.FPDefault (p, e) -> A.FPDefault (param p, e)
+    | A.FPPat _ as x -> x
+  in
+  { fd with
+    A.fn_clauses =
+      List.map
+        (fun (c : A.fn_clause) -> { c with A.fc_params = List.map fp c.A.fc_params })
+        fd.A.fn_clauses }
 
 (* ── Use/alias-aware call resolution ───────────────────────────────────────
    Resolve a call name the way the typechecker does: a bare name binds to the
@@ -2009,6 +2083,16 @@ let resolve_call (ctx : rctx) (defs : (string, fn_sig option) Hashtbl.t) (fname 
              in
              if imported then lookup (qualify m fname) else None)
            ctx.uses)
+
+(* True iff a call written as the bare [name] from inside [ctx]'s module
+   resolves to exactly [sg] — i.e. the contract every caller is obliged to
+   establish IS this definition's.  Used to decide whether an `impl` method's
+   parameter refinements may be assumed while walking its body; see
+   [collect_all_defs]'s merge step for the cases where it is false. *)
+let contract_is_enforced (ctx : rctx) defs (name : string) (sg : fn_sig) : bool =
+  match resolve_call ctx defs name with
+  | Some (Some found) -> found.refined = sg.refined
+  | _ -> false
 
 (* Populate [cbenv] from a LOCAL ALIAS of a named refined function (Task 2):
    only a bare-variable RHS that [resolve_call] resolves to a refined function
@@ -4355,8 +4439,16 @@ let rec warn_predicate_decls (errctx : Err.ctx) (decls : A.decl list) : unit =
       | _ -> ())
     decls
 
-let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
+(* [assume_params:false] walks the body with the parameter refinements erased,
+   so none of them can discharge anything.  Used for an `impl` method whose
+   contract [collect_all_defs] could not adopt unambiguously: with no caller
+   obliged to establish the predicate, assuming it inside the body would be
+   assume-without-check.  The POSTcondition check still sees the original
+   [fd] — a return refinement is verified, not assumed, and verifying it
+   against the declared parameters is exactly right. *)
+let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_def) : unit =
   check_fn_post ~root errctx fd;
+  let walked = if assume_params then fd else strip_param_refinements fd in
   List.iter
     (fun (c : A.fn_clause) ->
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
@@ -4367,7 +4459,7 @@ let visit_fn ~root errctx defs (ctx : rctx) (fd : A.fn_def) : unit =
       let ctx = local_shadow ctx (List.concat_map fnparam_binders c.A.fc_params) in
       let path = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in
       visit ~root errctx defs ctx path sc re cb c.A.fc_body)
-    fd.A.fn_clauses
+    walked.A.fn_clauses
 
 let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit =
   (* Gather this scope's aliases/uses first so every function in the module sees
@@ -4414,8 +4506,18 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
   | A.DMod (name, _, ds, _) ->
     let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
     visit_decls ~root errctx defs { ctx with modpath } ds
-  (* Each method body is an ordinary function body. *)
-  | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> visit_fn ~root errctx defs ctx fd) idf.A.impl_methods
+  (* Each method body is an ordinary function body — but its parameter
+     refinements may be assumed ONLY if callers are obliged to establish them,
+     i.e. only if [collect_all_defs] adopted this method's contract under the
+     name a caller would write.  When it could not (a `fn` owns the name, or
+     two impls of the same interface define the method), the body is walked
+     with the refinements stripped rather than silently trusted. *)
+  | A.DImpl (idf, _) ->
+    List.iter
+      (fun ((mn : A.name), (fd : A.fn_def)) ->
+        let assume_params = contract_is_enforced ctx defs mn.A.txt (sig_of_fn fd) in
+        visit_fn ~root errctx defs ~assume_params ctx fd)
+      idf.A.impl_methods
   (* An interface's DEFAULT method body is real code; the signatures are not. *)
   | A.DInterface (idf, _) ->
     List.iter

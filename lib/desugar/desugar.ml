@@ -2332,23 +2332,58 @@ let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
     | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)
   in
+  let rw_fn (def : fn_def) =
+    { def with fn_clauses = List.map (fun c ->
+        { c with fc_body  = rw c.fc_body
+               ; fc_guard = Option.map rw c.fc_guard }) def.fn_clauses }
+  in
+  (* Exhaustive over [decl] — NO wildcard.  The `| d -> d` that used to close
+     this match meant a self-qualified reference survived unstripped in every
+     declaration form except `fn`, `let`, `actor` and `mod`: `OuterB.g(-9)`
+     inside an `impl` method of the entry module `OuterB` stayed a dotted name
+     that nothing downstream resolves to the plain `g`, so the refinement
+     checker silently raised no obligation for it while the identical call in a
+     sibling `fn` was reported.  A new declaration form must be a compile error
+     here rather than another silent asymmetry. *)
   let rec strip_decls decls =
     List.map (function
-      | DFn (def, sp) ->
-        let def' = { def with fn_clauses = List.map (fun c ->
-            { c with fc_body  = rw c.fc_body
-                   ; fc_guard = Option.map rw c.fc_guard }) def.fn_clauses } in
-        DFn (def', sp)
-      | DLet (vis, b, sp) ->
-        DLet (vis, { b with bind_expr = rw b.bind_expr }, sp)
+      | DFn (def, sp) -> DFn (rw_fn def, sp)
+      | DLet (vis, b, sp) -> DLet (vis, { b with bind_expr = rw b.bind_expr }, sp)
       | DActor (vis, name, actor, sp) ->
         let actor' = { actor with
-          actor_init     = rw actor.actor_init
-        ; actor_handlers = List.map (fun h -> { h with ah_body = rw h.ah_body })
-                             actor.actor_handlers } in
+          actor_init      = rw actor.actor_init
+        ; actor_handlers  = List.map (fun h -> { h with ah_body = rw h.ah_body })
+                              actor.actor_handlers
+        ; actor_invariant = Option.map rw actor.actor_invariant } in
         DActor (vis, name, actor', sp)
       | DMod (name, vis, inner, sp) -> DMod (name, vis, strip_decls inner, sp)
-      | d -> d
+      | DImpl (idf, sp) ->
+        DImpl ({ idf with impl_methods =
+                            List.map (fun (n, def) -> (n, rw_fn def)) idf.impl_methods }, sp)
+      | DInterface (idf, sp) ->
+        DInterface ({ idf with iface_methods =
+                                 List.map (fun (m : method_decl) ->
+                                     { m with md_default = Option.map rw m.md_default })
+                                   idf.iface_methods }, sp)
+      | DApp (app, sp) ->
+        DApp ({ app with app_body     = rw app.app_body
+                       ; app_on_start = Option.map rw app.app_on_start
+                       ; app_on_stop  = Option.map rw app.app_on_stop }, sp)
+      | DTest (t, sp) -> DTest ({ t with test_body = rw t.test_body }, sp)
+      | DSetup (e, sp) -> DSetup (rw e, sp)
+      | DSetupAll (e, sp) -> DSetupAll (rw e, sp)
+      (* A `describe` block is part of its module's scope, so its decls are
+         stripped against the SAME prefix — not re-derived like a nested mod. *)
+      | DDescribe (name, ds, sp) -> DDescribe (name, strip_decls ds, sp)
+      (* ── Inert: no expression that can carry a self-qualified name. ────── *)
+      | DType _ | DAlwaysLinearType _   (* type definitions: types only *)
+      | DSig _                          (* signature: names and types only *)
+      | DProtocol _                     (* session type: message types *)
+      | DTransitions _                  (* state-machine edges: bare fn names *)
+      | DExtern _                       (* FFI signatures; bodies live in C *)
+      | DNeeds _ | DProofCap _ | DOpts _ (* capability paths / names / flags *)
+      | DDeriving _ | DSatisfy _        (* expanded into DImpl later in desugar *)
+      | DUse _ | DAlias _ as d -> d     (* import/alias paths, not references *)
     ) decls
   in
   strip_decls decls

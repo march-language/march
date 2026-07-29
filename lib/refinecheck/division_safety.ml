@@ -525,7 +525,12 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
       (function A.DOpts (opts, _) -> List.mem "no_panic" opts | _ -> false)
       decls
   in
-  List.iter (check_decl ~root errctx ~no_panic) decls
+  (* Which `impl` method contracts callers are actually obliged to establish.
+     Shared with [Refine_check] so the two passes cannot drift: a divisor
+     refinement on an impl method may discharge a division HERE only if the
+     same rule made it visible to callers THERE. *)
+  let adoptable = Refine_check.adoptable_impl_methods decls in
+  List.iter (check_decl ~root errctx ~no_panic ~adoptable) decls
 
 (* One declaration.  Every constructor of [A.decl] is named — there is NO
    wildcard, deliberately.  This walk used to descend only into [DFn] and
@@ -534,7 +539,7 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
    `100 / n` in an impl body passed `--check` silently and then panicked with
    "division by zero" at run time.  Exhaustive, a 25th decl form is a COMPILE
    ERROR here rather than another silent hole. *)
-and check_decl ~root errctx ~no_panic (d : A.decl) : unit =
+and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
   let body params e = if no_panic then check_body ~root errctx params e in
   let expr e = body [] e in
   match d with
@@ -545,9 +550,22 @@ and check_decl ~root errctx ~no_panic (d : A.decl) : unit =
   (* A `describe` block is part of its module's scope, so unlike DMod it
      INHERITS [no_panic] rather than re-deriving it from its own decl list —
      which carries no `cap` directive and would silently disable the check. *)
-  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~root errctx ~no_panic) ds
+  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~root errctx ~no_panic ~adoptable) ds
+  (* A divisor refinement declared on an `impl` method is a fact only if some
+     caller is obliged to establish it.  When the method name is ambiguous (a
+     `fn` owns it, or two impls define it) nothing obliges anyone, so the
+     refinement is STRIPPED and the division must prove itself some other way.
+     Otherwise `fn run(b, k : {Int | k != 0})` would discharge `m / k` while
+     `run(Box(4), 0)` sailed through — the exact assume-without-check this
+     capability exists to prevent. *)
   | A.DImpl (idf, _) ->
-    if no_panic then List.iter (fun (_, fd) -> check_fn ~root errctx fd) idf.A.impl_methods
+    if no_panic then
+      List.iter
+        (fun ((mn : A.name), (fd : A.fn_def)) ->
+          check_fn ~root errctx
+            (if List.mem mn.A.txt adoptable then fd
+             else Refine_check.strip_param_refinements fd))
+        idf.A.impl_methods
   | A.DInterface (idf, _) ->
     (* Default method bodies are real code; the signatures are not. *)
     List.iter
