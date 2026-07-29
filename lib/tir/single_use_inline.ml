@@ -1,3 +1,65 @@
+(** Single-use, impure-body inlining pass.
+
+    Relocates a top-level function's body to its single call site — the
+    complement of [Inline], which only handles syntactically *pure*
+    candidates. Scope:
+    - Impure-only: candidacy is gated on
+      [not (Purity.is_pure fn.Tir.fn_body)] below. A syntactically pure
+      function stays [Inline]'s responsibility (it can be duplicated freely
+      across several call sites, so it doesn't need this pass's
+      single-reference restriction). This pass exists because an impure body
+      may only ever be relocated, never duplicated: duplicating it would
+      duplicate its observable side effects, so it is only sound when there
+      is exactly one call site to move it to.
+    - Exhaustive reference counting: the eligibility test is "exactly one
+      *total* free top-level reference in the whole artifact, and that
+      occurrence is an arity-correct direct [EApp]". [scan_atom]/[scan_expr]
+      below must visit every atom position in every body with no gaps —
+      that's why [ADefRef], closure-stored atoms, [ECallPtr] targets, etc.
+      all count via [NonDirect] rather than being skipped. A future new
+      [Tir.expr]/[Tir.atom] constructor MUST be added to these scan
+      functions too, or a real (uncounted) second reference would make the
+      function wrongly look single-use.
+    - This pass never deletes a function definition: [run] below rebuilds
+      [tm_fns] with every [fn_def] intact and only rewrites [fn_body] at call
+      sites, leaving deletion to DCE's independent reachability analysis.
+      That is why an under-count in the reference scan above degrades to a
+      *code-size* hazard rather than a soundness one: the original
+      definition survives, so a missed second caller still reaches a whole,
+      correct copy of the body — it just also gets a duplicate relocated
+      into the (wrongly-believed) sole call site. Each dynamic call still
+      executes exactly one copy of the body; nothing dangles and no
+      side effect fires an extra time. This is the main reason the pass is
+      forgiving of its own edge cases — but it is not a license to be sloppy
+      in the scan, since silent code bloat is still a real defect.
+    - Post-Perceus, "impure" is a very wide net. [Purity.is_pure] (used
+      unparameterized here, i.e. with no known-impure user functions) treats
+      any body containing [EIncRC]/[EDecRC]/[EFree]/[EReuse]/atomic-RC or an
+      [ECallPtr] as impure — see `lib/tir/purity.ml`. Because this pass runs
+      inside [Opt.run] strictly after Perceus (see below), essentially every
+      non-trivial function body already carries RC ops by construction, so
+      almost every candidate is "impure" in this sense and falls to this
+      pass rather than to [Inline.run] (which requires purity). In practice
+      this pass, not [Inline.run], does most of the single-call-site
+      inlining once Perceus has run — despite the "impure-only" framing
+      above sounding like a narrow carve-out. Keep that in mind when judging
+      the blast radius of a change here: it is not a rarely-hit corner case.
+    - Perceus must already have run. Ownership operations ([EIncRC],
+      [EDecRC], [EFree], [EReuse], the atomic RC variants) are relocated
+      verbatim, in their original order, alongside the body they annotate —
+      soundness depends on those ops already being explicit in the TIR by
+      the time this pass runs. Nothing here asserts that; the ordering is
+      enforced only by [Opt.named_passes] running after
+      [March_tir.Perceus.perceus] in the driver (see `bin/main.ml`, and the
+      pass-order comment atop `lib/tir/opt.ml`). If that invocation order
+      is ever changed — e.g. `Opt.run` moved ahead of `Perceus.perceus`, or
+      a caller runs `Opt.run` standalone on pre-Perceus TIR — this pass
+      would silently relocate a pre-RC body as if it carried real RC ops,
+      miscompiling with no error at any stage. There is no cheap way to
+      assert this locally (the pass has no reliable, zero-cost signal that
+      RC insertion has or hasn't happened yet), so watch this ordering by
+      hand when touching the pass list. *)
+
 module SSet = Set.Make (String)
 
 type occurrence =
@@ -8,54 +70,6 @@ type summary = {
   mutable count : int;
   mutable sole : occurrence option;
 }
-
-let recursive_names successors =
-  let indices : (string, int) Hashtbl.t = Hashtbl.create 16 in
-  let lowlinks : (string, int) Hashtbl.t = Hashtbl.create 16 in
-  let index = ref 0 in
-  let stack = ref [] in
-  let on_stack = ref SSet.empty in
-  let recursive = ref SSet.empty in
-  let rec strongconnect name =
-    Hashtbl.add indices name !index;
-    Hashtbl.add lowlinks name !index;
-    incr index;
-    stack := name :: !stack;
-    on_stack := SSet.add name !on_stack;
-    SSet.iter
-      (fun successor ->
-        if not (Hashtbl.mem indices successor) then begin
-          strongconnect successor;
-          Hashtbl.replace lowlinks name
-            (min (Hashtbl.find lowlinks name)
-               (Hashtbl.find lowlinks successor))
-        end else if SSet.mem successor !on_stack then
-          Hashtbl.replace lowlinks name
-            (min (Hashtbl.find lowlinks name)
-               (Hashtbl.find indices successor)))
-      (Hashtbl.find successors name);
-    if Hashtbl.find lowlinks name = Hashtbl.find indices name then begin
-      let rec pop_component component =
-        match !stack with
-        | member :: rest ->
-          stack := rest;
-          on_stack := SSet.remove member !on_stack;
-          let component = SSet.add member component in
-          if String.equal member name then component
-          else pop_component component
-        | [] -> assert false
-      in
-      let component = pop_component SSet.empty in
-      if SSet.cardinal component > 1
-         || SSet.mem name (Hashtbl.find successors name) then
-        recursive := SSet.union component !recursive
-    end
-  in
-  Hashtbl.iter
-    (fun name _ ->
-      if not (Hashtbl.mem indices name) then strongconnect name)
-    successors;
-  !recursive
 
 let rewrite_expr ~changed candidates candidate_free_names resolve_name ~bound =
   let try_inline_call ~bound ~args ~call candidate_name =
@@ -72,7 +86,41 @@ let rewrite_expr ~changed candidates candidate_free_names resolve_name ~bound =
          the callee's bound variables cannot repair that provenance
          loss, so conservatively retain this one call when scopes
          collide. This keeps the rejection local to the one-use pass
-         instead of alpha-renaming unrelated caller bindings. *)
+         instead of alpha-renaming unrelated caller bindings.
+
+         WHY A *LEXICAL* [bound] IS SUFFICIENT, EVEN THOUGH THE THING IT
+         DEFENDS AGAINST IS NOT LEXICAL.  Codegen's shadowing map,
+         [Llvm_ctx.ctx.var_slot], is FLAT PER FUNCTION: cleared at entry
+         and snapshotted/restored only across [ECase] branches, never at
+         an [ELet]/[ESeq] scope end.  So a caller binder in an EARLIER
+         [ESeq] component is "dead" lexically (absent from [bound]) yet
+         still live in [var_slot] when the relocated body is emitted, and
+         a callee free [AVar] naming a global would then load that stale
+         local instead.  This was reproduced synthetically (hand-built
+         TIR: a body returning global [G] returned the caller's local 7
+         instead of 41), so the hazard is real in principle.
+
+         It is nevertheless unreachable from March source today, and the
+         block rests on three separate invariants — instrumenting this
+         pass over 73 programs found 10,941 inlines, 1,221 distinct names
+         in such dead scopes, and ZERO plain user-chosen ones among them:
+           (a) [Inline.alpha_rename] freshens every binder it relocates to
+               "name_i<N>" (checked unique), so anything an inline drops
+               into a dead scope can never equal a global's name;
+           (b) [llvm_case] snapshots/restores [var_slot] per branch, so
+               branch binders — the one place plain user names survive
+               post-Perceus, as "let f = inc_rc $fN; $fN" — stay contained;
+           (c) [Beta_adt], the only pass that could lift such a branch
+               binder OUT of its [ECase], runs PRE-Perceus, where the
+               binder is still a plain copy that Cprop/Dce erase.
+         Break any of those and this becomes live.  In particular, moving
+         [Beta_adt] into [Opt.named_passes] (or adding any post-Perceus
+         case-of-known-constructor reduction) would start depositing
+         plain, RC-carrying user names into [ELet]-RHS dead scopes.
+
+         For scale: [Inline.run] has NO capture guard at all — it relies
+         purely on [alpha_rename] — so this guard is already strictly
+         stronger than the pipeline's general inliner. *)
       if not (SSet.is_empty (SSet.inter bound free_names)) then call
       else
         match Inline.expand_call fn args with
@@ -195,6 +243,17 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
     | Tir.AVar var when not (SSet.mem var.Tir.v_name bound) ->
       record_free caller var.Tir.v_name;
       record_resolved occurrence (resolve_name var.Tir.v_name)
+    (* Deliberate asymmetry with the [AVar] arm above: this records the
+       occurrence (so the single-use COUNT stays correct) but does NOT
+       call [record_free], so an [ADefRef]-only reference never enters
+       [free_names] and is invisible to the capture guard.  That is safe,
+       not an oversight: [ADefRef] is emitted at exactly one site,
+       llvm_emit.ml's ("ptr", "@" ^ llvm_name (mangle_extern …)) arm,
+       unconditionally and with no [var_slot] consultation — capture can
+       only happen through the var_slot-sensitive [AVar] paths.  (For
+       belt and braces, [Inline.alpha_rename] also folds ADefRef names
+       into its used-name set, so freshening can never mint a local equal
+       to an ADefRef target.) *)
     | Tir.ADefRef def
       when SSet.mem def.Tir.did_name top_names ->
       record def.Tir.did_name occurrence
@@ -295,7 +354,7 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
       scan_expr ~caller:fn.Tir.fn_name ~bound fn.Tir.fn_body)
     module_.Tir.tm_fns;
   let roots = SSet.of_list (Dce.root_names module_) in
-  let recursive = recursive_names successors in
+  let recursive = Inline.recursive_names_in_graph successors in
   let candidates : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter
     (fun fn ->
