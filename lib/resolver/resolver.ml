@@ -523,8 +523,26 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
             all_parsed
         in
         let queue : (string, unit) Hashtbl.t Queue.t = Queue.create () in
+        (* A module kept UNCONDITIONALLY below (via [has_global_effect_decl] —
+           e.g. a sibling test file with its own `describe` blocks, which is
+           never the compile entry but is still emitted) must also have its
+           OWN references seeded into reachability.  Without this, a library
+           module referenced only from such a sibling — never from the entry
+           file itself or its explicit imports — is wrongly pruned: `forge
+           test` picks one test file as the compile entry (alphabetically
+           first) and relies on auto-discovery for the rest, so a lib module
+           used only by a non-entry test file has no seed that ever reaches
+           it, and disappears from the program with a misleading "Unknown
+           module" error at typecheck time instead of a pruning diagnostic. *)
+        let unconditional_srcs =
+          List.filter_map (fun (_, _, _, ast, src) ->
+              if has_global_effect_decl ast.March_ast.Ast.mod_decls
+              then Some src else None)
+            all_parsed
+        in
         let seed_texts =
-          (match entry_src with Some s -> [s] | None -> []) @ !loaded_srcs in
+          (match entry_src with Some s -> [s] | None -> []) @ !loaded_srcs
+          @ unconditional_srcs in
         List.iter (fun t -> Queue.add (referenced_name_tokens t) queue) seed_texts;
         while not (Queue.is_empty queue) do
           let toks = Queue.take queue in
