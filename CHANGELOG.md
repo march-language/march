@@ -26,10 +26,9 @@ git log is authoritative for exact commits.
   not make the callee's module strict, and nested modules do not inherit the
   capability. Modules that do not declare it behave exactly as before.
 
-  Three limits worth knowing before relying on it: return refinements go through
+  Two limits worth knowing before relying on it: return refinements go through
   a separate path that files no record, so an undischarged **postcondition** is
-  neither reported nor escalated; `impl`/`interface` method bodies are not
-  walked by this pass and so raise no obligation at all; and there is **no
+  neither reported nor escalated; and there is **no
   `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
   checker cannot discharge are an `assert` or removing `cap verified` from the
   module. It is therefore a tool for small, deliberately-verified modules rather
@@ -93,6 +92,21 @@ git log is authoritative for exact commits.
   two could never meet.
 
 ### Fixed
+
+- **`cap no_panic` and `cap verified` now cover the whole module, not just its
+  `fn`s.** Both passes walked only `fn` and nested `mod` declarations and
+  ignored everything else, so a capability directive said nothing about code
+  living in any other declaration form. A division by zero inside an `impl`
+  method body passed `--check` with exit 0 and then panicked at run time with
+  "division by zero"; the identical division inside a plain `fn` was correctly
+  rejected. Obligations are now raised in `impl` method bodies, `interface`
+  default method bodies, top-level `let` bindings, `actor` init/handler/
+  `@invariant` expressions, `app` body and `on_start`/`on_stop` hooks, and
+  `test` / `setup` / `setup_all` bodies (`describe` blocks recurse and inherit
+  the enclosing module's capability). Both walks are now exhaustive over the
+  declaration type with no wildcard, so a future declaration form is a compile
+  error rather than a new silent hole. Modules that declare no capability are
+  unaffected. Witnessed by `specs/lang/types/{accept/t119,reject/t120}`.
 
 - **`cap no_panic`: an unreflectable divisor refinement is no longer accepted as
   a proof.** The division-safety check treated "this predicate is outside the

@@ -8,6 +8,32 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Capability walks skipped every declaration form but `fn` and `mod` (FIXED 2026-07-29)
+
+`cap no_panic` promised a module's divisions cannot panic and accepted a
+division by zero that crashed at run time: both obligation-raising walks
+(`Refine_check.visit_decls`, `Division_safety.check_decls`) descended only into
+`DFn` and `DMod` and ended in `| _ -> ()`, so an `impl` method body, an
+`interface` default body, a top-level `let`, an actor handler and a `test` body
+were never looked at. `cap verified` had the same hole. The same division
+inside a plain `fn` was correctly rejected — coverage, not solver weakness.
+
+Both walks are now exhaustive over `A.decl` with NO wildcard, so a 25th
+declaration form is a compile error rather than a new silent hole. `DDescribe`
+recurses inheriting the enclosing module's capability; `DMod` still re-derives
+its own. Stdlib sweep empty (diagnostics byte-identical before/after), typing
+corpus 220/220, `--refine-report` counts on `stdlib/list.march` unchanged.
+Pinned by `test/test_refinecheck.ml`'s `walk-coverage` group and corpus
+witnesses `accept/t119` / `reject/t120`.
+
+**Still open (filed here, not fixed):** `collect_all_defs` — the table of which
+functions HAVE contracts — also walks only `DFn`/`DMod`, so a refined signature
+on an `impl` or `interface` method is invisible to callers. That is the
+opposite failure (a missing contract rather than a missing check) and wants its
+own fix.
+
+---
+
 ## A measure over the refined value only worked under one spelling (FIXED 2026-07-27)
 
 **Symptom.** `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` parsed,

@@ -364,6 +364,16 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
 let check_fn ~root errctx (fd : A.fn_def) : unit =
   List.iter (check_clause ~root errctx) fd.A.fn_clauses
 
+(* A body that is not a function clause — a top-level `let`, an actor handler,
+   a `test` body.  [params] carries whatever bindings ARE in scope (an actor
+   handler's parameters may be refined); everything else is empty, so the
+   divisor can only be discharged by a literal, a path condition, or a `let`
+   value collected from the body itself. *)
+let check_body ~root errctx (params : A.fn_param list) (body : A.expr) : unit =
+  check_clause ~root errctx
+    { A.fc_params = params; A.fc_guard = None; A.fc_body = body;
+      A.fc_span = A.dummy_span }
+
 (* ── Module-level walk ──────────────────────────────────────────────────── *)
 
 let rec check_decls ~root errctx (decls : A.decl list) : unit =
@@ -372,13 +382,63 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
       (function A.DOpts (opts, _) -> List.mem "no_panic" opts | _ -> false)
       decls
   in
-  List.iter
-    (function
-      | A.DFn (fd, _) when no_panic -> check_fn ~root errctx fd
-      | A.DMod (_, _, inner_decls, _) ->
-        check_decls ~root errctx inner_decls
-      | _ -> ())
-    decls
+  List.iter (check_decl ~root errctx ~no_panic) decls
+
+(* One declaration.  Every constructor of [A.decl] is named — there is NO
+   wildcard, deliberately.  This walk used to descend only into [DFn] and
+   [DMod] and end in `| _ -> ()`, so `cap no_panic` promised nothing about a
+   division inside an `impl` method, a top-level `let`, or an actor handler:
+   `100 / n` in an impl body passed `--check` silently and then panicked with
+   "division by zero" at run time.  Exhaustive, a 25th decl form is a COMPILE
+   ERROR here rather than another silent hole. *)
+and check_decl ~root errctx ~no_panic (d : A.decl) : unit =
+  let body params e = if no_panic then check_body ~root errctx params e in
+  let expr e = body [] e in
+  match d with
+  | A.DFn (fd, _) -> if no_panic then check_fn ~root errctx fd
+  (* A nested module re-derives its own `cap` directive: capabilities do not
+     inherit inward (bin/main.ml prepends the whole stdlib as sibling DMods). *)
+  | A.DMod (_, _, inner_decls, _) -> check_decls ~root errctx inner_decls
+  (* A `describe` block is part of its module's scope, so unlike DMod it
+     INHERITS [no_panic] rather than re-deriving it from its own decl list —
+     which carries no `cap` directive and would silently disable the check. *)
+  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~root errctx ~no_panic) ds
+  | A.DImpl (idf, _) ->
+    if no_panic then List.iter (fun (_, fd) -> check_fn ~root errctx fd) idf.A.impl_methods
+  | A.DInterface (idf, _) ->
+    (* Default method bodies are real code; the signatures are not. *)
+    List.iter
+      (fun (m : A.method_decl) -> Option.iter expr m.A.md_default)
+      idf.A.iface_methods
+  | A.DLet (_, b, _) -> expr b.A.bind_expr
+  | A.DActor (_, _, ad, _) ->
+    expr ad.A.actor_init;
+    List.iter
+      (fun (h : A.actor_handler) ->
+        body (List.map (fun p -> A.FPNamed p) h.A.ah_params) h.A.ah_body)
+      ad.A.actor_handlers;
+    Option.iter expr ad.A.actor_invariant
+  | A.DApp (app, _) ->
+    expr app.A.app_body;
+    Option.iter expr app.A.app_on_start;
+    Option.iter expr app.A.app_on_stop
+  | A.DTest (t, _) -> expr t.A.test_body
+  | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
+  (* ── Inert: no expression in which a division can appear.  Named
+     individually so a new decl form breaks the build here. ─────────────── *)
+  | A.DType _                (* type definitions: types only, no terms *)
+  | A.DAlwaysLinearType _    (* likewise, plus a linearity marker *)
+  | A.DSig _                 (* module signature: names and types only *)
+  | A.DProtocol _            (* session type: message types, no bodies *)
+  | A.DTransitions _         (* state-machine edges: names of fns declared elsewhere *)
+  | A.DExtern _              (* FFI declarations: signatures, bodies live in C *)
+  | A.DNeeds _               (* capability manifest: capability paths *)
+  | A.DProofCap _            (* proof-capability declaration: a name *)
+  | A.DOpts _                (* the `cap` directive itself, read above *)
+  | A.DDeriving _            (* desugared into DImpl before this pass runs *)
+  | A.DSatisfy _             (* likewise desugared into DImpl *)
+  | A.DUse _                 (* import: no expressions *)
+  | A.DAlias _ -> ()         (* alias: no expressions *)
 
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
   check_decls ~root errctx m.A.mod_decls

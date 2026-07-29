@@ -1,0 +1,34 @@
+-- Refinement types, DECL-WALK COVERAGE (2026-07-29). The accept side of the
+-- pair with reject/t120: the same `cap no_panic` module, the same `impl`
+-- method, the same division — but the divisor is guarded by `if n != 0`, so
+-- the path condition discharges the obligation and the program is approved.
+--
+-- Exit 0 on its own cannot distinguish "the guard was read and PROVED the
+-- divisor non-zero" from "the impl body was never walked at all", which is
+-- exactly the pre-2026-07-29 state (division_safety.ml's walk descended only
+-- into `DFn` and `DMod` and ended in `| _ -> ()`). That is why this file is
+-- meaningless alone and must be read against reject/t120, which is byte-for-
+-- byte this program minus the guard and MUST be rejected. Together the pair
+-- says: the walk now enters `impl` method bodies, and entering them does not
+-- false-positive on correct code.
+mod ImplDivOk do
+  cap no_panic
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+        Box(n) -> if n != 0 do 100 / n else 0 end
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(run(Box(2))))
+  end
+end

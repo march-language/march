@@ -3873,6 +3873,87 @@ let divsafety_hole_suite =
               end\n"))
   ]
 
+(* ── Decl-walk coverage ────────────────────────────────────────────────────
+   Both obligation-raising walks used to descend only into [DFn] and [DMod] and
+   end in `| _ -> ()`, so a capability directive said nothing about code living
+   in any other decl form: an `impl` method, a top-level `let`, an actor
+   handler, a `test` body.  `cap no_panic` accepted a division by zero that
+   crashed at runtime.  These pin the widened walk; the fourth is the control
+   that the widening does not make ORDINARY modules noisier. *)
+let walk_coverage_suite =
+  [ Alcotest.test_case "cap no_panic sees a division inside an impl body" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod NP do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> 100 / n
+      end
+    end
+  end
+end|}))
+  ; Alcotest.test_case "cap no_panic sees a division in a top-level let" `Quick (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_divsafety_error {|
+mod NP2 do
+  cap no_panic
+  fn zero() : Int do 0 end
+  let boom = 100 / zero()
+end|}))
+    (* NOTE ON THE CONTRACT USED HERE.  The obvious fixture — an impl body
+       calling `List.head(xs)` — cannot work: a string fixture prepends no
+       standard library, so `List.head` resolves to nothing, carries no
+       contract, and raises no obligation no matter how wide the walk is.  It
+       would pass before AND after the fix.  The obligation has to come from a
+       contract the fixture itself declares, hence module-level `weird`, whose
+       `is_prime` predicate is outside the checkable fragment and therefore
+       SKIPS — which `cap verified` must escalate to an error. *)
+  ; gated "cap verified sees an obligation inside an impl body" (fun () ->
+      Alcotest.(check bool) "error" true
+        (has_refine_error_d {|
+mod CV do
+  cap verified
+  type Box = Box(Int)
+  fn weird(k : {Int | is_prime(_)}) : Int do k end
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> weird(n)
+      end
+    end
+  end
+end|}))
+  ; gated "an ordinary module is unaffected by the wider walk" (fun () ->
+      (* The control. Widening the walk must not make a NON-capability module
+         report anything it did not report before: the same skip, without the
+         `cap verified` directive, stays silent. *)
+      Alcotest.(check bool) "no error" false
+        (has_refine_error_d {|
+mod Plain do
+  type Box = Box(Int)
+  fn weird(k : {Int | is_prime(_)}) : Int do k end
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+      Box(n) -> weird(n)
+      end
+    end
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -3908,4 +3989,5 @@ let () =
       ("string-alias", string_alias_suite);
       ("obligations", obligation_suite);
       ("cap-verified", cap_verified_suite);
-      ("divsafety-hole", divsafety_hole_suite) ]
+      ("divsafety-hole", divsafety_hole_suite);
+      ("walk-coverage", walk_coverage_suite) ]

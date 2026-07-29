@@ -1,0 +1,41 @@
+-- EXPECT-ERROR: division by `n` in `cap no_panic` module may be by zero
+-- Refinement types, DECL-WALK COVERAGE (2026-07-29). `cap no_panic` promises
+-- a module's divisions cannot panic. Until this file existed, the walk that
+-- raises division obligations (lib/refinecheck/division_safety.ml) descended
+-- only into `DFn` and `DMod` and ended in a `| _ -> ()` wildcard, so a
+-- division living in ANY other declaration form — an `impl` method, a
+-- top-level `let`, an actor handler, a `test` body — was never looked at.
+-- This exact program therefore passed `--check` with exit 0 and then died at
+-- run time with "division by zero": the capability's central promise, silently
+-- unenforced for every method body in the module.
+--
+-- The identical division written inside a plain `fn` was always rejected, so
+-- this was coverage, not solver weakness. Both walks are now exhaustive over
+-- `A.decl` with no wildcard — a 25th decl form is a compile error rather than
+-- a new silent hole.
+--
+-- Accept companion: accept/t119, the same impl body with an `if n != 0` guard,
+-- which the widened walk approves. Read the pair together: this file shows the
+-- impl body IS being read, its companion shows reading it does not false-
+-- positive on a guarded divisor.
+mod ImplDiv do
+  cap no_panic
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+        Box(n) -> 100 / n
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(run(Box(2))))
+  end
+end

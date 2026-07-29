@@ -4285,14 +4285,76 @@ let rec visit_decls ~root errctx defs (ctx : rctx) (decls : A.decl list) : unit 
       (function A.DOpts (opts, _) -> List.mem "verified" opts | _ -> false)
       decls;
   Fun.protect ~finally:(fun () -> strict_verified := saved_strict) (fun () ->
+    List.iter (visit_decl ~root errctx defs ctx) decls)
+
+(* One declaration.  Every constructor of [A.decl] is named — there is NO
+   wildcard, deliberately: for years this walk descended only into [DFn] and
+   [DMod] and ended in `| _ -> ()`, so `cap no_panic` said nothing about a
+   division inside an `impl` method, a top-level `let`, or an actor handler,
+   and accepted programs that divided by zero at runtime.  With the match
+   exhaustive, a 25th decl form is a COMPILE ERROR here rather than a silent
+   hole — the same guarantee [stdlib_member_defs_ok] already gives. *)
+and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
+  (* A bare expression that is not a function clause: no parameters, no guard,
+     hence empty scope/recenv/cbenv and an empty path condition. *)
+  let visit_expr e = visit ~root errctx defs ctx [] [] [] [] e in
+  (* Decls that merely group other decls (`describe`) must NOT go through
+     [visit_decls]: that would re-derive [strict_verified] from the inner list,
+     which carries no `cap` directive of its own, and so would silently drop
+     the enclosing module's capability.  A `describe` block is part of its
+     module's scope, so it inherits. *)
+  let visit_group ds = List.iter (visit_decl ~root errctx defs ctx) ds in
+  match d with
+  | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
+  | A.DMod (name, _, ds, _) ->
+    let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
+    visit_decls ~root errctx defs { ctx with modpath } ds
+  (* Each method body is an ordinary function body. *)
+  | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> visit_fn ~root errctx defs ctx fd) idf.A.impl_methods
+  (* An interface's DEFAULT method body is real code; the signatures are not. *)
+  | A.DInterface (idf, _) ->
     List.iter
-      (function
-        | A.DFn (fd, _) -> visit_fn ~root errctx defs ctx fd
-        | A.DMod (name, _, ds, _) ->
-          let modpath = if ctx.modpath = "" then name.A.txt else ctx.modpath ^ "." ^ name.A.txt in
-          visit_decls ~root errctx defs { ctx with modpath } ds
-        | _ -> ())
-      decls)
+      (fun (m : A.method_decl) -> Option.iter visit_expr m.A.md_default)
+      idf.A.iface_methods
+  | A.DLet (_, b, _) -> visit_expr b.A.bind_expr
+  | A.DActor (_, _, ad, _) ->
+    visit_expr ad.A.actor_init;
+    List.iter
+      (fun (h : A.actor_handler) ->
+        (* Handler parameters bind exactly like named function parameters, so
+           their refinements must be in scope for the body. *)
+        let ps = List.map (fun p -> A.FPNamed p) h.A.ah_params in
+        let sc = List.fold_left scope_add_fnparam [] ps in
+        let re = List.fold_left recenv_add_fnparam [] ps in
+        let cb = List.fold_left cb_add_fnparam [] ps in
+        let ctx = local_shadow ctx (List.concat_map fnparam_binders ps) in
+        visit ~root errctx defs ctx [] sc re cb h.A.ah_body)
+      ad.A.actor_handlers;
+    (* The @invariant predicate is evaluated at run time like any other
+       expression, so obligations inside it count. *)
+    Option.iter visit_expr ad.A.actor_invariant
+  | A.DApp (app, _) ->
+    visit_expr app.A.app_body;
+    Option.iter visit_expr app.A.app_on_start;
+    Option.iter visit_expr app.A.app_on_stop
+  | A.DTest (t, _) -> visit_expr t.A.test_body
+  | A.DSetup (e, _) | A.DSetupAll (e, _) -> visit_expr e
+  | A.DDescribe (_, ds, _) -> visit_group ds
+  (* ── Inert: these decl forms carry no expression an obligation can arise in.
+     Named individually so adding a 25th form breaks the build here. ────── *)
+  | A.DType _                (* type definitions: types only, no terms *)
+  | A.DAlwaysLinearType _    (* likewise, plus a linearity marker *)
+  | A.DSig _                 (* module signature: names and types only *)
+  | A.DProtocol _            (* session type: message types, no bodies *)
+  | A.DTransitions _         (* state-machine edges: names of fns declared elsewhere *)
+  | A.DExtern _              (* FFI declarations: signatures, bodies live in C *)
+  | A.DNeeds _               (* capability manifest: capability paths *)
+  | A.DProofCap _            (* proof-capability declaration: a name *)
+  | A.DOpts _                (* the `cap` directive itself, read above *)
+  | A.DDeriving _            (* desugared into DImpl before this pass runs *)
+  | A.DSatisfy _             (* likewise desugared into DImpl *)
+  | A.DUse _                 (* import: read into [ctx.uses] above *)
+  | A.DAlias _ -> ()         (* alias: read into [ctx.aliases] above *)
 
 (** Register ADT/record sorts for a list of declarations without running the full
     VC pass.  Called by [--check-migration] mode to prime the type tables before

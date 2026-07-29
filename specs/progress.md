@@ -1,5 +1,48 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, capability walks made exhaustive over `A.decl`)
+
+**`cap no_panic` accepted a division by zero that crashed at run time.** Both
+obligation-raising walks — `Refine_check.visit_decls` and
+`Division_safety.check_decls` — descended only into `DFn` and `DMod` and ended
+in `| _ -> ()`, so a capability directive said nothing about code in any other
+declaration form. This program passed `--check` with exit 0 and then panicked:
+
+```march
+mod NP do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do fn run : a -> Int end
+  impl Runner(Box) do
+    fn run(b) do match b do Box(n) -> 100 / n end end
+  end
+end
+```
+
+The identical division inside a plain `fn` was correctly rejected, so this was
+COVERAGE, not solver weakness. Both walks are now exhaustive over `A.decl` with
+NO wildcard — the same guarantee `stdlib_member_defs_ok` already gave the
+alias-suppression gate — and descend into `DImpl` method bodies, `DInterface`
+default bodies, `DLet`, `DActor` (init, each handler with its parameters in
+scope, `@invariant`), `DApp` (body, `on_start`, `on_stop`), `DTest`, `DSetup`,
+`DSetupAll`, and `DDescribe` (which recurses INHERITING the enclosing module's
+capability, unlike `DMod`, which re-derives its own). The thirteen expression-
+free forms are named individually with a one-line reason, so a 25th declaration
+form is a compile error rather than a new silent hole.
+
+Blast radius measured, not assumed: the stdlib sweep is empty (all 111 modules'
+`--check` diagnostics byte-identical before and after), the typing corpus is
+220/220, and the `--refine-report` counts on `stdlib/list.march` are unchanged
+(user-only `0 proved, 0 violated, 5 skipped`; user + stdlib `8 proved, 0
+violated, 28 skipped`). Pinned by `test/test_refinecheck.ml`'s `walk-coverage`
+group (294 tests, was 290) and corpus witnesses `accept/t119` / `reject/t120`.
+
+**Known residual (not fixed here).** `collect_all_defs`, the table that records
+which functions HAVE contracts, still walks only `DFn`/`DMod`. A refined
+signature declared on an `impl` or `interface` method is therefore invisible to
+callers — a separate hole, in the opposite direction (a missing contract, not a
+missing check).
+
 ## Current State (as of 2026-07-28, refinement legibility: `--refine-report`, measure aliases, `cap verified`)
 
 **A refinement obligation now leaves a record, so the checked fraction is a

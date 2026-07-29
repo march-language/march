@@ -882,9 +882,14 @@ message above).
 - **Precondition obligations at call sites only.** Same ledger as
   `--refine-report`: a postcondition the checker cannot discharge is neither
   recorded nor escalated.
-- **`DImpl` / `DInterface` method bodies are not covered.** The pass walks `DFn`
-  and nested `DMod` declarations; calls made inside an interface implementation
-  raise no obligation and so cannot escalate.
+- **Every declaration form is covered** (since 2026-07-29). The pass once walked
+  only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
+  inside an `impl` method, an `interface` default body, a top-level `let`, an
+  actor handler or a `test` raised no obligation and could not escalate. Both
+  this walk and `cap no_panic`'s division walk are now exhaustive over `A.decl`
+  with no wildcard, so a new declaration form is a compile error rather than a
+  silent hole. A `describe` block recurses and inherits the enclosing module's
+  capability; a nested `mod` still re-derives its own.
 - **There is no `@[trusted]` escape hatch yet.** The only way to accept an
   obligation the checker cannot discharge is `assert`, or removing
   `cap verified` from the module. Until an escape hatch exists, `cap verified`
