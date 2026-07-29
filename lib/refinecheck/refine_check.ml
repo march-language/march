@@ -4895,6 +4895,44 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
         match List.rev p with last :: _ -> last.A.txt = md | [] -> false)
       path
   in
+  (* A `use`/`alias` competes for the bare name `<md>` on the same terms a
+     member definition does: only when it is the PROGRAM's, not the standard
+     library's.  Without this the exclusion was asymmetric — [defines] already
+     ignored stdlib spans — and one `import` added inside stdlib withdrew the
+     alias for every program compiled with that stdlib.
+
+     That happened: #112 added `import Process` to stdlib/system.march to
+     dedupe System.ProcessResult.  It is a glob (`UseAll`), which an earlier
+     revision of this scan treated as "could carry a nested module named
+     List", so `List.length` stopped being recognised as the stdlib's and
+     every `{List(a) | len(_) > 0}` contract silently stopped being enforced —
+     caught only by specs/lang/types/reject/t117, whose whole purpose is to
+     notice the alias going missing.
+
+     Scoping makes this sound beyond the stdlib case: an import inside
+     `mod System` binds names in System's body, not in the module being
+     checked.  This stays conservative for user code and only stops the
+     stdlib's own internals from speaking for the program.
+
+     ── WHY THIS COMPOSES WITH [glob_competes] ─────────────────────────────
+     The two guards were written independently for the same bug and are kept
+     BOTH, conjoined: a glob withdraws only when it is the program's own AND
+     its target provably provides a competitor.  That is sound for the reason
+     any intersection of over-approximations is.  Write C for "this
+     declaration really can make `<md>` denote a non-stdlib module".  The
+     span rule is sound, i.e. C ⟹ ¬is_stdlib_source_file; the resolution rule
+     is sound, i.e. C ⟹ glob_competes (unresolvable answers `true`).  Hence
+     C ⟹ both, so anything that really competes still withdraws, and the two
+     only ever subtract cases where at least one of them has a proof that
+     nothing competes.  Neither can license the other into missing a genuine
+     competitor, because neither weakens the other's test — they are ANDed,
+     not substituted. *)
+  let rebinds (sp : A.span) b =
+    if b && not (is_stdlib_source_file sp.A.file) then begin
+      rebound := true;
+      blame sp
+    end
+  in
   let rec go in_mod ds =
     List.iter
       (function
@@ -4918,10 +4956,8 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
           defines in_mod sp
             (List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods)
         (* ── Rebinds the bare segment `<md>` ─────────────────────────────── *)
-        | A.DAlias (a, sp) ->
-          if a.A.alias_name.A.txt = md then begin rebound := true; blame sp end
+        | A.DAlias (a, sp) -> rebinds sp (a.A.alias_name.A.txt = md)
         | A.DUse (u, sp) ->
-          let rebind () = rebound := true; blame sp in
           (* Four selector forms, all of which can put some other module under
              the bare name `<md>`:
                `use X.<md>`            — UseSingle, the path's last segment
@@ -4932,16 +4968,18 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
                                          excluded. *)
           (match u.A.use_sel with
            | A.UseSingle ->
-             (match List.rev u.A.use_path with
-              | last :: _ :: _ when last.A.txt = md -> rebind ()
-              | _ -> ())
-           | A.UseNames xs -> if mentions_md xs then rebind ()
+             rebinds sp
+               (match List.rev u.A.use_path with
+                | last :: _ :: _ -> last.A.txt = md
+                | _ -> false)
+           | A.UseNames xs -> rebinds sp (mentions_md xs)
            (* The two glob forms RESOLVE their target and look for a module
               named `<md>` rather than assuming one — see
-              [glob_import_competes].  Unresolvable ⇒ withdraw, as before. *)
+              [glob_import_competes].  Unresolvable ⇒ withdraw, as before.
+              [rebinds] then adds the stdlib-span exclusion on top. *)
            | A.UseExcept xs ->
-             if (not (mentions_md xs)) && glob_competes u.A.use_path then rebind ()
-           | A.UseAll -> if glob_competes u.A.use_path then rebind ())
+             rebinds sp ((not (mentions_md xs)) && glob_competes u.A.use_path)
+           | A.UseAll -> rebinds sp (glob_competes u.A.use_path))
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
         (* A `describe` block does not open a module scope of its own, so its

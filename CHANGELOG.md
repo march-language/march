@@ -163,8 +163,12 @@ git log is authoritative for exact commits.
   while the feature was inert. A glob now resolves its target and withdraws only
   if that module actually provides a competing member (an unresolvable path
   still withdraws, and a real competitor reached through a glob is still caught).
-  The blast radius is why the obligation *floor* in CI was moved onto a fixture
-  whose count actually drops when this happens.
+  A second guard was added alongside it: a `use`/`alias` competes for the bare
+  module name only when it is the *program's*, never the standard library's own
+  — the same span exclusion the member-definition half always applied. The two
+  are conjoined, so a glob withdraws only when it is your code *and* its target
+  really carries a competitor. The blast radius is why the obligation *floor* in
+  CI was moved onto a fixture whose count actually drops when this happens.
 
 - **`cap verified`: a length guard that "silently stopped counting" now says so,
   instead of blaming the solver.** The `List.length` / `String.byte_size` /

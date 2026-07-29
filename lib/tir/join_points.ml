@@ -200,6 +200,7 @@ let rec rename_expr (from_name : string) (to_name : string) (e : Tir.expr)
     is unsafe, so we stay conservative. *)
 let peel_common_let
     ?(rename = false)
+    ~(scrut : Tir.atom)
     (branches : Tir.branch list)
     (default  : Tir.expr option)
     : (Tir.var * Tir.expr * Tir.branch list * Tir.expr option) option =
@@ -225,11 +226,39 @@ let peel_common_let
        in
        if not all_match then None
        else begin
-         (* (2) The RHS must not mention any pattern-bound variable in any branch. *)
-         let rhs_safe = List.for_all (fun br ->
-           let br_var_names = List.map (fun v -> v.Tir.v_name) br.Tir.br_vars in
-           not (expr_mentions_any br_var_names rhs0)
-         ) branches in
+         (* (2) The RHS must not mention any pattern-bound variable in any
+            branch, NOR the scrutinee itself.
+
+            The scrutinee half is not a refinement of the first: floating a
+            let that reads the scrutinee moves it ABOVE the [ECase] that
+            destructures the scrutinee — harmless for a pure read, fatal for
+            anything that invalidates it.  Drop.ml's synthesized drop is
+            exactly that shape:
+
+              case x of Rec(xs, _) -> let freed = march_decrc_freed(x) in
+                                      case freed of True -> drop(xs)
+
+            Every arm starts with the same let, so this peeled it out and the
+            emitted code freed the box and THEN read its tag and fields:
+
+              %cr47  = call i64 @march_decrc_freed(ptr %ld46)   ; frees x
+              %tag51 = load i32, ptr %tgp50                     ; reads x
+              %fv53  = load ptr,  ptr %fp52                     ; reads x
+
+            — a use-after-free on every container released without being
+            destructured (segfault on macOS's allocator, silent corruption on
+            glibc).  Refusing the hoist whenever the RHS mentions the
+            scrutinee is deliberately conservative: losing the hoist of a
+            genuinely pure read costs an optimization, and telling pure from
+            invalidating apart needs effect information this pass lacks. *)
+         let scrut_names =
+           match scrut with Tir.AVar v -> [ v.Tir.v_name ] | _ -> [] in
+         let rhs_safe =
+           not (expr_mentions_any scrut_names rhs0)
+           && List.for_all (fun br ->
+             let br_var_names = List.map (fun v -> v.Tir.v_name) br.Tir.br_vars in
+             not (expr_mentions_any br_var_names rhs0)
+           ) branches in
          if not rhs_safe then None
          else begin
            (* The floated binder: a fresh name under [rename] (cannot collide,
@@ -292,7 +321,7 @@ let rec float_expr ?(rename = false) (changed : bool ref) (e : Tir.expr)
       { br with Tir.br_body = recur br.Tir.br_body }) branches in
     let default' = Option.map recur default in
     (* Now try to peel a common leading let from the (post-recursion) branches. *)
-    (match peel_common_let ~rename branches' default' with
+    (match peel_common_let ~rename ~scrut:a branches' default' with
      | None -> Tir.ECase (a, branches', default')
      | Some (v, rhs, new_branches, new_default) ->
        changed := true;

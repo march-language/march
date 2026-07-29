@@ -193,6 +193,11 @@ program ever compiled*. The feature was inert in production and nothing noticed,
 because a skipped obligation exits 0 exactly like a proved one. If the glob's target
 can't be resolved, it still withdraws.
 
+A second, independent guard sits alongside it: a `use` or `alias` competes only when
+it is the **program's**, never the standard library's own — the same span exclusion
+the member-definition half has always applied. The two are ANDed, so a glob withdraws
+only when it is your code *and* its target really carries a competitor.
+
 ### The same for strings — but only the byte-valued names
 
 `len` measures a `String` too, and the same connection is made for

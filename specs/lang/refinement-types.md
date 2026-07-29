@@ -261,6 +261,16 @@ function would manufacture false positives:
   a REJECT witness (`reject/t117`) and the `--refine-report` proof *floor* can
   see the difference.
 
+- **A `use`/`alias` competes only when it is the *program's*** (since
+  2026-07-29). The rebinding half now ignores declarations whose span is a
+  standard-library source file, exactly as the member-definition half always
+  has — an `import` inside `mod System` binds names in System's own body, not
+  in the module being checked. This is conjoined with the resolution rule
+  above, not substituted for it: a glob withdraws only when it is the
+  program's own **and** its target provably provides a competitor. Both are
+  over-approximations of "really competes", so their intersection still
+  contains every genuine competitor; neither weakens the other's test.
+
 The same treatment applies to strings — see
 [String Refinements](#string-refinements).
 

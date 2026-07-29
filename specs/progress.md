@@ -8348,3 +8348,36 @@ is what they need, and it now exists.
   checker — that is a separate pass wired only in `bin/main.ml`. Division-safety
   tests must call `Division_safety.check_module` on the **desugared** module
   (helper `has_divsafety_error`), or they pass vacuously.
+
+## 2026-07-29 — merging the two independent glob-import fixes (refinecheck)
+
+`origin/main`'s #115 and this branch's `0797e7b0` fixed the same bug — the single
+`import Process` in `stdlib/system.march` withdrawing the `List.length` /
+`String.byte_size` measure aliases for every March program — by two different
+routes, and the merge keeps **both**, conjoined, in `stdlib_member_defs_ok`
+(`lib/refinecheck/refine_check.ml`):
+
+- **Span rule (#115):** a `use`/`alias` competes for the bare module name only
+  when its span is not a standard-library source file, the same exclusion
+  `defines` always applied to member definitions. Scoping argument: an import
+  inside `mod System` binds in System's body, not in the module being checked.
+- **Resolution rule (ours):** a glob withdraws only if its target, resolved
+  against the unit's own declarations (following `use` chains, fuel 4), actually
+  provides a nested `mod List` / `alias … as List`. Unresolvable ⇒ withdraw.
+
+**Why conjoining is sound.** Let `C` be "this declaration really can make the
+bare name denote a non-stdlib module". Each rule is individually sound, i.e.
+`C ⟹ ¬is_stdlib_source_file` and `C ⟹ glob_competes`; therefore `C ⟹ both`, and
+the conjunction — an intersection of two over-approximations of `C` — still
+withdraws for every genuine competitor. Neither rule weakens the other's test,
+because they are ANDed rather than substituted. The blame span from the
+resolution side is retained, so a withdrawal still points at its cause.
+
+`bare_builtin_undefined` keeps the resolution rule only; the span exclusion was
+never applied there by either side and adding it is a separate question.
+
+Verified: `reject/t117` exits 1 with `import Process` still present;
+`accept/t118` reports `1 proved, 0 skipped` on the user-code slice; a glob whose
+target really carries a `mod List do fn length` withdraws the alias while the
+identical glob onto a competitor-free target keeps it; corpus 227/227;
+`test_refinecheck.exe` 340 tests pass; stdlib sweep empty.
