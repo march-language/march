@@ -68,6 +68,35 @@ let refine_error_count src =
          d.March_errors.Errors.severity = March_errors.Errors.Error)
        ctx.March_errors.Errors.diagnostics)
 
+(* The text of every ERROR the refinement pass reports on [src], concatenated.
+   DESUGARED, for the same reason [has_refine_error_d] is: a qualified guard
+   like `List.length(ys)` is an `EField` chain until desugar flattens it, so a
+   fixture checked without desugaring exercises a different program than the
+   compiler does — and an assertion about the message would then pass or fail
+   for reasons unrelated to what it claims to test.
+
+   A boolean cannot distinguish "reported for the right reason" from "reported
+   for a different one", which is exactly what the attribution of a skip is
+   about; only the text can. *)
+let refine_error_text_d src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  String.concat "\n"
+    (List.filter_map
+       (fun (d : March_errors.Errors.diagnostic) ->
+         if d.March_errors.Errors.severity = March_errors.Errors.Error then
+           Some d.March_errors.Errors.message
+         else None)
+       ctx.March_errors.Errors.diagnostics)
+
+(* Substring search — [String.contains] is over CHARACTERS, and there is no
+   substring predicate in the OCaml stdlib. *)
+let contains (hay : string) (needle : string) : bool =
+  let n = String.length needle and h = String.length hay in
+  let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+  n = 0 || at 0
+
 (* True iff the refinement pass reports at least one WARNING on [src].
    [has_refine_error] only sees Errors, so vocabulary diagnostics need this. *)
 let has_refine_warning src =
@@ -4001,6 +4030,131 @@ mod Plain do
 end|}))
   ]
 
+(* ── A withdrawn measure alias must explain itself ──────────────────────────
+   The `List.length` / `String.byte_size` / `string_byte_length` gates are
+   unit-global and syntactic BY DESIGN: they resolve doubt by withdrawing the
+   alias, which under the default stance costs only a missed proof.  Under
+   `cap verified` a missed proof is a hard ERROR, and the error used to read
+   "solver-undecided: the solver proved neither the predicate nor its
+   negation" — pointing at z3 and at the predicate when the cause was a
+   name-shadowing decision taken elsewhere in the unit, possibly in a
+   `MARCH_LIB_PATH` dependency the author never opened.  Every remedy that text
+   offered ("guard the call", "rewrite the predicate") was one the author had
+   already applied.
+
+   These tests pin the ATTRIBUTION, not the suppression: the gates still
+   withdraw exactly as before (see [length_alias_suite] / [string_alias_suite]),
+   and the last two cases are the ones that matter most — they are what stops
+   the fix from relabelling every undischarged obligation as an alias problem. *)
+let alias_attribution_suite =
+  [ gated "a nested `mod List do fn length` names itself in the cap verified error"
+      (fun () ->
+        (* Reachable only as `Ver3.Internal.List.length`, and it does NOT win at
+           runtime — but the gate is syntactic, so the alias goes anyway. *)
+        let msg =
+          refine_error_text_d
+            {|mod Ver3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "List.length"));
+    gated "an unrelated Int local named string_byte_length names itself"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod Ver4 do
+  cap verified
+  fn first(s : {String | len(_) > 0}) : Int do 0 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) > 0 do first(t) else 0 end
+  end
+  fn unrelated(n : Int) : Int do
+    let string_byte_length = n + 1
+    string_byte_length
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not blame the solver" false
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "names the withdrawn spelling" true
+          (contains msg "string_byte_length"));
+    (* ── THE CONTROLS ─────────────────────────────────────────────────────
+       A skip with no withdrawn alias behind it, and a skip in a module that
+       DOES have a withdrawn alias but at a call the alias could not have
+       helped, must both keep the general message.  Without these, "never says
+       solver-undecided" would pass trivially. *)
+    gated "a genuinely undecided obligation still says solver-undecided"
+      (fun () ->
+        let msg =
+          refine_error_text_d
+            {|mod CtlA do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still says solver-undecided" true
+          (contains msg "solver-undecided"));
+    gated "a withdrawn alias is not blamed for an UNGUARDED call"
+      (fun () ->
+        (* Same competing `mod List` as the first case, so the alias IS
+           withdrawn — but this call site never mentions the spelling, so the
+           withdrawal cannot be what stopped the proof and must not be named. *)
+        let msg =
+          refine_error_text_d
+            {|mod CtlB do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "still says solver-undecided" true
+          (contains msg "solver-undecided");
+        Alcotest.(check bool)
+          "does not name the alias" false
+          (contains msg "alias-withdrawn"));
+    (* Suppression itself is untouched: with nothing competing, the same guarded
+       call still PROVES and reports nothing at all. *)
+    gated "the guarded call still proves when no alias was withdrawn" (fun () ->
+        Alcotest.(check string)
+          "silent" ""
+          (refine_error_text_d
+             {|mod Ok1 do
+  cap verified
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -4036,6 +4190,7 @@ let () =
       ("string-alias", string_alias_suite);
       ("obligations", obligation_suite);
       ("cap-verified", cap_verified_suite);
+      ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
       ("walk-coverage", walk_coverage_suite) ]

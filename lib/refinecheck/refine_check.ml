@@ -503,6 +503,27 @@ let string_byte_length_is_builtin : bool ref = ref false
    `List.length` is in scope. *)
 let stdlib_source_files : string list ref = ref []
 
+(* ── Why an alias was withdrawn ────────────────────────────────────────────
+   The three gates above are unit-global, syntactic, and default to
+   SUPPRESSING — all correct, and none of it changes here.  What a withdrawal
+   costs under the default stance is a missed proof, i.e. silence.  Under
+   `cap verified` a skipped obligation is a hard ERROR, and then the withdrawal
+   becomes invisible in the worst way: the author wrote exactly the guard the
+   feature asks for, the alias silently did not apply, and the error text
+   blames the solver and the predicate.  Both remedies it offers are ones the
+   author already took.
+
+   So record, at the point a gate withdraws, WHICH spelling went and WHERE the
+   competing binding is.  This is observation only: nothing here is consulted
+   by [measure_alias], and suppression is bit-for-bit what it was. *)
+type withdrawal = {
+  wd_spelling : string;      (* the spelling whose alias was withdrawn *)
+  wd_measure : string;       (* the measure it would have aliased to *)
+  wd_span : A.span option;   (* the binding that caused it, when identified *)
+}
+
+let withdrawals : withdrawal list ref = ref []
+
 (* All three route to the single name `len`.  Whether `len` then resolves to a
    `len$x` constant or to `($strlen t)` is decided downstream by
    [resolve_measure], on the DECLARED BASE TYPE of the argument — so the String
@@ -2341,6 +2362,54 @@ let sort_of_ctor (ctor : string) : string option =
        module strict the moment one user module asked for verification. *)
 let strict_verified = ref false
 
+(* Does [e] ever APPLY the function spelled [name]?  Applications only: a bare
+   mention (`let f = List.length`) is not a guard, and counting it would let an
+   unrelated line decide what a call site is told. *)
+let expr_applies (name : string) (e : A.expr) : bool =
+  let found = ref false in
+  iter_all
+    (fun e ->
+      match e with
+      | A.EApp (A.EVar n, _, _) when n.A.txt = name -> found := true
+      | _ -> ())
+    e;
+  !found
+
+(* ── Attributing a skip to a withdrawn alias ───────────────────────────────
+   A withdrawn alias is only ONE of the reasons an obligation can go
+   undischarged, and a wrong attribution is worse than a vague one: it sends
+   the author to rename a binding that had nothing to do with their problem,
+   and it hides the real cause.  So this is deliberately conjunctive — all
+   three conditions, or we keep the honest general message:
+
+   1. the reason is [Solver_undecided].  A withdrawal cannot cause any other
+      skip: it removes an ASSUMPTION, so the VC is still built, still
+      well-sorted, and still reaches the solver — it just arrives without the
+      fact that would have discharged it.  An unreflectable predicate or a sort
+      conflict failed strictly earlier, for reasons the alias cannot touch.
+   2. the predicate actually mentions the measure the alias routes to.  A
+      withdrawn `len` alias is irrelevant to `{Int | _ != 0}`.
+   3. THIS call site is guarded by the withdrawn spelling.  Without this the
+      attribution would fire on every unguarded call in a module that happens
+      to contain a competing definition — which is exactly the relabel-
+      everything failure this fix must not become.  It is also what keeps a
+      genuine solver-undecided case saying `solver-undecided`.
+
+   Note the asymmetry with the gates themselves: THEY resolve doubt by
+   suppressing (silence is safe).  This resolves doubt by staying general,
+   because the thing being chosen here is a sentence, and an over-confident
+   sentence is a lie. *)
+let alias_withdrawal_cause ~(pred : A.expr) ~(path : (A.expr * bool) list)
+    (r : Obligation.reason) : withdrawal option =
+  match r with
+  | Obligation.Solver_undecided ->
+    List.find_opt
+      (fun w ->
+        expr_applies w.wd_measure pred
+        && List.exists (fun (cond, _) -> expr_applies w.wd_spelling cond) path)
+      !withdrawals
+  | _ -> None
+
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
 (* [path] is the path context: conditions known true here, each tagged with
    whether it is negated (the else-branch of an `if`). *)
@@ -2386,6 +2455,17 @@ let check_call ~root errctx ~span ~(callee : string)
      contract that checks nothing is distinguishable from one that passes.
      Recording is observation-only — it must never alter control flow. *)
   let note verdict =
+    (* Re-attribute BEFORE recording, not just in the error text: the ledger is
+       what `--refine-report` prints, and a ledger that disagrees with the
+       diagnostic is a second thing to be confused by. *)
+    let verdict, cause =
+      match verdict with
+      | Obligation.Skipped r ->
+        (match alias_withdrawal_cause ~pred:rp.pred ~path r with
+         | Some w -> (Obligation.Skipped (Obligation.Alias_withdrawn w.wd_spelling), w.wd_span)
+         | None -> (verdict, None))
+      | _ -> (verdict, None)
+    in
     Obligation.record
       { Obligation.span; callee; predicate = pred_str rp.pred; verdict };
     (* …except inside a `cap verified` module, where a skip is the very thing
@@ -2393,16 +2473,39 @@ let check_call ~root errctx ~span ~(callee : string)
        `Violated` are unaffected: the latter already reported itself. *)
     match verdict with
     | Obligation.Skipped r when !strict_verified ->
+      (* The remedy depends on the reason.  The generic advice below is worse
+         than useless for a withdrawn alias — "guard the call" is what the
+         author already did — so that case gets its own note, naming the
+         binding to rename and, when we found it, where it is. *)
+      let remedy =
+        match r with
+        | Obligation.Alias_withdrawn spelling ->
+          let where =
+            match cause with
+            | Some (sp : A.span) when sp.A.file <> "" ->
+              Printf.sprintf " (%s:%d)" sp.A.file sp.A.start_line
+            | Some (sp : A.span) -> Printf.sprintf " (line %d)" sp.A.start_line
+            | None -> ""
+          in
+          Printf.sprintf
+            "note: a binding of `%s` elsewhere in this compilation unit%s \
+             withdrew the alias for the WHOLE unit, including this call — the \
+             gate is unit-global and syntactic, so it does not matter whether \
+             that binding could ever win here.  Rename it, move it out of this \
+             unit, or restate the fact as a refinement the checker can use \
+             directly"
+            spelling where
+        | _ ->
+          "note: guard the call or strengthen what is known here, rewrite the \
+           predicate into the fragment the checker supports, or remove `cap \
+           verified` from this module — it asks for every obligation to be \
+           discharged"
+      in
       Err.error errctx ~span
         (Printf.sprintf
-           "`cap verified` module: cannot verify precondition `%s` on `%s` \
-            (%s: %s)\n\
-            note: guard the call or strengthen what is known here, rewrite the \
-            predicate into the fragment the checker supports, or remove `cap \
-            verified` from this module — it asks for every obligation to be \
-            discharged"
+           "`cap verified` module: cannot verify precondition `%s` on `%s` (%s: %s)\n%s"
            (pred_str rp.pred) callee (Obligation.reason_name r)
-           (Obligation.reason_detail r))
+           (Obligation.reason_detail r) remedy)
     | _ -> ()
   in
   match List.nth_opt args rp.idx with
@@ -4461,15 +4564,25 @@ let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
    Starting the walk with `in_mod = true` when the names match closes that.
 
    Direction of doubt is always to SUPPRESS: a missed proof is silence, the
-   status quo ante; a wrong fact in the assumption set is a false positive. *)
+   status quo ante; a wrong fact in the assumption set is a false positive.
+
+   Returns the verdict PLUS the span of the first competing declaration found,
+   so a withdrawal can point at its cause instead of leaving the user to search
+   the unit (which, with `MARCH_LIB_PATH`, may not even be their own code).
+   The span is diagnostic-only — the boolean is computed exactly as before. *)
 let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
-    (decls : A.decl list) : bool =
+    (decls : A.decl list) : bool * A.span option =
   let foreign = ref false in
   let rebound = ref false in
+  let cause = ref None in
+  let blame (sp : A.span) = if !cause = None then cause := Some sp in
   (* A member definition only competes if it did NOT come from the standard
      library's own sources — see [is_stdlib_source_file]. *)
   let defines in_mod (sp : A.span) b =
-    if in_mod && b && not (is_stdlib_source_file sp.A.file) then foreign := true
+    if in_mod && b && not (is_stdlib_source_file sp.A.file) then begin
+      foreign := true;
+      blame sp
+    end
   in
   let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
   let rec go in_mod ds =
@@ -4495,8 +4608,10 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
           defines in_mod sp
             (List.exists (fun ((mn : A.name), _) -> mn.A.txt = fn) idf.A.impl_methods)
         (* ── Rebinds the bare segment `<md>` ─────────────────────────────── *)
-        | A.DAlias (a, _) -> if a.A.alias_name.A.txt = md then rebound := true
-        | A.DUse (u, _) ->
+        | A.DAlias (a, sp) ->
+          if a.A.alias_name.A.txt = md then begin rebound := true; blame sp end
+        | A.DUse (u, sp) ->
+          let rebind () = rebound := true; blame sp in
           (* Four selector forms, all of which can put some other module under
              the bare name `<md>`:
                `use X.<md>`            — UseSingle, the path's last segment
@@ -4508,11 +4623,11 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
           (match u.A.use_sel with
            | A.UseSingle ->
              (match List.rev u.A.use_path with
-              | last :: _ :: _ when last.A.txt = md -> rebound := true
+              | last :: _ :: _ when last.A.txt = md -> rebind ()
               | _ -> ())
-           | A.UseNames xs -> if mentions_md xs then rebound := true
-           | A.UseExcept xs -> if not (mentions_md xs) then rebound := true
-           | A.UseAll -> rebound := true)
+           | A.UseNames xs -> if mentions_md xs then rebind ()
+           | A.UseExcept xs -> if not (mentions_md xs) then rebind ()
+           | A.UseAll -> rebind ())
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
         (* A `describe` block does not open a module scope of its own, so its
@@ -4534,12 +4649,13 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
       ds
   in
   go (mod_name = md) decls;
-  (not !foreign) && not !rebound
+  (((not !foreign) && not !rebound), !cause)
 
-let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+let list_length_defs_ok ~(mod_name : string) (decls : A.decl list) : bool * A.span option =
   stdlib_member_defs_ok ~md:"List" ~fn:"length" ~mod_name decls
 
-let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
+let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) :
+    bool * A.span option =
   stdlib_member_defs_ok ~md:"String" ~fn:"byte_size" ~mod_name decls
 
 (* Does any binding construct inside [e] bind [name]?  BINDER positions only —
@@ -4549,28 +4665,44 @@ let string_byte_size_defs_ok ~(mod_name : string) (decls : A.decl list) : bool =
 
    [iter_all] supplies the structure-agnostic descent, so a new expression form
    is covered as soon as it appears in [children]; this match only has to name
-   the forms that BIND. *)
-let expr_binds_name (name : string) (e : A.expr) : bool =
-  let found = ref false in
+   the forms that BIND.
+
+   Returns the SPAN of the first binder found rather than a bare boolean: the
+   `cap verified` diagnostic points the user at the binding that withdrew the
+   alias, and "somewhere in this unit" is not actionable when the unit spans a
+   `MARCH_LIB_PATH` dependency.  The predicate [expr_binds_name] below is this
+   function's `<> None`, so the two cannot drift. *)
+let expr_binder_span (name : string) (e : A.expr) : A.span option =
+  let found = ref None in
   let is n = n = name in
   let param (p : A.param) = is p.A.param_name.A.txt in
   iter_all
     (fun e ->
-      let here =
-        match e with
-        | A.ELam (ps, _, _) -> List.exists param ps
-        | A.ELetFn (n, ps, _, _, _) -> is n.A.txt || List.exists param ps
-        | A.ELet (b, _) -> List.exists is (pat_binders b.A.bind_pat)
-        | A.ELetQ (p, _, _, _) -> List.exists is (pat_binders p)
-        | A.EMatch (_, brs, _) ->
-          List.exists
-            (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
-            brs
-        | _ -> false
-      in
-      if here then found := true)
+      if !found = None then
+        let here =
+          match e with
+          | A.ELam (ps, _, sp) -> if List.exists param ps then Some sp else None
+          | A.ELetFn (n, ps, _, _, sp) ->
+            if is n.A.txt || List.exists param ps then Some sp else None
+          | A.ELet (b, sp) ->
+            if List.exists is (pat_binders b.A.bind_pat) then Some sp else None
+          | A.ELetQ (p, _, _, sp) ->
+            if List.exists is (pat_binders p) then Some sp else None
+          | A.EMatch (_, brs, sp) ->
+            if
+              List.exists
+                (fun (br : A.branch) -> List.exists is (pat_binders br.A.branch_pat))
+                brs
+            then Some sp
+            else None
+          | _ -> None
+        in
+        if here <> None then found := here)
     e;
   !found
+
+let expr_binds_name (name : string) (e : A.expr) : bool =
+  expr_binder_span name e <> None
 
 (* Is the BARE name [name] still the compiler builtin?  There is no stdlib
    March definition of `string_byte_length` to identify (it is an intrinsic),
@@ -4606,62 +4738,74 @@ let expr_binds_name (name : string) (e : A.expr) : bool =
    declaration form is a compile error here rather than a silent hole (round
    2).  The arms that do nothing say so by name, and each is a claim that that
    form cannot bind a bare value name; check it rather than trusting it. *)
-let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
+let bare_builtin_undefined (name : string) (decls : A.decl list) : bool * A.span option =
   let taken = ref false in
-  let take b = if b then taken := true in
+  let cause = ref None in
+  (* [sp] is the best location we have for this binder; the FIRST one recorded
+     wins, so the reported cause is stable under list order. *)
+  let take (sp : A.span) b =
+    if b then begin
+      taken := true;
+      if !cause = None then cause := Some sp
+    end
+  in
+  (* A binder found INSIDE an expression knows its own span, which is far more
+     useful than the enclosing declaration's. *)
+  let take_in (sp : A.span) e =
+    match expr_binder_span name e with Some s -> take s true | None -> ignore sp
+  in
   let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
-  let fn_def_takes (fd : A.fn_def) =
-    take (fd.A.fn_name.A.txt = name);
+  let fn_def_takes (sp : A.span) (fd : A.fn_def) =
+    take fd.A.fn_name.A.span (fd.A.fn_name.A.txt = name);
     List.iter
       (fun (c : A.fn_clause) ->
-        take (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
+        take sp (List.mem name (List.concat_map fnparam_binders c.A.fc_params));
         (* A default-value expression is a binder site too (it can carry a
            lambda), and [fc_params] holds it outside the body. *)
         List.iter
           (function
-            | A.FPDefault (_, d) -> take (expr_binds_name name d)
+            | A.FPDefault (_, d) -> take_in sp d
             | A.FPNamed _ | A.FPPat _ -> ())
           c.A.fc_params;
-        (match c.A.fc_guard with Some g -> take (expr_binds_name name g) | None -> ());
-        take (expr_binds_name name c.A.fc_body))
+        (match c.A.fc_guard with Some g -> take_in sp g | None -> ());
+        take_in sp c.A.fc_body)
       fd.A.fn_clauses
   in
   let rec go ds =
     List.iter
       (function
         (* ── Binds a bare value name ─────────────────────────────────────── *)
-        | A.DFn (fd, _) -> fn_def_takes fd
+        | A.DFn (fd, sp) -> fn_def_takes sp fd
         (* A module-level `let` is never descended into by [visit_decls], yet it
            binds the name for every sibling `DFn` body — the round-2 hole. *)
-        | A.DLet (_, b, _) ->
-          take (List.mem name (pat_binders b.A.bind_pat));
-          take (expr_binds_name name b.A.bind_expr)
+        | A.DLet (_, b, sp) ->
+          take sp (List.mem name (pat_binders b.A.bind_pat));
+          take_in sp b.A.bind_expr
         (* An `extern` block declares its functions under their bare names. *)
-        | A.DExtern (ed, _) ->
-          take (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
+        | A.DExtern (ed, sp) ->
+          take sp
+            (List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns)
         (* Interface METHODS are called by bare name and dispatched on the
            argument's type, so a method of this name takes the spelling; a
            default body is a binder site as well. *)
-        | A.DInterface (idf, _) ->
+        | A.DInterface (idf, sp) ->
           List.iter
             (fun (m : A.method_decl) ->
-              take (m.A.md_name.A.txt = name);
-              match m.A.md_default with
-              | Some d -> take (expr_binds_name name d)
-              | None -> ())
+              take m.A.md_name.A.span (m.A.md_name.A.txt = name);
+              match m.A.md_default with Some d -> take_in sp d | None -> ())
             idf.A.iface_methods
-        | A.DImpl (idf, _) ->
+        | A.DImpl (idf, sp) ->
           List.iter
             (fun ((mn : A.name), (fd : A.fn_def)) ->
-              take (mn.A.txt = name);
-              fn_def_takes fd)
+              take mn.A.span (mn.A.txt = name);
+              fn_def_takes sp fd)
             idf.A.impl_methods
-        | A.DAlias (a, _) -> take (a.A.alias_name.A.txt = name)
-        | A.DUse (u, _) ->
+        | A.DAlias (a, sp) -> take sp (a.A.alias_name.A.txt = name)
+        | A.DUse (u, sp) ->
           (match u.A.use_sel with
-           | A.UseAll -> taken := true
-           | A.UseExcept xs -> take (not (named xs))
-           | A.UseNames xs -> take (named xs)
+           | A.UseAll -> take sp true
+           | A.UseExcept xs -> take sp (not (named xs))
+           | A.UseNames xs -> take sp (named xs)
            | A.UseSingle -> ())
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
@@ -4682,7 +4826,7 @@ let bare_builtin_undefined (name : string) (decls : A.decl list) : bool =
       ds
   in
   go decls;
-  not !taken
+  (not !taken, !cause)
 
 (* [measure_axioms] (default true) gates the whole measure-axiom machinery —
    datatype modelling, recursion-equation axioms, AND the M-b soundness gate (the
@@ -4724,9 +4868,24 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   strict_verified := false;
   stdlib_source_files := stdlib_files;
   let mod_name = m.A.mod_name.A.txt in
-  list_length_is_stdlib := list_length_defs_ok ~mod_name m.A.mod_decls;
-  string_byte_size_is_stdlib := string_byte_size_defs_ok ~mod_name m.A.mod_decls;
-  string_byte_length_is_builtin := bare_builtin_undefined "string_byte_length" m.A.mod_decls;
+  (* Each gate answers "is the alias still safe?"; a `false` is a WITHDRAWAL,
+     and the withdrawal is what a `cap verified` diagnostic must be able to
+     name.  The boolean stored is exactly the gate's own answer — this records
+     alongside it, it does not decide anything. *)
+  withdrawals := [];
+  let gate spelling measure (ok, cause) =
+    if not ok then
+      withdrawals :=
+        { wd_spelling = spelling; wd_measure = measure; wd_span = cause } :: !withdrawals;
+    ok
+  in
+  list_length_is_stdlib :=
+    gate "List.length" "len" (list_length_defs_ok ~mod_name m.A.mod_decls);
+  string_byte_size_is_stdlib :=
+    gate "String.byte_size" "len" (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
+  string_byte_length_is_builtin :=
+    gate "string_byte_length" "len"
+      (bare_builtin_undefined "string_byte_length" m.A.mod_decls);
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending
