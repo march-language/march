@@ -9405,6 +9405,105 @@ let test_capturing_closure_materialization_no_leak_compiled () =
    [Perceus.insert_apply_fn_clo_drop] reproduces that SIGSEGV there while
    every native program in the corpus stays green. *)
 
+(* __try_call / __try_call_val — the callee-side $clo drop (see the two tests
+   above) is only sound when every C-runtime call site that invokes a
+   closure's apply function agrees on the calling convention. The runtime
+   originally decref'd the thunk itself AFTER calling it once — a second
+   consumption of the same reference the drop already released, since the
+   drop fires as the FIRST thing the apply function does (right after
+   extracting its captures, before any of the actual body runs), so it has
+   already executed by the time the runtime's own decrc would fire, on both
+   the normal-return and the panic (longjmp) path.
+
+   This is flaky, not deterministic: the freed memory frequently still looks
+   valid enough that the double-decrement doesn't crash immediately (a
+   classic use-after-free signature). Measured before the runtime fix
+   (removing the explicit `march_decrc(thunk)` in both __try_call and
+   __try_call_val, runtime/march_runtime.c): 6 crashes ("RC underflow") out
+   of 30 runs of a single-capture __try_call thunk. 0/30 after. A single
+   clean run proves nothing here — this test alone cannot pin a heap-timing
+   bug, so treat any future regression suspicion the same way: loop the
+   binary directly, don't trust one pass. *)
+let test_try_call_single_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallcap"
+    "mod TryCallCap do\n\
+    \  fn main() : Unit do\n\
+    \    let threshold = 5\n\
+    \    match __try_call(fn _ -> threshold > 0) do\n\
+    \    Ok(_) -> println(\"ok\")\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 30 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a single-capture __try_call thunk must not double-consume its \
+         closure's reference — flaky heap-corruption bug, run repeatedly"
+        "ok" run_out
+    done
+
+let test_try_call_val_single_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallvalcap"
+    "mod TryCallValCap do\n\
+    \  fn main() : Unit do\n\
+    \    let base = \"hi\"\n\
+    \    match __try_call_val(fn _ -> base ++ \"!\") do\n\
+    \    Ok(v) -> println(\"ok: \" ++ v)\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallvalcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 30 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a single-capture __try_call_val thunk must not double-consume its \
+         closure's reference — flaky heap-corruption bug, run repeatedly"
+        "ok: hi!" run_out
+    done
+
+(* The panic (longjmp) path: the drop fires before the body runs, so it must
+   also be safe when the body never returns normally. *)
+let test_try_call_panic_with_capture_no_double_free_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_trycallpanic"
+    "mod TryCallPanic do\n\
+    \  fn main() : Unit do\n\
+    \    let label = \"boom\"\n\
+    \    match __try_call(fn _ -> panic(label)) do\n\
+    \    Ok(_) -> println(\"ok\")\n\
+    \    Err(e) -> println(\"err: \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "trycallpanicbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 15 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        "a panicking single-capture __try_call thunk must not double-consume \
+         its closure's reference"
+        true (Test_helpers.contains "boom" run_out)
+    done
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12424,6 +12523,14 @@ let codegen_suites =
             test_lambda_static_closure_materialization_no_leak_compiled;
           Alcotest.test_case "compiled capturing lambda materialization does not leak per use" `Quick
             test_capturing_closure_materialization_no_leak_compiled;
+        ] );
+      ( "try_call_capture_ownership_codegen", [
+          Alcotest.test_case "single-capture __try_call thunk: no double-free (30x)" `Quick
+            test_try_call_single_capture_no_double_free_compiled;
+          Alcotest.test_case "single-capture __try_call_val thunk: no double-free (30x)" `Quick
+            test_try_call_val_single_capture_no_double_free_compiled;
+          Alcotest.test_case "single-capture __try_call thunk panics: no double-free (15x)" `Quick
+            test_try_call_panic_with_capture_no_double_free_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick

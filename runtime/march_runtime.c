@@ -1363,12 +1363,21 @@ void *__try_call(void *thunk) {
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
 
-    /* Release our reference to the thunk.  On the success path it may have
-       RC>1 if the caller kept a reference; we only release ours.  On the
-       panic path the apply function did not return, so any RC increments it
-       would have made are skipped — that may leak captured heap values on
-       panic, which is acceptable (panics are rare and terminate the test). */
-    march_decrc(thunk);
+    /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
+     * comment), a CAPTURING thunk's own apply function now releases its one
+     * reference to $clo internally — and it does so as the FIRST thing the
+     * function does, immediately after extracting its captures and before
+     * any of the actual body runs (lib/tir/perceus.ml's
+     * insert_apply_fn_clo_drop splices right after the fv-extraction
+     * prefix). That means the drop has already fired by the time apply()
+     * either returns normally OR longjmps out via a panic — both paths are
+     * covered by the same unconditional removal, no panicked/!panicked
+     * split needed. Decrementing again here double-consumed that reference;
+     * confirmed flaky (heap-layout-dependent) with a single-capture thunk:
+     * "RC underflow" on 6/30 runs before this fix, 0/30 after. A
+     * CAPTURE-FREE thunk's apply function does not drop $clo at all (see
+     * the fv-extraction guard in insert_apply_fn_clo_drop), so removing
+     * this decrc is inert for that case exactly as for task_spawn. */
 
     /* Build Result(a, String): 16-byte header + 8-byte field. */
     char      *result = (char *)march_alloc(24);
@@ -1444,7 +1453,7 @@ void *__try_call_val(void *thunk) {
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
 
-    march_decrc(thunk);
+    /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
     char      *result = (char *)march_alloc(24);
     march_hdr *hdr    = (march_hdr *)result;
