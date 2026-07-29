@@ -11,6 +11,39 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## The measure-alias gate's ENTRY-MODULE walk start is now witnessed (2026-07-29)
+
+`stdlib_member_defs_ok` (`lib/refinecheck/refine_check.ml`) starts its walk with
+`in_mod = (mod_name = md)` so that a program whose OWN entry module is named
+`List`/`String` and defines `length`/`byte_size` withdraws the measure alias.
+That line shipped without a test that could tell it from `go false`: two unit
+fixtures were written for it and both pass with it reverted, because a
+string-parsed fixture has an empty `stdlib_source_files` and so cannot reach the
+identity check at all.
+
+The discriminating shape has now been found and pinned as
+`accept/t126_entry_module_shadows_list_length.march` and
+`accept/t127_entry_module_shadows_string_byte_size.march`. The missing
+ingredient was desugar: `strip_entry_self_qual` rewrites `List.length` to a bare
+`length` whenever the entry module declares `length` as a `fn` or a `let`
+(`collect_direct_names` covers exactly `DFn` and `DLet`), so those spellings
+never reach refinecheck qualified and the gate genuinely cannot matter for them.
+The decl forms desugar does NOT rewrite — `extern`, `impl`, `interface` — leave
+the call site spelled `List.length`, and there the walk start decides the
+answer. Both witnesses declare the member in an `extern` block.
+
+Demonstrated with two compilers built by file-copy swap: with the walk start,
+the typing corpus is 227/227; with it reverted to `go false`, exactly those two
+files fail (225/227) with a FALSE `refinement violation … (e.g. len(ys) = 0)` —
+the checker assuming a foreign C `length` is the list's length. Candidates that
+did NOT discriminate, for the record: entry `mod List` defining `fn length` or
+`let length` (stripped by desugar), and the same shape as a nested `mod List`
+(already covered by `go false`'s `DMod` recursion). The two unit fixtures are
+kept — the property they assert (silence) is the one that must hold — with their
+honesty notes re-pointed at the corpus witnesses.
+
+---
+
 ## `cap no_panic` read a guard about a name that had been REBOUND (FIXED 2026-07-29)
 
 All three of `division_safety`'s fact channels key on a bare variable name — a

@@ -4700,6 +4700,17 @@ let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
    `mod List do fn length …` defines `List.length` with nothing nested to see.
    Starting the walk with `in_mod = true` when the names match closes that.
 
+   That walk start is PINNED by `specs/lang/types/accept/t126_entry_module_
+   shadows_list_length.march` (and `t127…string_byte_size` for the other
+   alias), not by any unit fixture here — a string-parsed module has an empty
+   [stdlib_source_files], so nothing in it can be told apart from the stdlib's
+   own definitions.  The witness declares `length` in an `extern` block on
+   purpose: desugar's [strip_entry_self_qual] rewrites `List.length` to bare
+   `length` when the entry module declares `length` as a `fn` or a `let`, so
+   only the decl forms it does not rewrite (`extern`, `impl`, `interface`)
+   leave a qualified call site for this gate to matter at.  Revert this to
+   `go false` and the corpus rejects `t126` with a false `len(ys) = 0`.
+
    Direction of doubt is always to SUPPRESS: a missed proof is silence, the
    status quo ante; a wrong fact in the assumption set is a false positive.
 

@@ -1,5 +1,31 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, the measure-alias entry-module gate is witnessed)
+
+**A line that no test could tell from its own absence now has a witness that
+fails without it.** `stdlib_member_defs_ok` starts its walk with
+`in_mod = (mod_name = md)` so a program whose OWN entry module is named
+`List`/`String` and defines `length`/`byte_size` withdraws the `len` measure
+alias. Neither of the two unit fixtures written for it could discriminate: a
+string-parsed module has an empty `stdlib_source_files`, so the stdlib-identity
+branch is unreachable from the unit harness.
+
+The missing ingredient was in desugar, not refinecheck. `strip_entry_self_qual`
+rewrites `List.length` to a bare `length` whenever the entry module declares
+`length` as a `fn` or a `let` (`collect_direct_names` covers exactly `DFn` and
+`DLet`), so the qualified spelling never reaches refinecheck for those forms and
+the gate genuinely cannot matter. The forms desugar does not rewrite — `extern`,
+`impl`, `interface` — leave the call site spelled `List.length`, and there the
+walk start alone decides the answer.
+
+Pinned by `accept/t126_entry_module_shadows_list_length` and
+`accept/t127_entry_module_shadows_string_byte_size`, both declaring the member
+in an `extern` block. Demonstrated with two compilers built by file-copy swap:
+with the walk start the typing corpus is 227/227; with it reverted to
+`go false`, exactly those two files fail and the checker reports a FALSE
+`refinement violation … (e.g. len(ys) = 0)` — assuming a foreign C `length` is
+the list's length. refinecheck 323 tests, stdlib sweep empty.
+
 ## Current State (as of 2026-07-29, `cap no_panic` retires facts about a rebound name)
 
 **A guard or refinement was carrying over to a DIFFERENT variable of the same

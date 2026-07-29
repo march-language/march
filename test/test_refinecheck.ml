@@ -3217,9 +3217,18 @@ end|}));
        HONESTY NOTE: unlike its four neighbours, this case passes against the
        PRE-fix gate too, so it does not by itself discriminate the hole — a
        string-parsed fixture has no stdlib prepended, and the discriminating
-       shape needs bin/main.ml's prepend-and-strip.  It is kept because the
-       property it asserts (silence) is the one that must hold, not because it
-       is a witness. *)
+       shape needs bin/main.ml's real driver.  It is kept because the property
+       it asserts (silence) is the one that must hold, not because it is a
+       witness.  The WITNESS that discriminates the walk start is
+       `specs/lang/types/accept/t126_entry_module_shadows_list_length.march`
+       (and `t127…string_byte_size` for the other alias): it declares `length`
+       in an `extern` block — a decl form `strip_entry_self_qual` does not
+       rewrite, so the call site really does reach refinecheck spelled
+       `List.length` — and with the walk start reverted to `go false` the
+       corpus rejects it with a FALSE `len(ys) = 0`.  Note `fn length` as
+       written below could NOT be that witness even through the real driver:
+       desugar strips `List.length` to bare `length` whenever the entry module
+       declares `length` as a `fn` or a `let`. *)
     gated "an entry module named List defining `length` is NOT aliased" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d
@@ -3451,7 +3460,9 @@ mod QSExt do
   fn main() : Int do go("a") end
 end|}));
 
-    (* Same shape, same honesty note, as the list-side entry-module case. *)
+    (* Same shape, same honesty note, as the list-side entry-module case — the
+       discriminating witness for this half is
+       `specs/lang/types/accept/t127_entry_module_shadows_string_byte_size.march`. *)
     gated "an entry module named String defining `byte_size` is NOT aliased" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d

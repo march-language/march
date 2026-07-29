@@ -67,7 +67,8 @@ git log is authoritative for exact commits.
   The alias is withdrawn for the whole module if anything could make that
   spelling denote a different function: a program defining its own
   `List.length` in any declaration form (a `fn`, a module-level `let`, an
-  `extern` block, an interface or impl method), a vendored or forked `List`
+  `extern` block, an interface or impl method) — including a program whose own
+  entry module is *named* `List` — a vendored or forked `List`
   supplied through `MARCH_LIB_PATH`, or rebinding the name `List` via
   `alias`/`use`/`import`. In those cases the obligation
   goes back to being unprovable and silently skipped, which is the pre-existing
