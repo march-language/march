@@ -86,7 +86,41 @@ let rewrite_expr ~changed candidates candidate_free_names resolve_name ~bound =
          the callee's bound variables cannot repair that provenance
          loss, so conservatively retain this one call when scopes
          collide. This keeps the rejection local to the one-use pass
-         instead of alpha-renaming unrelated caller bindings. *)
+         instead of alpha-renaming unrelated caller bindings.
+
+         WHY A *LEXICAL* [bound] IS SUFFICIENT, EVEN THOUGH THE THING IT
+         DEFENDS AGAINST IS NOT LEXICAL.  Codegen's shadowing map,
+         [Llvm_ctx.ctx.var_slot], is FLAT PER FUNCTION: cleared at entry
+         and snapshotted/restored only across [ECase] branches, never at
+         an [ELet]/[ESeq] scope end.  So a caller binder in an EARLIER
+         [ESeq] component is "dead" lexically (absent from [bound]) yet
+         still live in [var_slot] when the relocated body is emitted, and
+         a callee free [AVar] naming a global would then load that stale
+         local instead.  This was reproduced synthetically (hand-built
+         TIR: a body returning global [G] returned the caller's local 7
+         instead of 41), so the hazard is real in principle.
+
+         It is nevertheless unreachable from March source today, and the
+         block rests on three separate invariants — instrumenting this
+         pass over 73 programs found 10,941 inlines, 1,221 distinct names
+         in such dead scopes, and ZERO plain user-chosen ones among them:
+           (a) [Inline.alpha_rename] freshens every binder it relocates to
+               "name_i<N>" (checked unique), so anything an inline drops
+               into a dead scope can never equal a global's name;
+           (b) [llvm_case] snapshots/restores [var_slot] per branch, so
+               branch binders — the one place plain user names survive
+               post-Perceus, as "let f = inc_rc $fN; $fN" — stay contained;
+           (c) [Beta_adt], the only pass that could lift such a branch
+               binder OUT of its [ECase], runs PRE-Perceus, where the
+               binder is still a plain copy that Cprop/Dce erase.
+         Break any of those and this becomes live.  In particular, moving
+         [Beta_adt] into [Opt.named_passes] (or adding any post-Perceus
+         case-of-known-constructor reduction) would start depositing
+         plain, RC-carrying user names into [ELet]-RHS dead scopes.
+
+         For scale: [Inline.run] has NO capture guard at all — it relies
+         purely on [alpha_rename] — so this guard is already strictly
+         stronger than the pipeline's general inliner. *)
       if not (SSet.is_empty (SSet.inter bound free_names)) then call
       else
         match Inline.expand_call fn args with
@@ -209,6 +243,17 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
     | Tir.AVar var when not (SSet.mem var.Tir.v_name bound) ->
       record_free caller var.Tir.v_name;
       record_resolved occurrence (resolve_name var.Tir.v_name)
+    (* Deliberate asymmetry with the [AVar] arm above: this records the
+       occurrence (so the single-use COUNT stays correct) but does NOT
+       call [record_free], so an [ADefRef]-only reference never enters
+       [free_names] and is invisible to the capture guard.  That is safe,
+       not an oversight: [ADefRef] is emitted at exactly one site,
+       llvm_emit.ml's ("ptr", "@" ^ llvm_name (mangle_extern …)) arm,
+       unconditionally and with no [var_slot] consultation — capture can
+       only happen through the var_slot-sensitive [AVar] paths.  (For
+       belt and braces, [Inline.alpha_rename] also folds ADefRef names
+       into its used-name set, so freshening can never mint a local equal
+       to an ADefRef target.) *)
     | Tir.ADefRef def
       when SSet.mem def.Tir.did_name top_names ->
       record def.Tir.did_name occurrence
