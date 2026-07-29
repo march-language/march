@@ -4626,6 +4626,109 @@ end|}
         Alcotest.(check bool)
           "does not name the alias" false
           (contains msg "alias-withdrawn"));
+    (* ── RELEVANCE, not merely presence ───────────────────────────────────
+       The controls above only vary "is there a guard at all", and an earlier
+       version of this attribution passed them while still blaming a withdrawal
+       that was provably not the cause.  Each case below pairs a witness with a
+       CONTROL that deletes only the competing binding: if the control is still
+       undischarged, the withdrawal cannot have been what stopped the proof,
+       and naming it would send the author to rename something irrelevant. *)
+    gated "a guard on a DIFFERENT variable is not this obligation's guard"
+      (fun () ->
+        let prog competing =
+          Printf.sprintf
+            {|mod WA do
+  cap verified
+%s
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int), zs : List(Int)) : Int do
+    if List.length(zs) > 0 do head(ys) else 0 end
+  end
+end|}
+            competing
+        in
+        let competing =
+          {|  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end|}
+        in
+        let control = refine_error_text_d (prog "") in
+        let witness = refine_error_text_d (prog competing) in
+        (* The control proves causal irrelevance: with the alias fully active
+           the call is undischarged all the same. *)
+        Alcotest.(check bool)
+          "control is undischarged too" true
+          (contains control "solver-undecided");
+        Alcotest.(check bool)
+          "so the withdrawal is not blamed" false
+          (contains witness "alias-withdrawn");
+        Alcotest.(check bool)
+          "and the honest message stands" true
+          (contains witness "solver-undecided"));
+    gated "a withdrawn LIST alias is not blamed for a STRING obligation"
+      (fun () ->
+        (* All three spellings route to the single measure name `len`, so
+           mentioning `len` in the predicate cannot distinguish a list length
+           from a string byte length.  The String aliases were never withdrawn
+           here; nothing about `List.length` is relevant. *)
+        let msg =
+          refine_error_text_d
+            {|mod WB do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn first(s : {String | len(_) > 0}) : Int do 0 end
+  fn go(t : String, zs : List(Int)) : Int do
+    if List.length(zs) > 0 do first(t) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check bool) "reported at all" true (msg <> "");
+        Alcotest.(check bool)
+          "does not name the list alias" false (contains msg "alias-withdrawn");
+        Alcotest.(check bool)
+          "stays general" true (contains msg "solver-undecided"));
+    gated "a NEGATED guard is not read as a guard that proved nothing"
+      (fun () ->
+        (* `if List.length(ys) > 0 do 0 else head(ys) end` — the guard does not
+           fail to prove the predicate, it DISPROVES it.  The control shows the
+           genuine bug underneath; the witness must not dress that up as a
+           story about a nested module. *)
+        let prog competing =
+          Printf.sprintf
+            {|mod WC do
+  cap verified
+%s
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do 0 else head(ys) end
+  end
+end|}
+            competing
+        in
+        let control =
+          refine_error_text_d (prog "")
+        in
+        let witness =
+          refine_error_text_d
+            (prog
+               {|  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end|})
+        in
+        Alcotest.(check bool)
+          "the control finds a real violation" true
+          (contains control "refinement violation");
+        Alcotest.(check bool)
+          "so the withdrawal is not blamed" false
+          (contains witness "alias-withdrawn"));
     (* Suppression itself is untouched: with nothing competing, the same guarded
        call still PROVES and reports nothing at all. *)
     gated "the guarded call still proves when no alias was withdrawn" (fun () ->

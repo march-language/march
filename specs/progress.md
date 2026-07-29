@@ -130,14 +130,37 @@ re-attributed to a new `Obligation.Alias_withdrawn of string` — BEFORE it is
 recorded, so `--refine-report` and the diagnostic agree.
 
 Attribution is deliberately conjunctive, because a wrong attribution is worse
-than a vague one: the reason must be `Solver_undecided` (a withdrawal removes an
-assumption, so it cannot cause an earlier reflection or sort failure), the
-predicate must mention the measure the alias routes to, and THIS call site must
-apply the withdrawn spelling in a path condition. Anything else keeps the
-general message — pinned by two controls, one of them a module that *has* a
-withdrawn alias but an unguarded call, which still reads `solver-undecided`.
+than a vague one, and the bar is CAUSAL RELEVANCE rather than mere presence.
+Four conditions: the reason is `Solver_undecided` (a withdrawal removes an
+assumption, so it cannot cause an earlier reflection or sort failure); the
+predicate applies the measure the alias routes to; a POSITIVE path condition
+applies the withdrawn spelling TO THIS OBLIGATION'S OWN ARGUMENT; and the
+spelling measures the same kind of value as that argument (`wd_str` vs
+`rp_is_str`).
 
-Measured: refinecheck 302 tests (was 297; new `alias-attribution` group of 5),
+The last two exist because the first version had only "some path condition
+mentions the spelling", which fired in three cases where the withdrawal was
+provably NOT the cause — each caught by pairing the witness with a control that
+deletes only the competing binding:
+
+- **guard on a different variable.** `if List.length(zs) > 0 do head(ys) …`;
+  the control is undischarged too, so renaming the binding the note pointed at
+  would have changed nothing, and the general message's "guard the call" is the
+  correct advice.
+- **cross-measure blame.** All three spellings route to the single name `len`,
+  so a `{String | len(_) > 0}` obligation was blamed on a withdrawn
+  `List.length` and pointed at a list definition that could not have mattered.
+- **negated guard.** `if List.length(ys) > 0 do 0 else head(ys) end` does not
+  fail to prove the predicate, it DISPROVES it — the control reports a real
+  `refinement violation`, so "the guard proved nothing" would have dressed a
+  genuine bug up as a story about a nested module.
+
+The cost is coverage: a guard laundered through a local, applied to a
+non-variable actual, or established in a caller falls back to the general
+message. Deliberate — the reason explains one specific confusion, it does not
+claim every skip.
+
+Measured: refinecheck 333 tests (was 330; new `alias-attribution` group of 8),
 typing corpus 222/222, stdlib sweep empty.
 
 ## Current State (as of 2026-07-29, `cap no_panic` discharges before it rejects)

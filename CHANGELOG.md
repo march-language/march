@@ -161,13 +161,18 @@ git log is authoritative for exact commits.
   function's local `let string_byte_length = n + 1`, or, worst of all, a
   definition in a `MARCH_LIB_PATH` dependency the author never opened. Such a
   skip is now reported as `alias-withdrawn`, naming the spelling whose alias
-  went and pointing at the binding that took it. Attribution is conservative:
-  it applies only when the predicate actually mentions the affected measure
-  **and** this call site is guarded by the withdrawn spelling, so a genuinely
-  undecided obligation — including one in a module that has a withdrawn alias
-  elsewhere — still reads `solver-undecided`. Which obligations are suppressed
-  is completely unchanged; only what the user is told changed. The reason also
-  appears in `--refine-report`.
+  went and pointing at the binding that took it. Attribution asks for causal
+  relevance, not mere presence: the predicate must use the affected measure,
+  **and** a positive path condition must apply the withdrawn spelling to *this
+  call's own argument*, **and** the spelling must measure the same kind of value
+  (list spellings for a list, the byte-length spellings for a String). So a
+  guard on a different list, a `List.length` guard in front of a `String`
+  contract, a guard on the `else` side (which *disproves* the predicate and,
+  without the shadowing binding, reports a genuine refinement violation), and an
+  unguarded call all keep the plain `solver-undecided` message — in each case
+  the binding you would be sent to rename is not why anything failed. Which
+  obligations are suppressed is completely unchanged; only what the user is told
+  changed. The reason also appears in `--refine-report`.
 
 - **The optimizer's purity oracle no longer misjudges a monomorphized builtin
   call as pure.** Monomorphization rewrites calls to specialized names before

@@ -519,6 +519,12 @@ let stdlib_source_files : string list ref = ref []
 type withdrawal = {
   wd_spelling : string;      (* the spelling whose alias was withdrawn *)
   wd_measure : string;       (* the measure it would have aliased to *)
+  (* Which KIND of subject the spelling measures.  All three spellings route to
+     the single measure name `len`, so [wd_measure] alone cannot tell a list
+     length from a string byte length — and without this a withdrawn
+     `List.length` was blamed for an undischarged `{String | len(_) > 0}`,
+     naming a list definition that had nothing to do with it. *)
+  wd_str : bool;
   wd_span : A.span option;   (* the binding that caused it, when identified *)
 }
 
@@ -2459,12 +2465,31 @@ let expr_applies (name : string) (e : A.expr) : bool =
     e;
   !found
 
+(* Does [e] apply [name] TO THE VARIABLE [subject]?  Stricter than
+   [expr_applies] on purpose — see condition 3 of [alias_withdrawal_cause]: a
+   guard on some OTHER list says nothing about this call's argument, so
+   `List.length(zs) > 0` guarding `head(ys)` must not be read as a guard on
+   `ys`.  Compared by NAME rather than structurally, because the same variable
+   read at two source positions carries two different spans and would never
+   compare equal. *)
+let expr_applies_to (name : string) (subject : string) (e : A.expr) : bool =
+  let found = ref false in
+  iter_all
+    (fun e ->
+      match e with
+      | A.EApp (A.EVar n, args, _) when n.A.txt = name ->
+        if List.exists (function A.EVar v -> v.A.txt = subject | _ -> false) args then
+          found := true
+      | _ -> ())
+    e;
+  !found
+
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
    undischarged, and a wrong attribution is worse than a vague one: it sends
    the author to rename a binding that had nothing to do with their problem,
    and it hides the real cause.  So this is deliberately conjunctive — all
-   three conditions, or we keep the honest general message:
+   four conditions, or we keep the honest general message:
 
    1. the reason is [Solver_undecided].  A withdrawal cannot cause any other
       skip: it removes an ASSUMPTION, so the VC is still built, still
@@ -2473,25 +2498,59 @@ let expr_applies (name : string) (e : A.expr) : bool =
       conflict failed strictly earlier, for reasons the alias cannot touch.
    2. the predicate actually mentions the measure the alias routes to.  A
       withdrawn `len` alias is irrelevant to `{Int | _ != 0}`.
-   3. THIS call site is guarded by the withdrawn spelling.  Without this the
-      attribution would fire on every unguarded call in a module that happens
-      to contain a competing definition — which is exactly the relabel-
-      everything failure this fix must not become.  It is also what keeps a
-      genuine solver-undecided case saying `solver-undecided`.
+   3. a POSITIVE path condition applies the withdrawn spelling TO THIS
+      OBLIGATION'S OWN SUBJECT.  Each half of that is load-bearing, and the
+      first version of this test had neither:
+
+        - "to this subject", because `if List.length(zs) > 0 do head(ys) …`
+          is not a guard on `ys`.  Delete the competing binding and that
+          program is STILL undischarged — which is the proof that the
+          withdrawal was not the cause.  Blaming it sends the author to rename
+          something irrelevant, while the general message's "guard the call"
+          is the correct advice.
+        - "positive", because in `if List.length(ys) > 0 do 0 else head(ys) end`
+          the guard does not fail to prove the predicate — it DISPROVES it.
+          With the binding removed that program reports a real refinement
+          violation, so "the guard proved nothing" would dress a genuine bug in
+          the user's code up as a story about a nested module.  We cannot
+          report the violation ourselves (the alias is withdrawn, so nothing
+          reflects either way), but we can decline to misdescribe it.
+
+      Without this conjunct the attribution would also fire on every unguarded
+      call in a module that merely CONTAINS a competing definition — the
+      relabel-everything failure this fix must not become.
+   4. the withdrawn spelling measures the same KIND of thing as the subject:
+      `List.length` for a list subject, `String.byte_size` /
+      `string_byte_length` for a String one.  All three route to the single
+      name `len`, so condition 2 cannot separate them on its own, and a
+      withdrawn `List.length` was being blamed for an undischarged
+      `{String | len(_) > 0}` — naming a list definition that could not
+      possibly have mattered.
 
    Note the asymmetry with the gates themselves: THEY resolve doubt by
    suppressing (silence is safe).  This resolves doubt by staying general,
    because the thing being chosen here is a sentence, and an over-confident
-   sentence is a lie. *)
-let alias_withdrawal_cause ~(pred : A.expr) ~(path : (A.expr * bool) list)
-    (r : Obligation.reason) : withdrawal option =
-  match r with
-  | Obligation.Solver_undecided ->
+   sentence is a lie.  The cost is coverage: a guard laundered through a local
+   (`let n = List.length(ys)`), applied to a non-variable actual, or
+   established in a caller, falls back to the general message.  That is the
+   right trade — this reason exists to explain one specific confusion, not to
+   claim every skip. *)
+let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
+    ~(subject_is_str : bool) ~(path : (A.expr * bool) list) (r : Obligation.reason) :
+    withdrawal option =
+  match (r, subject) with
+  | Obligation.Solver_undecided, Some (A.EVar sn) ->
     List.find_opt
       (fun w ->
-        expr_applies w.wd_measure pred
-        && List.exists (fun (cond, _) -> expr_applies w.wd_spelling cond) path)
+        w.wd_str = subject_is_str
+        && expr_applies w.wd_measure pred
+        && List.exists
+             (fun (cond, negated) ->
+               (not negated) && expr_applies_to w.wd_spelling sn.A.txt cond)
+             path)
       !withdrawals
+  (* A non-variable actual (`head(f(xs))`) carries no name a guard could be
+     matched against, so we cannot show the guard was about THIS value. *)
   | _ -> None
 
 (* ── Check one refined parameter at a call site ──────────────────────────── *)
@@ -2545,7 +2604,15 @@ let check_call ~root errctx ~span ~(callee : string)
     let verdict, cause =
       match verdict with
       | Obligation.Skipped r ->
-        (match alias_withdrawal_cause ~pred:rp.pred ~path r with
+        (* The obligation's own SUBJECT — the actual passed at [rp.idx].  Read
+           here rather than taken from the enclosing [self_actual] because
+           [note] is in scope before that binding, and because a missing
+           argument must simply mean "no attribution". *)
+        (match
+           alias_withdrawal_cause ~pred:rp.pred
+             ~subject:(List.nth_opt args rp.idx)
+             ~subject_is_str:(rp_is_str rp) ~path r
+         with
          | Some w -> (Obligation.Skipped (Obligation.Alias_withdrawn w.wd_spelling), w.wd_span)
          | None -> (verdict, None))
       | _ -> (verdict, None)
@@ -2572,12 +2639,12 @@ let check_call ~root errctx ~span ~(callee : string)
             | None -> ""
           in
           Printf.sprintf
-            "note: a binding of `%s` elsewhere in this compilation unit%s \
+            "note: at least one binding of `%s` in this compilation unit%s \
              withdrew the alias for the WHOLE unit, including this call — the \
              gate is unit-global and syntactic, so it does not matter whether \
-             that binding could ever win here.  Rename it, move it out of this \
-             unit, or restate the fact as a refinement the checker can use \
-             directly"
+             that binding could ever win here.  There may be others: renaming \
+             or moving every one of them out of this unit restores the alias, \
+             and restating the fact as a refinement avoids the guard entirely"
             spelling where
         | _ ->
           "note: guard the call or strengthen what is known here, rewrite the \
@@ -5145,18 +5212,20 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      name.  The boolean stored is exactly the gate's own answer — this records
      alongside it, it does not decide anything. *)
   withdrawals := [];
-  let gate spelling measure (ok, cause) =
+  let gate spelling measure ~str (ok, cause) =
     if not ok then
       withdrawals :=
-        { wd_spelling = spelling; wd_measure = measure; wd_span = cause } :: !withdrawals;
+        { wd_spelling = spelling; wd_measure = measure; wd_str = str; wd_span = cause }
+        :: !withdrawals;
     ok
   in
   list_length_is_stdlib :=
-    gate "List.length" "len" (list_length_defs_ok ~mod_name m.A.mod_decls);
+    gate "List.length" "len" ~str:false (list_length_defs_ok ~mod_name m.A.mod_decls);
   string_byte_size_is_stdlib :=
-    gate "String.byte_size" "len" (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
+    gate "String.byte_size" "len" ~str:true
+      (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
   string_byte_length_is_builtin :=
-    gate "string_byte_length" "len"
+    gate "string_byte_length" "len" ~str:true
       (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;

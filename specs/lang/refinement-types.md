@@ -925,13 +925,40 @@ one in an unrelated function (`let string_byte_length = n + 1`) or in a
 `MARCH_LIB_PATH` dependency you never opened; the reported span is where to
 look.
 
-Attribution is conservative, so this reason never displaces a genuine one: it
-requires that the predicate mention the affected measure **and** that this call
-site apply the withdrawn spelling in a guard. An unguarded call in a module that
-happens to contain a competing definition still reads `solver-undecided`.
+The note names *at least one* binding; a unit may hold several, and the alias
+comes back only when every one of them is gone.
+
+**Attribution is conservative, and the bar is causal relevance rather than mere
+presence.** All four of these must hold, or the general `solver-undecided`
+message stands:
+
+1. the skip is a solver-undecided one (a withdrawal removes an assumption; it
+   cannot cause an earlier reflection or sort failure);
+2. the predicate applies the measure the alias routes to;
+3. a **positive** path condition applies the withdrawn spelling **to this
+   obligation's own argument**;
+4. the spelling measures the same kind of thing as that argument — `List.length`
+   for a list, `String.byte_size` / `string_byte_length` for a String.
+
+Conditions 3 and 4 are what keep the reason from swallowing unrelated failures.
+`if List.length(zs) > 0 do head(ys) else 0 end` is not a guard on `ys` — delete
+the competing binding and it is undischarged all the same, so the withdrawal was
+never the cause and "guard the call" is the correct advice. A negated guard,
+`if List.length(ys) > 0 do 0 else head(ys) end`, does not fail to prove the
+predicate — it *disproves* it, and with the binding removed reports a real
+refinement violation, so it is never dressed up as a shadowing story. And since
+all three spellings route to the single name `len`, condition 4 is what stops a
+withdrawn `List.length` being blamed for an undischarged `{String | len(_) > 0}`.
+
+The cost is coverage: a guard laundered through a local (`let n =
+List.length(ys)`), applied to a non-variable actual, or established in a caller
+falls back to the general message. That is the intended trade — the reason
+exists to explain one specific confusion, not to claim every skip.
 
 Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
-span; an unguarded call in the same module still reports `solver-undecided`).
+span; an unguarded call, a guard on a different variable, a cross-measure guard,
+and a negated guard all still report `solver-undecided`, each matched against a
+control with the competing binding deleted).
 
 **Scope and limits.** State these plainly before relying on it:
 

@@ -24,7 +24,14 @@ type reason =
      the unit, possibly in another file entirely, and only naming it is
      actionable.  See [Refine_check.withdrawals] for when a skip is attributed
      here — deliberately narrowly, since a WRONG attribution is worse than a
-     vague one. *)
+     vague one.
+
+     NOTE for anyone changing how reports GROUP skips: this is the first reason
+     carrying a payload, so two withdrawn spellings in one unit are two
+     distinct keys and print as two `alias-withdrawn` lines.  Cosmetic — the
+     headline totals are unaffected — but the fix would have to touch TWO
+     places, because [summary] below is used only by the tests: bin/main.ml's
+     [print_refine_report] keeps its own `Hashtbl` keyed on the whole reason. *)
   | Alias_withdrawn of string
 
 type verdict = Proved | Violated | Skipped of reason

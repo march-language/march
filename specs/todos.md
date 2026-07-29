@@ -103,12 +103,17 @@ safe direction and stays bit-for-bit). The gates return the span of the
 competing binding, `check_module` records each withdrawal, and a skip is
 re-attributed to a new `Obligation.Alias_withdrawn of string` before it is
 recorded, so `--refine-report` and the diagnostic agree. Attribution requires
-all three of: reason is `Solver_undecided`, the predicate mentions the aliased
-measure, and this call site applies the withdrawn spelling in a path condition —
-so a genuinely undecided obligation, including one in a module that has a
-withdrawn alias elsewhere, still reads `solver-undecided`. Refinecheck 302 tests
-(new `alias-attribution` group of 5, two of them controls), typing corpus
-222/222, stdlib sweep empty.
+all four of: reason is `Solver_undecided`; the predicate applies the aliased
+measure; a POSITIVE path condition applies the withdrawn spelling to THIS
+obligation's own argument; and the spelling measures the same kind of value as
+that argument. The last two came out of a review: with only "some path condition
+mentions the spelling", a guard on a *different* list, a `List.length` guard in
+front of a `String` contract, and a *negated* guard (which disproves the
+predicate — its control reports a genuine `refinement violation`) were all
+blamed on a withdrawal that was provably not the cause. Each is now pinned by a
+witness/control pair where the control deletes only the competing binding.
+Refinecheck 333 tests (new `alias-attribution` group of 8, five of them
+controls), typing corpus 222/222, stdlib sweep empty.
 
 ---
 

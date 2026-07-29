@@ -576,12 +576,17 @@ note: a binding of `List.length` elsewhere in this compilation unit
 The culprit can be somewhere you'd never suspect: a nested `mod Internal do mod List
 do fn length …` that nothing can even call as `List.length`, an unrelated function's
 `let string_byte_length = n + 1`, or a definition inside a `MARCH_LIB_PATH` dependency
-you never opened. The span in the note is where to look; rename that binding, or state
-the fact you need as a refinement instead of a runtime guard.
+you never opened. The span in the note is where to look — it names *at least one* such
+binding, and the alias only comes back when every one of them is gone. Rename them, or
+state the fact you need as a refinement instead of a runtime guard.
 
-You'll only see this reason when the predicate mentions the affected measure *and*
-this call is guarded by the withdrawn spelling — an unguarded call still reports
-`solver-undecided`, as it should.
+You'll only see this reason when the withdrawal is plausibly what stopped the proof:
+the predicate has to use the affected measure, and this call's own argument has to be
+guarded by the withdrawn spelling, positively, on the matching kind of value. A guard
+on a *different* list, a `List.length` guard in front of a *string* contract, a guard
+on the `else` side (which disproves the predicate rather than failing to prove it), and
+an unguarded call all keep the plain `solver-undecided` message — because in each of
+those the binding you'd be sent to rename is not the reason anything failed.
 
 **Know the edges before you reach for it.** It's strictly opt-in and scoped to the
 module that writes it: a `cap verified` module calling an ordinary one doesn't make
