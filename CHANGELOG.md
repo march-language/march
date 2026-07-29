@@ -102,6 +102,19 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refined list parameter's own promise now holds inside its own body.** A
+  function whose parameter is `{List(Int) | len(_) > 0}` could not pass that very
+  list to another function requiring the same thing: the inner call's obligation
+  was *skipped* rather than proved, because a measure over a caller-scope
+  variable was always reflected as a fresh unconstrained symbol. The identically
+  shaped `Int` version composed all along, so the difference was invisible —
+  a skip produces no diagnostic. The caller's own predicate is now loaded as an
+  assumption over the same SMT symbol the obligation uses, so contracts compose
+  across a call boundary for `len`-shaped list refinements the same way they
+  already did for scalars. Only the *caller's* promise is loaded, so a weaker
+  contract (`len(_) >= 0`) still does not discharge a stronger callee, and
+  rebinding or shadowing the name retires the fact.
+
 - **`cap no_panic` and `cap verified` now cover the whole module, not just its
   `fn`s.** Both passes walked only `fn` and nested `mod` declarations and
   ignored everything else, so a capability directive said nothing about code
