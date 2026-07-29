@@ -117,6 +117,34 @@ let float_sort = "$Float"
 
 let is_scalar_sort (s : string) : bool = s = bool_sort || s = float_sort
 
+(* ── The MEASURE-ONLY marker ───────────────────────────────────────────────
+   A fourth shape in the same marker channel, for a refined LOCAL/PARAMETER at
+   an ADT base type that the checker carries only through its MEASURES (`len`
+   over a list, a user measure over a variant), never as a datatype term.
+
+   It must be readable as "not a scalar, not a record, not `$Str`, and NOT a
+   sort any VC may declare a constant at": the value never becomes an SMT term
+   here, only `len$x`-style Int symbols standing for measures OF it.  Hence the
+   `$Meas:` prefix, which
+     - contains `$`, illegal in a March identifier and in [adt_sort_name]'s
+       output, so it can never collide with a real declared sort;
+     - is distinct from `$Str`/`$Bool`/`$Float` by the `:` and the payload;
+     - carries the underlying `M_…` sort name after the prefix, so a future
+       consumer that DOES want the datatype sort can recover it, while every
+       existing consumer (which tests marker equality against a specific sort
+       name, or [is_record_sort], or [scalar_sort_of_marker]) sees a value none
+       of its tests match and keeps its previous behaviour.
+
+   The one consumer that had a CATCH-ALL `Some sort_name ->` arm is
+   [scope_facts]; it is given an explicit arm below, because declaring a
+   constant at the sort `$Meas:M_List` would be a `(declare-const … )` for a
+   sort nobody declared — exactly the z3 `(error …)` the marker channel's
+   comment above warns about.
+
+   ([meas_sort_name], which needs [adt_sort_name], is defined alongside it.) *)
+let meas_sort_prefix = "$Meas:"
+let is_meas_sort (s : string) : bool = String.starts_with ~prefix:meas_sort_prefix s
+
 (* The BUILT-IN SMT sort a marker denotes, or [None] when the marker names a
    declared sort (an ADT, a record, `$Str`) and so is not a scalar at all.
    [None] marker = Int is the original, unchanged meaning. *)
@@ -665,6 +693,10 @@ let measure_preamble_sorts : (string, unit) Hashtbl.t = Hashtbl.create 8
    [adt_ctors] / [SData] are keyed by this safe name; constructors are not
    renamed. *)
 let adt_sort_name (march_name : string) : string = "M_" ^ march_name
+
+(* The MEASURE-ONLY marker for a March ADT — see [meas_sort_prefix]. *)
+let meas_sort_name (march_name : string) : string =
+  meas_sort_prefix ^ adt_sort_name march_name
 
 (* True when [t] is a bare TyCon that maps to a registered 1-constructor
    TDRecord sort — used to gate record-typed refinements on both the param
@@ -1606,6 +1638,23 @@ let refined_scope_ty : A.ty option -> (string * A.expr * string option) option =
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
     when is_record_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name name))
+  (* Any OTHER registered ADT — `List(Int)`, `List(a)`, a user `Tree` — at the
+     MEASURE-ONLY marker.  The record arm above wins for a record, so this arm
+     sees variants and applied type constructors only.
+
+     Admitting the type here is what lets a refined list PARAMETER's own
+     promise reach the body at all; who reads the entry decides what is done
+     with it.  Today exactly one consumer does: [check_call]'s `Other`-mode
+     measure path, which loads `len(_) > 0` as an assumption over the same
+     `len$x` symbol its goal already uses.  Every other consumer of [scope]
+     tests the marker against a specific sort ([str_sort], a record's `M_…`) or
+     through [scalar_sort_of_marker], so a `$Meas:` entry matches none of them
+     and behaves exactly as the previous `None` (no entry at all) did — with the
+     single exception of [scope_facts], which had a catch-all and is given an
+     explicit skip arm for this marker. *)
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+    when is_adt_base base ->
+    Some (binder_name binder, pred, Some (meas_sort_name name))
   | _ -> None
 
 (* Names a pattern binds (so a binding construct can shadow them). *)
@@ -3002,13 +3051,80 @@ let check_call ~root errctx ~span ~(callee : string)
             Some (Smt.Const name)
           end
     in
+    (* The Int symbol standing for `m(x)` where [x] is a March NAME — the one
+       channel through which a non-axiomatised measure over a variable is
+       reflected, on the goal side and (via [load_scope_measure_facts] below) on
+       the assumption side.  Memoized per `(m, x)` so BOTH sides name the symbol
+       exactly once: z3 rejects a duplicate `declare-const` as a hard error, and
+       a malformed VC comes back `Unknown`, i.e. an ordinary-looking SKIP with no
+       signal that anything went wrong.  (This VC builder does deduplicate
+       [decls] by (name, sort) pair before rendering, so an identical second
+       declaration would in fact have survived; the memo does not rely on that,
+       and it additionally keeps the `>= 0` assumption from being asserted
+       twice.) *)
+    let measure_var_cache : (string, Smt.term option) Hashtbl.t = Hashtbl.create 8 in
     let measure_of_var m x =
-      let c = Smt.Const (m ^ "$" ^ x) in
-      decls := (m ^ "$" ^ x, Smt.SInt) :: !decls;
-      (* `len` is known non-negative; user measures get no axiom in v1 (sound;
-         guarded uses still discharge via the path context). *)
-      if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
-      Some c
+      let nm = m ^ "$" ^ x in
+      match Hashtbl.find_opt measure_var_cache nm with
+      | Some cached -> cached
+      | None ->
+        let c = Smt.Const nm in
+        decls := (nm, Smt.SInt) :: !decls;
+        (* `len` is known non-negative; user measures get no axiom in v1 (sound;
+           guarded uses still discharge via the path context). *)
+        if is_nonneg_measure m then assume := Smt.Ge (c, Smt.IntLit 0) :: !assume;
+        let r = Some c in
+        Hashtbl.replace measure_var_cache nm r;
+        r
+    in
+    (* ── A caller-scope refined ADT parameter's own promise ──────────────────
+       `fn outer(ys : {List(Int) | len(_) > 0}) … inner(ys)`: the goal for the
+       inner call is `len$ys > 0`, and until this existed nothing said anything
+       about `len$ys`, so the VC was satisfiable both ways and the call was
+       SKIPPED — while the identically-shaped `Int` version composed, because
+       [reflect_scalar]'s `EVar` arm consults [sc] for scalar sorts and there is
+       no scalar sort for a list.
+
+       So: when the actual is a bare name carrying a MEASURE-ONLY scope entry
+       ([meas_sort_prefix]), reflect that entry's own predicate as an assumption.
+       Three restrictions keep this from guessing:
+
+         - the predicate's measures must apply to the entry's OWN binder (`_` or
+           its declared name).  A measure over any other name is a different
+           value; returning None there drops the whole predicate rather than
+           mis-attributing it.
+         - the measure must be non-axiomatised, i.e. exactly the class the goal
+           side reflects through [measure_of_var].  An axiom measure reflects as
+           `(size <dt-term>)` on the goal side, so emitting `size$x` here would
+           be an unrelated symbol — a dead fact at best.
+         - [resolve_var] is `None` throughout: the binder denotes a LIST, not a
+           scalar, so any predicate that mentions it outside a measure (or that
+           mentions any other variable) is dropped entirely.  No approximation.
+
+       Sound direction: this only ADDS a hypothesis that the caller's own
+       signature already promises about this very value, over the same symbol.
+       It is loaded at most once per name per VC (the [done] table), so the
+       assumption list cannot grow with the number of occurrences.
+
+       Shadowing is handled upstream and not here: [scope_shadow] retires the
+       name from [sc] at every binding construct, so after `let ys = tail(ys)`
+       the lookup simply finds nothing and no fact is loaded. *)
+    let scope_facts_loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+    let load_scope_measure_facts (x : string) : unit =
+      if not (Hashtbl.mem scope_facts_loaded x) then begin
+        Hashtbl.replace scope_facts_loaded x ();
+        match List.assoc_opt x sc with
+        | Some (b, q, Some s) when is_meas_sort s ->
+          let rv _ = None in
+          let rm m' n =
+            if (n = b || n = "_") && not (is_axiom_measure m') then measure_of_var m' x
+            else None
+          in
+          (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
+           | Some qa -> assume := qa :: !assume
+           | None -> ())
+        | _ -> ()
+      end
     in
     (* Reflect a value into the SMT datatype term an axiomatised measure ranges
        over: a constructor application becomes (ctor …) (so the recursion axioms
@@ -3160,7 +3276,12 @@ let check_call ~root errctx ~span ~(callee : string)
             | Some n -> Some (Smt.IntLit n)
             | None -> (
                 match a with
-                | A.EVar { A.txt = x; _ } -> measure_of_var m x
+                (* The actual is a bare name.  Load whatever the CALLER's own
+                   signature promises about its measures first, so the promise
+                   and the goal meet on the one memoized `m$x` symbol. *)
+                | A.EVar { A.txt = x; _ } ->
+                  load_scope_measure_facts x;
+                  measure_of_var m x
                 (* A non-variable, non-literal actual (a call, a field…): no
                    symbol to share with the caller's facts.  For the binder
                    spellings keep the fresh non-negative constant — it is what
@@ -3554,6 +3675,16 @@ let scope_facts (sc : scope) : (string * Smt.sort) list * Smt.term list * bool *
         (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
          | Some qa -> (ds, qa :: asm, has_rec)
          | None -> (ds, asm, has_rec))
+      (* A MEASURE-ONLY entry ([meas_sort_prefix]) contributes NOTHING here, and
+         must not fall into the ADT arm below: `$Meas:M_List` is a marker, not a
+         declared sort, so `(declare-const xs $Meas:M_List)` would be a z3
+         `(error …)` on the shared solver channel — and setting [has_rec] off a
+         list predicate would switch [check_post] onto its "a SAT model is a
+         definite violation" branch with nothing concrete pinned, which is a
+         false-positive engine.  Skipping leaves [check_post] behaving exactly as
+         it did before these entries existed; carrying a list measure through a
+         POSTcondition is a separate piece of work. *)
+      | Some sort_name when is_meas_sort sort_name -> (ds, asm, has_rec)
       | Some sort_name ->
         let c = Smt.Const name in
         let ds = (name, Smt.SData sort_name) :: ds in

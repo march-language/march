@@ -4992,6 +4992,81 @@ end|}
 end|}))
   ]
 
+(* ── Composing a LIST contract across a call boundary ───────────────────────
+   A refined list parameter's own promise must hold inside its own body, so a
+   function requiring a non-empty list can pass that very list on.  The `Int`
+   shape composed all along (via [reflect_scalar]'s scope lookup); the list
+   shape was SKIPPED, which produces no diagnostic and so looked fine. *)
+let compose_suite =
+  [ gated "a list contract composes into a call in its own body" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LC do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(_) > 0}) : Int do inner(ys) end
+  fn main() : Int do outer([1]) end
+end|});
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        (* proved must be 2 -- BOTH the outer([1]) call from main AND the
+           inner(ys) call inside outer's body.  If the fix is wired to the wrong
+           function (scope_facts, which check_call never consults), this stays
+           "1 proved, 1 skipped" -- the exact silent-non-fix this test exists
+           to catch. Do not weaken this to "no error"; a skip also produces no
+           error, and that is precisely the bug. *)
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+
+  ; gated "a WEAKER caller contract does not discharge a stronger callee" (fun () ->
+        (* The false-positive control that matters most: the caller promises
+           only len >= 0, true of every list, which proves nothing about
+           len > 0. If this reports a violation, the loaded fact is stronger
+           than the promise. If it PROVES, the fact is being read as the
+           callee's own predicate rather than the caller's. Either way the
+           assumption is wrong. It must be SKIPPED. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod LW do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(_) >= 0}) : Int do inner(ys) end
+  fn main() : Int do outer([1]) end
+end|});
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved by the weak fact" 1 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "rebinding the name retires the list fact" (fun () ->
+        (* THE CARDINAL-SIN TEST. `ys` inside the body is a different list after
+           the let; the caller's promise says nothing about it. If the outer
+           fact survives the rebind, a correct program is reported as
+           violating. *)
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod LS do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(_) > 0}) : Int do
+    let ys = List.tail(ys)
+    inner(ys)
+  end
+  fn main() : Int do outer([1, 2]) end
+end|}))
+
+  ; gated "a match binder shadowing the name retires the fact" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d {|
+mod LM do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer(ys : {List(Int) | len(_) > 0}, o : Option(List(Int))) : Int do
+    match o do
+      Some(ys) -> inner(ys)
+      None     -> 0
+    end
+  end
+  fn main() : Int do outer([1], None) end
+end|}))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5032,4 +5107,5 @@ let () =
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
-      ("walk-coverage", walk_coverage_suite) ]
+      ("walk-coverage", walk_coverage_suite);
+      ("compose", compose_suite) ]
