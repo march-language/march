@@ -161,7 +161,7 @@ message. Deliberate — the reason explains one specific confusion, it does not
 claim every skip.
 
 Measured: refinecheck 333 tests (was 330; new `alias-attribution` group of 8),
-typing corpus 222/222, stdlib sweep empty.
+typing corpus 227/227, stdlib sweep empty.
 
 ## Current State (as of 2026-07-29, `cap no_panic` discharges before it rejects)
 

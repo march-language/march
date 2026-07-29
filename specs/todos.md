@@ -113,7 +113,7 @@ predicate — its control reports a genuine `refinement violation`) were all
 blamed on a withdrawal that was provably not the cause. Each is now pinned by a
 witness/control pair where the control deletes only the competing binding.
 Refinecheck 333 tests (new `alias-attribution` group of 8, five of them
-controls), typing corpus 222/222, stdlib sweep empty.
+controls), typing corpus 227/227, stdlib sweep empty.
 
 ---
 
