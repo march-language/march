@@ -3949,6 +3949,124 @@ mod D3 do
 end|}))
   ]
 
+(* ── Division-safety: a rebound name retires the fact about it ─────────────
+   Every channel this pass reads keys on a bare variable NAME — a path
+   condition (`d != 0`), a refined parameter (`d : {Int | …}`), a `let` value
+   (`let d = …`) — so none of them survives that name being rebound.  The walk
+   did not retire ANY of them, and the negated-path fix above doubled the reach
+   of that omission: each program below passed `--check` with exit 0 and then
+   panicked at run time with "division by zero".
+
+   The `then`-side witness was already broken before that fix; it is the same
+   one-line discipline, so it is closed here too rather than left as a known
+   hole in a capability that promises the division cannot panic.
+
+   NOT gated: every case is decided before any VC is built (the guard fact is
+   retired, so the divisor reaches the unrefined branch and errors), and the
+   whole point is fail-closed behaviour — gating would disable these exactly
+   where verification is unavailable. *)
+let divsafety_shadowing_suite =
+  let errors name src = Alcotest.(check bool) name true (has_divsafety_error src) in
+  [ Alcotest.test_case "a `let` rebinding the guarded name retires the guard (else side)"
+      `Quick (fun () ->
+        errors "error" {|
+mod S1 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else
+      let d = 0
+      10 / d
+    end
+  end
+end|})
+  ; Alcotest.test_case "a `let` rebinding the guarded name retires the guard (then side)"
+      `Quick (fun () ->
+        (* Pre-existing, not a regression of the negated-path fix — the same
+           discipline closes it, so leaving it open would mean `cap no_panic`
+           still accepts a literal division by zero. *)
+        errors "error" {|
+mod S2 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d != 0 do
+      let d = 0
+      10 / d
+    else 0 end
+  end
+end|})
+  ; Alcotest.test_case "a lambda parameter shadowing the guarded name retires the guard"
+      `Quick (fun () ->
+        errors "error" {|
+mod S3 do
+  cap no_panic
+  fn ap(g : (Int) -> Int) : Int do g(0) end
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else ap(fn d -> 10 / d) end
+  end
+end|})
+  ; Alcotest.test_case "a match binder shadowing the guarded name retires the guard"
+      `Quick (fun () ->
+        errors "error" {|
+mod S4 do
+  cap no_panic
+  fn f(d : Int, o : Option(Int)) : Int do
+    if d == 0 do 0 else
+      match o do
+        Some(d) -> 10 / d
+        None -> 0
+      end
+    end
+  end
+end|})
+  ; Alcotest.test_case "a lambda parameter shadowing a REFINED parameter retires it"
+      `Quick (fun () ->
+        (* The parameter channel has the identical hole as the path channel:
+           the refinement is about the outer `d`, not the lambda's. *)
+        errors "error" {|
+mod S5 do
+  cap no_panic
+  fn ap(g : (Int) -> Int) : Int do g(0) end
+  fn f(d : {Int | _ != 0}) : Int do ap(fn d -> 10 / d) end
+end|})
+  ; Alcotest.test_case "a `let` rebinding a REFINED parameter to zero is caught"
+      `Quick (fun () ->
+        errors "error" {|
+mod S6 do
+  cap no_panic
+  fn f(d : {Int | _ != 0}) : Int do
+    let d = 0
+    10 / d
+  end
+end|})
+  ; Alcotest.test_case "an ordinary `let` divisor is still accepted" `Quick (fun () ->
+      (* The control: retirement must not swallow the `let` value channel it
+         replaces.  `let d = 5` retires the OUTER `d` and records 5 in its
+         place, so this stays silent. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod S7 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    let d = 5
+    10 / d
+  end
+end|}))
+  ; Alcotest.test_case "a guard on an unshadowed name still discharges" `Quick (fun () ->
+      (* The other control: retirement is per-NAME, so an unrelated binder
+         must not retire the guard. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod S8 do
+  cap no_panic
+  fn f(d : Int) : Int do
+    if d == 0 do 0 else
+      let k = 3
+      k / d
+    end
+  end
+end|}))
+  ]
+
 (* ── Decl-walk coverage ────────────────────────────────────────────────────
    Both obligation-raising walks used to descend only into [DFn] and [DMod] and
    end in `| _ -> ()`, so a capability directive said nothing about code living
@@ -4193,4 +4311,5 @@ let () =
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
+      ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite) ]

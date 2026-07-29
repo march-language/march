@@ -141,16 +141,73 @@ let clause_refined_params (clause : A.fn_clause) =
 
 (* ── Division-site walker ───────────────────────────────────────────────── *)
 
-(* Calls [f span divisor_expr path] for every integer division/modulo site,
-   carrying the accumulated path context (guard conditions) through branches. *)
+(* What is known at a division site.  All THREE channels key on a bare variable
+   NAME — a path condition is `(d != 0, negated)`, a refined parameter is
+   `("d", binder, pred)`, and a `let` value is `("d", rhs)` — so none of them
+   survives that name being rebound.  Every binding construct must retire the
+   names it shadows before descending, or a fact is attributed to the INNER
+   value:
+
+     if d == 0 do 0 else
+       let d = 0
+       10 / d        -- `not (d == 0)` is about the PARAMETER, not this `d`
+
+   That program passed `--check` and then panicked with "division by zero", as
+   did the `fn d -> 10 / d` and `Some(d) -> 10 / d` variants; so did the
+   then-side `if d != 0 do (let d = 0; 10 / d)`.
+
+   The direction of error here is the OPPOSITE of the refinement pass's.  There,
+   dropping a fact means silence and keeping a stale one means a false positive.
+   Here, dropping a fact means an ERROR and keeping a stale one means a division
+   that panics inside a module that promised it could not — so over-approximating
+   [shadowed] is still the safe direction, but for the opposite reason. *)
+type dctx = {
+  path : (A.expr * bool) list;    (* guard conditions, with a negated flag *)
+  shadowed : string list;         (* names rebound since the parameter scope *)
+  lets : (string * A.expr) list;  (* innermost tracked `let` value per name *)
+}
+
+let dctx_empty = { path = []; shadowed = []; lets = [] }
+
+(* Retire [names] from every channel. *)
+let retire (names : string list) (c : dctx) : dctx =
+  if names = [] then c
+  else
+    { path = Refine_check.path_shadow c.path names
+    ; shadowed = names @ c.shadowed
+    ; lets = List.filter (fun (n, _) -> not (List.mem n names)) c.lets }
+
+(* `let n = rhs`: retire the old [n] everywhere, then record the new value.
+   [n] joins [shadowed] because any refinement or guard about the OUTER `n` is
+   now stale; the fresh [lets] entry is what the checker may use instead. *)
+let bind_let (n : string) (rhs : A.expr) (c : dctx) : dctx =
+  let c = retire [ n ] c in
+  { c with lets = (n, rhs) :: c.lets }
+
+(* Names an [A.ELam] / [A.ELetFn] parameter list binds. *)
+let lam_param_names (ps : A.param list) : string list =
+  List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps
+
+(* The names a block statement binds for the REST of the block, and how. *)
+let stmt_binding (c : dctx) (stmt : A.expr) : dctx =
+  match stmt with
+  | A.ELet (b, _) ->
+    (match b.A.bind_pat with
+     | A.PatVar n -> bind_let n.A.txt b.A.bind_expr c
+     (* A destructuring pattern binds names whose values this pass does not
+        track: retire them and offer nothing in exchange. *)
+     | p -> retire (Refine_check.pat_binders p) c)
+  | A.ELetFn (n, _, _, _, _) -> retire [ n.A.txt ] c
+  | _ -> c
+
+(* Calls [f span divisor_expr ctx] for every integer division/modulo site. *)
 let rec iter_div_sites
-    (f : A.span -> A.expr -> (A.expr * bool) list -> unit)
-    (path : (A.expr * bool) list)
-    (e : A.expr) : unit =
-  let go e = iter_div_sites f path e in
+    (f : A.span -> A.expr -> dctx -> unit) (c : dctx) (e : A.expr) : unit =
+  let go e = iter_div_sites f c e in
+  let under names e = iter_div_sites f (retire names c) e in
   match e with
   | A.EApp (A.EVar { A.txt = op; _ }, [ lhs; rhs ], sp) when List.mem op div_ops ->
-    f sp rhs path;
+    f sp rhs c;
     go lhs;
     go rhs
   | A.EApp (fn, args, _) ->
@@ -161,36 +218,51 @@ let rec iter_div_sites
     List.iter (fun (_, e) -> go e) fields
   | A.ERecordUpdate (r, fields, _) ->
     go r; List.iter (fun (_, e) -> go e) fields
-  | A.EBlock (es, _) -> List.iter go es
+  (* A `let` (or local `fn`) binds for the REST of the block, so the context is
+     THREADED through the statements rather than one being reused for all of
+     them.  Each statement is walked in the context that PRECEDES it, so a
+     binding does not shadow its own right-hand side (`let d = 10 / d` divides
+     by the outer `d`).  This also means only the `let`s that actually precede
+     a division are visible to it; the pre-pass this replaced collected the
+     whole block, including bindings written after the division site. *)
+  | A.EBlock (es, _) ->
+    ignore
+      (List.fold_left
+         (fun c stmt -> iter_div_sites f c stmt; stmt_binding c stmt)
+         c es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.EMatch (scrut, arms, _) ->
     go scrut;
     List.iter
       (fun (arm : A.branch) ->
-        Option.iter go arm.A.branch_guard;
-        let arm_path =
+        (* Pattern binders are in scope for the guard as well as the body. *)
+        let ac = retire (Refine_check.pat_binders arm.A.branch_pat) c in
+        Option.iter (iter_div_sites f ac) arm.A.branch_guard;
+        let ac =
           match arm.A.branch_guard with
-          | Some g -> (g, false) :: path
-          | None -> path
+          | Some g -> { ac with path = (g, false) :: ac.path }
+          | None -> ac
         in
-        iter_div_sites f arm_path arm.A.branch_body)
+        iter_div_sites f ac arm.A.branch_body)
       arms
   | A.EIf (cond, t, e, _) ->
     go cond;
-    iter_div_sites f ((cond, false) :: path) t;
-    iter_div_sites f ((cond, true) :: path) e
+    iter_div_sites f { c with path = (cond, false) :: c.path } t;
+    iter_div_sites f { c with path = (cond, true) :: c.path } e
   | A.ECond (arms, _) ->
     List.iter
-      (fun (c, b) ->
-        go c;
-        iter_div_sites f ((c, false) :: path) b)
+      (fun (cond, b) ->
+        go cond;
+        iter_div_sites f { c with path = (cond, false) :: c.path } b)
       arms
   | A.EField (inner, _, _) -> go inner
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (inner, _, _) -> go inner
-  | A.ELam (_, body, _) -> go body
-  | A.ELetFn (_, _, _, body, _) -> go body
-  | A.ELetQ (_, rhs, body, _) -> go rhs; go body
+  | A.ELam (ps, body, _) -> under (lam_param_names ps) body
+  (* A local `fn go(...)` binds its own name (it may recurse) and its
+     parameters throughout its body. *)
+  | A.ELetFn (n, ps, _, body, _) -> under (n.A.txt :: lam_param_names ps) body
+  | A.ELetQ (p, rhs, body, _) -> go rhs; under (Refine_check.pat_binders p) body
   | A.EAssert (inner, _) -> go inner
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner
@@ -265,22 +337,16 @@ let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
       | _ -> false)
     path
 
-(* Collect let-bound (name, rhs_expr) pairs visible at division sites.
-   Walks EBlock prefix statements; stops at the first non-let expression. *)
-let collect_let_values (body : A.expr) : (string * A.expr) list =
-  match body with
-  | A.EBlock (es, _) ->
-    List.filter_map
-      (function
-        | A.ELet (b, _) ->
-          (match b.A.bind_pat with
-           | A.PatVar n -> Some (n.A.txt, b.A.bind_expr)
-           | _ -> None)
-        | _ -> None)
-      es
-  | _ -> []
-
-let check_var_divisor ~root errctx span var_name params path let_values =
+(* [c.shadowed] names have been rebound since the parameter scope, so a
+   refinement declared on the parameter of that name says nothing about the
+   value being divided by.  Retiring them here is what stops
+   `if d != 0 do (let d = 0; 10 / d)` — and its `fn d -> …` and `Some(d) -> …`
+   siblings — from reading the outer fact. *)
+let check_var_divisor ~root errctx span var_name all_params (c : dctx) =
+  let params =
+    List.filter (fun (n, _, _) -> not (List.mem n c.shadowed)) all_params
+  in
+  let path = c.path and let_values = c.lets in
   match List.find_opt (fun (n, _, _) -> n = var_name) params with
   | None ->
     if path_proves_nonzero var_name path then ()
@@ -348,14 +414,24 @@ let check_var_divisor ~root errctx span var_name params path let_values =
          a fact in scope; [var_name] is one of them (we just found it). *)
       let decls = List.map (fun (n, _, _) -> (n, Smt.SInt)) params in
       let declared = List.map fst decls in
+      (* Both assumption channels are filtered the same way: a term mentioning
+         a symbol this VC did not declare is DROPPED rather than sent.  z3's
+         reply to an ill-sorted assertion is an `(error …)` that
+         [Solver.read_verdict] consumes and reports as `Unknown`, so sending one
+         does not break the channel — it just forces the whole query to
+         [Refine.Unverified], turning an answerable question into a guaranteed
+         failure.  A sibling parameter refined against an undeclared name
+         (`a : {v : Int | v > k}`) used to poison the divisor's query that way.
+         Dropping an assumption can only make the goal harder to prove, so this
+         stays fail-closed. *)
       let param_assumes =
-        List.filter_map (fun (n, b, p) -> smt_of ~b ~var:n p) params
+        List.filter_map
+          (fun (n, b, p) ->
+            match smt_of ~b ~var:n p with
+            | Some t when consts_declared declared t -> Some t
+            | _ -> None)
+          params
       in
-      (* Same reflection the path fallback above approximates syntactically.
-         A condition mentioning a symbol we did not declare is DROPPED rather
-         than sent: an ill-sorted query makes z3 error out, which only produces
-         a worse-diagnosed version of the same failure.  Dropping assumptions
-         can only make the goal harder to prove, so it stays fail-closed. *)
       let path_assumes =
         List.filter_map
           (fun (cond, negated) ->
@@ -404,12 +480,13 @@ let check_var_divisor ~root errctx span var_name params path let_values =
 
 let check_clause ~root errctx (clause : A.fn_clause) : unit =
   let params = clause_refined_params clause in
-  let init_path =
-    match clause.A.fc_guard with Some g -> [ (g, false) ] | None -> []
+  let init =
+    match clause.A.fc_guard with
+    | Some g -> { dctx_empty with path = [ (g, false) ] }
+    | None -> dctx_empty
   in
-  let let_values = collect_let_values clause.A.fc_body in
   iter_div_sites
-    (fun span divisor path ->
+    (fun span divisor c ->
       match divisor with
       | A.ELit (A.LitInt 0, _) ->
         Err.error errctx ~span
@@ -417,14 +494,14 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
       | A.EVar { A.txt = var_name; _ } ->
-        check_var_divisor ~root errctx span var_name params path let_values
+        check_var_divisor ~root errctx span var_name params c
       | _ ->
         (* Complex expression — always flag conservatively *)
         Err.error errctx ~span
           ("division by a complex expression in `cap no_panic` module: \
             cannot prove divisor is non-zero."
            ^ division_suggestion))
-    init_path
+    init
     clause.A.fc_body
 
 let check_fn ~root errctx (fd : A.fn_def) : unit =
