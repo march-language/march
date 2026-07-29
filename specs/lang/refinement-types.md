@@ -231,11 +231,45 @@ function would manufacture false positives:
   the source files the compiler actually loaded, so it works the same from a
   repo checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing
   anywhere.
-- **Withdrawn for the whole module** if anything could make that spelling denote
-  a different function — a program defining its own `List.length`, a vendored or
-  forked `List` arriving through `MARCH_LIB_PATH`, or rebinding `List` via
-  `alias`/`use`. In those cases the obligation goes back to unprovable-and-
-  skipped, which is the pre-alias behaviour.
+- **Withdrawn for the whole compilation unit** if anything in it could make that
+  spelling denote a different function — a program defining its own
+  `List.length`, a vendored or forked `List` arriving through `MARCH_LIB_PATH`,
+  or rebinding `List` via `alias`/`use`. In those cases the obligation goes back
+  to unprovable-and-skipped, which is the pre-alias behaviour.
+
+  **The gate is unit-global, and the unit is bigger than the file you are
+  editing.** `bin/main.ml` prepends the entire standard library to every
+  compilation, and `MARCH_LIB_PATH` adds every `.march` file in every dependency
+  directory. One genuine competitor anywhere in that set disables the alias for
+  the whole program, including in files that never mention it. This is a real
+  coverage cost, accepted deliberately: deciding whether a competitor could
+  actually win at a given call site needs a resolver this pass does not have,
+  and the errors are asymmetric — over-withdrawing loses a proof (silence),
+  under-withdrawing puts a wrong fact in the assumption set and reports correct
+  code, which is the cardinal sin.
+
+- **A glob import RESOLVES its target instead of assuming the worst** (since
+  2026-07-29). `import Foo` / `use Foo.*` withdraws the alias only if `Foo`
+  actually provides a competing member, decided by walking the compilation
+  unit's own module structure (a `use` inside the target is followed
+  transitively, under a fuel bound); an unresolvable path, or exhausted fuel,
+  still withdraws. Before this, the mere presence of a glob was enough — and
+  since `stdlib/system.march` carries a single `import Process` and the stdlib
+  is prepended to everything, the alias was withdrawn for **every March program
+  ever compiled**. The feature was inert in production and the suite stayed
+  green, because a skipped obligation exits 0 exactly as a proved one does; only
+  a REJECT witness (`reject/t117`) and the `--refine-report` proof *floor* can
+  see the difference.
+
+- **A `use`/`alias` competes only when it is the *program's*** (since
+  2026-07-29). The rebinding half now ignores declarations whose span is a
+  standard-library source file, exactly as the member-definition half always
+  has — an `import` inside `mod System` binds names in System's own body, not
+  in the module being checked. This is conjoined with the resolution rule
+  above, not substituted for it: a glob withdraws only when it is the
+  program's own **and** its target provably provides a competitor. Both are
+  over-approximations of "really competes", so their intersection still
+  contains every genuine competitor; neither weakens the other's test.
 
 The same treatment applies to strings — see
 [String Refinements](#string-refinements).
@@ -537,10 +571,14 @@ Only byte-valued spellings are aliased, because `len` is a byte count:
 The same withdrawal rules as the list alias apply: a program that defines its own
 `String.byte_size` (unless it *is* the standard library's) — in any declaration
 form: a `fn`, a module-level `let`, an `extern` block, an interface or impl
-method — rebinds `String` via `alias`/`use`/`import`, or binds the name
+method — rebinds `String` via `alias`/`use`, or binds the name
 `string_byte_length` itself — as a declaration,
 an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
-alias for the whole module, and the obligation returns to being skipped.
+alias for the whole **compilation unit** (prepended stdlib and every
+`MARCH_LIB_PATH` dependency included), and the obligation returns to being
+skipped. A glob import withdraws only if its resolved target really provides the
+competitor; see
+[`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure).
 
 ### What String refinements do *not* do
 
@@ -811,10 +849,22 @@ Two slices are printed because the compiler prepends the whole standard library
 to every compilation: **user code** counts only obligations raised at call sites
 in the file you named, **user + stdlib** counts every obligation raised in the
 run. Use the first to judge your own module; use the second as a whole-program
-coverage number (March's CI ratchets on it, so a change that quietly stops
-checking things fails the build).
+coverage number.
 
-Each skip is attributed to one of five reasons:
+**CI ratchets on both, from two different fixtures, and that split is
+load-bearing.** The skip **ceiling** reads `stdlib/list.march`'s `user + stdlib`
+slice (28 skips, 8 proved as of 2026-07-29). The proof **floor** reads the
+`user code` slice of `accept/t118` (1 proved), because a ceiling alone is not a
+ratchet — a checker that raises no obligations at all satisfies it perfectly.
+The floor cannot live on `stdlib/list.march`: its `user code` slice proves 0, and
+its whole-program `8 proved` is dominated by obligations that survive the very
+regressions the floor exists to catch. `t118` is a program whose single
+obligation is *proved* by a `List.length` guard, so it drops to `0 proved` the
+moment the measure alias stops working — which is exactly what the unit-global
+glob-import bug did to every March program, invisibly, while `t118` still exited
+0 (a skip and a proof are both exit 0; only the count tells them apart).
+
+Each skip is attributed to one of six reasons:
 
 | Reason | What happened |
 |---|---|
@@ -822,7 +872,14 @@ Each skip is attributed to one of five reasons:
 | `unreflectable-subject` | the argument's own value did not translate, so no goal was built |
 | `sort-conflict` | reflecting it would declare one symbol at two different sorts |
 | `float-sort-gate` | the float wellsortedness gate rejected the formula |
+| `alias-withdrawn` | the guard used a measure alias (`List.length`, `String.byte_size`, `string_byte_length`) that this compilation unit had withdrawn, because something in the unit binds that name |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
+
+`alias-withdrawn` is a refinement of `solver-undecided`, not a separate failure:
+the VC was built and the solver ran, it just arrived without the fact that would
+have discharged it. It is reported separately because the *action* differs — the
+call is already guarded, and what has to change is a name binding elsewhere in
+the unit. See [the alias-withdrawal note](#a-withdrawn-alias-names-itself) below.
 
 The ledger records **precondition obligations raised at call sites**. Return
 refinements go through a separate path that does not file a record, so a
@@ -869,6 +926,91 @@ module — it asks for every obligation to be discharged
 Both forms verified 2026-07-28 (guarded: exit 0; unguarded: exit 1 with the
 message above).
 
+### A withdrawn alias names itself
+
+The measure aliases (`List.length`, `String.byte_size`, `string_byte_length`)
+are withdrawn for the **whole compilation unit** the moment anything in it could
+make the spelling denote a different function — see the shadowing rules under
+each alias above. The gate is unit-global and syntactic on purpose: it does not
+ask whether the competing binding could actually win at this call, because the
+precise answer needs a resolver the pass does not have there, and the errors are
+asymmetric (over-suppress = a missed proof, silence; under-suppress = a false
+positive on correct code).
+
+Under `cap verified` a missed proof is not silence, so a withdrawal is visible —
+and it must not be mistaken for a solver failure. This program is guarded by the
+exact idiom the alias exists for, and is still an error:
+
+```march
+mod Ver3 do
+  cap verified
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end
+```
+
+```
+`cap verified` module: cannot verify precondition `len(_) > 0` on `head`
+(alias-withdrawn: the guard uses `List.length`, but this compilation unit also
+BINDS that name, so the checker withdrew its built-in measure meaning and the
+guard proved nothing)
+note: at least one binding of `List.length` in this compilation unit
+(ver3.march:5) withdrew the alias for the WHOLE unit, including this call — the
+gate is unit-global and syntactic, so it does not matter whether that binding
+could ever win here.  There may be others: renaming or moving every one of them
+out of this unit restores the alias, and restating the fact as a refinement
+avoids the guard entirely
+```
+
+The nested `length` is reachable only as `Ver3.Internal.List.length` and does
+**not** win at runtime — the gate does not care, and that is the point of the
+message. The same applies to a bare-name binding anywhere in the unit, including
+one in an unrelated function (`let string_byte_length = n + 1`) or in a
+`MARCH_LIB_PATH` dependency you never opened; the reported span is where to
+look.
+
+The note names *at least one* binding; a unit may hold several, and the alias
+comes back only when every one of them is gone.
+
+**Attribution is conservative, and the bar is causal relevance rather than mere
+presence.** All four of these must hold, or the general `solver-undecided`
+message stands:
+
+1. the skip is a solver-undecided one (a withdrawal removes an assumption; it
+   cannot cause an earlier reflection or sort failure);
+2. the predicate applies the measure the alias routes to;
+3. a **positive** path condition applies the withdrawn spelling **to this
+   obligation's own argument**;
+4. the spelling measures the same kind of thing as that argument — `List.length`
+   for a list, `String.byte_size` / `string_byte_length` for a String.
+
+Conditions 3 and 4 are what keep the reason from swallowing unrelated failures.
+`if List.length(zs) > 0 do head(ys) else 0 end` is not a guard on `ys` — delete
+the competing binding and it is undischarged all the same, so the withdrawal was
+never the cause and "guard the call" is the correct advice. A negated guard,
+`if List.length(ys) > 0 do 0 else head(ys) end`, does not fail to prove the
+predicate — it *disproves* it, and with the binding removed reports a real
+refinement violation, so it is never dressed up as a shadowing story. And since
+all three spellings route to the single name `len`, condition 4 is what stops a
+withdrawn `List.length` being blamed for an undischarged `{String | len(_) > 0}`.
+
+The cost is coverage: a guard laundered through a local (`let n =
+List.length(ys)`), applied to a non-variable actual, or established in a caller
+falls back to the general message. That is the intended trade — the reason
+exists to explain one specific confusion, not to claim every skip.
+
+Verified 2026-07-29 (both triggers report `alias-withdrawn` with the causing
+span; an unguarded call, a guard on a different variable, a cross-measure guard,
+and a negated guard all still report `solver-undecided`, each matched against a
+control with the competing binding deleted).
+
 **Scope and limits.** State these plainly before relying on it:
 
 - **Strictly opt-in, and scoped to the decl list that declares it.** A
@@ -882,14 +1024,100 @@ message above).
 - **Precondition obligations at call sites only.** Same ledger as
   `--refine-report`: a postcondition the checker cannot discharge is neither
   recorded nor escalated.
-- **`DImpl` / `DInterface` method bodies are not covered.** The pass walks `DFn`
-  and nested `DMod` declarations; calls made inside an interface implementation
-  raise no obligation and so cannot escalate.
+- **Every declaration form is walked** (since 2026-07-29). The pass once walked
+  only `DFn` and nested `DMod` and ended in a `| _ -> ()` wildcard, so calls
+  inside an `impl` method, an `interface` default body, a top-level `let`, an
+  actor handler or a `test` raised no obligation and could not escalate. Both
+  this walk and `cap no_panic`'s division walk are now exhaustive over `A.decl`
+  with no wildcard, so a new declaration form is a compile error rather than a
+  silent hole. A `describe` block recurses and inherits the enclosing module's
+  capability; a nested `mod` still re-derives its own.
+
+  **What "walked" does and does not buy you.** Walking a body means obligations
+  *raised inside it* are reported. Whether a **refinement written on an `impl`
+  method's own parameter** is enforced is a separate question, and the answer is
+  deliberately conditional:
+
+  - The contract is adopted — registered so every caller must establish it —
+    only when the method name unambiguously denotes it: no `fn` in the same
+    module owns the name, and only one `impl` defines the method. A call
+    resolved by NAME cannot tell two impls' contracts apart, and checking
+    correct code against a predicate it never touches is the failure this
+    subsystem must never have.
+  - When the name is ambiguous the refinement binds **nobody**: the body is
+    walked with it stripped, so it cannot discharge anything either. Unenforced
+    means unusable in both directions — never "assumed in the body but demanded
+    of no caller", which is how `fn run(b, k : {Int | k != 0})` once made
+    `m / k` provable under `cap no_panic` while `run(Box(4), 0)` compiled and
+    then divided by zero.
+  - A refinement written in the **`interface`'s own method signature**
+    (`fn run : a -> {Int | _ > 0} -> Int`) is still **not** enforced at call
+    sites. Nothing assumes it either, so it is a missing check rather than an
+    unsound one, but do not rely on it. Put the refinement on the `impl`
+    method's parameter instead.
+- **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
+  (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
+  that is what the capability promises — but "we could not reflect the
+  predicate" is not itself an outcome. A divisor refinement outside the linear
+  fragment is now handed to z3 anyway: `{v : Int | v * v > 0}` is exactly
+  `v != 0` over the integers, and rejecting it was a false positive on a
+  *complete* proof. Predicates that reflect but prove nothing (`v * v >= 0`,
+  true of every integer) come back `Refuted`, and ones z3 cannot decide come
+  back `Unverified`; both are still errors. Path conditions are reflected with
+  their negations on both routes, so the `else` side of `if d == 0` discharges
+  the obligation exactly as `if d != 0` does on the `then` side. Bracketed by
+  `accept/t121` and `reject/t122`.
+- **Every fact `cap no_panic`'s divisor check reads is retired when its name is
+  REBOUND** (since 2026-07-29). The divisor is identified by bare name, and so
+  are all three channels — the path condition, the refined parameter, the `let`
+  value — so a `let`, a lambda parameter, a `match` binder, a `let?` pattern or
+  a local `fn` that rebinds that name drops everything known about the outer
+  variable. Without it, `if d == 0 do 0 else (let d = 0; 10 / d) end` passed
+  `--check` and then panicked. Note the direction: unlike the refinement pass,
+  where dropping a fact means silence, dropping one here means an ERROR, so the
+  retirement is deliberately over-approximate — a guard is re-established by
+  re-stating it inside the rebinding scope. `reject/t123`.
 - **There is no `@[trusted]` escape hatch yet.** The only way to accept an
   obligation the checker cannot discharge is `assert`, or removing
   `cap verified` from the module. Until an escape hatch exists, `cap verified`
   is a tool for small, deliberately-verified modules rather than a whole-codebase
   setting.
+
+### Open holes, stated as of 2026-07-29
+
+Everything above says what these capabilities *do*. This is the complementary
+list — what a reader must not assume — kept here rather than only in
+`specs/todos.md` so that nobody reads a guarantee out of the absence of a
+caveat. None of these is known to be *unsound* in the "assumed but unchecked"
+sense; each is a check that does not happen.
+
+1. **A refinement in an `interface`'s own method signature is unenforced.**
+   Nothing assumes it either. Put it on the `impl` method's parameter.
+2. **The measure-alias gates are unit-global.** One genuine competitor anywhere
+   in the compilation unit — including in a `MARCH_LIB_PATH` dependency you
+   never opened — disables `List.length` / `String.byte_size` /
+   `string_byte_length` as measure aliases for the entire program. Under the
+   default stance that is silence; under `cap verified` it is a build failure,
+   which is why the `alias-withdrawn` reason exists.
+3. **Postconditions are outside the ledger.** `check_post` neither records an
+   obligation nor escalates one, so `--refine-report` *undercounts* by every
+   return refinement it could not discharge, and a `cap verified` module
+   silently permits an undischarged **return** refinement. `cap verified` is a
+   guarantee about preconditions at call sites only.
+4. **There is no `@[trusted]`.**
+5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
+   wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
+   spellings `strip_entry_self_qual` rewrites, so an entry module that declares
+   the name in some other form keeps the qualified spelling — which is what
+   makes `accept/t126` / `t127` discriminating, but is a hole of the same
+   family as the four that were closed.
+6. **Impl-method contract adoption ignores `use`-imported impl methods** when
+   judging whether a method name is ambiguous. The judgement is made over the
+   compilation unit's own declarations; an impl brought in under a `use` is not
+   counted as a competitor for the name.
+7. **`alias-withdrawn` attribution does not follow a laundered guard.**
+   `let n = List.length(ys)` followed by `if n > 0` falls back to the general
+   `solver-undecided` message even when a withdrawal really was the cause.
 
 ---
 

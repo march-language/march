@@ -13,6 +13,26 @@ type reason =
   | Sort_conflict            (* a symbol would have been declared at two sorts *)
   | Float_sort_gate          (* the float/formula wellsortedness gate rejected it *)
   | Solver_undecided         (* neither goal nor its negation was Verified *)
+  (* A measure ALIAS that the guard relied on was withdrawn, because this
+     compilation unit binds the spelling carried here.  Strictly a refinement
+     of [Solver_undecided]: the VC was built and the solver ran, it just had no
+     fact connecting the guard to the measure.  It exists because the two are
+     not the same message to a USER — "the solver proved neither the predicate
+     nor its negation" points at Z3 and at the predicate, and every remedy that
+     text offers ("guard the call", "rewrite the predicate") is one the author
+     already applied.  The cause is a name-shadowing decision made elsewhere in
+     the unit, possibly in another file entirely, and only naming it is
+     actionable.  See [Refine_check.withdrawals] for when a skip is attributed
+     here — deliberately narrowly, since a WRONG attribution is worse than a
+     vague one.
+
+     NOTE for anyone changing how reports GROUP skips: this is the first reason
+     carrying a payload, so two withdrawn spellings in one unit are two
+     distinct keys and print as two `alias-withdrawn` lines.  Cosmetic — the
+     headline totals are unaffected — but the fix would have to touch TWO
+     places, because [summary] below is used only by the tests: bin/main.ml's
+     [print_refine_report] keeps its own `Hashtbl` keyed on the whole reason. *)
+  | Alias_withdrawn of string
 
 type verdict = Proved | Violated | Skipped of reason
 
@@ -29,6 +49,10 @@ let reason_name = function
   | Sort_conflict -> "sort-conflict"
   | Float_sort_gate -> "float-sort-gate"
   | Solver_undecided -> "solver-undecided"
+  (* The spelling is deliberately NOT interpolated into the slug: `--refine-report`
+     groups skips by reason, and a per-spelling slug would split one cause into
+     as many buckets as there are names.  The spelling belongs in the detail. *)
+  | Alias_withdrawn _ -> "alias-withdrawn"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -46,6 +70,12 @@ let reason_detail = function
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"
   | Float_sort_gate -> "the float wellsortedness gate rejected the formula"
   | Solver_undecided -> "the solver proved neither the predicate nor its negation"
+  | Alias_withdrawn spelling ->
+    Printf.sprintf
+      "the guard uses `%s`, but this compilation unit also BINDS that name, so \
+       the checker withdrew its built-in measure meaning and the guard proved \
+       nothing"
+      spelling
 
 let summary () =
   let proved = ref 0 and violated = ref 0 and skips = Hashtbl.create 8 in

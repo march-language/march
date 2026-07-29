@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: refinement does not rule out zero
+-- Refinement types, `cap no_panic` DIVISION SAFETY (2026-07-29). The reject
+-- twin of accept/t121, and the reason that file is evidence of anything.
+--
+-- `v * v >= 0` holds for EVERY integer, zero included, so it proves nothing
+-- about the divisor. It is nonetheless exactly as non-linear and exactly as
+-- reflectable as t121's `v * v > 0`. Teaching division_safety to emit general
+-- multiplication had to make t121 pass WITHOUT making this pass: the widening
+-- is "try harder to discharge", never "accept what we cannot decide". z3
+-- refutes this goal and the module is rejected; had the query come back
+-- `unknown` instead, [Refine.Unverified] rejects it too. `cap no_panic` is a
+-- guarantee the author opted into, so every outcome short of Verified is an
+-- error.
+mod NonlinearDivisorUnproven do
+  cap no_panic
+
+  fn scale(d : {v : Int | v * v >= 0}) : Int do
+    10 / d
+  end
+
+  fn main() do
+    println(int_to_string(scale(2)))
+  end
+end

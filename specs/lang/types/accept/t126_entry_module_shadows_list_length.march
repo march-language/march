@@ -1,0 +1,30 @@
+-- The ENTRY module is itself named `List` and defines its own `length` — here
+-- through an `extern` block, a decl form whose members `strip_entry_self_qual`
+-- does not rewrite, so the call below really does reach refinecheck spelled
+-- `List.length`.  The measure alias that lets refinecheck read `List.length(xs)`
+-- as `len(xs)` must therefore be WITHDRAWN: this `length` is a foreign C
+-- function that may return anything at all.
+--
+-- With the alias withdrawn, `List.length(ys) == 0` says nothing about `len(ys)`,
+-- `head(ys)` is neither provably satisfied nor provably violated, and the right
+-- answer is SILENCE.  If the gate ever stops starting its walk inside the entry
+-- module's own declarations (`go (mod_name = md)` in `stdlib_member_defs_ok`),
+-- the alias survives, `len(ys) = 0` becomes a fact, and this program is
+-- rejected with a FALSE refinement violation on `head(ys)` — the shape that
+-- makes this witness discriminating and that no string-parsed unit fixture can
+-- reproduce (it needs bin/main.ml's real stdlib prepend).
+mod List do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn length(xs : List(Int)) : Int = "march_shim_list_length"
+  end
+
+  fn head(xs : {List(Int) | len(_) > 0}) : List(Int) do xs end
+
+  fn go(ys : List(Int)) : List(Int) do
+    if List.length(ys) == 0 do head(ys) else ys end
+  end
+
+  fn main() : List(Int) do go([1]) end
+end

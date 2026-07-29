@@ -28,8 +28,11 @@ git log is authoritative for exact commits.
 
   Three limits worth knowing before relying on it: return refinements go through
   a separate path that files no record, so an undischarged **postcondition** is
-  neither reported nor escalated; `impl`/`interface` method bodies are not
-  walked by this pass and so raise no obligation at all; and there is **no
+  neither reported nor escalated; a refinement written on an **`interface`
+  method's signature** is not enforced at call sites (put it on the `impl`
+  method's parameter, where it is — see the 2026-07-29 entries below), and an
+  `impl` method's own parameter refinement is adopted only when its name
+  unambiguously denotes one contract; and there is **no
   `@[trusted]` escape hatch yet** — the only ways to accept an obligation the
   checker cannot discharge are an `assert` or removing `cap verified` from the
   module. It is therefore a tool for small, deliberately-verified modules rather
@@ -45,11 +48,15 @@ git log is authoritative for exact commits.
   a violation only when a predicate can *never* hold, which makes silence
   ambiguous between "proved" and "not checkable" — an ambiguity that let
   `{List(a) | len(_) > 0}` ship enforcing nothing while the suite stayed green.
-  CI now ratchets on the whole-program counts — a ceiling on skips *and* a floor
-  on proofs, since a ceiling alone is satisfied by a checker that raises no
-  obligations at all — so a change that quietly stops checking things fails the
-  build. Counts cover precondition obligations raised at call sites;
-  postconditions are not in the ledger.
+  CI now ratchets in both directions — a ceiling on skips, read from the
+  whole-program counts, *and* a floor on proofs, since a ceiling alone is
+  satisfied by a checker that raises no obligations at all. The floor is read
+  from the **user-code** slice of a fixture whose single obligation is actually
+  *proved*, so it falls to zero the moment that proof stops happening; a
+  whole-program proof count would not have moved. So a change that quietly stops
+  checking things fails the build. Counts cover precondition obligations raised
+  at call sites; postconditions are not in the ledger, so the report undercounts
+  by every undischarged return refinement.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -64,7 +71,8 @@ git log is authoritative for exact commits.
   The alias is withdrawn for the whole module if anything could make that
   spelling denote a different function: a program defining its own
   `List.length` in any declaration form (a `fn`, a module-level `let`, an
-  `extern` block, an interface or impl method), a vendored or forked `List`
+  `extern` block, an interface or impl method) — including a program whose own
+  entry module is *named* `List` — a vendored or forked `List`
   supplied through `MARCH_LIB_PATH`, or rebinding the name `List` via
   `alias`/`use`/`import`. In those cases the obligation
   goes back to being unprovable and silently skipped, which is the pre-existing
@@ -113,6 +121,102 @@ git log is authoritative for exact commits.
   base-case branch drops nothing. That is an independent dead-alias gap rather
   than part of this ownership protocol, and it is unchanged here.
 
+- **`cap no_panic` and `cap verified` now cover the whole module, not just its
+  `fn`s.** Both passes walked only `fn` and nested `mod` declarations and
+  ignored everything else, so a capability directive said nothing about code
+  living in any other declaration form. A division by zero inside an `impl`
+  method body passed `--check` with exit 0 and then panicked at run time with
+  "division by zero"; the identical division inside a plain `fn` was correctly
+  rejected. Obligations are now raised in `impl` method bodies, `interface`
+  default method bodies, top-level `let` bindings, `actor` init/handler/
+  `@invariant` expressions, `app` body and `on_start`/`on_stop` hooks, and
+  `test` / `setup` / `setup_all` bodies (`describe` blocks recurse and inherit
+  the enclosing module's capability). Both walks are now exhaustive over the
+  declaration type with no wildcard, so a future declaration form is a compile
+  error rather than a new silent hole.
+
+  **This can newly fail a build that has no `cap` directive at all.** A
+  *provably violated* obligation is reported regardless of any capability, so a
+  call that definitely breaks a precondition — inside an `impl` method body or a
+  top-level `let` — is now an error where it used to be silence. Those are true
+  positives and the intended outcome, but they are a real behaviour change for
+  ordinary modules, not just for capability-declaring ones. (The standard
+  library is unchanged: its `--check` output is byte-identical before and
+  after.) Witnessed by `specs/lang/types/{accept/t119,reject/t120}`.
+
+- **A refinement on an `impl` method's parameter now obliges its callers — or
+  binds nobody.** Widening the walk above created a subtler bug: the checker
+  *assumed* an impl method's parameter refinements while walking its body, but
+  the table of known contracts still recorded only `fn`s, so no caller was ever
+  required to establish them. `fn run(b, k : {Int | k != 0})` made `m / k`
+  provable inside a `cap no_panic` module while `run(Box(4), 0)` compiled
+  cleanly and divided by zero at run time. Impl-method signatures are now
+  registered, so the obligation lands on the call site. Registration is
+  deliberately conservative — a method name is adopted only when no `fn` in the
+  same module owns it and only one `impl` defines it, because a call resolved by
+  name cannot tell two impls' contracts apart. When the name is ambiguous the
+  refinement is stripped from the body as well, so it is never assumed by a body
+  that no caller answers for. A refinement written in the **`interface`'s** own
+  method signature is still not enforced at call sites; put it on the `impl`
+  method's parameter.
+
+- **A self-module-qualified call is checked wherever it appears.** `desugar`'s
+  entry-module self-qualification stripper (`M.f(...)` → `f(...)` inside `mod M`)
+  had its own wildcard and handled only `fn`, `let`, `actor` and `mod`, so
+  `OuterB.g(-9)` written inside an `impl` method of entry module `OuterB`
+  survived unstripped, resolved to nothing, and silently raised no obligation —
+  while the identical call in a sibling `fn` was reported. That match is now
+  exhaustive too, and also covers `interface` defaults, `app` hooks, `test`,
+  `setup`/`setup_all`, `describe` and actor `@invariant` expressions.
+
+- **The `List.length` / `String.byte_size` measure aliases were disabled for
+  *every* March program, by one `import` in the standard library.** The gates
+  that withdraw those aliases are unit-global, and a glob import (`import X`,
+  `use X.*`) used to withdraw on its mere presence, on the reasoning that it
+  might carry anything. But the compiler prepends the entire standard library to
+  every compilation, and `stdlib/system.march` contains a single
+  `import Process` — so every March program compiled since the feature shipped
+  had the aliases withdrawn, and a `List.length` guard proved nothing anywhere.
+  Nothing caught it: a withdrawn alias means the obligation is *skipped*, and a
+  skip exits 0 exactly as a proof does, so the whole test suite stayed green
+  while the feature was inert. A glob now resolves its target and withdraws only
+  if that module actually provides a competing member (an unresolvable path
+  still withdraws, and a real competitor reached through a glob is still caught).
+  A second guard was added alongside it: a `use`/`alias` competes for the bare
+  module name only when it is the *program's*, never the standard library's own
+  — the same span exclusion the member-definition half always applied. The two
+  are conjoined, so a glob withdraws only when it is your code *and* its target
+  really carries a competitor. The blast radius is why the obligation *floor* in
+  CI was moved onto a fixture whose count actually drops when this happens.
+
+- **`cap verified`: a length guard that "silently stopped counting" now says so,
+  instead of blaming the solver.** The `List.length` / `String.byte_size` /
+  `string_byte_length` measure aliases are withdrawn for the whole compilation
+  unit whenever anything in it could make the spelling denote something else —
+  by design, since under the default stance the only cost is a missed proof. In
+  a `cap verified` module a missed proof is an error, and it read
+  `solver-undecided: the solver proved neither the predicate nor its negation`
+  on code carrying exactly the guard the feature asks for. Both of its
+  suggestions ("guard the call", "rewrite the predicate") were things the author
+  had already done, because the real cause was a name binding somewhere else —
+  a nested `mod Internal do mod List do fn length …` that is reachable only as
+  `Q.Internal.List.length` and does not win at runtime, or an unrelated
+  function's local `let string_byte_length = n + 1`, or, worst of all, a
+  definition in a `MARCH_LIB_PATH` dependency the author never opened. Such a
+  skip is now reported as `alias-withdrawn`, naming the spelling whose alias
+  went and pointing at the binding that took it. Attribution asks for causal
+  relevance, not mere presence: the predicate must use the affected measure,
+  **and** a positive path condition must apply the withdrawn spelling to *this
+  call's own argument*, **and** the spelling must measure the same kind of value
+  (list spellings for a list, the byte-length spellings for a String). So a
+  guard on a different list, a `List.length` guard in front of a `String`
+  contract, a guard on the `else` side (which *disproves* the predicate and,
+  without the shadowing binding, reports a genuine refinement violation), and an
+  unguarded call all keep the plain `solver-undecided` message — in each case
+  the binding you would be sent to rename is not why anything failed. Which
+  obligations are suppressed is completely unchanged; only what the user is told
+  changed. The reason also appears in `--refine-report`.
+
 - **The optimizer's purity oracle no longer misjudges a monomorphized builtin
   call as pure.** Monomorphization rewrites calls to specialized names before
   optimization runs (e.g. `println` becomes `println$String`), and the purity
@@ -135,6 +239,46 @@ git log is authoritative for exact commits.
   did. A path condition that genuinely proves the divisor non-zero (a `when
   d != 0` guard) still discharges the obligation. Only `cap no_panic` modules
   are affected; a refinement the checker *can* reflect is unchanged.
+
+- **`cap no_panic`: a divisor refinement that *proves* the divisor non-zero is
+  no longer rejected for being written unusually.** Closing the hole above
+  over-corrected: the check reported anything its own reflection could not
+  translate, and that reflection refused multiplication unless one factor was a
+  literal. So `fn scale(d : {v : Int | v * v > 0})` — a predicate that is
+  *exactly* `d != 0` over the integers, and that the solver decides instantly —
+  was rejected with "outside the checkable fragment", even though the same
+  program ran correctly without the capability. Such predicates are now sent to
+  the solver rather than refused unread. The stance is unchanged: the checker
+  tries harder to discharge, it does not accept what it cannot decide. A
+  predicate that reflects but proves nothing (`v * v >= 0`, true of every
+  integer) is still an error, as is one the solver cannot settle, and one it
+  cannot reflect at all. Separately, a divisor guarded on the `else` side of a
+  condition — `if d == 0 do 0 else 10 / d end` — is now recognised as safe;
+  negated path conditions were previously dropped by the syntactic fallback
+  while the solver route handled them. Witnessed by
+  `specs/lang/types/{accept/t121,reject/t122}`.
+
+- **`cap no_panic`: a guard or refinement no longer carries over to a *different*
+  variable that happens to share its name.** The check identified the divisor by
+  name alone, so rebinding that name inside the guarded branch left the outer
+  fact in force. All four of these passed `--check` with exit 0 and then panicked
+  at run time with "division by zero" — the failure the capability exists to
+  prevent:
+
+  ```march
+  if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+  if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+  if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+  if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+  ```
+
+  A name rebound by a `let`, a local `fn`, a lambda parameter, a `let?` pattern
+  or a `match` pattern now retires everything known about the outer variable of
+  that name — its guard, its refinement, and its `let` value. Correct programs
+  are unaffected: `let d = 5` followed by `10 / d` is still accepted (the new
+  binding replaces the old fact rather than merely erasing it), and a binder
+  with a different name does not disturb the guard. Witnessed by
+  `specs/lang/types/reject/t123` and the `divsafety-shadowing` test group.
 - **A program that repeatedly passes a capture-free lambda (an anonymous
   function that reads no outer variables, e.g. `fn x -> x * 2`) as a value
   no longer grows memory without bound.** This extends the fix below for
@@ -205,6 +349,25 @@ git log is authoritative for exact commits.
   Scope is unchanged — ASCII only, non-ASCII bytes pass through untouched.
 
 ### Documentation
+
+- **The refinement-types pages now state what is *not* checked, and two
+  over-claims were corrected.** `specs/lang/refinement-types.md` gained an "Open
+  holes" list and `docs/refinement-types.md` a `cap no_panic` section covering
+  what that capability actually promises. Corrected: "every declaration form is
+  covered" was true of *raising* obligations but read as "a refinement on an
+  `impl` signature is enforced", which holds only when the method name
+  unambiguously denotes one contract; and this changelog's claim that modules
+  declaring no capability were unaffected was false, since a *provably violated*
+  obligation is reported regardless of any capability. Both pages also quoted an
+  `alias-withdrawn` diagnostic whose wording no longer matched the compiler's,
+  found by re-running every published snippet. The residuals are now written
+  down rather than left to inference: a refinement in an `interface`'s own
+  signature is unenforced; the measure-alias gates are unit-global, so one
+  competing binding anywhere — including in a `MARCH_LIB_PATH` dependency —
+  disables the alias program-wide; postconditions are outside the obligation
+  ledger, so `--refine-report` undercounts and `cap verified` silently permits an
+  undischarged *return* refinement; and there is still no `@[trusted]` escape
+  hatch.
 
 - `stdlib/string.march` no longer claims the runtime has small-string
   optimisation. It had stated since 2026-03-19 that "strings of 15 bytes or

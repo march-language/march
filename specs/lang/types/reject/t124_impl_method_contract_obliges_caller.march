@@ -1,0 +1,53 @@
+-- EXPECT-ERROR: argument does not satisfy precondition `k != 0`
+-- Refinement types, ASSUME-WITHOUT-CHECK (2026-07-29). This is the bug that
+-- the decl-walk widening (reject/t120) CREATED and this witness closes.
+--
+-- Once both passes walked `impl` method bodies, an impl method's parameter
+-- refinement became a FACT the checker assumed: `k != 0` is what makes `m / k`
+-- dischargeable under `cap no_panic`. But the table of known contracts still
+-- recorded only `fn` declarations, so no caller was ever obliged to establish
+-- it. `run(Box(4), 0)` therefore passed `--check` with exit 0 and the program
+-- divided by zero at run time -- the exact failure `cap no_panic` exists to
+-- prevent, arrived at through the very decl form the widening had just claimed
+-- to cover. Walking a body and enforcing a signature are different guarantees,
+-- and holding one while advertising the other is worse than holding neither:
+-- the compiler walks the body, discharges the division against a contract
+-- nothing enforces, and reports success.
+--
+-- `collect_all_defs` now registers impl-method signatures, so the obligation
+-- lands here, at the call site. Registration is deliberately conservative --
+-- see `adoptable_impl_methods`: a method name is adopted only when no `fn` in
+-- the same module owns it and only one `impl` defines it, because a call
+-- resolved by NAME cannot tell two impls' contracts apart, and checking
+-- correct code against a predicate it never touches is the one failure this
+-- subsystem must never have. When the name is NOT adoptable the refinement is
+-- stripped from the body as well, so it binds nobody rather than binding only
+-- the body (pinned by `walk-coverage` in test/test_refinecheck.ml, which the
+-- corpus cannot express -- it needs two impls of one interface).
+--
+-- Accept companion: accept/t125, byte-for-byte this program with a satisfying
+-- argument. Exit 1 here says the caller is obliged; exit 0 there says
+-- obliging it did not start rejecting correct calls.
+--
+-- Note this fires with NO `cap` directive anywhere: a provably violated
+-- obligation is reported regardless of any capability.
+mod ImplContract do
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do
+        Box(m) -> m / k
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(run(Box(4), 0)))
+  end
+end

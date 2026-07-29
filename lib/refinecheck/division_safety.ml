@@ -9,8 +9,11 @@
    Supported:
    - Literal divisors: 0 → always error; non-zero → always safe.
    - Variable divisors with an Int refinement `{v | pred}`: syntactic fast-path
-     for common patterns (v > 0, v >= 1, v != 0, v < 0, …); Z3 discharge for
-     everything else in the linear-arithmetic fragment.
+     for common patterns (v > 0, v >= 1, v != 0, v < 0, …); otherwise a Z3
+     discharge, ATTEMPTED even when the predicate does not reflect — an
+     unreflectable predicate is outside this file's fragment, not necessarily
+     the solver's, and the path conditions alone may settle the goal.  Only a
+     genuine non-[Verified] verdict is an error.
    - Variable divisors without a refinement: always error.
    - Complex divisors (arbitrary expressions): always error (conservative). *)
 
@@ -76,10 +79,17 @@ let rec smt_of ~b ~var (e : A.expr) : Smt.term option =
     (match op with
      | "+"  -> bin (fun a b -> Smt.Add (a, b)) a rhs
      | "-"  -> bin (fun a b -> Smt.Sub (a, b)) a rhs
+     (* A literal factor stays in linear arithmetic; anything else becomes a
+        general [Smt.Mul].  Refusing non-linear products here was a REGRESSION
+        source, not a safety measure: `{v : Int | v * v > 0}` is exactly
+        `v != 0` over the integers and z3 decides it instantly, yet the
+        unreflectable arm below rejected the program.  A product z3 cannot
+        decide comes back `unknown` → [Refine.Unverified] → still an error. *)
      | "*"  ->
        (match go a, go rhs with
         | Some (Smt.IntLit k), Some t | Some t, Some (Smt.IntLit k) ->
           Some (Smt.MulLit (k, t))
+        | Some ta, Some tb -> Some (Smt.Mul (ta, tb))
         | _ -> None)
      | "==" -> bin (fun a b -> Smt.Eq  (a, b)) a rhs
      | "!=" -> bin (fun a b -> Smt.Ne  (a, b)) a rhs
@@ -95,6 +105,22 @@ let rec smt_of ~b ~var (e : A.expr) : Smt.term option =
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a ], _) ->
     Option.map (fun t -> Smt.Neg t) (go a)
   | _ -> None
+
+(* True when every symbol [t] mentions has been declared in the VC.  Only the
+   shapes [smt_of] can produce are recognised; anything else answers false,
+   which drops the assumption — the fail-closed direction, since fewer
+   assumptions can only make a goal harder to prove. *)
+let rec consts_declared (declared : string list) (t : Smt.term) : bool =
+  let both a b = consts_declared declared a && consts_declared declared b in
+  match t with
+  | Smt.Const x -> List.mem x declared
+  | Smt.IntLit _ | Smt.BoolLit _ -> true
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
+  | Smt.Eq (a, b) | Smt.Ne (a, b)
+  | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> both a b
+  | Smt.MulLit (_, a) | Smt.Neg a | Smt.Not a -> consts_declared declared a
+  | _ -> false
 
 (* ── Param collection ───────────────────────────────────────────────────── *)
 
@@ -115,16 +141,73 @@ let clause_refined_params (clause : A.fn_clause) =
 
 (* ── Division-site walker ───────────────────────────────────────────────── *)
 
-(* Calls [f span divisor_expr path] for every integer division/modulo site,
-   carrying the accumulated path context (guard conditions) through branches. *)
+(* What is known at a division site.  All THREE channels key on a bare variable
+   NAME — a path condition is `(d != 0, negated)`, a refined parameter is
+   `("d", binder, pred)`, and a `let` value is `("d", rhs)` — so none of them
+   survives that name being rebound.  Every binding construct must retire the
+   names it shadows before descending, or a fact is attributed to the INNER
+   value:
+
+     if d == 0 do 0 else
+       let d = 0
+       10 / d        -- `not (d == 0)` is about the PARAMETER, not this `d`
+
+   That program passed `--check` and then panicked with "division by zero", as
+   did the `fn d -> 10 / d` and `Some(d) -> 10 / d` variants; so did the
+   then-side `if d != 0 do (let d = 0; 10 / d)`.
+
+   The direction of error here is the OPPOSITE of the refinement pass's.  There,
+   dropping a fact means silence and keeping a stale one means a false positive.
+   Here, dropping a fact means an ERROR and keeping a stale one means a division
+   that panics inside a module that promised it could not — so over-approximating
+   [shadowed] is still the safe direction, but for the opposite reason. *)
+type dctx = {
+  path : (A.expr * bool) list;    (* guard conditions, with a negated flag *)
+  shadowed : string list;         (* names rebound since the parameter scope *)
+  lets : (string * A.expr) list;  (* innermost tracked `let` value per name *)
+}
+
+let dctx_empty = { path = []; shadowed = []; lets = [] }
+
+(* Retire [names] from every channel. *)
+let retire (names : string list) (c : dctx) : dctx =
+  if names = [] then c
+  else
+    { path = Refine_check.path_shadow c.path names
+    ; shadowed = names @ c.shadowed
+    ; lets = List.filter (fun (n, _) -> not (List.mem n names)) c.lets }
+
+(* `let n = rhs`: retire the old [n] everywhere, then record the new value.
+   [n] joins [shadowed] because any refinement or guard about the OUTER `n` is
+   now stale; the fresh [lets] entry is what the checker may use instead. *)
+let bind_let (n : string) (rhs : A.expr) (c : dctx) : dctx =
+  let c = retire [ n ] c in
+  { c with lets = (n, rhs) :: c.lets }
+
+(* Names an [A.ELam] / [A.ELetFn] parameter list binds. *)
+let lam_param_names (ps : A.param list) : string list =
+  List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps
+
+(* The names a block statement binds for the REST of the block, and how. *)
+let stmt_binding (c : dctx) (stmt : A.expr) : dctx =
+  match stmt with
+  | A.ELet (b, _) ->
+    (match b.A.bind_pat with
+     | A.PatVar n -> bind_let n.A.txt b.A.bind_expr c
+     (* A destructuring pattern binds names whose values this pass does not
+        track: retire them and offer nothing in exchange. *)
+     | p -> retire (Refine_check.pat_binders p) c)
+  | A.ELetFn (n, _, _, _, _) -> retire [ n.A.txt ] c
+  | _ -> c
+
+(* Calls [f span divisor_expr ctx] for every integer division/modulo site. *)
 let rec iter_div_sites
-    (f : A.span -> A.expr -> (A.expr * bool) list -> unit)
-    (path : (A.expr * bool) list)
-    (e : A.expr) : unit =
-  let go e = iter_div_sites f path e in
+    (f : A.span -> A.expr -> dctx -> unit) (c : dctx) (e : A.expr) : unit =
+  let go e = iter_div_sites f c e in
+  let under names e = iter_div_sites f (retire names c) e in
   match e with
   | A.EApp (A.EVar { A.txt = op; _ }, [ lhs; rhs ], sp) when List.mem op div_ops ->
-    f sp rhs path;
+    f sp rhs c;
     go lhs;
     go rhs
   | A.EApp (fn, args, _) ->
@@ -135,36 +218,51 @@ let rec iter_div_sites
     List.iter (fun (_, e) -> go e) fields
   | A.ERecordUpdate (r, fields, _) ->
     go r; List.iter (fun (_, e) -> go e) fields
-  | A.EBlock (es, _) -> List.iter go es
+  (* A `let` (or local `fn`) binds for the REST of the block, so the context is
+     THREADED through the statements rather than one being reused for all of
+     them.  Each statement is walked in the context that PRECEDES it, so a
+     binding does not shadow its own right-hand side (`let d = 10 / d` divides
+     by the outer `d`).  This also means only the `let`s that actually precede
+     a division are visible to it; the pre-pass this replaced collected the
+     whole block, including bindings written after the division site. *)
+  | A.EBlock (es, _) ->
+    ignore
+      (List.fold_left
+         (fun c stmt -> iter_div_sites f c stmt; stmt_binding c stmt)
+         c es)
   | A.ELet (b, _) -> go b.A.bind_expr
   | A.EMatch (scrut, arms, _) ->
     go scrut;
     List.iter
       (fun (arm : A.branch) ->
-        Option.iter go arm.A.branch_guard;
-        let arm_path =
+        (* Pattern binders are in scope for the guard as well as the body. *)
+        let ac = retire (Refine_check.pat_binders arm.A.branch_pat) c in
+        Option.iter (iter_div_sites f ac) arm.A.branch_guard;
+        let ac =
           match arm.A.branch_guard with
-          | Some g -> (g, false) :: path
-          | None -> path
+          | Some g -> { ac with path = (g, false) :: ac.path }
+          | None -> ac
         in
-        iter_div_sites f arm_path arm.A.branch_body)
+        iter_div_sites f ac arm.A.branch_body)
       arms
   | A.EIf (cond, t, e, _) ->
     go cond;
-    iter_div_sites f ((cond, false) :: path) t;
-    iter_div_sites f ((cond, true) :: path) e
+    iter_div_sites f { c with path = (cond, false) :: c.path } t;
+    iter_div_sites f { c with path = (cond, true) :: c.path } e
   | A.ECond (arms, _) ->
     List.iter
-      (fun (c, b) ->
-        go c;
-        iter_div_sites f ((c, false) :: path) b)
+      (fun (cond, b) ->
+        go cond;
+        iter_div_sites f { c with path = (cond, false) :: c.path } b)
       arms
   | A.EField (inner, _, _) -> go inner
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (inner, _, _) -> go inner
-  | A.ELam (_, body, _) -> go body
-  | A.ELetFn (_, _, _, body, _) -> go body
-  | A.ELetQ (_, rhs, body, _) -> go rhs; go body
+  | A.ELam (ps, body, _) -> under (lam_param_names ps) body
+  (* A local `fn go(...)` binds its own name (it may recurse) and its
+     parameters throughout its body. *)
+  | A.ELetFn (n, ps, _, body, _) -> under (n.A.txt :: lam_param_names ps) body
+  | A.ELetQ (p, rhs, body, _) -> go rhs; under (Refine_check.pat_binders p) body
   | A.EAssert (inner, _) -> go inner
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner
@@ -180,55 +278,75 @@ let division_suggestion =
    `{v : Int | v != 0}` (or `v > 0`) to prove it is safe."
 
 (* Syntactically check whether path conditions prove [var] ≠ 0.
-   Only looks at non-negated guards (e.g. `when b != 0`, `when b > 0`). *)
+
+   NEGATED conditions count.  `path` carries `(cond, negated)`, where `negated`
+   marks the ELSE side of an `if`; on that side the fact in scope is `not cond`.
+   Ignoring those entries — as this used to — made the syntactic fallback
+   asymmetric with the z3 path below, which reflects negations properly, so
+   `if d == 0 do 0 else 10 / d end` was reported even though the guard alone
+   makes the division unreachable with zero.  A negated comparison is handled by
+   dualising the operator (`==` ↦ `!=`, `<` ↦ `>=`, …), which is exact for the
+   total orders involved. *)
 let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
+  (* `not (a op b)` ⟺ `a (dual op) b` *)
+  let dual = function
+    | "==" -> Some "!=" | "!=" -> Some "=="
+    | "<"  -> Some ">=" | ">=" -> Some "<"
+    | ">"  -> Some "<=" | "<=" -> Some ">"
+    | _ -> None
+  in
+  (* `a op b` ⟺ `b (flipped op) a` — used to normalise to `var op literal`. *)
+  let flip = function
+    | "<" -> ">" | ">" -> "<" | "<=" -> ">=" | ">=" -> "<="
+    | op -> op (* == and != are symmetric *)
+  in
+  (* Does `var op n` imply var ≠ 0? *)
+  let proves op n =
+    match op with
+    | "!=" -> n = 0
+    | "==" -> n <> 0
+    | ">"  -> n >= 0
+    | ">=" -> n >= 1
+    | "<"  -> n <= 0
+    | "<=" -> n <= -1
+    | _ -> false
+  in
   List.exists
     (fun (cond, negated) ->
-      if negated then false
-      else
-        match cond with
-        | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) ->
-          let is_var e =
-            match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
-          in
-          let int_of e =
-            match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
-          in
-          (match op with
-           | "!=" ->
-             (is_var a && int_of b = Some 0) || (is_var b && int_of a = Some 0)
-           | ">" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of a))
-           | ">=" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of a))
-           | "<" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of a))
-           | "<=" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of a))
-           | _ -> false)
-        | _ -> false)
+      match cond with
+      | A.EApp (A.EVar { A.txt = op0; _ }, [ a; b ], _) ->
+        let is_var e =
+          match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
+        in
+        let int_of e =
+          match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
+        in
+        (* Normalise to `var op n`, then dualise if we are on the else side. *)
+        let normalised =
+          match int_of b, int_of a with
+          | Some n, _ when is_var a -> Some (op0, n)
+          | _, Some n when is_var b -> Some (flip op0, n)
+          | _ -> None
+        in
+        (match normalised with
+         | None -> false
+         | Some (op, n) ->
+           (match (if negated then dual op else Some op) with
+            | None -> false
+            | Some op -> proves op n))
+      | _ -> false)
     path
 
-(* Collect let-bound (name, rhs_expr) pairs visible at division sites.
-   Walks EBlock prefix statements; stops at the first non-let expression. *)
-let collect_let_values (body : A.expr) : (string * A.expr) list =
-  match body with
-  | A.EBlock (es, _) ->
-    List.filter_map
-      (function
-        | A.ELet (b, _) ->
-          (match b.A.bind_pat with
-           | A.PatVar n -> Some (n.A.txt, b.A.bind_expr)
-           | _ -> None)
-        | _ -> None)
-      es
-  | _ -> []
-
-let check_var_divisor ~root errctx span var_name params path let_values =
+(* [c.shadowed] names have been rebound since the parameter scope, so a
+   refinement declared on the parameter of that name says nothing about the
+   value being divided by.  Retiring them here is what stops
+   `if d != 0 do (let d = 0; 10 / d)` — and its `fn d -> …` and `Some(d) -> …`
+   siblings — from reading the outer fact. *)
+let check_var_divisor ~root errctx span var_name all_params (c : dctx) =
+  let params =
+    List.filter (fun (n, _, _) -> not (List.mem n c.shadowed)) all_params
+  in
+  let path = c.path and let_values = c.lets in
   match List.find_opt (fun (n, _, _) -> n = var_name) params with
   | None ->
     if path_proves_nonzero var_name path then ()
@@ -280,70 +398,95 @@ let check_var_divisor ~root errctx span var_name params path let_values =
                no refinement proves `%s ≠ 0`.%s"
               var_name var_name division_suggestion))
   | Some (_, bdr, pred) ->
-    (* Fast syntactic check — no Z3 needed for obvious cases *)
+    (* Two z3-free fast paths first, so the obvious cases still discharge on a
+       machine with no solver. *)
     if syntactic_nonzero bdr pred then ()
-    else
-      (* Try Z3, adding any path-derived assumptions *)
-      match smt_of ~b:bdr ~var:var_name pred with
-      (* An unreflectable predicate is NOT a proof.  Treating it as one made a
-         meaningless refinement more permissive than no refinement at all —
-         `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
-         errored.  `cap no_panic` promises the division cannot panic, so an
-         obligation we cannot discharge must fail closed, exactly as the
-         `Refine.Unverified` branch below already does.  A path condition that
-         syntactically proves `var ≠ 0` still discharges it, matching the
-         unrefined-parameter branch above. *)
-      | None ->
-        if path_proves_nonzero var_name path then ()
-        else
-          Err.error errctx ~span
-            (Printf.sprintf
-               "division by `%s` in `cap no_panic` module: the refinement on \
-                `%s` is outside the checkable fragment, so it cannot prove \
-                `%s != 0`.%s"
-               var_name var_name var_name division_suggestion)
-      | Some assumption ->
-        let path_assumes =
-          List.filter_map
-            (fun (cond, negated) ->
-              match smt_of ~b:"\x00" ~var:"\x00" cond with
-              | None -> None
-              | Some t -> Some (if negated then Smt.Not t else t))
-            path
-        in
-        let vc =
-          Smt.
-            { decls = [ (var_name, Smt.SInt) ]
-            ; assumptions = assumption :: path_assumes
-            ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
-            }
-        in
-        (match Refine.discharge ~root vc with
-         | Refine.Verified -> () (* Z3: refinement proves divisor ≠ 0 *)
-         | Refine.Refuted _ ->
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: refinement \
-                 does not rule out zero.%s"
-                var_name division_suggestion)
-         | Refine.Unverified ->
-           (* Z3 absent or unknown — be conservative *)
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: cannot verify \
-                 divisor is non-zero (Z3 unavailable or VC unknown).%s"
-                var_name division_suggestion))
+    else if path_proves_nonzero var_name path then ()
+    else begin
+      (* Whether or not the refinement itself reflects, ATTEMPT the discharge:
+         an unreflectable predicate is outside *this file's* fragment, not
+         necessarily outside z3's, and the path conditions alone may settle the
+         obligation.  What must not change is the stance — `cap no_panic` is a
+         guarantee, so anything short of [Refine.Verified] is an error.  The
+         reflection failure only picks the wording. *)
+      let refinement = smt_of ~b:bdr ~var:var_name pred in
+      (* Every Int-refined parameter is a declared Int const whose refinement is
+         a fact in scope; [var_name] is one of them (we just found it). *)
+      let decls = List.map (fun (n, _, _) -> (n, Smt.SInt)) params in
+      let declared = List.map fst decls in
+      (* Both assumption channels are filtered the same way: a term mentioning
+         a symbol this VC did not declare is DROPPED rather than sent.  z3's
+         reply to an ill-sorted assertion is an `(error …)` that
+         [Solver.read_verdict] consumes and reports as `Unknown`, so sending one
+         does not break the channel — it just forces the whole query to
+         [Refine.Unverified], turning an answerable question into a guaranteed
+         failure.  A sibling parameter refined against an undeclared name
+         (`a : {v : Int | v > k}`) used to poison the divisor's query that way.
+         Dropping an assumption can only make the goal harder to prove, so this
+         stays fail-closed. *)
+      let param_assumes =
+        List.filter_map
+          (fun (n, b, p) ->
+            match smt_of ~b ~var:n p with
+            | Some t when consts_declared declared t -> Some t
+            | _ -> None)
+          params
+      in
+      let path_assumes =
+        List.filter_map
+          (fun (cond, negated) ->
+            match smt_of ~b:"\x00" ~var:"\x00" cond with
+            | Some t when consts_declared declared t ->
+              Some (if negated then Smt.Not t else t)
+            | _ -> None)
+          path
+      in
+      let vc =
+        Smt.
+          { decls
+          ; assumptions = param_assumes @ path_assumes
+          ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
+          }
+      in
+      match Refine.discharge ~root vc, refinement with
+      | Refine.Verified, _ -> () (* z3: the facts in scope prove divisor ≠ 0 *)
+      | (Refine.Refuted _ | Refine.Unverified), None ->
+        (* An unreflectable predicate is NOT a proof.  Treating it as one made a
+           meaningless refinement more permissive than no refinement at all —
+           `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
+           errored. *)
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: the refinement on \
+              `%s` is outside the checkable fragment, so it cannot prove \
+              `%s != 0`.%s"
+             var_name var_name var_name division_suggestion)
+      | Refine.Refuted _, Some _ ->
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: refinement \
+              does not rule out zero.%s"
+             var_name division_suggestion)
+      | Refine.Unverified, Some _ ->
+        (* Z3 absent or unknown — be conservative *)
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: cannot verify \
+              divisor is non-zero (Z3 unavailable or VC unknown).%s"
+             var_name division_suggestion)
+    end
 
 (* ── Per-clause check ───────────────────────────────────────────────────── *)
 
 let check_clause ~root errctx (clause : A.fn_clause) : unit =
   let params = clause_refined_params clause in
-  let init_path =
-    match clause.A.fc_guard with Some g -> [ (g, false) ] | None -> []
+  let init =
+    match clause.A.fc_guard with
+    | Some g -> { dctx_empty with path = [ (g, false) ] }
+    | None -> dctx_empty
   in
-  let let_values = collect_let_values clause.A.fc_body in
   iter_div_sites
-    (fun span divisor path ->
+    (fun span divisor c ->
       match divisor with
       | A.ELit (A.LitInt 0, _) ->
         Err.error errctx ~span
@@ -351,18 +494,28 @@ let check_clause ~root errctx (clause : A.fn_clause) : unit =
       | A.ELit (A.LitInt _, _) ->
         () (* non-zero literal: trivially safe *)
       | A.EVar { A.txt = var_name; _ } ->
-        check_var_divisor ~root errctx span var_name params path let_values
+        check_var_divisor ~root errctx span var_name params c
       | _ ->
         (* Complex expression — always flag conservatively *)
         Err.error errctx ~span
           ("division by a complex expression in `cap no_panic` module: \
             cannot prove divisor is non-zero."
            ^ division_suggestion))
-    init_path
+    init
     clause.A.fc_body
 
 let check_fn ~root errctx (fd : A.fn_def) : unit =
   List.iter (check_clause ~root errctx) fd.A.fn_clauses
+
+(* A body that is not a function clause — a top-level `let`, an actor handler,
+   a `test` body.  [params] carries whatever bindings ARE in scope (an actor
+   handler's parameters may be refined); everything else is empty, so the
+   divisor can only be discharged by a literal, a path condition, or a `let`
+   value collected from the body itself. *)
+let check_body ~root errctx (params : A.fn_param list) (body : A.expr) : unit =
+  check_clause ~root errctx
+    { A.fc_params = params; A.fc_guard = None; A.fc_body = body;
+      A.fc_span = A.dummy_span }
 
 (* ── Module-level walk ──────────────────────────────────────────────────── *)
 
@@ -372,13 +525,81 @@ let rec check_decls ~root errctx (decls : A.decl list) : unit =
       (function A.DOpts (opts, _) -> List.mem "no_panic" opts | _ -> false)
       decls
   in
-  List.iter
-    (function
-      | A.DFn (fd, _) when no_panic -> check_fn ~root errctx fd
-      | A.DMod (_, _, inner_decls, _) ->
-        check_decls ~root errctx inner_decls
-      | _ -> ())
-    decls
+  (* Which `impl` method contracts callers are actually obliged to establish.
+     Shared with [Refine_check] so the two passes cannot drift: a divisor
+     refinement on an impl method may discharge a division HERE only if the
+     same rule made it visible to callers THERE. *)
+  let adoptable = Refine_check.adoptable_impl_methods decls in
+  List.iter (check_decl ~root errctx ~no_panic ~adoptable) decls
+
+(* One declaration.  Every constructor of [A.decl] is named — there is NO
+   wildcard, deliberately.  This walk used to descend only into [DFn] and
+   [DMod] and end in `| _ -> ()`, so `cap no_panic` promised nothing about a
+   division inside an `impl` method, a top-level `let`, or an actor handler:
+   `100 / n` in an impl body passed `--check` silently and then panicked with
+   "division by zero" at run time.  Exhaustive, a 25th decl form is a COMPILE
+   ERROR here rather than another silent hole. *)
+and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
+  let body params e = if no_panic then check_body ~root errctx params e in
+  let expr e = body [] e in
+  match d with
+  | A.DFn (fd, _) -> if no_panic then check_fn ~root errctx fd
+  (* A nested module re-derives its own `cap` directive: capabilities do not
+     inherit inward (bin/main.ml prepends the whole stdlib as sibling DMods). *)
+  | A.DMod (_, _, inner_decls, _) -> check_decls ~root errctx inner_decls
+  (* A `describe` block is part of its module's scope, so unlike DMod it
+     INHERITS [no_panic] rather than re-deriving it from its own decl list —
+     which carries no `cap` directive and would silently disable the check. *)
+  | A.DDescribe (_, ds, _) -> List.iter (check_decl ~root errctx ~no_panic ~adoptable) ds
+  (* A divisor refinement declared on an `impl` method is a fact only if some
+     caller is obliged to establish it.  When the method name is ambiguous (a
+     `fn` owns it, or two impls define it) nothing obliges anyone, so the
+     refinement is STRIPPED and the division must prove itself some other way.
+     Otherwise `fn run(b, k : {Int | k != 0})` would discharge `m / k` while
+     `run(Box(4), 0)` sailed through — the exact assume-without-check this
+     capability exists to prevent. *)
+  | A.DImpl (idf, _) ->
+    if no_panic then
+      List.iter
+        (fun ((mn : A.name), (fd : A.fn_def)) ->
+          check_fn ~root errctx
+            (if List.mem mn.A.txt adoptable then fd
+             else Refine_check.strip_param_refinements fd))
+        idf.A.impl_methods
+  | A.DInterface (idf, _) ->
+    (* Default method bodies are real code; the signatures are not. *)
+    List.iter
+      (fun (m : A.method_decl) -> Option.iter expr m.A.md_default)
+      idf.A.iface_methods
+  | A.DLet (_, b, _) -> expr b.A.bind_expr
+  | A.DActor (_, _, ad, _) ->
+    expr ad.A.actor_init;
+    List.iter
+      (fun (h : A.actor_handler) ->
+        body (List.map (fun p -> A.FPNamed p) h.A.ah_params) h.A.ah_body)
+      ad.A.actor_handlers;
+    Option.iter expr ad.A.actor_invariant
+  | A.DApp (app, _) ->
+    expr app.A.app_body;
+    Option.iter expr app.A.app_on_start;
+    Option.iter expr app.A.app_on_stop
+  | A.DTest (t, _) -> expr t.A.test_body
+  | A.DSetup (e, _) | A.DSetupAll (e, _) -> expr e
+  (* ── Inert: no expression in which a division can appear.  Named
+     individually so a new decl form breaks the build here. ─────────────── *)
+  | A.DType _                (* type definitions: types only, no terms *)
+  | A.DAlwaysLinearType _    (* likewise, plus a linearity marker *)
+  | A.DSig _                 (* module signature: names and types only *)
+  | A.DProtocol _            (* session type: message types, no bodies *)
+  | A.DTransitions _         (* state-machine edges: names of fns declared elsewhere *)
+  | A.DExtern _              (* FFI declarations: signatures, bodies live in C *)
+  | A.DNeeds _               (* capability manifest: capability paths *)
+  | A.DProofCap _            (* proof-capability declaration: a name *)
+  | A.DOpts _                (* the `cap` directive itself, read above *)
+  | A.DDeriving _            (* desugared into DImpl before this pass runs *)
+  | A.DSatisfy _             (* likewise desugared into DImpl *)
+  | A.DUse _                 (* import: no expressions *)
+  | A.DAlias _ -> ()         (* alias: no expressions *)
 
 let check_module ?(root = Sys.getcwd ()) (errctx : Err.ctx) (m : A.module_) : unit =
   check_decls ~root errctx m.A.mod_decls

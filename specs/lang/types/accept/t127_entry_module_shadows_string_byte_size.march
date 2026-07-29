@@ -1,0 +1,22 @@
+-- The `String.byte_size` half of `t126`: the entry module is named `String` and
+-- defines its own `byte_size` through an `extern` block, so the alias that reads
+-- `String.byte_size(s)` as `len(s)` must be withdrawn and the guarded call must
+-- draw SILENCE.  Reverting the gate's walk start (`go (mod_name = md)` in
+-- `stdlib_member_defs_ok`) makes the alias survive the entry module's own
+-- foreign definition and this program is rejected with a FALSE refinement
+-- violation on `first(t)`.
+mod String do
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn byte_size(s : String) : Int = "march_shim_byte_size"
+  end
+
+  fn first(s : {String | len(_) > 0}) : String do s end
+
+  fn go(t : String) : String do
+    if String.byte_size(t) == 0 do first(t) else t end
+  end
+
+  fn main() : String do go("a") end
+end

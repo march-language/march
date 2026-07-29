@@ -1,0 +1,31 @@
+-- Refinement types, ASSUME-WITHOUT-CHECK (2026-07-29). The accept side of the
+-- pair with reject/t124: byte-for-byte the same program with `2` in place of
+-- `0`, so the impl method's `{Int | k != 0}` precondition IS satisfied.
+--
+-- Its job is the false-positive direction. Registering `impl` method
+-- signatures as callable contracts is what obliges the caller in t124, and
+-- that is exactly the kind of change that starts rejecting correct code:
+-- impl methods are dispatched by TYPE but resolved here by NAME, so an
+-- over-eager rule would check this call against some other impl's predicate.
+-- Read the pair together -- t124 says the obligation is raised, this file says
+-- it is raised against the right contract and discharged when it holds.
+mod ImplContractOk do
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b, k : {Int | k != 0}) : Int do
+      match b do
+        Box(m) -> m / k
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(run(Box(4), 2)))
+  end
+end
