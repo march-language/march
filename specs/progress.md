@@ -1,5 +1,40 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, call-boundary composition gets its corpus witnesses)
+
+**Counts:** `test_refinecheck` 348 (unchanged — this task adds no OCaml code),
+typing corpus 229/229 (114 accept / 115 reject, up from 227/227), full corpus
+run via `check_types.sh` clean, `check-docs.sh` exit 0. No known failures
+introduced.
+
+Task 3 of the refinement-contract-composition plan closes it out with corpus
+witnesses for the two composition fixes (Tasks 1 and 2, above): a runtime
+`List(Int)` non-empty contract now composes across a call boundary, and the
+same holds for an axiomatised user `@[measure]`. `accept/t128_refine_list_contract_composes_call`
+pins the positive case (`outer(ys : {List(Int) | len(_) > 0}) do inner(ys) end`
+— both `outer`'s own call from `main` and the inner `inner(ys)` call are now
+PROVED). Its reject companion, `reject/t129_refine_weaker_contract_composition_still_fails`,
+is the load-bearing half: an accept-only witness cannot distinguish "composed"
+from "merely skipped" since both exit 0 — the exact gap that let the
+`List.length`/`len` alias go silently dead in production earlier the same day
+(see the `import Process` entry in `specs/todos.md`). It reuses the
+WEAKER-caller-contract shape from Task 1's own test suite (`outer`'s
+`{List(Int) | len(_) >= 0}` proves nothing about `inner`'s `len(_) > 0`, so
+that call alone is SKIPPED, not violated) and pairs it with a `List.length(ys)
+== 0` runtime guard (the `t117`/`t118` mechanism) to produce a genuine,
+independently-derived violation — proving composition does not launder a
+weaker contract into a false proof.
+
+The CI obligation ratchet (`.github/workflows/ci.yml`, "Refinement obligation
+coverage ratchet" step) was re-measured on a cold `.march/cas/artifacts-v2`
+cache: the floor fixture (`accept/t118_refine_length_guard_discharges.march`)
+still measures exactly `1 proved, 0 violated, 0 skipped` on its `user code`
+slice, and `stdlib/list.march` still measures `8 proved, 0 violated, 28
+skipped` (user + stdlib). Both match the ratchet's existing `proved_floor=1`
+and `baseline=28` exactly — neither bound moved, and neither needed to: the
+composition fix's own regression tests live in `test_refinecheck.ml`'s
+`compose`/`compose-adt` suites, not in these two measurement fixtures.
+
 ## Current State (as of 2026-07-29, a measure over the refined ADT value itself is enforced and composes)
 
 **Counts:** `test_refinecheck` 348 (was 344), typing corpus 113 accept / 114
