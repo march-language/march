@@ -8,6 +8,63 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ---
 
+## Purity oracle mismatched monomorphized builtin names (FIXED 2026-07-28)
+
+**Symptom.** `lib/tir/purity.ml`'s `is_pure_ext` matched an `EApp` callee's name
+against `impure_builtins` (bare names like `"println"`) with exact `List.mem`
+equality. Monomorphization (`lib/tir/mono.ml`'s `mangle_name`, via
+`Tir_names.specialize_mangle`) rewrites calls to specialized names before
+`Opt.run` (which consumes the purity oracle) ever sees them — `println` becomes
+`println$String`. The exact match failed, so `println$String` (and every other
+specialized impure builtin) was silently classified PURE.
+
+**Consequence.** `test/native/single_use_inline_rc.march` (wired at `test/dune`,
+alias `single_use_inline_rc`) was vacuous: its `helper` (calls `println` twice,
+zero RC ops in its body — a borrowed `List(Int)` param, string literals, scalar
+return) was eliminated by the ordinary `Inline` pass regardless of whether
+`single_use_inline.ml` ran at all, because `Inline` requires purity and the
+buggy oracle said `helper` was pure. No live miscompile was found or is claimed
+— DCE does not drop dead impure-looking bindings, and impure-inlining output
+parity held across the corpus — this was a latent correctness defect in the
+oracle plus a real test-integrity gap.
+
+**Fix.** Added `Tir_names.strip_specialization_suffix` (next to
+`specialize_mangle`, `lib/tir/tir_names.ml`) as the single home for inverting
+the "$"-suffix mangling convention: find the last `.` (or start of string),
+take the first `$` at-or-after that position, truncate there. This correctly
+leaves an interface-impl mangle's own `.`-preceding `$` (e.g.
+`"Show$List.show"`) untouched while stripping only the specialization suffix
+(`"Show$List.show$Int"` -> `"Show$List.show"`; `"println$String"` -> `"println"`;
+`"List.map$Int"` -> `"List.map"`). `purity.ml`'s `EApp` case now matches the
+stripped base name against `impure_builtins` (and the transitive impure-fn set),
+so a specialized impure builtin is no longer misclassified. Unit tests added in
+`test/test_codegen.ml`'s `tir_names` group covering all three shapes plus the
+no-`$`-at-all case and round-trips through `specialize_mangle`/`iface_mangle`.
+
+**Verified non-vacuous.** With the fix applied, disabling
+`single_use_inline.ml`'s eligibility predicate (`if false && ...` at line 309)
+and recompiling `single_use_inline_rc.march` with `--emit-llvm` leaves `@helper`
+in the emitted LLVM (both `define` and `call`) — the native test's grep guard
+would now fail. Restoring the predicate eliminates `@helper` again. The test
+genuinely exercises `single_use_inline` now.
+
+**Behavior shift measured, smaller than initially anticipated.** Because
+`Opt.run` runs after Perceus RC-insertion, most function bodies already contain
+`EIncRC`/`EDecRC`/etc. and were already classified impure by the pre-existing
+RC-op check, independent of this bug. The builtin-name gap only flips
+classification for bodies with zero RC ops that call a specialized impure
+builtin — the `single_use_inline_rc.march` shape is the paradigm case. No TIR
+golden snapshot changed (`test/run_snapshots.exe`'s corpus stops at
+post-Perceus, before `Opt.run`/the affected passes ever execute) and no other
+test's pass/fail status changed. Full suite results: `run_codegen` 509/509,
+`run_compiler` 612/612, `run_eval` 256/256, `run_stdlib -q` clean (Slow tests
+skipped), `run_snapshots` 33/33, `dune build @runtest` 4179/4179 plus one
+pre-existing unrelated failure (`adversarial-regressions` #39, an ASAN-binary
+30s-timeout under machine load — reproduces identically on unmodified `HEAD`,
+confirmed by reverting the fix and rerunning before restoring it).
+
+---
+
 ## A measure over the refined value only worked under one spelling (FIXED 2026-07-27)
 
 **Symptom.** `{List(a) | len(_) > 0}` and `{v : List(a) | len(v) > 0}` parsed,

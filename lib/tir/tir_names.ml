@@ -251,6 +251,49 @@ let iface_mangle ~(iface : string) ~(ty : string) ~(meth : string) : string =
 let specialize_mangle (base : string) (mangled_ty : string) : string =
   base ^ "$" ^ mangled_ty
 
+(** [strip_specialization_suffix name] inverts [specialize_mangle]/
+    [mangle_name]'s "$"-suffix convention: it strips the specialization
+    suffix (and any interface-impl second-order suffix appended the same
+    way) to recover the base name a purity/effect table would have an
+    entry for.
+
+    Rule, mirroring [is_iface_mangled]'s own last-'.' scan: find the LAST
+    ['.'] in [name] (or the start of the string if there is none); the
+    specialization separator is the FIRST ['$'] at-or-after that position.
+    Truncate there. A ['$'] that lands BEFORE the last '.' is part of an
+    interface-impl mangle (e.g. "Show$List.show") and is therefore part of
+    the base name, not a specialization suffix — left untouched.
+
+      - ["println$String"]        -> ["println"]           (no '.'; first
+        '$' at position 0 is the separator)
+      - ["List.map$Int"]          -> ["List.map"]           ('$' after the
+        last '.')
+      - ["Show$List.show$Int"]    -> ["Show$List.show"]     (the FIRST '$'
+        is before the last '.', so it is skipped; the SECOND '$', after
+        the last '.', is the separator)
+      - ["map"] (no '$' at all)   -> ["map"]                (unchanged)
+
+    This is a total, deterministic string operation — every input has a
+    well-defined answer under this rule, so there is no "ambiguous" case
+    to reject. Conservatism belongs to the CALLER (e.g. [Purity]): match
+    against the stripped base, and if the base is not recognised, treat
+    the name as impure rather than assuming purity. *)
+let strip_specialization_suffix (name : string) : string =
+  let len = String.length name in
+  let search_start =
+    match String.rindex_opt name '.' with
+    | Some i -> i + 1
+    | None -> 0
+  in
+  let rec find_dollar i =
+    if i >= len then None
+    else if name.[i] = '$' then Some i
+    else find_dollar (i + 1)
+  in
+  match find_dollar search_start with
+  | Some j -> String.sub name 0 j
+  | None -> name
+
 (* ── Default-argument mangling: "base$N" ────────────────────────────────
    Producer: lib/desugar/desugar.ml's [expand_defaults_decl] mints, for a
    fn with default params, a full-arity mangled decl ["%s$%d" name

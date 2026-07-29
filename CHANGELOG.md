@@ -94,6 +94,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The optimizer's purity oracle no longer misjudges a monomorphized builtin
+  call as pure.** Monomorphization rewrites calls to specialized names before
+  optimization runs (e.g. `println` becomes `println$String`), and the purity
+  check (used by `Inline`/`single_use_inline`/DCE/fusion) matched callee names
+  with exact string equality against a bare-name impure-builtin list, so a
+  specialized impure builtin like `println$String` was silently treated as
+  pure. Fixed by stripping the specialization suffix before matching. No live
+  miscompile was found or is claimed by this fix — it closes a latent
+  correctness gap in the oracle (and a companion test-integrity gap where a
+  native regression test passed regardless of whether the pass it targeted
+  ran at all).
+
 - **`cap no_panic`: an unreflectable divisor refinement is no longer accepted as
   a proof.** The division-safety check treated "this predicate is outside the
   checkable fragment" as a discharged obligation, which made a *meaningless*
