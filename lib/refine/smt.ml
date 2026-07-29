@@ -33,6 +33,14 @@ type term =
   | Add of term * term
   | Sub of term * term
   | MulLit of int * term     (* literal coefficient * term — keeps us in linear arithmetic *)
+  (* General (possibly NON-linear) multiplication.  [MulLit] is still the right
+     constructor whenever one factor is a literal — it keeps the query in LIA,
+     where z3 is complete and fast.  [Mul] exists for the predicates that are
+     genuinely non-linear (`v * v > 0`, which is exactly `v != 0` over the
+     integers): the driver emits no `(set-logic …)`, so z3 runs its `ALL`
+     tactic and decides these instantly.  Where it cannot, the answer is
+     `unknown`, which every caller already treats as *not proved*. *)
+  | Mul of term * term
   | Neg of term
   | Not of term
   | And of term * term
@@ -113,6 +121,7 @@ let rec render = function
   | Add (a, b) -> Printf.sprintf "(+ %s %s)" (render a) (render b)
   | Sub (a, b) -> Printf.sprintf "(- %s %s)" (render a) (render b)
   | MulLit (k, a) -> Printf.sprintf "(* %d %s)" k (render a)
+  | Mul (a, b) -> Printf.sprintf "(* %s %s)" (render a) (render b)
   | Neg a -> Printf.sprintf "(- %s)" (render a)
   | Not a -> Printf.sprintf "(not %s)" (render a)
   | And (a, b) -> Printf.sprintf "(and %s %s)" (render a) (render b)

@@ -118,6 +118,24 @@ git log is authoritative for exact commits.
   did. A path condition that genuinely proves the divisor non-zero (a `when
   d != 0` guard) still discharges the obligation. Only `cap no_panic` modules
   are affected; a refinement the checker *can* reflect is unchanged.
+
+- **`cap no_panic`: a divisor refinement that *proves* the divisor non-zero is
+  no longer rejected for being written unusually.** Closing the hole above
+  over-corrected: the check reported anything its own reflection could not
+  translate, and that reflection refused multiplication unless one factor was a
+  literal. So `fn scale(d : {v : Int | v * v > 0})` — a predicate that is
+  *exactly* `d != 0` over the integers, and that the solver decides instantly —
+  was rejected with "outside the checkable fragment", even though the same
+  program ran correctly without the capability. Such predicates are now sent to
+  the solver rather than refused unread. The stance is unchanged: the checker
+  tries harder to discharge, it does not accept what it cannot decide. A
+  predicate that reflects but proves nothing (`v * v >= 0`, true of every
+  integer) is still an error, as is one the solver cannot settle, and one it
+  cannot reflect at all. Separately, a divisor guarded on the `else` side of a
+  condition — `if d == 0 do 0 else 10 / d end` — is now recognised as safe;
+  negated path conditions were previously dropped by the syntactic fallback
+  while the solver route handled them. Witnessed by
+  `specs/lang/types/{accept/t121,reject/t122}`.
 - **A program that repeatedly passes a capture-free lambda (an anonymous
   function that reads no outer variables, e.g. `fn x -> x * 2`) as a value
   no longer grows memory without bound.** This extends the fix below for

@@ -1,5 +1,50 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, `cap no_panic` discharges before it rejects)
+
+**A divisor refinement that PROVES the obligation was being rejected for being
+written unusually.** Making the unreflectable case an error (entry below) was
+right in general and wrong for predicates z3 decides instantly, because
+`division_safety.ml`'s local `smt_of` refused any product without a literal
+factor. So this errored with "the refinement on `d` is outside the checkable
+fragment", while the same program without the capability ran and printed `5`:
+
+```march
+mod Div2 do
+  cap no_panic
+  fn scale(d : {v : Int | v * v > 0}) : Int do 10 / d end
+end
+```
+
+`v * v > 0` is *exactly* `v != 0` over the integers — a complete proof, not an
+approximation. Two independent defects, both fixed:
+
+1. **Discharge before rejecting.** `Smt.term` gains a general `Mul` (the driver
+   emits no `(set-logic …)`, so z3 runs `ALL` and handles NIA); `smt_of` still
+   prefers `MulLit` when a factor is literal, keeping the common case in LIA.
+   The refined-divisor arm now builds a VC and calls `Refine.discharge`
+   REGARDLESS of whether the predicate reflected — an unreflectable predicate is
+   outside *this file's* fragment, not necessarily z3's, and the path conditions
+   alone may settle the goal. The stance is unchanged and load-bearing:
+   `cap no_panic` is a guarantee, so `Refuted` and `Unverified` are both still
+   errors, and reflection failure only picks the wording (`accept/t121` vs
+   `reject/t122`: `v * v >= 0` is just as non-linear and just as reflectable,
+   holds of every integer, and is still rejected).
+2. **Symmetric path reasoning.** `path_proves_nonzero` ignored NEGATED path
+   conditions while the reflectable arm beside it handled them via `smt_of`, so
+   `if d == 0 do 0 else 10 / d end` was reported although the guard makes the
+   division unreachable with zero. It now dualises the operator on the else
+   side (`==` ↦ `!=`, `<` ↦ `>=`, …) and both arms run the same reflection.
+   Path terms mentioning a symbol the VC did not declare are dropped rather
+   than sent, since an ill-sorted query only makes z3 error out — dropping
+   assumptions is the fail-closed direction.
+
+Both z3-free fast paths (`syntactic_nonzero`, then `path_proves_nonzero`) still
+run first, so a machine with no solver behaves as before on the obvious cases.
+Measured: refinecheck 297 tests (was 294; new `divsafety-entailment` group,
+whose control case is deliberately UNgated so it runs on a z3-less machine),
+`run_compiler` 612, typing corpus 222/222, stdlib sweep empty.
+
 ## Current State (as of 2026-07-29, capability walks made exhaustive over `A.decl`)
 
 **`cap no_panic` accepted a division by zero that crashed at run time.** Both

@@ -890,6 +890,18 @@ message above).
   with no wildcard, so a new declaration form is a compile error rather than a
   silent hole. A `describe` block recurses and inherits the enclosing module's
   capability; a nested `mod` still re-derives its own.
+- **`cap no_panic`'s divisor check tries to DISCHARGE before it rejects**
+  (since 2026-07-29). Every outcome short of `Refine.Verified` is an error —
+  that is what the capability promises — but "we could not reflect the
+  predicate" is not itself an outcome. A divisor refinement outside the linear
+  fragment is now handed to z3 anyway: `{v : Int | v * v > 0}` is exactly
+  `v != 0` over the integers, and rejecting it was a false positive on a
+  *complete* proof. Predicates that reflect but prove nothing (`v * v >= 0`,
+  true of every integer) come back `Refuted`, and ones z3 cannot decide come
+  back `Unverified`; both are still errors. Path conditions are reflected with
+  their negations on both routes, so the `else` side of `if d == 0` discharges
+  the obligation exactly as `if d != 0` does on the `then` side. Bracketed by
+  `accept/t121` and `reject/t122`.
 - **There is no `@[trusted]` escape hatch yet.** The only way to accept an
   obligation the checker cannot discharge is `assert`, or removing
   `cap verified` from the module. Until an escape hatch exists, `cap verified`

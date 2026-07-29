@@ -1,10 +1,41 @@
 # March — TODO List
 
+**Last updated:** 2026-07-29 (`cap no_panic` now DISCHARGES a divisor refinement before rejecting it — `{v : Int | v * v > 0}` is a complete proof of `v != 0` and was being reported as unreflectable — and reads negated path conditions on both routes; earlier the same day: capability walks made exhaustive over `A.decl`; see below and Done.)
 **Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV filed earlier the same day — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value, removing a per-materialization leak; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value AND per capture-free lambda value, removing a per-materialization leak in both cases; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## `cap no_panic` rejected a divisor refinement that PROVED the obligation (FIXED 2026-07-29)
+
+Closing the unreflectable-divisor hole (2026-07-28, below) over-corrected. The
+new arm reported anything `division_safety.ml`'s own `smt_of` could not
+translate, and that reflection refused multiplication unless one factor was a
+literal — so `fn scale(d : {v : Int | v * v > 0}) : Int do 10 / d end` was
+rejected as "outside the checkable fragment" even though `v * v > 0` is exactly
+`v != 0` over the integers and z3 decides it instantly. Without the capability
+the same program ran and printed `5`.
+
+Two defects, both fixed. (1) `Smt.term` gains a general `Mul` — no
+`(set-logic …)` is emitted, so z3 runs `ALL` and handles the non-linear case,
+while `MulLit` still covers literal factors and keeps the common case in LIA —
+and the refined-divisor arm now calls `Refine.discharge` WHETHER OR NOT the
+predicate reflected, since an unreflectable predicate is outside this file's
+fragment rather than z3's, and the path conditions alone may settle the goal.
+The stance is unchanged: `Refuted` and `Unverified` are both still errors, and
+reflection failure only picks the wording. (2) `path_proves_nonzero` ignored
+NEGATED path conditions while the arm beside it reflected them, so
+`if d == 0 do 0 else 10 / d end` was reported; it now dualises the operator on
+the else side and both arms use the same reflection.
+
+Refinecheck 297 tests (new `divsafety-entailment` group; its control case —
+an unreflectable refinement that proves nothing — is deliberately UNgated so it
+also runs where there is no solver), `run_compiler` 612, typing corpus 222/222
+with witnesses `accept/t121` / `reject/t122` (`v * v >= 0` holds of every
+integer and is still rejected), stdlib sweep empty.
 
 ---
 

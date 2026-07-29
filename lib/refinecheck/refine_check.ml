@@ -167,7 +167,8 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.IsCtor (_, a) -> m a
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b)
+  | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
@@ -192,8 +193,8 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Not a -> w a
   | Smt.Neg a | Smt.MulLit (_, a) -> int_side a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
-  | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Lt (a, b)
+  | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
   (* Floats and `$Str` are disjoint sorts; an `fp.*` term is well-sorted here
      exactly when neither operand drags a string in.  Whether its operands are
      genuinely FLOATS is [float_wellsorted]'s job, not this guard's. *)
@@ -240,6 +241,7 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.IntLit _ | Smt.BoolLit _ -> false
   | Smt.App (_, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.Mul (a, b)
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -291,7 +293,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
-  | Smt.MulLit _ | Smt.Neg _ -> false
+  | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _ -> false
 
 (* How a return refinement's predicate relates to the callee's parameters.
 

@@ -9,8 +9,11 @@
    Supported:
    - Literal divisors: 0 → always error; non-zero → always safe.
    - Variable divisors with an Int refinement `{v | pred}`: syntactic fast-path
-     for common patterns (v > 0, v >= 1, v != 0, v < 0, …); Z3 discharge for
-     everything else in the linear-arithmetic fragment.
+     for common patterns (v > 0, v >= 1, v != 0, v < 0, …); otherwise a Z3
+     discharge, ATTEMPTED even when the predicate does not reflect — an
+     unreflectable predicate is outside this file's fragment, not necessarily
+     the solver's, and the path conditions alone may settle the goal.  Only a
+     genuine non-[Verified] verdict is an error.
    - Variable divisors without a refinement: always error.
    - Complex divisors (arbitrary expressions): always error (conservative). *)
 
@@ -76,10 +79,17 @@ let rec smt_of ~b ~var (e : A.expr) : Smt.term option =
     (match op with
      | "+"  -> bin (fun a b -> Smt.Add (a, b)) a rhs
      | "-"  -> bin (fun a b -> Smt.Sub (a, b)) a rhs
+     (* A literal factor stays in linear arithmetic; anything else becomes a
+        general [Smt.Mul].  Refusing non-linear products here was a REGRESSION
+        source, not a safety measure: `{v : Int | v * v > 0}` is exactly
+        `v != 0` over the integers and z3 decides it instantly, yet the
+        unreflectable arm below rejected the program.  A product z3 cannot
+        decide comes back `unknown` → [Refine.Unverified] → still an error. *)
      | "*"  ->
        (match go a, go rhs with
         | Some (Smt.IntLit k), Some t | Some t, Some (Smt.IntLit k) ->
           Some (Smt.MulLit (k, t))
+        | Some ta, Some tb -> Some (Smt.Mul (ta, tb))
         | _ -> None)
      | "==" -> bin (fun a b -> Smt.Eq  (a, b)) a rhs
      | "!=" -> bin (fun a b -> Smt.Ne  (a, b)) a rhs
@@ -95,6 +105,22 @@ let rec smt_of ~b ~var (e : A.expr) : Smt.term option =
   | A.EApp (A.EVar { A.txt = "-"; _ }, [ a ], _) ->
     Option.map (fun t -> Smt.Neg t) (go a)
   | _ -> None
+
+(* True when every symbol [t] mentions has been declared in the VC.  Only the
+   shapes [smt_of] can produce are recognised; anything else answers false,
+   which drops the assumption — the fail-closed direction, since fewer
+   assumptions can only make a goal harder to prove. *)
+let rec consts_declared (declared : string list) (t : Smt.term) : bool =
+  let both a b = consts_declared declared a && consts_declared declared b in
+  match t with
+  | Smt.Const x -> List.mem x declared
+  | Smt.IntLit _ | Smt.BoolLit _ -> true
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
+  | Smt.Eq (a, b) | Smt.Ne (a, b)
+  | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
+  | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> both a b
+  | Smt.MulLit (_, a) | Smt.Neg a | Smt.Not a -> consts_declared declared a
+  | _ -> false
 
 (* ── Param collection ───────────────────────────────────────────────────── *)
 
@@ -180,37 +206,63 @@ let division_suggestion =
    `{v : Int | v != 0}` (or `v > 0`) to prove it is safe."
 
 (* Syntactically check whether path conditions prove [var] ≠ 0.
-   Only looks at non-negated guards (e.g. `when b != 0`, `when b > 0`). *)
+
+   NEGATED conditions count.  `path` carries `(cond, negated)`, where `negated`
+   marks the ELSE side of an `if`; on that side the fact in scope is `not cond`.
+   Ignoring those entries — as this used to — made the syntactic fallback
+   asymmetric with the z3 path below, which reflects negations properly, so
+   `if d == 0 do 0 else 10 / d end` was reported even though the guard alone
+   makes the division unreachable with zero.  A negated comparison is handled by
+   dualising the operator (`==` ↦ `!=`, `<` ↦ `>=`, …), which is exact for the
+   total orders involved. *)
 let path_proves_nonzero (var : string) (path : (A.expr * bool) list) : bool =
+  (* `not (a op b)` ⟺ `a (dual op) b` *)
+  let dual = function
+    | "==" -> Some "!=" | "!=" -> Some "=="
+    | "<"  -> Some ">=" | ">=" -> Some "<"
+    | ">"  -> Some "<=" | "<=" -> Some ">"
+    | _ -> None
+  in
+  (* `a op b` ⟺ `b (flipped op) a` — used to normalise to `var op literal`. *)
+  let flip = function
+    | "<" -> ">" | ">" -> "<" | "<=" -> ">=" | ">=" -> "<="
+    | op -> op (* == and != are symmetric *)
+  in
+  (* Does `var op n` imply var ≠ 0? *)
+  let proves op n =
+    match op with
+    | "!=" -> n = 0
+    | "==" -> n <> 0
+    | ">"  -> n >= 0
+    | ">=" -> n >= 1
+    | "<"  -> n <= 0
+    | "<=" -> n <= -1
+    | _ -> false
+  in
   List.exists
     (fun (cond, negated) ->
-      if negated then false
-      else
-        match cond with
-        | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) ->
-          let is_var e =
-            match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
-          in
-          let int_of e =
-            match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
-          in
-          (match op with
-           | "!=" ->
-             (is_var a && int_of b = Some 0) || (is_var b && int_of a = Some 0)
-           | ">" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of a))
-           | ">=" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of a))
-           | "<" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= 0) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 0) (int_of a))
-           | "<=" ->
-             (is_var a && Option.fold ~none:false ~some:(fun n -> n <= -1) (int_of b))
-             || (is_var b && Option.fold ~none:false ~some:(fun n -> n >= 1) (int_of a))
-           | _ -> false)
-        | _ -> false)
+      match cond with
+      | A.EApp (A.EVar { A.txt = op0; _ }, [ a; b ], _) ->
+        let is_var e =
+          match e with A.EVar { A.txt = x; _ } -> x = var | _ -> false
+        in
+        let int_of e =
+          match e with A.ELit (A.LitInt n, _) -> Some n | _ -> None
+        in
+        (* Normalise to `var op n`, then dualise if we are on the else side. *)
+        let normalised =
+          match int_of b, int_of a with
+          | Some n, _ when is_var a -> Some (op0, n)
+          | _, Some n when is_var b -> Some (flip op0, n)
+          | _ -> None
+        in
+        (match normalised with
+         | None -> false
+         | Some (op, n) ->
+           (match (if negated then dual op else Some op) with
+            | None -> false
+            | Some op -> proves op n))
+      | _ -> false)
     path
 
 (* Collect let-bound (name, rhs_expr) pairs visible at division sites.
@@ -280,59 +332,73 @@ let check_var_divisor ~root errctx span var_name params path let_values =
                no refinement proves `%s ≠ 0`.%s"
               var_name var_name division_suggestion))
   | Some (_, bdr, pred) ->
-    (* Fast syntactic check — no Z3 needed for obvious cases *)
+    (* Two z3-free fast paths first, so the obvious cases still discharge on a
+       machine with no solver. *)
     if syntactic_nonzero bdr pred then ()
-    else
-      (* Try Z3, adding any path-derived assumptions *)
-      match smt_of ~b:bdr ~var:var_name pred with
-      (* An unreflectable predicate is NOT a proof.  Treating it as one made a
-         meaningless refinement more permissive than no refinement at all —
-         `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
-         errored.  `cap no_panic` promises the division cannot panic, so an
-         obligation we cannot discharge must fail closed, exactly as the
-         `Refine.Unverified` branch below already does.  A path condition that
-         syntactically proves `var ≠ 0` still discharges it, matching the
-         unrefined-parameter branch above. *)
-      | None ->
-        if path_proves_nonzero var_name path then ()
-        else
-          Err.error errctx ~span
-            (Printf.sprintf
-               "division by `%s` in `cap no_panic` module: the refinement on \
-                `%s` is outside the checkable fragment, so it cannot prove \
-                `%s != 0`.%s"
-               var_name var_name var_name division_suggestion)
-      | Some assumption ->
-        let path_assumes =
-          List.filter_map
-            (fun (cond, negated) ->
-              match smt_of ~b:"\x00" ~var:"\x00" cond with
-              | None -> None
-              | Some t -> Some (if negated then Smt.Not t else t))
-            path
-        in
-        let vc =
-          Smt.
-            { decls = [ (var_name, Smt.SInt) ]
-            ; assumptions = assumption :: path_assumes
-            ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
-            }
-        in
-        (match Refine.discharge ~root vc with
-         | Refine.Verified -> () (* Z3: refinement proves divisor ≠ 0 *)
-         | Refine.Refuted _ ->
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: refinement \
-                 does not rule out zero.%s"
-                var_name division_suggestion)
-         | Refine.Unverified ->
-           (* Z3 absent or unknown — be conservative *)
-           Err.error errctx ~span
-             (Printf.sprintf
-                "division by `%s` in `cap no_panic` module: cannot verify \
-                 divisor is non-zero (Z3 unavailable or VC unknown).%s"
-                var_name division_suggestion))
+    else if path_proves_nonzero var_name path then ()
+    else begin
+      (* Whether or not the refinement itself reflects, ATTEMPT the discharge:
+         an unreflectable predicate is outside *this file's* fragment, not
+         necessarily outside z3's, and the path conditions alone may settle the
+         obligation.  What must not change is the stance — `cap no_panic` is a
+         guarantee, so anything short of [Refine.Verified] is an error.  The
+         reflection failure only picks the wording. *)
+      let refinement = smt_of ~b:bdr ~var:var_name pred in
+      (* Every Int-refined parameter is a declared Int const whose refinement is
+         a fact in scope; [var_name] is one of them (we just found it). *)
+      let decls = List.map (fun (n, _, _) -> (n, Smt.SInt)) params in
+      let declared = List.map fst decls in
+      let param_assumes =
+        List.filter_map (fun (n, b, p) -> smt_of ~b ~var:n p) params
+      in
+      (* Same reflection the path fallback above approximates syntactically.
+         A condition mentioning a symbol we did not declare is DROPPED rather
+         than sent: an ill-sorted query makes z3 error out, which only produces
+         a worse-diagnosed version of the same failure.  Dropping assumptions
+         can only make the goal harder to prove, so it stays fail-closed. *)
+      let path_assumes =
+        List.filter_map
+          (fun (cond, negated) ->
+            match smt_of ~b:"\x00" ~var:"\x00" cond with
+            | Some t when consts_declared declared t ->
+              Some (if negated then Smt.Not t else t)
+            | _ -> None)
+          path
+      in
+      let vc =
+        Smt.
+          { decls
+          ; assumptions = param_assumes @ path_assumes
+          ; goal = Smt.Ne (Smt.Const var_name, Smt.IntLit 0)
+          }
+      in
+      match Refine.discharge ~root vc, refinement with
+      | Refine.Verified, _ -> () (* z3: the facts in scope prove divisor ≠ 0 *)
+      | (Refine.Refuted _ | Refine.Unverified), None ->
+        (* An unreflectable predicate is NOT a proof.  Treating it as one made a
+           meaningless refinement more permissive than no refinement at all —
+           `{Int | is_prime(_)}` passed while a bare `Int` divisor correctly
+           errored. *)
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: the refinement on \
+              `%s` is outside the checkable fragment, so it cannot prove \
+              `%s != 0`.%s"
+             var_name var_name var_name division_suggestion)
+      | Refine.Refuted _, Some _ ->
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: refinement \
+              does not rule out zero.%s"
+             var_name division_suggestion)
+      | Refine.Unverified, Some _ ->
+        (* Z3 absent or unknown — be conservative *)
+        Err.error errctx ~span
+          (Printf.sprintf
+             "division by `%s` in `cap no_panic` module: cannot verify \
+              divisor is non-zero (Z3 unavailable or VC unknown).%s"
+             var_name division_suggestion)
+    end
 
 (* ── Per-clause check ───────────────────────────────────────────────────── *)
 

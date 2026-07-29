@@ -3873,6 +3873,53 @@ let divsafety_hole_suite =
               end\n"))
   ]
 
+(* ── Division-safety: discharge before rejecting ───────────────────────────
+   Closing the unreflectable-refinement hole (above) over-corrected: the new
+   arm rejected predicates that DO entail `d != 0` and that z3 decides
+   instantly, because [division_safety]'s own [smt_of] refused non-literal
+   multiplication.  It also fell back to a syntactic path check that ignored
+   NEGATED path conditions, while the reflectable arm beside it handled them.
+   These pin both fixes — and, critically, the control that neither fix
+   reopens the hole.
+
+   GATING: the first case genuinely needs z3 (nothing syntactic decides
+   `v * v > 0`), so it is [gated].  The other two must NOT be: the control has
+   to fail closed precisely when there is no solver, and the negated-guard case
+   is decided by [path_proves_nonzero] with no VC built at all. *)
+let divsafety_entailment_suite =
+  [ gated "a non-linear refinement that entails d != 0 is accepted" (fun () ->
+        (* v*v > 0  <=>  v != 0 over the integers. Z3 decides this instantly;
+           only division_safety's own linear smt_of refused it. *)
+        Alcotest.(check bool) "no error" false
+          (has_divsafety_error {|
+mod D1 do
+  cap no_panic
+  fn scale(d : {v : Int | v * v > 0}) : Int do 10 / d end
+end|}))
+  ; Alcotest.test_case "an unreflectable refinement that proves NOTHING still errors" `Quick
+      (fun () ->
+        (* The control. Widening must not reopen the hole PR #105 closed. *)
+        Alcotest.(check bool) "error" true
+          (has_divsafety_error {|
+mod D2 do
+  cap no_panic
+  fn f(n : Int, d : {Int | is_prime(_)}) : Int do n / d end
+end|}))
+  ; Alcotest.test_case "a negated path condition discharges too" `Quick (fun () ->
+      (* The `Some assumption` branch reflects negated path conditions via
+         smt_of; the None arm's `path_proves_nonzero` fallback dropped the
+         else-branch. The guard alone makes this division unreachable with
+         zero. *)
+      Alcotest.(check bool) "no error" false
+        (has_divsafety_error {|
+mod D3 do
+  cap no_panic
+  fn f(d : {v : Int | v * v > 0}) : Int do
+    if d == 0 do 0 else 10 / d end
+  end
+end|}))
+  ]
+
 (* ── Decl-walk coverage ────────────────────────────────────────────────────
    Both obligation-raising walks used to descend only into [DFn] and [DMod] and
    end in `| _ -> ()`, so a capability directive said nothing about code living
@@ -3990,4 +4037,5 @@ let () =
       ("obligations", obligation_suite);
       ("cap-verified", cap_verified_suite);
       ("divsafety-hole", divsafety_hole_suite);
+      ("divsafety-entailment", divsafety_entailment_suite);
       ("walk-coverage", walk_coverage_suite) ]
