@@ -111,7 +111,9 @@ let rec has_global_effect_decl decls =
   List.exists (function
     | March_ast.Ast.DImpl _ | March_ast.Ast.DInterface _
     | March_ast.Ast.DDeriving _ | March_ast.Ast.DTransitions _
-    | March_ast.Ast.DProtocol _ | March_ast.Ast.DExtern _ -> true
+    | March_ast.Ast.DProtocol _ | March_ast.Ast.DExtern _
+    | March_ast.Ast.DDescribe _ | March_ast.Ast.DTest _
+    | March_ast.Ast.DSetup _ | March_ast.Ast.DSetupAll _ -> true
     | March_ast.Ast.DMod (_, _, inner, _) -> has_global_effect_decl inner
     | _ -> false) decls
 
@@ -469,7 +471,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
       (* Phase 1: parse + desugar every un-loaded discovered file across ALL
          lib dirs, keeping its source text for reachability analysis. *)
       let all_parsed =
-        List.concat_map (fun lib_dir ->
+        List.concat_map (fun (dir_idx, lib_dir) ->
             let files = collect_lib_files lib_dir in
             List.filter_map (fun file_path ->
                 let canon_fp =
@@ -483,11 +485,11 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                     | Error msg ->
                       Printf.eprintf "[lib] %s\n%!" msg; None
                     | Ok ast ->
-                      Some (canon_fp, file_path,
+                      Some (dir_idx, canon_fp, file_path,
                             March_desugar.Desugar.desugar_module ~is_entry:false ast,
                             src)
               ) files
-          ) all_lib_paths
+          ) (List.mapi (fun i d -> (i, d)) all_lib_paths)
       in
       (* Reachability pruning.  An auto-discovered library module is only
          built when the entry can actually reach it — directly or transitively,
@@ -514,7 +516,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
            anchors that keep it (module name + provided type/ctor names), and
            the module-name tokens its own source references (transitive spread). *)
         let discovered =
-          List.map (fun (_, _, ast, src) ->
+          List.map (fun (_, _, _, ast, src) ->
               let mn = mod_name_of ast in
               let anchors = mn :: provided_anchor_names ast.March_ast.Ast.mod_decls in
               (mn, anchors, referenced_name_tokens src))
@@ -540,12 +542,25 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
         || Hashtbl.mem reachable (mod_name_of ast)
         || has_global_effect_decl ast.March_ast.Ast.mod_decls
       in
-      (* Sort: more dot-segments in mod name → load first (namespace leaves).
-         Alphabetical tiebreak keeps things deterministic. *)
-      let sorted = List.sort (fun (_, _, a, _) (_, _, b, _) ->
-          let da = dot_count (mod_name_of a) and db = dot_count (mod_name_of b) in
-          if db <> da then compare db da
-          else compare (mod_name_of a) (mod_name_of b)
+      (* Sort: SEARCH-PATH ORDER first, then more dot-segments in mod name
+         (namespace leaves), then alphabetically for determinism.
+
+         The search-path key is what keeps the caller's ordering intent
+         intact.  `forge test` places lib/ before test/ on MARCH_LIB_PATH
+         precisely because test modules call into lib modules and never the
+         reverse: a lib function still bound to its pass-1 Mono placeholder,
+         pinned first by a TEST call site, makes every later call site with
+         a different record shape fail to unify.  Sorting on the module name
+         alone silently undid that — `Forgepm.Test.*` and `Forgepm.Web.*`
+         have equal dot-counts, so "Test" sorted ahead of "Web" and the test
+         modules were checked first, yielding a wall of `expected () but got
+         Unit`.  Within one directory the dot-count rule still applies. *)
+      let sorted = List.sort (fun (ia, _, _, a, _) (ib, _, _, b, _) ->
+          if ia <> ib then compare ia ib
+          else
+            let da = dot_count (mod_name_of a) and db = dot_count (mod_name_of b) in
+            if db <> da then compare db da
+            else compare (mod_name_of a) (mod_name_of b)
         ) all_parsed in
       (* Phase 2: build DMods in sorted order for KEPT modules only.  Emit
          transitive imports as top-level siblings (not nested) to avoid
@@ -553,7 +568,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
          the string the file was parsed under (= what its spans carry),
          recorded for user_files.  A pruned module is skipped entirely — never
          noted as a user file, never emitted, never typechecked. *)
-      List.concat_map (fun (canon_fp, orig_path, ast, _src) ->
+      List.concat_map (fun (_dir_idx, canon_fp, orig_path, ast, _src) ->
           if Hashtbl.mem loaded_paths canon_fp then []
           else if not (keep ast) then []
           else begin

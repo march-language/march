@@ -5419,6 +5419,64 @@ end
    at `depot/query.march` — became a hard "Module not found".  That broke
    depot itself, whose own Depot.Query / Depot.Url / Depot.Transaction /
    Depot.Migration live at lib/api/depot_*.march. *)
+(* `forge test` compiles ONE test file as the entry and lets auto-discovery
+   pull in the siblings.  Reachability pruning (48cf9263) keeps a discovered
+   module only when the entry references it or it carries a global-effect
+   decl — and nothing references a test module by name, which is what a test
+   module IS.  Every sibling was therefore dropped, [collect_tests] never saw
+   its bodies, and the run reported a PASS over whatever survived: forgepm
+   went from 544 tests to 21, exit 0.  Silent test loss is the worst
+   available failure mode, so pin it. *)
+let test_sibling_test_module_is_not_pruned () =
+  let sibling_src = {|mod T.Sibling do
+  import Test
+
+describe "sibling" do
+  test "runs" do
+    Test.assert_true(true, "holds")
+  end
+end
+end
+|} in
+  let entry_src = {|mod T.Entry do
+  import Test
+
+describe "entry" do
+  test "runs" do
+    Test.assert_true(true, "holds")
+  end
+end
+end
+|} in
+  let dir = Filename.temp_file "march_test_prune_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+      try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+      with _ -> ())
+    (fun () ->
+      let oc = open_out (Filename.concat dir "sibling_test.march") in
+      output_string oc sibling_src; close_out oc;
+      (* The entry must be a REAL file: [resolve_imports] disables pruning
+         entirely when it cannot read [source_file], so a synthetic path
+         would make this test vacuous (it passes either way). *)
+      let entry_path = Filename.concat dir "entry_test.march" in
+      let oc = open_out entry_path in
+      output_string oc entry_src; close_out oc;
+      Unix.putenv "MARCH_LIB_PATH" dir;
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+        let m = parse_and_desugar entry_src in
+        let (_errs, extra_decls, _files) =
+          March_resolver.Resolver.resolve_imports ~source_file:entry_path m in
+        let mentions_sibling =
+          List.exists (function
+            | March_ast.Ast.DMod (n, _, _, _) -> n.March_ast.Ast.txt = "T.Sibling"
+            | _ -> false) extra_decls
+        in
+        Alcotest.(check bool)
+          "an unreferenced sibling test module survives reachability pruning"
+          true mentions_sibling))
+
 let test_stdlib_prefixed_user_module_resolves () =
   let sibling_src = {|mod Depot.Query do
   fn answer() : Int do 42 end
@@ -9925,6 +9983,9 @@ let compiler_suites =
           Alcotest.test_case
             "user module under a stdlib-named dotted prefix resolves"
             `Quick test_stdlib_prefixed_user_module_resolves;
+          Alcotest.test_case
+            "unreferenced sibling test module is not pruned"
+            `Quick test_sibling_test_module_is_not_pruned;
         ] );
       ( "diagnostic dedup",
         [
