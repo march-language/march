@@ -73,8 +73,15 @@ let rec is_pure_ext (impure_fns : StringSet.t) : Tir.expr -> bool = function
   | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _
   | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ -> false
   | Tir.EApp (f, _)            ->
-    not (List.mem f.Tir.v_name impure_builtins)
+    (* Monomorphization rewrites builtin/stdlib calls to specialized names
+       (e.g. "println" -> "println$String" via Tir_names.specialize_mangle),
+       so match against the specialization-stripped base name, not the raw
+       call-site name — an exact match here would silently reclassify every
+       specialized impure builtin as pure. *)
+    let base = Tir_names.strip_specialization_suffix f.Tir.v_name in
+    not (List.mem base impure_builtins)
     && not (StringSet.mem f.Tir.v_name impure_fns)
+    && not (StringSet.mem base impure_fns)
   | Tir.ECallPtr _             -> false  (* indirect call — unknown target *)
   | Tir.ELet (_, rhs, body)    -> is_pure_ext impure_fns rhs && is_pure_ext impure_fns body
   | Tir.ELetRec (fns, body)    ->
