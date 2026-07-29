@@ -1,5 +1,62 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, the refinement-guarantee sweep is closed and documented)
+
+**Counts:** `test_refinecheck` 338 (was 294 at the start of the sweep), typing
+corpus 227/227, `run_compiler` and `run_eval` green, stdlib diagnostic sweep
+byte-identical old-vs-new across all 111 modules, `--refine-report` on
+`stdlib/list.march` unchanged at `8 proved / 0 violated / 28 skipped`
+(user + stdlib). No known failures introduced.
+
+**The single most consequential finding was not a hole in the checker but a
+hole in the instrumentation.** `origin/main` had added one `import Process` to
+`stdlib/system.march`. The measure-alias gates are unit-global and treated a
+glob import as a competitor on sight; the compiler prepends the whole standard
+library to every compilation; therefore the `List.length` / `String.byte_size` /
+`string_byte_length` aliases — the headline feature of PR #105 — were withdrawn
+for **every March program ever compiled**, and no test noticed, because a
+withdrawn alias makes the obligation *skipped* and a skip exits 0 exactly as a
+proof does. `accept/t118` passed throughout. Only two instruments can see the
+difference: a REJECT witness (`reject/t117`), and the `--refine-report` proof
+FLOOR added the same day. That is the case for the floor, stated once and for
+all: **a ceiling on skips is not a ratchet, because a checker that raises no
+obligations satisfies it perfectly.**
+
+The sweep closed, in order: both obligation-raising walks made exhaustive over
+`A.decl` (a `cap no_panic` division by zero in an `impl` body used to `--check`
+clean and then panic); the assume-without-check that widening created (an `impl`
+method's parameter refinement is now adopted as a caller obligation, or stripped
+so it binds nobody — never assumed by a body no caller answers for); a fifth
+wildcard walk in desugar (`strip_entry_self_qual`); `cap no_panic` discharging a
+divisor refinement before rejecting it (`{v : Int | v * v > 0}` is a complete
+proof of `v != 0`); divisor facts retired on shadowing, on both sides of a
+guard; `Obligation.Alias_withdrawn` with conjunctive attribution so it never
+displaces a genuine `solver-undecided`; the glob-import gate made precise; the
+CI floor re-pointed at a fixture whose count actually moves; and four
+test-quality gaps, each new test proven to fail under a named mutation.
+
+**Documentation now states the residuals rather than implying their absence.**
+`specs/lang/refinement-types.md` gained an "Open holes, stated as of 2026-07-29"
+list and `docs/refinement-types.md` a `cap no_panic` section; both were corrected
+where earlier work over-claimed. Two over-claims specifically: "every declaration
+form is covered" reads as "a refined `impl` signature is enforced", which is true
+only under the unambiguous-name rule; and the CHANGELOG's "modules that declare
+no capability are unaffected" was false — a *provably violated* obligation is
+reported regardless of any capability, so widening the walk newly fails builds
+containing a genuine violation in an `impl` body or a top-level `let`. Both are
+fixed. A third was found while verifying: both pages quoted an `alias-withdrawn`
+diagnostic whose wording no longer matched what the compiler emits.
+
+Still open and now written down in both pages: a refinement in an `interface`'s
+own signature is unenforced; the alias gates remain unit-global (one competitor
+anywhere, including in a `MARCH_LIB_PATH` dependency, disables the alias
+program-wide); `check_post` postconditions are outside the ledger, so
+`--refine-report` undercounts and `cap verified` silently permits an undischarged
+*return* refinement; there is no `@[trusted]` escape hatch;
+`collect_direct_names` still has a wildcard; adoption ignores `use`-imported
+impl methods; and a guard laundered through a local falls back to the general
+message.
+
 ## Current State (as of 2026-07-29, the measure-alias entry-module gate is witnessed)
 
 **A line that no test could tell from its own absence now has a witness that

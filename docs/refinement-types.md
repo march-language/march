@@ -170,10 +170,28 @@ function is how you'd get a false alarm on correct code. Only the **qualified**
 `List.length` counts (a bare `length` is left alone), and only while it's still the
 standard library's own. If your program defines its own `List.length` — however it
 spells the definition: a `fn`, a module-level `let`, an `extern` block, an interface
-or impl method — ships a forked
-`List` via `MARCH_LIB_PATH`, or rebinds `List` with `alias`/`use`/`import`, the connection is
-dropped for that whole module and you're back to the older behaviour: the obligation
-is skipped, quietly, rather than proved.
+or impl method — ships a forked `List` via `MARCH_LIB_PATH`, or rebinds `List` with
+`alias` or `use`, the connection is dropped and you're back to the older behaviour:
+the obligation is skipped, quietly, rather than proved.
+
+**"Dropped" means dropped for the whole compilation unit, not just the file you're
+editing.** The check is syntactic and unit-global: it doesn't ask whether the
+competing binding could ever win at your call site, because answering that needs a
+resolver this pass doesn't have. One genuine competitor anywhere in the unit —
+including inside a `MARCH_LIB_PATH` dependency you never opened, and remembering that
+the compiler prepends the entire standard library to every compilation — disables the
+alias program-wide. That's a real cost, and it's the direction the checker errs in on
+purpose: over-withdrawing loses a proof (silence), while under-withdrawing would put a
+wrong fact in the assumption set and flag correct code.
+
+A glob import (`import Foo`, `use Foo.*`) is the one case that got more careful:
+it withdraws the alias only if `Foo` **actually provides** a competing `List`, resolved
+by walking the unit's own module structure. Before that, the bare presence of a glob
+was enough — and since `stdlib/system.march` contains a single `import Process`, and
+the stdlib is prepended to everything, the alias was in fact withdrawn for *every March
+program ever compiled*. The feature was inert in production and nothing noticed,
+because a skipped obligation exits 0 exactly like a proved one. If the glob's target
+can't be resolved, it still withdraws.
 
 ### The same for strings — but only the byte-valued names
 
@@ -500,8 +518,15 @@ report prints.)
 You get two counts because the compiler quietly prepends the whole standard library to
 every compilation. **User code** counts only the call sites in the file you named —
 that's the one to watch while writing a module. **User + stdlib** counts everything
-raised in the run, which makes a good whole-program coverage number (March's own CI
-fails the build if it climbs, since more skips means less is being checked).
+raised in the run, which makes a good whole-program coverage number.
+
+March's own CI ratchets on both directions: a **ceiling** on skips (more skips means
+less is being checked) and a **floor** on proofs. The floor matters more than it
+sounds — a ceiling on its own is satisfied perfectly by a checker that raises no
+obligations at all, and the floor is read from a small fixture whose one obligation is
+*proved* by a `List.length` guard, so it collapses to zero the instant the measure
+alias stops working. That's precisely the failure that went unnoticed for a while:
+a skip and a proof both exit 0, and only the count can tell them apart.
 
 Every skip says *why*: the predicate uses vocabulary the checker can't translate
 (`unreflectable-predicate`), the argument's own value didn't translate
@@ -569,7 +594,7 @@ solver:
 (alias-withdrawn: the guard uses `List.length`, but this compilation unit also
 BINDS that name, so the checker withdrew its built-in measure meaning and the
 guard proved nothing)
-note: a binding of `List.length` elsewhere in this compilation unit
+note: at least one binding of `List.length` in this compilation unit
 (ver3.march:5) withdrew the alias for the WHOLE unit, including this call — …
 ```
 
@@ -588,16 +613,153 @@ on the `else` side (which disproves the predicate rather than failing to prove i
 an unguarded call all keep the plain `solver-undecided` message — because in each of
 those the binding you'd be sent to rename is not the reason anything failed.
 
+The price of that caution is coverage: a guard laundered through a local
+(`let n = List.length(ys)` and then `if n > 0`), applied to something other than a
+plain variable, or established up in a caller falls back to the general message even
+when a withdrawal really was the cause. The reason exists to explain one specific
+confusion, not to claim every skip.
+
 **Know the edges before you reach for it.** It's strictly opt-in and scoped to the
 module that writes it: a `cap verified` module calling an ordinary one doesn't make
 the callee strict, and nested modules don't inherit it (they can't — the standard
 library arrives as sibling modules, and inheriting would turn all of it strict at
-once). It escalates **preconditions at call sites** only, so an undischarged
-postcondition slips through. It doesn't reach into `impl` or `interface` method
-bodies. And there's **no `@[trusted]` escape hatch yet** — if one obligation in the
-module genuinely can't be discharged, your options are an `assert` or dropping
-`cap verified` entirely. That makes it a good fit for a small, deliberately-verified
-module today, and not yet something to switch on across a codebase.
+once).
+
+It *does* now reach every declaration form in the module it's written in. The walk
+used to descend only into `fn` and nested `mod` and quietly ignore the rest, so a call
+inside an `impl` method, an `interface` default body, a top-level `let`, an actor
+handler or a `test` raised no obligation and had nothing to escalate. Both that walk
+and `cap no_panic`'s are now exhaustive, so a future declaration form is a compile
+error in the compiler rather than a new silent hole.
+
+Three things it still doesn't do, and you should know all three before trusting it:
+
+- **Postconditions are outside the ledger entirely.** A refined *return* type goes
+  down a separate path that files no record, so `cap verified` neither reports nor
+  escalates a return refinement it couldn't discharge — and `--refine-report`
+  undercounts by exactly that much. `cap verified` is a guarantee about preconditions
+  at call sites, full stop.
+- **A refinement in an `interface`'s own method signature isn't enforced.** Write
+  `fn run : a -> {Int | _ > 0} -> Int` in the interface and no call site is obliged by
+  it. Nothing assumes it either, so it's a missing check rather than an unsound one —
+  but put the refinement on the `impl` method's parameter, where it *is* enforced.
+
+  Even there, enforcement is conditional. An `impl` method's parameter refinement
+  obliges callers only when the method's name unambiguously denotes it: no `fn` in the
+  same module owns the name, and only one `impl` defines the method. A call is resolved
+  here by *name* while it dispatches by *type*, and checking correct code against a
+  predicate it never touches is the one failure this subsystem must never have. When
+  the name is ambiguous the refinement binds **nobody** — it's stripped from the body
+  too, so it can't discharge anything either. Unenforced means unusable in both
+  directions, never "assumed inside the body but demanded of no caller", which is
+  exactly how `fn run(b, k : {Int | k != 0})` once made `m / k` provable under
+  `cap no_panic` while `run(Box(4), 0)` compiled and then divided by zero.
+- **There's no `@[trusted]` escape hatch yet.** If one obligation in the module
+  genuinely can't be discharged, your options are an `assert` or dropping
+  `cap verified` entirely.
+
+That makes it a good fit for a small, deliberately-verified module today, and not yet
+something to switch on across a codebase.
+
+---
+
+## `cap no_panic` — Divisions That Can't Panic
+
+`cap verified`'s sibling takes the same "silence is not good enough" stance and points
+it at one specific runtime panic: integer division by zero. Declare `cap no_panic` in a
+module and **every** `/` and `%` in it must have a divisor the checker can prove
+non-zero. Anything short of a proof is a compile error — that's the whole promise, and
+it's why this capability fails closed where the default refinement stance fails open.
+
+A divisor is discharged by a literal, by a path condition, or by a refinement on the
+parameter it came from. Both sides of a guard count:
+
+```march
+mod NonlinearDivisor do
+  cap no_panic
+
+  fn scale(d : {v : Int | v * v > 0}) : Int do
+    10 / d
+  end
+
+  fn guarded(d : {v : Int | v * v > 0}) : Int do
+    if d == 0 do 0 else 10 / d end
+  end
+
+  fn main() do
+    println(int_to_string(scale(2) + guarded(5)))
+  end
+end
+```
+
+Both of those are accepted. `v * v > 0` is exactly `v != 0` over the integers, and the
+checker now hands such a predicate to the solver rather than refusing to read it —
+rejecting a *complete* proof for being written unusually was a false positive on
+correct code. The stance itself hasn't moved: a predicate that reflects but proves
+nothing (`v * v >= 0`, true of every integer) is still an error, and so is one the
+solver can't settle. And on the `else` side of `if d == 0` the fact in scope is
+`not (d == 0)`, which discharges the division on its own.
+
+**It covers the whole module.** Until recently the division walk saw only `fn` and
+nested `mod` bodies, so this program passed `--check` with exit 0 and then died at run
+time with "division by zero":
+
+```march
+mod ImplDiv do
+  cap no_panic
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+        Box(n) -> 100 / n
+      end
+    end
+  end
+
+  fn main() do
+    println(int_to_string(run(Box(2))))
+  end
+end
+```
+
+It's a compile error now. Add the `if n != 0` guard and it's accepted again — the walk
+reads the body, it doesn't just distrust it. Top-level `let`s, `interface` defaults,
+actor handlers, `app` hooks and `test` bodies are covered the same way.
+
+**A rebound name knows nothing about the old one.** Every fact the divisor check reads
+is keyed by a bare variable name — the path condition, the parameter's refinement, a
+`let`'s value — so rebinding that name has to retire all of them, and it didn't. All
+four of these passed `--check` and then panicked:
+
+```march
+if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+```
+
+(Compressed onto one line each for comparison — March has no `;`, so the `let` really
+sits on its own line inside the branch.)
+
+A `let`, a local `fn`, a lambda parameter, a `let?` pattern or a `match` binder now
+drops everything known about the outer variable of that name. Note which way this
+errs: in the ordinary refinement checker, losing a fact means silence, but here it
+means an *error*, so the retirement is deliberately over-eager. If you need the guard
+inside the rebinding scope, re-state it there. Correct code is unaffected —
+`let d = 5` followed by `10 / d` still passes, because the new binding replaces the old
+fact rather than merely erasing it.
+
+**One asymmetry to know:** a refinement on an `impl` method's parameter can discharge a
+division inside that method's body only when callers are actually obliged to establish
+it — the two passes share one adoption rule so they can't drift apart. See
+[the `cap verified` edges](#cap-verified--making-silence-an-error) for when that
+adoption happens.
 
 ---
 
@@ -638,8 +800,10 @@ dependent typing. Know the edges:
   `List.length`, `String.byte_size`, and the `string_byte_length` builtin discharge a
   `len` obligation; a bare `length`, `String.codepoint_count`, and `string_length` do
   not, and a guard written with those leaves the call *skipped* rather than proved.
-  The connection is also dropped module-wide if the name could denote something other
-  than the standard library's own function. See [the solver really does connect
+  The connection is also dropped for the whole **compilation unit** — every prepended
+  stdlib module and every `MARCH_LIB_PATH` dependency included — if a single binding
+  anywhere in it could make the name denote something other than the standard library's
+  own function. See [the solver really does connect
   `List.length` to `len`](#the-solver-really-does-connect-listlength-to-len).
 - **Relational postconditions work, within structural recursion.** A predicate
   that relates a measure across an operation — `size(insert(t, x)) == size(t) + 1`

@@ -1,13 +1,40 @@
 # March — TODO List
 
-**Last updated:** 2026-07-29 (`cap no_panic` now retires every fact about a name a `let`/lambda/`match`/local-`fn` rebinds — `if d == 0 do 0 else (let d = 0; 10 / d) end` passed `--check` and then panicked; earlier the same day: a withdrawn measure alias explains itself, `cap no_panic` discharges a divisor refinement before rejecting it, capability walks exhaustive over `A.decl`; also merged in: the optimizer's purity oracle no longer misjudges a monomorphized builtin call as pure (2026-07-28); see below and Done.)
-**Last updated:** 2026-07-29 (a withdrawn measure alias now explains itself: a `cap verified` module no longer says `solver-undecided` when the real cause is that a `List.length`/`String.byte_size`/`string_byte_length` binding elsewhere in the unit withdrew the alias — suppression unchanged, only the attribution; earlier the same day: `cap no_panic` discharges a divisor refinement before rejecting it, and the capability walks made exhaustive over `A.decl`; see below and Done.)
-**Last updated:** 2026-07-29 (`cap no_panic` now DISCHARGES a divisor refinement before rejecting it — `{v : Int | v * v > 0}` is a complete proof of `v != 0` and was being reported as unreflectable — and reads negated path conditions on both routes; earlier the same day: capability walks made exhaustive over `A.decl`; see below and Done.)
+**Last updated:** 2026-07-29 (refinement-guarantee sweep, one branch: a glob import no longer withdraws the measure aliases on sight — one `import Process` in `stdlib/system.march` had disabled the `List.length` alias for EVERY March program, invisibly, since a skip exits 0 just like a proof; `cap no_panic` retires every fact about a rebound name — `if d == 0 do 0 else (let d = 0; 10 / d) end` passed `--check` then panicked; a withdrawn alias explains itself under `cap verified` instead of blaming z3; `cap no_panic` discharges a divisor refinement before rejecting it; a refinement on an `impl` method parameter obliges callers or binds nobody; both capability walks — and desugar's `strip_entry_self_qual` — exhaustive over `A.decl`; the CI obligation ratchet gained a proof FLOOR; also merged in: the optimizer's purity oracle no longer misjudges a monomorphized builtin call as pure (2026-07-28); see below and Done.)
 **Last updated:** 2026-07-28 (refinement legibility: `--refine-report` obligation counts, `List.length`/`String.byte_size` aliased to the `len` measure, `cap verified`, and a `cap no_panic` unreflectable-divisor fix; earlier: non-empty-collection contracts + measure-over-self binder spellings; `Json.parse` signed exponents, on top of the byte-index scanner rewrite + `string_byte_at` builtin; module-qualified ctor pattern silently failed to match compiled; interpolating a String no longer costs a refcount pair; see below and Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV filed earlier the same day — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value, removing a per-materialization leak; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 **Last updated:** 2026-07-28 (fixed the compiled-only zero-arg function-value SIGSEGV — `let zf = answer; zf()` now rejected at `--check` instead of crashing; static capture-free closures — one immortal global per top-level function value AND per capture-free lambda value, removing a per-materialization leak in both cases; one out-of-scope bug remains filed open — capturing-closure leak; see Done.)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
+
+---
+
+## One `import` in the stdlib disabled the measure aliases for every March program (FIXED 2026-07-29)
+
+The gates that withdraw the `List.length` / `String.byte_size` /
+`string_byte_length` measure aliases are unit-global, and both treated a **glob
+import** (`use X.*` / `import X`) as a competitor on sight, reasoning that it
+might carry anything. `bin/main.ml` prepends the entire standard library to
+every compilation, and `stdlib/system.march` line 24 is `import Process`. So the
+alias was withdrawn for **every March program ever compiled** with the feature:
+`if List.length(ys) > 0 do head(ys) else 0 end` proved nothing, anywhere.
+
+Nothing caught it, and the reason is the point. A withdrawn alias makes the
+obligation *skipped*, and a skip exits 0 exactly as a proof does — so
+`accept/t118` passed, the whole suite stayed green, and the feature was inert in
+production. Bisect: every commit on this branch exits 1 on `reject/t117`; the
+`origin/main` merge exits 0. Only two instruments can see it — the REJECT
+witness, and the `--refine-report` proof FLOOR added the same day (`t118` drops
+from 1 proved to 0). This is the strongest argument on record for the floor.
+
+Fixed by resolving the glob instead of assuming: `glob_import_competes` walks the
+compilation unit's own module structure to the import's target and withdraws only
+if that module actually provides the competing member (a `use` inside the target
+is followed transitively under a fuel bound). An unresolvable path or exhausted
+fuel still withdraws — precision is added only where the contents are in hand,
+and the direction of doubt is unchanged, since under-suppressing would put a
+wrong fact in the assumption set and report correct code. A real competitor
+reached through a glob is still caught. Verified both directions.
 
 ---
 
@@ -293,8 +320,14 @@ enforcing nothing while the suite stayed green.
   whole stdlib). Measured baseline on `stdlib/list.march`: user-only
   `0 proved, 0 violated, 5 skipped`; user + stdlib `8 proved, 0 violated,
   28 skipped`.
-- CI ratchet on the whole-program skip count (ceiling 28), in the `conformance`
-  job — `doc-lint` has neither a built compiler nor z3.
+- CI ratchet in the `conformance` job (`doc-lint` has neither a built compiler
+  nor z3): a **ceiling** on the whole-program skip count (28, from
+  `stdlib/list.march`) **and**, since 2026-07-29, a **floor** on proofs (1, read
+  from the `user code` slice of `accept/t118`). A ceiling alone is not a ratchet
+  — a checker raising no obligations satisfies it — and the floor must sit on a
+  fixture whose count actually moves: `stdlib/list.march` proves 0 in user code
+  and its whole-program 8 does not budge under the regressions the floor exists
+  to catch. Observed failing (proved=0) with the alias withdrawn, then passing.
 - `List.length` / `String.byte_size` / `string_byte_length` aliased to the `len`
   measure, so runtime length guards discharge `len` obligations. Narrow and
   withdrawable; `string_length` deliberately abstained from (byte length today,
@@ -308,12 +341,42 @@ enforcing nothing while the suite stayed green.
 - **No `@[trusted]` escape hatch.** `cap verified` has no way to accept a single
   obligation the checker cannot discharge; the only outs are `assert` or dropping
   the capability. Until this exists, `cap verified` is not usable at scale.
-- **`cap verified` does not cover `DImpl`/`DInterface` method bodies.** The pass
-  walks `DFn` and nested `DMod` only, so calls inside an interface implementation
-  raise no obligation and cannot escalate.
+- ~~**`cap verified` does not cover `DImpl`/`DInterface` method bodies.**~~
+  **CLOSED 2026-07-29** — both obligation-raising walks are now exhaustive over
+  `A.decl` with no wildcard; see "Capability walks skipped every declaration form
+  but `fn` and `mod`" above. What remains of this item is narrower and is filed
+  as its own follow-up below (a refinement in an *interface's own signature* is
+  still unenforced).
+- **A refinement in an `interface`'s OWN method signature is unenforced.**
+  `fn run : a -> {Int | _ > 0} -> Int` written in the interface obliges no call
+  site. Nothing assumes it either, so this is a missing check rather than an
+  unsound one — but it silently does nothing, which is the failure mode this
+  area keeps producing. The supported spelling is a refinement on the `impl`
+  method's parameter (adopted when the method name is unambiguous).
 - **Postconditions are not in the ledger.** `check_post` neither records nor
-  escalates, so `--refine-report` undercounts and `cap verified` silently permits
-  an undischarged return refinement.
+  escalates, so `--refine-report` undercounts by every undischarged *return*
+  refinement and `cap verified` silently permits one. Still open as of
+  2026-07-29 and stated in both `specs/lang/refinement-types.md` and
+  `docs/refinement-types.md`.
+- **The measure-alias gates are unit-global.** One genuine competing binding
+  anywhere in the compilation unit — the prepended stdlib, or any
+  `MARCH_LIB_PATH` dependency the author never opened — withdraws
+  `List.length` / `String.byte_size` / `string_byte_length` as measure aliases
+  for the entire program. Deciding whether a competitor could actually win at a
+  given call site needs a resolver the pass does not have there, and the error
+  directions are asymmetric (over-withdraw = silence, under-withdraw = a false
+  positive), so the coarseness is deliberate — but it is a real coverage cost
+  and the glob-import regression below shows how invisibly it can bite.
+- **`collect_direct_names` (`lib/desugar/desugar.ml`) still ends in a wildcard**,
+  covering only `DFn` and `DLet`. It is the fifth walk of this family and the one
+  that was not made exhaustive; it decides which self-qualified spellings
+  `strip_entry_self_qual` rewrites.
+- **Impl-method contract adoption ignores `use`-imported impl methods** when
+  judging whether a method name is ambiguous: `adoptable_impl_methods` counts
+  only the compilation unit's own `DFn`/`DImpl` declarations.
+- **`alias-withdrawn` attribution does not follow a laundered guard.**
+  `let n = List.length(ys)` then `if n > 0` falls back to the general
+  `solver-undecided` message even when the withdrawal really was the cause.
 - **A qualified spelling INSIDE a predicate enforces nothing, silently.**
   `{List(Int) | List.length(_) > 0}` parses and typechecks, and enforces
   nothing at all: refinement predicates are not run through desugar, so

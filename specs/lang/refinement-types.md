@@ -231,11 +231,35 @@ function would manufacture false positives:
   the source files the compiler actually loaded, so it works the same from a
   repo checkout, an installed `share/march`, or a `MARCH_STDLIB` pointing
   anywhere.
-- **Withdrawn for the whole module** if anything could make that spelling denote
-  a different function — a program defining its own `List.length`, a vendored or
-  forked `List` arriving through `MARCH_LIB_PATH`, or rebinding `List` via
-  `alias`/`use`. In those cases the obligation goes back to unprovable-and-
-  skipped, which is the pre-alias behaviour.
+- **Withdrawn for the whole compilation unit** if anything in it could make that
+  spelling denote a different function — a program defining its own
+  `List.length`, a vendored or forked `List` arriving through `MARCH_LIB_PATH`,
+  or rebinding `List` via `alias`/`use`. In those cases the obligation goes back
+  to unprovable-and-skipped, which is the pre-alias behaviour.
+
+  **The gate is unit-global, and the unit is bigger than the file you are
+  editing.** `bin/main.ml` prepends the entire standard library to every
+  compilation, and `MARCH_LIB_PATH` adds every `.march` file in every dependency
+  directory. One genuine competitor anywhere in that set disables the alias for
+  the whole program, including in files that never mention it. This is a real
+  coverage cost, accepted deliberately: deciding whether a competitor could
+  actually win at a given call site needs a resolver this pass does not have,
+  and the errors are asymmetric — over-withdrawing loses a proof (silence),
+  under-withdrawing puts a wrong fact in the assumption set and reports correct
+  code, which is the cardinal sin.
+
+- **A glob import RESOLVES its target instead of assuming the worst** (since
+  2026-07-29). `import Foo` / `use Foo.*` withdraws the alias only if `Foo`
+  actually provides a competing member, decided by walking the compilation
+  unit's own module structure (a `use` inside the target is followed
+  transitively, under a fuel bound); an unresolvable path, or exhausted fuel,
+  still withdraws. Before this, the mere presence of a glob was enough — and
+  since `stdlib/system.march` carries a single `import Process` and the stdlib
+  is prepended to everything, the alias was withdrawn for **every March program
+  ever compiled**. The feature was inert in production and the suite stayed
+  green, because a skipped obligation exits 0 exactly as a proved one does; only
+  a REJECT witness (`reject/t117`) and the `--refine-report` proof *floor* can
+  see the difference.
 
 The same treatment applies to strings — see
 [String Refinements](#string-refinements).
@@ -537,10 +561,14 @@ Only byte-valued spellings are aliased, because `len` is a byte count:
 The same withdrawal rules as the list alias apply: a program that defines its own
 `String.byte_size` (unless it *is* the standard library's) — in any declaration
 form: a `fn`, a module-level `let`, an `extern` block, an interface or impl
-method — rebinds `String` via `alias`/`use`/`import`, or binds the name
+method — rebinds `String` via `alias`/`use`, or binds the name
 `string_byte_length` itself — as a declaration,
 an import, a `let`, a lambda or `fn` parameter, or a match binder — loses the
-alias for the whole module, and the obligation returns to being skipped.
+alias for the whole **compilation unit** (prepended stdlib and every
+`MARCH_LIB_PATH` dependency included), and the obligation returns to being
+skipped. A glob import withdraws only if its resolved target really provides the
+competitor; see
+[`List.length` is an alias of the `len` measure](#listlength-is-an-alias-of-the-len-measure).
 
 ### What String refinements do *not* do
 
@@ -811,8 +839,20 @@ Two slices are printed because the compiler prepends the whole standard library
 to every compilation: **user code** counts only obligations raised at call sites
 in the file you named, **user + stdlib** counts every obligation raised in the
 run. Use the first to judge your own module; use the second as a whole-program
-coverage number (March's CI ratchets on it, so a change that quietly stops
-checking things fails the build).
+coverage number.
+
+**CI ratchets on both, from two different fixtures, and that split is
+load-bearing.** The skip **ceiling** reads `stdlib/list.march`'s `user + stdlib`
+slice (28 skips, 8 proved as of 2026-07-29). The proof **floor** reads the
+`user code` slice of `accept/t118` (1 proved), because a ceiling alone is not a
+ratchet — a checker that raises no obligations at all satisfies it perfectly.
+The floor cannot live on `stdlib/list.march`: its `user code` slice proves 0, and
+its whole-program `8 proved` is dominated by obligations that survive the very
+regressions the floor exists to catch. `t118` is a program whose single
+obligation is *proved* by a `List.length` guard, so it drops to `0 proved` the
+moment the measure alias stops working — which is exactly what the unit-global
+glob-import bug did to every March program, invisibly, while `t118` still exited
+0 (a skip and a proof are both exit 0; only the count tells them apart).
 
 Each skip is attributed to one of six reasons:
 
@@ -911,11 +951,12 @@ end
 (alias-withdrawn: the guard uses `List.length`, but this compilation unit also
 BINDS that name, so the checker withdrew its built-in measure meaning and the
 guard proved nothing)
-note: a binding of `List.length` elsewhere in this compilation unit
+note: at least one binding of `List.length` in this compilation unit
 (ver3.march:5) withdrew the alias for the WHOLE unit, including this call — the
 gate is unit-global and syntactic, so it does not matter whether that binding
-could ever win here.  Rename it, move it out of this unit, or restate the fact
-as a refinement the checker can use directly
+could ever win here.  There may be others: renaming or moving every one of them
+out of this unit restores the alias, and restating the fact as a refinement
+avoids the guard entirely
 ```
 
 The nested `length` is reachable only as `Ver3.Internal.List.length` and does
@@ -1031,6 +1072,42 @@ control with the competing binding deleted).
   `cap verified` from the module. Until an escape hatch exists, `cap verified`
   is a tool for small, deliberately-verified modules rather than a whole-codebase
   setting.
+
+### Open holes, stated as of 2026-07-29
+
+Everything above says what these capabilities *do*. This is the complementary
+list — what a reader must not assume — kept here rather than only in
+`specs/todos.md` so that nobody reads a guarantee out of the absence of a
+caveat. None of these is known to be *unsound* in the "assumed but unchecked"
+sense; each is a check that does not happen.
+
+1. **A refinement in an `interface`'s own method signature is unenforced.**
+   Nothing assumes it either. Put it on the `impl` method's parameter.
+2. **The measure-alias gates are unit-global.** One genuine competitor anywhere
+   in the compilation unit — including in a `MARCH_LIB_PATH` dependency you
+   never opened — disables `List.length` / `String.byte_size` /
+   `string_byte_length` as measure aliases for the entire program. Under the
+   default stance that is silence; under `cap verified` it is a build failure,
+   which is why the `alias-withdrawn` reason exists.
+3. **Postconditions are outside the ledger.** `check_post` neither records an
+   obligation nor escalates one, so `--refine-report` *undercounts* by every
+   return refinement it could not discharge, and a `cap verified` module
+   silently permits an undischarged **return** refinement. `cap verified` is a
+   guarantee about preconditions at call sites only.
+4. **There is no `@[trusted]`.**
+5. **`collect_direct_names` in `lib/desugar/desugar.ml` still ends in a
+   wildcard**, covering only `DFn` and `DLet`. It decides which self-qualified
+   spellings `strip_entry_self_qual` rewrites, so an entry module that declares
+   the name in some other form keeps the qualified spelling — which is what
+   makes `accept/t126` / `t127` discriminating, but is a hole of the same
+   family as the four that were closed.
+6. **Impl-method contract adoption ignores `use`-imported impl methods** when
+   judging whether a method name is ambiguous. The judgement is made over the
+   compilation unit's own declarations; an impl brought in under a `use` is not
+   counted as a competitor for the name.
+7. **`alias-withdrawn` attribution does not follow a laundered guard.**
+   `let n = List.length(ys)` followed by `if n > 0` falls back to the general
+   `solver-undecided` message even when a withdrawal really was the cause.
 
 ---
 

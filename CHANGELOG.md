@@ -48,11 +48,15 @@ git log is authoritative for exact commits.
   a violation only when a predicate can *never* hold, which makes silence
   ambiguous between "proved" and "not checkable" — an ambiguity that let
   `{List(a) | len(_) > 0}` ship enforcing nothing while the suite stayed green.
-  CI now ratchets on the whole-program counts — a ceiling on skips *and* a floor
-  on proofs, since a ceiling alone is satisfied by a checker that raises no
-  obligations at all — so a change that quietly stops checking things fails the
-  build. Counts cover precondition obligations raised at call sites;
-  postconditions are not in the ledger.
+  CI now ratchets in both directions — a ceiling on skips, read from the
+  whole-program counts, *and* a floor on proofs, since a ceiling alone is
+  satisfied by a checker that raises no obligations at all. The floor is read
+  from the **user-code** slice of a fixture whose single obligation is actually
+  *proved*, so it falls to zero the moment that proof stops happening; a
+  whole-program proof count would not have moved. So a change that quietly stops
+  checking things fails the build. Counts cover precondition obligations raised
+  at call sites; postconditions are not in the ledger, so the report undercounts
+  by every undischarged return refinement.
 
 - **A `List.length` guard now discharges a `len` refinement obligation.** The
   refinement checker treats `List.length` as an alias of the `len` measure, so
@@ -145,6 +149,22 @@ git log is authoritative for exact commits.
   while the identical call in a sibling `fn` was reported. That match is now
   exhaustive too, and also covers `interface` defaults, `app` hooks, `test`,
   `setup`/`setup_all`, `describe` and actor `@invariant` expressions.
+
+- **The `List.length` / `String.byte_size` measure aliases were disabled for
+  *every* March program, by one `import` in the standard library.** The gates
+  that withdraw those aliases are unit-global, and a glob import (`import X`,
+  `use X.*`) used to withdraw on its mere presence, on the reasoning that it
+  might carry anything. But the compiler prepends the entire standard library to
+  every compilation, and `stdlib/system.march` contains a single
+  `import Process` — so every March program compiled since the feature shipped
+  had the aliases withdrawn, and a `List.length` guard proved nothing anywhere.
+  Nothing caught it: a withdrawn alias means the obligation is *skipped*, and a
+  skip exits 0 exactly as a proof does, so the whole test suite stayed green
+  while the feature was inert. A glob now resolves its target and withdraws only
+  if that module actually provides a competing member (an unresolvable path
+  still withdraws, and a real competitor reached through a glob is still caught).
+  The blast radius is why the obligation *floor* in CI was moved onto a fixture
+  whose count actually drops when this happens.
 
 - **`cap verified`: a length guard that "silently stopped counting" now says so,
   instead of blaming the solver.** The `List.length` / `String.byte_size` /
@@ -306,6 +326,25 @@ git log is authoritative for exact commits.
   Scope is unchanged — ASCII only, non-ASCII bytes pass through untouched.
 
 ### Documentation
+
+- **The refinement-types pages now state what is *not* checked, and two
+  over-claims were corrected.** `specs/lang/refinement-types.md` gained an "Open
+  holes" list and `docs/refinement-types.md` a `cap no_panic` section covering
+  what that capability actually promises. Corrected: "every declaration form is
+  covered" was true of *raising* obligations but read as "a refinement on an
+  `impl` signature is enforced", which holds only when the method name
+  unambiguously denotes one contract; and this changelog's claim that modules
+  declaring no capability were unaffected was false, since a *provably violated*
+  obligation is reported regardless of any capability. Both pages also quoted an
+  `alias-withdrawn` diagnostic whose wording no longer matched the compiler's,
+  found by re-running every published snippet. The residuals are now written
+  down rather than left to inference: a refinement in an `interface`'s own
+  signature is unenforced; the measure-alias gates are unit-global, so one
+  competing binding anywhere — including in a `MARCH_LIB_PATH` dependency —
+  disables the alias program-wide; postconditions are outside the obligation
+  ledger, so `--refine-report` undercounts and `cap verified` silently permits an
+  undischarged *return* refinement; and there is still no `@[trusted]` escape
+  hatch.
 
 - `stdlib/string.march` no longer claims the runtime has small-string
   optimisation. It had stated since 2026-03-19 that "strings of 15 bytes or
