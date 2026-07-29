@@ -21,6 +21,8 @@ mod System do
   needs IO.Process
   needs IO.Clock
 
+  import Process
+
   -- ---- Platform detection ----
 
   doc """
@@ -117,10 +119,6 @@ mod System do
   end
 
   -- ---- Subprocess execution ----
-
-  -- Result of a completed subprocess.
-  -- Mirrors Process.ProcessResult for symmetry.
-  type ProcessResult = ProcessResult(Int, String, String)
 
   doc """
   Run an external command synchronously, capturing stdout.
