@@ -107,10 +107,27 @@ let has_refine_warning src =
       d.March_errors.Errors.severity = March_errors.Errors.Warning)
     ctx.March_errors.Errors.diagnostics
 
+(* Most of this suite needs a solver, so a z3-less machine cannot run it.  What
+   it must NOT do is report those cases as PASSING.  [gated] used to print a
+   "[skip]" line and then return unit, which alcotest scores as `[OK]`: on a
+   machine without z3 the entire gated corpus went green and the exit code said
+   nothing at all — a developer could "run the refinement tests" and learn
+   precisely zero.  [Alcotest.skip] raises instead, so those cases are reported
+   as `[SKIP]` and counted as skipped in the summary line.
+
+   RESIDUAL HAZARD, stated plainly because it cannot be removed from here:
+   alcotest still EXITS 0 when every test skipped, so a green exit code is not
+   by itself evidence that anything was verified.  Read the summary line — it
+   distinguishes "N tests run" from "N skipped".  CI installs z3 (see
+   .github/actions/march-setup/action.yml), so on CI nothing here is skipped;
+   this is a developer-local hazard.  Cases that do NOT need a solver are
+   deliberately built with a plain [Alcotest.test_case] rather than [gated] —
+   see [cap_verified_suite], [reason_suite] and [divsafety_hole_suite] — since
+   gating a test whose subject is fail-closed behaviour would disable it
+   exactly when verification is unavailable. *)
 let gated name f =
   Alcotest.test_case name `Quick (fun () ->
-      if z3_available () then f ()
-      else Printf.printf "\n[skip] %s: no z3 on PATH\n" name)
+      if z3_available () then f () else Alcotest.skip ())
 
 let decl n =
   Printf.sprintf
@@ -3109,17 +3126,30 @@ let float_suite =
    was SKIPPED, which from outside is indistinguishable from proved.  Only a
    guard that must FIRE proves the two symbols actually meet. *)
 let length_alias_suite =
+  (* Asserts the LEDGER, not silence.  Silence is what a SKIP looks like too, so
+     `check bool "no error" false` here passed with the alias deleted — the very
+     confusion the obligation ledger exists to end.  `1 proved, 0 skipped` is a
+     claim only a working alias can satisfy.
+     Mutation that fails this: make [measure_alias] return [None] always
+     (lib/refinecheck/refine_check.ml) — proved drops 1→0, skipped 0→1. *)
   [ gated "a List.length guard discharges a len obligation" (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error_d
-             {|
+        let src =
+          {|
 mod L1 do
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
   fn go(ys : List(Int)) : Int do
     if List.length(ys) > 0 do head(ys) else 0 end
   end
   fn main() : Int do go([1]) end
-end|}));
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
 
     gated "a contradictory List.length guard IS a violation" (fun () ->
         Alcotest.(check bool) "error" true
@@ -3405,17 +3435,27 @@ end|}
    proved.  Desugared throughout — `String.byte_size(t)` is an `EField` chain
    until desugar flattens it to a dotted `EVar`. *)
 let string_alias_suite =
+  (* Ledger, not silence — see the note on [length_alias_suite]'s first case.
+     Mutation that fails this: make [measure_alias] return [None] always;
+     proved drops 1→0 and the obligation reappears as a skip. *)
   [ gated "a String.byte_size guard discharges a String len obligation" (fun () ->
-        Alcotest.(check bool) "no error" false
-          (has_refine_error_d
-             {|
+        let src =
+          {|
 mod S1 do
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) > 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
-end|}));
+end|}
+        in
+        March_refinecheck.Obligation.reset ();
+        Alcotest.(check bool) "no error" false (has_refine_error_d src);
+        let proved, violated, skips = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 1 proved;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 0
+          (List.fold_left (fun a (_, n) -> a + n) 0 skips));
 
     gated "a contradictory String.byte_size guard IS a violation" (fun () ->
         Alcotest.(check bool) "error" true
@@ -3825,6 +3865,145 @@ let obligation_suite =
           (List.fold_left (fun a (_, n) -> a + n) 0 skips))
   ]
 
+(* ── Reason CLASSIFICATION ─────────────────────────────────────────────────
+   [obligation_suite] above counts skips; these pin WHICH reason each skip is
+   filed under.  A count cannot tell the difference, and the difference is the
+   whole reason several of these constructors exist: [Unreflectable_subject]
+   was split out of [Unreflectable_predicate] precisely so a record-typed
+   SUBJECT that failed to reflect is not reported as an unreflectable
+   PREDICATE — a user with a perfectly ordinary predicate would otherwise be
+   told to rewrite it and sent after the wrong thing.  Nothing checked that
+   split ever fired, so the two could have been silently re-conflated (or
+   swapped) with the suite still green.
+
+   Gating: only the [Solver_undecided] case reaches the solver.  The other
+   three are decided at reflection / sort-gate time, BEFORE [Refine.discharge],
+   so gating them would disable them on a z3-less machine for no reason — and
+   worse, [Solver_undecided] is the fallthrough every obligation lands in when
+   there is no solver, so an ungated reason test would pass by accident there.
+   Verified empirically with z3 off PATH. *)
+let skip_reasons src =
+  March_refinecheck.Obligation.reset ();
+  ignore (has_refine_error_d src);
+  List.filter_map
+    (fun (o : March_refinecheck.Obligation.t) ->
+      match o.March_refinecheck.Obligation.verdict with
+      | March_refinecheck.Obligation.Skipped r ->
+        Some (March_refinecheck.Obligation.reason_name r)
+      | _ -> None)
+    (March_refinecheck.Obligation.all ())
+
+let reason_suite =
+  [ (* A RECORD subject whose actual cannot be reflected: `mk()` is a call, so
+       [record_self] finds no term for it and no goal is built at all.  The
+       predicate `v.port >= 1` is entirely reflectable — which is the point:
+       blaming it would be a lie.
+       Mutation that fails this: in refine_check.ml, change the `\`Skip` arm of
+       the reason match to [Unreflectable_predicate] (i.e. undo the split). *)
+    Alcotest.test_case "an unreflectable SUBJECT is not blamed on the predicate"
+      `Quick (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS1 do
+  type Config = { port : Int }
+  fn mk() : Config do { port: 1 } end
+  fn serve(c : {v : Config | v.port >= 1}) : Int do c.port end
+  fn f() : Int do serve(mk()) end
+end|}
+        in
+        Alcotest.(check (list string)) "unreflectable-subject"
+          [ "unreflectable-subject" ] rs);
+
+    (* Reflection SUCCEEDS here — `_ > "a"` builds a term — but it compares the
+       `$Str`-sorted subject with an Int-sorted side, which [wellsorted]
+       rejects before any VC is sent.  Sending it would put an `(error …)` line
+       on the shared `z3 -in` channel.
+       Mutation that fails this: make [sort_conflict] return [false] always,
+       or make [wellsorted] return [true] always — the obligation then reaches
+       the solver and is filed [solver-undecided] instead. *)
+    Alcotest.test_case "a Str/Int sort clash is filed as sort-conflict" `Quick
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS2 do
+  fn f(s : {String | _ > "a"}) : Int do 1 end
+  fn go(t : String) : Int do f(t) end
+end|}
+        in
+        Alcotest.(check (list string)) "sort-conflict" [ "sort-conflict" ] rs);
+
+    (* `_ > 0` on a Float subject: [fp_rewrite] declines (only one side is
+       float-sorted), so the term still mentions a float outside an `fp.*`
+       comparison and [float_wellsorted] abandons the VC.
+       Mutation that fails this: make [float_wellsorted] return [true] always —
+       the goal is emitted, the solver runs, and the reason becomes
+       [solver-undecided]. *)
+    Alcotest.test_case "a Float/Int comparison is filed as float-sort-gate" `Quick
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS3 do
+  fn f(x : {Float | _ > 0}) : Float do x end
+  fn go(y : Float) : Float do f(y) end
+end|}
+        in
+        Alcotest.(check (list string)) "float-sort-gate" [ "float-sort-gate" ] rs);
+
+    (* The genuine solver outcome, with a CONTROL.  Without the control this
+       test would pass on a z3-less machine for the wrong reason: with no
+       solver EVERY obligation falls through to [Solver_undecided].  The
+       control — the same call under a guard that discharges it — can only be
+       [Proved] when a solver actually ran and decided, so the pair together
+       says "z3 ran, and on the unguarded call it declined".
+       Mutation that fails this: replace the final `| _ -> note (Skipped
+       Solver_undecided)` arm with any other reason. *)
+    gated "a genuinely undecided obligation is filed as solver-undecided" (fun () ->
+        let control =
+          {|mod RS4b do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "the control is decided, not skipped" []
+          (skip_reasons control);
+        let rs =
+          skip_reasons
+            {|mod RS4 do
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do head(ys) end
+end|}
+        in
+        Alcotest.(check (list string)) "solver-undecided" [ "solver-undecided" ] rs);
+
+    (* [Alias_withdrawn] is checked in [alias_attribution_suite] through the
+       `cap verified` MESSAGE text, which is the user-facing surface.  It is
+       also re-attributed in the LEDGER (see [note] in refine_check.ml), and
+       `--refine-report` prints the ledger, so a ledger that disagreed with the
+       diagnostic would be a second thing to be confused by.  Pin the ledger
+       side directly, including that it is not left as [solver-undecided].
+       Mutation that fails this: move the re-attribution in [note] to after
+       [Obligation.record], so only the message is re-attributed. *)
+    gated "a withdrawn alias is re-attributed in the LEDGER, not just the message"
+      (fun () ->
+        let rs =
+          skip_reasons
+            {|mod RS5 do
+  mod Internal do
+    mod List do
+      fn length(xs : List(Int)) : Int do 99 end
+    end
+  end
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) > 0 do head(ys) else 0 end
+  end
+end|}
+        in
+        Alcotest.(check (list string)) "alias-withdrawn" [ "alias-withdrawn" ] rs)
+  ]
+
 (* ── `cap verified`: an obligation the checker SKIPS becomes an error ─────
    The default stance reports only definite failures; `cap verified` inverts
    that for the module that asks for it.  The load-bearing test is the third
@@ -3840,8 +4019,23 @@ let refine_error_texts src =
       else None)
     ctx.March_errors.Errors.diagnostics
 
+(* NOTE ON GATING (same reasoning as [divsafety_hole_suite] below): five of these
+   six cases never reach the solver, so gating them on z3 would DISABLE the
+   fail-closed tests exactly on the machine where verification is unavailable —
+   the one place fail-closed behaviour matters most.  `is_prime` fails at
+   REFLECTION ([smt_of] returns None) and the escalation happens in that `None`
+   arm, before [Refine.discharge] is ever called; the two scoping cases and the
+   message case ride the same arm.
+   The one genuine exception is "a PROVED obligation stays silent": with no
+   solver every obligation falls through to [Solver_undecided], which under
+   `cap verified` escalates to an error, so that case asserts silence that only
+   a real solver can produce.  It stays [gated].
+   Verified empirically by running this group with z3 removed from PATH:
+     env PATH=/usr/bin:/bin ./_build/default/test/test_refinecheck.exe \
+       test cap-verified -e *)
 let cap_verified_suite =
-  [ gated "cap verified: an unreflectable predicate is an ERROR" (fun () ->
+  [ Alcotest.test_case "cap verified: an unreflectable predicate is an ERROR" `Quick
+      (fun () ->
         Alcotest.(check bool) "error" true
           (has_refine_error
              "mod V1 do\n\
@@ -3860,7 +4054,8 @@ let cap_verified_suite =
               end\n"));
 
     (* THE test.  Same skip, no `cap verified` — must stay silent. *)
-    gated "WITHOUT cap verified the same skip stays silent" (fun () ->
+    Alcotest.test_case "WITHOUT cap verified the same skip stays silent" `Quick
+      (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod V3 do\n\
@@ -3872,7 +4067,8 @@ let cap_verified_suite =
        does NOT inherit strictness.  In production bin/main.ml prepends the
        whole standard library as sibling `DMod`s of the entry module's decls,
        so inheritance would make every stdlib module strict. *)
-    gated "cap verified does NOT reach into a nested ordinary module" (fun () ->
+    Alcotest.test_case "cap verified does NOT reach into a nested ordinary module"
+      `Quick (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error
              "mod V4 do\n\
@@ -3886,7 +4082,8 @@ let cap_verified_suite =
 
     (* Scoping, inward: a nested module may opt in on its own, and doing so
        must not leave strict mode on for its siblings. *)
-    gated "a nested cap verified module opts in without leaking to siblings" (fun () ->
+    Alcotest.test_case "a nested cap verified module opts in without leaking to siblings"
+      `Quick (fun () ->
         let errs =
           refine_error_texts
             "mod V5 do\n\
@@ -3903,7 +4100,8 @@ let cap_verified_suite =
 
     (* The message must name the obligation and say why it could not be
        discharged — the whole point is legibility. *)
-    gated "the cap verified error names the predicate, the callee and the reason"
+    Alcotest.test_case
+      "the cap verified error names the predicate, the callee and the reason" `Quick
       (fun () ->
         let errs =
           refine_error_texts
@@ -4778,6 +4976,7 @@ let () =
       ("length-alias", length_alias_suite);
       ("string-alias", string_alias_suite);
       ("obligations", obligation_suite);
+      ("obligation-reasons", reason_suite);
       ("cap-verified", cap_verified_suite);
       ("alias-attribution", alias_attribution_suite);
       ("divsafety-hole", divsafety_hole_suite);
