@@ -115,7 +115,9 @@ git log is authoritative for exact commits.
   `{Tree | size(_) > 0}` can pass that very tree on. Only the caller's own
   promise is loaded, so a weaker contract (`size(_) >= 0`) still does not
   discharge a stronger callee, and rebinding or shadowing the name retires the
-  fact.
+  fact. Note this can turn a program that used to compile into one that does
+  not: a call the checker previously skipped in this position is now decided, so
+  a genuine violation like `inner(Leaf)` becomes a compile error.
 
 - **A refined list parameter's own promise now holds inside its own body.** A
   function whose parameter is `{List(Int) | len(_) > 0}` could not pass that very
@@ -129,6 +131,19 @@ git log is authoritative for exact commits.
   already did for scalars. Only the *caller's* promise is loaded, so a weaker
   contract (`len(_) >= 0`) still does not discharge a stronger callee, and
   rebinding or shadowing the name retires the fact.
+
+  With the ADT-measure fix above, this closes composition for every refinement
+  shape but one: `Int`, `Float`, `Bool`, `String` `len`, record fields, the
+  built-in list `len`, and a user `@[measure]` over an ADT all compose, while a
+  **constructor-tag** refinement (`{Option(Int) | is_Some(_)}`) still does not —
+  tag facts are established at the call site by a literal or a `match`, not
+  carried by a binding. This is a distinct mechanism from a caller-established
+  runtime **guard** (`if List.length(ys) > 0 do …`), which is unchanged: a guard
+  is a test you write, a contract is a promise the caller already kept. It
+  applies to **preconditions** only — a parameter's promise reaches calls in the
+  body, not a refined return type. And a fact still does not survive a local
+  `let` (`let u = 5` then `take_pos(u)` against `{Int | _ > 0}` is skipped), a
+  pre-existing limitation for every type that this work does not change.
 
 - **`cap no_panic` and `cap verified` now cover the whole module, not just its
   `fn`s.** Both passes walked only `fn` and nested `mod` declarations and

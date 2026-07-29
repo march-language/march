@@ -1,5 +1,78 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, the refinement docs are re-verified against the built compiler)
+
+**Counts:** unchanged — `test_refinecheck` 348, `run_compiler` 615, `run_eval`
+256, typing corpus 229/229, `check-docs.sh` exit 0, stdlib false-positive sweep
+EMPTY. Documentation only; no compiler code touched.
+
+Task 4 (final) of the refinement-contract-composition plan. Every March snippet
+that changed or was newly written was run through
+`./_build/default/bin/main.exe --check --refine-report` on a cold
+`.march/cas/artifacts-v2` (a warm artifact cache exits before refinecheck and
+prints nothing, which reads identically to "nothing to report"); 19 snippets in
+all, each judged by exit code and by its `user code` obligation counts rather
+than by exit code alone, since a skip and a proof both exit 0.
+
+**The stale limitation is retired in all three places** it was filed — the
+`specs/todos.md` follow-up (struck through with a dated `CLOSED` note, per the
+file's convention) plus both `specs/lang/refinement-types.md` and
+`docs/refinement-types.md`. Each gained a section on the mechanism, and the
+distinction the docs previously had no reason to draw is now explicit and
+load-bearing: a caller-established runtime **guard** (`if List.length(ys) > 0 do
+…`, the `len`-alias mechanism of 2026-07-28) and a caller's **declared
+contract** are two different things, and only the second is what composes. A
+reader needs to know which shape they have to know which machinery they get.
+
+**Measured scope of composition, since the two shipped fixes were scoped to
+different types and neither report stated the combined picture.** Every refined
+form composes at `2 proved, 0 violated, 0 skipped` — `Int`, `Float`, `Bool`,
+`String` `len`, a record field, the built-in list `len`, and a user
+`@[measure]` over an ADT — with exactly one exception: a **constructor-tag**
+refinement (`{Option(Int) | is_Some(_)}`) forwarded to a callee with the
+identical contract still measures `1 proved, 1 skipped`, the proof being the
+outer literal. That is now stated as a limitation on both pages rather than
+left to be inferred. The headline practical case is also pinned:
+`List.head(xs)` inside `fn head_of(xs : {List(Int) | len(_) > 0})` measures
+`2 proved, 0 violated, 0 skipped` and exits 0 **under `cap verified`** with no
+guard — the exact program the retired todo item named as the ceiling on
+threading these contracts through the stdlib.
+
+**A doc claim that the Task 2 fix silently falsified.** The spec chapter's
+Limitations section asserted, with a 2026-07-27 re-verification date, that "an
+AXIOMATISED measure applied to the refined value itself is reasoned about by
+axiom, not evaluated on a literal" — specifically that `big(Leaf)` against
+`{v : Tree | size(v) > 2}` "stays silent". Run against HEAD it is **reported**
+(exit 1, `0 proved, 1 violated`), because that documented limitation *was* the
+pre-existing bug Task 2 fixed. The bullet is rewritten to say so, keeping the
+history visible, and re-verified in all four directions: `inner(Leaf)` against
+`{Tree(Int) | size(_) > 0}` reported, `inner(Node(Leaf, 5, Leaf))` proved,
+`big(Leaf)` against `size(v) > 2` reported, and `{v : Tree(Int) | size(v) < 0}`
+still caught for an opaque argument from the non-negativity axiom alone. What
+genuinely remains is narrower and is stated as such: the unconstrained
+placeholder survives only as the fallback where there is nothing to reflect.
+The site page gained a worked `Leaf`/`Node` example for this shape, flagged as
+formerly-silent, since any doc example of that shape needed re-running.
+
+**Newly documented, and not fixed by this plan:** a caller's fact does not
+propagate through a local `let` for **any** type — `let u = 5` then
+`take_pos(u)` against `{Int | _ > 0}` measures `0 proved, 1 skipped`, and the
+`List` analogue is identical. Pre-existing and general; it is also the reason
+rebinding a refined parameter leaves the call skipped rather than reported.
+Filed as an open follow-up alongside tag forwarding. Postconditions remaining
+outside the ledger, the unit-global alias gates, and the absent `@[trusted]`
+are each restated as pre-existing and untouched by this plan, so that nobody
+reads a combined guarantee out of two adjacent CHANGELOG entries.
+
+**Stale counts corrected in the spec chapter's Conformance status:** typing
+corpus 218 → 229 programs (114 accept / 115 reject) and `test_refinecheck` 245
+→ 348, with the 8 new composition tests and the `accept/t128` / `reject/t129`
+bracketing named. The two existing CHANGELOG entries were extended rather than
+duplicated: the ADT-measure entry now warns that a program which used to
+compile can now fail (a previously-skipped call in that position is now
+decided), and the list entry now carries the combined composition picture,
+the guard-versus-contract distinction, and the preconditions-only scope.
+
 ## Current State (as of 2026-07-29, call-boundary composition gets its corpus witnesses)
 
 **Counts:** `test_refinecheck` 348 (unchanged — this task adds no OCaml code),
