@@ -90,6 +90,20 @@
       color: var(--text-muted); padding: 6px; line-height: 0;
     }
 
+    /* Search/Home/GitHub/theme move here on narrow screens — see the
+       .d-mobile-extra rules under the 900px media query below. */
+    .d-mobile-extra { display: none; }
+    .d-mobile-search-btn {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      cursor: pointer; padding: 8px 12px; border-radius: 6px; font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .d-mobile-search-btn kbd {
+      margin-left: auto; font-size: 10px; padding: 1px 5px; border-radius: 4px;
+      border: 1px solid var(--border); color: inherit;
+    }
+
     /* ── LAYOUT ──────────────────────────────────────────────────────────── */
     .d-layout { display: flex; padding-top: 60px; min-height: 100vh; }
 
@@ -221,6 +235,15 @@
       .d-sidebar.open { transform: translateX(0); }
       .d-hamburger { display: block; }
       .d-main { padding: 32px 24px; max-width: 100%; }
+
+      /* Crowd relief: search/Home/GitHub/theme move into the sidebar drawer so
+         the nav row never has to fit more than the logo + hamburger. */
+      .d-nav-right > *:not(#d-hamburger) { display: none; }
+      .d-mobile-extra {
+        display: flex; flex-direction: column; gap: 8px;
+        padding: 4px 12px 16px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
+      }
+      .d-mobile-extra .d-theme-btn { align-self: flex-start; }
     }
     @media (max-width: 600px) {
       .d-nav-inner { padding: 0 16px; }
@@ -260,6 +283,18 @@
   <!-- SIDEBAR -->
   <aside class="d-sidebar" id="d-sidebar">
     <div class="d-sidebar-inner">
+      <div class="d-mobile-extra">
+        <button type="button" class="d-mobile-search-btn" data-ms-open aria-label="Search docs (Command K)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <span>Search</span>
+          <kbd>⌘K</kbd>
+        </button>
+        <a href="{{ site.baseurl }}/" class="d-sidebar-link" onclick="closeSidebar()">Home</a>
+        <a href="https://github.com/march-language/march" target="_blank" rel="noopener" class="d-sidebar-link" onclick="closeSidebar()">GitHub</a>
+        <button class="d-theme-btn" id="d-theme-btn-mobile">☀ Light</button>
+      </div>
       {% assign nav_pages = site.pages | sort: 'nav_order' %}
 
       <p class="d-sidebar-section">Start Here</p>
@@ -328,15 +363,21 @@ function initTheme() {
 
 function applyTheme() {
   document.documentElement.classList.toggle('light', !dark);
+  const label = dark ? '☀ Light' : '☾ Dark';
   const btn = document.getElementById('d-theme-btn');
-  if (btn) btn.textContent = dark ? '☀ Light' : '☾ Dark';
+  const btnMobile = document.getElementById('d-theme-btn-mobile');
+  if (btn) btn.textContent = label;
+  if (btnMobile) btnMobile.textContent = label;
 }
 
-document.getElementById('d-theme-btn').addEventListener('click', () => {
+function toggleTheme() {
   dark = !dark;
   localStorage.setItem('march-theme', dark ? 'dark' : 'light');
   applyTheme();
-});
+}
+
+document.getElementById('d-theme-btn').addEventListener('click', toggleTheme);
+document.getElementById('d-theme-btn-mobile').addEventListener('click', toggleTheme);
 
 const sidebar  = document.getElementById('d-sidebar');
 const overlay  = document.getElementById('d-overlay');
