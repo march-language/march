@@ -5600,6 +5600,77 @@ end
           "an unreferenced sibling test module survives reachability pruning"
           true mentions_sibling))
 
+(* Regression: [test_sibling_test_module_is_not_pruned] (48cf9263 /
+   march-language/march#106) pins that a non-entry sibling TEST module itself
+   survives pruning.  But that fix keeps only the sibling's OWN decls in the
+   program — it never seeds the sibling's references into the reachability
+   BFS.  So a plain library module referenced ONLY by that sibling (never by
+   the entry file, never by an explicit import) still gets pruned: `forge
+   test` always compiles one test file as the entry (alphabetically first)
+   and relies on auto-discovery for the rest, so if the entry never happens
+   to mention a lib module some OTHER test file needs, that lib module
+   silently vanishes from the merged program.  This surfaces as a confusing
+   "Unknown module `Foo`" typecheck error rather than a pruning diagnostic —
+   worse, the entry file has no textual reason to reference every lib module
+   its siblings use, so this triggers on perfectly ordinary multi-file test
+   suites (sigil's `lib/page.march` used only from `test/sigil_test.march`,
+   while `test/markdown_test.march` sorts first alphabetically and never
+   mentions `Page`). *)
+let test_lib_module_used_only_by_sibling_test_is_not_pruned () =
+  let lib_src = {|mod OnlyUsedBySibling do
+  fn helper(x : Int) : Int do x * 2 end
+end
+|} in
+  let sibling_src = {|mod T.Sibling do
+  import Test
+
+describe "sibling" do
+  test "uses the lib module" do
+    Test.assert_true(OnlyUsedBySibling.helper(1) == 2, "holds")
+  end
+end
+end
+|} in
+  let entry_src = {|mod T.Entry do
+  import Test
+
+describe "entry" do
+  test "runs" do
+    Test.assert_true(true, "holds")
+  end
+end
+end
+|} in
+  let dir = Filename.temp_file "march_test_prune_sibling_lib_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  Fun.protect ~finally:(fun () ->
+      try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+      with _ -> ())
+    (fun () ->
+      let write_file path contents =
+        let oc = open_out path in output_string oc contents; close_out oc in
+      write_file (Filename.concat dir "only_used_by_sibling.march") lib_src;
+      write_file (Filename.concat dir "sibling_test.march") sibling_src;
+      (* The entry must be a REAL file: [resolve_imports] disables pruning
+         entirely when it cannot read [source_file], so a synthetic path
+         would make this test vacuous (it passes either way). *)
+      let entry_path = Filename.concat dir "entry_test.march" in
+      write_file entry_path entry_src;
+      Unix.putenv "MARCH_LIB_PATH" dir;
+      Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+        let m = parse_and_desugar entry_src in
+        let (_errs, extra_decls, _files) =
+          March_resolver.Resolver.resolve_imports ~source_file:entry_path m in
+        let mentions_lib =
+          List.exists (function
+            | March_ast.Ast.DMod (n, _, _, _) -> n.March_ast.Ast.txt = "OnlyUsedBySibling"
+            | _ -> false) extra_decls
+        in
+        Alcotest.(check bool)
+          "a lib module referenced only by a non-entry sibling test file survives pruning"
+          true mentions_lib))
+
 let test_stdlib_prefixed_user_module_resolves () =
   let sibling_src = {|mod Depot.Query do
   fn answer() : Int do 42 end
@@ -10118,6 +10189,9 @@ let compiler_suites =
           Alcotest.test_case
             "unreferenced sibling test module is not pruned"
             `Quick test_sibling_test_module_is_not_pruned;
+          Alcotest.test_case
+            "lib module used only by a non-entry sibling test file is not pruned"
+            `Quick test_lib_module_used_only_by_sibling_test_is_not_pruned;
         ] );
       ( "diagnostic dedup",
         [
