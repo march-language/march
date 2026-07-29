@@ -9504,6 +9504,93 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
         true (Test_helpers.contains "boom" run_out)
     done
 
+(* NativeArray.map_int/map_float et al. and TypedArray.map/fold — a THIRD
+   family of call sites sharing the same double-consumption bug as
+   __try_call above, but shaped differently: instead of one call plus an
+   explicit runtime decrc, these call the SAME closure once PER ELEMENT
+   without transferring ownership on each call. Both the C-runtime general
+   path (runtime/march_runtime.c's native_int_arr_map/native_float_arr_map/
+   march_typed_array_map/march_typed_array_fold, all via march_incrc before
+   each per-element call plus one march_decrc after the loop) and the
+   compiled-loop fast path (lib/tir/llvm_emit.ml's
+   emit_native_map_inline_loop/emit_native_map2_inline_loop, Phase 2c) share
+   this fix.
+
+   This repro deliberately exercises the case that must fall back to the
+   GENERAL path rather than the inline loop: a closure that captures a free
+   variable AND is called again after the map, so it is not single-use
+   (Native_map_inline.ml declines to rewrite it — any Perceus-inserted RC op
+   on the closure counts as an extra use). Confirmed via TIR dump before
+   writing this test: `inc_rc closure; NativeArray.map_int(a1, closure)`,
+   proving the closure is a transferred-but-still-live reference at that
+   call site, not a last-use consume. *)
+let test_native_array_map_reused_capturing_closure_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
+    "mod ArrMapCap do\n\
+    \  fn main() : Unit do\n\
+    \    let k = 7\n\
+    \    let closure = fn x -> x + k\n\
+    \    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))\n\
+    \    let a2 = NativeArray.map_int(a1, closure)\n\
+    \    println(NativeArray.to_list_int(a2))\n\
+    \    println(int_to_string(closure(100)))\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "arrmapcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1" (Filename.quote bin) in
+    for _ = 1 to 20 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check string)
+        "a capturing closure reused after NativeArray.map_int must not be \
+         freed mid-map (general C-runtime path, not the inline fast path)"
+        "[8, 9, 10]\n107" run_out
+    done
+
+(* Signal.watch — a FOURTH family, and the most severe: unlike __try_call
+   (one call) or the array builtins (N calls but the whole map finishes and
+   releases in one process step), a watcher closure is held for the
+   program's entire lifetime and can be invoked an UNBOUNDED number of times,
+   once per signal delivery. Before this fix (runtime/march_runtime.c's
+   march_signal_drain, march_incrc before each apply() call) a CAPTURING
+   watcher's apply function released its one $clo reference on the very
+   first delivery — the table then held a dangling pointer, and the SECOND
+   delivery dispatched through freed memory. Confirmed deterministic (not
+   flaky like __try_call's UAF): every run crashed on delivery 2 before the
+   fix, every run below is clean after it. *)
+let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
+    "mod SigWatchCap do\n\
+    \  fn main() do\n\
+    \    let k = 99\n\
+    \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    Signal.raise(Signal.Usr2)\n\
+    \    println(\"done\")\n\
+    \  end\n\
+     end\n"
+  in
+  let bin = Filename.concat tmp "sigwatchcapbin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
+    for _ = 1 to 25 do
+      let run_out = read_cmd_output cmd in
+      Alcotest.(check bool)
+        "a capturing Signal.watch handler delivered 3 times must not be \
+         freed after the first delivery (long-lived, unbounded-repeat call site)"
+        true
+        (ir_contains run_out "done" && ir_contains run_out "EXIT:0"
+         && not (ir_contains run_out "RC underflow"))
+    done
+
 (* ── `--check` diagnostic-display determinism ───────────────────────────
    Repeated `march --check` of the SAME source file must produce
    byte-identical stderr every run. Regression for a display-nondeterminism
@@ -12531,6 +12618,10 @@ let codegen_suites =
             test_try_call_val_single_capture_no_double_free_compiled;
           Alcotest.test_case "single-capture __try_call thunk panics: no double-free (15x)" `Quick
             test_try_call_panic_with_capture_no_double_free_compiled;
+          Alcotest.test_case "NativeArray.map_int: reused capturing closure not freed mid-map (20x)" `Quick
+            test_native_array_map_reused_capturing_closure_compiled;
+          Alcotest.test_case "Signal.watch: capturing handler survives repeated delivery (25x)" `Quick
+            test_signal_watch_capturing_handler_repeated_delivery_compiled;
         ] );
       ( "erased_option_niche_fbip_codegen", [
           Alcotest.test_case "compiled erased-niche-Option FBIP reuse: no RC underflow" `Quick

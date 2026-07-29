@@ -121,6 +121,17 @@ git log is authoritative for exact commits.
   base-case branch drops nothing. That is an independent dead-alias gap rather
   than part of this ownership protocol, and it is unchanged here.
 
+  The ownership change above also required four fixes at the C-runtime
+  boundary, since several places call a closure's apply function directly
+  and did not agree with the new convention: `__try_call`/`__try_call_val`
+  (used internally by `Check.try_prop` and directly callable) crashed
+  intermittently on a single-capture callback; `NativeArray.map_int`/
+  `map_float`/`map2` and `TypedArray.map`/`fold` crashed or corrupted results
+  when passed a capturing closure; and a `Signal.watch` handler that captures
+  a variable now survives being delivered more than once (it previously
+  crashed reliably on the second delivery). All four are fixed and covered by
+  new regression tests.
+
 - **`cap no_panic` and `cap verified` now cover the whole module, not just its
   `fn`s.** Both passes walked only `fn` and nested `mod` declarations and
   ignored everything else, so a capability directive said nothing about code

@@ -715,6 +715,38 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
   let x = fresh ctx "nmap_x" in
   emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" x elem_ty sptr);
+  (* RC contract: [apply_name] is called once per element with the SAME
+     [clo_reg] throughout the loop.  For a capturing closure (clo_reg <>
+     "null"), lib/tir/perceus.ml's insert_apply_fn_clo_drop makes every one
+     of those calls release $clo internally — so without this incrc,
+     element 0's call already frees the closure and every later element
+     calls through freed memory.  Mirrors the identical fix applied to the
+     C-runtime map/fold helpers (native_int_arr_map et al.,
+     runtime/march_runtime.c) for the general (non-inlined) path; this is
+     the inlined-loop counterpart, since Phase 2c's whole point is to call
+     [apply_name] directly and never go through those helpers at all.
+
+     [clo_reg] itself arrives here as ONE transferred reference: per
+     [Native_map_inline]'s own doc comment, this rewrite fires ONLY when
+     the closure var is single-use with no Perceus-inserted RC op anywhere
+     else in the TIR (any other use — e.g. the closure captured AND called
+     again elsewhere — makes the pass decline and fall back to the general
+     path, which owns the same contract in the C runtime). That single use
+     being "last use, no incref" is exactly Perceus's ordinary
+     transfer-on-call convention: the callee (originally
+     native_int_arr_map/native_float_arr_map; now this inlined loop
+     standing in for it) is trusted to consume the one reference. So this
+     loop must fully consume it too — [march_decrc] after the loop below,
+     matching the C-runtime fix's final decrc exactly, not merely balance
+     each call's internal drop.
+
+     "null" (Phase 2, non-capturing) skips both the per-call incrc and the
+     final decrc: the apply function never reads $clo, so
+     insert_apply_fn_clo_drop's fv-extraction guard means no drop ever
+     fires, and there is no reference to release — matching how this
+     function was already exempt before the $clo ownership work. *)
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
   let y_native =
     if unboxed then begin
       (* No box either side: raw double in, raw double out. This is the
@@ -744,6 +776,10 @@ let emit_native_map_inline_loop ctx ~is_float ~unboxed ~arr_atom ~apply_name ~cl
   emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
 
   emit_label ctx exit_lbl;
+  (* Release the one transferred reference to [clo_reg] — see the RC
+     contract comment above the incrc inside the loop body. *)
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
   ("ptr", new_arr)
 
 (** [Native_map_inline]'s two-array counterpart to [emit_native_map_inline_loop]
@@ -818,6 +854,12 @@ let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~a
   emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr2 arr2_v byte_off);
   let y = fresh ctx "nmap2_y" in
   emit ctx (Printf.sprintf "%s = load %s, ptr %s, align 8" y elem_ty sptr2);
+  (* Same RC contract as [emit_native_map_inline_loop] above: incrc before
+     each call to balance that call's internal $clo drop for a capturing
+     closure, matched by a final decrc after the loop (below) that
+     releases the one transferred reference. *)
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
   let z_native =
     if unboxed then begin
       let z = fresh ctx "nmap2_z" in
@@ -847,6 +889,8 @@ let emit_native_map2_inline_loop ctx ~is_float ~unboxed ~arr1_atom ~arr2_atom ~a
   emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
 
   emit_label ctx exit_lbl;
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
   ("ptr", new_arr)
 
 (* ── Core expression emitter ─────────────────────────────────────────── *)

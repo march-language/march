@@ -1,5 +1,45 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, closure-call-site RC audit: four more fixes)
+
+**The $clo ownership drop (previous entry) was correct at the TIR level but
+incomplete at the runtime boundary.** The drop assumes every apply-fn call is
+a one-shot, ownership-transferring call — true for ordinary March-compiled
+call sites, false for several places the C runtime invokes a closure's apply
+function directly. Found via `dune build @runtest` after PR CI stayed red
+past the first (task_spawn) runtime fix; `scripts/run-tests.sh` and the four
+alcotest binaries never exercise dune-rule golden tests and were fully green
+throughout.
+
+Four more sites fixed, two shapes:
+
+- **One call + an explicit runtime `decrc`** (`__try_call`/`__try_call_val`,
+  `runtime/march_runtime.c`): the thunk's own apply function already
+  released $clo, so the runtime's decrc was a second consumption. Flaky, not
+  deterministic — 6/30 crashes on a single-capture thunk before the fix,
+  0/30 after; freed memory often still looked valid enough not to crash
+  immediately. `__try_call` is directly user-callable, and
+  `test/imports/erased_clo_native`'s dune-rule golden hit this exact shape.
+- **N calls to the same closure without transferring ownership per call**
+  (`march_signal_drain`, the array-map/fold builtins, and their LLVM-IR-level
+  inline fast path in `lib/tir/llvm_emit.ml`): fixed with `march_incrc`
+  before each call. The array builtins additionally need one `march_decrc`
+  after the loop (the closure arrives as one transferred reference, per TIR:
+  `inc_rc closure` is emitted only when still live after the call);
+  `march_signal_drain` does not (the watcher table's held reference persists
+  across drains, released only by the existing replace/unwatch path). The
+  actor message-dispatch loop got the same defensive fix by shape-match,
+  though whether a capturing dispatch closure is actually producible from
+  user-level actor syntax today was not independently confirmed.
+
+Verified: full `dune build @runtest` clean except the pre-existing
+environmental ASAN failure. 5 new `test_codegen.ml` regressions
+(`try_call_capture_ownership_codegen`), each run 15–30x since several of
+these are heap-timing-dependent. All previously-failing goldens
+(`erased_clo_native`, `native_arr_map_inline_{vectorize,capture,
+float_box_reuse,unboxed}`, `native_arr_map2_inline`) confirmed clean and
+output-correct (diffed against `.expected`).
+
 ## Current State (as of 2026-07-29, capturing-closure ownership: the $clo drop)
 
 **Capturing closures are released instead of leaked.** A lambda capturing a free
