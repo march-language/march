@@ -275,7 +275,7 @@ pfn make_tarball(pkg_dir, out_path) do
   Err(e)  -> Err("tar failed: " ++ e)
   Ok(res) ->
     match res do
-    ProcessResult(code, _, stderr) ->
+    Process.ProcessResult(code, _, stderr) ->
       if code == 0 do Ok(out_path) else Err("tar exit " ++ int_to_string(code) ++ ": " ++ stderr) end
     end
   end
@@ -390,7 +390,7 @@ pfn run_fetch() do
     Ok((st, bd)) ->
       if st >= 200 && st < 300 do
         match File.write(out, bd) do
-        Err(e) -> do println("write failed: " ++ e) Process.exit(2) end
+        Err(e) -> do println("write failed: " ++ to_string(e)) Process.exit(2) end
         Ok(_)  -> do println("ok " ++ int_to_string(st) ++ " " ++ int_to_string(String.byte_size(bd))) Process.exit(0) end
         end
       else
