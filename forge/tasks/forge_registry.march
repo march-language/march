@@ -291,6 +291,19 @@ pfn do_publish(registry, token, pkg_dir) do
     Err(e)              -> Err(e)
     Ok((name, version)) ->
       let out = "/tmp/forge-publish-" ++ Crypto.random_hex(8) ++ ".tar.gz"
+      -- This println is not just a progress message: on the compiled
+      -- backend, make_tarball's `Process.ProcessResult(...)` match (over a
+      -- Process.run() result) panics with "non-exhaustive pattern match"
+      -- immediately below when this call is the very first thing evaluated
+      -- after the `let out = ...` binding, even though the match is
+      -- provably exhaustive (ProcessResult has exactly one constructor) and
+      -- the interpreter always takes it correctly. Isolated to a compiled-
+      -- backend register-allocation/RC-timing bug: an intervening call
+      -- (any Cap(IO.Console) builtin observed to work; println is the
+      -- natural one here) changes the codegen enough to avoid it. Remove
+      -- only once the underlying compiler bug is fixed and confirmed with a
+      -- few consecutive `forge publish` runs, not just one.
+      println("packaging " ++ name ++ " " ++ version ++ "...")
       match make_tarball(pkg_dir, out) do
       Err(e) -> Err(e)
       Ok(_)  ->
