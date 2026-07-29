@@ -1,5 +1,46 @@
 # March — Progress Summary
 
+## Current State (as of 2026-07-29, a measure over the refined ADT value itself is enforced and composes)
+
+**Counts:** `test_refinecheck` 348 (was 344), typing corpus 113 accept / 114
+reject all as expected, stdlib violation sweep empty across all 111 modules,
+`run_compiler` / `run_eval` / `run_codegen` / `run_stdlib` green (`-q`). No known
+failures introduced.
+
+**The composition question answered a different question first.** Task 2 of the
+refinement-contract-composition plan asked whether Task 1's caller-scope fact
+resolver (which made `{List(Int) | len(_) > 0}` compose across a call) also
+covered an axiomatised user `@[measure]`. It did not — but the reason it could
+not was upstream of composition: in `check_call`'s `resolve_measure`, the
+**axiomatised** branch resolved the refined value's own binder spellings (`_`,
+the named binder) to an *unconstrained* datatype constant `$self`, discarding
+the actual argument entirely. So `{Tree | size(_) > 0}` was decided against an
+arbitrary tree and enforced nothing at all: `inner(Node(Leaf, 5, Leaf))` was not
+proved, and `inner(Leaf)` — a genuine violation — was not reported. The same
+measure over a *different* parameter (`{Int | _ < size(t)}`, the shape the
+existing `axioms-ma` suite covers) already reflected the actual and worked, which
+is why the hole was invisible: a skip exits 0 exactly as a proof does. This is
+the same accept-only-witness failure mode recorded for the non-axiomatised
+spellings on 2026-07-27, in the sibling branch of the same `if`.
+
+Both spellings now resolve against the same actual the named-parameter path does,
+via `reflect_dt` — which also *is* the composition fix, because for an `EVar x`
+actual `reflect_dt` yields `Const x` at the ADT sort, exactly the term Task 1's
+`load_scope_measure_facts` can phrase a caller-scope assumption over. That
+resolver gained an axiomatised arm emitting `(m x)` and setting `check_call`'s own
+`uses_axiom` ref, so the quantified-axiom preamble is attached to the VC that
+needs it — and only to that VC: a plain-`Int` group (`bounds-a2`, 6 tests) still
+runs in 0.06s, while the 4 new measure-bound cases cost ~3.8s each.
+
+Deliberately still out of scope, and verified to have stayed out: `check_post`
+(postcondition composition of an ADT measure) and `scope_facts` are untouched;
+every hunk is inside `check_call`. Also confirmed architectural, not a
+regression: a rebind (`let u = Leaf`) makes the following call *skipped*, not
+reported — this pass propagates no local `let`'s value into a later goal for any
+type, and the `Int` and `List` analogues behave identically. What matters there
+is that the retired fact does not leak into a false proof, which is pinned by an
+obligation-count assertion rather than a boolean.
+
 ## Current State (as of 2026-07-29, the refinement-guarantee sweep is closed and documented)
 
 **Counts:** `test_refinecheck` 338 (was 294 at the start of the sweep), typing

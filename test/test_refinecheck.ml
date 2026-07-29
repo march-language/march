@@ -5067,6 +5067,128 @@ mod LM do
 end|}))
   ]
 
+(* ── Composing a USER ADT `@[measure]` contract across a call boundary ──────
+   `len` on a variable reflects to a plain uninterpreted Int constant; an
+   AXIOMATISED measure (declared `@[measure]`) reflects the SUBJECT itself into
+   an `Smt.SData` datatype term and needs the quantified-axiom preamble attached
+   to the VC.  So the list case composing is not by itself evidence that this
+   one does — these pin it directly. *)
+let compose_adt_suite =
+  [ gated "a user ADT measure contract composes" (fun () ->
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TA do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn outer(u : {Tree | size(_) > 0}) : Int do inner(u) end
+  fn main() : Int do outer(Node(Leaf, 5, Leaf)) end
+end|});
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "proved" 2 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "a user ADT fact is retired on rebind, not proved falsely" (fun () ->
+        (* THE CARDINAL-SIN TEST.  `let u = Leaf` makes the call genuinely
+           violating: `u` inside the body is a different tree, and the caller's
+           promise says nothing about it.  If the outer fact survives the rebind,
+           this VC comes back PROVED — a wrong proof, silently, which is worse
+           than a false positive because nothing surfaces at all.
+
+           What it asserts is therefore `proved = 1` (main's `outer(...)` alone),
+           NOT that the violation is reported.  A plain `has_refine_error` is
+           false for BOTH a correct skip and a leaked false proof and so cannot
+           tell them apart; the count can.
+
+           Reporting the violation is out of reach for a reason that has nothing
+           to do with measures or ADTs: this pass does not propagate a LOCAL
+           `let`'s value into a later goal for ANY type.  The `Int` analogue
+           (`fn outer(u : {Int | _ > 0}) do let u = 0  inner(u) end`) and the
+           `List` analogue (`let ys = []`) are both likewise 1 proved / 1
+           skipped.  Local-value propagation is separate work; retiring the fact
+           is the property under test here, and a skip is its correct outcome. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TS do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn outer(u : {Tree | size(_) > 0}) : Int do
+    let u = Leaf
+    inner(u)
+  end
+  fn main() : Int do outer(Node(Leaf, 5, Leaf)) end
+end|});
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "the retired fact proves nothing" 1 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "a WEAKER caller ADT contract does not discharge a stronger callee"
+      (fun () ->
+        (* The false-positive control: the caller promises only `size(_) >= 0`,
+           true of every tree, which proves nothing about `size(_) > 0`.  A
+           violation here would mean the loaded fact is stronger than the
+           promise; a proof would mean the fact is being read as the callee's own
+           predicate.  It must be SKIPPED — 1 proved, main's call alone. *)
+        March_refinecheck.Obligation.reset ();
+        ignore (has_refine_error_d {|
+mod TW do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn outer(u : {Tree | size(_) >= 0}) : Int do inner(u) end
+  fn main() : Int do outer(Node(Leaf, 5, Leaf)) end
+end|});
+        let proved, violated, _ = March_refinecheck.Obligation.summary () in
+        Alcotest.(check int) "not proved by the weak fact" 1 proved;
+        Alcotest.(check int) "violated" 0 violated)
+
+  ; gated "an ADT measure contract on the subject itself is now enforced"
+      (fun () ->
+        (* The direct, composition-free shape this task had to fix first: until
+           the self spellings reflected the ACTUAL, `{Tree | size(_) > 0}`
+           enforced nothing — BOTH of these were skipped.  An accept-only
+           witness cannot tell a working contract from one that checks nothing,
+           so both directions are pinned. *)
+        let prog arg =
+          Printf.sprintf {|
+mod TD do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  @[measure]
+  fn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  fn inner(t : {Tree | size(_) > 0}) : Int do 1 end
+  fn main() : Int do inner(%s) end
+end|} arg
+        in
+        Alcotest.(check bool) "Node is accepted" false
+          (has_refine_error_d (prog "Node(Leaf, 5, Leaf)"));
+        Alcotest.(check bool) "Leaf is rejected" true
+          (has_refine_error_d (prog "Leaf")))
+  ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -5108,4 +5230,5 @@ let () =
       ("divsafety-entailment", divsafety_entailment_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);
-      ("compose", compose_suite) ]
+      ("compose", compose_suite);
+      ("compose-adt", compose_adt_suite) ]

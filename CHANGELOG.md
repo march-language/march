@@ -102,6 +102,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A refinement whose predicate measures the refined value itself is now
+  enforced for user ADTs.** A contract like `{Tree | size(_) > 0}`, where `size`
+  is a user `@[measure]` over `Tree`, checked *nothing*: the argument being
+  passed was discarded and the predicate decided against an arbitrary tree
+  instead, so `inner(Node(Leaf, 5, Leaf))` was not proved and `inner(Leaf)` — a
+  real violation — was not reported. Both are now decided by the measure's own
+  recursion axioms. The same measure applied to a *different* parameter
+  (`{Int | _ < size(t)}`) worked all along, so the gap was invisible: a skip
+  produces no diagnostic. Such contracts also now compose across a call
+  boundary, like `len`-shaped list refinements: a caller whose parameter is
+  `{Tree | size(_) > 0}` can pass that very tree on. Only the caller's own
+  promise is loaded, so a weaker contract (`size(_) >= 0`) still does not
+  discharge a stronger callee, and rebinding or shadowing the name retires the
+  fact.
+
 - **A refined list parameter's own promise now holds inside its own body.** A
   function whose parameter is `{List(Int) | len(_) > 0}` could not pass that very
   list to another function requiring the same thing: the inner call's obligation

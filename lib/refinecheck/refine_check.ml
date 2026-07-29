@@ -3093,10 +3093,18 @@ let check_call ~root errctx ~span ~(callee : string)
            its declared name).  A measure over any other name is a different
            value; returning None there drops the whole predicate rather than
            mis-attributing it.
-         - the measure must be non-axiomatised, i.e. exactly the class the goal
-           side reflects through [measure_of_var].  An axiom measure reflects as
-           `(size <dt-term>)` on the goal side, so emitting `size$x` here would
-           be an unrelated symbol — a dead fact at best.
+         - the fact must be phrased over the SAME symbol the goal side uses for
+           this value, which differs by measure class:
+             · a NON-axiomatised measure (list `len`, a plain user measure) is a
+               bare uninterpreted Int, `m$x`, via the memoized [measure_of_var];
+             · an AXIOMATISED `@[measure]` ranges over the datatype itself, so
+               the fact is `(m x)` with `x` declared at the measure's ADT sort —
+               the same term the goal side builds when it reflects the actual
+               `EVar x` through [reflect_dt].  That form only MEANS anything if
+               the quantified-axiom preamble is attached to this VC, so it sets
+               the very [uses_axiom] ref that gates it (defined once for the
+               whole VC above; a second, disconnected flag would leave the
+               assumption in the VC with nothing to interpret it).
          - [resolve_var] is `None` throughout: the binder denotes a LIST, not a
            scalar, so any predicate that mentions it outside a measure (or that
            mentions any other variable) is dropped entirely.  No approximation.
@@ -3117,8 +3125,20 @@ let check_call ~root errctx ~span ~(callee : string)
         | Some (b, q, Some s) when is_meas_sort s ->
           let rv _ = None in
           let rm m' n =
-            if (n = b || n = "_") && not (is_axiom_measure m') then measure_of_var m' x
-            else None
+            if not (n = b || n = "_") then None
+            else if is_axiom_measure m' then begin
+              (* Gate the quantified-axiom preamble on the SHARED per-VC ref, so
+                 `(m x)` here and `(m x)` in the goal are interpreted by the same
+                 axioms.  Both this and the goal side declare `x` at the sort; the
+                 VC builder deduplicates [decls] by (name, sort), and the
+                 per-name [scope_facts_loaded] memo keeps a repeated occurrence
+                 of the same name from re-loading the fact at all. *)
+              let adt = Hashtbl.find axiom_measures m' in
+              uses_axiom := true;
+              decls := (x, Smt.SData adt) :: !decls;
+              Some (Smt.App (m', [ Smt.Const x ]))
+            end
+            else measure_of_var m' x
           in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm q with
            | Some qa -> assume := qa :: !assume
@@ -3242,21 +3262,46 @@ let check_call ~root errctx ~span ~(callee : string)
       else if is_axiom_measure m then (
         uses_axiom := true;
         let adt = Hashtbl.find axiom_measures m in
-        (* The refined value itself, under EITHER spelling of the binder —
-           see [self_dt_sym].  It is an unconstrained datatype constant, so
-           only the measure's own axioms (e.g. `size` is non-negative) can
-           settle the goal; that is exactly what the named spelling already
-           did, and the anonymous one now does too. *)
-        if is_self name then begin
-          decls := (self_dt_sym, Smt.SData adt) :: !decls;
-          Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
-        end
-        else
-          match actual_of_name name with
-          | None ->
-            decls := (name, Smt.SData adt) :: !decls;
-            Some (Smt.App (m, [ Smt.Const name ]))
-          | Some a -> Option.map (fun t -> Smt.App (m, [ t ])) (reflect_dt adt a))
+        (* BOTH spellings resolve against the SAME actual argument, exactly as
+           the non-axiomatised branch below does — the anonymous `_`, the named
+           binder and (for a cross-argument name) that parameter's own name all
+           denote the value being passed.
+
+           Until this, the self spellings routed to an UNCONSTRAINED datatype
+           constant [self_dt_sym] instead, discarding [self_actual].  So
+           `{Tree | size(_) > 0}` was decided only by `size`'s own axioms about
+           an arbitrary tree — satisfiable both ways — and every call was
+           SKIPPED, including `inner(Node(Leaf, 5, Leaf))` (provable: the
+           recursion axioms compute 1) and `inner(Leaf)` (a real violation:
+           they compute 0).  A contract in that shape enforced nothing at all,
+           silently, while the same measure over ANOTHER parameter's name
+           (`{Int | _ < size(t)}`) worked, because that path already reflected
+           the actual.
+
+           Reflecting the actual is also what lets the CALLER's own promise meet
+           this goal: for `EVar x` [reflect_dt] yields `Const x` at the ADT sort,
+           the same term [load_scope_measure_facts] phrases its assumption over.
+           Hence the load below, before reflecting.
+
+           The fallback keeps the previous behaviour where there is nothing to
+           reflect (an actual that is neither a variable, a constructor literal,
+           nor a call with a proven postcondition): an unconstrained constant,
+           i.e. SAT, i.e. a skip. *)
+        let actual = if is_self name then Some self_actual else actual_of_name name in
+        match actual with
+        | None ->
+          decls := (name, Smt.SData adt) :: !decls;
+          Some (Smt.App (m, [ Smt.Const name ]))
+        | Some a ->
+          (match a with A.EVar { A.txt = x; _ } -> load_scope_measure_facts x | _ -> ());
+          (match reflect_dt adt a with
+           | Some t -> Some (Smt.App (m, [ t ]))
+           | None ->
+             if is_self name then begin
+               decls := (self_dt_sym, Smt.SData adt) :: !decls;
+               Some (Smt.App (m, [ Smt.Const self_dt_sym ]))
+             end
+             else None))
       else
         (* A measure with no axioms (a user measure, or list `len`).  All three
            spellings of the refined value — the anonymous `_`, the named binder
