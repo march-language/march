@@ -3260,11 +3260,80 @@ mod QIN do
   fn main() : Int do go([1]) end
 end|}));
 
-    gated "a glob `import X` withdraws the alias" (fun () ->
+    (* `Shim` is not declared in this unit, so the glob's contents cannot be
+       resolved — the unresolvable case, which still withdraws. *)
+    gated "a glob `import X` of an UNRESOLVABLE X withdraws the alias" (fun () ->
         Alcotest.(check bool) "no error" false
           (has_refine_error_d
              {|
 mod QGlob do
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* ── The glob pair: LOOK, don't assume ─────────────────────────────────
+       A glob used to withdraw unconditionally.  Because bin/main.ml prepends
+       the whole stdlib and this gate is unit-global, the single `import
+       Process` in `stdlib/system.march` therefore withdrew the alias for
+       EVERY March program — the feature was inert in production, and no
+       ACCEPT witness could see it (a skip exits 0 exactly like a proof).
+
+       These two fixtures are the same program, differing ONLY in whether the
+       glob's target actually carries a competing `List.length`.  The second
+       is the one that discriminates the fix (it FAILS pre-fix, silently); the
+       first is the one that guards the soundness boundary — trading a dead
+       feature for a false positive would show up here. *)
+    gated "a glob whose target DOES define List.length withdraws the alias" (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGComp do
+  mod Shim do
+    mod List do
+      fn length(xs : List(Int)) : Int do 0 end
+    end
+  end
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    gated "a glob whose target has NO List keeps the alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn go(ys : List(Int)) : Int do
+    if List.length(ys) == 0 do head(ys) else 0 end
+  end
+  fn main() : Int do go([1]) end
+end|}));
+
+    (* An `alias … as List` inside the glob's target is a competitor too. *)
+    gated "a glob whose target aliases something to `List` withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QGAlias do
+  mod Other do
+    fn length(xs : List(Int)) : Int do 0 end
+  end
+  mod Shim do
+    alias Other as List
+  end
   import Shim
   fn head(xs : {List(Int) | len(_) > 0}) : Int do 0 end
   fn go(ys : List(Int)) : Int do
@@ -3487,6 +3556,79 @@ mod QSIN do
   fn slug(s : {String | len(_) > 0}) : Int do 1 end
   fn go(t : String) : Int do
     if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* The glob pair, string side — the two gates are one parameterised
+       function, so both spellings are pinned symmetrically.  See the list
+       side for why the second case is the one that discriminates the fix. *)
+    gated "a glob whose target DOES define String.byte_size withdraws the alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QSGComp do
+  mod Shim do
+    mod String do
+      fn byte_size(s : String) : Int do 0 end
+    end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a glob whose target has NO String keeps the alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QSGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if String.byte_size(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    (* And the bare-builtin gate, which shares the same glob resolution: a
+       glob takes `string_byte_length` only if its target declares one. *)
+    gated "a glob whose target DEFINES string_byte_length withdraws the bare alias"
+      (fun () ->
+        Alcotest.(check bool) "no error" false
+          (has_refine_error_d
+             {|
+mod QBGComp do
+  mod Shim do
+    fn string_byte_length(s : String) : Int do 99 end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
+  end
+  fn main() : Int do go("a") end
+end|}));
+
+    gated "a glob whose target lacks string_byte_length keeps the bare alias" (fun () ->
+        Alcotest.(check bool) "error" true
+          (has_refine_error_d
+             {|
+mod QBGClean do
+  mod Shim do
+    fn helper(x : Int) : Int do x end
+  end
+  import Shim
+  fn slug(s : {String | len(_) > 0}) : Int do 1 end
+  fn go(t : String) : Int do
+    if string_byte_length(t) == 0 do slug(t) else 0 end
   end
   fn main() : Int do go("a") end
 end|}));

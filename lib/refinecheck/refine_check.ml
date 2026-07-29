@@ -4671,6 +4671,87 @@ let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
    someone else's function, so either withdraws the alias too. *)
 let is_stdlib_source_file (f : string) : bool = List.mem f !stdlib_source_files
 
+(* ── Glob imports: LOOK instead of assuming ────────────────────────────────
+   `import X` / `use X.*` can only make a spelling denote something else if X
+   actually PROVIDES the competing member.  An earlier revision of both gates
+   below withdrew on the mere presence of a glob, on the reasoning that it
+   might carry anything.  That is not merely coarse, it is fatal: bin/main.ml
+   prepends the whole stdlib into every compilation unit and both gates are
+   unit-global, so the single `import Process` in `stdlib/system.march`
+   withdrew every alias for EVERY March program ever compiled — the feature
+   was inert in production, and only a REJECT witness could notice (a skip
+   exits 0, exactly like a proof).
+
+   So resolve the glob's target and ask.  Resolution is purely syntactic over
+   the declarations of the compilation unit that was handed to us, which is
+   all the module structure this pass has; whenever it cannot answer — the
+   path names a module not present in the unit, or the search runs out of fuel
+   — the answer is `true`, i.e. WITHDRAW, exactly as before.  Precision is
+   only ever added where the contents are actually in hand.
+
+   Direction of doubt is unchanged and non-negotiable: over-suppressing costs
+   a missed proof (silence); under-suppressing puts a wrong fact in the
+   assumption set, which makes violations EASIER to prove and reports correct
+   code — a false positive, this pass's cardinal sin. *)
+
+(* Walk [path] down through nested `mod` declarations from [root]. *)
+let find_module_decls (root : A.decl list) (path : A.name list) : A.decl list option =
+  let rec descend ds = function
+    | [] -> Some ds
+    | (seg : A.name) :: rest ->
+      let rec search = function
+        | [] -> None
+        | A.DMod (n, _, ds', _) :: _ when n.A.txt = seg.A.txt -> descend ds' rest
+        | _ :: tl -> search tl
+      in
+      search ds
+  in
+  match path with [] -> None | _ -> descend root path
+
+(* Does a glob import of the module at [path] bring a competitor into scope?
+
+   [binds_decl] recognises a NON-`use` declaration of the target module that
+   provides the thing (a nested `mod List`, a `fn string_byte_length`, …).
+   [names_it] answers whether an explicit selector list names it, and
+   [single_binds] whether a bare `use A.B` (no selector) binds it under its
+   last segment.  A `use` INSIDE the target is followed transitively, since we
+   cannot be sure March does not re-export it; [fuel] bounds that walk and its
+   exhaustion, like any other unresolved case, withdraws. *)
+let glob_import_competes ~(root : A.decl list) ~(unit_name : string)
+    ~(binds_decl : A.decl -> bool) ~(names_it : A.name list -> bool)
+    ~(single_binds : A.name list -> bool) (path : A.name list) : bool =
+  (* A path may be written relative to the unit's own module (`import
+     System.Process` from inside `mod System`), whose declarations ARE the
+     root list rather than a `DMod` within it. *)
+  let resolve p =
+    match find_module_decls root p with
+    | Some ds -> Some ds
+    | None -> (
+      match p with
+      | (hd : A.name) :: tl when hd.A.txt = unit_name -> find_module_decls root tl
+      | _ -> None)
+  in
+  let rec provides fuel ds =
+    List.exists
+      (fun d ->
+        binds_decl d
+        ||
+        match d with
+        | A.DDescribe (_, ds', _) -> provides fuel ds'
+        | A.DUse (u, _) -> (
+          match u.A.use_sel with
+          | A.UseSingle -> single_binds u.A.use_path
+          | A.UseNames xs -> names_it xs
+          | A.UseExcept xs -> (not (names_it xs)) && glob fuel u.A.use_path
+          | A.UseAll -> glob fuel u.A.use_path)
+        | _ -> false)
+      ds
+  and glob fuel p =
+    if fuel <= 0 then true
+    else match resolve p with Some ds -> provides (fuel - 1) ds | None -> true
+  in
+  glob 4 path
+
 (* Is the qualified spelling `<md>.<fn>` still the standard library's own?
    Parameterised over the pair so the `List.length` and `String.byte_size`
    aliases share one gate rather than two that can drift apart.
@@ -4733,6 +4814,20 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
     end
   in
   let mentions_md xs = List.exists (fun (n : A.name) -> n.A.txt = md) xs in
+  (* Does glob-importing the module at [path] put some other module under the
+     bare name `<md>`?  A nested `mod <md>` or an `alias … as <md>` inside the
+     target does; nothing else in it can. *)
+  let glob_competes path =
+    glob_import_competes ~root:decls ~unit_name:mod_name
+      ~binds_decl:(function
+        | A.DMod (n, _, _, _) -> n.A.txt = md
+        | A.DAlias (a, _) -> a.A.alias_name.A.txt = md
+        | _ -> false)
+      ~names_it:mentions_md
+      ~single_binds:(fun p ->
+        match List.rev p with last :: _ -> last.A.txt = md | [] -> false)
+      path
+  in
   let rec go in_mod ds =
     List.iter
       (function
@@ -4774,8 +4869,12 @@ let stdlib_member_defs_ok ~(md : string) ~(fn : string) ~(mod_name : string)
               | last :: _ :: _ when last.A.txt = md -> rebind ()
               | _ -> ())
            | A.UseNames xs -> if mentions_md xs then rebind ()
-           | A.UseExcept xs -> if not (mentions_md xs) then rebind ()
-           | A.UseAll -> rebind ())
+           (* The two glob forms RESOLVE their target and look for a module
+              named `<md>` rather than assuming one — see
+              [glob_import_competes].  Unresolvable ⇒ withdraw, as before. *)
+           | A.UseExcept xs ->
+             if (not (mentions_md xs)) && glob_competes u.A.use_path then rebind ()
+           | A.UseAll -> if glob_competes u.A.use_path then rebind ())
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (name, _, ds, _) -> go (name.A.txt = md) ds
         (* A `describe` block does not open a module scope of its own, so its
@@ -4886,7 +4985,8 @@ let expr_binds_name (name : string) (e : A.expr) : bool =
    declaration form is a compile error here rather than a silent hole (round
    2).  The arms that do nothing say so by name, and each is a claim that that
    form cannot bind a bare value name; check it rather than trusting it. *)
-let bare_builtin_undefined (name : string) (decls : A.decl list) : bool * A.span option =
+let bare_builtin_undefined ?(mod_name = "") (name : string) (decls : A.decl list) :
+    bool * A.span option =
   let taken = ref false in
   let cause = ref None in
   (* [sp] is the best location we have for this binder; the FIRST one recorded
@@ -4903,6 +5003,27 @@ let bare_builtin_undefined (name : string) (decls : A.decl list) : bool * A.span
     match expr_binder_span name e with Some s -> take s true | None -> ignore sp
   in
   let named xs = List.exists (fun (n : A.name) -> n.A.txt = name) xs in
+  (* Does glob-importing the module at [path] bring a member called [name]
+     into scope?  Only a value DECLARATION of that name in the target does —
+     a nested module's members are not glob-imported along with it. *)
+  let glob_competes path =
+    glob_import_competes ~root:decls ~unit_name:mod_name
+      ~binds_decl:(function
+        | A.DFn (fd, _) -> fd.A.fn_name.A.txt = name
+        | A.DLet (_, b, _) -> List.mem name (pat_binders b.A.bind_pat)
+        | A.DExtern (ed, _) ->
+          List.exists (fun (f : A.extern_fn) -> f.A.ef_name.A.txt = name) ed.A.ext_fns
+        | A.DInterface (idf, _) ->
+          List.exists
+            (fun (m : A.method_decl) -> m.A.md_name.A.txt = name)
+            idf.A.iface_methods
+        | A.DImpl (idf, _) ->
+          List.exists (fun ((mn : A.name), _) -> mn.A.txt = name) idf.A.impl_methods
+        | _ -> false)
+      ~names_it:named
+      ~single_binds:(fun _ -> false)
+      path
+  in
   let fn_def_takes (sp : A.span) (fd : A.fn_def) =
     take fd.A.fn_name.A.span (fd.A.fn_name.A.txt = name);
     List.iter
@@ -4951,9 +5072,12 @@ let bare_builtin_undefined (name : string) (decls : A.decl list) : bool * A.span
         | A.DAlias (a, sp) -> take sp (a.A.alias_name.A.txt = name)
         | A.DUse (u, sp) ->
           (match u.A.use_sel with
-           | A.UseAll -> take sp true
-           | A.UseExcept xs -> take sp (not (named xs))
+           (* A glob takes the name only if its target actually defines it —
+              see [glob_import_competes].  Unresolvable ⇒ take, as before. *)
+           | A.UseAll -> take sp (glob_competes u.A.use_path)
+           | A.UseExcept xs -> take sp ((not (named xs)) && glob_competes u.A.use_path)
            | A.UseNames xs -> take sp (named xs)
+           (* `use A.B` binds the MODULE `B`, never a bare value name. *)
            | A.UseSingle -> ())
         (* ── Contains declarations; recurse ──────────────────────────────── *)
         | A.DMod (_, _, ds, _) | A.DDescribe (_, ds, _) -> go ds
@@ -5033,7 +5157,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     gate "String.byte_size" "len" (string_byte_size_defs_ok ~mod_name m.A.mod_decls);
   string_byte_length_is_builtin :=
     gate "string_byte_length" "len"
-      (bare_builtin_undefined "string_byte_length" m.A.mod_decls);
+      (bare_builtin_undefined ~mod_name "string_byte_length" m.A.mod_decls);
   let mfns = collect_measure_fns m.A.mod_decls in
   registered_measures := List.map fst mfns;
   (* Determine which measures are non-negative (single pass; a measure depending
